@@ -19,7 +19,7 @@ private:
 public:
     void ping_server();
 
-    inline void broadcast_message(blcl::net::message<MsgType>& msg) { 
+    inline void broadcast_message(const blcl::net::message<MsgType>& msg) { 
         send(msg); 
     }
 };
