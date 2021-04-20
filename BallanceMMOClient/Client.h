@@ -9,11 +9,8 @@ enum class MsgType : uint32_t {
     ServerDeny,
     ServerPing,
     MessageAll,
-    ServerMessage,
-
-    Game_BallState
+    ServerMessage
 };
-
 class Client : public blcl::net::client_interface<MsgType> {
 private:
 public:

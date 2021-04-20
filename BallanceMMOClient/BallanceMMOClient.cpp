@@ -17,6 +17,19 @@ void BallanceMMOClient::OnPostStartMenu() {
 void BallanceMMOClient::OnProcess()
 {
 	if (m_bml->IsPlaying()) {
+		auto* ball = get_current_ball();
+		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
+			// OnTrafo
+			spirit_ball_ = spirit_balls_[ball->GetName()].obj;
+			VxVector vec;
+			ball->GetPosition(&vec);
+			spirit_ball_->SetPosition(vec);
+			spirit_ball_->Show(CKSHOW);
+			//
+
+			player_ball_ = ball;
+		}
+
 		player_ball_->GetPosition(&position_);
 		player_ball_->GetQuaternion(&rotation_);
 		msg_.clear();
@@ -28,7 +41,11 @@ void BallanceMMOClient::OnProcess()
 
 void BallanceMMOClient::OnStartLevel()
 {
-	player_ball_ = static_cast<CK3dObject*>(m_bml->GetArrayByName("CurrentLevel")->GetElementObject(0, 1));
+	player_ball_ = get_current_ball();
+	spirit_ball_ = spirit_balls_[player_ball_->GetName()].obj;
+	VxVector vec(42, 15, -153);
+	spirit_ball_->SetPosition(vec);
+	spirit_ball_->Show(CKSHOW);
 }
 
 void BallanceMMOClient::OnUnload()
@@ -38,13 +55,13 @@ void BallanceMMOClient::OnUnload()
 
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
 {
-	if (!strcmp(filename, "3D Entities\\Balls.nmo")) {
-		CKDataArray* physBall = m_bml->GetArrayByName("Physicalize_GameBall");
-		for (int i = 0; i < physBall->GetRowCount(); i++) {
+	if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
+		CKDataArray* physicalized_ball = m_bml->GetArrayByName("Physicalize_GameBall");
+		for (int i = 0; i < physicalized_ball->GetRowCount(); i++) {
 			SpiritBall ball;
 			std::string ball_name;
-			ball_name.resize(physBall->GetElementStringValue(i, 0, nullptr), '\0');
-			physBall->GetElementStringValue(i, 0, &ball_name[0]);
+			ball_name.resize(physicalized_ball->GetElementStringValue(i, 0, nullptr), '\0');
+			physicalized_ball->GetElementStringValue(i, 0, &ball_name[0]);
 			ball_name.pop_back();
 			ball.obj = m_bml->Get3dObjectByName(ball_name.c_str());
 
@@ -72,17 +89,13 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 			spirit_balls_[ball_name] = ball;
 		}
 	}
+
+	if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
+		current_level_array_ = m_bml->GetArrayByName("CurrentLevel");
+	}
 }
 
-//int GetCurrentBall() {
-	//CKObject* ball = m_curLevel->GetElementObject(0, 1);
-	//if (ball) {
-		//std::string ballName = ball->GetName();
-		//for (size_t i = 0; i < m_dualBalls.size(); i++) {
-			//if (m_dualBalls[i].name == ballName)
-				//return i;
-		//}
-	//}
+void BallanceMMOClient::process_incoming_message(const blcl::net::owned_message<MsgType>& msg)
+{
 
-	//return 0;
-//}
+}
