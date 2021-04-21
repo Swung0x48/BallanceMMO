@@ -6,7 +6,7 @@ IMod* BMLEntry(IBML* bml) {
 
 void BallanceMMOClient::OnLoad()
 {
-	client_.connect("10.210.150.25", 60000);
+	client_.connect("192.168.31.157", 60000);
 }
 
 void BallanceMMOClient::OnPostStartMenu() {
@@ -24,8 +24,8 @@ void BallanceMMOClient::OnProcess()
 			
 			VxVector vec;
 			ball->GetPosition(&vec);
-			spirit_ball_->SetPosition(vec);
-			spirit_ball_->Show(CKSHOW);
+			//spirit_ball_->SetPosition(vec);
+			//spirit_ball_->Show(CKSHOW);
 			
 			// Update current player ball
 			player_ball_ = ball;
@@ -38,6 +38,11 @@ void BallanceMMOClient::OnProcess()
 		msg_.header.id = MsgType::MessageAll;
 		msg_ << ball_status_;
 		client_.broadcast_message(msg_);
+
+		if (m_bml->IsIngame() && !client_.get_incoming_messages().empty()) {
+			auto msg = client_.get_incoming_messages().pop_front();
+			process_incoming_message(msg.msg);
+		}
 	}
 }
 
@@ -46,20 +51,20 @@ void BallanceMMOClient::OnStartLevel()
 	player_ball_ = get_current_ball();
 	spirit_ball_ = template_balls_[ball_name_to_idx_[player_ball_->GetName()[5]]];
 	ball_status_.type = ball_name_to_idx_[player_ball_->GetName()[5]];
-	VxVector vec(42, 15, -153);
-	spirit_ball_->SetPosition(vec);
+	//VxVector vec(42, 15, -153);
+	//spirit_ball_->SetPosition(vec);
 	spirit_ball_->Show(CKSHOW);
 
-	msg_receive_thread_ = std::thread([this]() {
-		while (m_bml->IsIngame())
-		{
-			while (client_.get_incoming_messages().empty())
-				client_.get_incoming_messages().wait();
+	//msg_receive_thread_ = std::thread([this]() {
+		//while (m_bml->IsIngame())
+		//{
+			//while (client_.get_incoming_messages().empty())
+				//client_.get_incoming_messages().wait();
 
-			auto msg = client_.get_incoming_messages().pop_front();
-			process_incoming_message(msg.msg);
-		}
-	});
+			//auto msg = client_.get_incoming_messages().pop_front();
+			//process_incoming_message(msg.msg);
+		//}
+	//});
 }
 
 void BallanceMMOClient::OnUnload()
@@ -115,7 +120,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 {
 	switch (msg.header.id) {
 		case MsgType::ServerMessage: {
-			m_bml->SendIngameMessage("Incoming message!");
+			//m_bml->SendIngameMessage("Incoming message!");
 
 			uint32_t remote_id;
 			msg >> remote_id;
