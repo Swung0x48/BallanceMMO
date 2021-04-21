@@ -140,8 +140,17 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				peer_balls_[remote_id] = state;
 			}
 
-			peer_balls_[remote_id].balls[msg_state.type]->SetPosition(msg_state.position);
-			peer_balls_[remote_id].balls[msg_state.type]->SetQuaternion(msg_state.rotation);
+			uint32_t current_ball = peer_balls_[remote_id].current_ball;
+			uint32_t new_ball = msg_state.type;
+			if (current_ball != new_ball) {
+				peer_balls_[remote_id].balls[current_ball]->Show(CKHIDE);
+				peer_balls_[remote_id].balls[new_ball]->Show(CKSHOW);
+
+				peer_balls_[remote_id].current_ball = new_ball;
+			}
+
+			peer_balls_[remote_id].balls[new_ball]->SetPosition(msg_state.position);
+			peer_balls_[remote_id].balls[new_ball]->SetQuaternion(msg_state.rotation);
 			break;
 		}
 	}

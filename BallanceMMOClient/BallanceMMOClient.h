@@ -46,7 +46,7 @@ private:
 
 	struct PeerState {
 		CK3dObject* balls[3];
-		int current_ball = 0;
+		uint32_t current_ball = 0;
 	};
 	std::unordered_map<uint32_t, PeerState> peer_balls_;
 
