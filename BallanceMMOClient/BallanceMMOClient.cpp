@@ -20,7 +20,7 @@ void BallanceMMOClient::OnProcess()
 		auto ball = get_current_ball();
 		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
 			// OnTrafo
-			spirit_ball_ = template_balls_[ball_name_to_idx_[ball->GetName()[0]]];
+			spirit_ball_ = template_balls_[ball_name_to_idx_[ball->GetName()[5]]];
 			
 			VxVector vec;
 			ball->GetPosition(&vec);
@@ -29,7 +29,7 @@ void BallanceMMOClient::OnProcess()
 			
 			// Update current player ball
 			player_ball_ = ball;
-			ball_status_.type = ball_name_to_idx_[player_ball_->GetName()[0]];
+			ball_status_.type = ball_name_to_idx_[player_ball_->GetName()[5]];
 		}
 
 		player_ball_->GetPosition(&ball_status_.position);
@@ -44,7 +44,8 @@ void BallanceMMOClient::OnProcess()
 void BallanceMMOClient::OnStartLevel()
 {
 	player_ball_ = get_current_ball();
-	spirit_ball_ = template_balls_[ball_name_to_idx_[player_ball_->GetName()[0]]];
+	spirit_ball_ = template_balls_[ball_name_to_idx_[player_ball_->GetName()[5]]];
+	ball_status_.type = ball_name_to_idx_[player_ball_->GetName()[5]];
 	VxVector vec(42, 15, -153);
 	spirit_ball_->SetPosition(vec);
 	spirit_ball_->Show(CKSHOW);
@@ -100,7 +101,8 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 				}
 			}
 			template_balls_[i] = ball;
-			ball_name_to_idx_[ball_name[0]] = i;
+			ball_name_to_idx_[ball_name[5]] = i; // "Ball_Xxx" 
+												 //		  ^
 		}
 	}
 

@@ -2,6 +2,7 @@
 
 #include <BML/BMLAll.h>
 #include "Client.h"
+#include <map>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -40,7 +41,7 @@ private:
 	//VxVector position_;
 	//VxQuaternion rotation_;
 	CKDataArray* current_level_array_ = nullptr;
-	std::unordered_map<char, int> ball_name_to_idx_;
+	std::map<char, int> ball_name_to_idx_;
 	CK3dObject* template_balls_[3];
 
 	struct PeerState {
