@@ -25,8 +25,8 @@ private:
 		//std::vector<CKMaterial*> materials;
 	//};
 
-	struct BallStatus {
-		int type;
+	struct BallState {
+		uint32_t type;
 		VxVector position;
 		VxQuaternion rotation;
 	};
@@ -37,11 +37,11 @@ private:
 	blcl::net::message<MsgType> msg_ = blcl::net::message<MsgType>();
 	CK3dObject* player_ball_ = nullptr;
 	CK3dObject* spirit_ball_ = nullptr;
-	BallStatus ball_status_;
+	BallState ball_status_;
 	//VxVector position_;
 	//VxQuaternion rotation_;
 	CKDataArray* current_level_array_ = nullptr;
-	std::map<char, int> ball_name_to_idx_;
+	std::map<char, uint32_t> ball_name_to_idx_;
 	CK3dObject* template_balls_[3];
 
 	struct PeerState {
@@ -67,6 +67,6 @@ private:
 		return nullptr;
 	}
 
-	void process_incoming_message(blcl::net::owned_message<MsgType>& msg);
+	void process_incoming_message(blcl::net::message<MsgType>& msg);
 	CK3dObject* init_spirit_ball(int ball_index, uint32_t id);
 };

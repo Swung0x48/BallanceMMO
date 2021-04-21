@@ -6,7 +6,7 @@ IMod* BMLEntry(IBML* bml) {
 
 void BallanceMMOClient::OnLoad()
 {
-	client_.connect("192.168.50.100", 60000);
+	client_.connect("10.210.150.25", 60000);
 }
 
 void BallanceMMOClient::OnPostStartMenu() {
@@ -57,7 +57,7 @@ void BallanceMMOClient::OnStartLevel()
 				client_.get_incoming_messages().wait();
 
 			auto msg = client_.get_incoming_messages().pop_front();
-			process_incoming_message(msg);
+			process_incoming_message(msg.msg);
 		}
 	});
 }
@@ -111,25 +111,37 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 	}
 }
 
-void BallanceMMOClient::process_incoming_message(blcl::net::owned_message<MsgType>& msg)
+void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& msg)
 {
-	switch (msg.msg.header.id) {
-		case MsgType::MessageAll: {
-			BallStatus status;
-			int ball_index;
-			msg.msg >> ball_index >> status;
-			uint32_t remote_id = msg.remote->get_id();
+	switch (msg.header.id) {
+		case MsgType::ServerMessage: {
+			m_bml->SendIngameMessage("Incoming message!");
+
+			uint32_t remote_id;
+			msg >> remote_id;
+			BallState msg_state;
+			msg >> msg_state;
+
+			GetLogger()->Info("%d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+				remote_id,
+				msg_state.position.x,
+				msg_state.position.y,
+				msg_state.position.z,
+				msg_state.rotation.x,
+				msg_state.rotation.y,
+				msg_state.rotation.z,
+				msg_state.rotation.w);
 			if (peer_balls_.find(remote_id) == peer_balls_.end()) {
-				// if incoming msg from a new client, then init balls and set IC
+				// If message comes from a new client, then init balls and set IC
 				PeerState state;
 				for (size_t i = 0; i < 3; i++)
 					state.balls[i] = init_spirit_ball(i, remote_id);
-				state.current_ball = ball_index;
+				state.current_ball = msg_state.type;
 				peer_balls_[remote_id] = state;
 			}
 
-			peer_balls_[remote_id].balls[ball_index]->SetPosition(status.position);
-			peer_balls_[remote_id].balls[ball_index]->SetQuaternion(status.rotation);
+			peer_balls_[remote_id].balls[msg_state.type]->SetPosition(msg_state.position);
+			peer_balls_[remote_id].balls[msg_state.type]->SetQuaternion(msg_state.rotation);
 			break;
 		}
 	}
