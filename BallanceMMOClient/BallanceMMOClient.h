@@ -31,7 +31,6 @@ private:
 		VxQuaternion rotation;
 	};
 
-	char buffer_[2048];
 	const size_t MSG_MAX_SIZE = 500;
 	Client client_;
 	bool receiving_msg_ = false;

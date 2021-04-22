@@ -96,7 +96,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 			dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
 			dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
 			dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-			ball = static_cast<CK3dObject*>(m_bml->GetCKContext()->CopyObject(ball, &dep, "_Spirit_"));
+			ball = static_cast<CK3dObject*>(m_bml->GetCKContext()->CopyObject(ball, &dep, "_Peer_"));
 			for (int j = 0; j < ball->GetMeshCount(); j++) {
 				CKMesh* mesh = ball->GetMesh(j);
 				for (int k = 0; k < mesh->GetMaterialCount(); k++) {
@@ -133,7 +133,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			BallState msg_state;
 			msg >> msg_state;
 
-			sprintf(buffer_, "%d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+			GetLogger()->Info("%d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
 				remote_id,
 				msg_state.position.x,
 				msg_state.position.y,
@@ -142,7 +142,6 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				msg_state.rotation.y,
 				msg_state.rotation.z,
 				msg_state.rotation.w);
-			m_bml->SendIngameMessage(buffer_);
 			if (peer_balls_.find(remote_id) == peer_balls_.end()) {
 				// If message comes from a new client, then init balls and set IC
 				PeerState state;
