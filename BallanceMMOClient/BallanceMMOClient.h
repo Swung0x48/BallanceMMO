@@ -31,8 +31,10 @@ private:
 		VxQuaternion rotation;
 	};
 
+	char buffer_[2048];
 	const size_t MSG_MAX_SIZE = 500;
 	Client client_;
+	bool receiving_msg_ = false;
 	std::thread msg_receive_thread_;
 	blcl::net::message<MsgType> msg_ = blcl::net::message<MsgType>();
 	CK3dObject* player_ball_ = nullptr;
