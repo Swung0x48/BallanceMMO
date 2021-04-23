@@ -2,6 +2,8 @@
 
 #include <BML/BMLAll.h>
 #include "Client.h"
+#include <concurrent_unordered_map.h>
+#include <unordered_map>
 #include <map>
 
 extern "C" {
@@ -13,7 +15,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "0.0.5"; }
+	virtual CKSTRING GetVersion() override { return "0.1.0"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -46,10 +48,10 @@ private:
 	CK3dObject* template_balls_[3];
 
 	struct PeerState {
-		CK3dObject* balls[3];
+		CK3dObject* balls[3] = { nullptr };
 		uint32_t current_ball = 0;
 	};
-	std::unordered_map<uint32_t, PeerState> peer_balls_;
+	concurrency::concurrent_unordered_map<uint32_t, PeerState> peer_balls_;
 
 	virtual void OnLoad() override;
 	virtual void OnPostStartMenu() override;

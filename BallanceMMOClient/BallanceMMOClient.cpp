@@ -148,9 +148,13 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				for (size_t i = 0; i < 3; i++)
 					state.balls[i] = init_spirit_ball(i, remote_id);
 				state.current_ball = msg_state.type;
-				peer_balls_[remote_id] = state;
+				//if (state.current_ball > 3)
+					//state.current_ball = 0;
+				peer_balls_.insert({ remote_id, std::move(state) });
 			}
 
+			if (peer_balls_.size() == 0)
+				return;
 			uint32_t current_ball = peer_balls_[remote_id].current_ball;
 			uint32_t new_ball = msg_state.type;
 			if (current_ball != new_ball) {
