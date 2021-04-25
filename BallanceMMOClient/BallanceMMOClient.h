@@ -15,7 +15,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "0.1.9"; }
+	virtual CKSTRING GetVersion() override { return "0.1.12"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -33,7 +33,7 @@ private:
 		VxQuaternion rotation;
 	};
 
-	const size_t MSG_MAX_SIZE = 500;
+	const size_t MSG_MAX_SIZE = 25;
 	Client client_;
 	bool receiving_msg_ = false;
 	std::thread msg_receive_thread_;

@@ -43,6 +43,7 @@ void BallanceMMOClient::OnLoad()
 void BallanceMMOClient::OnPostStartMenu() {
 	if (client_.is_connected()) {
 		m_bml->SendIngameMessage("Connected!");
+		client_.get_incoming_messages().clear();
 	}
 
 	if (gui_avail_)
@@ -81,7 +82,7 @@ void BallanceMMOClient::OnProcess()
 		//	auto msg = client_.get_incoming_messages().pop_front();
 		//	process_incoming_message(msg.msg);
 		//}
-		if (loop_count_ % 5 == 0) {
+		if (loop_count_ % 60 == 0) {
 			GetLogger()->Info("Pinging Server...");
 			client_.ping_server();
 			if (gui_avail_) {
@@ -115,10 +116,12 @@ void BallanceMMOClient::OnStartLevel()
 				while (client_.get_incoming_messages().empty())
 					client_.get_incoming_messages().wait();
 
+				//GetLogger()->Info("%d msg", client_.get_incoming_messages().size());
 				auto msg = client_.get_incoming_messages().pop_front();
 				process_incoming_message(msg.msg);
-				//if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
-					//client_.get_incoming_messages().clear();
+				
+				if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
+					client_.get_incoming_messages().clear();
 			}
 		});
 		msg_receive_thread_.detach();
@@ -194,7 +197,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			msg >> sent;
 			//GetLogger()->Info("%d", int(std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count()));
 			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
-			sprintf(ping_char_, "Ping: %4.lld ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count());
+			sprintf(ping_char_, "Ping: %02lld ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count());
 			
 			break;
 		}
@@ -227,6 +230,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				//if (state.current_ball > 3)
 					//state.current_ball = 0;
 				peer_balls_.insert({ remote_id, std::move(state) });
+				peer_balls_[remote_id].balls[msg_state.type]->Show(CKSHOW);
 			}
 
 			if (peer_balls_.size() == 0)
