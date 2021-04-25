@@ -4,6 +4,22 @@ IMod* BMLEntry(IBML* bml) {
 	return new BallanceMMOClient(bml);
 }
 
+std::string normalize(const std::string& input) {
+	if (input.length() <= 5)
+		return "Ball_Err";
+
+	if (input.substr(0, 5) != "Ball_")
+		return "Ball_Err";
+
+	size_t i = 6;
+	for (; i < input.length(); i++) {
+		if (input[i] == '_')
+			break;
+	}
+
+	return input.substr(0, i);
+}
+
 void BallanceMMOClient::OnLoad()
 {
 	GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
@@ -16,6 +32,12 @@ void BallanceMMOClient::OnLoad()
 	tmp_prop->SetDefaultInteger(60000);
 	props_["remote_port"] = tmp_prop;
 	client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
+
+	gui_ = new BGui::Gui;
+	ping_text_ = gui_->AddTextLabel("M_MMO_Ping", "Ping: --- ms", ExecuteBB::GAMEFONT_01, 0, 0, 0.99f, 0.03f);
+	ping_text_->SetAlignment(ALIGN_RIGHT);
+	ping_text_->SetVisible(false);
+	gui_avail_ = true;
 }
 
 void BallanceMMOClient::OnPostStartMenu() {
@@ -24,17 +46,19 @@ void BallanceMMOClient::OnPostStartMenu() {
 	}
 
 	if (gui_avail_)
-		gui_->SetVisible(false);
+		ping_text_->SetVisible(false);
 }
 
 void BallanceMMOClient::OnProcess()
 {
 	if (m_bml->IsPlaying()) {
+		loop_count_++;
+
 		auto ball = get_current_ball();
 		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
 			// OnTrafo
 			GetLogger()->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
-			spirit_ball_ = template_balls_[ball_name_to_idx_[ball->GetName()[5]]];
+			//spirit_ball_ = template_balls_[ball_name_to_idx_[ball->GetName()[5]]];
 			
 			VxVector vec;
 			ball->GetPosition(&vec);
@@ -43,37 +67,49 @@ void BallanceMMOClient::OnProcess()
 			
 			// Update current player ball
 			player_ball_ = ball;
-			ball_status_.type = ball_name_to_idx_[player_ball_->GetName()[5]];
+			ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
 		}
 
-		player_ball_->GetPosition(&ball_status_.position);
-		player_ball_->GetQuaternion(&ball_status_.rotation);
+		player_ball_->GetPosition(&ball_state_.position);
+		player_ball_->GetQuaternion(&ball_state_.rotation);
 		msg_.clear();
 		msg_.header.id = MsgType::MessageAll;
-		msg_ << ball_status_;
+		msg_ << ball_state_;
 		client_.broadcast_message(msg_);
 
 		//if (m_bml->IsIngame() && !client_.get_incoming_messages().empty()) {
 		//	auto msg = client_.get_incoming_messages().pop_front();
 		//	process_incoming_message(msg.msg);
 		//}
-		client_.ping_server();
+		if (loop_count_ % 5 == 0) {
+			GetLogger()->Info("Pinging Server...");
+			client_.ping_server();
+			if (gui_avail_) {
+				auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
+				ping_text_->SetText(ping_char_);
+				ping_text_->SetVisible(true);
+			}
+		}
+		if (ping_text_)
+			ping_text_->Process();
 	}
-	if (gui_avail_)
-		gui_->Process();
 }
 
 void BallanceMMOClient::OnStartLevel()
 {
 	player_ball_ = get_current_ball();
-	spirit_ball_ = template_balls_[ball_name_to_idx_[player_ball_->GetName()[5]]];
-	ball_status_.type = ball_name_to_idx_[player_ball_->GetName()[5]];
+	//spirit_ball_ = template_balls_[ball_name_to_idx_[player_ball_->GetName()[5]]];
+	ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
 	//VxVector vec(42, 15, -153);
 	//spirit_ball_->SetPosition(vec);
-	spirit_ball_->Show(CKSHOW);
+	//spirit_ball_->Show(CKSHOW);
 	if (!receiving_msg_) {
 		receiving_msg_ = true;
 		msg_receive_thread_ = std::thread([this]() {
+			std::unique_lock<std::mutex> lk(start_receiving_mtx);
+			while (!ready_to_rx_)
+				start_receiving_cv_.wait(lk);
+
 			while (receiving_msg_)
 			{
 				while (client_.get_incoming_messages().empty())
@@ -89,6 +125,11 @@ void BallanceMMOClient::OnStartLevel()
 	}
 }
 
+void BallanceMMOClient::OnBallNavActive() {
+	ready_to_rx_ = true;
+	start_receiving_cv_.notify_one();
+}
+
 void BallanceMMOClient::OnUnload()
 {
 	receiving_msg_ = false;
@@ -100,15 +141,7 @@ void BallanceMMOClient::OnUnload()
 
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
 {
-	if (isMap && !gui_avail_) {
-		if (!gui_avail_) {
-			gui_ = new BGui::Gui;
-			ping_text_ = gui_->AddTextLabel("M_MMO_Ping", "Ping: --- ms", ExecuteBB::GAMEFONT_01, 0, 0, 0.99f, 0.03f);
-			ping_text_->SetAlignment(ALIGN_RIGHT);
-			gui_avail_ = true;
-		}
-		gui_->SetVisible(true);
-	}
+	//ping_text_->SetVisible(true);
 
 	if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
 		CKDataArray* physicalized_ball = m_bml->GetArrayByName("Physicalize_GameBall");
@@ -142,8 +175,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 				}
 			}
 			template_balls_[i] = ball;
-			ball_name_to_idx_[ball_name[5]] = i; // "Ball_Xxx" 
-												 //		  ^
+			ball_name_to_idx_[ball_name] = i; // "Ball_Xxx"
 		}
 	}
 
@@ -156,25 +188,27 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 {
 	switch (msg.header.id) {
 		case MsgType::ServerPing: {
+			GetLogger()->Info("On ServerPing");
 			std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
 			std::chrono::system_clock::time_point sent;
 			msg >> sent;
 			//GetLogger()->Info("%d", int(std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count()));
-			sprintf(ping_char_buffer_, "Ping: %4.lld ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count());
-			if (gui_avail_)
-				ping_text_->SetText(ping_char_buffer_);
+			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
+			sprintf(ping_char_, "Ping: %4.lld ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count());
+			
 			break;
 		}
 		case MsgType::ServerMessage: {
-			//m_bml->SendIngameMessage("Incoming message!");
+			GetLogger()->Info("On broadcast Msg");
 
 			uint32_t remote_id;
 			msg >> remote_id;
 			BallState msg_state;
 			msg >> msg_state;
-#ifdef DEBUG
-			GetLogger()->Info("%d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+//#ifdef DEBUG
+			GetLogger()->Info("%d, B: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
 				remote_id,
+				msg_state.type,
 				msg_state.position.x,
 				msg_state.position.y,
 				msg_state.position.z,
@@ -182,12 +216,12 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				msg_state.rotation.y,
 				msg_state.rotation.z,
 				msg_state.rotation.w);
-#endif // DEBUG
+//#endif // DEBUG
 
 			if (peer_balls_.find(remote_id) == peer_balls_.end()) {
 				// If message comes from a new client, then init balls and set IC
 				PeerState state;
-				for (size_t i = 0; i < 3; i++)
+				for (size_t i = 0; i < ball_name_to_idx_.size(); i++)
 					state.balls[i] = init_spirit_ball(i, remote_id);
 				state.current_ball = msg_state.type;
 				//if (state.current_ball > 3)
