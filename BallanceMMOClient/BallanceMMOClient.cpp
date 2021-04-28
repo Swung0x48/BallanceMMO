@@ -55,6 +55,12 @@ void BallanceMMOClient::OnProcess()
 	if (m_bml->IsPlaying()) {
 		loop_count_++;
 
+		if (!client_.is_connected()) {
+			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
+			strcpy(ping_char_, "Ping: --- ms");
+			//client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
+		}
+
 		auto ball = get_current_ball();
 		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
 			// OnTrafo
@@ -139,6 +145,9 @@ void BallanceMMOClient::OnUnload()
 	client_.get_incoming_messages().clear();
 	if (msg_receive_thread_.joinable())
 		msg_receive_thread_.join();
+
+	delete ping_text_;
+	delete gui_;
 	client_.disconnect();
 }
 
