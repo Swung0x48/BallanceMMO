@@ -79,23 +79,16 @@ void BallanceMMOClient::OnProcess()
 
 		player_ball_->GetPosition(&ball_state_.position);
 		player_ball_->GetQuaternion(&ball_state_.rotation);
-		msg_.clear();
-		msg_.header.id = MsgType::MessageAll;
-		msg_ << ball_state_;
-		client_.broadcast_message(msg_);
+		
 
 		//if (m_bml->IsIngame() && !client_.get_incoming_messages().empty()) {
 		//	auto msg = client_.get_incoming_messages().pop_front();
 		//	process_incoming_message(msg.msg);
 		//}
-		if (loop_count_ % 60 == 0) {
-			GetLogger()->Info("Pinging Server...");
-			client_.ping_server();
-			if (gui_avail_) {
-				auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
-				ping_text_->SetText(ping_char_);
-				ping_text_->SetVisible(true);
-			}
+		if (gui_avail_) {
+			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
+			ping_text_->SetText(ping_char_);
+			ping_text_->SetVisible(true);
 		}
 		if (ping_text_)
 			ping_text_->Process();
@@ -105,11 +98,8 @@ void BallanceMMOClient::OnProcess()
 void BallanceMMOClient::OnStartLevel()
 {
 	player_ball_ = get_current_ball();
-	//spirit_ball_ = template_balls_[ball_name_to_idx_[player_ball_->GetName()[5]]];
 	ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
-	//VxVector vec(42, 15, -153);
-	//spirit_ball_->SetPosition(vec);
-	//spirit_ball_->Show(CKSHOW);
+
 	if (!receiving_msg_) {
 		receiving_msg_ = true;
 		msg_receive_thread_ = std::thread([this]() {
@@ -132,11 +122,27 @@ void BallanceMMOClient::OnStartLevel()
 		});
 		msg_receive_thread_.detach();
 	}
+
+	pinging_.setInterval([&]() {
+		GetLogger()->Info("Pinging Server...");
+		client_.ping_server();
+	}, 1000);
 }
 
 void BallanceMMOClient::OnBallNavActive() {
 	ready_to_rx_ = true;
 	start_receiving_cv_.notify_one();
+
+	send_ball_state_.setInterval([&]() {
+		msg_.clear();
+		msg_.header.id = MsgType::MessageAll;
+		msg_ << ball_state_;
+		client_.broadcast_message(msg_);
+	}, 15);
+}
+
+void BallanceMMOClient::OnBallNavInactive() {
+	send_ball_state_.stop();
 }
 
 void BallanceMMOClient::OnUnload()
