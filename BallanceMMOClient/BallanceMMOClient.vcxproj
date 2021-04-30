@@ -83,12 +83,12 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>false</LinkIncremental>
     <TargetExt>.bmod</TargetExt>
-    <IncludePath>C:\Users\Swung0x48\source\repos\timercpp;C:\Users\Swung0x48\source\repos\BallanceMMO\BallanceMMOClient\include\asio\include;C:\Users\Swung0x48\source\repos\Swung0x48\SimpleRealTimeNetworking\NetCommon;$(ProjectPath)\..\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectPath)\..\..\timercpp;$(ProjectPath)\..\..\asio\asio\include;$(ProjectPath)\..\..\SimpleRealTimeNetworking\NetCommon;$(ProjectPath)\..\include;$(IncludePath)</IncludePath>
     <OutDir>..\..\..\..\Desktop\Ballance-Debug\ModLoader\Mods</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>C:\Users\Swung0x48\source\repos\timercpp;C:\Users\Swung0x48\source\repos\BallanceMMO\BallanceMMOClient\include\asio\include;C:\Users\Swung0x48\source\repos\Swung0x48\SimpleRealTimeNetworking\NetCommon;$(ProjectPath)\..\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectPath)\..\..\timercpp;$(ProjectPath)\..\..\asio\asio\include;$(ProjectPath)\..\..\SimpleRealTimeNetworking\NetCommon;$(ProjectPath)\..\include;$(IncludePath)</IncludePath>
     <TargetExt>.bmod</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
