@@ -6,6 +6,7 @@
 /*	Copyright (c) Virtools 2000, All Rights Reserved.						 */	
 /*************************************************************************/
 
+
 #ifndef _XSTRING_H_
 #define _XSTRING_H_
 
