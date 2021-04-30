@@ -48,6 +48,8 @@ void BallanceMMOClient::OnPostStartMenu() {
 
 	if (gui_avail_)
 		ping_text_->SetVisible(false);
+
+	pinging_.stop();
 }
 
 void BallanceMMOClient::OnProcess()
@@ -126,7 +128,7 @@ void BallanceMMOClient::OnStartLevel()
 	pinging_.setInterval([&]() {
 		GetLogger()->Info("Pinging Server...");
 		client_.ping_server();
-	}, 1000);
+	}, PING_INTERVAL);
 }
 
 void BallanceMMOClient::OnBallNavActive() {
@@ -138,7 +140,7 @@ void BallanceMMOClient::OnBallNavActive() {
 		msg_.header.id = MsgType::MessageAll;
 		msg_ << ball_state_;
 		client_.broadcast_message(msg_);
-	}, 15);
+	}, SEND_BALL_STATE_INTERVAL);
 }
 
 void BallanceMMOClient::OnBallNavInactive() {
@@ -148,6 +150,8 @@ void BallanceMMOClient::OnBallNavInactive() {
 void BallanceMMOClient::OnUnload()
 {
 	receiving_msg_ = false;
+	send_ball_state_.stop();
+	pinging_.stop();
 	client_.get_incoming_messages().clear();
 	if (msg_receive_thread_.joinable())
 		msg_receive_thread_.join();
@@ -212,8 +216,12 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			msg >> sent;
 			//GetLogger()->Info("%d", int(std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count()));
 			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
-			sprintf(ping_char_, "Ping: %02lld ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count());
+			unsigned long long ping = std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count();
+			sprintf(ping_char_, "Ping: %02lld ms", ping);
 			
+			if (ping > PING_TIMEOUT)
+				client_.get_incoming_messages().clear();
+
 			break;
 		}
 		case MsgType::ServerMessage: {

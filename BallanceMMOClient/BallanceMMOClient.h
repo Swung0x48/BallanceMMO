@@ -16,7 +16,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "0.1.16"; }
+	virtual CKSTRING GetVersion() override { return "0.1.17"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -35,6 +35,9 @@ private:
 	};
 
 	const size_t MSG_MAX_SIZE = 25;
+	const unsigned int SEND_BALL_STATE_INTERVAL = 15;
+	const unsigned int PING_INTERVAL = 1000;
+	const unsigned int PING_TIMEOUT = 2000;
 	Client client_;
 	bool receiving_msg_ = false;
 	std::thread msg_receive_thread_;
