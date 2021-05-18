@@ -1,11 +1,12 @@
 #pragma once
 
 #include <BML/BMLAll.h>
-#include "Client.h"
 #include <timercpp.h>
+#include "Client.h"
 #include <concurrent_unordered_map.h>
 #include <unordered_map>
 #include <map>
+#include <iomanip>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -16,7 +17,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "0.1.17"; }
+	virtual CKSTRING GetVersion() override { return "1.0.0-alpha1"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -33,6 +34,7 @@ private:
 		VxVector position;
 		VxQuaternion rotation;
 	};
+
 
 	const size_t MSG_MAX_SIZE = 25;
 	const unsigned int SEND_BALL_STATE_INTERVAL = 15;

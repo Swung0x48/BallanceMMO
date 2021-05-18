@@ -33,6 +33,17 @@ void BallanceMMOClient::OnLoad()
 	props_["remote_port"] = tmp_prop;
 	client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
 
+	GetConfig()->SetCategoryComment("Player", "Who are you?");
+	tmp_prop = GetConfig()->GetProperty("Player", "Playername");
+	tmp_prop->SetComment("Your name please?");
+	std::srand(std::time(nullptr));
+	int random_variable = std::rand() % 1000;
+	std::stringstream ss;
+	ss << "Player" << std::setw(3) << std::setfill('0') << random_variable;
+	tmp_prop->SetDefaultString(ss.str().c_str());
+	props_["playername"] = tmp_prop;
+
+
 	gui_ = new BGui::Gui;
 	ping_text_ = gui_->AddTextLabel("M_MMO_Ping", "Ping: --- ms", ExecuteBB::GAMEFONT_01, 0, 0, 0.99f, 0.03f);
 	ping_text_->SetAlignment(ALIGN_RIGHT);

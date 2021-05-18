@@ -1,9 +1,6 @@
-[submodule "asio"]
-	path = asio
-	url = https://github.com/chriskohlhoff/asio.git
-[submodule "timercpp"]
-	path = timercpp
+[submodule "includes/timercpp"]
+	path = includes/timercpp
 	url = https://github.com/99x/timercpp.git
-[submodule "SimpleRealTimeNetworking"]
-	path = SimpleRealTimeNetworking
+[submodule "includes/SimpleRealTimeNetworking"]
+	path = includes/SimpleRealTimeNetworking
 	url = https://github.com/Swung0x48/SimpleRealTimeNetworking.git
