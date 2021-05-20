@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <map>
 #include <iomanip>
+#include <fstream>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -17,7 +18,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "1.0.0-alpha1"; }
+	virtual CKSTRING GetVersion() override { return "0.1.18"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -64,6 +65,9 @@ private:
 
 	Timer send_ball_state_;
 	Timer pinging_;
+
+	//std::atomic<bool> sending_ball_state_ = false;
+	//std::atomic<bool> pinging_server_ = false;
 
 	struct PeerState {
 		CK3dObject* balls[3] = { nullptr };
