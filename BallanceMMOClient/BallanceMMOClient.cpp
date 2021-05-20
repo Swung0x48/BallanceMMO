@@ -25,7 +25,7 @@ void BallanceMMOClient::OnLoad()
 	GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 	IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "Server Address");
 	tmp_prop->SetComment("Remote server address, it could be an IP address or a domain name.");
-	tmp_prop->SetDefaultString("139.224.23.40");
+	tmp_prop->SetDefaultString("192.168.50.100");
 	props_["remote_addr"] = tmp_prop;
 	tmp_prop = GetConfig()->GetProperty("Remote", "Port");
 	tmp_prop->SetComment("The port that server is running on.");
@@ -51,16 +51,27 @@ void BallanceMMOClient::OnLoad()
 	gui_avail_ = true;
 }
 
-void BallanceMMOClient::OnPostStartMenu() {
+void BallanceMMOClient::OnPreStartMenu() {
 	if (client_.is_connected()) {
-		m_bml->SendIngameMessage("Connected!");
-		client_.get_incoming_messages().clear();
+		while (!client_.get_incoming_messages().empty()) {
+			auto msg = client_.get_incoming_messages().pop_front().msg;
+			process_incoming_message(msg);
+		}
 	}
 
 	if (gui_avail_)
 		ping_text_->SetVisible(false);
 
 	pinging_.stop();
+}
+
+void BallanceMMOClient::OnPostStartMenu() {
+	if (client_.is_connected()) {
+		while (!client_.get_incoming_messages().empty()) {
+			auto msg = client_.get_incoming_messages().pop_front().msg;
+			process_incoming_message(msg);
+		}
+	}
 }
 
 void BallanceMMOClient::OnProcess()
@@ -148,7 +159,7 @@ void BallanceMMOClient::OnBallNavActive() {
 
 	send_ball_state_.setInterval([&]() {
 		msg_.clear();
-		msg_.header.id = MsgType::MessageAll;
+		msg_.header.id = MsgType::BallState;
 		msg_ << ball_state_;
 		client_.broadcast_message(msg_);
 	}, SEND_BALL_STATE_INTERVAL);
@@ -220,6 +231,27 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& msg)
 {
 	switch (msg.header.id) {
+		case MsgType::ServerAccept: {
+			m_bml->SendIngameMessage("Connection established.");
+			break;
+		}
+		case MsgType::UsernameReq: {
+			GetLogger()->Info("On UsernameReq");
+			msg >> client_.max_username_length_;
+			client_.send_username(std::string(props_["playername"]->GetString()));
+			break;
+		}
+		case MsgType::UsernameAck: {
+			m_bml->SendIngameMessage(("Welcome back, " + std::string(reinterpret_cast<const char*>(msg.body.data()))).c_str());
+			break;
+		}
+		case MsgType::ClientDisconnect: {
+			uint64_t client_id; msg >> client_id;
+			std::stringstream ss;
+			ss << reinterpret_cast<const char*>(msg.body.data()) << " left the game.";
+			m_bml->SendIngameMessage(ss.str().c_str());
+			break;
+		}
 		case MsgType::ServerPing: {
 			GetLogger()->Info("On ServerPing");
 			std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
@@ -235,15 +267,15 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 
 			break;
 		}
-		case MsgType::ServerMessage: {
-			GetLogger()->Info("On broadcast Msg");
+		case MsgType::BallState: {
+			GetLogger()->Info("On BallState");
 
-			uint32_t remote_id;
+			uint64_t remote_id;
 			msg >> remote_id;
 			BallState msg_state;
 			msg >> msg_state;
 //#ifdef DEBUG
-			GetLogger()->Info("%d, B: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+			GetLogger()->Info("%I64d, B: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
 				remote_id,
 				msg_state.type,
 				msg_state.position.x,
@@ -282,10 +314,18 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			peer_balls_[remote_id].balls[new_ball]->SetQuaternion(msg_state.rotation);
 			break;
 		}
+		default: {
+			GetLogger()->Warn("Unknown message ID: %u", msg.header.id);
+			GetLogger()->Warn("Message size: %u", msg.header.size);
+			GetLogger()->Warn("If you ever seen this, it's likely an error.");
+			GetLogger()->Warn("Please report this incident to the developer.");
+
+			break;
+		}
 	}
 }
 
-CK3dObject* BallanceMMOClient::init_spirit_ball(int ball_index, uint32_t id) {
+CK3dObject* BallanceMMOClient::init_spirit_ball(int ball_index, uint64_t id) {
 	CKDependencies dep;
 	dep.Resize(40); dep.Fill(0);
 	dep.m_Flags = CK_DEPENDENCIES_CUSTOM;

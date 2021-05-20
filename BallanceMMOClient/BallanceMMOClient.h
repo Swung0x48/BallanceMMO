@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <map>
 #include <iomanip>
+#include <sstream>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -69,10 +70,11 @@ private:
 		CK3dObject* balls[3] = { nullptr };
 		uint32_t current_ball = 0;
 	};
-	concurrency::concurrent_unordered_map<uint32_t, PeerState> peer_balls_;
+	concurrency::concurrent_unordered_map<uint64_t, PeerState> peer_balls_;
 	std::unordered_map<std::string, IProperty*> props_;
 
 	virtual void OnLoad() override;
+	virtual void OnPreStartMenu() override;
 	virtual void OnPostStartMenu() override;
 	virtual void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass,
 		BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic,
@@ -92,5 +94,5 @@ private:
 	}
 
 	void process_incoming_message(blcl::net::message<MsgType>& msg);
-	CK3dObject* init_spirit_ball(int ball_index, uint32_t id);
+	CK3dObject* init_spirit_ball(int ball_index, uint64_t id);
 };
