@@ -6,14 +6,14 @@ IMod* BMLEntry(IBML* bml) {
 
 std::string hash_sha256(std::ifstream& fs)
 {
-	const size_t BUF_SIZE = 1024;
+	const size_t BUF_SIZE = 256;
 	SHA256 sha256;
 	std::vector<char> buffer(BUF_SIZE, 0);
 	while (!fs.eof())
 	{
 		fs.read(buffer.data(), buffer.size());
-		std::streamsize readSize = fs.gcount();
-		sha256.add(buffer.data(), readSize);
+		std::streamsize read_size = fs.gcount();
+		sha256.add(buffer.data(), read_size);
 	}
 	return sha256.getHash();
 }
@@ -115,6 +115,11 @@ void BallanceMMOClient::OnProcess()
 		player_ball_->GetPosition(&ball_state_.position);
 		player_ball_->GetQuaternion(&ball_state_.rotation);
 		
+		msg_.clear();
+		msg_.header.id = MsgType::BallState;
+		msg_ << ball_state_;
+		client_.broadcast_message(msg_);
+
 		if (gui_avail_) {
 			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
 			ping_text_->SetText(ping_char_);
@@ -162,22 +167,22 @@ void BallanceMMOClient::OnBallNavActive() {
 	ready_to_rx_ = true;
 	start_receiving_cv_.notify_one();
 
-	send_ball_state_.setInterval([&]() {
+	/*send_ball_state_.setInterval([&]() {
 		msg_.clear();
 		msg_.header.id = MsgType::BallState;
 		msg_ << ball_state_;
 		client_.broadcast_message(msg_);
-	}, SEND_BALL_STATE_INTERVAL);
+	}, SEND_BALL_STATE_INTERVAL);*/
 }
 
 void BallanceMMOClient::OnBallNavInactive() {
-	send_ball_state_.stop();
+	//send_ball_state_.stop();
 }
 
 void BallanceMMOClient::OnUnload()
 {
 	receiving_msg_ = false;
-	send_ball_state_.stop();
+	//send_ball_state_.stop();
 	pinging_.stop();
 	client_.get_incoming_messages().clear();
 	if (msg_receive_thread_.joinable())
@@ -234,7 +239,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 	if (isMap) {
 		std::string filename_string(filename);
 		std::filesystem::path path = std::filesystem::current_path().parent_path().append(filename_string[0] == '.' ? filename_string.substr(3, filename_string.length()) : filename_string);
-		std::ifstream map(path);
+		std::ifstream map(path, std::ios::in | std::ios::binary);
 		map_hash_ = hash_sha256(map);
 		m_bml->SendIngameMessage(map_hash_.c_str());
 		blcl::net::message<MsgType> msg;
@@ -308,7 +313,6 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				msg_state.rotation.z,
 				msg_state.rotation.w);
 //#endif // DEBUG
-
 			if (peer_balls_.find(remote_id) == peer_balls_.end()) {
 				// If message comes from a new client, then init balls and set IC
 				PeerState state;
@@ -334,10 +338,16 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			peer_balls_[remote_id].balls[new_ball]->SetQuaternion(msg_state.rotation);
 			break;
 		}
+		case MsgType::MapHashAck: {
+			break;
+		}
+		case MsgType::ExitMap: {
+			break;
+		}
 		default: {
 			GetLogger()->Warn("Unknown message ID: %u", msg.header.id);
 			GetLogger()->Warn("Message size: %u", msg.header.size);
-			GetLogger()->Warn("If you ever seen this, it's likely an error.");
+			GetLogger()->Warn("If you ever seen this, it's likely something really nasty happened.");
 			GetLogger()->Warn("Please report this incident to the developer.");
 
 			break;

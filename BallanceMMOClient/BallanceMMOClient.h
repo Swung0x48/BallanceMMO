@@ -67,7 +67,7 @@ private:
 	bool ready_to_rx_ = false;
 	std::string map_hash_;
 
-	Timer send_ball_state_;
+	//Timer send_ball_state_;
 	Timer pinging_;
 
 	struct PeerState {
