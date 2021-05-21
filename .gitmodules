@@ -4,3 +4,4 @@
 [submodule "includes/SimpleRealTimeNetworking"]
 	path = includes/SimpleRealTimeNetworking
 	url = https://github.com/Swung0x48/SimpleRealTimeNetworking.git
+    branch = experimental
