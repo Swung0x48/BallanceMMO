@@ -35,9 +35,9 @@ public:
     void send_username(const std::string& username) {
         blcl::net::message<MsgType> msg;
         msg.header.id = MsgType::Username;
-        std::vector<uint8_t> username_bin(max_username_length_ + 1);
-        strncpy(reinterpret_cast<char*>(username_bin.data()), username.c_str(), max_username_length_);
-        msg.write(username_bin.data(), strlen(reinterpret_cast<char*>(username_bin.data())) + 1);
+        //std::vector<uint8_t> username_bin(max_username_length_ + 1);
+        //strncpy(reinterpret_cast<char*>(username_bin.data()), username.c_str(), max_username_length_);
+        msg.write(username.c_str(), username.length() + 1);
         send(msg);
     }
 };

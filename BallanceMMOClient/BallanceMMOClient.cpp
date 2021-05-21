@@ -4,6 +4,20 @@ IMod* BMLEntry(IBML* bml) {
 	return new BallanceMMOClient(bml);
 }
 
+std::string hash_sha256(std::ifstream& fs)
+{
+	const size_t BUF_SIZE = 1024;
+	SHA256 sha256;
+	std::vector<char> buffer(BUF_SIZE, 0);
+	while (!fs.eof())
+	{
+		fs.read(buffer.data(), buffer.size());
+		std::streamsize readSize = fs.gcount();
+		sha256.add(buffer.data(), readSize);
+	}
+	return sha256.getHash();
+}
+
 std::string normalize(const std::string& input) {
 	if (input.length() <= 5)
 		return "Ball_Err";
@@ -23,9 +37,9 @@ std::string normalize(const std::string& input) {
 void BallanceMMOClient::OnLoad()
 {
 	GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
-	IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "Server Address");
+	IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
 	tmp_prop->SetComment("Remote server address, it could be an IP address or a domain name.");
-	tmp_prop->SetDefaultString("192.168.50.100");
+	tmp_prop->SetDefaultString("139.224.23.40");
 	props_["remote_addr"] = tmp_prop;
 	tmp_prop = GetConfig()->GetProperty("Remote", "Port");
 	tmp_prop->SetComment("The port that server is running on.");
@@ -216,6 +230,17 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 	if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
 		current_level_array_ = m_bml->GetArrayByName("CurrentLevel");
 	}
+
+	if (isMap) {
+		std::string filename_string(filename);
+		std::filesystem::path path = std::filesystem::current_path().parent_path().append(filename_string[0] == '.' ? filename_string.substr(3, filename_string.length()) : filename_string);
+		std::ifstream map(path);
+		map_hash_ = hash_sha256(map);
+		m_bml->SendIngameMessage(map_hash_.c_str());
+		blcl::net::message<MsgType> msg;
+		msg.header.id = MsgType::EnterMap;
+		client_.send(msg);
+	}
 }
 
 void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& msg)
@@ -255,6 +280,13 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			if (ping > PING_TIMEOUT)
 				client_.get_incoming_messages().clear();
 
+			break;
+		}
+		case MsgType::MapHashReq: {
+			msg.clear();
+			msg.header.id = MsgType::MapHash;
+			msg.write(map_hash_.c_str(), map_hash_.length() + 1);
+			client_.send(msg);
 			break;
 		}
 		case MsgType::BallState: {

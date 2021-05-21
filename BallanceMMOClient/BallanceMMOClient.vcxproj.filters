@@ -21,12 +21,18 @@
     <ClInclude Include="Client.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="sha256.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="Client.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="sha256.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
+#include "sha256.h"
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -37,7 +39,7 @@ private:
 		VxQuaternion rotation;
 	};
 
-
+	const size_t BUF_SIZE = 1024;
 	const size_t MSG_MAX_SIZE = 25;
 	const unsigned int SEND_BALL_STATE_INTERVAL = 15;
 	const unsigned int PING_INTERVAL = 1000;
@@ -63,6 +65,7 @@ private:
 	std::mutex start_receiving_mtx;
 	std::condition_variable start_receiving_cv_;
 	bool ready_to_rx_ = false;
+	std::string map_hash_;
 
 	Timer send_ball_state_;
 	Timer pinging_;
@@ -96,4 +99,16 @@ private:
 
 	void process_incoming_message(blcl::net::message<MsgType>& msg);
 	CK3dObject* init_spirit_ball(int ball_index, uint64_t id);
+	uint32_t crc32(std::ifstream& fs) {
+		std::vector<char> buffer(BUF_SIZE, 0);
+		uint32_t crc = 0;
+		while (!fs.eof())
+		{
+			fs.read(buffer.data(), buffer.size());
+			std::streamsize read_size = fs.gcount();
+			CKComputeDataCRC(buffer.data(), read_size, crc);
+		}
+
+		return crc;
+	}
 };
