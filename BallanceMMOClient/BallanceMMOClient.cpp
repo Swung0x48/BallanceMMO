@@ -89,9 +89,12 @@ void BallanceMMOClient::OnProcess()
 		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
 			// OnTrafo
 			GetLogger()->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
+			//spirit_ball_ = template_balls_[ball_name_to_idx_[ball->GetName()[5]]];
 			
 			VxVector vec;
 			ball->GetPosition(&vec);
+			//spirit_ball_->SetPosition(vec);
+			//spirit_ball_->Show(CKSHOW);
 			
 			// Update current player ball
 			player_ball_ = ball;
@@ -101,6 +104,11 @@ void BallanceMMOClient::OnProcess()
 		player_ball_->GetPosition(&ball_state_.position);
 		player_ball_->GetQuaternion(&ball_state_.rotation);
 		
+
+		//if (m_bml->IsIngame() && !client_.get_incoming_messages().empty()) {
+		//	auto msg = client_.get_incoming_messages().pop_front();
+		//	process_incoming_message(msg.msg);
+		//}
 		if (gui_avail_) {
 			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
 			ping_text_->SetText(ping_char_);
@@ -128,6 +136,7 @@ void BallanceMMOClient::OnStartLevel()
 				while (client_.get_incoming_messages().empty())
 					client_.get_incoming_messages().wait();
 
+				//GetLogger()->Info("%d msg", client_.get_incoming_messages().size());
 				auto msg = client_.get_incoming_messages().pop_front();
 				process_incoming_message(msg.msg);
 				
@@ -205,6 +214,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 					VxColor color = mat->GetDiffuse();
 					color.a = 0.5f;
 					mat->SetDiffuse(color);
+					//ball.materials.push_back(mat);
 					m_bml->SetIC(mat);
 				}
 			}
@@ -283,6 +293,8 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				for (size_t i = 0; i < ball_name_to_idx_.size(); i++)
 					state.balls[i] = init_spirit_ball(i, remote_id);
 				state.current_ball = msg_state.type;
+				//if (state.current_ball > 3)
+					//state.current_ball = 0;
 				peer_balls_.insert({ remote_id, std::move(state) });
 				peer_balls_[remote_id].balls[msg_state.type]->Show(CKSHOW);
 			}
@@ -325,6 +337,12 @@ CK3dObject* BallanceMMOClient::init_spirit_ball(int ball_index, uint64_t id) {
 		CKMesh* mesh = ball->GetMesh(j);
 		for (int k = 0; k < mesh->GetMaterialCount(); k++) {
 			CKMaterial* mat = mesh->GetMaterial(k);
+			//mat->EnableAlphaBlend();
+			//mat->SetSourceBlend(VXBLEND_SRCALPHA);
+			//mat->SetDestBlend(VXBLEND_INVSRCALPHA);
+			//VxColor color = mat->GetDiffuse();
+			//color.a = 0.5f;
+			//mat->SetDiffuse(color);
 			m_bml->SetIC(mat);
 		}
 	}

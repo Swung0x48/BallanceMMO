@@ -7,7 +7,6 @@
 #include <unordered_map>
 #include <map>
 #include <iomanip>
-#include <fstream>
 #include <sstream>
 
 extern "C" {
@@ -19,7 +18,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "0.1.18"; }
+	virtual CKSTRING GetVersion() override { return "1.0.0-alpha1"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
