@@ -73,6 +73,7 @@ private:
 	struct PeerState {
 		CK3dObject* balls[3] = { nullptr };
 		uint32_t current_ball = 0;
+		std::string player_name = "";
 	};
 	concurrency::concurrent_unordered_map<uint64_t, PeerState> peer_balls_;
 	std::unordered_map<std::string, IProperty*> props_;
@@ -100,6 +101,11 @@ private:
 
 	void process_incoming_message(blcl::net::message<MsgType>& msg);
 	CK3dObject* init_spirit_ball(int ball_index, uint64_t id);
+
+	void add_active_client(uint64_t client, const std::string& player_name) {
+		peer_balls_[client].player_name = player_name;
+	}
+
 	uint32_t crc32(std::ifstream& fs) {
 		std::vector<char> buffer(BUF_SIZE, 0);
 		uint32_t crc = 0;
@@ -116,6 +122,9 @@ private:
 	bool hide_player_ball(uint64_t client_id) {
 		try {
 			auto& peerstate = peer_balls_.at(client_id);
+			if (peerstate.balls[peerstate.current_ball] == nullptr)
+				return false;
+
 			peerstate.balls[peerstate.current_ball]->Show(CKHIDE);
 			return true;
 		}

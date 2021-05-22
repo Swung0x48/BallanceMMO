@@ -150,8 +150,8 @@ void BallanceMMOClient::OnStartLevel()
 				auto msg = client_.get_incoming_messages().pop_front();
 				process_incoming_message(msg.msg);
 				
-				if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
-					client_.get_incoming_messages().clear();
+				//if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
+					//client_.get_incoming_messages().clear();
 			}
 		});
 		msg_receive_thread_.detach();
@@ -268,6 +268,13 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			client_.send_username(std::string(props_["playername"]->GetString()));
 			break;
 		}
+		case MsgType::Username: {
+			uint64_t client_id; msg >> client_id;
+			std::string name(reinterpret_cast<const char*>(msg.body.data()));
+			add_active_client(client_id, name);
+			GetLogger()->Info("%I64d %s", client_id, name.c_str());
+			break;
+		}
 		case MsgType::UsernameAck: {
 			m_bml->SendIngameMessage(("Welcome back, " + std::string(reinterpret_cast<const char*>(msg.body.data()))).c_str());
 			break;
@@ -290,8 +297,8 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			unsigned long long ping = std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count();
 			sprintf(ping_char_, "Ping: %02lld ms", ping);
 			
-			if (ping > PING_TIMEOUT)
-				client_.get_incoming_messages().clear();
+			//if (ping > PING_TIMEOUT)
+				//client_.get_incoming_messages().clear();
 
 			break;
 		}
@@ -321,13 +328,15 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 				msg_state.rotation.z,
 				msg_state.rotation.w);
 //#endif // DEBUG
-			if (peer_balls_.find(remote_id) == peer_balls_.end()) {
+			if (peer_balls_.find(remote_id) == peer_balls_.end() || peer_balls_[remote_id].balls[0] == nullptr) {
 				// If message comes from a new client, then init balls and set IC
-				PeerState state;
+				PeerState& state = peer_balls_[remote_id];
+
+				//PeerState state;
 				for (size_t i = 0; i < ball_name_to_idx_.size(); i++)
 					state.balls[i] = init_spirit_ball(i, remote_id);
 				state.current_ball = msg_state.type;
-				peer_balls_.insert({ remote_id, std::move(state) });
+				//peer_balls_[remote_id] = std::move(state);
 				peer_balls_[remote_id].balls[msg_state.type]->Show(CKSHOW);
 			}
 
@@ -337,7 +346,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			auto new_ball = msg_state.type;
 			if (current_ball != new_ball) {
 				peer_balls_[remote_id].balls[current_ball]->Show(CKHIDE);
-				peer_balls_[remote_id].balls[new_ball]->Show(CKSHOW);
+				//peer_balls_[remote_id].balls[new_ball]->Show(CKSHOW);
 
 				peer_balls_[remote_id].current_ball = new_ball;
 			}
