@@ -9,6 +9,7 @@ enum class MsgType : uint32_t {
     ServerDeny,
     ServerPing,
     ClientDisconnect,
+
     BallState,
     UsernameReq,
     Username,
@@ -18,7 +19,7 @@ enum class MsgType : uint32_t {
     ExitMap,
     MapHashReq,
     MapHash,
-    MapHashAck
+    MapHashAck,
 };
 
 class Client : public blcl::net::client_interface<MsgType> {

@@ -179,6 +179,13 @@ void BallanceMMOClient::OnBallNavInactive() {
 	//send_ball_state_.stop();
 }
 
+void BallanceMMOClient::OnPreExitLevel()
+{
+	blcl::net::message<MsgType> msg;
+	msg.header.id = MsgType::ExitMap;
+	client_.send(msg);
+}
+
 void BallanceMMOClient::OnUnload()
 {
 	receiving_msg_ = false;
@@ -270,6 +277,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			std::stringstream ss;
 			ss << reinterpret_cast<const char*>(msg.body.data()) << " left the game.";
 			m_bml->SendIngameMessage(ss.str().c_str());
+			hide_player_ball(client_id);
 			break;
 		}
 		case MsgType::ServerPing: {
@@ -325,23 +333,27 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 
 			if (peer_balls_.size() == 0)
 				return;
-			uint32_t current_ball = peer_balls_[remote_id].current_ball;
-			uint32_t new_ball = msg_state.type;
+			auto current_ball = peer_balls_[remote_id].current_ball;
+			auto new_ball = msg_state.type;
 			if (current_ball != new_ball) {
 				peer_balls_[remote_id].balls[current_ball]->Show(CKHIDE);
 				peer_balls_[remote_id].balls[new_ball]->Show(CKSHOW);
 
 				peer_balls_[remote_id].current_ball = new_ball;
 			}
-
+			peer_balls_[remote_id].balls[new_ball]->Show(CKSHOW);
 			peer_balls_[remote_id].balls[new_ball]->SetPosition(msg_state.position);
 			peer_balls_[remote_id].balls[new_ball]->SetQuaternion(msg_state.rotation);
 			break;
 		}
 		case MsgType::MapHashAck: {
+			for (auto& ball: peer_balls_)
+				hide_player_ball(ball.first);
 			break;
 		}
 		case MsgType::ExitMap: {
+			uint64_t client_id; msg >> client_id;
+			hide_player_ball(client_id);
 			break;
 		}
 		default: {

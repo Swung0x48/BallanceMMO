@@ -77,17 +77,18 @@ private:
 	concurrency::concurrent_unordered_map<uint64_t, PeerState> peer_balls_;
 	std::unordered_map<std::string, IProperty*> props_;
 
-	virtual void OnLoad() override;
-	virtual void OnPreStartMenu() override;
-	virtual void OnPostStartMenu() override;
-	virtual void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass,
+	void OnLoad() override;
+	void OnPreStartMenu() override;
+	void OnPostStartMenu() override;
+	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass,
 		BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic,
 		XObjectArray* objArray, CKObject* masterObj) override;
-	virtual void OnProcess() override;
-	virtual void OnStartLevel() override;
-	virtual void OnUnload() override;
-	virtual void OnBallNavActive() override;
-	virtual void OnBallNavInactive() override;
+	void OnProcess() override;
+	void OnStartLevel() override;
+	void OnUnload() override;
+	void OnBallNavActive() override;
+	void OnBallNavInactive() override;
+	void OnPreExitLevel() override;
 
 private:
 	CK3dObject* get_current_ball() { 
@@ -110,5 +111,17 @@ private:
 		}
 
 		return crc;
+	}
+
+	bool hide_player_ball(uint64_t client_id) {
+		try {
+			auto& peerstate = peer_balls_.at(client_id);
+			peerstate.balls[peerstate.current_ball]->Show(CKHIDE);
+			return true;
+		}
+		catch (std::out_of_range& e) {
+			GetLogger()->Warn(e.what());
+			return false;
+		}
 	}
 };
