@@ -94,9 +94,10 @@ void BallanceMMOClient::OnProcess()
 		loop_count_++;
 
 		if (!client_.is_connected()) {
-			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
-			strcpy(ping_char_, "Ping: --- ms");
-			//client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
+			auto lk = std::unique_lock<std::mutex>(ping_char_mtx_, std::try_to_lock);
+			if (lk)
+				strcpy(ping_char_, "Ping: --- ms");
+			client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
 		}
 
 		auto ball = get_current_ball();
@@ -121,9 +122,11 @@ void BallanceMMOClient::OnProcess()
 		client_.broadcast_message(msg_);
 
 		if (gui_avail_) {
-			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
-			ping_text_->SetText(ping_char_);
-			ping_text_->SetVisible(true);
+			auto lk = std::unique_lock<std::mutex>(ping_char_mtx_, std::try_to_lock);
+			if (lk) {
+				ping_text_->SetText(ping_char_);
+				ping_text_->SetVisible(true);
+			}
 		}
 		if (ping_text_)
 			ping_text_->Process();
