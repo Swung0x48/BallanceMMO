@@ -146,14 +146,13 @@ void BallanceMMOClient::OnProcess()
 				m_bml->GetRenderContext()->GetViewRect(viewport);
 				VxRect rect;
 				i.second.balls[i.second.current_ball]->GetRenderExtents(rect);
-				Vx2DVector pos((rect.left + rect.right) / 2.0f / viewport.right, (rect.top + rect.bottom) / 2.0f / viewport.bottom);
+				Vx2DVector pos((rect.left + rect.right) / 2.0f / viewport.right, rect.top / viewport.bottom);
+#ifdef _DEBUG
 				GetLogger()->Info("pos: %.0f, %.0f", (rect.left + rect.right) / 2.0f, (rect.top + rect.bottom) / 2.0f);
 				GetLogger()->Info("vec: %.2f, %.2f", pos.x, pos.y);
+#endif // _DEBUG
 				i.second.username_label->SetPosition(pos);
 				i.second.username_label->Process();
-				//char buffer[100];
-				//sprintf(buffer, "ID, Name: %I64u, %s", i.first, i.second.player_name.c_str());
-				//m_bml->SendIngameMessage(buffer);
 			}
 		}
 	}
@@ -321,9 +320,9 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
 			std::chrono::system_clock::time_point sent;
 			msg >> sent;
-			//GetLogger()->Info("%d", int(std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count()));
-			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
 			unsigned long long ping = std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count();
+			GetLogger()->Info("%I64d ms", ping);
+			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
 			sprintf(ping_char_, "Ping: %02lld ms", ping);
 			
 			//if (ping > PING_TIMEOUT)
