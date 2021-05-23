@@ -127,6 +127,32 @@ void BallanceMMOClient::OnProcess()
 		}
 		if (ping_text_)
 			ping_text_->Process();
+
+		if (m_bml->GetInputManager()->IsKeyDown(CKKEY_TAB, nullptr)) {
+			for (auto& i : peer_balls_) {
+				if (i.second.balls[i.second.current_ball] == nullptr)
+					continue;
+
+				if (i.second.username_label == nullptr) {
+					i.second.username_label = gui_->AddTextLabel(("MMO_Name_" + std::to_string(i.first)).c_str(), i.second.player_name.c_str(), ExecuteBB::GAMEFONT_03, 0, 0, 0.1f, 0.03f);
+					i.second.username_label->SetAlignment(ALIGN_CENTER);
+					i.second.username_label->SetVisible(true);
+				}
+				
+				VxRect viewport;
+				m_bml->GetRenderContext()->GetViewRect(viewport);
+				VxRect rect;
+				i.second.balls[i.second.current_ball]->GetRenderExtents(rect);
+				Vx2DVector pos((rect.left + rect.right) / 2.0f / viewport.right, (rect.top + rect.bottom) / 2.0f / viewport.bottom);
+				GetLogger()->Info("pos: %.0f, %.0f", (rect.left + rect.right) / 2.0f, (rect.top + rect.bottom) / 2.0f);
+				GetLogger()->Info("vec: %.2f, %.2f", pos.x, pos.y);
+				i.second.username_label->SetPosition(pos);
+				i.second.username_label->Process();
+				//char buffer[100];
+				//sprintf(buffer, "ID, Name: %I64u, %s", i.first, i.second.player_name.c_str());
+				//m_bml->SendIngameMessage(buffer);
+			}
+		}
 	}
 }
 
@@ -272,7 +298,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			uint64_t client_id; msg >> client_id;
 			std::string name(reinterpret_cast<const char*>(msg.body.data()));
 			add_active_client(client_id, name);
-			GetLogger()->Info("%I64d %s", client_id, name.c_str());
+			GetLogger()->Info("Update client ID: %I64d name to %s", client_id, name.c_str());
 			break;
 		}
 		case MsgType::UsernameAck: {

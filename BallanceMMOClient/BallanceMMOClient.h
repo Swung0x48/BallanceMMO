@@ -74,6 +74,7 @@ private:
 		CK3dObject* balls[3] = { nullptr };
 		uint32_t current_ball = 0;
 		std::string player_name = "";
+		BGui::Label* username_label;
 	};
 	concurrency::concurrent_unordered_map<uint64_t, PeerState> peer_balls_;
 	std::unordered_map<std::string, IProperty*> props_;
