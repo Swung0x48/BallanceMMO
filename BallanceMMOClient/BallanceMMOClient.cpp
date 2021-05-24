@@ -131,7 +131,11 @@ void BallanceMMOClient::OnProcess()
 		if (ping_text_)
 			ping_text_->Process();
 
-		if (m_bml->GetInputManager()->IsKeyDown(CKKEY_TAB, nullptr)) {
+		if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_TAB)) {
+			show_player_name_ = !show_player_name_;
+		}
+
+		if (show_player_name_) {
 			for (auto& i : peer_balls_) {
 				if (i.second.balls[i.second.current_ball] == nullptr)
 					continue;
@@ -141,7 +145,7 @@ void BallanceMMOClient::OnProcess()
 					i.second.username_label->SetAlignment(ALIGN_CENTER);
 					i.second.username_label->SetVisible(true);
 				}
-				
+
 				VxRect viewport;
 				m_bml->GetRenderContext()->GetViewRect(viewport);
 				VxRect rect;

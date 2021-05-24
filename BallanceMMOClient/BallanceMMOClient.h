@@ -21,7 +21,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "0.1.18"; }
+	virtual CKSTRING GetVersion() override { return "1.0.0-alpha2"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -66,6 +66,7 @@ private:
 	std::condition_variable start_receiving_cv_;
 	bool ready_to_rx_ = false;
 	std::string map_hash_;
+	bool show_player_name_ = false;
 
 	//Timer send_ball_state_;
 	Timer pinging_;
