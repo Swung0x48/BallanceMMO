@@ -57,8 +57,7 @@ void BallanceMMOClient::OnLoad()
 	tmp_prop->SetDefaultString(ss.str().c_str());
 	props_["playername"] = tmp_prop;
 
-
-	gui_ = new BGui::Gui;
+	gui_ = std::make_unique<BGui::Gui>();
 	ping_text_ = gui_->AddTextLabel("M_MMO_Ping", "Ping: --- ms", ExecuteBB::GAMEFONT_01, 0, 0, 0.99f, 0.03f);
 	ping_text_->SetAlignment(ALIGN_RIGHT);
 	ping_text_->SetVisible(false);
@@ -86,12 +85,33 @@ void BallanceMMOClient::OnPostStartMenu() {
 			process_incoming_message(msg);
 		}
 	}
+
+	if (!receiving_msg_) {
+		receiving_msg_ = true;
+		msg_receive_thread_ = std::thread([this]() {
+			std::unique_lock<std::mutex> lk(start_receiving_mtx);
+			//while (!ready_to_rx_)
+				//start_receiving_cv_.wait(lk);
+
+			while (receiving_msg_)
+			{
+				while (client_.get_incoming_messages().empty())
+					client_.get_incoming_messages().wait();
+
+				auto msg = client_.get_incoming_messages().pop_front();
+				process_incoming_message(msg.msg);
+				//if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
+					//client_.get_incoming_messages().clear();
+			}
+		});
+		//msg_receive_thread_.detach();
+	}
 }
 
 void BallanceMMOClient::OnProcess()
 {
 	if (m_bml->IsPlaying()) {
-		loop_count_++;
+		//loop_count_++;
 
 		if (!client_.is_connected()) {
 			auto lk = std::unique_lock<std::mutex>(ping_char_mtx_, std::try_to_lock);
@@ -136,12 +156,22 @@ void BallanceMMOClient::OnProcess()
 		}
 
 		if (show_player_name_) {
+#ifdef DEBUG
+			GetLogger()->Info("peer ball size: %d", peer_balls_.size());
+#endif // DEBUG
+
 			for (auto& i : peer_balls_) {
 				if (i.second.balls[i.second.current_ball] == nullptr)
 					continue;
 
 				if (i.second.username_label == nullptr) {
-					i.second.username_label = gui_->AddTextLabel(("MMO_Name_" + std::to_string(i.first)).c_str(), i.second.player_name.c_str(), ExecuteBB::GAMEFONT_03, 0, 0, 0.1f, 0.03f);
+					i.second.username_label = std::make_unique<BGui::Label>(("MMO_Name_" + std::to_string(i.first)).c_str());
+					i.second.username_label->SetText(i.second.player_name.c_str());
+					i.second.username_label->SetFont(ExecuteBB::GAMEFONT_03);
+					i.second.username_label->SetPosition(Vx2DVector(0, 0));
+					i.second.username_label->SetSize(Vx2DVector(0.1f, 0.03f));
+
+					//i.second.username_label = gui_->AddTextLabel(("MMO_Name_" + std::to_string(i.first)).c_str(), i.second.player_name.c_str(), ExecuteBB::GAMEFONT_03, 0, 0, 0.1f, 0.03f);
 					i.second.username_label->SetAlignment(ALIGN_CENTER);
 					i.second.username_label->SetVisible(true);
 				}
@@ -155,6 +185,9 @@ void BallanceMMOClient::OnProcess()
 				GetLogger()->Info("pos: %.0f, %.0f", (rect.left + rect.right) / 2.0f, (rect.top + rect.bottom) / 2.0f);
 				GetLogger()->Info("vec: %.2f, %.2f", pos.x, pos.y);
 #endif // _DEBUG
+				//i.second.username_label->SetText(i.second.player_name.c_str());
+				//GetLogger()->Info(i.second.player_name.c_str());
+				i.second.username_label->SetVisible(true);
 				i.second.username_label->SetPosition(pos);
 				i.second.username_label->Process();
 			}
@@ -167,7 +200,10 @@ void BallanceMMOClient::OnStartLevel()
 	player_ball_ = get_current_ball();
 	ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
 
-	if (!receiving_msg_) {
+	ready_to_rx_ = true;
+	start_receiving_cv_.notify_one();
+
+	/*if (!receiving_msg_) {
 		receiving_msg_ = true;
 		msg_receive_thread_ = std::thread([this]() {
 			std::unique_lock<std::mutex> lk(start_receiving_mtx);
@@ -182,12 +218,12 @@ void BallanceMMOClient::OnStartLevel()
 				auto msg = client_.get_incoming_messages().pop_front();
 				process_incoming_message(msg.msg);
 				
-				//if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
-					//client_.get_incoming_messages().clear();
+				if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
+					client_.get_incoming_messages().clear();
 			}
 		});
 		msg_receive_thread_.detach();
-	}
+	}*/
 
 	pinging_.setInterval([&]() {
 		GetLogger()->Info("Pinging Server...");
@@ -196,8 +232,8 @@ void BallanceMMOClient::OnStartLevel()
 }
 
 void BallanceMMOClient::OnBallNavActive() {
-	ready_to_rx_ = true;
-	start_receiving_cv_.notify_one();
+	//ready_to_rx_ = true;
+	//start_receiving_cv_.notify_one();
 
 	/*send_ball_state_.setInterval([&]() {
 		msg_.clear();
@@ -228,7 +264,7 @@ void BallanceMMOClient::OnUnload()
 		msg_receive_thread_.join();
 
 	delete ping_text_;
-	delete gui_;
+	//delete gui_;
 	client_.disconnect();
 }
 
@@ -289,6 +325,15 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 
 void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& msg)
 {
+	if (msg.size() > MSG_MAX_SIZE) {
+		GetLogger()->Error("A message exceeds MAX_MSG_SIZE (%d > %u).", msg.size(), MAX_MSG_SIZE);
+		GetLogger()->Error("Message identifier: ", msg.header.id);
+		GetLogger()->Error("It's likely a junk message and will be discarded");
+		GetLogger()->Warn("If you ever seen this, it's likely something really nasty happened.");
+		GetLogger()->Warn("Please report this incident to the developer.");
+		return;
+	}
+
 	switch (msg.header.id) {
 		case MsgType::ServerAccept: {
 			m_bml->SendIngameMessage("Connection established.");
@@ -316,7 +361,9 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			std::stringstream ss;
 			ss << reinterpret_cast<const char*>(msg.body.data()) << " left the game.";
 			m_bml->SendIngameMessage(ss.str().c_str());
-			hide_player_ball(client_id);
+			if (!hide_player_ball(client_id)) {
+				GetLogger()->Warn("Hide %I64u failed.", client_id);
+			}
 			break;
 		}
 		case MsgType::ServerPing: {
@@ -326,7 +373,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			msg >> sent;
 			unsigned long long ping = std::chrono::duration_cast<std::chrono::milliseconds>(now - sent).count();
 			GetLogger()->Info("%I64d ms", ping);
-			auto lk = std::scoped_lock<std::mutex>(ping_char_mtx_);
+			auto lk = std::unique_lock<std::mutex>(ping_char_mtx_);
 			sprintf(ping_char_, "Ping: %02lld ms", ping);
 			
 			//if (ping > PING_TIMEOUT)
@@ -395,6 +442,12 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 		case MsgType::ExitMap: {
 			uint64_t client_id; msg >> client_id;
 			hide_player_ball(client_id);
+			peer_balls_.unsafe_erase(client_id);
+			//delete peer_balls_.at(client_id).username_label;
+			break;
+		}
+		case MsgType::PlayerJoined: {
+			m_bml->SendIngameMessage((std::string(reinterpret_cast<const char*>(msg.body.data())) + " joined the game.").c_str());
 			break;
 		}
 		default: {

@@ -20,6 +20,8 @@ enum class MsgType : uint32_t {
     MapHashReq,
     MapHash,
     MapHashAck,
+
+    PlayerJoined
 };
 
 class Client : public blcl::net::client_interface<MsgType> {

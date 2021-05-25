@@ -21,7 +21,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "1.0.0-alpha2"; }
+	virtual CKSTRING GetVersion() override { return "1.0.7-alpha8"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -40,7 +40,7 @@ private:
 	};
 
 	const size_t BUF_SIZE = 1024;
-	const size_t MSG_MAX_SIZE = 25;
+	const size_t MSG_MAX_SIZE = 512;
 	const unsigned int SEND_BALL_STATE_INTERVAL = 15;
 	const unsigned int PING_INTERVAL = 1000;
 	const unsigned int PING_TIMEOUT = 2000;
@@ -56,12 +56,12 @@ private:
 	CKDataArray* current_level_array_ = nullptr;
 	std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK3dObject* template_balls_[3];
-	BGui::Gui* gui_ = nullptr;
+	std::unique_ptr<BGui::Gui> gui_ = nullptr;
 	bool gui_avail_ = false;
 	BGui::Label* ping_text_ = nullptr;
 	char ping_char_[50];
 	std::mutex ping_char_mtx_;
-	long long loop_count_;
+	//long long loop_count_;
 	std::mutex start_receiving_mtx;
 	std::condition_variable start_receiving_cv_;
 	bool ready_to_rx_ = false;
@@ -75,7 +75,7 @@ private:
 		CK3dObject* balls[3] = { nullptr };
 		uint32_t current_ball = 0;
 		std::string player_name = "";
-		BGui::Label* username_label;
+		std::unique_ptr<BGui::Label> username_label;
 	};
 	concurrency::concurrent_unordered_map<uint64_t, PeerState> peer_balls_;
 	std::unordered_map<std::string, IProperty*> props_;
@@ -128,6 +128,7 @@ private:
 				return false;
 
 			peerstate.balls[peerstate.current_ball]->Show(CKHIDE);
+			peerstate.username_label->SetVisible(false);
 			return true;
 		}
 		catch (std::out_of_range& e) {
