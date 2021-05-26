@@ -1,6 +1,6 @@
 #pragma once
 
-#include <BML/BMLAll.h>
+#include <BML/BMLAll.h> 
 #include <timercpp.h>
 #include "Client.h"
 #include <concurrent_unordered_map.h>
@@ -21,18 +21,13 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "1.0.7-alpha8"; }
+	virtual CKSTRING GetVersion() override { return "1.2.0-alpha14"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
 	DECLARE_BML_VERSION;
 	
 private:
-	//struct SpiritBall {
-		//CK3dObject* obj = nullptr;
-		//std::vector<CKMaterial*> materials;
-	//};
-
 	struct BallState {
 		uint32_t type = 0;
 		VxVector position;
@@ -49,19 +44,16 @@ private:
 	std::thread msg_receive_thread_;
 	blcl::net::message<MsgType> msg_ = blcl::net::message<MsgType>();
 	CK3dObject* player_ball_ = nullptr;
-	//CK3dObject* spirit_ball_ = nullptr;
 	BallState ball_state_;
-	//VxVector position_;
-	//VxQuaternion rotation_;
 	CKDataArray* current_level_array_ = nullptr;
 	std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK3dObject* template_balls_[3];
 	std::unique_ptr<BGui::Gui> gui_ = nullptr;
 	bool gui_avail_ = false;
-	BGui::Label* ping_text_ = nullptr;
+	bool connected_ = false;
+	std::unique_ptr<BGui::Label> ping_text_;
 	char ping_char_[50];
 	std::mutex ping_char_mtx_;
-	//long long loop_count_;
 	std::mutex start_receiving_mtx;
 	std::condition_variable start_receiving_cv_;
 	bool ready_to_rx_ = false;
@@ -92,6 +84,7 @@ private:
 	void OnBallNavActive() override;
 	void OnBallNavInactive() override;
 	void OnPreExitLevel() override;
+	void OnPreEndLevel() override;
 
 private:
 	CK3dObject* get_current_ball() { 

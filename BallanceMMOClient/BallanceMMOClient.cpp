@@ -57,15 +57,24 @@ void BallanceMMOClient::OnLoad()
 	tmp_prop->SetDefaultString(ss.str().c_str());
 	props_["playername"] = tmp_prop;
 
-	gui_ = std::make_unique<BGui::Gui>();
-	ping_text_ = gui_->AddTextLabel("M_MMO_Ping", "Ping: --- ms", ExecuteBB::GAMEFONT_01, 0, 0, 0.99f, 0.03f);
+	//gui_ = std::make_unique<BGui::Gui>();
+	ping_text_ = std::make_unique<BGui::Label>("M_MMO_Ping");
+	//ping_text_ = gui_->AddTextLabel("M_MMO_Ping", "Ping: --- ms", ExecuteBB::GAMEFONT_01, 0, 0, 0.99f, 0.03f);
+	ping_text_->SetText("Ping: --- ms");
+	ping_text_->SetFont(ExecuteBB::GAMEFONT_01);
+	ping_text_->SetPosition(Vx2DVector(0, 0));
+	ping_text_->SetSize(Vx2DVector(0.99f, 0.03f));
 	ping_text_->SetAlignment(ALIGN_RIGHT);
 	ping_text_->SetVisible(false);
+	auto lk = std::unique_lock<std::mutex>(ping_char_mtx_, std::try_to_lock);
+	if (lk)
+		strcpy(ping_char_, "Ping: --- ms");
 	gui_avail_ = true;
 }
 
 void BallanceMMOClient::OnPreStartMenu() {
 	if (client_.is_connected()) {
+		connected_ = true;
 		while (!client_.get_incoming_messages().empty()) {
 			auto msg = client_.get_incoming_messages().pop_front().msg;
 			process_incoming_message(msg);
@@ -80,9 +89,18 @@ void BallanceMMOClient::OnPreStartMenu() {
 
 void BallanceMMOClient::OnPostStartMenu() {
 	if (client_.is_connected()) {
+		connected_ = true;
+		size_t messages = 0;
 		while (!client_.get_incoming_messages().empty()) {
+			++messages;
 			auto msg = client_.get_incoming_messages().pop_front().msg;
 			process_incoming_message(msg);
+		}
+
+		if (messages == 0) {
+			m_bml->SendIngameMessage("Connection to the server cannot be established.");
+			m_bml->SendIngameMessage("Check your network or mod config and try restart the game.");
+			client_.disconnect();
 		}
 	}
 
@@ -100,8 +118,6 @@ void BallanceMMOClient::OnPostStartMenu() {
 
 				auto msg = client_.get_incoming_messages().pop_front();
 				process_incoming_message(msg.msg);
-				//if (client_.get_incoming_messages().size() > MSG_MAX_SIZE)
-					//client_.get_incoming_messages().clear();
 			}
 		});
 		//msg_receive_thread_.detach();
@@ -113,11 +129,14 @@ void BallanceMMOClient::OnProcess()
 	if (m_bml->IsPlaying()) {
 		//loop_count_++;
 
-		if (!client_.is_connected()) {
+		if (!client_.is_connected() && connected_) {
 			auto lk = std::unique_lock<std::mutex>(ping_char_mtx_, std::try_to_lock);
 			if (lk)
 				strcpy(ping_char_, "Ping: --- ms");
-			client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
+			m_bml->SendIngameMessage("You've been disconnected from server.");
+			client_.disconnect();
+			connected_ = false;
+			//client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger());
 		}
 
 		auto ball = get_current_ball();
@@ -247,6 +266,13 @@ void BallanceMMOClient::OnBallNavInactive() {
 	//send_ball_state_.stop();
 }
 
+void BallanceMMOClient::OnPreEndLevel()
+{
+	blcl::net::message<MsgType> msg;
+	msg.header.id = MsgType::FinishLevel;
+	client_.send(msg);
+}
+
 void BallanceMMOClient::OnPreExitLevel()
 {
 	blcl::net::message<MsgType> msg;
@@ -263,7 +289,7 @@ void BallanceMMOClient::OnUnload()
 	if (msg_receive_thread_.joinable())
 		msg_receive_thread_.join();
 
-	delete ping_text_;
+	//delete ping_text_;
 	//delete gui_;
 	client_.disconnect();
 }
@@ -337,6 +363,8 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 	switch (msg.header.id) {
 		case MsgType::ServerAccept: {
 			m_bml->SendIngameMessage("Connection established.");
+			uint64_t client_id; msg >> client_id;
+			GetLogger()->Info("Assigned ID: %I64u", client_id);
 			break;
 		}
 		case MsgType::UsernameReq: {
@@ -442,8 +470,14 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 		case MsgType::ExitMap: {
 			uint64_t client_id; msg >> client_id;
 			hide_player_ball(client_id);
+			m_bml->SendIngameMessage((peer_balls_[client_id].player_name + " left this map.").c_str());
 			peer_balls_.unsafe_erase(client_id);
 			//delete peer_balls_.at(client_id).username_label;
+			break;
+		}
+		case MsgType::FinishLevel: {
+			uint64_t client_id; msg >> client_id;
+			m_bml->SendIngameMessage((peer_balls_[client_id].player_name + " finished this level.").c_str());
 			break;
 		}
 		case MsgType::PlayerJoined: {
