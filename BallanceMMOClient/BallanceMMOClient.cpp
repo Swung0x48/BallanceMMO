@@ -90,17 +90,9 @@ void BallanceMMOClient::OnPreStartMenu() {
 void BallanceMMOClient::OnPostStartMenu() {
 	if (client_.is_connected()) {
 		connected_ = true;
-		size_t messages = 0;
 		while (!client_.get_incoming_messages().empty()) {
-			++messages;
 			auto msg = client_.get_incoming_messages().pop_front().msg;
 			process_incoming_message(msg);
-		}
-
-		if (messages == 0) {
-			m_bml->SendIngameMessage("Connection to the server cannot be established.");
-			m_bml->SendIngameMessage("Check your network or mod config and try restart the game.");
-			client_.disconnect();
 		}
 	}
 
