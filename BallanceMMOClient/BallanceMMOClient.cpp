@@ -363,8 +363,11 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 	switch (msg.header.id) {
 		case MsgType::ServerAccept: {
 			m_bml->SendIngameMessage("Connection established.");
+			break;
+		}
+		case MsgType::ClientValidated: {
 			uint64_t client_id; msg >> client_id;
-			GetLogger()->Info("Assigned ID: %I64u", client_id);
+			GetLogger()->Info("Assigned client ID: %I64d", client_id);
 			break;
 		}
 		case MsgType::UsernameReq: {
@@ -377,7 +380,7 @@ void BallanceMMOClient::process_incoming_message(blcl::net::message<MsgType>& ms
 			uint64_t client_id; msg >> client_id;
 			std::string name(reinterpret_cast<const char*>(msg.body.data()));
 			add_active_client(client_id, name);
-			GetLogger()->Info("Update client ID: %I64d name to %s", client_id, name.c_str());
+			GetLogger()->Info("Update client %I64d name to %s", client_id, name.c_str());
 			break;
 		}
 		case MsgType::UsernameAck: {

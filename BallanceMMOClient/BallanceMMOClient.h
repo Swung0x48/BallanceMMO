@@ -21,7 +21,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "1.2.0-alpha14"; }
+	virtual CKSTRING GetVersion() override { return "1.2.1-alpha15"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }

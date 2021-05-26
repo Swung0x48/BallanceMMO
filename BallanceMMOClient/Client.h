@@ -8,6 +8,7 @@ enum class MsgType : uint32_t {
     ServerAccept,
     ServerDeny,
     ServerPing,
+    ClientValidated,
     ClientDisconnect,
 
     BallState,
