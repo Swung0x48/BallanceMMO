@@ -21,7 +21,7 @@ public:
 	BallanceMMOClient(IBML* bml) : IMod(bml) {}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "1.2.2-alpha16"; }
+	virtual CKSTRING GetVersion() override { return "1.2.3-alpha17"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -121,7 +121,8 @@ private:
 				return false;
 
 			peerstate.balls[peerstate.current_ball]->Show(CKHIDE);
-			peerstate.username_label->SetVisible(false);
+			if (peerstate.username_label != nullptr)
+				peerstate.username_label->SetVisible(false);
 			return true;
 		}
 		catch (std::out_of_range& e) {
