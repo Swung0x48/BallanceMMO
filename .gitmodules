@@ -4,3 +4,7 @@
 [submodule "includes/SimpleRealTimeNetworking"]
 	path = includes/SimpleRealTimeNetworking
 	url = https://github.com/Swung0x48/SimpleRealTimeNetworking.git
+    branch = experimental
+[submodule "includes/hash-library"]
+	path = includes/hash-library
+	url = https://github.com/stbrumme/hash-library.git

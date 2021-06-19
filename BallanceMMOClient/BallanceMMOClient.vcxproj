@@ -21,10 +21,12 @@
   <ItemGroup>
     <ClInclude Include="BallanceMMOClient.h" />
     <ClInclude Include="Client.h" />
+    <ClInclude Include="sha256.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp" />
     <ClCompile Include="Client.cpp" />
+    <ClCompile Include="sha256.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
