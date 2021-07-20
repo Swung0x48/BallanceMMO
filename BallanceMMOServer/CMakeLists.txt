@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.19)
+project(BallanceMMOServer)
+set(CMAKE_CXX_STANDARD 20)
+
+include (TestBigEndian)
+TEST_BIG_ENDIAN(IS_BIG_ENDIAN)
+if(IS_BIG_ENDIAN)
+    message(STATUS "Big endian detected")
+    add_definitions(-D__BYTE_ORDER=4321)
+else()
+    message(STATUS "Not big endian, assuming little endian")
+    add_definitions(-D__BYTE_ORDER=1234)
+endif()
+
+include_directories(submodules/AMMOProtocol/includes)
+include_directories(submodules/AMMOProtocol/submodules/asio/asio/include)
+include_directories(submodules/AMMOProtocol/submodules/crc32)
+
+add_executable(BallanceMMOServer server.cpp submodules/AMMOProtocol/submodules/crc32/Crc32.cpp)
+add_executable(BallanceMMOMockClient client.cpp submodules/AMMOProtocol/submodules/crc32/Crc32.cpp)

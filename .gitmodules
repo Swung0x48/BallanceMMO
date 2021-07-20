@@ -1,0 +1,3 @@
+[submodule "BallanceMMOServer/submodules/AMMOProtocol"]
+	path = BallanceMMOServer/submodules/AMMOProtocol
+	url = https://github.com/Swung0x48/AMMOProtocol.git
