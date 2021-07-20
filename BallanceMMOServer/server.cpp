@@ -24,9 +24,10 @@ public:
         std::for_each(online_clients_.begin(), online_clients_.end(),[this](auto& item) {
             auto& [key, value] = item;
             // 1-minute timeout (no update timeout)
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - value.last_timestamp) > std::chrono::seconds (5)) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - value.last_timestamp) > std::chrono::minutes (1)) {
+                if (value.state == ammo::role::client_state::Connected)
+                    std::cout << "[INFO] " << value.name << " left the game. (Timeout)" << std::endl;
                 value.state = ammo::role::client_state::Disconnected;
-                std::cout << "[INFO] " << value.name << " left the game. (timeout)" << std::endl;
             }
         });
 
@@ -139,9 +140,8 @@ int main() {
     std::thread update_thread([&server, &updating] () {
         while (updating) {
             server.now = std::chrono::system_clock::now();
-            auto status = server.update(64, true, std::chrono::seconds(1));
-//            if (status == std::cv_status::timeout) {
-//            }
+            server.update(64, true, std::chrono::minutes(5));
+
             server.now = std::chrono::system_clock::now();
             server.cleanup();
         }
