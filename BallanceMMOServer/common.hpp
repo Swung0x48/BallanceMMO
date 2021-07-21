@@ -1,6 +1,10 @@
 #ifndef BALLANCEMMOSERVER_COMMON_HPP
 #define BALLANCEMMOSERVER_COMMON_HPP
 
+#ifdef _WIN32
+#undef max
+#endif
+
 enum PacketType: uint32_t {
     PacketFragment,
     Denied,
@@ -33,7 +37,7 @@ struct PlayerData {
     }
 };
 
-uint64_t encode(uint64_t bin) {
+uint64_t encode_for_validation(uint64_t bin) {
     auto* slice = reinterpret_cast<uint8_t *>(&bin);
     for (size_t i = 0; i < sizeof(bin) / sizeof(uint8_t); i++) {
         slice[i] = (slice[i] << 3 | slice[i] >> 5);

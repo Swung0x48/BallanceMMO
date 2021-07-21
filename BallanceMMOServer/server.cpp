@@ -51,7 +51,7 @@ protected:
                 uint64_t checksum = now.time_since_epoch().count();
                 online_clients_[msg.remote] = {
                         "",
-                        encode(checksum),
+                        encode_for_validation(checksum),
                         msg.message.header.sequence,
                         std::chrono::system_clock::now(),
                         ammo::role::client_state::Pending

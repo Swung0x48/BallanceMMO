@@ -44,7 +44,7 @@ int main() {
                         std::cout << "[INFO] Accepted by server!" << std::endl;
                     } else if (msg.message.header.id == ConnectionChallenge) {
                         uint64_t checksum; msg.message >> checksum;
-                        checksum = encode(checksum);
+                        checksum = encode_for_validation(checksum);
                         msg.message.clear();
                         msg.message << checksum;
                         ammo::entity::string<PacketType> name = client.name;
