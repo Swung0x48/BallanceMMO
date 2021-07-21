@@ -5,3 +5,8 @@
 /.vs
 /BallanceMMOServer/out/build/x64-Debug/CMakeFiles
 /BallanceMMOServer/out/build/x64-Debug
+/BallanceMMOClient/include/BML
+/BallanceMMOClient/lib/BML
+/BallanceMMOClient/Debug
+/Debug
+/BallanceMMOClient/x64/Debug
