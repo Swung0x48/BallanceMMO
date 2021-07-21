@@ -110,7 +110,7 @@ protected:
                 break;
             }
             case ClientDisconnect: {
-                if (online_clients_.contains(msg.remote)) {
+                if (online_clients_.contains(msg.remote) && online_clients_[msg.remote].state != ammo::role::client_state::Disconnected) {
                     auto& client = online_clients_.at(msg.remote);
                     client.state = ammo::role::client_state::Disconnected;
                     std::cout << "[INFO] " << client.name << " left the game. (On ClientDisconnect)" << std::endl;
