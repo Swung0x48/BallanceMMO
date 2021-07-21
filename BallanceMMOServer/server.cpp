@@ -27,6 +27,8 @@ public:
             if (std::chrono::duration_cast<std::chrono::seconds>(now - value.last_timestamp) > std::chrono::minutes (1)) {
                 if (value.state == ammo::role::client_state::Connected)
                     std::cout << "[INFO] " << value.name << " left the game. (Timeout)" << std::endl;
+                else if (value.state == ammo::role::client_state::Pending)
+                    std::cout << "[INFO] (" << key << ") disconnected. (Timeout)" << std::endl;
                 value.state = ammo::role::client_state::Disconnected;
             }
         });
@@ -113,7 +115,7 @@ protected:
                 if (online_clients_.contains(msg.remote) && online_clients_[msg.remote].state != ammo::role::client_state::Disconnected) {
                     auto& client = online_clients_.at(msg.remote);
                     client.state = ammo::role::client_state::Disconnected;
-                    std::cout << "[INFO] " << client.name << " left the game. (On ClientDisconnect)" << std::endl;
+                    std::cout << "[INFO] " << ((!client.name.empty()) ? client.name : ("(" + msg.remote.address().to_string() + std::to_string(msg.remote.port()) + ")")) << " left the game. (On ClientDisconnect)" << std::endl;
                 }
                 break;
             }
