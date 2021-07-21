@@ -24,9 +24,6 @@
     <ClInclude Include="CommandMMO.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="update_context.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp">

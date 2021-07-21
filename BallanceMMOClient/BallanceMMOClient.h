@@ -4,6 +4,7 @@
 #include "client.h"
 #include "CommandMMO.h"
 #include <unordered_map>
+#include <mutex>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -22,8 +23,12 @@ public:
 
 private:
 	void OnLoad() override;
+	void OnExitGame() override;
 	void OnUnload() override;
 	
 	client client_;
 	std::unordered_map<std::string, IProperty*> props_;
+	std::thread receive_thread_;
+	std::mutex bml_lock_;
+	std::atomic_bool quit_;
 };

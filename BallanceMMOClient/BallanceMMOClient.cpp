@@ -26,12 +26,27 @@ void BallanceMMOClient::OnLoad()
 	tmp_prop->SetDefaultString(ss.str().c_str());
 	props_["playername"] = tmp_prop;
 
-	m_bml->RegisterCommand(new CommandMMO(client_, props_));
+	m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_lock_));
+	receive_thread_ = std::thread([this]() {
+		while (!quit_) {
+			while (client_.get_incoming_messages().empty())
+				client_.get_incoming_messages().wait();
+
+			while (!client_.get_incoming_messages().empty()) {
+				auto msg = client_.get_incoming_messages().pop_front();
+				//on_message(msg);
+			}
+		}
+	});
 }
 
-void BallanceMMOClient::OnUnload()
+void BallanceMMOClient::OnExitGame()
 {
-	if (client_.get_state() != ammo::role::client_state::Disconnected)
+	if (client_.get_state() != ammo::role::client_state::Disconnected) {
 		client_.disconnect();
+	}
 }
 
+void BallanceMMOClient::OnUnload() {
+	client_.shutdown();
+}

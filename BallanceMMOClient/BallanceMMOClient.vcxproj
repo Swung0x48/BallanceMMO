@@ -22,7 +22,6 @@
     <ClInclude Include="BallanceMMOClient.h" />
     <ClInclude Include="client.h" />
     <ClInclude Include="CommandMMO.h" />
-    <ClInclude Include="update_context.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\submodules\AMMOProtocol\submodules\crc32\Crc32.cpp" />
