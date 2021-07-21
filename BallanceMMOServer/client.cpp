@@ -11,13 +11,12 @@ public:
         send(msg);
     }
 
-    void disconnect() override {
+    void disconnect() {
         ammo::common::message<PacketType> msg;
         msg.header.id = ClientDisconnect;
         for (int i = 0; i < 10; ++i) {
             send(msg);
         }
-        client::disconnect();
     }
     std::string name = "Spectator001";
 };
@@ -99,6 +98,7 @@ int main() {
         }
     }
     client.disconnect();
+    client.shutdown();
     if (update_thread.joinable())
         update_thread.join();
 }
