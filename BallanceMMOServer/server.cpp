@@ -40,9 +40,10 @@ public:
     }
 protected:
     void on_message(ammo::common::owned_message<PacketType>& msg) override {
-//        if (!online_clients_.contains(msg.remote)) {
-//            return;
-//        }
+        if (online_clients_.contains(msg.remote)) {
+            online_clients_[msg.remote].last_sequence = msg.message.header.sequence;
+            online_clients_[msg.remote].last_timestamp = std::chrono::system_clock::now();
+        }
 
         switch (msg.message.header.id) {
             case PacketFragment: {
