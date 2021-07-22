@@ -29,6 +29,19 @@ void BallanceMMOClient::OnLoad()
 	m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_mtx_));
 }
 
+void BallanceMMOClient::OnPreStartMenu()
+{
+}
+
+void BallanceMMOClient::OnProcess() {
+    if (!client_.connected())
+        return;
+
+    if (m_bml->IsIngame()) {
+
+    }
+}
+
 void BallanceMMOClient::OnExitGame()
 {
 	try {
@@ -51,6 +64,15 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
             std::scoped_lock lk(bml_mtx_);
             m_bml->SendIngameMessage("Accepted by server!");
             m_bml->SendIngameMessage((std::string("Welcome back, ") + props_["playername"]->GetString()).c_str());
+
+            m_bml->AddTimerLoop(1000.0f, [this]() {
+                ammo::common::message<PacketType> msg;
+                uint64_t now = std::chrono::system_clock::now().time_since_epoch().count();
+                msg << now;
+                msg.header.id = Ping;
+                client_.send(msg);
+                return client_.connected();
+            });
         }
         else if (msg.message.header.id == ConnectionChallenge) {
             uint64_t checksum;
@@ -80,7 +102,9 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
                 auto now = std::chrono::system_clock::now().time_since_epoch().count();
                 uint64_t then; msg.message >> then;
                 auto ping = now - then; // in microseconds
-                std::cout << "[INFO] Ping: " << ping / 1000 << " ms" << std::endl;
+                std::unique_lock<std::mutex> lk(bml_mtx_, std::try_to_lock);
+                if (lk)
+                    GetLogger()->Info("Ping: %d ms", ping / 1000);
                 break;
             }
             case GameState: {
