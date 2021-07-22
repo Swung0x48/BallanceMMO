@@ -41,6 +41,8 @@ public:
 protected:
     void on_message(ammo::common::owned_message<PacketType>& msg) override {
         if (online_clients_.contains(msg.remote)) {
+            if (PlayerData::sequence_greater_than(online_clients_[msg.remote].last_sequence, msg.message.header.sequence))
+                return;
             online_clients_[msg.remote].last_sequence = msg.message.header.sequence;
             online_clients_[msg.remote].last_timestamp = std::chrono::system_clock::now();
         }
