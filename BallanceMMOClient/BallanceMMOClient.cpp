@@ -31,8 +31,12 @@ void BallanceMMOClient::OnLoad()
 
 void BallanceMMOClient::OnExitGame()
 {
-	client_.disconnect();
-	client_.shutdown();
+	try {
+		client_.disconnect();
+		client_.shutdown();
+	} catch (std::exception& e) {
+		GetLogger()->Error(e.what());
+	}
 }
 
 void BallanceMMOClient::OnUnload() {
