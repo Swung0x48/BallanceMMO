@@ -1,12 +1,16 @@
 #pragma once
 #include <BML/BMLAll.h>
+#include <memory>
 #include "client.h"
+#include "text_sprite.h"
 class CommandMMO: public ICommand
 {
 private:
 	client& client_;
 	std::unordered_map<std::string, IProperty*>& props_;
 	std::mutex& bml_lock_;
+	std::shared_ptr<text_sprite> ping_;
+	std::shared_ptr<text_sprite> status_;
 
 	void help(IBML* bml) {
 		std::lock_guard<std::mutex> lk(bml_lock_);
@@ -16,10 +20,16 @@ private:
 	}
 
 public:
-	CommandMMO(client& client, std::unordered_map<std::string, IProperty*>& props, std::mutex& bml_lock):
+	CommandMMO(client& client, std::unordered_map<std::string, IProperty*>& props, 
+		std::mutex& bml_lock,
+		std::shared_ptr<text_sprite> ping,
+		std::shared_ptr<text_sprite> status):
 		client_(client),
 		props_(props),
-		bml_lock_(bml_lock) {}
+		bml_lock_(bml_lock),
+		ping_(ping),
+		status_(status)
+	{}
 	virtual std::string GetName() override { return "ballancemmo"; };
 	virtual std::string GetAlias() override { return "mmo"; };
 	virtual std::string GetDescription() override { return "Commands for BallanceMMO."; };
@@ -38,6 +48,8 @@ public:
 						bml->SendIngameMessage("Already connected.");
 					}
 					else if (client_.get_state() == ammo::role::client_state::Disconnected) {
+						status_->update("Pending");
+						status_->paint(0xFFF6A71B);
 						std::lock_guard<std::mutex> lk(bml_lock_);
 						if (client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger()))
 							bml->SendIngameMessage("Connection request sent to server. Waiting for reply...");
@@ -46,11 +58,15 @@ public:
 					}
 				}
 				else if (args[1] == "disconnect") {
-					std::lock_guard<std::mutex> lk(bml_lock_);
 					if (client_.get_state() == ammo::role::client_state::Disconnected) {
+						std::lock_guard<std::mutex> lk(bml_lock_);
 						bml->SendIngameMessage("Already disconnected.");
 					} else {
 						client_.disconnect();
+						ping_->update("Ping: --- ms");
+						status_->update("Disconnected");
+						status_->paint(0xffff0000);
+						std::lock_guard<std::mutex> lk(bml_lock_);
 						bml->SendIngameMessage("Disconnected.");
 					}
 				}

@@ -25,15 +25,27 @@ void BallanceMMOClient::OnLoad()
 	ss << "Player" << std::setw(3) << std::setfill('0') << random_variable;
 	tmp_prop->SetDefaultString(ss.str().c_str());
 	props_["playername"] = tmp_prop;
-
-	m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_mtx_));
 }
 
-void BallanceMMOClient::OnPreStartMenu()
+void BallanceMMOClient::OnPostStartMenu()
 {
+    if (!init_) {
+        ping_ = std::make_shared<text_sprite>("T_MMO_PING", "Ping: --- ms", RIGHT_MOST, 0.0f, bml_mtx_);
+        status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.025f, bml_mtx_);
+        status_->paint(0xffff0000);
+
+        init_ = true;
+    }
+
+    m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_mtx_, ping_, status_));
 }
 
 void BallanceMMOClient::OnProcess() {
+    if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_TAB)) {
+        ping_->toggle();
+        status_->toggle();
+    }
+
     if (!client_.connected())
         return;
 
@@ -61,7 +73,9 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
     if (!client_.connected()) {
         if (msg.message.header.id == ConnectionAccepted) {
             client_.confirm_validation();
-            std::scoped_lock lk(bml_mtx_);
+            status_->update("Connected");
+            status_->paint(0xff00ff00);
+            std::unique_lock lk(bml_mtx_);
             m_bml->SendIngameMessage("Accepted by server!");
             m_bml->SendIngameMessage((std::string("Welcome back, ") + props_["playername"]->GetString()).c_str());
 
@@ -86,6 +100,8 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
             client_.send(msg.message);
         }
         else if (msg.message.header.id == Denied) {
+            status_->update("Disconnected (Rejected)");
+            status_->paint(0xffff0000);
             std::scoped_lock lk(bml_mtx_);
             m_bml->SendIngameMessage("Rejected by server.");
         }
@@ -102,9 +118,7 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
                 auto now = std::chrono::system_clock::now().time_since_epoch().count();
                 uint64_t then; msg.message >> then;
                 auto ping = now - then; // in microseconds
-                std::unique_lock<std::mutex> lk(bml_mtx_, std::try_to_lock);
-                if (lk)
-                    GetLogger()->Info("Ping: %d ms", ping / 1000);
+                ping_->update(std::format("Ping: {:3} ms", ping / 1000), false);
                 break;
             }
             case GameState: {
