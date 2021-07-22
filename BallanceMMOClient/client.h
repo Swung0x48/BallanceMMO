@@ -17,5 +17,9 @@ public:
 		}
 		ammo::role::client<PacketType>::disconnect();
 	}
+
+	void on_message(ammo::common::owned_message<PacketType>& message) override {
+
+	}
 };
 
