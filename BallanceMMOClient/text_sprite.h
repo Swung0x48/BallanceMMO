@@ -27,7 +27,7 @@ struct text_sprite {
 		sprite_->SetFont("", 10, 500, false, false);
 		sprite_->SetText(content.c_str());
 		sprite_->SetTextColor(0xFFFFFFFF);
-		sprite_->SetVisible(true);
+		sprite_->SetVisible(false);
 		sprite_->SetZOrder(20);
 	};
 	bool update(const std::string& text, bool preemptive = true) {
