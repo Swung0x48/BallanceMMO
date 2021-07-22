@@ -46,11 +46,12 @@ public:
 					}
 				}
 				else if (args[1] == "disconnect") {
+					std::lock_guard<std::mutex> lk(bml_lock_);
 					if (client_.get_state() == ammo::role::client_state::Disconnected) {
-						std::lock_guard<std::mutex> lk(bml_lock_);
 						bml->SendIngameMessage("Already disconnected.");
 					} else {
 						client_.disconnect();
+						bml->SendIngameMessage("Disconnected.");
 					}
 				}
 				break;

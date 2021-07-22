@@ -13,8 +13,7 @@ extern "C" {
 class BallanceMMOClient : public IMod {
 public:
 	BallanceMMOClient(IBML* bml) : IMod(bml),
-		client_(
-			[this](ammo::common::owned_message<PacketType>& msg) { OnMessage(msg); })
+		client_([this](ammo::common::owned_message<PacketType>& msg) { OnMessage(msg); })
 	{}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }

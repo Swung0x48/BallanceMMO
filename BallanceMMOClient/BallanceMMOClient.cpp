@@ -50,6 +50,7 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
             client_.confirm_validation();
             std::scoped_lock lk(bml_mtx_);
             m_bml->SendIngameMessage("Accepted by server!");
+            m_bml->SendIngameMessage((std::string("Welcome back, ") + props_["playername"]->GetString()).c_str());
         }
         else if (msg.message.header.id == ConnectionChallenge) {
             uint64_t checksum;

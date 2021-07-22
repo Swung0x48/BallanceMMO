@@ -3,11 +3,10 @@
 #include "../BallanceMMOServer/common.hpp"
 class client: public ammo::role::client<PacketType>
 {
-	const std::function<void(ammo::common::owned_message<PacketType>& msg)> callback_;
+	std::function<void(ammo::common::owned_message<PacketType>& msg)> callback_;
 public:
-	client(const std::function<void(ammo::common::owned_message<PacketType>& msg)> callback):
-		callback_(callback) {
-
+	client(std::function<void(ammo::common::owned_message<PacketType>& msg)> callback):
+		callback_(std::move(callback)) {
 	}
 
 	void send_request() override {
