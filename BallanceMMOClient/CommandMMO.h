@@ -36,7 +36,6 @@ public:
 					if (client_.connected()) {
 						std::lock_guard<std::mutex> lk(bml_lock_);
 						bml->SendIngameMessage("Already connected.");
-						bml->SendIngameMessage("Disconnect first before connect.");
 					}
 					else if (client_.get_state() == ammo::role::client_state::Disconnected) {
 						std::lock_guard<std::mutex> lk(bml_lock_);

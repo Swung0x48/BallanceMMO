@@ -26,7 +26,7 @@ void BallanceMMOClient::OnLoad()
 	tmp_prop->SetDefaultString(ss.str().c_str());
 	props_["playername"] = tmp_prop;
 
-	m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_lock_));
+	m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_mtx_));
 }
 
 void BallanceMMOClient::OnExitGame()
@@ -41,4 +41,53 @@ void BallanceMMOClient::OnExitGame()
 
 void BallanceMMOClient::OnUnload() {
 	
+}
+
+void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
+{
+    if (!client_.connected()) {
+        if (msg.message.header.id == ConnectionAccepted) {
+            client_.confirm_validation();
+            std::scoped_lock lk(bml_mtx_);
+            m_bml->SendIngameMessage("Accepted by server!");
+        }
+        else if (msg.message.header.id == ConnectionChallenge) {
+            uint64_t checksum;
+            msg.message >> checksum;
+            checksum = encode_for_validation(checksum);
+            msg.message.clear();
+            msg.message << checksum;
+            ammo::entity::string<PacketType> str = props_["playername"]->GetString();
+            str.serialize(msg.message);
+            msg.message.header.id = ConnectionResponse;
+            client_.send(msg.message);
+        }
+        else if (msg.message.header.id == Denied) {
+            std::scoped_lock lk(bml_mtx_);
+            m_bml->SendIngameMessage("Rejected by server.");
+        }
+    }
+    else {
+        switch (msg.message.header.id) {
+            case PacketFragment: {
+                break;
+            }
+            case Denied: {
+                break;
+            }
+            case Ping: {
+                auto now = std::chrono::system_clock::now().time_since_epoch().count();
+                uint64_t then; msg.message >> then;
+                auto ping = now - then; // in microseconds
+                std::cout << "[INFO] Ping: " << ping / 1000 << " ms" << std::endl;
+                break;
+            }
+            case GameState: {
+                break;
+            }
+            default: {
+                GetLogger()->Warn("Unknown message ID: %d", msg.message.header.id);
+            }
+        }
+    }
 }

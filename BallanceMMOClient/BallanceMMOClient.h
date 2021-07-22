@@ -12,7 +12,10 @@ extern "C" {
 
 class BallanceMMOClient : public IMod {
 public:
-	BallanceMMOClient(IBML* bml) : IMod(bml) {}
+	BallanceMMOClient(IBML* bml) : IMod(bml),
+		client_(
+			[this](ammo::common::owned_message<PacketType>& msg) { OnMessage(msg); })
+	{}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetVersion() override { return "2.0.0-alpha1"; }
@@ -25,10 +28,9 @@ private:
 	void OnLoad() override;
 	void OnExitGame() override;
 	void OnUnload() override;
-	
-	client client_;
+	void OnMessage(ammo::common::owned_message<PacketType>& msg);
+
 	std::unordered_map<std::string, IProperty*> props_;
-	std::thread receive_thread_;
-	std::mutex bml_lock_;
-	std::atomic_bool quit_;
+	std::mutex bml_mtx_;
+	client client_;
 };
