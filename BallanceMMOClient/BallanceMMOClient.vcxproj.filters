@@ -27,6 +27,9 @@
     <ClInclude Include="text_sprite.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="peer_state.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp">

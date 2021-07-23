@@ -22,6 +22,7 @@
     <ClInclude Include="BallanceMMOClient.h" />
     <ClInclude Include="client.h" />
     <ClInclude Include="CommandMMO.h" />
+    <ClInclude Include="peer_state.h" />
     <ClInclude Include="text_sprite.h" />
   </ItemGroup>
   <ItemGroup>
