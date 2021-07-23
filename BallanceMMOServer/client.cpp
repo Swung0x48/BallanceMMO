@@ -56,6 +56,7 @@ protected:
                     break;
                 }
                 case GameState: {
+                    std::cout << "On GameState" << std::endl;
                     break;
                 }
                 default: {

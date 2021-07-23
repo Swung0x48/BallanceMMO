@@ -123,6 +123,7 @@ protected:
                 break;
             }
             case GameState: {
+                std::cout << "On GameState " << msg.remote << std::endl;
                 broadcast_message(msg);
                 break;
             }
@@ -132,7 +133,7 @@ protected:
         }
 
         if (online_clients_.contains(msg.remote)) {
-            online_clients_[msg.remote].last_sequence = PlayerData::sequence_max(online_clients_[msg.remote].last_sequence, msg.message.header.sequence);
+            online_clients_[msg.remote].last_sequence = msg.message.header.sequence;
         }
     }
 };
