@@ -14,10 +14,12 @@ enum PacketType: uint32_t {
     ConnectionResponse,
     ConnectionAccepted,
     ClientDisconnect,
+    ClientConnected,
     GameState
 };
 
 struct PlayerData {
+    uint64_t id;
     std::string name;
     uint64_t checksum = 0u;
     uint32_t last_sequence = 0u;

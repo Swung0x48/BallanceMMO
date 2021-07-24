@@ -24,7 +24,7 @@ public:
         std::for_each(online_clients_.begin(), online_clients_.end(),[this](auto& item) {
             auto& [key, value] = item;
             // 1-minute timeout (no update timeout)
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - value.last_timestamp) > std::chrono::minutes (1)) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - value.last_timestamp) > std::chrono::minutes(1)) {
                 if (value.state == ammo::role::client_state::Connected)
                     std::cout << "[INFO] " << value.name << " left the game. (Timeout)" << std::endl;
                 else if (value.state == ammo::role::client_state::Pending)
@@ -55,6 +55,7 @@ protected:
                 std::cout << "[INFO] Connection request from " << msg.remote << std::endl;
                 uint64_t checksum = now.time_since_epoch().count();
                 online_clients_[msg.remote] = {
+                        next_id_++,
                         "",
                         encode_for_validation(checksum),
                         msg.message.header.sequence,
@@ -105,7 +106,15 @@ protected:
                 // Reply with ConnectionAccepted
                 msg.message.clear();
                 msg.message.header.id = ConnectionAccepted;
+                msg.message << client.id;
                 send(msg);
+
+                // Broadcast to other online clients
+                msg.message.clear();
+                msg.message.header.id = ClientConnected;
+                msg.message << client.id;
+                username.serialize(msg.message);
+                broadcast_message(msg);
                 break;
             }
             case Ping: {
@@ -136,6 +145,8 @@ protected:
             online_clients_[msg.remote].last_sequence = msg.message.header.sequence;
         }
     }
+private:
+    uint64_t next_id_ = 0;
 };
 
 int main() {
