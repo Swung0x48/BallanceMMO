@@ -5,7 +5,7 @@
 #undef max
 #endif
 
-enum PacketType: uint32_t {
+enum PacketType : uint32_t {
     PacketFragment,
     Denied,
     Ping,
@@ -15,7 +15,8 @@ enum PacketType: uint32_t {
     ConnectionAccepted,
     ClientDisconnect,
     ClientConnected,
-    GameState
+    GameState,
+    OnlineClients
 };
 
 struct PlayerData {

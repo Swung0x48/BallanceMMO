@@ -52,7 +52,8 @@ protected:
                 break;
             }
             case ConnectionRequest: {
-                std::cout << "[INFO] Connection request from " << msg.remote << std::endl;
+                std::cout << "[INFO] Connection request from " << msg.remote << '\n';
+                std::cout << "[INFO] Assigned ID: " << next_id_ << std::endl;
                 uint64_t checksum = now.time_since_epoch().count();
                 online_clients_[msg.remote] = {
                         next_id_++,
@@ -108,6 +109,30 @@ protected:
                 msg.message.header.id = ConnectionAccepted;
                 msg.message << client.id;
                 send(msg);
+
+                // Send already online clients
+                msg.message.clear();
+                msg.message.header.id = OnlineClients;
+                uint32_t count = 0; // Just pad, come back later.
+                msg.message << count;
+                try {
+                    for (auto& client : online_clients_) {
+                        if (client.second.state == ammo::role::client_state::Connected) {
+                            msg.message << client.second.id;
+                            ammo::entity::string<PacketType> name = client.second.name;
+                            name.serialize(msg.message);
+                            ++count;
+                        }
+                    }
+                    msg.message.write_position = 0;
+                    msg.message << count;
+                    if (msg.message.body.size() <= MAX_PACKET_SIZE) {
+                        send(msg);
+                    }
+                }
+                catch (const std::runtime_error& e) {
+                    std::cout << "[ERR] " << e.what() << std::endl;
+                }
 
                 // Broadcast to other online clients
                 msg.message.clear();
