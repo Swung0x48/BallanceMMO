@@ -27,7 +27,7 @@
     <ClInclude Include="text_sprite.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="peer_state.h">
+    <ClInclude Include="label_sprite.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
