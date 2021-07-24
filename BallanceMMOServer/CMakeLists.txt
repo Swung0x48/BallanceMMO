@@ -1,6 +1,8 @@
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.10)
 project(BallanceMMOServer)
 set(CMAKE_CXX_STANDARD 20)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+
 
 include (TestBigEndian)
 TEST_BIG_ENDIAN(IS_BIG_ENDIAN)
@@ -12,9 +14,14 @@ else()
     add_definitions(-D__BYTE_ORDER=1234)
 endif()
 
+find_package(Threads REQUIRED)
+
 include_directories(submodules/AMMOProtocol/includes)
 include_directories(submodules/AMMOProtocol/submodules/asio/asio/include)
 include_directories(submodules/AMMOProtocol/submodules/crc32)
 
 add_executable(BallanceMMOServer server.cpp submodules/AMMOProtocol/submodules/crc32/Crc32.cpp)
+target_link_libraries(BallanceMMOServer PRIVATE Threads::Threads)
 add_executable(BallanceMMOMockClient client.cpp submodules/AMMOProtocol/submodules/crc32/Crc32.cpp)
+target_link_libraries(BallanceMMOMockClient PRIVATE Threads::Threads)
+
