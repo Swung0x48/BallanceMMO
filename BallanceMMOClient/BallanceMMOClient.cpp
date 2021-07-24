@@ -93,7 +93,7 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
-    if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_BACKSLASH)) {
+    if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_COMMA)) {
         ping_->toggle();
         status_->toggle();
     }
@@ -149,8 +149,10 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
 {
     if (!client_.connected()) {
         if (msg.message.header.id == ConnectionAccepted) {
-            std::unique_lock lk(bml_mtx_);
             client_.confirm_validation();
+            msg.message >> id_;
+
+            std::unique_lock lk(bml_mtx_);
             status_->update("Connected");
             status_->paint(0xff00ff00);
             m_bml->SendIngameMessage("Accepted by server!");
@@ -203,8 +205,21 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
                 ping_->update(std::format("Ping: {:3} ms", ping / 1000), false);
                 break;
             }
+            case ClientConnected: {
+                uint64_t id; msg.message >> id;
+                std::unique_lock peer_lk(peer_mtx_);
+                if (!peer_balls_.contains(id)) {
+                    ammo::entity::string<PacketType> name;
+                    name.deserialize(msg.message);
+                    std::unique_lock bml_lk(bml_mtx_);
+                    peer_balls_[id].player_name = name.str;
+                    m_bml->SendIngameMessage((name.str + " joined the game.").c_str());
+                }
+                break;
+            }
             case GameState: {
                 std::unique_lock lk(bml_mtx_);
+
                 break;
             }
             default: {

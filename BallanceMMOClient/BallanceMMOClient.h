@@ -4,6 +4,7 @@
 #include "client.h"
 #include "CommandMMO.h"
 #include "text_sprite.h"
+#include "label_sprite.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -35,13 +36,6 @@ private:
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	void OnMessage(ammo::common::owned_message<PacketType>& msg);
 
-	struct PeerState {
-		CK3dObject* balls[3] = { nullptr };
-		uint32_t current_ball = 0;
-		std::string player_name = "";
-		std::unique_ptr<BGui::Label> username_label;
-	};
-
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
@@ -50,6 +44,7 @@ private:
 	const float RIGHT_MOST = 0.98f;
 
 	bool init_ = false;
+	uint64_t id_;
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
 
@@ -59,11 +54,18 @@ private:
 		VxVector position;
 		VxQuaternion rotation;
 	} ball_state_;
-	CK3dObject* template_balls_[3];
+	CK3dObject* template_balls_[3] = { nullptr };
 	std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CKDataArray* current_level_array_ = nullptr;
-	uint64_t id_counter_ = 0;
 
+	struct PeerState {
+		CK3dObject* balls[3];
+		uint32_t current_ball = 0;
+		std::string player_name = "";
+		std::unique_ptr<label_sprite> username_label;
+	};
+	std::mutex peer_mtx_;
+	std::unordered_map<uint64_t, PeerState> peer_balls_;
 	CK3dObject* get_current_ball() {
 		if (current_level_array_)
 			return static_cast<CK3dObject*>(current_level_array_->GetElementObject(0, 1));
@@ -71,7 +73,7 @@ private:
 		return nullptr;
 	}
 
-	CK3dObject* init_spirit_ball(int ball_index, uint64_t& id) {
+	CK3dObject* init_spirit_ball(int ball_index, uint64_t id) {
 		CKDependencies dep;
 		dep.Resize(40); dep.Fill(0);
 		dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
@@ -87,7 +89,6 @@ private:
 			}
 		}
 
-		id++;
 		return ball;
 	}
 };
