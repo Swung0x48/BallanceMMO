@@ -31,6 +31,8 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 {
     if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
         CKDataArray* physicalized_ball = m_bml->GetArrayByName("Physicalize_GameBall");
+        
+        template_balls_.reserve(physicalized_ball->GetRowCount());
         for (int i = 0; i < physicalized_ball->GetRowCount(); i++) {
             CK3dObject* ball;
             std::string ball_name;
@@ -59,7 +61,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
                     m_bml->SetIC(mat);
                 }
             }
-            template_balls_[i] = ball;
+            template_balls_.emplace_back(ball);
             ball_name_to_idx_[ball_name] = i; // "Ball_Xxx"
         }
     }
@@ -115,6 +117,7 @@ void BallanceMMOClient::OnProcess() {
         player_ball_->GetQuaternion(&ball_state_.rotation);
         ammo::common::message<PacketType> msg;
         msg.header.id = PacketType::GameState;
+        msg << id_;
         msg << ball_state_;
         std::unique_lock client_lk(client_mtx_, std::try_to_lock);
         if (client_lk)
@@ -218,7 +221,34 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
                 break;
             }
             case GameState: {
-                std::unique_lock lk(bml_mtx_);
+                uint64_t id; msg.message >> id;
+                BallState msg_state; msg.message >> msg_state;
+
+                std::unique_lock bml_lk(bml_mtx_);
+                std::unique_lock peer_lk(peer_mtx_);
+                if (!peer_balls_.contains(id)) {
+                    return; // ignore for now
+                }
+
+                peer_balls_[id].balls.resize(template_balls_.size());
+
+                if (peer_balls_[id].balls[0] == nullptr) {
+                    init_spirit_balls(id);
+                }
+                if (peer_balls_[id].username_label == nullptr) {
+                    peer_balls_[id].username_label =
+                        std::make_unique<label_sprite>(
+                            "Name_" + peer_balls_[id].player_name,
+                            peer_balls_[id].player_name,
+                            0.5, 0.5);
+                }
+                if (peer_balls_[id].current_ball != msg_state.type) {
+                    OnPeerTrafo(id, peer_balls_[id].current_ball, msg_state.type);
+                }
+
+                auto* current_ball = peer_balls_[id].balls[peer_balls_[id].current_ball];
+                current_ball->SetPosition(msg_state.position);
+                current_ball->SetQuaternion(msg_state.rotation);
 
                 break;
             }
@@ -228,4 +258,13 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
             }
         }
     }
+}
+
+void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
+{
+    GetLogger()->Info("OnPeerTrafo, %d -> %d", from, to);
+    PeerState& peer = peer_balls_[id];
+    peer.current_ball = to;
+    peer.balls[from]->Show(CKHIDE);
+    peer.balls[to]->Show(CKSHOW);
 }

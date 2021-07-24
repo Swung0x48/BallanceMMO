@@ -34,7 +34,10 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
+	
+	// Custom
 	void OnMessage(ammo::common::owned_message<PacketType>& msg);
+	void OnPeerTrafo(uint64_t id, int from, int to);
 
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
@@ -54,12 +57,12 @@ private:
 		VxVector position;
 		VxQuaternion rotation;
 	} ball_state_;
-	CK3dObject* template_balls_[3] = { nullptr };
+	std::vector<CK3dObject*> template_balls_;
 	std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CKDataArray* current_level_array_ = nullptr;
 
 	struct PeerState {
-		CK3dObject* balls[3];
+		std::vector<CK3dObject*> balls;
 		uint32_t current_ball = 0;
 		std::string player_name = "";
 		std::unique_ptr<label_sprite> username_label;
@@ -90,5 +93,11 @@ private:
 		}
 
 		return ball;
+	}
+
+	void init_spirit_balls(uint64_t id) {
+		for (size_t i = 0; i < template_balls_.size(); ++i) {
+			peer_balls_[id].balls[i] = init_spirit_ball(i, id);
+		}
 	}
 };
