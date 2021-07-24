@@ -122,6 +122,11 @@ void BallanceMMOClient::OnProcess() {
         std::unique_lock client_lk(client_mtx_, std::try_to_lock);
         if (client_lk)
             client_.send(msg);
+
+        for (auto& peer: peer_) {
+            if (peer.second.username_label != nullptr)
+                peer.second.username_label->process();
+        }
     }
 }
 
@@ -211,12 +216,28 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
             case ClientConnected: {
                 uint64_t id; msg.message >> id;
                 std::unique_lock peer_lk(peer_mtx_);
-                if (!peer_balls_.contains(id)) {
+                if (!peer_.contains(id)) {
                     ammo::entity::string<PacketType> name;
                     name.deserialize(msg.message);
                     std::unique_lock bml_lk(bml_mtx_);
-                    peer_balls_[id].player_name = name.str;
+                    peer_[id].player_name = name.str;
                     m_bml->SendIngameMessage((name.str + " joined the game.").c_str());
+                }
+                break;
+            }
+            case OnlineClients: {
+                uint32_t count; msg.message >> count;
+                for (size_t i = 0; i < count; ++i) {
+                    uint64_t id; msg.message >> id;
+                    ammo::entity::string<PacketType> name;
+                    name.deserialize(msg.message);
+
+                    GetLogger()->Info("%d %s", id, name.str.c_str());
+
+                    std::unique_lock<std::mutex> peer_lk(peer_mtx_);
+                    if (!peer_.contains(id)) {
+                        peer_[id].player_name = name.str;
+                    }
                 }
                 break;
             }
@@ -226,27 +247,28 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
 
                 std::unique_lock bml_lk(bml_mtx_);
                 std::unique_lock peer_lk(peer_mtx_);
-                if (!peer_balls_.contains(id)) {
+                if (!peer_.contains(id)) {
                     return; // ignore for now
                 }
 
-                peer_balls_[id].balls.resize(template_balls_.size());
+                peer_[id].balls.resize(template_balls_.size());
 
-                if (peer_balls_[id].balls[0] == nullptr) {
+                if (peer_[id].balls[0] == nullptr) {
                     init_spirit_balls(id);
                 }
-                if (peer_balls_[id].username_label == nullptr) {
-                    peer_balls_[id].username_label =
+                if (peer_[id].username_label == nullptr) {
+                    peer_[id].username_label =
                         std::make_unique<label_sprite>(
-                            "Name_" + peer_balls_[id].player_name,
-                            peer_balls_[id].player_name,
+                            "Name_" + peer_[id].player_name,
+                            peer_[id].player_name,
                             0.5, 0.5);
+                    peer_[id].username_label->set_visible(true);
                 }
-                if (peer_balls_[id].current_ball != msg_state.type) {
-                    OnPeerTrafo(id, peer_balls_[id].current_ball, msg_state.type);
+                if (peer_[id].current_ball != msg_state.type) {
+                    OnPeerTrafo(id, peer_[id].current_ball, msg_state.type);
                 }
 
-                auto* current_ball = peer_balls_[id].balls[peer_balls_[id].current_ball];
+                auto* current_ball = peer_[id].balls[peer_[id].current_ball];
                 current_ball->SetPosition(msg_state.position);
                 current_ball->SetQuaternion(msg_state.rotation);
 
@@ -263,7 +285,7 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
 void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
 {
     GetLogger()->Info("OnPeerTrafo, %d -> %d", from, to);
-    PeerState& peer = peer_balls_[id];
+    PeerState& peer = peer_[id];
     peer.current_ball = to;
     peer.balls[from]->Show(CKHIDE);
     peer.balls[to]->Show(CKSHOW);

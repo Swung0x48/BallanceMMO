@@ -68,7 +68,7 @@ private:
 		std::unique_ptr<label_sprite> username_label;
 	};
 	std::mutex peer_mtx_;
-	std::unordered_map<uint64_t, PeerState> peer_balls_;
+	std::unordered_map<uint64_t, PeerState> peer_;
 	CK3dObject* get_current_ball() {
 		if (current_level_array_)
 			return static_cast<CK3dObject*>(current_level_array_->GetElementObject(0, 1));
@@ -97,7 +97,7 @@ private:
 
 	void init_spirit_balls(uint64_t id) {
 		for (size_t i = 0; i < template_balls_.size(); ++i) {
-			peer_balls_[id].balls[i] = init_spirit_ball(i, id);
+			peer_[id].balls[i] = init_spirit_ball(i, id);
 		}
 	}
 };

@@ -25,20 +25,35 @@ struct label_sprite {
 		sprite_->SetVisible(false);
 		sprite_->SetZOrder(20);
 	};
+
+	void set_position(const Vx2DVector& position) {
+		std::unique_lock lk(mtx_);
+		sprite_->SetPosition(position);
+	}
+
 	void update(const std::string& text) {
 		std::unique_lock lk(mtx_);
 		sprite_->SetText(text.c_str());
 	}
 
-	void toggle() {
+	void set_visible(bool visible) {
 		std::unique_lock lk(mtx_);
-		visible_ = !visible_;
+		visible_ = visible;
 		sprite_->SetVisible(visible_);
+	}
+
+	void toggle() {
+		set_visible(!visible_);
 	}
 
 	void set_position(Vx2DVector pos) {
 		std::unique_lock lk(mtx_);
 		sprite_->SetPosition(pos);
+	}
+
+	void process() {
+		std::unique_lock lk(mtx_);
+		sprite_->Process();
 	}
 };
 
