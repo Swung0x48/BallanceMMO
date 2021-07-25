@@ -42,7 +42,7 @@ public:
 				break;
 			}
 			case 2: {
-				if (args[1] == "connect") {
+				if (args[1] == "connect" || args[1] == "c") {
 					if (client_.connected()) {
 						std::lock_guard<std::mutex> lk(bml_lock_);
 						bml->SendIngameMessage("Already connected.");
@@ -57,7 +57,7 @@ public:
 							bml->SendIngameMessage("Connect to server failed.");
 					}
 				}
-				else if (args[1] == "disconnect") {
+				else if (args[1] == "disconnect" || args[1] == "d") {
 					if (client_.get_state() == ammo::role::client_state::Disconnected) {
 						std::lock_guard<std::mutex> lk(bml_lock_);
 						bml->SendIngameMessage("Already disconnected.");

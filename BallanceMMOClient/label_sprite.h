@@ -46,11 +46,6 @@ struct label_sprite {
 		set_visible(!visible_);
 	}
 
-	void set_position(Vx2DVector pos) {
-		std::unique_lock lk(mtx_);
-		sprite_->SetPosition(pos);
-	}
-
 	void process() {
 		std::unique_lock lk(mtx_);
 		sprite_->Process();

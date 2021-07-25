@@ -36,7 +36,9 @@ private:
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	
 	// Custom
+	//void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnMessage(ammo::common::owned_message<PacketType>& msg);
+	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
 
 	std::unordered_map<std::string, IProperty*> props_;

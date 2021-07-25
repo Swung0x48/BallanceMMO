@@ -109,6 +109,7 @@ void BallanceMMOClient::OnProcess() {
         if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
             // OnTrafo
             GetLogger()->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
+            OnTrafo(ball_name_to_idx_[player_ball_->GetName()], ball_name_to_idx_[ball->GetName()]);
             // Update current player ball
             player_ball_ = ball;
             ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
@@ -124,8 +125,10 @@ void BallanceMMOClient::OnProcess() {
             client_.send(msg);
 
         for (auto& peer: peer_) {
-            if (peer.second.username_label != nullptr)
-                peer.second.username_label->process();
+            auto& username_label = peer.second.username_label;
+            if (username_label != nullptr) {
+                username_label->process();
+            }
         }
     }
 }
@@ -150,7 +153,7 @@ void BallanceMMOClient::OnExitGame()
 }
 
 void BallanceMMOClient::OnUnload() {
-	
+
 }
 
 void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
@@ -272,6 +275,12 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
                 current_ball->SetPosition(msg_state.position);
                 current_ball->SetQuaternion(msg_state.rotation);
 
+                auto& username_label = peer_[id].username_label;
+                VxRect extent; current_ball->GetRenderExtents(extent);
+                VxRect viewport; m_bml->GetRenderContext()->GetViewRect(viewport);
+                Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, extent.top / viewport.bottom);
+                username_label->set_position(pos);
+
                 break;
             }
             default: {
@@ -280,6 +289,10 @@ void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)
             }
         }
     }
+}
+
+void BallanceMMOClient::OnTrafo(int from, int to)
+{
 }
 
 void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
