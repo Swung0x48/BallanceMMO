@@ -89,7 +89,7 @@ void BallanceMMOClient::OnPostStartMenu()
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.025f);
         status_->paint(0xffff0000);
 
-        m_bml->RegisterCommand(new CommandMMO(client_, props_, bml_mtx_, ping_, status_));
+        m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
     }
 }
@@ -144,16 +144,71 @@ void BallanceMMOClient::OnStartLevel()
 
 void BallanceMMOClient::OnExitGame()
 {
-	try {
-		client_.disconnect();
-		client_.shutdown();
-	} catch (std::exception& e) {
-		GetLogger()->Error(e.what());
-	}
+	
 }
 
 void BallanceMMOClient::OnUnload() {
+    try {
+        client_.disconnect();
+        client_.shutdown();
+    }
+    catch (std::exception& e) {
+        GetLogger()->Error(e.what());
+    }
+}
 
+void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& args)
+{
+    auto help = [this](IBML* bml) {
+        std::lock_guard<std::mutex> lk(bml_mtx_);
+        bml->SendIngameMessage("BallanceMMO Help");
+        bml->SendIngameMessage("/connect - Connect to server.");
+        bml->SendIngameMessage("/disconnect - Disconnect from server.");
+    };
+
+    switch (args.size()) {
+        case 1: {
+            help(bml);
+            break;
+        }
+        case 2: {
+            if (args[1] == "connect" || args[1] == "c") {
+                if (client_.connected()) {
+                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    bml->SendIngameMessage("Already connected.");
+                }
+                else if (client_.get_state() == ammo::role::client_state::Disconnected) {
+                    status_->update("Pending");
+                    status_->paint(0xFFF6A71B);
+                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    if (client_.connect(props_["remote_addr"]->GetString(), props_["remote_port"]->GetInteger()))
+                        bml->SendIngameMessage("Connection request sent to server. Waiting for reply...");
+                    else
+                        bml->SendIngameMessage("Connect to server failed.");
+                }
+            }
+            else if (args[1] == "disconnect" || args[1] == "d") {
+                if (client_.get_state() == ammo::role::client_state::Disconnected) {
+                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    bml->SendIngameMessage("Already disconnected.");
+                }
+                else {
+                    client_.disconnect();
+                    ping_->update("Ping: --- ms");
+                    status_->update("Disconnected");
+                    status_->paint(0xffff0000);
+                    std::unique_lock<std::mutex> peer_lk(peer_mtx_);
+                    peer_.clear();
+                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    bml->SendIngameMessage("Disconnected.");
+                }
+            }
+            break;
+        }
+        default: {
+            help(bml);
+        }
+    }
 }
 
 void BallanceMMOClient::OnMessage(ammo::common::owned_message<PacketType>& msg)

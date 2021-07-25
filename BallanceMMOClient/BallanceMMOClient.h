@@ -36,7 +36,7 @@ private:
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	
 	// Custom
-	//void OnCommand(IBML* bml, const std::vector<std::string>& args);
+	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnMessage(ammo::common::owned_message<PacketType>& msg);
 	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
@@ -68,6 +68,18 @@ private:
 		uint32_t current_ball = 0;
 		std::string player_name = "";
 		std::unique_ptr<label_sprite> username_label;
+
+		~PeerState() {
+			CKDependencies dep;
+			dep.Resize(40); dep.Fill(0);
+			dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
+			dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
+			dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
+			dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
+			for (auto* ball : balls) {
+				CKDestroyObject(ball, 0, &dep);
+			}
+		}
 	};
 	std::mutex peer_mtx_;
 	std::unordered_map<uint64_t, PeerState> peer_;
