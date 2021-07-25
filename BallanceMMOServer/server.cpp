@@ -157,7 +157,7 @@ protected:
                 break;
             }
             case GameState: {
-                std::cout << "On GameState " << msg.remote << std::endl;
+                //std::cout << "On GameState " << msg.remote << std::endl;
                 broadcast_message(msg);
                 break;
             }
