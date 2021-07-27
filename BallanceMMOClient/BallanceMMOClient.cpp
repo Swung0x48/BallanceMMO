@@ -9,7 +9,7 @@ void BallanceMMOClient::OnLoad()
 	GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 	IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
 	tmp_prop->SetComment("Remote server address, it could be an IP address or a domain name.");
-	tmp_prop->SetDefaultString("127.0.0.1");
+	tmp_prop->SetDefaultString("139.224.23.40");
 	props_["remote_addr"] = tmp_prop;
 	tmp_prop = GetConfig()->GetProperty("Remote", "Port");
 	tmp_prop->SetComment("The port that server is running on.");
@@ -106,6 +106,9 @@ void BallanceMMOClient::OnProcess() {
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
     if (bml_lk && m_bml->IsPlaying()) {
         auto ball = get_current_ball();
+        if (player_ball_ == nullptr)
+            player_ball_ = ball;
+
         if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
             // OnTrafo
             GetLogger()->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
