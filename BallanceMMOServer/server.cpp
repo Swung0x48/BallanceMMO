@@ -46,9 +46,6 @@ public:
 
         std::erase_if(online_clients_, [](const auto& item) {
             auto const& [key, value] = item;
-#ifdef DEBUG
-            std::cout << "[DEBUG] Purging " << value.name << '(' << value.id << ", " << key << ")\n";
-#endif
             return value.state == ammo::role::client_state::Disconnected;
         });
     }
