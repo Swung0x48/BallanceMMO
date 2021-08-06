@@ -1,9 +1,9 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.12)
 project(BallanceMMOServer)
 set(CMAKE_CXX_STANDARD 20)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-
+add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
 include (TestBigEndian)
 TEST_BIG_ENDIAN(IS_BIG_ENDIAN)
 if(IS_BIG_ENDIAN)
