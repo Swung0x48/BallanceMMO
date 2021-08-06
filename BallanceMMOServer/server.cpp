@@ -25,10 +25,17 @@ public:
     }
 
     void cleanup() {
-        std::for_each(online_clients_.begin(), online_clients_.end(),[this](auto& item) {
+        std::for_each(online_clients_.begin(), online_clients_.end(),[](auto& item) {
             auto& [key, value] = item;
             // 1-minute timeout (no update timeout)
             if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - value.last_timestamp) > std::chrono::minutes(1)) {
+#ifdef DEBUG
+                std::cout << "[DEBUG] Kicking " << value.name << '(' << value.id << ", " << key << ")\n";
+                std::cout << "[DEBUG] Last sequence: " << value.last_sequence << '\n';
+                std::cout << "[DEBUG] Last timestamp: " << value.last_timestamp.time_since_epoch().count() << '\n';
+                std::cout << "[DEBUG] -----\n";
+                std::cout << "[DEBUG] Current time: " << std::chrono::system_clock::now().time_since_epoch().count()<< std::endl;
+#endif
                 if (value.state == ammo::role::client_state::Connected)
                     std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] " << value.name << " left the game. (Timeout)" << std::endl;
                 else if (value.state == ammo::role::client_state::Pending)
@@ -39,6 +46,9 @@ public:
 
         std::erase_if(online_clients_, [](const auto& item) {
             auto const& [key, value] = item;
+#ifdef DEBUG
+            std::cout << "[DEBUG] Purging " << value.name << '(' << value.id << ", " << key << ")\n";
+#endif
             return value.state == ammo::role::client_state::Disconnected;
         });
     }
@@ -78,9 +88,18 @@ protected:
                 auto& client = online_clients_[msg.remote];
 
                 bool denied = false;
+#ifdef DEBUG
+                std::cout << "[DEBUG] Checking client validity..." << '\n';
+                std::cout << "[DEBUG] expected: " << client.checksum << '\n';
+                std::cout << "[DEBUG] actual: " << response << std::endl;
+#endif
                 if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - client.last_timestamp) > std::chrono::minutes(1)) {
                     // 1-minute timeout (request-to-response)
                     denied = true;
+#ifdef DEBUG
+                    std::cout << "[DEBUG] last timestamp: " << client.last_timestamp.time_since_epoch().count() << '\n';
+                    std::cout << "[DEBUG] current time: " << std::chrono::system_clock::now().time_since_epoch().count()<< std::endl;
+#endif
                     std::cout << '[' << SimpleServer::get_current_time_string() << "] [WARN] Denied connection from " << msg.remote << " (Timeout)" << std::endl;
                 }
                 if (response != client.checksum) {
@@ -179,6 +198,9 @@ private:
 };
 
 int main() {
+#ifdef DEBUG
+    std::cout << "[DEBUG] Now running under development mode." << std::endl;
+#endif
     SimpleServer server(50000);
     if (server.start())
         std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] Server started!\n";
