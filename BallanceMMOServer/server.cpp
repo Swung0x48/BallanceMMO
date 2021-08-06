@@ -8,7 +8,11 @@ class SimpleServer: public ammo::role::server<PacketType> {
 public:
     explicit SimpleServer(uint16_t port): ammo::role::server<PacketType>(port) {}
     std::unordered_map<asio::ip::udp::endpoint, PlayerData> online_clients_;
-    std::chrono::system_clock::time_point now;
+    static std::string get_current_time_string() {
+        auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::string ret = std::ctime(&now);
+        return ret.substr(0, ret.length() - 1);
+    }
 
     void broadcast_message(const ammo::common::owned_message<PacketType>& msg) {
         std::for_each(online_clients_.begin(), online_clients_.end(),[this, &msg](auto& item) {
@@ -24,11 +28,11 @@ public:
         std::for_each(online_clients_.begin(), online_clients_.end(),[this](auto& item) {
             auto& [key, value] = item;
             // 1-minute timeout (no update timeout)
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - value.last_timestamp) > std::chrono::minutes(1)) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - value.last_timestamp) > std::chrono::minutes(1)) {
                 if (value.state == ammo::role::client_state::Connected)
-                    std::cout << "[INFO] " << value.name << " left the game. (Timeout)" << std::endl;
+                    std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] " << value.name << " left the game. (Timeout)" << std::endl;
                 else if (value.state == ammo::role::client_state::Pending)
-                    std::cout << "[INFO] (" << key << ") disconnected. (Timeout)" << std::endl;
+                    std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] (" << key << ") disconnected. (Timeout)" << std::endl;
                 value.state = ammo::role::client_state::Disconnected;
             }
         });
@@ -52,9 +56,9 @@ protected:
                 break;
             }
             case ConnectionRequest: {
-                std::cout << "[INFO] Connection request from " << msg.remote << '\n';
-                std::cout << "[INFO] Assigned ID: " << next_id_ << std::endl;
-                uint64_t checksum = now.time_since_epoch().count();
+                std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] Connection request from " << msg.remote << '\n';
+                std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] Assigned ID: " << next_id_ << std::endl;
+                uint64_t checksum = std::chrono::system_clock::now().time_since_epoch().count();
                 online_clients_[msg.remote] = {
                         next_id_++,
                         "",
@@ -74,13 +78,13 @@ protected:
                 auto& client = online_clients_[msg.remote];
 
                 bool denied = false;
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - client.last_timestamp) > std::chrono::minutes(1)) {
+                if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - client.last_timestamp) > std::chrono::minutes(1)) {
                     // 1-minute timeout (request-to-response)
                     denied = true;
-                    std::cout << "[INFO] Denied connection from " << msg.remote << " (Timeout)" << std::endl;
+                    std::cout << '[' << SimpleServer::get_current_time_string() << "] [WARN] Denied connection from " << msg.remote << " (Timeout)" << std::endl;
                 }
                 if (response != client.checksum) {
-                    std::cout << "[INFO] Denied connection from " << msg.remote << " (Challenge-response failed)" << std::endl;
+                    std::cout << '[' << SimpleServer::get_current_time_string() << "] [WARN] Denied connection from " << msg.remote << " (Challenge-response failed)" << std::endl;
                     denied = true;
                 }
                 if (denied) {
@@ -102,7 +106,7 @@ protected:
                 ammo::entity::string<PacketType> username;
                 username.deserialize(msg.message);
                 client.name = username.str;
-                std::cout << "[INFO] " << client.name << " joined the game." << std::endl;
+                std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] " << client.name << " joined the game." << std::endl;
 
                 // Reply with ConnectionAccepted
                 msg.message.clear();
@@ -131,7 +135,7 @@ protected:
                     }
                 }
                 catch (const std::runtime_error& e) {
-                    std::cout << "[ERR] " << e.what() << std::endl;
+                    std::cout << '[' << SimpleServer::get_current_time_string() << "] [ERR] " << e.what() << std::endl;
                 }
 
                 // Broadcast to other online clients
@@ -152,7 +156,7 @@ protected:
                 if (online_clients_.contains(msg.remote) && online_clients_[msg.remote].state != ammo::role::client_state::Disconnected) {
                     auto& client = online_clients_.at(msg.remote);
                     client.state = ammo::role::client_state::Disconnected;
-                    std::cout << "[INFO] " << ((!client.name.empty()) ? client.name : ("(" + msg.remote.address().to_string() + ":" + std::to_string(msg.remote.port()) + ")")) << " left the game. (On ClientDisconnect)" << std::endl;
+                    std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] " << ((!client.name.empty()) ? client.name : ("(" + msg.remote.address().to_string() + ":" + std::to_string(msg.remote.port()) + ")")) << " left the game. (On ClientDisconnect)" << std::endl;
                 }
                 break;
             }
@@ -162,7 +166,7 @@ protected:
                 break;
             }
             default: {
-                std::cout << "[WARN] Unexpected message ID: " << msg.message.header.id << std::endl;
+                std::cout << '[' << SimpleServer::get_current_time_string() << "] [WARN] Unexpected message ID: " << msg.message.header.id << std::endl;
             }
         }
 
@@ -176,15 +180,13 @@ private:
 
 int main() {
     SimpleServer server(50000);
-    server.start();
+    if (server.start())
+        std::cout << '[' << SimpleServer::get_current_time_string() << "] [INFO] Server started!\n";
     std::atomic_bool updating = true;
 
     std::thread update_thread([&server, &updating] () {
         while (updating) {
-            server.now = std::chrono::system_clock::now();
             server.update(64, true, std::chrono::minutes(5));
-
-            server.now = std::chrono::system_clock::now();
             server.cleanup();
         }
     });
