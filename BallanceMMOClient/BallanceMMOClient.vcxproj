@@ -26,7 +26,7 @@
     <ClInclude Include="text_sprite.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\submodules\AMMOProtocol\submodules\crc32\Crc32.cpp" />
+    <!-- <ClCompile Include="..\submodules\AMMOProtocol\submodules\crc32\Crc32.cpp" /> -->
     <ClCompile Include="BallanceMMOClient.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -125,7 +125,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectPath)\..\..\submodules\AMMOProtocol\submodules\crc32;$(ProjectPath)\..\..\submodules\AMMOProtocol\submodules\asio\asio\include;$(ProjectPath)\..\..\submodules\AMMOProtocol\includes;$(ProjectPath)\..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectPath)\..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
     </ClCompile>
     <Link>
