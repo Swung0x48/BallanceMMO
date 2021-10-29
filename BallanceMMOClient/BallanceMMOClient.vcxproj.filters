@@ -35,8 +35,5 @@
     <ClCompile Include="BallanceMMOClient.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="..\submodules\AMMOProtocol\submodules\crc32\Crc32.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
   </ItemGroup>
 </Project>

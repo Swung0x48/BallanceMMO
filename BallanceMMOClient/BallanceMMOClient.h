@@ -4,6 +4,13 @@
 #include "CommandMMO.h"
 #include "text_sprite.h"
 #include "label_sprite.h"
+
+#include <steam/steamnetworkingsockets.h>
+#include <steam/isteamnetworkingutils.h>
+#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
+#include <steam/steam_api.h>
+#endif
+
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -18,7 +25,7 @@ public:
 	{}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "2.0.1-alpha2"; }
+	virtual CKSTRING GetVersion() override { return "3.0.0-alpha1"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
