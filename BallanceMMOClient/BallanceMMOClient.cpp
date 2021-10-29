@@ -57,6 +57,7 @@ void BallanceMMOClient::OnProcess() {
 
         check_on_trafo(ball);
         update_player_ball_state();
+        assemble_and_send_state();
         /*ammo::common::message<PacketType> msg;
         msg.header.id = PacketType::GameState;
         msg << id_;

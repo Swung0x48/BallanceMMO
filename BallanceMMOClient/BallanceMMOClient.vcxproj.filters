@@ -18,9 +18,6 @@
     <ClInclude Include="BallanceMMOClient.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="client.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="CommandMMO.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -28,6 +25,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="label_sprite.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="client.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

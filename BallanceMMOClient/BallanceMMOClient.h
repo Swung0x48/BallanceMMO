@@ -4,13 +4,7 @@
 #include "CommandMMO.h"
 #include "text_sprite.h"
 #include "label_sprite.h"
-
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
-#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
-#include <steam/steam_api.h>
-#endif
-
+#include "client.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -198,6 +192,10 @@ private:
 	void update_player_ball_state() {
 		player_ball_->GetPosition(&ball_state_.position);
 		player_ball_->GetQuaternion(&ball_state_.rotation);
+	}
+
+	void assemble_and_send_state() {
+
 	}
 
 	void process_username_label() {
