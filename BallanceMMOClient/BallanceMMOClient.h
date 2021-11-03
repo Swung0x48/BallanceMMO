@@ -15,8 +15,12 @@ extern "C" {
 
 class BallanceMMOClient : public IMod {
 public:
-	BallanceMMOClient(IBML* bml) : IMod(bml)
-	{}
+	BallanceMMOClient(IBML* bml): 
+		IMod(bml),
+		client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
+			[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
+	{
+	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetVersion() override { return "3.0.0-alpha1"; }
@@ -38,6 +42,11 @@ private:
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
+	void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
+	void OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo);
+
+	//std::unique_ptr<client> client_;
+	client client_;
 
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
@@ -115,13 +124,13 @@ private:
 	void init_config() {
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 		IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
-		tmp_prop->SetComment("Remote server address, it could be an IP address or a domain name.");
-		tmp_prop->SetDefaultString("139.224.23.40");
+		tmp_prop->SetComment("Remote server address with port. It could be an IP address or a domain name.");
+		tmp_prop->SetDefaultString("127.0.0.1:26676");
 		props_["remote_addr"] = tmp_prop;
-		tmp_prop = GetConfig()->GetProperty("Remote", "Port");
+		/*tmp_prop = GetConfig()->GetProperty("Remote", "Port");
 		tmp_prop->SetComment("The port that server is running on.");
 		tmp_prop->SetDefaultInteger(50000);
-		props_["remote_port"] = tmp_prop;
+		props_["remote_port"] = tmp_prop;*/
 
 		GetConfig()->SetCategoryComment("Player", "Who are you?");
 		tmp_prop = GetConfig()->GetProperty("Player", "Playername");
