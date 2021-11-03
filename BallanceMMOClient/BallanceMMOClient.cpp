@@ -212,15 +212,22 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     const char* fmt_string = "[%d] %10.6f %s\n";
     SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - client_.get_init_timestamp();
     switch (eType) {
-    case k_ESteamNetworkingSocketsDebugOutputType_Bug:
-    case k_ESteamNetworkingSocketsDebugOutputType_Error:
-        GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
-        break;
-    case k_ESteamNetworkingSocketsDebugOutputType_Important:
-    case k_ESteamNetworkingSocketsDebugOutputType_Warning:
-        GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
-        break;
-    default:
-        GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
+        case k_ESteamNetworkingSocketsDebugOutputType_Bug:
+        case k_ESteamNetworkingSocketsDebugOutputType_Error:
+            GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
+            break;
+        case k_ESteamNetworkingSocketsDebugOutputType_Important:
+        case k_ESteamNetworkingSocketsDebugOutputType_Warning:
+            GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
+            break;
+        default:
+            GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
+    }
+
+    if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
+        GetLogger()->Error("We've encountered a bug. Please contact developer with this piece of log.");
+        GetLogger()->Error("Nuking process...");
+
+        exit(1);
     }
 }

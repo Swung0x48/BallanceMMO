@@ -23,11 +23,15 @@ public:
 
 		SteamDatagramErrMsg msg;
 		if (!GameNetworkingSockets_Init(nullptr, msg)) {
+			logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Error, "GNS init failed");
+			logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Error, msg);
 			//logger_->Error("GNS init failed: %s", msg);
 		}
 
 		init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
-		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, DebugOutput);
+		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingWrapper);
+
+		interface_ = SteamNetworkingSockets();
 	}
 
 	bool connect(const char* address) {
@@ -42,12 +46,16 @@ public:
 		server_address_.ToString(sz_addr, sizeof(sz_addr), true);
 
 		//logger_->Info("Connecting to server at %s", sz_addr);
-		interface_ = SteamNetworkingSockets();
+		logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Msg, "Connecting to server...");
+		logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Msg, sz_addr);
+		
 		SteamNetworkingConfigValue_t opt;
 		opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)OnConnectionStatusChangedWrapper);
 		connection_ = interface_->ConnectByIPAddress(server_address_, 1, &opt);
 
 		if (connection_ == k_HSteamNetConnection_Invalid) {
+			logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Error, "Failed to create connection.");
+
 			//logger_->Error("Failed to create connection.");
 			return false;
 		}
