@@ -109,6 +109,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 if (client_.connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Already connected.");
+                } else if (client_.alive()) {
+                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    bml->SendIngameMessage("Connecting in process, please wait...");
                 }
                 else {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
