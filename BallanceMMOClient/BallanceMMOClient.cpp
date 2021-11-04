@@ -111,8 +111,6 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     bml->SendIngameMessage("Already connected.");
                 }
                 else {
-                    status_->update("Pending");
-                    status_->paint(0xFFF6A71B);
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     if (client_.connect(props_["remote_addr"]->GetString()))
                         bml->SendIngameMessage("Connecting...");
@@ -162,10 +160,19 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
     GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_None:
+        status_->update("Disconnected");
+        status_->paint(0xffff0000);
         // NOTE: We will get callbacks here when we destroy connections.  You can ignore these.
         break;
-
-    case k_ESteamNetworkingConnectionState_ClosedByPeer:
+    case k_ESteamNetworkingConnectionState_ClosedByPeer: {
+        if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
+            // Note: we could distinguish between a timeout, a rejected connection,
+            // or some other transport problem.
+            m_bml->SendIngameMessage("Connect failed. (ClosedByPeer)");
+            GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
+            break;
+        }
+    }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {
         // Print an appropriate message
@@ -194,10 +201,13 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
 
     case k_ESteamNetworkingConnectionState_Connecting:
         // We will get this callback when we start connecting.
-        // We can ignore this.
+        status_->update("Connecting");
+        status_->paint(0xFFF6A71B);
         break;
 
     case k_ESteamNetworkingConnectionState_Connected:
+        status_->update("Connected");
+        status_->paint(0xff00ff00);
         GetLogger()->Info("Connected to server.");
         break;
 
@@ -225,8 +235,10 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
+        m_bml->SendIngameMessage("BallanceMMO has encountered a bug. Please contact developer with this piece of log.");
         GetLogger()->Error("We've encountered a bug. Please contact developer with this piece of log.");
         GetLogger()->Error("Nuking process...");
+        std::this_thread::sleep_for(std::chrono::seconds(5));
 
         exit(1);
     }
