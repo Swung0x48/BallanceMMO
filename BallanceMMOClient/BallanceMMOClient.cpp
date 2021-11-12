@@ -87,7 +87,8 @@ void BallanceMMOClient::OnExitGame()
 }
 
 void BallanceMMOClient::OnUnload() {
-
+    client_.close_connection();
+    client::destroy();
 }
 
 void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& args)
@@ -175,6 +176,7 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
             GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
             break;
         }
+        break;
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {

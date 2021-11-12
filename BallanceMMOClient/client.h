@@ -4,6 +4,9 @@
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
 #include <steam/steam_api.h>
 #endif
+#include <thread>
+#include <chrono>
+#include <cassert>
 
 //#include <BML/BMLAll.h> // Just for logging purposes
 #include <memory>
@@ -84,9 +87,25 @@ public:
 		return connection_ != k_HSteamNetConnection_Invalid;
 	}
 
+	void close_connection() {
+		close_connection(this->connection_);
+	}
+
 	void close_connection(HSteamNetConnection connection) {
-		interface_->CloseConnection(connection, 0, nullptr, false);
-		connection_ = k_HSteamNetConnection_Invalid;
+		if (connection != k_HSteamNetConnection_Invalid) {
+			interface_->CloseConnection(connection, 0, "Goodbye", true);
+			assert(connection == this->connection_);
+			connection_ = k_HSteamNetConnection_Invalid;
+		}
+	}
+
+	static void destroy() {
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
+		GameNetworkingSockets_Kill();
+#else
+		SteamDatagramClient_Kill();
+#endif
 	}
 
 private:
@@ -108,7 +127,7 @@ private:
 	SteamNetworkingIPAddr server_address_ = SteamNetworkingIPAddr();
 	ISteamNetworkingSockets* interface_ = nullptr;
 	HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
-	ESteamNetworkingConnectionState state_;
+	ESteamNetworkingConnectionState state_ = k_ESteamNetworkingConnectionState_None;
 	std::function<void(ESteamNetworkingSocketsDebugOutputType, const char*)> logging_callback_;
 	std::function<void(SteamNetConnectionStatusChangedCallback_t*)> on_connection_status_changed_callback_;
 	SteamNetworkingMicroseconds init_timestamp_;

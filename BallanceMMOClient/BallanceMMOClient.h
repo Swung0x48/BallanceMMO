@@ -207,6 +207,11 @@ private:
 
 	}
 
+	void cleanup() {
+		client_.close_connection();
+		
+	}
+
 	void process_username_label() {
 		for (auto& peer : peer_) {
 			auto& username_label = peer.second.username_label;
