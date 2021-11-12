@@ -8,6 +8,8 @@
 #include <chrono>
 #include <atomic>
 #include <unordered_map>
+#include <cassert>
+#include <cstdarg>
 
 struct client_data {
     std::string name;

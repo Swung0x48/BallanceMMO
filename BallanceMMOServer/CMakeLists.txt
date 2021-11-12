@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.12)
 project(BallanceMMOServer)
 set(CMAKE_CXX_STANDARD 20)
 
+
 add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets ${CMAKE_CURRENT_BINARY_DIR}/BallanceMMO)
 
-#set(CMAKE_TOOLCHAIN_FILE ../submodule/vcpkg/scripts/buildsystems/vcpkg.cmake)
+set(CMAKE_TOOLCHAIN_FILE ../submodule/vcpkg/scripts/buildsystems/vcpkg.cmake)
 #include(../submodule/GameNetworkingSockets/examples/CMakeLists.txt)
 #include(../submodule/GameNetworkingSockets/cmake/DefaultBuildType.cmake)
 

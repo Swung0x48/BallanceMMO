@@ -9,6 +9,9 @@
 #include <atomic>
 #include <unordered_map>
 
+#include <cassert>
+#include <cstdarg>
+
 struct client_data {
     std::string name;
 };
@@ -78,7 +81,6 @@ public:
         running_ = false;
 
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
-
 
         if (client_thread_.joinable())
             client_thread_.join();
