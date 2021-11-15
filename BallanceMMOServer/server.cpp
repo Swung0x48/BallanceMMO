@@ -3,56 +3,20 @@
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
 #include <steam/steam_api.h>
 #endif
-#include <iostream>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <unordered_map>
-#include <cassert>
-#include <cstdarg>
+#include "role.hpp"
+
 
 struct client_data {
     std::string name;
 };
 
-class server {
+class server: public role {
 public:
-    static void init_socket() {
-#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
-        SteamDatagramErrMsg err_msg;
-        if (!GameNetworkingSockets_Init(nullptr, err_msg))
-            FatalError("GameNetworkingSockets_Init failed.  %s", err_msg);
-#else
-            SteamDatagramClient_SetAppID( 570 ); // Just set something, doesn't matter what
-		//SteamDatagramClient_SetUniverse( k_EUniverseDev );
-
-		SteamDatagramErrMsg errMsg;
-		if ( !SteamDatagramClient_Init( true, errMsg ) )
-			FatalError( "SteamDatagramClient_Init failed.  %s", errMsg );
-
-		// Disable authentication when running with Steam, for this
-		// example, since we're not a real app.
-		//
-		// Authentication is disabled automatically in the open-source
-		// version since we don't have a trusted third party to issue
-		// certs.
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32( k_ESteamNetworkingConfig_IP_AllowWithoutAuth, 1 );
-#endif
-        init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
-        SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, DebugOutput);
-    }
-
-    server(uint16_t port) {
-        interface_ = SteamNetworkingSockets();
+    explicit server(uint16_t port) {
         port_ = port;
     }
 
-    void update() {
-        poll_incoming_messages();
-        poll_connection_state_changes();
-    }
-
-    void run() {
+    void run() override {
         if (!setup())
             FatalError("Server failed on setup.");
 
@@ -64,7 +28,7 @@ public:
         });
 
         while (running_) {
-            poll_local_user_input();
+            poll_local_state_changes();
         }
     }
 
@@ -74,21 +38,12 @@ public:
             server_thread_.join();
     }
 
-    static void destroy() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
-        GameNetworkingSockets_Kill();
-#else
-        SteamDatagramClient_Kill();
-#endif
-    }
-private:
+protected:
     bool setup() {
         SteamNetworkingIPAddr local_address{};
         local_address.Clear();
         local_address.m_port = port_;
-        SteamNetworkingConfigValue_t opt{};
-        opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*) SteamNetConnectionStatusChangedCallbackWrapper);
+        SteamNetworkingConfigValue_t opt = generate_opt();
         listen_socket_ = interface_->CreateListenSocketIP(local_address, 1, &opt);
         if (listen_socket_ == k_HSteamListenSocket_Invalid) {
             return false;
@@ -102,7 +57,7 @@ private:
         return true;
     }
 
-    void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) {
+    void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
         switch ( pInfo->m_info.m_eState )
         {
             case k_ESteamNetworkingConnectionState_None:
@@ -211,7 +166,7 @@ private:
         }
     }
 
-    void poll_incoming_messages() {
+    void poll_incoming_messages() override {
         while (running_) {
             ISteamNetworkingMessage* incoming_message = nullptr;
             int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, &incoming_message, 1);
@@ -234,12 +189,7 @@ private:
         }
     }
 
-    void poll_connection_state_changes() {
-        this_instance_ = this;
-        interface_->RunCallbacks();
-    }
-
-    void poll_local_user_input() {
+    void poll_local_state_changes() override {
         std::string cmd;
         std::cin >> cmd;
         if (cmd == "stop") {
@@ -247,47 +197,12 @@ private:
         }
     }
 
-    static void SteamNetConnectionStatusChangedCallbackWrapper(SteamNetConnectionStatusChangedCallback_t* pInfo) {
-        this_instance_->on_connection_status_changed(pInfo);
-    }
-
-    static void DebugOutput( ESteamNetworkingSocketsDebugOutputType eType, const char *pszMsg )
-    {
-        SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
-        printf("%10.6f %s\n", time*1e-6, pszMsg);
-        fflush(stdout);
-
-        if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug)
-        {
-            fflush(stdout);
-            fflush(stderr);
-            exit(1);
-        }
-    }
-
-    static void FatalError( const char *fmt, ... )
-    {
-        char text[ 2048 ];
-        va_list ap;
-        va_start( ap, fmt );
-        vsprintf( text, fmt, ap );
-        va_end(ap);
-        char *nl = strchr( text, '\0' ) - 1;
-        if ( nl >= text && *nl == '\n' )
-            *nl = '\0';
-        DebugOutput( k_ESteamNetworkingSocketsDebugOutputType_Bug, text );
-    }
-
     uint16_t port_ = 0;
-    ISteamNetworkingSockets* interface_ = nullptr;
     HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
     std::atomic_bool running_ = false;
     std::thread server_thread_;
     std::unordered_map<HSteamNetConnection, client_data> clients_;
-
-    static inline server* this_instance_;
-    static inline SteamNetworkingMicroseconds init_timestamp_;
 };
 
 int main() {
