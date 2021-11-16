@@ -42,6 +42,10 @@ public:
 
     virtual void run() = 0;
 
+    virtual bool running() {
+        return running_;
+    }
+
     static SteamNetworkingConfigValue_t generate_opt() {
         SteamNetworkingConfigValue_t opt{};
         opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
@@ -54,6 +58,8 @@ public:
         poll_connection_state_changes();
 //        poll_local_state_changes();
     }
+
+    virtual void poll_local_state_changes() = 0;
 
     static void destroy() {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -68,6 +74,7 @@ protected:
     ISteamNetworkingSockets* interface_ = nullptr;
     static inline role* this_instance_ = nullptr;
     static inline SteamNetworkingMicroseconds init_timestamp_;
+    std::atomic_bool running_ = false;
 
     virtual void poll_incoming_messages() = 0;
 
@@ -76,9 +83,9 @@ protected:
         interface_->RunCallbacks();
     }
 
-    virtual void poll_local_state_changes() = 0;
-
     virtual void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) = 0;
+
+    virtual void on_message(ISteamNetworkingMessage* msg) = 0;
 
     static void SteamNetConnectionStatusChangedCallbackWrapper(SteamNetConnectionStatusChangedCallback_t* pInfo) {
         this_instance_->on_connection_status_changed(pInfo);

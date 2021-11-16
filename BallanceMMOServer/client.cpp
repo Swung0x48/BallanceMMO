@@ -12,14 +12,15 @@
 #include <cassert>
 #include <cstdarg>
 #include "role.hpp"
+#include "common.hpp"
 
 struct client_data {
     std::string name;
 };
 
-class client: public role {
+class client : public role {
 public:
-    bool connect(std::string connection_string) {
+    bool connect(const std::string& connection_string) {
         SteamNetworkingIPAddr server_address{};
         if (!server_address.ParseString(connection_string.c_str())) {
             return false;
@@ -34,25 +35,30 @@ public:
 
     void run() override {
         running_ = true;
-        client_thread_ = std::thread([this]() {
-            while (running_) {
-                update();
-            }
-        });
-
         while (running_) {
-            poll_local_state_changes();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            update();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+
+//        while (running_) {
+//            poll_local_state_changes();
+//        }
+    }
+
+    template<typename T>
+    EResult send(T msg, int send_flags, int64* out_message_number = nullptr) {
+        static_assert(std::is_trivially_copyable<T>());
+        return interface_->SendMessageToConnection(connection_,
+                                            &msg,
+                                            sizeof(msg),
+                                            send_flags,
+                                            out_message_number);
+
     }
 
     void shutdown() {
         running_ = false;
-
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
-
-        if (client_thread_.joinable())
-            client_thread_.join();
     }
 
 private:
@@ -71,10 +77,10 @@ private:
                 if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
                     // Note: we could distinguish between a timeout, a rejected connection,
                     // or some other transport problem.
-                    printf("We sought the remote host, yet our efforts were met with defeat.  (%s)",
+                    printf("We sought the remote host, yet our efforts were met with defeat.  (%s)\n",
                            pInfo->m_info.m_szEndDebug);
                 } else if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-                    printf("Alas, troubles beset us; we have lost contact with the host.  (%s)",
+                    printf("Alas, troubles beset us; we have lost contact with the host.  (%s)\n",
                            pInfo->m_info.m_szEndDebug);
                 } else {
                     // NOTE: We could check the reason code for a normal disconnection
@@ -98,13 +104,18 @@ private:
                 break;
 
             case k_ESteamNetworkingConnectionState_Connected:
-                printf("Connected to server OK");
+                printf("Connected to server OK\n");
                 break;
 
             default:
                 // Silences -Wswitch
                 break;
         }
+    }
+
+    void on_message(ISteamNetworkingMessage* msg) override {
+        fwrite(msg->m_pData, 1, msg->m_cbSize, stdout);
+        fputc('\n', stdout);
     }
 
     void poll_incoming_messages() override {
@@ -117,8 +128,7 @@ private:
                 FatalError("Error checking for messages.");
             assert(msg_count == 1 && incoming_message);
 
-            fwrite(incoming_message->m_pData, 1, incoming_message->m_cbSize, stdout);
-            fputc('\n', stdout);
+            on_message(incoming_message);
             incoming_message->Release();
         }
     }
@@ -133,6 +143,11 @@ private:
         std::cin >> input;
         if (input == "stop") {
             shutdown();
+        } else if (input == "1") {
+            bmmo::ball_state_msg msg;
+            msg.state.position.x = 1;
+            msg.state.quaternion.y = 2;
+            send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         } else {
             interface_->SendMessageToConnection(connection_,
                                                 input.c_str(),
@@ -142,34 +157,7 @@ private:
         }
     }
 
-    static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
-        SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
-
-        if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-            fprintf(stderr, "%10.6f %s\n", time * 1e-6, pszMsg);
-            fflush(stdout);
-            fflush(stderr);
-            exit(1);
-        }
-        printf("%10.6f %s\n", time * 1e-6, pszMsg);
-        fflush(stdout);
-    }
-
-    static void FatalError(const char* fmt, ...) {
-        char text[2048];
-        va_list ap;
-        va_start(ap, fmt);
-        vsprintf(text, fmt, ap);
-        va_end(ap);
-        char* nl = strchr(text, '\0') - 1;
-        if (nl >= text && *nl == '\n')
-            *nl = '\0';
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
-    }
-
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
-    std::atomic_bool running_ = false;
-    std::thread client_thread_;
 };
 
 int main() {
@@ -180,10 +168,27 @@ int main() {
     client client;
 
     std::cout << "Connecting to server..." << std::endl;
-    client.connect("127.0.0.1:26676");
+    if (!client.connect("127.0.0.1:26676")) {
+        std::cerr << "Cannot connect to server." << std::endl;
+        return 1;
+    }
 
-    client.run();
+    std::thread client_thread([&client]() { client.run(); });
+    do {
+        std::string input;
+        std::cin >> input;
+        if (input == "stop") {
+            client.shutdown();
+        } else if (input == "1") {
+            bmmo::ball_state_msg msg;
+            msg.state.position.x = 1;
+            msg.state.quaternion.y = 2;
+            client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+        }
+    } while (client.running());
 
     std::cout << "Stopping..." << std::endl;
+    if (client_thread.joinable())
+        client_thread.join();
     client::destroy();
 }
