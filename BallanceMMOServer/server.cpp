@@ -8,6 +8,7 @@
 #include "role.hpp"
 #include <vector>
 #include "common.hpp"
+#include "message/message_all.hpp"
 
 struct client_data {
     std::string name;
@@ -119,7 +120,7 @@ protected:
                 // This must be a new connection
                 assert(clients_.find(pInfo->m_hConn) == clients_.end());
 
-                printf("Connection request from %s", pInfo->m_info.m_szConnectionDescription);
+                printf("Connection request from %s\n", pInfo->m_info.m_szConnectionDescription);
 
                 // A client is attempting to connect
                 // Try to accept the connection.
@@ -128,7 +129,7 @@ protected:
                     // disconnected, the connection may already be half closed.  Just
                     // destroy whatever we have on our side.
                     interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
-                    printf("Can't accept connection.  (It was already closed?)");
+                    printf("Can't accept connection.  (It was already closed?)\n");
                     break;
                 }
 
@@ -150,6 +151,7 @@ protected:
 
                 // Add them to the client list, using std::map wacky syntax
                 clients_[pInfo->m_hConn] = {nick};
+                interface_->SetConnectionName(pInfo->m_hConn, nick);
 //                SetClientNick( pInfo->m_hConn, nick );
                 break;
             }
@@ -165,14 +167,23 @@ protected:
         }
     }
 
-    void on_message(ISteamNetworkingMessage* msg) override {
-        auto client_it = clients_.find(msg->m_conn);
+    void on_message(ISteamNetworkingMessage* networking_msg) override {
+        auto client_it = clients_.find(networking_msg->m_conn);
         assert(client_it != clients_.end());
 
-        auto* data = reinterpret_cast<bmmo::message*>(msg->m_pData);
-        switch (data->opcode) {
-            case bmmo::LoginRequest:
+        auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
+        switch (raw_msg->opcode) {
+            case bmmo::LoginRequest: {
+//                assert(*(reinterpret_cast<uint32_t*>(raw_msg->content)) == strlen((const char*)(raw_msg->content) + sizeof(uint32_t)));
+//                std::cout << (const char*)(raw_msg->content) + sizeof(uint32_t) << " logged in!" << std::endl;
+//                clients_[msg->m_conn] = {(const char*)(raw_msg->content) + sizeof(uint32_t)};
+//                interface_->SetConnectionName(msg->m_conn, (const char*)(raw_msg->content) + sizeof(uint32_t));
+                bmmo::login_request_msg msg;
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+                std::cout << msg.nickname << " logged in!" << std::endl;
                 break;
+            }
             case bmmo::LoginAccepted:
                 break;
             case bmmo::LoginDenied:
@@ -184,7 +195,7 @@ protected:
             case bmmo::Ping:
                 break;
             case bmmo::BallState: {
-                auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(msg->m_pData);
+                auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
                 std::cout << "(" <<
                           state_msg->state.position.x << ", " <<
@@ -202,7 +213,7 @@ protected:
 
         // TODO: replace with actual message data structure handling
         std::string str;
-        str.assign((const char*)msg->m_pData, msg->m_cbSize);
+        str.assign((const char*)networking_msg->m_pData, networking_msg->m_cbSize);
 
         std::cout << client_it->second.name << ": " << str << std::endl;
         interface_->SendMessageToConnection(client_it->first, str.c_str(), str.length() + 1,
@@ -244,7 +255,9 @@ int main() {
     std::thread server_thread([&server]() { server.run(); });
     std::cout << "Server started!" << std::endl;
 
+
     do {
+        std::cout << "\r>" << std::flush;
         std::string cmd;
         std::cin >> cmd;
         if (cmd == "stop") {

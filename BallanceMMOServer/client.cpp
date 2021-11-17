@@ -11,8 +11,10 @@
 #include <atomic>
 #include <cassert>
 #include <cstdarg>
+#include <sstream>
 #include "role.hpp"
 #include "common.hpp"
+#include "message/message_all.hpp"
 
 struct client_data {
     std::string name;
@@ -45,15 +47,22 @@ public:
 //        }
     }
 
+    EResult send(void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+        return interface_->SendMessageToConnection(connection_,
+                                                   buffer,
+                                                   size,
+                                                   send_flags,
+                                                   out_message_number);
+
+    }
+
     template<typename T>
     EResult send(T msg, int send_flags, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
-        return interface_->SendMessageToConnection(connection_,
-                                            &msg,
-                                            sizeof(msg),
-                                            send_flags,
-                                            out_message_number);
-
+        return send(&msg,
+                    sizeof(msg),
+                    send_flags,
+                    out_message_number);
     }
 
     void shutdown() {
@@ -103,10 +112,14 @@ private:
                 // We can ignore this.
                 break;
 
-            case k_ESteamNetworkingConnectionState_Connected:
+            case k_ESteamNetworkingConnectionState_Connected: {
                 printf("Connected to server OK\n");
+                bmmo::login_request_msg msg;
+                msg.nickname = "Swung";
+                msg.serialize();
+                send((void*)msg.raw.str().c_str(), msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
                 break;
-
+            }
             default:
                 // Silences -Wswitch
                 break;
@@ -148,12 +161,6 @@ private:
             msg.state.position.x = 1;
             msg.state.quaternion.y = 2;
             send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
-        } else {
-            interface_->SendMessageToConnection(connection_,
-                                                input.c_str(),
-                                                input.length() + 1,
-                                                k_nSteamNetworkingSend_Reliable,
-                                                nullptr);
         }
     }
 

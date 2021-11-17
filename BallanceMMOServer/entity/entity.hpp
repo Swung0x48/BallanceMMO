@@ -14,6 +14,11 @@ namespace bmmo {
         double z = 0.0;
         double w = 0.0;
     };
+
+    struct ball_state {
+        vec3 position;
+        quaternion quaternion;
+    };
 }
 
 #endif //BALLANCEMMOSERVER_ENTITY_HPP
