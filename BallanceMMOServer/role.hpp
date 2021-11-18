@@ -93,14 +93,28 @@ protected:
 
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
-        printf("%10.6f %s\n", time * 1e-6, pszMsg);
-        fflush(stdout);
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
+            fprintf(stderr, "\r%10.2f %s\n> ", time * 1e-6, pszMsg);
             fflush(stdout);
             fflush(stderr);
             exit(1);
+        } else {
+            printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
+            fflush(stdout);
         }
+    }
+
+    static void Printf(const char* fmt, ...) {
+        char text[2048];
+        va_list ap;
+        va_start(ap, fmt);
+        vsprintf(text, fmt, ap);
+        va_end(ap);
+        char* nl = strchr(text, '\0') - 1;
+        if (nl >= text && *nl == '\n')
+            *nl = '\0';
+        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Msg, text);
     }
 
     static void FatalError(const char* fmt, ...) {

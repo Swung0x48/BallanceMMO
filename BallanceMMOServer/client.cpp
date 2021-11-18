@@ -65,6 +65,12 @@ public:
                     out_message_number);
     }
 
+    std::string get_info() {
+        char info[2048];
+        interface_->GetDetailedConnectionStatus(connection_, info, 2048);
+        return std::string(info);
+    }
+
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
@@ -117,7 +123,7 @@ private:
                 bmmo::login_request_msg msg;
                 msg.nickname = "Swung";
                 msg.serialize();
-                send((void*)msg.raw.str().c_str(), msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+                send((void*)msg.raw.str().c_str(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             default:
@@ -190,7 +196,10 @@ int main() {
             bmmo::ball_state_msg msg;
             msg.state.position.x = 1;
             msg.state.quaternion.y = 2;
-            client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+            for (int i = 0; i < 50; ++i)
+                client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+        } else if (input == "2") {
+            std::cout << client.get_info() << std::endl;
         }
     } while (client.running());
 

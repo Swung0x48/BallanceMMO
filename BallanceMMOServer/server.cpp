@@ -120,7 +120,7 @@ protected:
                 // This must be a new connection
                 assert(clients_.find(pInfo->m_hConn) == clients_.end());
 
-                printf("Connection request from %s\n", pInfo->m_info.m_szConnectionDescription);
+                Printf("Connection request from %s\n", pInfo->m_info.m_szConnectionDescription);
 
                 // A client is attempting to connect
                 // Try to accept the connection.
@@ -129,14 +129,14 @@ protected:
                     // disconnected, the connection may already be half closed.  Just
                     // destroy whatever we have on our side.
                     interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
-                    printf("Can't accept connection.  (It was already closed?)\n");
+                    Printf("Can't accept connection.  (It was already closed?)\n");
                     break;
                 }
 
                 // Assign the poll group
                 if (!interface_->SetConnectionPollGroup(pInfo->m_hConn, poll_group_)) {
                     interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
-                    printf("Failed to set poll group?");
+                    Printf("Failed to set poll group?");
                     break;
                 }
 
@@ -181,7 +181,27 @@ protected:
                 bmmo::login_request_msg msg;
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
-                std::cout << msg.nickname << " logged in!" << std::endl;
+
+                // accepting client
+                Printf("%s logged in!\n", msg.nickname.c_str());
+                clients_[networking_msg->m_conn] = {msg.nickname};
+                interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
+
+                // notify client of other online players
+                bmmo::login_accepted_msg accepted_msg;
+                auto client_it = clients_.find(networking_msg->m_conn);
+                for (auto it = clients_.begin(); it != clients_.end(); ++it) {
+                    if (client_it != it)
+                        accepted_msg.online_players.emplace_back(it->second.name);
+                }
+                accepted_msg.serialize();
+                Printf("%s\n", accepted_msg.raw.str().c_str());
+
+                // notify other client of the fact that this client goes online
+//                for (auto it = clients_.begin(); it != clients_.end(); ++it) {
+//                    if (client_it != it)
+//
+//                }
                 break;
             }
             case bmmo::LoginAccepted:
@@ -197,14 +217,22 @@ protected:
             case bmmo::BallState: {
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
-                std::cout << "(" <<
-                          state_msg->state.position.x << ", " <<
-                          state_msg->state.position.y << ", " <<
-                          state_msg->state.position.z << "), (" <<
-                          state_msg->state.quaternion.x << ", " <<
-                          state_msg->state.quaternion.y << ", " <<
-                          state_msg->state.quaternion.z << ", " <<
-                          state_msg->state.quaternion.w << ")" << std::endl;
+                Printf("(%lf, %lf, %lf), (%lf, %lf, %lf, %lf)",
+                       state_msg->state.position.x,
+                       state_msg->state.position.y,
+                       state_msg->state.position.z,
+                       state_msg->state.quaternion.x,
+                       state_msg->state.quaternion.y,
+                       state_msg->state.quaternion.z,
+                       state_msg->state.quaternion.w);
+//                std::cout << "(" <<
+//                          state_msg->state.position.x << ", " <<
+//                          state_msg->state.position.y << ", " <<
+//                          state_msg->state.position.z << "), (" <<
+//                          state_msg->state.quaternion.x << ", " <<
+//                          state_msg->state.quaternion.y << ", " <<
+//                          state_msg->state.quaternion.z << ", " <<
+//                          state_msg->state.quaternion.w << ")" << std::endl;
                 break;
             }
             case bmmo::KeyboardInput:
@@ -215,7 +243,7 @@ protected:
         std::string str;
         str.assign((const char*)networking_msg->m_pData, networking_msg->m_cbSize);
 
-        std::cout << client_it->second.name << ": " << str << std::endl;
+        Printf("%s: %s", client_it->second.name.c_str(), str.c_str());
         interface_->SendMessageToConnection(client_it->first, str.c_str(), str.length() + 1,
                                             k_nSteamNetworkingSend_Reliable,
                                             nullptr);
@@ -255,9 +283,8 @@ int main() {
     std::thread server_thread([&server]() { server.run(); });
     std::cout << "Server started!" << std::endl;
 
-
     do {
-        std::cout << "\r>" << std::flush;
+        std::cout << "\r> " << std::flush;
         std::string cmd;
         std::cin >> cmd;
         if (cmd == "stop") {
@@ -268,5 +295,7 @@ int main() {
     std::cout << "Stopping..." << std::endl;
     if (server_thread.joinable())
         server_thread.join();
+
     server::destroy();
+    printf("\r");
 }

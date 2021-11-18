@@ -33,6 +33,10 @@ namespace bmmo {
         opcode code;
         std::stringstream raw;
 
+        size_t size() {
+            return raw.str().size();
+        }
+
         // entity -> raw
         virtual void serialize() {
             raw.write(reinterpret_cast<const char*>(&code), sizeof(opcode));
