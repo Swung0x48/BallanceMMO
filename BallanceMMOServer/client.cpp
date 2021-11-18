@@ -65,10 +65,16 @@ public:
                     out_message_number);
     }
 
-    std::string get_info() {
+    std::string get_detailed_info() {
         char info[2048];
         interface_->GetDetailedConnectionStatus(connection_, info, 2048);
-        return std::string(info);
+        return {info};
+    }
+
+    SteamNetConnectionRealTimeStatus_t get_info() {
+        SteamNetConnectionRealTimeStatus_t status;
+        interface_->GetConnectionRealTimeStatus(connection_, &status, 0, nullptr);
+        return status;
     }
 
     void shutdown() {
@@ -199,7 +205,11 @@ int main() {
             for (int i = 0; i < 50; ++i)
                 client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         } else if (input == "2") {
-            std::cout << client.get_info() << std::endl;
+            std::cout << client.get_detailed_info() << std::endl;
+        } else if (input == "3") {
+            auto status = client.get_info();
+            std::cout << "Ping: " << status.m_nPing << "ms" << std::endl;
+            std::cout << "ConnectionQualityRemote: " << status.m_flConnectionQualityRemote * 100.0 << "%" << std::endl;
         }
     } while (client.running());
 
