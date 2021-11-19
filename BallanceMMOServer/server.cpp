@@ -43,7 +43,19 @@ public:
         }
     }
 
+    void broadcast_message(void* buffer, size_t size, int send_flags, HSteamNetConnection* ignored_client = nullptr) {
+        for (auto& i: clients_)
+            if (ignored_client == nullptr || *ignored_client != i.first)
+                interface_->SendMessageToConnection(i.first, buffer, size,
+                                                    send_flags,
+                                                    nullptr);
+    }
+
     void shutdown() {
+        for (auto& i: clients_) {
+            interface_->CloseConnection(i.first, 0, "Server closed", true);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         running_ = false;
 //        if (server_thread_.joinable())
 //            server_thread_.join();
@@ -99,7 +111,12 @@ protected:
                     // Spew something to our own log.  Note that because we put their nick
                     // as the connection description, it will show up, along with their
                     // transport-specific data (e.g. their IP address)
-
+                    Printf( "Connection %s %s, reason %d: %s\n",
+                            pInfo->m_info.m_szConnectionDescription,
+                            pszDebugLogAction,
+                            pInfo->m_info.m_eEndReason,
+                            pInfo->m_info.m_szEndDebug
+                    );
 
                     clients_.erase(itClient);
                 } else {
@@ -189,7 +206,7 @@ protected:
 
                 // notify client of other online players
                 bmmo::login_accepted_msg accepted_msg;
-                auto client_it = clients_.find(networking_msg->m_conn);
+//                auto client_it = clients_.find(networking_msg->m_conn);
                 for (auto it = clients_.begin(); it != clients_.end(); ++it) {
                     if (client_it != it)
                         accepted_msg.online_players.emplace_back(it->second.name);
@@ -208,7 +225,7 @@ protected:
                 break;
             case bmmo::LoginDenied:
                 break;
-            case bmmo::PlayerDisconnect:
+            case bmmo::PlayerDisconnected:
                 break;
             case bmmo::PlayerConnected:
                 break;
@@ -218,13 +235,13 @@ protected:
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
                 Printf("(%lf, %lf, %lf), (%lf, %lf, %lf, %lf)",
-                       state_msg->state.position.x,
-                       state_msg->state.position.y,
-                       state_msg->state.position.z,
-                       state_msg->state.quaternion.x,
-                       state_msg->state.quaternion.y,
-                       state_msg->state.quaternion.z,
-                       state_msg->state.quaternion.w);
+                       state_msg->content.position.x,
+                       state_msg->content.position.y,
+                       state_msg->content.position.z,
+                       state_msg->content.quaternion.x,
+                       state_msg->content.quaternion.y,
+                       state_msg->content.quaternion.z,
+                       state_msg->content.quaternion.w);
 //                std::cout << "(" <<
 //                          state_msg->state.position.x << ", " <<
 //                          state_msg->state.position.y << ", " <<
@@ -233,10 +250,17 @@ protected:
 //                          state_msg->state.quaternion.y << ", " <<
 //                          state_msg->state.quaternion.z << ", " <<
 //                          state_msg->state.quaternion.w << ")" << std::endl;
+                bmmo::owned_ball_state_msg new_msg;
+                std::memcpy(&(new_msg.content), &(state_msg->content), sizeof(state_msg->content));
+                new_msg.content.player_id = networking_msg->m_conn;
+                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_UnreliableNoDelay, &networking_msg->m_conn);
+
                 break;
             }
             case bmmo::KeyboardInput:
                 break;
+            default:
+                FatalError("Invalid message with opcode %d received.");
         }
 
         // TODO: replace with actual message data structure handling

@@ -20,7 +20,7 @@ struct client_data {
     std::string name;
 };
 
-class client : public role {
+class client: public role {
 public:
     bool connect(const std::string& connection_string) {
         SteamNetworkingIPAddr server_address{};
@@ -39,7 +39,7 @@ public:
         running_ = true;
         while (running_) {
             update();
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
 //        while (running_) {
@@ -72,8 +72,14 @@ public:
     }
 
     SteamNetConnectionRealTimeStatus_t get_info() {
-        SteamNetConnectionRealTimeStatus_t status;
+        SteamNetConnectionRealTimeStatus_t status{};
         interface_->GetConnectionRealTimeStatus(connection_, &status, 0, nullptr);
+        return status;
+    }
+
+    SteamNetConnectionRealTimeLaneStatus_t get_lane_info() {
+        SteamNetConnectionRealTimeLaneStatus_t status{};
+        interface_->GetConnectionRealTimeStatus(connection_, nullptr, 0, &status);
         return status;
     }
 
@@ -98,14 +104,14 @@ private:
                 if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
                     // Note: we could distinguish between a timeout, a rejected connection,
                     // or some other transport problem.
-                    printf("We sought the remote host, yet our efforts were met with defeat.  (%s)\n",
+                    Printf("We sought the remote host, yet our efforts were met with defeat.  (%s)\n",
                            pInfo->m_info.m_szEndDebug);
                 } else if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-                    printf("Alas, troubles beset us; we have lost contact with the host.  (%s)\n",
+                    Printf("Alas, troubles beset us; we have lost contact with the host.  (%s)\n",
                            pInfo->m_info.m_szEndDebug);
                 } else {
                     // NOTE: We could check the reason code for a normal disconnection
-                    printf("The host hath bidden us farewell.  (%s)", pInfo->m_info.m_szEndDebug);
+                    Printf("The host hath bidden us farewell.  (%s)", pInfo->m_info.m_szEndDebug);
                 }
 
                 // Clean up the connection.  This is important!
@@ -125,11 +131,11 @@ private:
                 break;
 
             case k_ESteamNetworkingConnectionState_Connected: {
-                printf("Connected to server OK\n");
+                Printf("Connected to server OK\n");
                 bmmo::login_request_msg msg;
                 msg.nickname = "Swung";
                 msg.serialize();
-                send((void*)msg.raw.str().c_str(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             default:
@@ -138,9 +144,32 @@ private:
         }
     }
 
-    void on_message(ISteamNetworkingMessage* msg) override {
-        fwrite(msg->m_pData, 1, msg->m_cbSize, stdout);
-        fputc('\n', stdout);
+    void on_message(ISteamNetworkingMessage* networking_msg) override {
+//        printf("\b");
+//        fwrite(msg->m_pData, 1, msg->m_cbSize, stdout);
+//        fputc('\n', stdout);
+
+//        printf("\b> ");
+//        Printf(reinterpret_cast<const char*>(msg->m_pData));
+        auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
+        switch (raw_msg->opcode) {
+            case bmmo::OwnedBallState: {
+                assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
+                auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
+                Printf("%ld: (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+                       obs->content.player_id,
+                       obs->content.state.position.x,
+                       obs->content.state.position.y,
+                       obs->content.state.position.z,
+                       obs->content.state.quaternion.x,
+                       obs->content.state.quaternion.y,
+                       obs->content.state.quaternion.z,
+                       obs->content.state.quaternion.w);
+                break;
+            }
+            default:
+                break;
+        }
     }
 
     void poll_incoming_messages() override {
@@ -170,8 +199,8 @@ private:
             shutdown();
         } else if (input == "1") {
             bmmo::ball_state_msg msg;
-            msg.state.position.x = 1;
-            msg.state.quaternion.y = 2;
+            msg.content.position.x = 1;
+            msg.content.quaternion.y = 2;
             send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         }
     }
@@ -200,16 +229,50 @@ int main() {
             client.shutdown();
         } else if (input == "1") {
             bmmo::ball_state_msg msg;
-            msg.state.position.x = 1;
-            msg.state.quaternion.y = 2;
-            for (int i = 0; i < 50; ++i)
-                client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+            msg.content.position.x = 1;
+            msg.content.quaternion.y = 2;
+//            for (int i = 0; i < 50; ++i)
+            client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         } else if (input == "2") {
-            std::cout << client.get_detailed_info() << std::endl;
+            std::atomic_bool running = true;
+            std::thread output_thread([&]() {
+                while (running) {
+                    bmmo::ball_state_msg msg;
+                    msg.content.position.x = 1;
+                    msg.content.quaternion.y = 2;
+                    for (int i = 0; i < 50; ++i)
+                        client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+
+                    std::cout << client.get_detailed_info() << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds (500));
+                    std::cout << "\033[2J\033[H" << std::flush;
+                }
+            });
+            while (running) {
+                std::string in;
+                std::cin >> in;
+                if (in == "q") {
+                    running = false;
+                }
+            }
+            if (output_thread.joinable())
+                output_thread.join();
         } else if (input == "3") {
             auto status = client.get_info();
-            std::cout << "Ping: " << status.m_nPing << "ms" << std::endl;
-            std::cout << "ConnectionQualityRemote: " << status.m_flConnectionQualityRemote * 100.0 << "%" << std::endl;
+            client::Printf("Ping: %dms\n", status.m_nPing);
+            client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
+            auto l_status = client.get_lane_info();
+            client::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
+        } else if (input == "4") {
+            if (client_thread.joinable())
+                client_thread.join();
+
+            if (!client.connect("127.0.0.1:26676")) {
+                std::cerr << "Cannot connect to server." << std::endl;
+                return 1;
+            }
+
+            client_thread = std::move(std::thread([&client]() { client.run(); }));
         }
     } while (client.running());
 
@@ -217,4 +280,5 @@ int main() {
     if (client_thread.joinable())
         client_thread.join();
     client::destroy();
+//    std::cout << "\033[2J\033[H" << std::flush;
 }

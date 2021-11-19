@@ -91,6 +91,7 @@ protected:
         this_instance_->on_connection_status_changed(pInfo);
     }
 
+public:
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
 

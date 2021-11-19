@@ -8,23 +8,26 @@
 
 namespace bmmo {
     enum opcode : uint32_t {
+        None,
         LoginRequest,
         LoginAccepted,
         LoginDenied,
-        PlayerDisconnect,
+        PlayerDisconnected,
         PlayerConnected,
 
         Ping,
         BallState,
+        OwnedBallState,
         KeyboardInput
     };
 
-    template<typename T>
+    template<typename T, opcode C = None>
     struct message {
-        opcode opcode;
+        opcode opcode = C;
         T content;
     };
 
+    // DO NOT ALLOCATE THIS! Only for typing pointers
     typedef struct message<uint8_t[k_cbMaxSteamNetworkingSocketsMessageSizeSend - sizeof(opcode)]> general_message;
 
     struct serializable_message {
@@ -33,7 +36,7 @@ namespace bmmo {
         opcode code;
         std::stringstream raw;
 
-        size_t size() {
+        size_t size() const {
             return raw.str().size();
         }
 
@@ -48,16 +51,6 @@ namespace bmmo {
             raw.read(reinterpret_cast<char*>(&c), sizeof(opcode));
             assert(c == code);
         }
-    };
-
-//    struct general_message {
-//         opcode opcode;
-//         uint8_t content[k_cbMaxSteamNetworkingSocketsMessageSizeSend - sizeof(opcode)];
-//    };
-
-    struct ball_state_msg {
-        opcode opcode = BallState;
-        ball_state state;
     };
 }
 
