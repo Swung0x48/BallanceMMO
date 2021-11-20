@@ -151,7 +151,7 @@ private:
 //        printf("\b> ");
 //        Printf(reinterpret_cast<const char*>(msg->m_pData));
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        switch (raw_msg->opcode) {
+        switch (raw_msg->code) {
             case bmmo::OwnedBallState: {
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
                 auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
@@ -160,10 +160,10 @@ private:
                        obs->content.state.position.x,
                        obs->content.state.position.y,
                        obs->content.state.position.z,
-                       obs->content.state.quaternion.x,
-                       obs->content.state.quaternion.y,
-                       obs->content.state.quaternion.z,
-                       obs->content.state.quaternion.w);
+                       obs->content.state.rotation.x,
+                       obs->content.state.rotation.y,
+                       obs->content.state.rotation.z,
+                       obs->content.state.rotation.w);
                 break;
             }
             default:
@@ -199,7 +199,7 @@ private:
         } else if (input == "1") {
             bmmo::ball_state_msg msg;
             msg.content.position.x = 1;
-            msg.content.quaternion.y = 2;
+            msg.content.rotation.y = 2;
             send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         }
     }
@@ -229,7 +229,7 @@ int main() {
         } else if (input == "1") {
             bmmo::ball_state_msg msg;
             msg.content.position.x = 1;
-            msg.content.quaternion.y = 2;
+            msg.content.rotation.y = 2;
 //            for (int i = 0; i < 50; ++i)
             client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         } else if (input == "2") {
@@ -238,7 +238,7 @@ int main() {
                 while (running) {
                     bmmo::ball_state_msg msg;
                     msg.content.position.x = 1;
-                    msg.content.quaternion.y = 2;
+                    msg.content.rotation.y = 2;
                     for (int i = 0; i < 50; ++i)
                         client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
 

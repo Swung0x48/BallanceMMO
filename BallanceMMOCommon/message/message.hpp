@@ -23,7 +23,7 @@ namespace bmmo {
 
     template<typename T, opcode C = None>
     struct message {
-        opcode opcode = C;
+        opcode code = C;
         T content;
     };
 

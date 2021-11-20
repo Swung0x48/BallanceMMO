@@ -5,7 +5,7 @@
 namespace bmmo {
     struct ball_state {
         vec3 position;
-        quaternion quaternion;
+        quaternion rotation;
     };
 
     typedef struct message<ball_state, BallState> ball_state_msg;

@@ -188,7 +188,7 @@ protected:
         assert(client_it != clients_.end());
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        switch (raw_msg->opcode) {
+        switch (raw_msg->code) {
             case bmmo::LoginRequest: {
 //                assert(*(reinterpret_cast<uint32_t*>(raw_msg->content)) == strlen((const char*)(raw_msg->content) + sizeof(uint32_t)));
 //                std::cout << (const char*)(raw_msg->content) + sizeof(uint32_t) << " logged in!" << std::endl;
@@ -237,10 +237,10 @@ protected:
                        state_msg->content.position.x,
                        state_msg->content.position.y,
                        state_msg->content.position.z,
-                       state_msg->content.quaternion.x,
-                       state_msg->content.quaternion.y,
-                       state_msg->content.quaternion.z,
-                       state_msg->content.quaternion.w);
+                       state_msg->content.rotation.x,
+                       state_msg->content.rotation.y,
+                       state_msg->content.rotation.z,
+                       state_msg->content.rotation.w);
 //                std::cout << "(" <<
 //                          state_msg->state.position.x << ", " <<
 //                          state_msg->state.position.y << ", " <<
