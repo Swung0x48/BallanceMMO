@@ -5,10 +5,9 @@
 #include <steam/steam_api.h>
 #endif
 
-#include "role.hpp"
+#include "../BallanceMMOCommon/role/role.hpp"
 #include <vector>
-#include "common.hpp"
-#include "message/message_all.hpp"
+#include "../BallanceMMOCommon/common.hpp"
 
 struct client_data {
     std::string name;

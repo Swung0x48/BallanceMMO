@@ -8,13 +8,18 @@ namespace bmmo {
 
         player_connected_msg(): serializable_message(bmmo::PlayerConnected) {}
 
-
         void serialize() override {
             serializable_message::serialize();
+
+            message_utils::write_string(name, raw);
+            assert(raw.good());
         }
 
         void deserialize() override {
             serializable_message::deserialize();
+
+            message_utils::read_string(raw, name);
+            assert(raw.good());
         }
 
     };

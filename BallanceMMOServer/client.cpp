@@ -12,9 +12,8 @@
 #include <cassert>
 #include <cstdarg>
 #include <sstream>
-#include "role.hpp"
-#include "common.hpp"
-#include "message/message_all.hpp"
+#include "../BallanceMMOCommon/role/role.hpp"
+#include "../BallanceMMOCommon/common.hpp"
 
 struct client_data {
     std::string name;
@@ -280,5 +279,4 @@ int main() {
     if (client_thread.joinable())
         client_thread.join();
     client::destroy();
-//    std::cout << "\033[2J\033[H" << std::flush;
 }

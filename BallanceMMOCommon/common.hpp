@@ -5,7 +5,7 @@
 #undef max
 #endif
 
-#include "message/message.hpp"
+#include "message/message_all.hpp"
 #include "entity/entity.hpp"
 
 #endif //BALLANCEMMOSERVER_COMMON_HPP
