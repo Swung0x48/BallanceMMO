@@ -249,8 +249,10 @@ protected:
 //                          state_msg->state.quaternion.y << ", " <<
 //                          state_msg->state.quaternion.z << ", " <<
 //                          state_msg->state.quaternion.w << ")" << std::endl;
+
                 bmmo::owned_ball_state_msg new_msg;
-                std::memcpy(&(new_msg.content), &(state_msg->content), sizeof(state_msg->content));
+                new_msg.content.state = state_msg->content;
+//                std::memcpy(&(new_msg.content), &(state_msg->content), sizeof(state_msg->content));
                 new_msg.content.player_id = networking_msg->m_conn;
                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_UnreliableNoDelay, &networking_msg->m_conn);
 
@@ -263,13 +265,13 @@ protected:
         }
 
         // TODO: replace with actual message data structure handling
-        std::string str;
-        str.assign((const char*)networking_msg->m_pData, networking_msg->m_cbSize);
-
-        Printf("%s: %s", client_it->second.name.c_str(), str.c_str());
-        interface_->SendMessageToConnection(client_it->first, str.c_str(), str.length() + 1,
-                                            k_nSteamNetworkingSend_Reliable,
-                                            nullptr);
+//        std::string str;
+//        str.assign((const char*)networking_msg->m_pData, networking_msg->m_cbSize);
+//
+//        Printf("%s: %s", client_it->second.name.c_str(), str.c_str());
+//        interface_->SendMessageToConnection(client_it->first, str.c_str(), str.length() + 1,
+//                                            k_nSteamNetworkingSend_Reliable,
+//                                            nullptr);
     }
 
     void poll_incoming_messages() override {
