@@ -3,8 +3,11 @@
 ################################################################################
 
 /.vs
+/.vscode
 /BallanceMMOServer/out/build/x64-Debug/CMakeFiles
 /BallanceMMOServer/out/build/x64-Debug
+/BallanceMMOServer/out/build/x64-Debug/CMakeFiles
+/build
 /BallanceMMOClient/include/BML
 /BallanceMMOClient/lib/BML
 /BallanceMMOClient/Debug
