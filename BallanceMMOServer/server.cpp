@@ -42,10 +42,29 @@ public:
         }
     }
 
+    EResult send(HSteamNetConnection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+        return interface_->SendMessageToConnection(destination,
+                                                   buffer,
+                                                   size,
+                                                   send_flags,
+                                                   out_message_number);
+
+    }
+
+    template<typename T>
+    EResult send(HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
+        static_assert(std::is_trivially_copyable<T>());
+        return send(destination,
+                    &msg,
+                    sizeof(msg),
+                    send_flags,
+                    out_message_number);
+    }
+
     void broadcast_message(void* buffer, size_t size, int send_flags, HSteamNetConnection* ignored_client = nullptr) {
         for (auto& i: clients_)
             if (ignored_client == nullptr || *ignored_client != i.first)
-                interface_->SendMessageToConnection(i.first, buffer, size,
+                send(i.first, buffer, size,
                                                     send_flags,
                                                     nullptr);
     }
@@ -163,7 +182,7 @@ protected:
                 // but not logged on) until them.  I'm trying to keep this example
                 // code really simple.
                 char nick[64];
-                sprintf(nick, "BraveWarrior%d", 10000 + (rand() % 100000));
+                sprintf(nick, "Unidentified%d", 10000 + (rand() % 100000));
 
                 // Add them to the client list, using std::map wacky syntax
                 clients_[pInfo->m_hConn] = {nick};
@@ -211,8 +230,9 @@ protected:
                         accepted_msg.online_players.emplace_back(it->second.name);
                 }
                 accepted_msg.serialize();
-                Printf("%s\n", accepted_msg.raw.str().c_str());
-
+                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+                //Printf("%s\n", accepted_msg.raw.str().c_str());
+                
                 // notify other client of the fact that this client goes online
 //                for (auto it = clients_.begin(); it != clients_.end(); ++it) {
 //                    if (client_it != it)
@@ -261,7 +281,7 @@ protected:
             case bmmo::KeyboardInput:
                 break;
             default:
-                FatalError("Invalid message with opcode %d received.");
+                FatalError("Invalid message with opcode %d received.", raw_msg->code);
         }
 
         // TODO: replace with actual message data structure handling
