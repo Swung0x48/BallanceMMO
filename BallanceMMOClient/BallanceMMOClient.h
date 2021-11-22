@@ -8,18 +8,20 @@
 #include <unordered_map>
 #include <mutex>
 #include <memory>
+#include <format>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
 }
 
-class BallanceMMOClient : public IMod {
+class BallanceMMOClient : public IMod, public client {
 public:
 	BallanceMMOClient(IBML* bml): 
-		IMod(bml),
-		client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
-			[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
+		IMod(bml)
+		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
+		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
+		this_instance_ = this;
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
@@ -28,6 +30,25 @@ public:
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
 	DECLARE_BML_VERSION;
+
+	static void init_socket() {
+#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
+		SteamDatagramErrMsg err_msg;
+		if (!GameNetworkingSockets_Init(nullptr, err_msg))
+			FatalError("GameNetworkingSockets_Init failed.  %s", err_msg);
+#else
+		SteamDatagramClient_SetAppID(570); // Just set something, doesn't matter what
+		//SteamDatagramClient_SetUniverse( k_EUniverseDev );
+
+		SteamDatagramErrMsg errMsg;
+		if (!SteamDatagramClient_Init(true, errMsg))
+			FatalError("SteamDatagramClient_Init failed.  %s", errMsg);
+
+		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_IP_AllowWithoutAuth, 1);
+#endif
+		init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
+		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingOutput);
+	}
 
 private:
 	void OnLoad() override;
@@ -42,20 +63,33 @@ private:
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
-	void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
-	void OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo);
 
-	//std::unique_ptr<client> client_;
-	client client_;
+	// Callbacks from client
+	static void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
+	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
+	void on_message(ISteamNetworkingMessage* network_msg) override;
+
+	static void FatalError(const char* fmt, ...) {
+		char text[2048];
+		va_list ap;
+		va_start(ap, fmt);
+		vsprintf(text, fmt, ap);
+		va_end(ap);
+		char* nl = strchr(text, '\0') - 1;
+		if (nl >= text && *nl == '\n')
+			*nl = '\0';
+		LoggingOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
+	}
 
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
+	std::thread network_thread_;
 
 	const float RIGHT_MOST = 0.98f;
 
 	bool init_ = false;
-	uint64_t id_ = 0;
+	//uint64_t id_ = 0;
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
 
@@ -208,7 +242,7 @@ private:
 	}
 
 	void cleanup() {
-		client_.close_connection();
+		close_connection();
 		
 	}
 
