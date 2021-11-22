@@ -1,6 +1,7 @@
 #include "BallanceMMOClient.h"
 
 IMod* BMLEntry(IBML* bml) {
+    BallanceMMOClient::init_socket();
 	return new BallanceMMOClient(bml);
 }
 
@@ -45,36 +46,36 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
-    poll_and_toggle_debug_info();
-    client_.poll_connection_state_changes();
+    //poll_connection_state_changes();
+    //poll_incoming_messages();
 
-    if (!client_.connected())
+    poll_and_toggle_debug_info();
+
+    if (!connected())
         return;
 
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
-    if (bml_lk && m_bml->IsPlaying()) {
-        auto ball = get_current_ball();
-        if (player_ball_ == nullptr)
-            player_ball_ = ball;
+    if (bml_lk) {
+        int ping = get_status().m_nPing;
+        ping_->update(std::format("Ping: {} ms", ping), false);
 
-        check_on_trafo(ball);
-        update_player_ball_state();
-        assemble_and_send_state();
-        /*ammo::common::message<PacketType> msg;
-        msg.header.id = PacketType::GameState;
-        msg << id_;
-        msg << ball_state_;
-        std::unique_lock client_lk(client_mtx_, std::try_to_lock);
-        if (client_lk)
-            client_.send(msg);*/
+        if (m_bml->IsPlaying()) {
+            auto ball = get_current_ball();
+            if (player_ball_ == nullptr)
+                player_ball_ = ball;
 
-        process_username_label();
+            check_on_trafo(ball);
+            update_player_ball_state();
+            assemble_and_send_state();
+
+            process_username_label();
+        }
     }
 }
 
 void BallanceMMOClient::OnStartLevel()
 {
-    if (!client_.connected())
+    if (!connected())
         return;
 
     player_ball_ = get_current_ball();
@@ -87,7 +88,7 @@ void BallanceMMOClient::OnExitGame()
 }
 
 void BallanceMMOClient::OnUnload() {
-    client_.close_connection();
+    shutdown();
     client::destroy();
 }
 
@@ -107,35 +108,44 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         }
         case 2: {
             if (args[1] == "connect" || args[1] == "c") {
-                if (client_.connected()) {
+                if (connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Already connected.");
-                } else if (client_.alive()) {
+                } else if (connecting()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Connecting in process, please wait...");
                 }
                 else {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
-                    if (client_.connect(props_["remote_addr"]->GetString()))
+                    if (connect(props_["remote_addr"]->GetString())){
                         bml->SendIngameMessage("Connecting...");
+                        network_thread_ = std::thread([this]() { run(); });
+                    }
                     else
                         bml->SendIngameMessage("Connect to server failed.");
                 }
             }
             else if (args[1] == "disconnect" || args[1] == "d") {
-                if (client_.get_state() == k_ESteamNetworkingConnectionState_Dead) {
+                if (!connecting() && !connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Already disconnected.");
                 }
                 else {
                     //client_.disconnect();
+                    //ping_->update("Ping: --- ms");
+                    //status_->update("Disconnected");
+                    //status_->paint(0xffff0000);
+                    std::unique_lock<std::mutex> peer_lk(peer_mtx_);
+                    peer_.clear();
+                    shutdown();
+                    if (network_thread_.joinable())
+                        network_thread_.join();
+                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    bml->SendIngameMessage("Disconnected.");
+
                     ping_->update("Ping: --- ms");
                     status_->update("Disconnected");
                     status_->paint(0xffff0000);
-                    std::unique_lock<std::mutex> peer_lk(peer_mtx_);
-                    peer_.clear();
-                    std::lock_guard<std::mutex> lk(bml_mtx_);
-                    bml->SendIngameMessage("Disconnected.");
                 }
             }
             break;
@@ -159,14 +169,14 @@ void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
     peer.balls[to]->Show(CKSHOW);
 }
 
-void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo)
+void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
 {
     GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_None:
+        ping_->update("Ping: --- ms");
         status_->update("Disconnected");
         status_->paint(0xffff0000);
-        // NOTE: We will get callbacks here when we destroy connections.  You can ignore these.
         break;
     case k_ESteamNetworkingConnectionState_ClosedByPeer: {
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
@@ -180,6 +190,9 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {
+        ping_->update("Ping: --- ms");
+        status_->update("Disconnected");
+        status_->paint(0xffff0000);
         // Print an appropriate message
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
             // Note: we could distinguish between a timeout, a rejected connection,
@@ -200,7 +213,7 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
         // and we cannot linger because it's already closed on the other end,
         // so we just pass 0's.
 
-        client_.close_connection(pInfo->m_hConn);
+        interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
         break;
     }
 
@@ -210,14 +223,49 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
         status_->paint(0xFFF6A71B);
         break;
 
-    case k_ESteamNetworkingConnectionState_Connected:
-        status_->update("Connected");
-        status_->paint(0xff00ff00);
-        GetLogger()->Info("Connected to server.");
+    case k_ESteamNetworkingConnectionState_Connected: {
+        status_->update("Connected (Login requested)");
+        //status_->paint(0xff00ff00);
+        m_bml->SendIngameMessage("Connected to server.");
+        m_bml->SendIngameMessage("Logging in...");
+        bmmo::login_request_msg msg;
+        msg.nickname = props_["playername"]->GetString();
+        msg.serialize();
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         break;
-
+    }
     default:
         // Silences -Wswitch
+        break;
+    }
+}
+
+void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
+    auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
+
+    switch (raw_msg->code) {
+    case bmmo::OwnedBallState: {
+        assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
+        auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
+        GetLogger()->Info("%ld: (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+            obs->content.player_id,
+            obs->content.state.position.x,
+            obs->content.state.position.y,
+            obs->content.state.position.z,
+            obs->content.state.rotation.x,
+            obs->content.state.rotation.y,
+            obs->content.state.rotation.z,
+            obs->content.state.rotation.w);
+        break;
+    }
+    case bmmo::LoginAccepted: {
+        status_->update("Connected");
+        status_->paint(0xff00ff00);
+        m_bml->SendIngameMessage("Logged in.");
+        break;
+    }
+    default:
+        GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);
         break;
     }
 }
@@ -225,26 +273,26 @@ void BallanceMMOClient::OnConnectionStatusChanged(SteamNetConnectionStatusChange
 void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg)
 {
     const char* fmt_string = "[%d] %10.6f %s\n";
-    SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - client_.get_init_timestamp();
+    SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
     switch (eType) {
         case k_ESteamNetworkingSocketsDebugOutputType_Bug:
         case k_ESteamNetworkingSocketsDebugOutputType_Error:
-            GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
+            static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
             break;
         case k_ESteamNetworkingSocketsDebugOutputType_Important:
         case k_ESteamNetworkingSocketsDebugOutputType_Warning:
-            GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
+            static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
             break;
         default:
-            GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
+            static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-        m_bml->SendIngameMessage("BallanceMMO has encountered a bug. Please contact developer with this piece of log.");
-        GetLogger()->Error("We've encountered a bug. Please contact developer with this piece of log.");
-        GetLogger()->Error("Nuking process...");
+        static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("BallanceMMO has encountered a bug. Please contact developer with this piece of log.");
+        static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Error("We've encountered a bug. Please contact developer with this piece of log.");
+        static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Error("Nuking process...");
         std::this_thread::sleep_for(std::chrono::seconds(5));
 
-        exit(1);
+        std::terminate();
     }
 }

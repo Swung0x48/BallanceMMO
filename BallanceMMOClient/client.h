@@ -8,131 +8,120 @@
 #include <chrono>
 #include <cassert>
 
-//#include <BML/BMLAll.h> // Just for logging purposes
 #include <memory>
-#include <functional>
+#include "../../BallanceMMOCommon/common.hpp"
 
-class client
-{
+class client : public role {
 public:
-	client(std::function<void(ESteamNetworkingSocketsDebugOutputType, const char*)> logging_callback,
-		std::function<void(SteamNetConnectionStatusChangedCallback_t*)> on_connection_status_changed_callback):
-		logging_callback_(std::move(logging_callback)),
-		on_connection_status_changed_callback_(std::move(on_connection_status_changed_callback))
-	{
-		//logger_ = logger;
-		//bml_ = bml;
-		this_instance_ = this;
+    bool connect(const std::string& connection_string) {
+        SteamNetworkingIPAddr server_address{};
+        if (!server_address.ParseString(connection_string.c_str())) {
+            return false;
+        }
+        SteamNetworkingConfigValue_t opt = generate_opt();
+        connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
+        if (connection_ == k_HSteamNetConnection_Invalid)
+            return false;
 
-		SteamDatagramErrMsg msg;
-		if (!GameNetworkingSockets_Init(nullptr, msg)) {
-			logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Error, "GNS init failed");
-			logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Error, msg);
-			//logger_->Error("GNS init failed: %s", msg);
-		}
+        return true;
+    }
 
-		init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
-		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingWrapper);
+    void run() override {
+        running_ = true;
+        while (running_) {
+            update();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
 
-		interface_ = SteamNetworkingSockets();
-	}
+    ESteamNetworkingConnectionState get_connection_state() {
+        return get_status().m_eState;
+    }
 
-	bool connect(const char* address) {
-		SteamNetworkingIPAddr addr;
-		addr.ParseString(address);
-		return connect(addr);
-	}
+    bool connected() {
+        return get_connection_state() == k_ESteamNetworkingConnectionState_Connected;
+    }
 
-	bool connect(SteamNetworkingIPAddr address) {
-		server_address_ = address;
-		char sz_addr[SteamNetworkingIPAddr::k_cchMaxString];
-		server_address_.ToString(sz_addr, sizeof(sz_addr), true);
+    bool connecting() {
+        return get_connection_state() == k_ESteamNetworkingConnectionState_Connecting || get_connection_state() == k_ESteamNetworkingConnectionState_FindingRoute;
+    }
 
-		//logger_->Info("Connecting to server at %s", sz_addr);
-		logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Msg, "Connecting to server...");
-		logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Msg, sz_addr);
+    EResult send(void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+        return interface_->SendMessageToConnection(connection_,
+            buffer,
+            size,
+            send_flags,
+            out_message_number);
 
-		SteamNetworkingConfigValue_t opt;
-		opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)OnConnectionStatusChangedWrapper);
-		connection_ = interface_->ConnectByIPAddress(server_address_, 1, &opt);
+    }
 
-		if (connection_ == k_HSteamNetConnection_Invalid) {
-			logging_callback_(k_ESteamNetworkingSocketsDebugOutputType_Error, "Failed to create connection.");
+    template<typename T>
+    EResult send(T msg, int send_flags, int64* out_message_number = nullptr) {
+        static_assert(std::is_trivially_copyable<T>());
+        return send(&msg,
+            sizeof(msg),
+            send_flags,
+            out_message_number);
+    }
 
-			//logger_->Error("Failed to create connection.");
-			return false;
-		}
+    std::string get_detailed_status() {
+        char info[2048];
+        interface_->GetDetailedConnectionStatus(connection_, info, 2048);
+        return { info };
+    }
 
-		return true;
-	}
+    SteamNetConnectionRealTimeStatus_t get_status() {
+        SteamNetConnectionRealTimeStatus_t status{};
+        if (interface_ != nullptr)
+            interface_->GetConnectionRealTimeStatus(connection_, &status, 0, nullptr);
+        return status;
+    }
 
-	bool connected() {
-		return state_ == k_ESteamNetworkingConnectionState_Connected;
-	}
+    int get_ping() {
+        return get_status().m_nPing;
+    }
 
-	ESteamNetworkingConnectionState get_state() const {
-		return state_;
-	}
+    void close_connection() {
+        close_connection(this->connection_);
+    }
 
-	void poll_connection_state_changes() {
-		this_instance_ = this;
-		interface_->RunCallbacks();
-	}
+    void close_connection(HSteamNetConnection connection) {
+        if (connection != k_HSteamNetConnection_Invalid) {
+            interface_->CloseConnection(connection, 0, "Goodbye", true);
+            assert(connection == this->connection_);
+            connection_ = k_HSteamNetConnection_Invalid;
+        }
+    }
 
-	SteamNetworkingMicroseconds get_init_timestamp() {
-		return init_timestamp_;
-	}
+    void shutdown() {
+        running_ = false;
+        close_connection();
+    }
 
-	bool alive() {
-		return connection_ != k_HSteamNetConnection_Invalid;
-	}
+protected:
+    void poll_incoming_messages() override {
+        while (running_) {
+            ISteamNetworkingMessage* incoming_message = nullptr;
+            int msg_count = interface_->ReceiveMessagesOnConnection(connection_, &incoming_message, 1);
+            if (msg_count == 0)
+                break;
+            if (msg_count < 0)
+                FatalError("Error checking for messages.");
+            assert(msg_count == 1 && incoming_message);
 
-	void close_connection() {
-		close_connection(this->connection_);
-	}
+            on_message(incoming_message);
+            incoming_message->Release();
+        }
+    }
 
-	void close_connection(HSteamNetConnection connection) {
-		if (connection != k_HSteamNetConnection_Invalid) {
-			interface_->CloseConnection(connection, 0, "Goodbye", true);
-			assert(connection == this->connection_);
-			connection_ = k_HSteamNetConnection_Invalid;
-		}
-	}
+    void poll_connection_state_changes() override {
+        this_instance_ = this;
+        interface_->RunCallbacks();
+    }
 
-	static void destroy() {
-		std::this_thread::sleep_for(std::chrono::milliseconds(500));
-#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
-		GameNetworkingSockets_Kill();
-#else
-		SteamDatagramClient_Kill();
-#endif
-	}
+    void poll_local_state_changes() override {
+        
+    }
 
-private:
-	void OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo) {
-		state_ = pInfo->m_info.m_eState;
-		on_connection_status_changed_callback_(pInfo);
-	}
-
-	static void OnConnectionStatusChangedWrapper(SteamNetConnectionStatusChangedCallback_t* pInfo) {
-		//this_instance_->OnConnectionStatusChanged(pInfo);
-		this_instance_->on_connection_status_changed_callback_(pInfo);
-	}
-
-	static void LoggingWrapper(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
-		this_instance_->logging_callback_(eType, pszMsg);
-	}
-
-private:
-	SteamNetworkingIPAddr server_address_ = SteamNetworkingIPAddr();
-	ISteamNetworkingSockets* interface_ = nullptr;
-	HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
-	ESteamNetworkingConnectionState state_ = k_ESteamNetworkingConnectionState_None;
-	std::function<void(ESteamNetworkingSocketsDebugOutputType, const char*)> logging_callback_;
-	std::function<void(SteamNetConnectionStatusChangedCallback_t*)> on_connection_status_changed_callback_;
-	SteamNetworkingMicroseconds init_timestamp_;
-
-	//static inline ILogger* logger_;
-	//static inline IBML* bml_;
-	static inline client* this_instance_;
+    HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
 };
