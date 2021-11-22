@@ -155,8 +155,9 @@ private:
             case bmmo::OwnedBallState: {
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
                 auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
-                Printf("%ld: (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+                Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
                        obs->content.player_id,
+                       obs->content.state.type,
                        obs->content.state.position.x,
                        obs->content.state.position.y,
                        obs->content.state.position.z,

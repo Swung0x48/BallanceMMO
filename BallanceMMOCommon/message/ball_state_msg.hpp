@@ -4,6 +4,7 @@
 
 namespace bmmo {
     struct ball_state {
+        uint32_t type = 0;
         vec3 position;
         quaternion rotation;
     };

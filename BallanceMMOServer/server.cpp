@@ -253,7 +253,8 @@ protected:
             case bmmo::BallState: {
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
-                Printf("(%lf, %lf, %lf), (%lf, %lf, %lf, %lf)",
+                Printf("%d, (%lf, %lf, %lf), (%lf, %lf, %lf, %lf)",
+                       state_msg->content.type,
                        state_msg->content.position.x,
                        state_msg->content.position.y,
                        state_msg->content.position.z,
