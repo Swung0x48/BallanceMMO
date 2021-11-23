@@ -3,16 +3,16 @@
 
 namespace bmmo {
     struct vec3 {
-        double x = 0.0;
-        double y = 0.0;
-        double z = 0.0;
+        float x = 0.0;
+        float y = 0.0;
+        float z = 0.0;
     };
 
     struct quaternion {
-        double x = 0.0;
-        double y = 0.0;
-        double z = 0.0;
-        double w = 0.0;
+        float x = 0.0;
+        float y = 0.0;
+        float z = 0.0;
+        float w = 0.0;
     };
 }
 
