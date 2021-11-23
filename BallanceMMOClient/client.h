@@ -94,8 +94,11 @@ public:
     }
 
     void shutdown() {
-        running_ = false;
-        close_connection();
+        if (running_) {
+            running_ = false;
+            close_connection();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
     }
 
 protected:

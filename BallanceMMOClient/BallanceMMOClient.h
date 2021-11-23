@@ -238,7 +238,10 @@ private:
 	}
 
 	void assemble_and_send_state() {
-
+		bmmo::ball_state_msg msg{};
+		assert(sizeof(msg.content) == sizeof(ball_state_));
+		std::memcpy(&(msg.content), &ball_state_, sizeof(msg.content));
+		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
 	}
 
 	void cleanup() {

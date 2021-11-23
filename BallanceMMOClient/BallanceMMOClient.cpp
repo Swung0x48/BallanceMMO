@@ -84,7 +84,7 @@ void BallanceMMOClient::OnStartLevel()
 
 void BallanceMMOClient::OnExitGame()
 {
-	
+    shutdown();
 }
 
 void BallanceMMOClient::OnUnload() {
