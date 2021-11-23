@@ -36,8 +36,8 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 void BallanceMMOClient::OnPostStartMenu()
 {
     if (!init_) {
-        ping_ = std::make_shared<text_sprite>("T_MMO_PING", "Ping: --- ms", RIGHT_MOST, 0.0f);
-        status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.025f);
+        ping_ = std::make_shared<text_sprite>("T_MMO_PING", "Ping: --- ms", RIGHT_MOST, 0.03f);
+        status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
         status_->paint(0xffff0000);
 
         m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
@@ -56,7 +56,7 @@ void BallanceMMOClient::OnProcess() {
 
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
     if (bml_lk) {
-        int ping = get_status().m_nPing;
+        int ping = get_ping();
         ping_->update(std::format("Ping: {} ms", ping), false);
 
         if (m_bml->IsPlaying()) {
