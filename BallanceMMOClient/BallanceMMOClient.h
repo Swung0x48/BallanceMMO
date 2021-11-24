@@ -257,4 +257,36 @@ private:
 			}
 		}
 	}
+
+	static std::string pretty_percentage(float value) {
+		if (value < 0)
+			return "Not available";
+
+		return std::format("{:.2f}%", value * 100.0f);
+	}
+
+	static std::string pretty_bytes(float bytes)
+	{
+		const char* suffixes[] = { "B", "KB", "MB", "GB", "TB", "PB", "EB" };
+		int s = 0; // which suffix to use
+		while (bytes >= 1024 && s < 7)
+		{
+			s++;
+			bytes /= 1024;
+		}
+
+		return std::format("{:.1f}{}", bytes, suffixes[s]);
+	}
+
+	static std::string pretty_status(SteamNetConnectionRealTimeStatus_t status) {
+		return std::format("Ping: {} ms\n", status.m_nPing) +
+			"ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n"
+			"ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n" +
+			std::format("Tx: {:.0f}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n" +
+			std::format("Rx: {:.0f}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n" +
+			"Est. MaxBandwidth: " + pretty_bytes(status.m_nSendRateBytesPerSecond) + "/s\n" +
+			std::format("Queue time: {}us\n", status.m_usecQueueTime) +
+			std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable) +
+			std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
+	}
 };

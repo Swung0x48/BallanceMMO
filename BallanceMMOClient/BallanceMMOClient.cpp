@@ -36,7 +36,8 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 void BallanceMMOClient::OnPostStartMenu()
 {
     if (!init_) {
-        ping_ = std::make_shared<text_sprite>("T_MMO_PING", "Ping: --- ms", RIGHT_MOST, 0.03f);
+        ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
+        ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
         status_->paint(0xffff0000);
 
@@ -56,8 +57,7 @@ void BallanceMMOClient::OnProcess() {
 
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
     if (bml_lk) {
-        int ping = get_ping();
-        ping_->update(std::format("Ping: {} ms", ping), false);
+        ping_->update(pretty_status(get_status()), false);
 
         if (m_bml->IsPlaying()) {
             auto ball = get_current_ball();
@@ -132,7 +132,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 }
                 else {
                     //client_.disconnect();
-                    //ping_->update("Ping: --- ms");
+                    //ping_->update("");
                     //status_->update("Disconnected");
                     //status_->paint(0xffff0000);
                     std::unique_lock<std::mutex> peer_lk(peer_mtx_);
@@ -143,7 +143,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Disconnected.");
 
-                    ping_->update("Ping: --- ms");
+                    ping_->update("");
                     status_->update("Disconnected");
                     status_->paint(0xffff0000);
                 }
@@ -174,7 +174,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
     GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_None:
-        ping_->update("Ping: --- ms");
+        ping_->update("");
         status_->update("Disconnected");
         status_->paint(0xffff0000);
         break;
@@ -190,7 +190,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {
-        ping_->update("Ping: --- ms");
+        ping_->update("");
         status_->update("Disconnected");
         status_->paint(0xffff0000);
         // Print an appropriate message
@@ -247,8 +247,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OwnedBallState: {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
         auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
-        GetLogger()->Info("%ld: (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+        GetLogger()->Info("%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
             obs->content.player_id,
+            obs->content.state.type,
             obs->content.state.position.x,
             obs->content.state.position.y,
             obs->content.state.position.z,
