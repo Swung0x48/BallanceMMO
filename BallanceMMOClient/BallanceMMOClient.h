@@ -10,6 +10,7 @@
 #include <mutex>
 #include <memory>
 #include <format>
+#include <asio.hpp>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -85,6 +86,8 @@ private:
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
+	asio::io_context io_ctx_;
+	asio::thread_pool thread_pool_;
 	std::thread network_thread_;
 
 	const float RIGHT_MOST = 0.98f;
@@ -242,8 +245,13 @@ private:
 	}
 
 	void cleanup() {
-		close_connection();
-		
+		std::unique_lock<std::mutex> peer_lk(peer_mtx_);
+		peer_.clear();
+		shutdown();
+		io_ctx_.stop();
+		if (network_thread_.joinable())
+			network_thread_.join();
+		thread_pool_.stop();
 	}
 
 	void process_username_label() {
@@ -275,15 +283,18 @@ private:
 		return std::format("{:.1f}{}", bytes, suffixes[s]);
 	}
 
-	static std::string pretty_status(SteamNetConnectionRealTimeStatus_t status) {
-		return std::format("Ping: {} ms\n", status.m_nPing) +
-			"ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n"
-			"ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n" +
-			std::format("Tx: {:.0f}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n" +
-			std::format("Rx: {:.0f}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n" +
-			"Est. MaxBandwidth: " + pretty_bytes(status.m_nSendRateBytesPerSecond) + "/s\n" +
-			std::format("Queue time: {}us\n", status.m_usecQueueTime) +
-			std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable) +
-			std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
+	static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
+		std::string s;
+		s.reserve(2048);
+		s += std::format("Ping: {} ms\n", status.m_nPing);
+		s += "ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n";
+		s += "ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n";
+		s += std::format("Tx: {:.0f}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
+		s += std::format("Rx: {:.0f}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
+		s += "Est. MaxBandwidth: " + pretty_bytes(status.m_nSendRateBytesPerSecond) + "/s\n";
+		s += std::format("Queue time: {}us\n", status.m_usecQueueTime);
+		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
+		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
+		return s;
 	}
 };

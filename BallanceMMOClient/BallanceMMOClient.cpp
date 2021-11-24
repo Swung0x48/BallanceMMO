@@ -55,19 +55,19 @@ void BallanceMMOClient::OnProcess() {
     if (!connected())
         return;
 
-    std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
-    if (bml_lk) {
-        ping_->update(pretty_status(get_status()), false);
+    //std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
+    std::unique_lock<std::mutex> bml_lk(bml_mtx_);
 
+    if (bml_lk) {
         if (m_bml->IsPlaying()) {
             auto ball = get_current_ball();
             if (player_ball_ == nullptr)
                 player_ball_ = ball;
 
             check_on_trafo(ball);
-            update_player_ball_state();
-            assemble_and_send_state();
 
+            update_player_ball_state();
+            asio::post(thread_pool_, [this]() { assemble_and_send_state(); });
             process_username_label();
         }
     }
@@ -119,7 +119,18 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     if (connect(props_["remote_addr"]->GetString())){
                         bml->SendIngameMessage("Connecting...");
-                        network_thread_ = std::thread([this]() { run(); });
+                        if (io_ctx_.stopped())
+                            io_ctx_.restart();
+                        asio::post(io_ctx_, [this]() { run(); });
+                        asio::post(thread_pool_, [this]() {
+                            do {
+                                auto status = get_status();
+                                std::string str = pretty_status(status);
+                                ping_->update(str, false);
+                                std::this_thread::sleep_for(std::chrono::seconds(1));
+                            } while (connected());
+                        });
+                        network_thread_ = std::thread([this]() { io_ctx_.run(); });
                     }
                     else
                         bml->SendIngameMessage("Connect to server failed.");
@@ -135,11 +146,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     //ping_->update("");
                     //status_->update("Disconnected");
                     //status_->paint(0xffff0000);
-                    std::unique_lock<std::mutex> peer_lk(peer_mtx_);
-                    peer_.clear();
-                    shutdown();
-                    if (network_thread_.joinable())
-                        network_thread_.join();
+                    cleanup();
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Disconnected.");
 
