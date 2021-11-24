@@ -5,6 +5,7 @@
 #include "text_sprite.h"
 #include "label_sprite.h"
 #include "client.h"
+#include "game_state.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -94,11 +95,7 @@ private:
 	std::shared_ptr<text_sprite> status_;
 
 	CK3dObject* player_ball_ = nullptr;
-	struct BallState {
-		uint32_t type = 0;
-		VxVector position;
-		VxQuaternion rotation;
-	} ball_state_;
+	BallState local_ball_state_;
 	std::vector<CK3dObject*> template_balls_;
 	std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CKDataArray* current_level_array_ = nullptr;
@@ -228,19 +225,19 @@ private:
 			OnTrafo(ball_name_to_idx_[player_ball_->GetName()], ball_name_to_idx_[ball->GetName()]);
 			// Update current player ball
 			player_ball_ = ball;
-			ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
+			local_ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
 		}
 	}
 
 	void update_player_ball_state() {
-		player_ball_->GetPosition(&ball_state_.position);
-		player_ball_->GetQuaternion(&ball_state_.rotation);
+		player_ball_->GetPosition(&local_ball_state_.position);
+		player_ball_->GetQuaternion(&local_ball_state_.rotation);
 	}
 
 	void assemble_and_send_state() {
 		bmmo::ball_state_msg msg{};
-		assert(sizeof(msg.content) == sizeof(ball_state_));
-		std::memcpy(&(msg.content), &ball_state_, sizeof(msg.content));
+		assert(sizeof(msg.content) == sizeof(local_ball_state_));
+		std::memcpy(&(msg.content), &local_ball_state_, sizeof(msg.content));
 		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
 	}
 

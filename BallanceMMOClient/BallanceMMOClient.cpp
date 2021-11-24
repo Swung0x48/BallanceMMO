@@ -79,7 +79,7 @@ void BallanceMMOClient::OnStartLevel()
         return;
 
     player_ball_ = get_current_ball();
-    ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
+    local_ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
 }
 
 void BallanceMMOClient::OnExitGame()
