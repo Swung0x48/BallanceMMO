@@ -274,6 +274,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         status_->update("Connected");
         status_->paint(0xff00ff00);
         m_bml->SendIngameMessage("Logged in.");
+        bmmo::login_accepted_msg msg;
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+        GetLogger()->Info("Online players: ");
+        for (auto& i : msg.online_players) {
+            GetLogger()->Info(i.c_str());
+        }
         break;
     }
     default:
@@ -300,9 +307,8 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-        static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("BallanceMMO has encountered a bug. Please contact developer with this piece of log.");
-        static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Error("We've encountered a bug. Please contact developer with this piece of log.");
-        static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Error("Nuking process...");
+        static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
+        static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("Nuking process in 5 seconds...");
         std::this_thread::sleep_for(std::chrono::seconds(5));
 
         std::terminate();
