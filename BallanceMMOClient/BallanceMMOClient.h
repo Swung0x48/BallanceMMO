@@ -98,6 +98,8 @@ private:
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
 
+	game_state db_;
+
 	CK3dObject* player_ball_ = nullptr;
 	BallState local_ball_state_;
 	std::vector<CK3dObject*> template_balls_;

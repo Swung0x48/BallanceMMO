@@ -55,7 +55,6 @@ void BallanceMMOClient::OnProcess() {
     if (!connected())
         return;
 
-    //std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
 
     if (bml_lk) {
@@ -156,6 +155,24 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     status_->update("Disconnected");
                     status_->paint(0xffff0000);
                 }
+            }
+            else if (args[1] == "list" || args[1] == "d") {
+                if (!connected())
+                    break;
+
+                std::stringstream ss;
+                bool is_first = true;
+                db_.for_each([this, &ss, &is_first](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    if (is_first) {
+                        ss << pair.second.name;
+                        is_first = false;
+                    } else {
+                        ss << ", " << pair.second.name;
+                    }
+                    return true;
+                });
+
+                m_bml->SendIngameMessage(ss.str().c_str());
             }
             break;
         }
@@ -279,7 +296,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         GetLogger()->Info("Online players: ");
         for (auto& i : msg.online_players) {
-            GetLogger()->Info(i.c_str());
+            db_.create(i.first, i.second);
         }
         break;
     }
