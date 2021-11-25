@@ -4,6 +4,7 @@
 #include "../entity/entity.hpp"
 #include <steam/steamnetworkingtypes.h>
 #include <vector>
+#include <unordered_map>
 #include <sstream>
 
 namespace bmmo {

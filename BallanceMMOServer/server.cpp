@@ -184,8 +184,8 @@ protected:
                 char nick[64];
                 sprintf(nick, "Unidentified%d", 10000 + (rand() % 100000));
 
-                // Add them to the client list, using std::map wacky syntax
-                clients_[pInfo->m_hConn] = {nick};
+                // DO NOT add client here.
+                //clients_[pInfo->m_hConn] = {nick};
                 interface_->SetConnectionName(pInfo->m_hConn, nick);
 //                SetClientNick( pInfo->m_hConn, nick );
                 break;
@@ -219,7 +219,7 @@ protected:
 
                 // accepting client
                 Printf("%s logged in!\n", msg.nickname.c_str());
-                clients_[networking_msg->m_conn] = {msg.nickname};
+                clients_[networking_msg->m_conn] = {msg.nickname};  // add the client here
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
                 // notify client of other online players
@@ -227,7 +227,7 @@ protected:
 //                auto client_it = clients_.find(networking_msg->m_conn);
                 for (auto it = clients_.begin(); it != clients_.end(); ++it) {
                     if (client_it != it)
-                        accepted_msg.online_players.emplace_back(it->second.name);
+                        accepted_msg.online_players[it->first] = it->second.name;
                 }
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
