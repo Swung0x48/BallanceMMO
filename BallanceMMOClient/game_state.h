@@ -28,14 +28,14 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		peers_[id] = {};
+		states[id] = {};
 		return true;
 	}
 
 	bool exists(HSteamNetConnection id) {
 		std::shared_lock lk(mutex_);
 
-		return peers_.find(id) != peers_.end();
+		return states.find(id) != states.end();
 	}
 
 	bool update(HSteamNetConnection id, const std::string& name) {
@@ -43,7 +43,7 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		peers_[id].name = name;
+		states[id].name = name;
 	}
 
 	bool update(HSteamNetConnection id, const PlayerState& state) {
@@ -51,7 +51,7 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		peers_[id] = state;
+		states[id] = state;
 	}
 
 	bool update(HSteamNetConnection id, const BallState& state) {
@@ -59,7 +59,7 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		peers_[id].ball_state = state;
+		states[id].ball_state = state;
 	}
 
 	bool remove(HSteamNetConnection id) {
@@ -67,15 +67,25 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		peers_.erase(id);
+		states.erase(id);
 		return true;
 	}
 
 	size_t player_count(HSteamNetConnection id) {
 		std::shared_lock lk(mutex_);
-		return peers_.size();
+		return states.size();
 	}
+
+	auto read_lock() {
+		return std::move(std::shared_lock(mutex_));
+	}
+
+	auto write_lock() {
+		return std::move(std::unique_lock(mutex_));
+	}
+
+	std::unordered_map<HSteamNetConnection, PlayerState> states;
+
 private:
 	std::shared_mutex mutex_;
-	std::unordered_map<HSteamNetConnection, PlayerState> peers_;
 };
