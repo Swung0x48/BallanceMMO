@@ -69,6 +69,13 @@ public:
                                                     nullptr);
     }
 
+    void print_clients() {
+        Printf("%d clients online:", clients_.size());
+        for (auto& i: clients_) {
+            Printf("%u: %s", i.first, i.second.name.c_str());
+        }
+    }
+
     void shutdown() {
         for (auto& i: clients_) {
             interface_->CloseConnection(i.first, 0, "Server closed", true);
@@ -147,6 +154,7 @@ protected:
                 // to finish up.  The reason information do not matter in this case,
                 // and we cannot linger because it's already closed on the other end,
                 // so we just pass 0's.
+                
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
                 break;
             }
@@ -253,7 +261,8 @@ protected:
             case bmmo::BallState: {
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
-                Printf("%d, (%lf, %lf, %lf), (%lf, %lf, %lf, %lf)",
+                Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
+                       networking_msg->m_conn,
                        state_msg->content.type,
                        state_msg->content.position.x,
                        state_msg->content.position.y,
@@ -335,6 +344,8 @@ int main() {
         std::cin >> cmd;
         if (cmd == "stop") {
             server.shutdown();
+        } else if (cmd == "list") {
+            server.print_clients();
         }
     } while (server.running());
 
