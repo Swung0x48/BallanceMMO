@@ -204,9 +204,9 @@ protected:
 
     void on_message(ISteamNetworkingMessage* networking_msg) override {
         auto client_it = clients_.find(networking_msg->m_conn);
-        assert(client_it != clients_.end());
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
+        assert(raw_msg->code == bmmo::LoginRequest || client_it != clients_.end());
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
 //                assert(*(reinterpret_cast<uint32_t*>(raw_msg->content)) == strlen((const char*)(raw_msg->content) + sizeof(uint32_t)));
