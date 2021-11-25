@@ -69,7 +69,7 @@ public:
                                                     nullptr);
     }
 
-    std::unordered_map<HSteamNetConnection, client_data>& print_clients() {
+    void print_clients() {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
             Printf("%u: %s", i.first, i.second.name.c_str());
