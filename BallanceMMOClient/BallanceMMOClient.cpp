@@ -56,7 +56,7 @@ void BallanceMMOClient::OnProcess() {
         return;
 
     //std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
-    std::unique_lock<std::mutex> bml_lk(bml_mtx_);
+    std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
 
     if (bml_lk) {
         if (m_bml->IsPlaying()) {
@@ -65,9 +65,11 @@ void BallanceMMOClient::OnProcess() {
                 player_ball_ = ball;
 
             check_on_trafo(ball);
-
             update_player_ball_state();
-            asio::post(thread_pool_, [this]() { assemble_and_send_state(); });
+
+            asio::post(thread_pool_, [this]() {
+                assemble_and_send_state();
+            });
             process_username_label();
         }
     }
@@ -119,10 +121,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     if (connect(props_["remote_addr"]->GetString())){
                         bml->SendIngameMessage("Connecting...");
-                        if (io_ctx_.stopped())
-                            io_ctx_.restart();
-                        asio::post(io_ctx_, [this]() { run(); });
-                        asio::post(thread_pool_, [this]() {
+                        //if (io_ctx_.stopped())
+                            //io_ctx_.restart();
+                        network_thread_ = std::thread([this]() { run(); });
+                        //asio::post(io_ctx_, [this]() { run(); });
+                        ping_thread_ = std::thread([this]() {
                             do {
                                 auto status = get_status();
                                 std::string str = pretty_status(status);
@@ -130,7 +133,6 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                 std::this_thread::sleep_for(std::chrono::seconds(1));
                             } while (connected());
                         });
-                        network_thread_ = std::thread([this]() { io_ctx_.run(); });
                     }
                     else
                         bml->SendIngameMessage("Connect to server failed.");
@@ -179,6 +181,8 @@ void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
 {
     GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
+    estate_ = pInfo->m_info.m_eState;
+
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_None:
         ping_->update("");

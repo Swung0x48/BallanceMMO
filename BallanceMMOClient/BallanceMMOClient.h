@@ -86,9 +86,10 @@ private:
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
-	asio::io_context io_ctx_;
+	//asio::io_context io_ctx_;
 	asio::thread_pool thread_pool_;
 	std::thread network_thread_;
+	std::thread ping_thread_;
 
 	const float RIGHT_MOST = 0.98f;
 
@@ -248,9 +249,11 @@ private:
 		std::unique_lock<std::mutex> peer_lk(peer_mtx_);
 		peer_.clear();
 		shutdown();
-		io_ctx_.stop();
+		//io_ctx_.stop();
 		if (network_thread_.joinable())
 			network_thread_.join();
+		if (ping_thread_.joinable())
+			ping_thread_.join();
 		thread_pool_.stop();
 	}
 

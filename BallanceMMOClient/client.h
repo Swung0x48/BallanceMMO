@@ -35,7 +35,7 @@ public:
     }
 
     ESteamNetworkingConnectionState get_connection_state() {
-        return get_status().m_eState;
+        return estate_;
     }
 
     bool connected() {
@@ -127,4 +127,5 @@ protected:
     }
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
+    ESteamNetworkingConnectionState estate_;
 };
