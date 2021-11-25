@@ -23,19 +23,20 @@ struct PlayerState {
 class game_state
 {
 public:
-	bool create(HSteamNetConnection id) {
+	bool create(HSteamNetConnection id, const std::string& name = "") {
 		if (exists(id))
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states[id] = {};
+		states_[id] = {};
+		states_[id].name = name;
 		return true;
 	}
 
 	bool exists(HSteamNetConnection id) {
 		std::shared_lock lk(mutex_);
 
-		return states.find(id) != states.end();
+		return states_.find(id) != states_.end();
 	}
 
 	bool update(HSteamNetConnection id, const std::string& name) {
@@ -43,7 +44,8 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states[id].name = name;
+		states_[id].name = name;
+		return true;
 	}
 
 	bool update(HSteamNetConnection id, const PlayerState& state) {
@@ -51,7 +53,8 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states[id] = state;
+		states_[id] = state;
+		return true;
 	}
 
 	bool update(HSteamNetConnection id, const BallState& state) {
@@ -59,7 +62,8 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states[id].ball_state = state;
+		states_[id].ball_state = state;
+		return true;
 	}
 
 	bool remove(HSteamNetConnection id) {
@@ -67,25 +71,45 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states.erase(id);
+		states_.erase(id);
 		return true;
 	}
 
 	size_t player_count(HSteamNetConnection id) {
 		std::shared_lock lk(mutex_);
-		return states.size();
+		return states_.size();
 	}
 
-	auto read_lock() {
-		return std::move(std::shared_lock(mutex_));
+	template <class Fn>
+	void for_each(const Fn& fn) {
+		using pair_type = std::pair<const HSteamNetConnection, PlayerState>;
+		constexpr bool is_arg_const = std::is_invocable_v<Fn, const pair_type&>;
+		using argument_type = std::conditional_t<is_arg_const, const pair_type, pair_type>&;
+
+		// lock
+		if constexpr (is_arg_const) {
+			mutex_.lock_shared();
+		} else {
+			mutex_.lock();
+		}
+
+		// looping
+		for (argument_type i : states_) {
+			if (!fn(i))
+				break;
+		}
+
+		// unlock
+		if constexpr (is_arg_const) {
+			mutex_.unlock_shared();
+		}
+		else {
+			mutex_.unlock();
+		}
 	}
 
-	auto write_lock() {
-		return std::move(std::unique_lock(mutex_));
-	}
-
-	std::unordered_map<HSteamNetConnection, PlayerState> states;
 
 private:
 	std::shared_mutex mutex_;
+	std::unordered_map<HSteamNetConnection, PlayerState> states_;
 };
