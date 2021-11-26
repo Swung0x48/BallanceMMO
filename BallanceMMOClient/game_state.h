@@ -33,6 +33,12 @@ public:
 		return true;
 	}
 
+	std::optional<const PlayerState> get(HSteamNetConnection id) {
+		if (!exists(id))
+			return {};
+		return states_[id];
+	}
+
 	bool exists(HSteamNetConnection id) {
 		std::shared_lock lk(mutex_);
 

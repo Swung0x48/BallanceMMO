@@ -308,6 +308,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         db_.create(msg.connection_id, msg.name);
+        m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+        break;
+    }
+    case bmmo::PlayerDisconnected: {
+        bmmo::player_disconnected_msg* msg = reinterpret_cast<bmmo::player_disconnected_msg *>(network_msg->m_pData);
+        auto state = db_.get(msg->content.connection_id);
+        assert(state.has_value());
+        m_bml->SendIngameMessage((state->name + " left the game.").c_str());
+        db_.remove(msg->content.connection_id);
+        break;
     }
     default:
         GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);
