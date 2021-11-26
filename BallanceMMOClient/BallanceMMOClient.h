@@ -251,17 +251,19 @@ private:
 		std::unique_lock<std::mutex> peer_lk(peer_mtx_);
 		peer_.clear();
 		shutdown();
-		ping_->update("");
-		status_->update("Disconnected");
-		status_->paint(0xffff0000);
-		//io_ctx_.stop();
+		
 		if (ping_thread_.joinable())
 			ping_thread_.join();
+
+		// Weird bug if join thread here. Will join at the place before next use
 		//if (network_thread_.joinable())
 			//network_thread_.join();
 		
 		thread_pool_.stop();
 
+		ping_->update("");
+		status_->update("Disconnected");
+		status_->paint(0xffff0000);
 	}
 
 	void process_username_label() {

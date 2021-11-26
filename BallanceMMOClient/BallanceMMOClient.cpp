@@ -283,7 +283,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         assert(success);
         auto state = db_.get(obs->content.player_id);
         GetLogger()->Info("%s: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
-            state->name,
+            state->name.c_str(),
             state->ball_state.type,
             state->ball_state.position.x,
             state->ball_state.position.y,
