@@ -14,7 +14,8 @@ void BallanceMMOClient::OnLoad()
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
 {
     if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
-        init_template_balls();
+        objects_.init_template_balls();
+        objects_.init_players();
     }
 
     if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
@@ -64,23 +65,27 @@ void BallanceMMOClient::OnProcess() {
                 player_ball_ = ball;
 
             check_on_trafo(ball);
-            update_player_ball_state();
+            poll_player_ball_state();
 
             asio::post(thread_pool_, [this]() {
                 assemble_and_send_state();
             });
-            process_username_label();
+
+            objects_.update();
         }
     }
 }
 
 void BallanceMMOClient::OnStartLevel()
 {
-    if (!connected())
-        return;
+    /*if (!connected())
+        return;*/
 
     player_ball_ = get_current_ball();
-    local_ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
+    local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
+
+    //objects_.destroy_all_objects();
+    //objects_.init_players();
 }
 
 void BallanceMMOClient::OnExitGame()
@@ -98,8 +103,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
         bml->SendIngameMessage("BallanceMMO Help");
-        bml->SendIngameMessage("/connect - Connect to server.");
-        bml->SendIngameMessage("/disconnect - Disconnect from server.");
+        bml->SendIngameMessage("/mmo connect - Connect to server.");
+        bml->SendIngameMessage("/mmo disconnect - Disconnect from server.");
+        bml->SendIngameMessage("/mmo list - List online players.");
     };
 
     switch (args.size()) {
@@ -183,10 +189,10 @@ void BallanceMMOClient::OnTrafo(int from, int to)
 void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
 {
     GetLogger()->Info("OnPeerTrafo, %d -> %d", from, to);
-    PeerState& peer = peer_[id];
+    /*PeerState& peer = peer_[id];
     peer.current_ball = to;
     peer.balls[from]->Show(CKHIDE);
-    peer.balls[to]->Show(CKSHOW);
+    peer.balls[to]->Show(CKSHOW);*/
 }
 
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
@@ -261,7 +267,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
                 auto status = get_status();
                 std::string str = pretty_status(status);
                 ping_->update(str, false);
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         });
         break;
@@ -281,7 +287,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
         bool success = db_.update(obs->content.player_id, reinterpret_cast<const BallState&>(obs->content.state));
         assert(success);
-        auto state = db_.get(obs->content.player_id);
+        /*auto state = db_.get(obs->content.player_id);
         GetLogger()->Info("%s: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
             state->name.c_str(),
             state->ball_state.type,
@@ -291,7 +297,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             state->ball_state.rotation.x,
             state->ball_state.rotation.y,
             state->ball_state.rotation.z,
-            state->ball_state.rotation.w);
+            state->ball_state.rotation.w);*/
         break;
     }
     case bmmo::LoginAccepted: {
@@ -313,6 +319,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         db_.create(msg.connection_id, msg.name);
         m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+
+        // TODO: call this when the player enters a map
+        if (m_bml->IsIngame())
+            objects_.init_player(msg.connection_id, msg.name);
         break;
     }
     case bmmo::PlayerDisconnected: {
@@ -321,6 +331,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         assert(state.has_value());
         m_bml->SendIngameMessage((state->name + " left the game.").c_str());
         db_.remove(msg->content.connection_id);
+        objects_.remove(msg->content.connection_id);
         break;
     }
     default:

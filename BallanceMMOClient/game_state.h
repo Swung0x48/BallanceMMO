@@ -114,8 +114,15 @@ public:
 		}
 	}
 
+	void set_ball_id(const std::string& name, const uint32_t id) {
+		ball_name_to_id_[name] = id;
+	}
 
+	uint32_t get_ball_id(const std::string& name) {
+		return ball_name_to_id_[name];
+	}
 private:
 	std::shared_mutex mutex_;
 	std::unordered_map<HSteamNetConnection, PlayerState> states_;
+	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
 };

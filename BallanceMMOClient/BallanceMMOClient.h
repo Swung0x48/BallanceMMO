@@ -6,6 +6,7 @@
 #include "label_sprite.h"
 #include "client.h"
 #include "game_state.h"
+#include "game_objects.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -19,7 +20,8 @@ extern "C" {
 class BallanceMMOClient : public IMod, public client {
 public:
 	BallanceMMOClient(IBML* bml): 
-		IMod(bml)
+		IMod(bml),
+		objects_(bml, db_)
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
@@ -99,14 +101,15 @@ private:
 	std::shared_ptr<text_sprite> status_;
 
 	game_state db_;
+	game_objects objects_;
 
 	CK3dObject* player_ball_ = nullptr;
 	BallState local_ball_state_;
 	std::vector<CK3dObject*> template_balls_;
-	std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
+	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CKDataArray* current_level_array_ = nullptr;
 
-	struct PeerState {
+	/*struct PeerState {
 		std::vector<CK3dObject*> balls;
 		uint32_t current_ball = 0;
 		std::string player_name = "";
@@ -125,7 +128,7 @@ private:
 		}
 	};
 	std::mutex peer_mtx_;
-	std::unordered_map<uint64_t, PeerState> peer_;
+	std::unordered_map<uint64_t, PeerState> peer_;*/
 	CK3dObject* get_current_ball() {
 		if (current_level_array_)
 			return static_cast<CK3dObject*>(current_level_array_->GetElementObject(0, 1));
@@ -133,7 +136,7 @@ private:
 		return nullptr;
 	}
 
-	CK3dObject* init_spirit_ball(int ball_index, uint64_t id) {
+	/*CK3dObject* init_spirit_ball(int ball_index, uint64_t id) {
 		CKDependencies dep;
 		dep.Resize(40); dep.Fill(0);
 		dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
@@ -150,13 +153,13 @@ private:
 		}
 
 		return ball;
-	}
+	}*/
 
-	void init_spirit_balls(uint64_t id) {
+	/*void init_spirit_balls(uint64_t id) {
 		for (size_t i = 0; i < template_balls_.size(); ++i) {
 			peer_[id].balls[i] = init_spirit_ball(i, id);
 		}
-	}
+	}*/
 
 	void init_config() {
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
@@ -180,42 +183,42 @@ private:
 		props_["playername"] = tmp_prop;
 	}
 
-	void init_template_balls() {
-		CKDataArray* physicalized_ball = m_bml->GetArrayByName("Physicalize_GameBall");
+	//void init_template_balls() {
+	//	CKDataArray* physicalized_ball = m_bml->GetArrayByName("Physicalize_GameBall");
 
-		template_balls_.reserve(physicalized_ball->GetRowCount());
-		for (int i = 0; i < physicalized_ball->GetRowCount(); i++) {
-			CK3dObject* ball;
-			std::string ball_name;
-			ball_name.resize(physicalized_ball->GetElementStringValue(i, 0, nullptr), '\0');
-			physicalized_ball->GetElementStringValue(i, 0, &ball_name[0]);
-			ball_name.pop_back();
-			ball = m_bml->Get3dObjectByName(ball_name.c_str());
+	//	template_balls_.reserve(physicalized_ball->GetRowCount());
+	//	for (int i = 0; i < physicalized_ball->GetRowCount(); i++) {
+	//		CK3dObject* ball;
+	//		std::string ball_name;
+	//		ball_name.resize(physicalized_ball->GetElementStringValue(i, 0, nullptr), '\0');
+	//		physicalized_ball->GetElementStringValue(i, 0, &ball_name[0]);
+	//		ball_name.pop_back();
+	//		ball = m_bml->Get3dObjectByName(ball_name.c_str());
 
-			CKDependencies dep;
-			dep.Resize(40); dep.Fill(0);
-			dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
-			dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-			dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
-			dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-			ball = static_cast<CK3dObject*>(m_bml->GetCKContext()->CopyObject(ball, &dep, "_Peer_"));
-			for (int j = 0; j < ball->GetMeshCount(); j++) {
-				CKMesh* mesh = ball->GetMesh(j);
-				for (int k = 0; k < mesh->GetMaterialCount(); k++) {
-					CKMaterial* mat = mesh->GetMaterial(k);
-					mat->EnableAlphaBlend();
-					mat->SetSourceBlend(VXBLEND_SRCALPHA);
-					mat->SetDestBlend(VXBLEND_INVSRCALPHA);
-					VxColor color = mat->GetDiffuse();
-					color.a = 0.5f;
-					mat->SetDiffuse(color);
-					m_bml->SetIC(mat);
-				}
-			}
-			template_balls_.emplace_back(ball);
-			ball_name_to_idx_[ball_name] = i; // "Ball_Xxx"
-		}
-	}
+	//		CKDependencies dep;
+	//		dep.Resize(40); dep.Fill(0);
+	//		dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
+	//		dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
+	//		dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
+	//		dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
+	//		ball = static_cast<CK3dObject*>(m_bml->GetCKContext()->CopyObject(ball, &dep, "_Peer_"));
+	//		for (int j = 0; j < ball->GetMeshCount(); j++) {
+	//			CKMesh* mesh = ball->GetMesh(j);
+	//			for (int k = 0; k < mesh->GetMaterialCount(); k++) {
+	//				CKMaterial* mat = mesh->GetMaterial(k);
+	//				mat->EnableAlphaBlend();
+	//				mat->SetSourceBlend(VXBLEND_SRCALPHA);
+	//				mat->SetDestBlend(VXBLEND_INVSRCALPHA);
+	//				VxColor color = mat->GetDiffuse();
+	//				color.a = 0.5f;
+	//				mat->SetDiffuse(color);
+	//				m_bml->SetIC(mat);
+	//			}
+	//		}
+	//		template_balls_.emplace_back(ball);
+	//		ball_name_to_idx_[ball_name] = i; // "Ball_Xxx"
+	//	}
+	//}
 
 	void poll_and_toggle_debug_info() {
 		if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_F3)) {
@@ -228,14 +231,14 @@ private:
 		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
 			// OnTrafo
 			GetLogger()->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
-			OnTrafo(ball_name_to_idx_[player_ball_->GetName()], ball_name_to_idx_[ball->GetName()]);
+			OnTrafo(db_.get_ball_id(player_ball_->GetName()), db_.get_ball_id(ball->GetName()));
 			// Update current player ball
 			player_ball_ = ball;
-			local_ball_state_.type = ball_name_to_idx_[player_ball_->GetName()];
+			local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
 		}
 	}
 
-	void update_player_ball_state() {
+	void poll_player_ball_state() {
 		player_ball_->GetPosition(&local_ball_state_.position);
 		player_ball_->GetQuaternion(&local_ball_state_.rotation);
 	}
@@ -248,8 +251,6 @@ private:
 	}
 
 	void cleanup() {
-		std::unique_lock<std::mutex> peer_lk(peer_mtx_);
-		peer_.clear();
 		shutdown();
 		
 		if (ping_thread_.joinable())
@@ -266,14 +267,14 @@ private:
 		status_->paint(0xffff0000);
 	}
 
-	void process_username_label() {
+	/*void process_username_label() {
 		for (auto& peer : peer_) {
 			auto& username_label = peer.second.username_label;
 			if (username_label != nullptr) {
 				username_label->process();
 			}
 		}
-	}
+	}*/
 
 	static std::string pretty_percentage(float value) {
 		if (value < 0)
