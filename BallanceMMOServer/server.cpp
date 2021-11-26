@@ -69,6 +69,13 @@ public:
                                                     nullptr);
     }
 
+    template<typename T>
+    void broadcast_message(T msg, int send_flags, HSteamNetConnection* ignored_client = nullptr) {
+        static_assert(std::is_trivially_copyable<T>());
+
+        broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
+    }
+
     void print_clients() {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
@@ -143,6 +150,9 @@ protected:
                             pInfo->m_info.m_szEndDebug
                     );
 
+                    bmmo::player_disconnected_msg msg;
+                    msg.content.connection_id = pInfo->m_hConn;
+                    broadcast_message(msg, k_nSteamNetworkingSend_Reliable, &pInfo->m_hConn);
                     clients_.erase(itClient);
                 } else {
                     assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting);
