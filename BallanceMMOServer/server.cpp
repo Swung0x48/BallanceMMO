@@ -217,10 +217,6 @@ protected:
         assert(raw_msg->code == bmmo::LoginRequest || client_it != clients_.end());
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
-//                assert(*(reinterpret_cast<uint32_t*>(raw_msg->content)) == strlen((const char*)(raw_msg->content) + sizeof(uint32_t)));
-//                std::cout << (const char*)(raw_msg->content) + sizeof(uint32_t) << " logged in!" << std::endl;
-//                clients_[msg->m_conn] = {(const char*)(raw_msg->content) + sizeof(uint32_t)};
-//                interface_->SetConnectionName(msg->m_conn, (const char*)(raw_msg->content) + sizeof(uint32_t));
                 bmmo::login_request_msg msg;
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
@@ -230,22 +226,21 @@ protected:
                 clients_[networking_msg->m_conn] = {msg.nickname};  // add the client here
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
-                // notify client of other online players
+                // notify this client of other online players
                 bmmo::login_accepted_msg accepted_msg;
-//                auto client_it = clients_.find(networking_msg->m_conn);
                 for (auto it = clients_.begin(); it != clients_.end(); ++it) {
                     if (client_it != it)
                         accepted_msg.online_players[it->first] = it->second.name;
                 }
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
-                //Printf("%s\n", accepted_msg.raw.str().c_str());
                 
                 // notify other client of the fact that this client goes online
-//                for (auto it = clients_.begin(); it != clients_.end(); ++it) {
-//                    if (client_it != it)
-//
-//                }
+                bmmo::player_connected_msg connected_msg;
+                connected_msg.connection_id = networking_msg->m_conn;
+                connected_msg.name = msg.nickname;
+                connected_msg.serialize();
+                broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
                 break;
             }
             case bmmo::LoginAccepted:
