@@ -122,19 +122,13 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         bml->SendIngameMessage("Connecting...");
                         //if (io_ctx_.stopped())
                             //io_ctx_.restart();
+                        if (network_thread_.joinable())
+                            network_thread_.join();
                         network_thread_ = std::thread([this]() { run(); });
                         //asio::post(io_ctx_, [this]() { run(); });
-                        ping_thread_ = std::thread([this]() {
-                            do {
-                                auto status = get_status();
-                                std::string str = pretty_status(status);
-                                ping_->update(str, false);
-                                std::this_thread::sleep_for(std::chrono::seconds(1));
-                            } while (connected());
-                        });
                     }
                     else
-                        bml->SendIngameMessage("Connect to server failed.");
+                        bml->SendIngameMessage("Connect to server failed. (Invalid connection string?)");
                 }
             }
             else if (args[1] == "disconnect" || args[1] == "d") {
@@ -156,13 +150,13 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     status_->paint(0xffff0000);
                 }
             }
-            else if (args[1] == "list" || args[1] == "d") {
+            else if (args[1] == "list" || args[1] == "l") {
                 if (!connected())
                     break;
 
                 std::stringstream ss;
                 bool is_first = true;
-                db_.for_each([this, &ss, &is_first](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                db_.for_each([&ss, &is_first](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     if (is_first) {
                         ss << pair.second.name;
                         is_first = false;
@@ -241,7 +235,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         // and we cannot linger because it's already closed on the other end,
         // so we just pass 0's.
 
-        interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
+        //interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
+        cleanup();
         break;
     }
 
@@ -260,6 +255,14 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         msg.nickname = props_["playername"]->GetString();
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        ping_thread_ = std::thread([this]() {
+            while (connected()) {
+                auto status = get_status();
+                std::string str = pretty_status(status);
+                ping_->update(str, false);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        });
         break;
     }
     default:

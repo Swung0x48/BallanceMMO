@@ -90,6 +90,7 @@ public:
             interface_->CloseConnection(connection, 0, "Goodbye", true);
             assert(connection == this->connection_);
             connection_ = k_HSteamNetConnection_Invalid;
+            estate_ = k_ESteamNetworkingConnectionState_None;
         }
     }
 
@@ -109,7 +110,8 @@ protected:
             if (msg_count == 0)
                 break;
             if (msg_count < 0)
-                FatalError("Error checking for messages.");
+                break;
+                //FatalError("Error checking for messages.");
             assert(msg_count == 1 && incoming_message);
 
             on_message(incoming_message);

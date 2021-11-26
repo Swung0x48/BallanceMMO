@@ -252,10 +252,11 @@ private:
 		peer_.clear();
 		shutdown();
 		//io_ctx_.stop();
-		if (network_thread_.joinable())
-			network_thread_.join();
 		if (ping_thread_.joinable())
 			ping_thread_.join();
+		//if (network_thread_.joinable())
+			//network_thread_.join();
+		
 		thread_pool_.stop();
 	}
 
