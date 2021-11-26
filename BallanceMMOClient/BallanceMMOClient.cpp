@@ -208,6 +208,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
             break;
         }
+        cleanup();
         break;
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
@@ -278,16 +279,19 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OwnedBallState: {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
         auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
-        GetLogger()->Info("%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
-            obs->content.player_id,
-            obs->content.state.type,
-            obs->content.state.position.x,
-            obs->content.state.position.y,
-            obs->content.state.position.z,
-            obs->content.state.rotation.x,
-            obs->content.state.rotation.y,
-            obs->content.state.rotation.z,
-            obs->content.state.rotation.w);
+        bool success = db_.update(obs->content.player_id, reinterpret_cast<const BallState&>(obs->content.state));
+        assert(success);
+        auto state = db_.get(obs->content.player_id);
+        GetLogger()->Info("%s: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+            state->name,
+            state->ball_state.type,
+            state->ball_state.position.x,
+            state->ball_state.position.y,
+            state->ball_state.position.z,
+            state->ball_state.rotation.x,
+            state->ball_state.rotation.y,
+            state->ball_state.rotation.z,
+            state->ball_state.rotation.w);
         break;
     }
     case bmmo::LoginAccepted: {

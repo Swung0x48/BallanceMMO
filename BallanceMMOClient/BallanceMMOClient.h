@@ -251,6 +251,9 @@ private:
 		std::unique_lock<std::mutex> peer_lk(peer_mtx_);
 		peer_.clear();
 		shutdown();
+		ping_->update("");
+		status_->update("Disconnected");
+		status_->paint(0xffff0000);
 		//io_ctx_.stop();
 		if (ping_thread_.joinable())
 			ping_thread_.join();
@@ -258,6 +261,7 @@ private:
 			//network_thread_.join();
 		
 		thread_pool_.stop();
+
 	}
 
 	void process_username_label() {
