@@ -303,6 +303,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         break;
     }
+    case bmmo::PlayerConnected: {
+        bmmo::player_connected_msg msg;
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+        db_.create(msg.connection_id, msg.name);
+    }
     default:
         GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);
         break;
