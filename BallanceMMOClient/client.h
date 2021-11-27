@@ -105,17 +105,19 @@ public:
 protected:
     void poll_incoming_messages() override {
         while (running_) {
-            ISteamNetworkingMessage* incoming_message = nullptr;
-            int msg_count = interface_->ReceiveMessagesOnConnection(connection_, &incoming_message, 1);
+            ISteamNetworkingMessage* incoming_message[ONCE_RECV_MSG_COUNT] = { nullptr };
+            int msg_count = interface_->ReceiveMessagesOnConnection(connection_, incoming_message, ONCE_RECV_MSG_COUNT);
             if (msg_count == 0)
                 break;
             if (msg_count < 0)
                 break;
                 //FatalError("Error checking for messages.");
-            assert(msg_count == 1 && incoming_message);
+            assert(msg_count > 0 && incoming_message);
 
-            on_message(incoming_message);
-            incoming_message->Release();
+            for (int i = 0; i < msg_count; ++i) {
+                on_message(incoming_message[i]);
+                incoming_message[i]->Release();
+            }
         }
     }
 
@@ -130,4 +132,5 @@ protected:
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     ESteamNetworkingConnectionState estate_;
+    static constexpr inline size_t ONCE_RECV_MSG_COUNT = 50;
 };
