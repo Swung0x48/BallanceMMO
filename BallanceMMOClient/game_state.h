@@ -114,6 +114,11 @@ public:
 		}
 	}
 
+	void clear() {
+		std::unique_lock lk(mutex_);
+		states_.clear();
+	}
+
 	void set_ball_id(const std::string& name, const uint32_t id) {
 		ball_name_to_id_[name] = id;
 	}

@@ -126,12 +126,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     if (connect(props_["remote_addr"]->GetString())){
                         bml->SendIngameMessage("Connecting...");
-                        //if (io_ctx_.stopped())
-                            //io_ctx_.restart();
                         if (network_thread_.joinable())
                             network_thread_.join();
                         network_thread_ = std::thread([this]() { run(); });
-                        //asio::post(io_ctx_, [this]() { run(); });
                     }
                     else
                         bml->SendIngameMessage("Connect to server failed. (Invalid connection string?)");

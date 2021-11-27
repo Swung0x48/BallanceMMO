@@ -260,7 +260,9 @@ private:
 		//if (network_thread_.joinable())
 			//network_thread_.join();
 		
-		thread_pool_.stop();
+		//thread_pool_.stop();
+		db_.clear();
+		objects_.destroy_all_objects();
 
 		ping_->update("");
 		status_->update("Disconnected");
@@ -289,7 +291,7 @@ private:
 		int s = 0; // which suffix to use
 		while (bytes >= 1024 && s < 7)
 		{
-			s++;
+			++s;
 			bytes /= 1024;
 		}
 
