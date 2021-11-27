@@ -128,7 +128,7 @@ protected:
                     // is the only codepath where we remove clients (except on shutdown),
                     // and connection change callbacks are dispatched in queue order.
                     auto itClient = clients_.find(pInfo->m_hConn);
-                    assert(itClient != clients_.end());
+                    //assert(itClient != clients_.end()); // It might in limbo state...So may not yet to be found
 
                     // Select appropriate log messages
                     const char* pszDebugLogAction;
@@ -224,7 +224,7 @@ protected:
         auto client_it = clients_.find(networking_msg->m_conn);
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        if (raw_msg->code == bmmo::LoginRequest || client_it != clients_.end()) // ignore limbo clients message
+        if (!(raw_msg->code == bmmo::LoginRequest || client_it != clients_.end())) // ignore limbo clients message
             return;
 
         switch (raw_msg->code) {
