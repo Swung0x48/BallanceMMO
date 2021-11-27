@@ -224,7 +224,9 @@ protected:
         auto client_it = clients_.find(networking_msg->m_conn);
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        assert(raw_msg->code == bmmo::LoginRequest || client_it != clients_.end());
+        if (raw_msg->code == bmmo::LoginRequest || client_it != clients_.end()) // ignore limbo clients message
+            return;
+
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
                 bmmo::login_request_msg msg;
