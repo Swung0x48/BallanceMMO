@@ -8,6 +8,7 @@ struct PlayerObjects {
 	static inline IBML* bml;
 	std::vector<CK3dObject*> balls;
 	std::unique_ptr<label_sprite> username_label;
+	uint32_t visible_ball_type = 0;
 
 	~PlayerObjects() {
 		for (auto* ball: balls)
@@ -41,6 +42,14 @@ public:
 		});
 	}
 
+	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
+		auto* old_ball = objects_[id].balls[from];
+		auto* new_ball = objects_[id].balls[to];
+
+		old_ball->Show(CKHIDE);
+		new_ball->Show(CKSHOW);
+	}
+
 	void update() {
 		// Can be costly
 		//cleanup();
@@ -59,6 +68,12 @@ public:
 			}
 
 			uint32_t current_ball_type = item.second.ball_state.type;
+
+			if (current_ball_type != objects_[item.first].visible_ball_type) {
+				on_trafo(item.first, objects_[item.first].visible_ball_type, current_ball_type);
+				objects_[item.first].visible_ball_type = current_ball_type;
+			}
+
 			auto* current_ball = objects_[item.first].balls[current_ball_type];
 			auto& username_label = objects_[item.first].username_label;
 
@@ -66,13 +81,12 @@ public:
 			current_ball->SetPosition(item.second.ball_state.position);
 			current_ball->SetQuaternion(item.second.ball_state.rotation);
 
-			current_ball->Show(CKSHOW);
-			username_label->set_visible(true);
-
 			// Update username label
 			VxRect extent; objects_[item.first].balls[current_ball_type]->GetRenderExtents(extent);
+			//bml_->SendIngameMessage((std::to_string(extent.left) + " " + std::to_string(extent.right) + " " + std::to_string(extent.top) + " " + std::to_string(extent.bottom)).c_str());
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, extent.top / viewport.bottom);
 			username_label->set_position(pos);
+			username_label->set_visible(true);
 			return true;
 		});
 	}
