@@ -124,14 +124,31 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 }
                 else {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
-                    if (connect(props_["remote_addr"]->GetString())){
-                        bml->SendIngameMessage("Connecting...");
-                        if (network_thread_.joinable())
-                            network_thread_.join();
-                        network_thread_ = std::thread([this]() { run(); });
+
+                    // Resolve address
+                    auto p = parse_connection_string(props_["remote_addr"]->GetString());
+                    asio::ip::udp::resolver resolver(io_ctx_);
+                    asio::error_code ec;
+                    auto results = resolver.resolve(p.first, p.second, ec);
+
+                    if (ec) {
+                        bml->SendIngameMessage("Failed to resolve hostname.");
+                        bml->SendIngameMessage(ec.message().c_str());
+                        break;
                     }
-                    else
-                        bml->SendIngameMessage("Connect to server failed. (Invalid connection string?)");
+
+                    for (const auto& i : results) {
+                        auto endpoint = i.endpoint();
+                        std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+                        if (connect(connection_string)) {
+                            bml->SendIngameMessage("Connecting...");
+                            if (network_thread_.joinable())
+                                network_thread_.join();
+                            network_thread_ = std::thread([this]() { run(); });
+                            return;
+                        }
+                    }
+                    bml->SendIngameMessage("Connect to server failed.");
                 }
             }
             else if (args[1] == "disconnect" || args[1] == "d") {

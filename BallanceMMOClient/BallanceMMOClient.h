@@ -29,7 +29,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.1-alpha2"; }
+	virtual CKSTRING GetVersion() override { return "3.0.2-alpha3"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -88,7 +88,8 @@ private:
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
-	//asio::io_context io_ctx_;
+	
+	asio::io_context io_ctx_;
 	asio::thread_pool thread_pool_;
 	std::thread network_thread_;
 	std::thread ping_thread_;
@@ -134,6 +135,13 @@ private:
 			return static_cast<CK3dObject*>(current_level_array_->GetElementObject(0, 1));
 
 		return nullptr;
+	}
+
+	static std::pair<std::string, std::string> parse_connection_string(const std::string& str) {
+		size_t pos = str.find(":");
+		std::string address = str.substr(0, pos);
+		std::string port = str.substr(pos + 1);
+		return { address, port };
 	}
 
 	/*CK3dObject* init_spirit_ball(int ball_index, uint64_t id) {
