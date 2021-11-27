@@ -266,16 +266,16 @@ protected:
             case bmmo::BallState: {
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
-                Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
-                       networking_msg->m_conn,
-                       state_msg->content.type,
-                       state_msg->content.position.x,
-                       state_msg->content.position.y,
-                       state_msg->content.position.z,
-                       state_msg->content.rotation.x,
-                       state_msg->content.rotation.y,
-                       state_msg->content.rotation.z,
-                       state_msg->content.rotation.w);
+                // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
+                //        networking_msg->m_conn,
+                //        state_msg->content.type,
+                //        state_msg->content.position.x,
+                //        state_msg->content.position.y,
+                //        state_msg->content.position.z,
+                //        state_msg->content.rotation.x,
+                //        state_msg->content.rotation.y,
+                //        state_msg->content.rotation.z,
+                //        state_msg->content.rotation.w);
 //                std::cout << "(" <<
 //                          state_msg->state.position.x << ", " <<
 //                          state_msg->state.position.y << ", " <<
