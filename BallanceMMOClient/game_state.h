@@ -119,6 +119,25 @@ public:
 		states_.clear();
 	}
 
+	void set_nickname(const std::string& name) {
+		std::unique_lock lk(mutex_);
+		nickname_ = name;
+	}
+
+	std::string get_nickname() {
+		std::shared_lock lk(mutex_);
+		return nickname_;
+	}
+
+	void set_client_id(HSteamNetConnection id) {
+		std::unique_lock lk(mutex_);
+		assigned_id_ = id;
+	}
+
+	HSteamNetConnection get_client_id() {
+		return assigned_id_;
+	}
+
 	void set_ball_id(const std::string& name, const uint32_t id) {
 		ball_name_to_id_[name] = id;
 	}
@@ -130,4 +149,6 @@ private:
 	std::shared_mutex mutex_;
 	std::unordered_map<HSteamNetConnection, PlayerState> states_;
 	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
+	std::string nickname_;
+	HSteamNetConnection assigned_id_;
 };

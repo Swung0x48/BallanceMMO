@@ -37,7 +37,8 @@ public:
 
 	void init_players() {
 		db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
-			init_player(item.first, item.second.name);
+			if (item.first != db_.get_client_id())
+				init_player(item.first, item.second.name);
 			return true;
 		});
 	}
@@ -63,6 +64,9 @@ public:
 		VxRect viewport; bml_->GetRenderContext()->GetViewRect(viewport);
 
 		db_.for_each([this, &viewport](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+			if (item.first == db_.get_client_id())
+				return true;
+
 			if (!objects_.contains(item.first)) {
 				init_player(item.first, item.second.name);
 			}

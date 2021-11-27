@@ -256,6 +256,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         m_bml->SendIngameMessage("Connected to server.");
         m_bml->SendIngameMessage("Logging in...");
         bmmo::login_request_msg msg;
+        db_.set_nickname(props_["playername"]->GetString());
         msg.nickname = props_["playername"]->GetString();
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -306,6 +307,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         GetLogger()->Info("Online players: ");
         for (auto& i : msg.online_players) {
+            if (i.second == db_.get_nickname()) {
+                db_.set_client_id(i.first);
+            }
             db_.create(i.first, i.second);
         }
         break;
