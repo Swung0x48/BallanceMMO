@@ -133,7 +133,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
                     if (ec) {
                         bml->SendIngameMessage("Failed to resolve hostname.");
-                        bml->SendIngameMessage(ec.message().c_str());
+                        GetLogger()->Error(ec.message().c_str());
                         break;
                     }
 
@@ -187,6 +187,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
 
                 m_bml->SendIngameMessage(ss.str().c_str());
+            }
+            else if (args[1] == "p") {
+                objects_.physicalize_all();
             }
             break;
         }

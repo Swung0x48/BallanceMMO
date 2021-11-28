@@ -9,6 +9,7 @@ struct PlayerObjects {
 	std::vector<CK3dObject*> balls;
 	std::unique_ptr<label_sprite> username_label;
 	uint32_t visible_ball_type = 0;
+	bool physicalized = false;
 
 	~PlayerObjects() {
 		for (auto* ball: balls)
@@ -82,12 +83,13 @@ public:
 			auto& username_label = objects_[item.first].username_label;
 
 			// Update ball
-			current_ball->SetPosition(item.second.ball_state.position);
-			current_ball->SetQuaternion(item.second.ball_state.rotation);
+			if (!objects_[item.first].physicalized) {
+				current_ball->SetPosition(item.second.ball_state.position);
+				current_ball->SetQuaternion(item.second.ball_state.rotation);
+			}
 
 			// Update username label
 			VxRect extent; objects_[item.first].balls[current_ball_type]->GetRenderExtents(extent);
-			//bml_->SendIngameMessage((std::to_string(extent.left) + " " + std::to_string(extent.right) + " " + std::to_string(extent.top) + " " + std::to_string(extent.bottom)).c_str());
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, extent.top / viewport.bottom);
 			username_label->set_position(pos);
 			username_label->set_visible(true);
@@ -96,8 +98,22 @@ public:
 		});
 	}
 
-	void on_trafo(uint32_t from, uint32_t to) {
+	void physicalize(HSteamNetConnection id) {
+		CKDataArray* physBall = bml_->GetArrayByName("Physicalize_GameBall");
 
+		uint32_t current_ball_type = db_.get(id)->ball_state.type;
+		auto* current_ball = objects_[id].balls[current_ball_type];
+		objects_[id].physicalized = true;
+		std::string ballName(physBall->GetElementStringValue(current_ball_type, 0, nullptr), '\0');
+		physBall->GetElementStringValue(current_ball_type, 0, ballName.data());
+		ballName += "_Mesh";
+		ExecuteBB::PhysicalizeBall(current_ball, false, 0.7f, 0.4f, 1.0f, "", false, true, true, 0.1f, 0.1f, ballName.c_str());
+	}
+
+	void physicalize_all() {
+		for (const auto& i : objects_) {
+			physicalize(i.first);
+		}
 	}
 
 	void remove(HSteamNetConnection id) {

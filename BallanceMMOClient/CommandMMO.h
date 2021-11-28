@@ -1,8 +1,6 @@
 #pragma once
 #include <BML/BMLAll.h>
-#include <memory>
-//#include "client.h"
-//#include "text_sprite.h"
+
 class CommandMMO: public ICommand
 {
 private:
