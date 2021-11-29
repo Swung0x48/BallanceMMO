@@ -130,7 +130,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     // Resolve address
                     auto p = parse_connection_string(props_["remote_addr"]->GetString());
                     resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
-                    resolver_->async_resolve(p.first, p.second, [&](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
+                    resolver_->async_resolve(p.first, p.second, [this, bml](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
                         std::lock_guard<std::mutex> lk(bml_mtx_);
                         // If address correctly resolved...
                         if (!ec) {
