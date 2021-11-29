@@ -90,6 +90,10 @@ private:
 	std::mutex client_mtx_;
 	
 	asio::io_context io_ctx_;
+	std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work_guard_;
+	//std::thread io_ctx_thread_;
+	std::unique_ptr<asio::ip::udp::resolver> resolver_;
+
 	asio::thread_pool thread_pool_;
 	std::thread network_thread_;
 	std::thread ping_thread_;

@@ -123,32 +123,45 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     bml->SendIngameMessage("Connecting in process, please wait...");
                 }
                 else {
-                    std::lock_guard<std::mutex> lk(bml_mtx_);
+                    // Bootstrap io_context
+                    work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());
+                    asio::post(thread_pool_, [this]() { io_ctx_.run(); });
 
                     // Resolve address
                     auto p = parse_connection_string(props_["remote_addr"]->GetString());
-                    asio::ip::udp::resolver resolver(io_ctx_);
-                    asio::error_code ec;
-                    auto results = resolver.resolve(p.first, p.second, ec);
-
-                    if (ec) {
-                        bml->SendIngameMessage("Failed to resolve hostname.");
-                        GetLogger()->Error(ec.message().c_str());
-                        break;
-                    }
-
-                    for (const auto& i : results) {
-                        auto endpoint = i.endpoint();
-                        std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
-                        if (connect(connection_string)) {
-                            bml->SendIngameMessage("Connecting...");
-                            if (network_thread_.joinable())
-                                network_thread_.join();
-                            network_thread_ = std::thread([this]() { run(); });
+                    resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
+                    resolver_->async_resolve(p.first, p.second, [&](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
+                        std::lock_guard<std::mutex> lk(bml_mtx_);
+                        // If address correctly resolved...
+                        if (!ec) {
+                            for (const auto& i : results) {
+                                auto endpoint = i.endpoint();
+                                std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+                                if (connect(connection_string)) {
+                                    bml->SendIngameMessage("Connecting...");
+                                    if (network_thread_.joinable())
+                                        network_thread_.join();
+                                    network_thread_ = std::thread([this]() { run(); });
+                                    work_guard_.reset();
+                                    io_ctx_.stop();
+                                    resolver_.reset();
+                                    return;
+                                }
+                            }
+                            // but none of the resolve results are unreachable...
+                            bml->SendIngameMessage("Connect to server failed.");
+                            work_guard_.reset();
+                            io_ctx_.stop();
+                            resolver_.reset();
                             return;
                         }
-                    }
-                    bml->SendIngameMessage("Connect to server failed.");
+                        // If not correctly resolved...
+                        bml->SendIngameMessage("Failed to resolve hostname.");
+                        GetLogger()->Error(ec.message().c_str());
+                        work_guard_.reset();
+                        io_ctx_.stop();
+                        return;
+                    });
                 }
             }
             else if (args[1] == "disconnect" || args[1] == "d") {
