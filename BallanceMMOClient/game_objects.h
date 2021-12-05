@@ -65,6 +65,7 @@ public:
 		VxRect viewport; bml_->GetRenderContext()->GetViewRect(viewport);
 
 		db_.for_each([this, &viewport](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+			// Not creating or updating game object for this client itself.
 			if (item.first == db_.get_client_id())
 				return true;
 
@@ -81,6 +82,9 @@ public:
 
 			auto* current_ball = objects_[item.first].balls[current_ball_type];
 			auto& username_label = objects_[item.first].username_label;
+
+			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
+				return true;
 
 			// Update ball
 			if (!objects_[item.first].physicalized) {

@@ -360,7 +360,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
-        GetLogger()->Info("Creating state entry for %ud, %s", msg.connection_id, msg.name.c_str());
+        GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
         db_.create(msg.connection_id, msg.name);
 
         // TODO: call this when the player enters a map
