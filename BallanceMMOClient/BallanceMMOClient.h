@@ -29,7 +29,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.4-alpha5"; }
+	virtual CKSTRING GetVersion() override { return "3.0.7-alpha8"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -110,9 +110,15 @@ private:
 
 	CK3dObject* player_ball_ = nullptr;
 	BallState local_ball_state_;
-	std::vector<CK3dObject*> template_balls_;
+	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CKDataArray* current_level_array_ = nullptr;
+
+	std::atomic_bool resolving_endpoint_ = false;
+
+	bool connecting() override {
+		return client::connecting() || resolving_endpoint_;
+	}
 
 	/*struct PeerState {
 		std::vector<CK3dObject*> balls;
@@ -275,6 +281,11 @@ private:
 		//thread_pool_.stop();
 		db_.clear();
 		objects_.destroy_all_objects();
+
+		if (!io_ctx_.stopped())
+			io_ctx_.stop();
+
+		resolving_endpoint_ = false;
 
 		ping_->update("");
 		status_->update("Disconnected");

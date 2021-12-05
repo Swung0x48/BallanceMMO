@@ -123,17 +123,25 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     bml->SendIngameMessage("Connecting in process, please wait...");
                 }
                 else {
+                    bml->SendIngameMessage("Resolving server address...");
+                    resolving_endpoint_ = true;
                     // Bootstrap io_context
                     work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());
-                    asio::post(thread_pool_, [this]() { io_ctx_.run(); });
+                    asio::post(thread_pool_, [this]() {
+                        if (io_ctx_.stopped())
+                            io_ctx_.reset();
+                        io_ctx_.run();
+                    });
 
                     // Resolve address
                     auto p = parse_connection_string(props_["remote_addr"]->GetString());
                     resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
                     resolver_->async_resolve(p.first, p.second, [this, bml](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
+                        resolving_endpoint_ = false;
                         std::lock_guard<std::mutex> lk(bml_mtx_);
                         // If address correctly resolved...
                         if (!ec) {
+                            bml->SendIngameMessage("Server address resolved.");
                             for (const auto& i : results) {
                                 auto endpoint = i.endpoint();
                                 std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
@@ -351,8 +359,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::player_connected_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        db_.create(msg.connection_id, msg.name);
         m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+        GetLogger()->Info("Creating state entry for %ud, %s", msg.connection_id, msg.name.c_str());
+        db_.create(msg.connection_id, msg.name);
 
         // TODO: call this when the player enters a map
         if (m_bml->IsIngame())

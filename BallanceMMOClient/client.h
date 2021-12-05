@@ -42,8 +42,10 @@ public:
         return get_connection_state() == k_ESteamNetworkingConnectionState_Connected;
     }
 
-    bool connecting() {
-        return get_connection_state() == k_ESteamNetworkingConnectionState_Connecting || get_connection_state() == k_ESteamNetworkingConnectionState_FindingRoute;
+    virtual bool connecting() {
+        return 
+            get_connection_state() == k_ESteamNetworkingConnectionState_Connecting || 
+            get_connection_state() == k_ESteamNetworkingConnectionState_FindingRoute;
     }
 
     EResult send(void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {

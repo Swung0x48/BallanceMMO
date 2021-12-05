@@ -162,6 +162,7 @@ public:
 			template_balls_.emplace_back(ball);
 			db_.set_ball_id(ball_name, i);  // "Ball_Xxx"
 		}
+		template_init_ = true;
 	}
 
 	CK3dObject* init_spirit_ball(int ball_index, uint64_t id) {
@@ -198,6 +199,7 @@ public:
 		destroy_templates();
 	}
 private:
+	bool template_init_ = false;
 	std::vector<CK3dObject*> template_balls_;
 	IBML* bml_ = nullptr;
 	game_state& db_;
