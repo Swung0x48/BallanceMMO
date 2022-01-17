@@ -26,7 +26,7 @@ public:
         running_ = true;
         while (running_) {
             update();
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            //std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
 //        while (running_) {
