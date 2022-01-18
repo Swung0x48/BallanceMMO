@@ -25,8 +25,8 @@ public:
 
         running_ = true;
         while (running_) {
-            update();
-            //std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (!update())
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
 //        while (running_) {
@@ -311,19 +311,20 @@ protected:
 //                                            nullptr);
     }
 
-    void poll_incoming_messages() override {
-        while (running_) {
-            ISteamNetworkingMessage* incoming_message = nullptr;
-            int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, &incoming_message, 1);
-            if (msg_count == 0)
-                break;
-            if (msg_count < 0)
-                FatalError("Error checking for messages.");
-            assert(msg_count == 1 && incoming_message);
+    int poll_incoming_messages() override {
+        int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, incoming_messages_, ONCE_RECV_MSG_COUNT);
+        if (msg_count == 0)
+            return 0;
+        if (msg_count < 0)
+            FatalError("Error checking for messages.");
+        assert(msg_count > 0);
 
-            on_message(incoming_message);
-            incoming_message->Release();
+        for (int i = 0; i < msg_count; ++i) {
+            on_message(incoming_messages_[i]);
+            incoming_messages_[i]->Release();
         }
+        
+        return msg_count;
     }
 
     uint16_t port_ = 0;

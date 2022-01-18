@@ -9,6 +9,8 @@
 #include <cassert>
 #include <cstdarg>
 
+static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
+
 class role {
 public:
     static void init_socket() {
@@ -53,10 +55,11 @@ public:
         return opt;
     }
 
-    virtual void update() {
-        poll_incoming_messages();
+    virtual bool update() {
+        int msg_count = poll_incoming_messages();
         poll_connection_state_changes();
 //        poll_local_state_changes();
+        return msg_count > 0;
     }
 
     virtual void poll_local_state_changes() = 0;
@@ -75,8 +78,9 @@ protected:
     static inline role* this_instance_ = nullptr;
     static inline SteamNetworkingMicroseconds init_timestamp_;
     std::atomic_bool running_ = false;
+    ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
 
-    virtual void poll_incoming_messages() = 0;
+    virtual int poll_incoming_messages() = 0;
 
     virtual void poll_connection_state_changes() {
         this_instance_ = this;

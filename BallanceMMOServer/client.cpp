@@ -37,8 +37,8 @@ public:
     void run() override {
         running_ = true;
         while (running_) {
-            update();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (!update())
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
 //        while (running_) {
@@ -172,19 +172,20 @@ private:
         }
     }
 
-    void poll_incoming_messages() override {
-        while (running_) {
-            ISteamNetworkingMessage* incoming_message = nullptr;
-            int msg_count = interface_->ReceiveMessagesOnConnection(connection_, &incoming_message, 1);
-            if (msg_count == 0)
-                break;
-            if (msg_count < 0)
-                FatalError("Error checking for messages.");
-            assert(msg_count == 1 && incoming_message);
+    int poll_incoming_messages() override {
+        int msg_count = interface_->ReceiveMessagesOnConnection(connection_, incoming_messages_, ONCE_RECV_MSG_COUNT);
+        if (msg_count == 0)
+            return 0;
+        if (msg_count < 0)
+            FatalError("Error checking for messages.");
+        assert(msg_count > 0);
 
-            on_message(incoming_message);
-            incoming_message->Release();
+        for (int i = 0; i < msg_count; ++i) {
+            on_message(incoming_messages_[i]);
+            incoming_messages_[i]->Release();
         }
+        
+        return msg_count;
     }
 
     void poll_connection_state_changes() override {
@@ -237,11 +238,11 @@ int main() {
             std::atomic_bool running = true;
             std::thread output_thread([&]() {
                 while (running) {
-                    bmmo::ball_state_msg msg;
-                    msg.content.position.x = 1;
-                    msg.content.rotation.y = 2;
-                    for (int i = 0; i < 50; ++i)
-                        client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+                    // bmmo::ball_state_msg msg;
+                    // msg.content.position.x = 1;
+                    // msg.content.rotation.y = 2;
+                    // for (int i = 0; i < 50; ++i)
+                    //     client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
 
                     std::cout << client.get_detailed_info() << std::endl;
                     std::this_thread::sleep_for(std::chrono::milliseconds (500));
