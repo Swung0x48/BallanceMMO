@@ -309,7 +309,9 @@ protected:
                 msg.player_id = current_player_id;
                 msg.clear();
                 msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+
+                // No need to ignore the sender, 'cause we will send the message back
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 break;
             }
