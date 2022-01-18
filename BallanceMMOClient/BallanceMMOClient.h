@@ -29,7 +29,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.7-alpha8"; }
+	virtual CKSTRING GetVersion() override { return "3.0.9-alpha10"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -120,26 +120,6 @@ private:
 		return client::connecting() || resolving_endpoint_;
 	}
 
-	/*struct PeerState {
-		std::vector<CK3dObject*> balls;
-		uint32_t current_ball = 0;
-		std::string player_name = "";
-		std::unique_ptr<label_sprite> username_label;
-
-		~PeerState() {
-			CKDependencies dep;
-			dep.Resize(40); dep.Fill(0);
-			dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
-			dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-			dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
-			dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-			for (auto* ball : balls) {
-				CKDestroyObject(ball, 0, &dep);
-			}
-		}
-	};
-	std::mutex peer_mtx_;
-	std::unordered_map<uint64_t, PeerState> peer_;*/
 	CK3dObject* get_current_ball() {
 		if (current_level_array_)
 			return static_cast<CK3dObject*>(current_level_array_->GetElementObject(0, 1));
@@ -153,31 +133,6 @@ private:
 		std::string port = str.substr(pos + 1);
 		return { address, port };
 	}
-
-	/*CK3dObject* init_spirit_ball(int ball_index, uint64_t id) {
-		CKDependencies dep;
-		dep.Resize(40); dep.Fill(0);
-		dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
-		dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-		dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
-		dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-		CK3dObject* ball = static_cast<CK3dObject*>(m_bml->GetCKContext()->CopyObject(template_balls_[ball_index], &dep, std::to_string(id).c_str()));
-		for (int j = 0; j < ball->GetMeshCount(); j++) {
-			CKMesh* mesh = ball->GetMesh(j);
-			for (int k = 0; k < mesh->GetMaterialCount(); k++) {
-				CKMaterial* mat = mesh->GetMaterial(k);
-				m_bml->SetIC(mat);
-			}
-		}
-
-		return ball;
-	}*/
-
-	/*void init_spirit_balls(uint64_t id) {
-		for (size_t i = 0; i < template_balls_.size(); ++i) {
-			peer_[id].balls[i] = init_spirit_ball(i, id);
-		}
-	}*/
 
 	void init_config() {
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
@@ -201,48 +156,73 @@ private:
 		props_["playername"] = tmp_prop;
 	}
 
-	//void init_template_balls() {
-	//	CKDataArray* physicalized_ball = m_bml->GetArrayByName("Physicalize_GameBall");
+	struct KeyVector {
+		char x = 0;
+		char y = 0;
+		char z = 0;
 
-	//	template_balls_.reserve(physicalized_ball->GetRowCount());
-	//	for (int i = 0; i < physicalized_ball->GetRowCount(); i++) {
-	//		CK3dObject* ball;
-	//		std::string ball_name;
-	//		ball_name.resize(physicalized_ball->GetElementStringValue(i, 0, nullptr), '\0');
-	//		physicalized_ball->GetElementStringValue(i, 0, &ball_name[0]);
-	//		ball_name.pop_back();
-	//		ball = m_bml->Get3dObjectByName(ball_name.c_str());
+		bool clear() {
+			return x == 0 && y == 0 && z == 0;
+		}
 
-	//		CKDependencies dep;
-	//		dep.Resize(40); dep.Fill(0);
-	//		dep.m_Flags = CK_DEPENDENCIES_CUSTOM;
-	//		dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-	//		dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
-	//		dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-	//		ball = static_cast<CK3dObject*>(m_bml->GetCKContext()->CopyObject(ball, &dep, "_Peer_"));
-	//		for (int j = 0; j < ball->GetMeshCount(); j++) {
-	//			CKMesh* mesh = ball->GetMesh(j);
-	//			for (int k = 0; k < mesh->GetMaterialCount(); k++) {
-	//				CKMaterial* mat = mesh->GetMaterial(k);
-	//				mat->EnableAlphaBlend();
-	//				mat->SetSourceBlend(VXBLEND_SRCALPHA);
-	//				mat->SetDestBlend(VXBLEND_INVSRCALPHA);
-	//				VxColor color = mat->GetDiffuse();
-	//				color.a = 0.5f;
-	//				mat->SetDiffuse(color);
-	//				m_bml->SetIC(mat);
-	//			}
-	//		}
-	//		template_balls_.emplace_back(ball);
-	//		ball_name_to_idx_[ball_name] = i; // "Ball_Xxx"
-	//	}
-	//}
+		auto operator<=>(const KeyVector&) const = default;
+		/*bool operator==(const KeyVector& that) const {
+			if (this == &that)
+				return true;
 
-	void poll_and_toggle_debug_info() {
+			return
+				this->x == that.x &&
+				this->y == that.y &&
+				this->z == that.z;
+		}*/
+	};
+
+	KeyVector last_input_;
+
+	void poll_status_toggle() {
 		if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_F3)) {
 			ping_->toggle();
 			status_->toggle();
 		}
+	}
+
+	void poll_local_input() {
+		BYTE* states = m_bml->GetInputManager()->GetKeyboardState();
+
+		KeyVector current_input;
+
+		bool w = states[CKKEY_W] & KEY_PRESSED;
+		bool a = states[CKKEY_A] & KEY_PRESSED;
+		bool s = states[CKKEY_S] & KEY_PRESSED;
+		bool d = states[CKKEY_D] & KEY_PRESSED;
+
+		current_input.x += (w ? 1 : 0);
+		current_input.z += (a ? 1 : 0);
+		current_input.x += (s ? -1 : 0);
+		current_input.z += (d ? -1 : 0);
+
+		if (current_input == last_input_) {
+			return;
+		}
+
+		ExecuteBB::UnsetPhysicsForce(player_ball_);
+		last_input_ = current_input;
+
+		if (current_input.clear()) {
+			return;
+		}
+
+		VxVector direction(current_input.x, current_input.y, current_input.z);
+
+		ExecuteBB::SetPhysicsForce(
+			player_ball_,
+			VxVector(0, 0, 0),
+			player_ball_,
+			direction,
+			m_bml->Get3dObjectByName("Cam_OrientRef"),
+			.43f);
+
+		ExecuteBB::PhysicsWakeUp(player_ball_);
 	}
 
 	void check_on_trafo(CK3dObject* ball) {
@@ -268,8 +248,8 @@ private:
 		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
 	}
 
-	void cleanup() {
-		shutdown();
+	void cleanup(bool down = false, bool linger = true) {
+		shutdown(linger);
 		
 		if (ping_thread_.joinable())
 			ping_thread_.join();
@@ -287,19 +267,17 @@ private:
 
 		resolving_endpoint_ = false;
 
-		ping_->update("");
-		status_->update("Disconnected");
-		status_->paint(0xffff0000);
-	}
+		if (down)
+			return;
 
-	/*void process_username_label() {
-		for (auto& peer : peer_) {
-			auto& username_label = peer.second.username_label;
-			if (username_label != nullptr) {
-				username_label->process();
-			}
+		if (ping_)
+			ping_->update("");
+
+		if (status_) {
+			status_->update("Disconnected");
+			status_->paint(0xffff0000);
 		}
-	}*/
+	}
 
 	static std::string pretty_percentage(float value) {
 		if (value < 0)
@@ -334,5 +312,27 @@ private:
 		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
 		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
 		return s;
+	}
+
+	CKBehavior* bbSetForce = nullptr;
+	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
+		using namespace ExecuteBB;
+		using namespace ScriptHelper;
+		SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
+		SetParamValue(bbSetForce->GetInputParameter(0)->GetDirectSource(), position);
+		SetParamObject(bbSetForce->GetInputParameter(1)->GetDirectSource(), posRef);
+		SetParamValue(bbSetForce->GetInputParameter(2)->GetDirectSource(), direction);
+		SetParamObject(bbSetForce->GetInputParameter(3)->GetDirectSource(), directionRef);
+		SetParamValue(bbSetForce->GetInputParameter(4)->GetDirectSource(), force);
+		bbSetForce->ActivateInput(0);
+		bbSetForce->Execute(0);
+	}
+
+	static void UnsetPhysicsForce(CKBehavior* bbSetForce, CK3dEntity* target) {
+		using namespace ExecuteBB;
+		using namespace ScriptHelper;
+		SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
+		bbSetForce->ActivateInput(1);
+		bbSetForce->Execute(0);
 	}
 };

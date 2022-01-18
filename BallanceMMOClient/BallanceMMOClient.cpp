@@ -14,6 +14,7 @@ void BallanceMMOClient::OnLoad()
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
 {
     if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
+        objects_.destroy_all_objects();
         objects_.init_template_balls();
         objects_.init_players();
     }
@@ -51,7 +52,8 @@ void BallanceMMOClient::OnProcess() {
     //poll_connection_state_changes();
     //poll_incoming_messages();
 
-    poll_and_toggle_debug_info();
+    poll_status_toggle();
+    poll_local_input();
 
     if (!connected())
         return;
@@ -90,11 +92,11 @@ void BallanceMMOClient::OnStartLevel()
 
 void BallanceMMOClient::OnExitGame()
 {
-    shutdown();
+    cleanup(true);
 }
 
 void BallanceMMOClient::OnUnload() {
-    shutdown();
+    cleanup(true);
     client::destroy();
 }
 
@@ -118,7 +120,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 if (connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Already connected.");
-                } else if (connecting()) {
+                }
+                else if (connecting()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     bml->SendIngameMessage("Connecting in process, please wait...");
                 }
@@ -131,7 +134,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         if (io_ctx_.stopped())
                             io_ctx_.reset();
                         io_ctx_.run();
-                    });
+                        });
 
                     // Resolve address
                     auto p = parse_connection_string(props_["remote_addr"]->GetString());
@@ -142,9 +145,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         // If address correctly resolved...
                         if (!ec) {
                             bml->SendIngameMessage("Server address resolved.");
+                            
                             for (const auto& i : results) {
                                 auto endpoint = i.endpoint();
                                 std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+                                GetLogger()->Info("Trying %s", connection_string.c_str());
                                 if (connect(connection_string)) {
                                     bml->SendIngameMessage("Connecting...");
                                     if (network_thread_.joinable())
@@ -157,7 +162,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                 }
                             }
                             // but none of the resolve results are unreachable...
-                            bml->SendIngameMessage("Connect to server failed.");
+                            bml->SendIngameMessage("Connect to server failed. All resolved address appears to be unresolvable.");
                             work_guard_.reset();
                             io_ctx_.stop();
                             resolver_.reset();
@@ -201,16 +206,33 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     if (is_first) {
                         ss << pair.second.name;
                         is_first = false;
-                    } else {
+                    }
+                    else {
                         ss << ", " << pair.second.name;
                     }
                     return true;
-                });
+                    });
 
                 m_bml->SendIngameMessage(ss.str().c_str());
-            }
-            else if (args[1] == "p") {
+            } else if (args[1] == "p") {
                 objects_.physicalize_all();
+            } else if (args[1] == "f") {
+                //bbSetForce = ExecuteBB::CreateSetPhysicsForce();
+                //SetForce(bbSetForce, player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
+                ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
+            } else if (args[1] == "u") {
+                ExecuteBB::UnsetPhysicsForce(player_ball_);
+                //UnsetPhysicsForce(bbSetForce, player_ball_);
+            }
+            break;
+        }
+        case 3: {
+            if (args[1] == "s" || args[1] == "say") {
+                bmmo::chat_msg msg{};
+                msg.chat_content = args[2];
+                msg.serialize();
+
+                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             }
             break;
         }
@@ -222,6 +244,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
 void BallanceMMOClient::OnTrafo(int from, int to)
 {
+    //throw std::runtime_error("On trafo");
 }
 
 void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
@@ -375,6 +398,23 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->SendIngameMessage((state->name + " left the game.").c_str());
         db_.remove(msg->content.connection_id);
         objects_.remove(msg->content.connection_id);
+        break;
+    }
+    case bmmo::Chat: {
+        bmmo::chat_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+
+        std::string print_msg;
+
+        if (msg.player_id == k_HSteamNetConnection_Invalid)
+            print_msg = std::format("(Server): {}", msg.chat_content);
+        else {
+            auto state = db_.get(msg.player_id);
+            assert(state.has_value());
+            print_msg = std::format("[{}]: {}", state->name, msg.chat_content);
+        }
+        m_bml->SendIngameMessage(print_msg.c_str());
         break;
     }
     default:
