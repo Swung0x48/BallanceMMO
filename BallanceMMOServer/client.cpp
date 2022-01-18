@@ -167,6 +167,16 @@ private:
                        obs->content.state.rotation.w);
                 break;
             }
+            case bmmo::Chat: {
+                bmmo::chat_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                if (msg.player_id == k_HSteamNetConnection_Invalid)
+                    Printf("[Server]: %s", msg.chat_content.c_str());
+                else
+                    Printf("%u: %s", msg.player_id, msg.chat_content.c_str());
+            }
             default:
                 break;
         }
@@ -274,6 +284,11 @@ int main() {
             }
 
             client_thread = std::move(std::thread([&client]() { client.run(); }));
+        } else {
+            bmmo::chat_msg msg{};
+            msg.chat_content = input;
+            msg.serialize();
+            client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
     } while (client.running());
 

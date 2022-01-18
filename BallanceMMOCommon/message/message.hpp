@@ -19,7 +19,9 @@ namespace bmmo {
         Ping,
         BallState,
         OwnedBallState,
-        KeyboardInput
+        KeyboardInput,
+
+        Chat
     };
 
     template<typename T, opcode C = None>
@@ -39,6 +41,11 @@ namespace bmmo {
 
         size_t size() const {
             return raw.str().size();
+        }
+
+        virtual void clear() {
+            std::stringstream temp;
+            raw.swap(temp);
         }
 
         // entity -> raw

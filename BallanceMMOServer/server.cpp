@@ -295,6 +295,24 @@ protected:
 
                 break;
             }
+            case bmmo::Chat: {
+                bmmo::chat_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                // Print chat message to console
+                const std::string& current_player_name = client_it->second.name;
+                const HSteamNetConnection current_player_id  = networking_msg->m_conn;
+                Printf("(%u, %s): %s", current_player_id, current_player_name.c_str(), msg.chat_content.c_str());
+
+                // Broatcast chat message to other player
+                msg.player_id = current_player_id;
+                msg.clear();
+                msg.serialize();
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+
+                break;
+            }
             case bmmo::KeyboardInput:
                 break;
             default:
@@ -354,6 +372,12 @@ int main() {
             server.shutdown();
         } else if (cmd == "list") {
             server.print_clients();
+        } else if (cmd == "say") {
+            bmmo::chat_msg msg{};
+            std::cin >> msg.chat_content;
+            msg.serialize();
+
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
     } while (server.running());
 
