@@ -29,8 +29,8 @@ public:
     void run() override {
         running_ = true;
         while (running_) {
-            update();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (!update())
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
     }
 
@@ -83,44 +83,39 @@ public:
         return get_status().m_nPing;
     }
 
-    void close_connection() {
-        close_connection(this->connection_);
-    }
-
-    void close_connection(HSteamNetConnection connection) {
+    void close_connection(HSteamNetConnection connection, bool linger = true) {
         if (connection != k_HSteamNetConnection_Invalid) {
-            interface_->CloseConnection(connection, 0, "Goodbye", true);
+            interface_->CloseConnection(connection, 0, "Goodbye", linger);
             assert(connection == this->connection_);
             connection_ = k_HSteamNetConnection_Invalid;
             estate_ = k_ESteamNetworkingConnectionState_None;
         }
     }
 
-    void shutdown() {
+    void shutdown(bool linger) {
         if (running_) {
             running_ = false;
-            close_connection();
+            close_connection(this->connection_, linger);
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }
 
 protected:
-    void poll_incoming_messages() override {
-        while (running_) {
-            ISteamNetworkingMessage* incoming_message[ONCE_RECV_MSG_COUNT] = { nullptr };
-            int msg_count = interface_->ReceiveMessagesOnConnection(connection_, incoming_message, ONCE_RECV_MSG_COUNT);
-            if (msg_count == 0)
-                break;
-            if (msg_count < 0)
-                break;
-                //FatalError("Error checking for messages.");
-            assert(msg_count > 0 && incoming_message);
+    int poll_incoming_messages() override {
+        ISteamNetworkingMessage* incoming_message[ONCE_RECV_MSG_COUNT] = { nullptr };
+        int msg_count = interface_->ReceiveMessagesOnConnection(connection_, incoming_message, ONCE_RECV_MSG_COUNT);
+        if (msg_count == 0)
+            return 0;
+        if (msg_count < 0)
+            //break;
+            FatalError("Error checking for messages.");
+        assert(msg_count > 0);
 
-            for (int i = 0; i < msg_count; ++i) {
-                on_message(incoming_message[i]);
-                incoming_message[i]->Release();
-            }
+        for (int i = 0; i < msg_count; ++i) {
+            on_message(incoming_message[i]);
+            incoming_message[i]->Release();
         }
+        return msg_count;
     }
 
     void poll_connection_state_changes() override {
@@ -134,5 +129,5 @@ protected:
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     ESteamNetworkingConnectionState estate_;
-    static constexpr inline size_t ONCE_RECV_MSG_COUNT = 50;
+    static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 };

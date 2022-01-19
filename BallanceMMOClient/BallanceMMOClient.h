@@ -29,7 +29,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.9-alpha10"; }
+	virtual CKSTRING GetVersion() override { return "3.0.10-alpha11"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -187,7 +187,7 @@ private:
 	}
 
 	void poll_local_input() {
-		BYTE* states = m_bml->GetInputManager()->GetKeyboardState();
+		/*BYTE* states = m_bml->GetInputManager()->GetKeyboardState();
 
 		KeyVector current_input;
 
@@ -220,9 +220,9 @@ private:
 			player_ball_,
 			direction,
 			m_bml->Get3dObjectByName("Cam_OrientRef"),
-			.43f);
+			.43f);*/
 
-		ExecuteBB::PhysicsWakeUp(player_ball_);
+		//ExecuteBB::PhysicsWakeUp(player_ball_); // Still not merged in upstream
 	}
 
 	void check_on_trafo(CK3dObject* ball) {
@@ -314,25 +314,25 @@ private:
 		return s;
 	}
 
-	CKBehavior* bbSetForce = nullptr;
-	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
-		using namespace ExecuteBB;
-		using namespace ScriptHelper;
-		SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
-		SetParamValue(bbSetForce->GetInputParameter(0)->GetDirectSource(), position);
-		SetParamObject(bbSetForce->GetInputParameter(1)->GetDirectSource(), posRef);
-		SetParamValue(bbSetForce->GetInputParameter(2)->GetDirectSource(), direction);
-		SetParamObject(bbSetForce->GetInputParameter(3)->GetDirectSource(), directionRef);
-		SetParamValue(bbSetForce->GetInputParameter(4)->GetDirectSource(), force);
-		bbSetForce->ActivateInput(0);
-		bbSetForce->Execute(0);
-	}
+	//CKBehavior* bbSetForce = nullptr;
+	//static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
+	//	using namespace ExecuteBB;
+	//	using namespace ScriptHelper;
+	//	SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
+	//	SetParamValue(bbSetForce->GetInputParameter(0)->GetDirectSource(), position);
+	//	SetParamObject(bbSetForce->GetInputParameter(1)->GetDirectSource(), posRef);
+	//	SetParamValue(bbSetForce->GetInputParameter(2)->GetDirectSource(), direction);
+	//	SetParamObject(bbSetForce->GetInputParameter(3)->GetDirectSource(), directionRef);
+	//	SetParamValue(bbSetForce->GetInputParameter(4)->GetDirectSource(), force);
+	//	bbSetForce->ActivateInput(0);
+	//	bbSetForce->Execute(0);
+	//}
 
-	static void UnsetPhysicsForce(CKBehavior* bbSetForce, CK3dEntity* target) {
-		using namespace ExecuteBB;
-		using namespace ScriptHelper;
-		SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
-		bbSetForce->ActivateInput(1);
-		bbSetForce->Execute(0);
-	}
+	//static void UnsetPhysicsForce(CKBehavior* bbSetForce, CK3dEntity* target) {
+	//	using namespace ExecuteBB;
+	//	using namespace ScriptHelper;
+	//	SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
+	//	bbSetForce->ActivateInput(1);
+	//	bbSetForce->Execute(0);
+	//}
 };

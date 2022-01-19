@@ -214,16 +214,17 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     });
 
                 m_bml->SendIngameMessage(ss.str().c_str());
-            } else if (args[1] == "p") {
-                objects_.physicalize_all();
-            } else if (args[1] == "f") {
-                //bbSetForce = ExecuteBB::CreateSetPhysicsForce();
-                //SetForce(bbSetForce, player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
-                ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
-            } else if (args[1] == "u") {
-                ExecuteBB::UnsetPhysicsForce(player_ball_);
-                //UnsetPhysicsForce(bbSetForce, player_ball_);
-            }
+            } 
+            //else if (args[1] == "p") {
+            //    objects_.physicalize_all();
+            //} else if (args[1] == "f") {
+            //    //bbSetForce = ExecuteBB::CreateSetPhysicsForce();
+            //    //SetForce(bbSetForce, player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
+            //    ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
+            //} else if (args[1] == "u") {
+            //    ExecuteBB::UnsetPhysicsForce(player_ball_);
+            //    //UnsetPhysicsForce(bbSetForce, player_ball_);
+            //}
             break;
         }
         case 3: {

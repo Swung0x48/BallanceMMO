@@ -23,6 +23,7 @@
     <ClInclude Include="client.h" />
     <ClInclude Include="CommandMMO.h" />
     <ClInclude Include="game_objects.h" />
+    <ClInclude Include="game_repository.h" />
     <ClInclude Include="game_state.h" />
     <ClInclude Include="label_sprite.h" />
     <ClInclude Include="text_sprite.h" />
@@ -30,6 +31,7 @@
   <ItemGroup>
     <!-- <ClCompile Include="..\submodules\AMMOProtocol\submodules\crc32\Crc32.cpp" /> -->
     <ClCompile Include="BallanceMMOClient.cpp" />
+    <ClCompile Include="game_repository.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
@@ -88,7 +90,7 @@
     <TargetExt>.bmod</TargetExt>
     <RunCodeAnalysis>false</RunCodeAnalysis>
     <EnableClangTidyCodeAnalysis>true</EnableClangTidyCodeAnalysis>
-    <OutDir>..\..\..\..\Desktop\Ballance-Debug\ModLoader\Mods</OutDir>
+    <OutDir>..\..\..\..\Desktop\Ballance-Debug - 副本 %282%29\ModLoader\Mods</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
