@@ -1,6 +1,7 @@
 #include "BallanceMMOClient.h"
 
 IMod* BMLEntry(IBML* bml) {
+    DeclareDumpFile();
     BallanceMMOClient::init_socket();
 	return new BallanceMMOClient(bml);
 }
@@ -101,7 +102,7 @@ void BallanceMMOClient::OnLevelFinish() {
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &msg.content.currentLevel);
     m_bml->GetArrayByName("AllLevel")->GetElementValue(msg.content.currentLevel - 1, 6, &msg.content.levelBouns);
     msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_) / 1e3;
-
+    GetLogger()->Info("Sending level finish message...");
     send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
@@ -434,8 +435,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             print_msg = std::format("[Server]: {}", msg.chat_content);
         else {
             auto state = db_.get(msg.player_id);
-            assert(state.has_value());
-            print_msg = std::format("{}: {}", state->name, msg.chat_content);
+            print_msg = std::format("{}: {}", state.has_value() ? state->name : db_.get_nickname(), msg.chat_content);
         }
         m_bml->SendIngameMessage(print_msg.c_str());
         break;

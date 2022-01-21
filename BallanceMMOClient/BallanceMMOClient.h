@@ -7,6 +7,7 @@
 #include "client.h"
 #include "game_state.h"
 #include "game_objects.h"
+#include "dumpfile.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -29,7 +30,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.11-alpha12"; }
+	virtual CKSTRING GetVersion() override { return "3.0.13-alpha14"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
