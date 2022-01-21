@@ -10,5 +10,6 @@
 #include "player_disconnected_msg.hpp"
 #include "owned_ball_state_msg.hpp"
 #include "chat_msg.hpp"
+#include "level_finish_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

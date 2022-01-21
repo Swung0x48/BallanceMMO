@@ -21,7 +21,9 @@ namespace bmmo {
         OwnedBallState,
         KeyboardInput,
 
-        Chat
+        Chat,
+
+        LevelFinish
     };
 
     template<typename T, opcode C = None>
