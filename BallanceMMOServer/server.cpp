@@ -153,7 +153,8 @@ protected:
                     bmmo::player_disconnected_msg msg;
                     msg.content.connection_id = pInfo->m_hConn;
                     broadcast_message(msg, k_nSteamNetworkingSend_Reliable, &pInfo->m_hConn);
-                    clients_.erase(itClient);
+                    if (itClient != clients_.end())
+                        clients_.erase(itClient);
                 } else {
                     assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting);
                 }
