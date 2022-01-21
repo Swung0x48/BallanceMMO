@@ -39,6 +39,9 @@
     <ClInclude Include="game_repository.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="dumpfile.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp">
