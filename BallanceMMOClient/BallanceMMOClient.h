@@ -29,7 +29,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.10-alpha11"; }
+	virtual CKSTRING GetVersion() override { return "3.0.11-alpha12"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -62,7 +62,8 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
-	
+	void OnLevelFinish() override;
+
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
@@ -115,6 +116,7 @@ private:
 	CKDataArray* current_level_array_ = nullptr;
 
 	std::atomic_bool resolving_endpoint_ = false;
+	float level_start_timestamp_ = 0.0f;
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
@@ -180,13 +182,52 @@ private:
 	KeyVector last_input_;
 
 	void poll_status_toggle() {
-		if (m_bml->GetInputManager()->IsKeyPressed(CKKEY_F3)) {
+		
+	}
+
+	/*char ckkey_to_num(CKKEYBOARD key) {
+		if (key == CKKEY_0)
+			return 0;
+
+		if (key >= CKKEY_1 && key <= CKKEY_9)
+			return key - CKKEY_1 + 1;
+
+		return -1;
+	}
+
+	CKKEYBOARD num_to_ckkey(int num) {
+		if (num == 0)
+			return CKKEY_0;
+
+		if (num >= 1 && num <= 9)
+			return (CKKEYBOARD)(num - 1 + CKKEY_1);
+
+		return CKKEY_AX;
+	}*/
+
+	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
+	const std::vector<std::string> init_args{ "mmo", "s" };
+	void poll_local_input() {
+		auto* input_manager = m_bml->GetInputManager();
+
+		// Toggle status
+		if (input_manager->IsKeyPressed(CKKEY_F3)) {
 			ping_->toggle();
 			status_->toggle();
 		}
-	}
 
-	void poll_local_input() {
+		for (int i = 0; i <= 3; ++i) {
+			if (input_manager->IsKeyPressed(keys_to_check[i])) {
+				std::vector<std::string> args(init_args);
+				if (i == 0) {
+					args.emplace_back("Go!");
+				} else {
+					args.emplace_back(std::to_string(i));
+				}
+				OnCommand(m_bml, args);
+			}
+		}
+
 		/*BYTE* states = m_bml->GetInputManager()->GetKeyboardState();
 
 		KeyVector current_input;

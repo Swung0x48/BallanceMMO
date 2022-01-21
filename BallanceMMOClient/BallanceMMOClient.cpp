@@ -52,7 +52,7 @@ void BallanceMMOClient::OnProcess() {
     //poll_connection_state_changes();
     //poll_incoming_messages();
 
-    poll_status_toggle();
+    //poll_status_toggle();
     poll_local_input();
 
     if (!connected())
@@ -86,8 +86,23 @@ void BallanceMMOClient::OnStartLevel()
     player_ball_ = get_current_ball();
     local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
 
+    level_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
+
     //objects_.destroy_all_objects();
     //objects_.init_players();
+}
+
+void BallanceMMOClient::OnLevelFinish() {
+    bmmo::level_finish_msg msg{};
+    auto* array_energy = m_bml->GetArrayByName("Energy");
+    array_energy->GetElementValue(0, 0, &msg.content.points);
+    array_energy->GetElementValue(0, 1, &msg.content.lifes);
+    array_energy->GetElementValue(0, 5, &msg.content.lifeBouns);
+    m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &msg.content.currentLevel);
+    m_bml->GetArrayByName("AllLevel")->GetElementValue(msg.content.currentLevel - 1, 6, &msg.content.levelBouns);
+    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_) / 1e3;
+
+    send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
 void BallanceMMOClient::OnExitGame()
@@ -108,6 +123,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         bml->SendIngameMessage("/mmo connect - Connect to server.");
         bml->SendIngameMessage("/mmo disconnect - Disconnect from server.");
         bml->SendIngameMessage("/mmo list - List online players.");
+        bml->SendIngameMessage("/mmo say - Send message to each other.");
     };
 
     switch (args.size()) {
@@ -229,6 +245,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         }
         case 3: {
             if (args[1] == "s" || args[1] == "say") {
+                if (!connected())
+                    break;
+
                 bmmo::chat_msg msg{};
                 msg.chat_content = args[2];
                 msg.serialize();
@@ -371,11 +390,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         GetLogger()->Info("Online players: ");
+
         for (auto& i : msg.online_players) {
             if (i.second == db_.get_nickname()) {
                 db_.set_client_id(i.first);
+            } else {
+                db_.create(i.first, i.second);
+                GetLogger()->Info(i.second.c_str());
             }
-            db_.create(i.first, i.second);
         }
         break;
     }
@@ -393,7 +415,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerDisconnected: {
-        bmmo::player_disconnected_msg* msg = reinterpret_cast<bmmo::player_disconnected_msg *>(network_msg->m_pData);
+        auto* msg = reinterpret_cast<bmmo::player_disconnected_msg *>(network_msg->m_pData);
         auto state = db_.get(msg->content.connection_id);
         assert(state.has_value());
         m_bml->SendIngameMessage((state->name + " left the game.").c_str());
@@ -409,14 +431,33 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::string print_msg;
 
         if (msg.player_id == k_HSteamNetConnection_Invalid)
-            print_msg = std::format("(Server): {}", msg.chat_content);
+            print_msg = std::format("[Server]: {}", msg.chat_content);
         else {
             auto state = db_.get(msg.player_id);
             assert(state.has_value());
-            print_msg = std::format("[{}]: {}", state->name, msg.chat_content);
+            print_msg = std::format("{}: {}", state->name, msg.chat_content);
         }
         m_bml->SendIngameMessage(print_msg.c_str());
         break;
+    }
+    case bmmo::LevelFinish: {
+        auto* msg = reinterpret_cast<bmmo::level_finish_msg*>(network_msg->m_pData);
+
+        // Prepare data...
+        int score = msg->content.levelBouns + msg->content.points + msg->content.lifes * msg->content.lifeBouns;
+
+        int total = int(msg->content.timeElapsed);
+        int minutes = total / 60;
+        int seconds = total % 60;
+        int hours = minutes / 60;
+        minutes = minutes % 60;
+        int ms = int((msg->content.timeElapsed - total) * 1000);
+
+        // Prepare message
+        const std::string fmt_string = "{} has finished a map, scored {}, elapsed {:02d}:{:02d}:{:02d}.{:03d} in real time.";
+        auto state = db_.get(msg->content.player_id);
+        m_bml->SendIngameMessage(std::format(fmt_string,
+            state.has_value() ? state->name : db_.get_nickname(), score, hours, minutes, seconds, ms).c_str());
     }
     default:
         GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);
