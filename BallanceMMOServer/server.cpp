@@ -315,6 +315,19 @@ protected:
 
                 break;
             }
+            case bmmo::LevelFinish: {
+                auto* msg = reinterpret_cast<bmmo::level_finish_msg*>(networking_msg->m_pData);
+                msg->content.player_id = networking_msg->m_conn;
+                
+                // Cheat check
+                if (msg->content.currentLevel * 100 != msg->content.levelBouns || msg->content.levelBouns != 200) {
+                    msg->content.cheated = true;
+                }
+
+                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+
+                break;
+            }
             case bmmo::KeyboardInput:
                 break;
             default:
