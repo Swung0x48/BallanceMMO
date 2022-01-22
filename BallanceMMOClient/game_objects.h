@@ -6,14 +6,17 @@
 
 struct PlayerObjects {
 	static inline IBML* bml;
-	std::vector<CK3dObject*> balls;
+	std::vector<CK_ID> balls;
 	std::unique_ptr<label_sprite> username_label;
 	uint32_t visible_ball_type = 0;
 	bool physicalized = false;
 
 	~PlayerObjects() {
-		for (auto* ball: balls)
-			bml->GetCKContext()->DestroyObject(ball);
+		for (auto ball : balls) {
+			auto* ball_ptr = bml->GetCKContext()->GetObject(ball);
+			if (ball_ptr)
+				bml->GetCKContext()->DestroyObject(ball);
+		}
 
 		username_label.reset();
 	}
@@ -28,7 +31,7 @@ public:
 	void init_player(const HSteamNetConnection id, const std::string& name) {
 		auto& obj = objects_[id];
 		for (int i = 0; i < template_balls_.size(); ++i) {
-			obj.balls.emplace_back(init_spirit_ball(i, id));
+			obj.balls.emplace_back(CKOBJID(init_spirit_ball(i, id)));
 		}
 		obj.username_label = std::make_unique<label_sprite>(
 			"Name_" + name,
@@ -45,8 +48,10 @@ public:
 	}
 
 	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
-		auto* old_ball = objects_[id].balls[from];
-		auto* new_ball = objects_[id].balls[to];
+		auto* old_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[from]);
+		auto* new_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[to]);
+
+		assert(old_ball && new_ball);
 
 		old_ball->Show(CKHIDE);
 		new_ball->Show(CKSHOW);
@@ -74,13 +79,17 @@ public:
 			}
 
 			uint32_t current_ball_type = item.second.ball_state.type;
+			auto* ctx = bml_->GetCKContext();
 
 			if (current_ball_type != objects_[item.first].visible_ball_type) {
 				on_trafo(item.first, objects_[item.first].visible_ball_type, current_ball_type);
 				objects_[item.first].visible_ball_type = current_ball_type;
 			}
 
-			auto* current_ball = objects_[item.first].balls[current_ball_type];
+			/*bml_->SendIngameMessage(std::to_string(item.first).c_str());
+			bml_->SendIngameMessage(std::to_string(current_ball_type).c_str());*/
+
+			auto* current_ball = static_cast<CK3dObject*>(ctx->GetObject(objects_[item.first].balls[current_ball_type]));
 			auto& username_label = objects_[item.first].username_label;
 
 			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
@@ -93,8 +102,8 @@ public:
 			}
 
 			// Update username label
-			VxRect extent; objects_[item.first].balls[current_ball_type]->GetRenderExtents(extent);
-			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, extent.top / viewport.bottom);
+			VxRect extent; static_cast<CK3dObject*>(ctx->GetObject(objects_[item.first].balls[current_ball_type]))->GetRenderExtents(extent);
+			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			username_label->set_position(pos);
 			username_label->set_visible(true);
 			username_label->process();
@@ -106,7 +115,7 @@ public:
 		CKDataArray* physBall = bml_->GetArrayByName("Physicalize_GameBall");
 
 		uint32_t current_ball_type = db_.get(id)->ball_state.type;
-		auto* current_ball = objects_[id].balls[current_ball_type];
+		auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(objects_[id].balls[current_ball_type]));
 		objects_[id].physicalized = true;
 		std::string ballName(physBall->GetElementStringValue(current_ball_type, 0, nullptr), '\0');
 		physBall->GetElementStringValue(current_ball_type, 0, ballName.data());
@@ -163,7 +172,7 @@ public:
 					bml_->SetIC(mat);
 				}
 			}
-			template_balls_.emplace_back(ball);
+			template_balls_.emplace_back(CKOBJID(ball));
 			db_.set_ball_id(ball_name, i);  // "Ball_Xxx"
 		}
 		template_init_ = true;
@@ -176,7 +185,7 @@ public:
 		dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
 		dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
 		dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-		CK3dObject* ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(template_balls_[ball_index], &dep, std::to_string(id).c_str()));
+		CK3dObject* ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(bml_->GetCKContext()->GetObject(template_balls_[ball_index]), &dep, std::to_string(id).c_str()));
 		for (int j = 0; j < ball->GetMeshCount(); j++) {
 			CKMesh* mesh = ball->GetMesh(j);
 			for (int k = 0; k < mesh->GetMaterialCount(); k++) {
@@ -193,8 +202,10 @@ public:
 	}
 
 	void destroy_templates() {
-		for (auto* i : template_balls_) {
-			bml_->GetCKContext()->DestroyObject(i);
+		auto* ctx = bml_->GetCKContext();
+		for (auto i : template_balls_) {
+			auto* obj = ctx->GetObject(i);
+			bml_->GetCKContext()->DestroyObject(obj);
 		}
 	}
 
@@ -204,7 +215,7 @@ public:
 	}
 private:
 	bool template_init_ = false;
-	std::vector<CK3dObject*> template_balls_;
+	std::vector<CK_ID> template_balls_;
 	IBML* bml_ = nullptr;
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;

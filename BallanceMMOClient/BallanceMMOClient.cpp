@@ -21,7 +21,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     }
 
     if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
-        current_level_array_ = m_bml->GetArrayByName("CurrentLevel");
+        current_level_array_ = CKOBJID(m_bml->GetArrayByName("CurrentLevel"));
     }
 
     /*if (isMap) {
@@ -169,9 +169,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                 GetLogger()->Info("Trying %s", connection_string.c_str());
                                 if (connect(connection_string)) {
                                     bml->SendIngameMessage("Connecting...");
-                                    if (network_thread_.joinable())
-                                        network_thread_.join();
-                                    network_thread_ = std::thread([this]() { run(); });
+                                    //if (network_thread_.joinable())
+                                        //network_thread_.join();
+                                    network_thread_ = std::jthread([this]() { run(); });
                                     work_guard_.reset();
                                     io_ctx_.stop();
                                     resolver_.reset();
@@ -345,7 +345,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         msg.nickname = props_["playername"]->GetString();
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        ping_thread_ = std::thread([this]() {
+        ping_thread_ = std::jthread([this]() {
             while (connected()) {
                 auto status = get_status();
                 std::string str = pretty_status(status);
@@ -369,7 +369,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
         auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
         bool success = db_.update(obs->content.player_id, reinterpret_cast<const BallState&>(obs->content.state));
-        assert(success);
+        //assert(success);
+        if (!success) {
+            GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", obs->content.player_id);
+        }
         /*auto state = db_.get(obs->content.player_id);
         GetLogger()->Info("%s: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
             state->name.c_str(),
@@ -407,12 +410,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+        if (m_bml->IsIngame()) {
+            GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
+            objects_.init_player(msg.connection_id, msg.name);
+        }
+
         GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
         db_.create(msg.connection_id, msg.name);
 
         // TODO: call this when the player enters a map
-        if (m_bml->IsIngame())
-            objects_.init_player(msg.connection_id, msg.name);
+        
         break;
     }
     case bmmo::PlayerDisconnected: {
@@ -435,6 +442,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             print_msg = std::format("[Server]: {}", msg.chat_content);
         else {
             auto state = db_.get(msg.player_id);
+            assert(state.has_value() || (db_.get_client_id() == msg.player_id));
             print_msg = std::format("{}: {}", state.has_value() ? state->name : db_.get_nickname(), msg.chat_content);
         }
         m_bml->SendIngameMessage(print_msg.c_str());
@@ -456,8 +464,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         // Prepare message
         const std::string fmt_string = "{} has finished a map, scored {}, elapsed {:02d}:{:02d}:{:02d}.{:03d} in real time.";
         auto state = db_.get(msg->content.player_id);
+        assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         m_bml->SendIngameMessage(std::format(fmt_string,
             state.has_value() ? state->name : db_.get_nickname(), score, hours, minutes, seconds, ms).c_str());
+        break;
     }
     default:
         GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);

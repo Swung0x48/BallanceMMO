@@ -30,7 +30,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.13-alpha14"; }
+	virtual CKSTRING GetVersion() override { return "3.0.14-alpha15"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -97,8 +97,8 @@ private:
 	std::unique_ptr<asio::ip::udp::resolver> resolver_;
 
 	asio::thread_pool thread_pool_;
-	std::thread network_thread_;
-	std::thread ping_thread_;
+	std::jthread network_thread_;
+	std::jthread ping_thread_;
 
 	const float RIGHT_MOST = 0.98f;
 
@@ -114,7 +114,7 @@ private:
 	BallState local_ball_state_;
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
-	CKDataArray* current_level_array_ = nullptr;
+	CK_ID current_level_array_ = 0;
 
 	std::atomic_bool resolving_endpoint_ = false;
 	float level_start_timestamp_ = 0.0f;
@@ -124,8 +124,8 @@ private:
 	}
 
 	CK3dObject* get_current_ball() {
-		if (current_level_array_)
-			return static_cast<CK3dObject*>(current_level_array_->GetElementObject(0, 1));
+		if (current_level_array_ != 0)
+			return static_cast<CK3dObject*>(static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementObject(0, 1));
 
 		return nullptr;
 	}
@@ -291,12 +291,15 @@ private:
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
-		shutdown(linger);
+		asio::post(thread_pool_, [this, linger] {
+			shutdown(linger);
+		});
 		
-		if (ping_thread_.joinable())
-			ping_thread_.join();
-
 		// Weird bug if join thread here. Will join at the place before next use
+		// Actually since we're using std::jthread, we don't have to join threads manually
+		//if (ping_thread_.joinable())
+		//	ping_thread_.join();
+		// 
 		//if (network_thread_.joinable())
 			//network_thread_.join();
 		
@@ -309,7 +312,7 @@ private:
 
 		resolving_endpoint_ = false;
 
-		if (down)
+		if (down) // If the game's going down, we don't care about text shown.
 			return;
 
 		if (ping_)
@@ -323,7 +326,7 @@ private:
 
 	static std::string pretty_percentage(float value) {
 		if (value < 0)
-			return "Not available";
+			return "N/A";
 
 		return std::format("{:.2f}%", value * 100.0f);
 	}
