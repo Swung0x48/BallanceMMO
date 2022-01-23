@@ -17,11 +17,15 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
         objects_.destroy_all_objects();
         objects_.init_template_balls();
-        objects_.init_players();
+        //objects_.init_players();
     }
 
     if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
         current_level_array_ = CKOBJID(m_bml->GetArrayByName("CurrentLevel"));
+    }
+
+    if (isMap) {
+        objects_.init_players();
     }
 
     /*if (isMap) {
@@ -47,6 +51,7 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
     }
+    objects_.destroy_all_objects();
 }
 
 void BallanceMMOClient::OnProcess() {

@@ -312,7 +312,7 @@ private:
 
 		resolving_endpoint_ = false;
 
-		if (down) // If the game's going down, we don't care about text shown.
+		if (down) // Since the game's going down, we don't care about text shown.
 			return;
 
 		if (ping_)

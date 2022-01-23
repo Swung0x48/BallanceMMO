@@ -103,6 +103,9 @@ public:
 
 			// Update username label
 			VxRect extent; static_cast<CK3dObject*>(ctx->GetObject(objects_[item.first].balls[current_ball_type]))->GetRenderExtents(extent);
+			if (extent.bottom < 0 && extent.right < 0) { // This player goes out of sight
+				return true;
+			}
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			username_label->set_position(pos);
 			username_label->set_visible(true);
