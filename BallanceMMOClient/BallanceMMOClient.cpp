@@ -223,17 +223,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     break;
 
                 std::stringstream ss;
-                bool is_first = true;
-                db_.for_each([&ss, &is_first](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    if (is_first) {
-                        ss << pair.second.name;
-                        is_first = false;
-                    }
-                    else {
-                        ss << ", " << pair.second.name;
-                    }
+                db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    ss << pair.second.name << ", ";
                     return true;
-                    });
+                });
+                ss << db_.get_nickname();
 
                 m_bml->SendIngameMessage(ss.str().c_str());
             } 
