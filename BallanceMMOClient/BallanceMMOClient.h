@@ -30,7 +30,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.17-alpha18"; }
+	virtual CKSTRING GetVersion() override { return "3.0.18-alpha19"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -215,6 +215,11 @@ private:
 		if (input_manager->IsKeyPressed(CKKEY_F3)) {
 			ping_->toggle();
 			status_->toggle();
+		}
+
+		// Toggle nametag
+		if (input_manager->IsKeyPressed(CKKEY_TAB)) {
+			db_.toggle_nametag_visible();
 		}
 
 		for (int i = 0; i <= 3; ++i) {

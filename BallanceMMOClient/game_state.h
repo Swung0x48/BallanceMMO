@@ -8,6 +8,7 @@
 
 #include <unordered_map>
 #include <shared_mutex>
+#include <atomic>
 
 struct BallState {
 	uint32_t type = 0;
@@ -145,10 +146,23 @@ public:
 	uint32_t get_ball_id(const std::string& name) {
 		return ball_name_to_id_[name];
 	}
+
+	bool is_nametag_visible() {
+		return nametag_visible_;
+	}
+
+	void set_nametag_visible(bool visible) {
+		nametag_visible_ = visible;
+	}
+
+	void toggle_nametag_visible() {
+		nametag_visible_ = !nametag_visible_;
+	}
 private:
 	std::shared_mutex mutex_;
 	std::unordered_map<HSteamNetConnection, PlayerState> states_;
 	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
 	std::string nickname_;
 	HSteamNetConnection assigned_id_;
+	std::atomic_bool nametag_visible_ = true;
 };

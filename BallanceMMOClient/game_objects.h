@@ -117,7 +117,7 @@ public:
 			}
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			username_label->set_position(pos);
-			username_label->set_visible(true);
+			username_label->set_visible(db_.is_nametag_visible());
 			username_label->process();
 			return true;
 		});
