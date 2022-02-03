@@ -31,7 +31,13 @@ public:
 	void init_player(const HSteamNetConnection id, const std::string& name) {
 		auto& obj = objects_[id];
 		for (int i = 0; i < template_balls_.size(); ++i) {
-			obj.balls.emplace_back(CKOBJID(init_spirit_ball(i, id)));
+			auto* ball = init_spirit_ball(i, id);
+			if (ball)
+				obj.balls.emplace_back(CKOBJID(ball));
+			else {
+				auto msg = std::format("Failed to init player: {} {}", id, i);
+				bml_->SendIngameMessage(msg.c_str());
+			}
 		}
 		obj.username_label = std::make_unique<label_sprite>(
 			"Name_" + name,
@@ -52,9 +58,11 @@ public:
 		auto* new_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[to]);
 
 		assert(old_ball && new_ball);
+		if (old_ball)
+			old_ball->Show(CKHIDE);
 
-		old_ball->Show(CKHIDE);
-		new_ball->Show(CKSHOW);
+		if (new_ball)
+			new_ball->Show(CKSHOW);
 	}
 
 	void update() {
@@ -102,8 +110,9 @@ public:
 			}
 
 			// Update username label
-			VxRect extent; static_cast<CK3dObject*>(ctx->GetObject(objects_[item.first].balls[current_ball_type]))->GetRenderExtents(extent);
+			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (extent.bottom < 0 && extent.right < 0) { // This player goes out of sight
+				username_label->set_visible(false);
 				return true;
 			}
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
@@ -162,6 +171,10 @@ public:
 			dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
 			dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
 			ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(ball, &dep, "_Peer_"));
+			if (!ball) {
+				auto msg = std::format("Failed to init template ball: {} {}", i);
+				bml_->SendIngameMessage(msg.c_str());
+			}
 			for (int j = 0; j < ball->GetMeshCount(); j++) {
 				CKMesh* mesh = ball->GetMesh(j);
 				for (int k = 0; k < mesh->GetMaterialCount(); k++) {
@@ -188,7 +201,21 @@ public:
 		dep[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
 		dep[CKCID_MESH] = CK_DEPENDENCIES_COPY_MESH_MATERIAL;
 		dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
-		CK3dObject* ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(bml_->GetCKContext()->GetObject(template_balls_[ball_index]), &dep, std::to_string(id).c_str()));
+		auto* template_ball = bml_->GetCKContext()->GetObject(template_balls_[ball_index]);
+		if (!template_ball) {
+			auto msg = std::format("Failed to find template ball when initializing: {} {}", id, ball_index);
+			bml_->SendIngameMessage(msg.c_str());
+			return nullptr;
+		}
+
+		CK3dObject* ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(template_ball, &dep, std::to_string(id).c_str()));
+		
+		if (!ball) {
+			auto msg = std::format("Failed to copy template ball when initializing: {} {}", id, ball_index);
+			bml_->SendIngameMessage(msg.c_str());
+			return nullptr;
+		}
+
 		for (int j = 0; j < ball->GetMeshCount(); j++) {
 			CKMesh* mesh = ball->GetMesh(j);
 			for (int k = 0; k < mesh->GetMaterialCount(); k++) {

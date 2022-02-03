@@ -25,7 +25,9 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     }
 
     if (isMap) {
+        GetLogger()->Info("Initializing peer objects...");
         objects_.init_players();
+        GetLogger()->Info("Initialize completed.");
     }
 
     /*if (isMap) {
@@ -42,6 +44,12 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 
 void BallanceMMOClient::OnPostStartMenu()
 {
+    if (init_) {
+        GetLogger()->Info("Destroying peer objects...");
+        objects_.destroy_all_objects();
+        GetLogger()->Info("Destroy completed.");
+    }
+
     if (!init_) {
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
@@ -51,7 +59,6 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
     }
-    objects_.destroy_all_objects();
 }
 
 void BallanceMMOClient::OnProcess() {
@@ -174,9 +181,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                 GetLogger()->Info("Trying %s", connection_string.c_str());
                                 if (connect(connection_string)) {
                                     bml->SendIngameMessage("Connecting...");
-                                    //if (network_thread_.joinable())
-                                        //network_thread_.join();
-                                    network_thread_ = std::jthread([this]() { run(); });
+                                    if (network_thread_.joinable())
+                                        network_thread_.join();
+                                    network_thread_ = std::thread([this]() { run(); });
                                     work_guard_.reset();
                                     io_ctx_.stop();
                                     resolver_.reset();
@@ -231,16 +238,13 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
                 m_bml->SendIngameMessage(ss.str().c_str());
             } 
-            //else if (args[1] == "p") {
-            //    objects_.physicalize_all();
-            //} else if (args[1] == "f") {
-            //    //bbSetForce = ExecuteBB::CreateSetPhysicsForce();
-            //    //SetForce(bbSetForce, player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
-            //    ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
-            //} else if (args[1] == "u") {
-            //    ExecuteBB::UnsetPhysicsForce(player_ball_);
-            //    //UnsetPhysicsForce(bbSetForce, player_ball_);
-            //}
+            /*else if (args[1] == "p") {
+                objects_.physicalize_all();
+            } else if (args[1] == "f") {
+                ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
+            } else if (args[1] == "u") {
+                ExecuteBB::UnsetPhysicsForce(player_ball_);
+            }*/
             break;
         }
         case 3: {
@@ -344,7 +348,9 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         msg.nickname = props_["playername"]->GetString();
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        ping_thread_ = std::jthread([this]() {
+        if (ping_thread_.joinable())
+            ping_thread_.join();
+        ping_thread_ = std::thread([this]() {
             while (connected()) {
                 auto status = get_status();
                 std::string str = pretty_status(status);
@@ -466,6 +472,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         m_bml->SendIngameMessage(std::format(fmt_string,
             state.has_value() ? state->name : db_.get_nickname(), score, hours, minutes, seconds, ms).c_str());
+        // TODO: Stop displaying objects on finish
         break;
     }
     default:

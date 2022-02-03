@@ -30,7 +30,7 @@ public:
         running_ = true;
         while (running_) {
             if (!update())
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 

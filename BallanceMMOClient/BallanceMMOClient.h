@@ -30,7 +30,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.15-alpha16"; }
+	virtual CKSTRING GetVersion() override { return "3.0.17-alpha18"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -97,8 +97,8 @@ private:
 	std::unique_ptr<asio::ip::udp::resolver> resolver_;
 
 	asio::thread_pool thread_pool_;
-	std::jthread network_thread_;
-	std::jthread ping_thread_;
+	std::thread network_thread_;
+	std::thread ping_thread_;
 
 	const float RIGHT_MOST = 0.98f;
 
@@ -297,6 +297,8 @@ private:
 		
 		// Weird bug if join thread here. Will join at the place before next use
 		// Actually since we're using std::jthread, we don't have to join threads manually
+		// Welp, std::jthread does not work on some of the clients. Switching back to std::thread. QwQ
+		// 
 		//if (ping_thread_.joinable())
 		//	ping_thread_.join();
 		// 
@@ -359,25 +361,25 @@ private:
 		return s;
 	}
 
-	//CKBehavior* bbSetForce = nullptr;
-	//static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
-	//	using namespace ExecuteBB;
-	//	using namespace ScriptHelper;
-	//	SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
-	//	SetParamValue(bbSetForce->GetInputParameter(0)->GetDirectSource(), position);
-	//	SetParamObject(bbSetForce->GetInputParameter(1)->GetDirectSource(), posRef);
-	//	SetParamValue(bbSetForce->GetInputParameter(2)->GetDirectSource(), direction);
-	//	SetParamObject(bbSetForce->GetInputParameter(3)->GetDirectSource(), directionRef);
-	//	SetParamValue(bbSetForce->GetInputParameter(4)->GetDirectSource(), force);
-	//	bbSetForce->ActivateInput(0);
-	//	bbSetForce->Execute(0);
-	//}
+	/*CKBehavior* bbSetForce = nullptr;
+	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
+		using namespace ExecuteBB;
+		using namespace ScriptHelper;
+		SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
+		SetParamValue(bbSetForce->GetInputParameter(0)->GetDirectSource(), position);
+		SetParamObject(bbSetForce->GetInputParameter(1)->GetDirectSource(), posRef);
+		SetParamValue(bbSetForce->GetInputParameter(2)->GetDirectSource(), direction);
+		SetParamObject(bbSetForce->GetInputParameter(3)->GetDirectSource(), directionRef);
+		SetParamValue(bbSetForce->GetInputParameter(4)->GetDirectSource(), force);
+		bbSetForce->ActivateInput(0);
+		bbSetForce->Execute(0);
+	}
 
-	//static void UnsetPhysicsForce(CKBehavior* bbSetForce, CK3dEntity* target) {
-	//	using namespace ExecuteBB;
-	//	using namespace ScriptHelper;
-	//	SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
-	//	bbSetForce->ActivateInput(1);
-	//	bbSetForce->Execute(0);
-	//}
+	static void UnsetPhysicsForce(CKBehavior* bbSetForce, CK3dEntity* target) {
+		using namespace ExecuteBB;
+		using namespace ScriptHelper;
+		SetParamObject(bbSetForce->GetTargetParameter()->GetDirectSource(), target);
+		bbSetForce->ActivateInput(1);
+		bbSetForce->Execute(0);
+	}*/
 };
