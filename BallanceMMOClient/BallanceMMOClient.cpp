@@ -74,7 +74,7 @@ void BallanceMMOClient::OnProcess() {
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
 
     if (bml_lk) {
-        if (m_bml->IsPlaying()) {
+        if (m_bml->IsIngame()) {
             auto ball = get_current_ball();
             if (player_ball_ == nullptr)
                 player_ball_ = ball;
