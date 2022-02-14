@@ -66,6 +66,40 @@ void BallanceMMOClient::OnProcess() {
     //poll_incoming_messages();
 
     //poll_status_toggle();
+    //m_bml->SkipRenderForNextTick();
+    {
+        CKBaseManager* physicsManager = m_bml->GetCKContext()->GetManagerByGuid(CKGUID(0x6bed328b, 0x141f5148));
+        GetLogger()->Info("PM addr: %x", physicsManager);
+
+        BYTE* timer = *reinterpret_cast<BYTE**>(reinterpret_cast<BYTE*>(physicsManager) + 0xC0);
+        float* averageTickTime = reinterpret_cast<float*>(reinterpret_cast<BYTE*>(physicsManager) + 0xC8);
+        /*GetLogger()->Info("avgTT: %.2f | %.2f, %.2f, %.2f, %u, %.2f",
+            *averageTickTime,
+            *reinterpret_cast<double*>(timer + 0x120),
+            *reinterpret_cast<double*>(timer + 0x128),
+            *reinterpret_cast<double*>(timer + 0x130),
+            *reinterpret_cast<DWORD*>(timer + 0x138),
+            *reinterpret_cast<double*>(*reinterpret_cast<BYTE**>(timer + 0x4) + 0x18));*/
+        GetLogger()->Info("Some counter: %u", *reinterpret_cast<DWORD*>(timer + 0x80));
+        auto* ball = get_current_ball();
+        if (ball != nullptr) {
+            VxVector pos;
+            ball->GetPosition(&pos);
+            GetLogger()->Info("%f %f %f %x %x %x", pos.x, pos.y, pos.z, *(DWORD*)&pos.x, *(DWORD*)&pos.y, *(DWORD*)&pos.z);
+        }
+        int objCnt = *reinterpret_cast<short*>(reinterpret_cast<BYTE*>(physicsManager) + 0x2A);
+        void** objList = *reinterpret_cast<void***>(reinterpret_cast<BYTE*>(physicsManager) + 0x2C);
+        if (objCnt > 0)
+            GetLogger()->Info("Count: %d", objCnt);
+        for (int i = 0; i < objCnt; i++) {
+            void* obj = objList[i];
+            BYTE* posptr = *reinterpret_cast<BYTE**>(reinterpret_cast<BYTE*>(obj) + 0xA4);
+            double* pos = reinterpret_cast<double*>(posptr + 0xB8);
+            float* speed = reinterpret_cast<float*>(posptr + 0xD8);
+            GetLogger()->Info("Physics Process %lf %lf %lf %f %f %f", pos[0], pos[1], pos[2], speed[0], speed[1], speed[2]);
+        }
+    }
+
     poll_local_input();
 
     if (!connected())
@@ -89,6 +123,8 @@ void BallanceMMOClient::OnProcess() {
             objects_.update();
         }
     }
+
+    
 }
 
 void BallanceMMOClient::OnStartLevel()

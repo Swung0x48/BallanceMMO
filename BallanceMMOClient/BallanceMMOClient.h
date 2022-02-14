@@ -30,7 +30,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.19-beta1"; }
+	virtual CKSTRING GetVersion() override { return "3.1.0-alpha1"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -293,7 +293,7 @@ private:
 		assert(sizeof(msg.content) == sizeof(local_ball_state_));
 		std::memcpy(&(msg.content), &local_ball_state_, sizeof(msg.content));
 		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
-		GetLogger()->Info("(%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+		/*GetLogger()->Info("(%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
 			local_ball_state_.position.x,
 			local_ball_state_.position.y,
 			local_ball_state_.position.z,
@@ -301,7 +301,7 @@ private:
 			local_ball_state_.rotation.y,
 			local_ball_state_.rotation.z,
 			local_ball_state_.rotation.w
-		);
+		);*/
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
