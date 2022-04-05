@@ -55,7 +55,7 @@ void BallanceMMOClient::OnPostStartMenu()
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
         status_->paint(0xffff0000);
-
+        
         m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
     }
@@ -430,10 +430,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::PlayerDisconnected: {
         auto* msg = reinterpret_cast<bmmo::player_disconnected_msg *>(network_msg->m_pData);
         auto state = db_.get(msg->content.connection_id);
-        assert(state.has_value());
-        m_bml->SendIngameMessage((state->name + " left the game.").c_str());
-        db_.remove(msg->content.connection_id);
-        objects_.remove(msg->content.connection_id);
+        //assert(state.has_value());
+        if (state.has_value()) {
+            m_bml->SendIngameMessage((state->name + " left the game.").c_str());
+            db_.remove(msg->content.connection_id);
+            objects_.remove(msg->content.connection_id);
+        }
         break;
     }
     case bmmo::Chat: {

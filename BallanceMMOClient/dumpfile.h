@@ -28,10 +28,9 @@ namespace NSDumpFile
         dumpInfo.ExceptionPointers = pException;
         dumpInfo.ThreadId = GetCurrentThreadId();
         dumpInfo.ClientPointers = TRUE;
-        
+
         HMODULE mhLib = ::LoadLibrary(_T("dbghelp.dll"));
         MINIDUMPWRITEDUMP pDump = (MINIDUMPWRITEDUMP)::GetProcAddress(mhLib, "MiniDumpWriteDump");
-
 
         // 写入Dump文件内容
         //

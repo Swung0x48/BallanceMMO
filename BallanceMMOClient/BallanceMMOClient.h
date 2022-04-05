@@ -30,7 +30,7 @@ public:
 	}
 
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.19-beta1"; }
+	virtual CKSTRING GetVersion() override { return "3.0.20-beta2"; }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -222,15 +222,18 @@ private:
 			db_.toggle_nametag_visible();
 		}
 
-		for (int i = 0; i <= 3; ++i) {
-			if (input_manager->IsKeyPressed(keys_to_check[i])) {
-				std::vector<std::string> args(init_args);
-				if (i == 0) {
-					args.emplace_back("Go!");
-				} else {
-					args.emplace_back(std::to_string(i));
+		if (input_manager->IsKeyDown(CKKEY_LCONTROL)) {
+			for (int i = 0; i <= 3; ++i) {
+				if (input_manager->IsKeyPressed(keys_to_check[i])) {
+					std::vector<std::string> args(init_args);
+					if (i == 0) {
+						args.emplace_back("Go!");
+					}
+					else {
+						args.emplace_back(std::to_string(i));
+					}
+					OnCommand(m_bml, args);
 				}
-				OnCommand(m_bml, args);
 			}
 		}
 
