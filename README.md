@@ -98,7 +98,7 @@ $ cmake -G Ninja .. -DOPENSSL_ROOT_DIR="/usr/local/opt/openssl@1.1/"
 $ ./BallanceMMOServer
 ```
 
-### Building client (Game Mod)
+## Building client (Game Mod)
 
 On Windows, we can use the vcpkg package manager. The following instructions assume that you will follow the steps and fetch vcpkg as a submodule. If you want to install vcpkg somewhere else, you're on your own.
 
