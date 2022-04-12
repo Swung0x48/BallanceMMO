@@ -10,11 +10,14 @@ namespace bmmo {
             stream.write(str.c_str(), str.length());
         }
 
-        static void read_string(std::stringstream& stream, std::string& str) {
+        static bool read_string(std::stringstream& stream, std::string& str) {
             uint32_t length = 0;
             stream.read(reinterpret_cast<char*>(&length), sizeof(length));
+            if (length > stream.str().length())
+                return false;
             str.resize(length);
             stream.read(str.data(), length);
+            return true;
         }
     };
 }

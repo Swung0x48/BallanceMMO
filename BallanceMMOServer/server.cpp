@@ -11,6 +11,7 @@
 
 struct client_data {
     std::string name;
+    bool cheated = false;
 };
 
 class server : public role {
@@ -79,7 +80,7 @@ public:
     void print_clients() {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
-            Printf("%u: %s", i.first, i.second.name.c_str());
+            Printf("%u: %s%s", i.first, i.second.name.c_str(), (i.second.cheated ? " [CHEAT]" : ""));
         }
     }
 
@@ -225,18 +226,34 @@ protected:
         auto client_it = clients_.find(networking_msg->m_conn);
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        if (!(raw_msg->code == bmmo::LoginRequest || client_it != clients_.end())) // ignore limbo clients message
+        if (!(raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || client_it != clients_.end())) // ignore limbo clients message
             return;
 
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
-                bmmo::login_request_msg msg;
+                bmmo::login_denied_msg msg;
+                send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
+                interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, "Outdated client", true);
+                break;
+            }
+            case bmmo::LoginRequestV2: {
+                bmmo::login_request_v2_msg msg;
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
+                // verify client version
+                bmmo::version_t current_version;
+                Printf("Current server version: %s; client version: %s.", current_version.to_string().c_str(), msg.version.to_string().c_str());
+                if (msg.version < current_version) {
+                    bmmo::login_denied_msg msg;
+                    send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
+                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, "Outdated client", true);
+                    break;
+                }
+
                 // accepting client
-                Printf("%s logged in!\n", msg.nickname.c_str());
-                clients_[networking_msg->m_conn] = {msg.nickname};  // add the client here
+                Printf("%s logged in with cheat mode %s!\n", msg.nickname.c_str(), msg.cheated ? "on" : "off");
+                clients_[networking_msg->m_conn] = {msg.nickname, (bool) (bool)msg.cheated};  // add the client here
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
                 // notify this client of other online players
@@ -329,6 +346,17 @@ protected:
 
                 break;
             }
+            case bmmo::CheatState: {
+                auto* state_msg = reinterpret_cast<bmmo::cheat_state_msg*>(networking_msg->m_pData);
+                client_it->second.cheated = state_msg->content.cheated;
+                Printf("%s turned %s cheat!", client_it->second.name.c_str(), state_msg->content.cheated ? "on" : "off");
+                bmmo::owned_cheat_state_msg new_msg{};
+                new_msg.content.player_id = networking_msg->m_conn;
+                new_msg.content.state.cheated = state_msg->content.cheated;
+                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+
+                break;
+            }
             case bmmo::KeyboardInput:
                 break;
             default:
@@ -394,6 +422,8 @@ int main() {
             msg.serialize();
 
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        } else if (cmd == "cheat?") {
+            
         }
     } while (server.running());
 

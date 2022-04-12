@@ -9,20 +9,20 @@ namespace bmmo {
 
         player_connected_msg(): serializable_message(bmmo::PlayerConnected) {}
 
-        void serialize() override {
+        bool serialize() override {
             serializable_message::serialize();
 
             raw.write(reinterpret_cast<const char*>(&connection_id), sizeof(connection_id));
             message_utils::write_string(name, raw);
-            assert(raw.good());
+            return raw.good();
         }
 
-        void deserialize() override {
+        bool deserialize() override {
             serializable_message::deserialize();
 
             raw.read(reinterpret_cast<char*>(&connection_id), sizeof(connection_id));
             message_utils::read_string(raw, name);
-            assert(raw.good());
+            return raw.good();
         }
 
     };

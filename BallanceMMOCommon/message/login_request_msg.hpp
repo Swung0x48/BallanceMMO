@@ -9,18 +9,21 @@ namespace bmmo {
 
         std::string nickname;
 
-        void serialize() override {
-            serializable_message::serialize();
+        bool serialize() override {
+            if (serializable_message::serialize()) return false;
 
             message_utils::write_string(nickname, raw);
-            assert(raw.good());
+            return (raw.good());
         }
 
-        void deserialize() override {
-            serializable_message::deserialize();
+        bool deserialize() override {
+            if (serializable_message::deserialize())
+                return false;
 
-            message_utils::read_string(raw, nickname);
-            assert(raw.good());
+            if (!message_utils::read_string(raw, nickname))
+                return false;
+            
+            return (raw.good());
         }
     };
 }

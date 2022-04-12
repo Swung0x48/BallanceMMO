@@ -343,9 +343,11 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         //status_->paint(0xff00ff00);
         m_bml->SendIngameMessage("Connected to server.");
         m_bml->SendIngameMessage("Logging in...");
-        bmmo::login_request_msg msg;
+        bmmo::login_request_v2_msg msg;
         db_.set_nickname(props_["playername"]->GetString());
         msg.nickname = props_["playername"]->GetString();
+        msg.version = version;
+        msg.cheated = m_bml->IsCheatEnabled();
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         if (ping_thread_.joinable())

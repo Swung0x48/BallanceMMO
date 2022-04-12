@@ -131,8 +131,11 @@ private:
 
             case k_ESteamNetworkingConnectionState_Connected: {
                 Printf("Connected to server OK\n");
-                bmmo::login_request_msg msg;
+                //bmmo::login_request_msg msg;
+                bmmo::login_request_v2_msg msg;
                 msg.nickname = "Swung";
+                msg.cheated = 0;
+                // msg.version = bmmo::version_t{1, 0, 0, bmmo::Alpha, 0};
                 msg.serialize();
                 send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
@@ -165,6 +168,12 @@ private:
                        obs->content.state.rotation.y,
                        obs->content.state.rotation.z,
                        obs->content.state.rotation.w);
+                break;
+            }
+            case bmmo::OwnedCheatState: {
+                assert(networking_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
+                auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(networking_msg->m_pData);
+                Printf("%ld turned cheat %s.", ocs->content.player_id, ocs->content.state.cheated ? "on" : "off");
                 break;
             }
             case bmmo::Chat: {
@@ -232,6 +241,7 @@ int main() {
         return 1;
     }
 
+    bool cheat = false;
     std::thread client_thread([&client]() { client.run(); });
     do {
         std::string input;
@@ -284,6 +294,11 @@ int main() {
             }
 
             client_thread = std::move(std::thread([&client]() { client.run(); }));
+        } else if (input == "cheat") {
+            cheat = !cheat;
+            bmmo::cheat_state_msg msg;
+            msg.content.cheated = cheat;
+            client.send(msg, k_nSteamNetworkingSend_Reliable);
         } else {
             bmmo::chat_msg msg{};
             msg.chat_content = input;

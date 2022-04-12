@@ -23,7 +23,12 @@ namespace bmmo {
 
         Chat,
 
-        LevelFinish
+        LevelFinish,
+
+        LoginRequestV2,
+
+        CheatState,
+        OwnedCheatState
     };
 
     template<typename T, opcode C = None>
@@ -51,15 +56,16 @@ namespace bmmo {
         }
 
         // entity -> raw
-        virtual void serialize() {
+        virtual bool serialize() {
             raw.write(reinterpret_cast<const char*>(&code), sizeof(opcode));
+            return true;
         }
 
         // raw -> entity
-        virtual void deserialize() {
+        virtual bool deserialize() {
             opcode c;
             raw.read(reinterpret_cast<char*>(&c), sizeof(opcode));
-            assert(c == code);
+            return c == code;
         }
     };
 }

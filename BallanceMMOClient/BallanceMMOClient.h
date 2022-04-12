@@ -29,8 +29,9 @@ public:
 		this_instance_ = this;
 	}
 
+	bmmo::version_t version;
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return "3.0.20-beta2"; }
+	virtual CKSTRING GetVersion() override { return version.to_string().c_str(); }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }

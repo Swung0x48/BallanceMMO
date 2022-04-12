@@ -8,7 +8,7 @@ namespace bmmo {
 
         login_accepted_msg(): serializable_message(bmmo::LoginAccepted) {}
 
-        void serialize() override {
+        bool serialize() override {
             serializable_message::serialize();
 
             uint32_t size = online_players.size();
@@ -17,10 +17,10 @@ namespace bmmo {
                 message_utils::write_string(i.second, raw);
                 raw.write(reinterpret_cast<const char*>(&i.first), sizeof(i.first));
             }
-            assert(raw.good());
+            return raw.good();
         }
 
-        void deserialize() override {
+        bool deserialize() override {
             serializable_message::deserialize();
 
             uint32_t size = 0;
@@ -28,13 +28,16 @@ namespace bmmo {
             for (uint32_t i = 0; i < size; ++i) {
                 std::string name;
                 HSteamNetConnection conn;
-                message_utils::read_string(raw, name);
+                if (message_utils::read_string(raw, name))
+                    return false;
+                if (sizeof(conn) + raw.tellg() > raw.gcount())
+                    return false;
                 raw.read(reinterpret_cast<char*>(&conn), sizeof(conn));
 
                 online_players[conn] = name;
             }
 
-            assert(raw.good());
+            return raw.good();
         }
 
     };

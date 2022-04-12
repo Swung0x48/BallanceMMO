@@ -10,20 +10,22 @@ namespace bmmo {
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
         std::string chat_content;
 
-        void serialize() override {
-            serializable_message::serialize();
+        bool serialize() override {
+            if (!serializable_message::serialize()) return false;
 
             raw.write(reinterpret_cast<const char*>(&player_id), sizeof(player_id));
             message_utils::write_string(chat_content, raw);
-            assert(raw.good());
+            return raw.good();
         }
 
-        void deserialize() override {
-            serializable_message::deserialize();
+        bool deserialize() override {
+            if (!serializable_message::deserialize()) return false;
 
+            if (sizeof(player_id) + raw.tellg() > size()) return false;
             raw.read(reinterpret_cast<char*>(&player_id), sizeof(player_id));
-            message_utils::read_string(raw, chat_content);
-            assert(raw.good());
+            if (!message_utils::read_string(raw, chat_content))
+                return false;
+            return raw.good();
         }
     };
 }
