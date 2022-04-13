@@ -15,6 +15,7 @@
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
 
+bool cheat = false;
 struct client_data {
     std::string name;
 };
@@ -185,6 +186,16 @@ private:
                     Printf("[Server]: %s", msg.chat_content.c_str());
                 else
                     Printf("%u: %s", msg.player_id, msg.chat_content.c_str());
+                break;
+            }
+            case bmmo::CheatToggle: {
+                auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
+                cheat = msg->content.cheated;
+                Printf("Server toggled cheat %s globally!", cheat ? "on" : "off");
+                bmmo::cheat_state_msg state_msg{};
+                state_msg.content.cheated = cheat;
+                send(state_msg, k_nSteamNetworkingSend_Reliable);
+                break;
             }
             default:
                 break;
@@ -241,7 +252,6 @@ int main() {
         return 1;
     }
 
-    bool cheat = false;
     std::thread client_thread([&client]() { client.run(); });
     do {
         std::string input;

@@ -28,7 +28,8 @@ namespace bmmo {
         LoginRequestV2,
 
         CheatState,
-        OwnedCheatState
+        OwnedCheatState,
+        CheatToggle
     };
 
     template<typename T, opcode C = None>

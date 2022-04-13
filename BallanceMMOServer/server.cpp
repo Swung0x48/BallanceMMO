@@ -84,6 +84,12 @@ public:
         }
     }
 
+    void toggle_cheat(bool cheat) {
+        bmmo::cheat_toggle_msg msg;
+        msg.content.cheated = (uint8_t)cheat;
+        broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+    }
+
     void shutdown() {
         for (auto& i: clients_) {
             interface_->CloseConnection(i.first, 0, "Server closed", true);
@@ -422,8 +428,13 @@ int main() {
             msg.serialize();
 
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        } else if (cmd == "cheat?") {
-            
+        } else if (cmd == "cheat") {
+            bool cheat_state = false;
+            std::string cheat_state_string;
+            std::cin >> cheat_state_string;
+            if (cheat_state_string == "on")
+                cheat_state = true;
+            server.toggle_cheat(cheat_state);
         }
     } while (server.running());
 

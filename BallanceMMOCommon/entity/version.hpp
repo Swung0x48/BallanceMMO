@@ -24,6 +24,7 @@ namespace bmmo {
                 case Alpha: stage_s = "-alpha" + std::to_string((int)build); break;
                 case Beta: stage_s = "-beta" + std::to_string((int)build); break;
                 case RC: stage_s = "-rc" + std::to_string((int)build); break;
+                case Release: break;
             };
             std::stringstream ss;
             ss << (int)major << "." << (int)minor << "." << (int)subminor << stage_s;

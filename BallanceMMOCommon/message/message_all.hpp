@@ -14,5 +14,6 @@
 #include "login_request_v2.hpp"
 #include "cheat_state_msg.hpp"
 #include "owned_cheat_state_msg.hpp"
+#include "cheat_toggle_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP
