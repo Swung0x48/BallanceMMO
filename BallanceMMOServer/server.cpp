@@ -232,8 +232,10 @@ protected:
         auto client_it = clients_.find(networking_msg->m_conn);
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        if (!(raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || client_it != clients_.end())) // ignore limbo clients message
+        if (!(raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || client_it != clients_.end())) { // ignore limbo clients message
+            interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min + 1, "Invalid client", true);
             return;
+        }
 
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
