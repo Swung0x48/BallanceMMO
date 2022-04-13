@@ -118,6 +118,22 @@ void BallanceMMOClient::OnLevelFinish() {
     send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
+void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
+{
+    if (strcmp(script->GetName(), "Gameplay_Ingame") == 0)
+        edit_Gameplay_Ingame(script);
+    if (strcmp(script->GetName(), "Gameplay_Events") == 0)
+        edit_Gameplay_Events(script);
+    if (strcmp(script->GetName(), "Event_handler") == 0)
+        edit_Event_handler(script);
+}
+
+void BallanceMMOClient::OnCheatEnabled(bool enable) {
+    bmmo::cheat_state_msg msg{};
+    msg.content.cheated = enable;
+    send(msg, k_nSteamNetworkingSend_Reliable);
+}
+
 void BallanceMMOClient::OnExitGame()
 {
     cleanup(true);
@@ -477,6 +493,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->SendIngameMessage(std::format(fmt_string,
             state.has_value() ? state->name : db_.get_nickname(), score, hours, minutes, seconds, ms).c_str());
         // TODO: Stop displaying objects on finish
+        break;
+    }
+    case bmmo::CheatToggle: {
+        auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(network_msg->m_pData);
+        bool cheat = msg->content.cheated;
+        m_bml->EnableCheat(cheat);
+        std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
+        m_bml->SendIngameMessage(str.c_str());
+        bmmo::cheat_state_msg state_msg{};
+        state_msg.content.cheated = m_bml->IsCheatEnabled();
+        send(state_msg, k_nSteamNetworkingSend_Reliable);
         break;
     }
     default:

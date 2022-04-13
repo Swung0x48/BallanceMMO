@@ -30,8 +30,9 @@ public:
 	}
 
 	bmmo::version_t version;
+	string version_string = version.to_string();
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return version.to_string().c_str(); }
+	virtual CKSTRING GetVersion() override { return version_string.c_str(); }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
@@ -65,7 +66,8 @@ private:
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	void OnLevelFinish() override;
-
+	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
+	void OnCheatEnabled(bool enable) override;
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
@@ -206,6 +208,35 @@ private:
 
 		return CKKEY_AX;
 	}*/
+	CKBehavior* script = nullptr;
+	CKBehavior* m_dynamicPos = nullptr;
+	CKBehavior* m_phyNewBall = nullptr;
+	//CKContext* ctx = m_bml->GetCKContext();
+	CKDataArray* m_curLevel = m_bml->GetArrayByName("CurrentLevel");
+	CKDataArray* m_ingameParam = m_bml->GetArrayByName("IngameParameter");
+	CK_ID init_game;
+	void edit_Gameplay_Ingame(CKBehavior* script) {
+		CKBehavior* init_ingame = ScriptHelper::FindFirstBB(script, "Init Ingame");
+		init_game = CKOBJID(init_ingame);
+		CKBehavior* ballMgr = ScriptHelper::FindFirstBB(script, "BallManager");
+		CKBehavior* newBall = ScriptHelper::FindFirstBB(ballMgr, "New Ball");
+		m_dynamicPos = ScriptHelper::FindNextBB(script, ballMgr, "TT Set Dynamic Position");
+		m_phyNewBall = ScriptHelper::FindFirstBB(newBall, "physicalize new Ball");
+	}
+
+	//CKParameter* m_curSector = nullptr;
+	CK_ID m_curSector;
+	void edit_Gameplay_Events(CKBehavior* script) {
+		CKBehavior* id = ScriptHelper::FindNextBB(script, script->GetInput(0));
+		m_curSector = CKOBJID(id->GetOutputParameter(0)->GetDestination(0));
+	}
+
+	CK_ID reset_level_;
+	CK_ID pause_level_;
+	void edit_Event_handler(CKBehavior* script) {
+		pause_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Pause Level"));
+		reset_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "reset Level"));
+	}
 
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
 	const std::vector<std::string> init_args{ "mmo", "s" };
@@ -237,6 +268,93 @@ private:
 				}
 			}
 		}
+		
+		//if (input_manager->IsKeyPressed(CKKEY_5)) {
+		//	/*m_bml->OnBallNavInactive();
+		//	m_bml->OnPreResetLevel();
+		//	CK3dEntity* curBall = static_cast<CK3dEntity*>(m_bml->GetArrayByName("CurrentLevel")->GetElementObject(0, 1));
+		//	if (curBall) {
+		//		ExecuteBB::Unphysicalize(curBall);
+		//	}
+		//	auto* in = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(init_game));
+		//	in->ActivateInput(0);
+		//	in->Activate();
+		//	m_bml->OnPostResetLevel();
+		//	m_bml->OnStartLevel();*/
+		//	/*auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(pause_level_));
+		//	beh->ActivateInput(0);
+		//	beh->Activate();*/
+		//	m_bml->OnPauseLevel();
+		//	m_bml->OnBallNavInactive();
+		//	CKMessageManager* mm = m_bml->GetMessageManager();
+		//	CKMessageType blend = mm->AddMessageType("Blend FadeIn");
+		//	mm->SendMessageSingle(blend, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
+		//	auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(reset_level_));
+		//	beh->ActivateInput(0);
+		//	beh->Activate();
+		//}
+		
+		/*if (input_manager->IsKeyPressed(CKKEY_P)) {
+			auto* ctx = m_bml->GetCKContext();
+			CKMessageManager* mm = m_bml->GetMessageManager();
+			CKMessageType ballDeact = mm->AddMessageType("BallNav deactivate");
+
+			mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Gameplay"));
+			mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Sound"));
+
+			m_bml->AddTimer(2u, [this, ctx]() {
+				CK3dEntity* curBall = static_cast<CK3dEntity*>(m_bml->GetArrayByName("CurrentLevel")->GetElementObject(0, 1));
+				if (curBall) {
+					ExecuteBB::Unphysicalize(curBall);
+
+					CKDataArray* ph = m_bml->GetArrayByName("PH");
+					for (int i = 0; i < ph->GetRowCount(); i++) {
+						CKBOOL set = true;
+						char name[100];
+						ph->GetElementStringValue(i, 1, name);
+						if (!strcmp(name, "P_Extra_Point"))
+							ph->SetElementValue(i, 4, &set);
+					}
+
+					auto* sector = static_cast<CKParameter*>(ctx->GetObject(m_curSector));
+					m_bml->GetArrayByName("IngameParameter")->SetElementValueFromParameter(0, 1, sector);
+					m_bml->GetArrayByName("IngameParameter")->SetElementValueFromParameter(0, 2, sector);
+					CKBehavior* sectorMgr = m_bml->GetScriptByName("Gameplay_SectorManager");
+					ctx->GetCurrentScene()->Activate(sectorMgr, true);
+
+					m_bml->AddTimerLoop(1u, [this, curBall, sectorMgr, ctx]() {
+						if (sectorMgr->IsActive())
+							return true;
+
+						m_dynamicPos->ActivateInput(1);
+						m_dynamicPos->Activate();
+
+						m_bml->AddTimer(1u, [this, curBall, sectorMgr, ctx]() {
+							VxMatrix matrix;
+							m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 3, &matrix);
+							curBall->SetWorldMatrix(matrix);
+
+							CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
+							m_bml->RestoreIC(camMF, true);
+							camMF->SetWorldMatrix(matrix);
+
+							m_bml->AddTimer(1u, [this]() {
+								m_dynamicPos->ActivateInput(0);
+								m_dynamicPos->Activate();
+
+								m_phyNewBall->ActivateInput(0);
+								m_phyNewBall->Activate();
+								m_phyNewBall->GetParent()->Activate();
+
+								GetLogger()->Info("Sector Reset");
+								});
+							});
+
+						return false;
+						});
+				}
+				});
+		}*/
 
 		/*BYTE* states = m_bml->GetInputManager()->GetKeyboardState();
 
@@ -297,6 +415,7 @@ private:
 		assert(sizeof(msg.content) == sizeof(local_ball_state_));
 		std::memcpy(&(msg.content), &local_ball_state_, sizeof(msg.content));
 		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
+#ifdef DEBUG
 		GetLogger()->Info("(%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
 			local_ball_state_.position.x,
 			local_ball_state_.position.y,
@@ -306,6 +425,7 @@ private:
 			local_ball_state_.rotation.z,
 			local_ball_state_.rotation.w
 		);
+#endif // DEBUG
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
