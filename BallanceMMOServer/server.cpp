@@ -355,7 +355,7 @@ protected:
             case bmmo::CheatState: {
                 auto* state_msg = reinterpret_cast<bmmo::cheat_state_msg*>(networking_msg->m_pData);
                 client_it->second.cheated = state_msg->content.cheated;
-                Printf("%s turned %s cheat!", client_it->second.name.c_str(), state_msg->content.cheated ? "on" : "off");
+                Printf("%s turned [%s] cheat!", client_it->second.name.c_str(), state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
