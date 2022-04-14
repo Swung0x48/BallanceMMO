@@ -28,9 +28,9 @@ namespace bmmo {
             for (uint32_t i = 0; i < size; ++i) {
                 std::string name;
                 HSteamNetConnection conn;
-                if (message_utils::read_string(raw, name))
+                if (!message_utils::read_string(raw, name))
                     return false;
-                if (sizeof(conn) + raw.tellg() > raw.gcount())
+                if (sizeof(conn) > raw.gcount())
                     return false;
                 raw.read(reinterpret_cast<char*>(&conn), sizeof(conn));
 
