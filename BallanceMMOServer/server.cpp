@@ -365,6 +365,8 @@ protected:
 
                 break;
             }
+            case bmmo::CheatToggle: {
+            }
             case bmmo::KeyboardInput:
                 break;
             default:

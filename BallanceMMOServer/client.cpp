@@ -197,6 +197,15 @@ private:
                 send(state_msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
+            case bmmo::OwnedCheatToggle: {
+                auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
+                cheat = msg->content.cheated;
+                Printf("#%u toggled cheat %s globally!", cheat ? "on" : "off");
+                bmmo::cheat_state_msg state_msg{};
+                state_msg.content.cheated = cheat;
+                send(state_msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
             default:
                 break;
         }

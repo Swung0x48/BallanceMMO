@@ -29,7 +29,8 @@ namespace bmmo {
 
         CheatState,
         OwnedCheatState,
-        CheatToggle
+        CheatToggle,
+        OwnedCheatToggle
     };
 
     template<typename T, opcode C = None>
