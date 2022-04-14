@@ -366,6 +366,11 @@ protected:
                 break;
             }
             case bmmo::CheatToggle: {
+                auto* state_msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
+                bmmo::owned_cheat_toggle_msg new_msg{};
+                new_msg.content.player_id = client_it->first;
+                new_msg.content.state.cheated = state_msg->content.cheated;
+                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
             }
             case bmmo::KeyboardInput:
                 break;
