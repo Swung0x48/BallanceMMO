@@ -18,19 +18,21 @@ struct BallState {
 
 struct PlayerState {
 	std::string name;
+	bool cheated = false;
 	BallState ball_state;
 };
 
 class game_state
 {
 public:
-	bool create(HSteamNetConnection id, const std::string& name = "") {
+	bool create(HSteamNetConnection id, const std::string& name = "", bool cheated = false) {
 		if (exists(id))
 			return false;
 
 		std::unique_lock lk(mutex_);
 		states_[id] = {};
 		states_[id].name = name;
+		states_[id].cheated = cheated;
 		return true;
 	}
 
@@ -70,6 +72,15 @@ public:
 
 		std::unique_lock lk(mutex_);
 		states_[id].ball_state = state;
+		return true;
+	}
+
+	bool update(HSteamNetConnection id, bool cheated) {
+		if (!exists(id))
+			return false;
+
+		std::unique_lock lk(mutex_);
+		states_[id].cheated = cheated;
 		return true;
 	}
 
