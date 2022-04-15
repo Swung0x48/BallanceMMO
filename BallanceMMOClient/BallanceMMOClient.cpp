@@ -253,7 +253,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 ss << db_.get_nickname();
 
                 m_bml->SendIngameMessage(ss.str().c_str());
-            } 
+            }
             /*else if (args[1] == "p") {
                 objects_.physicalize_all();
             } else if (args[1] == "f") {
@@ -273,6 +273,14 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 msg.serialize();
 
                 send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            }
+            else if (args[1] == "cheat") {
+                bool cheat_state = false;
+                if (args[2] == "on")
+                    cheat_state = true;
+                bmmo::cheat_toggle_msg msg{};
+                msg.content.cheated = cheat_state;
+                send(msg, k_nSteamNetworkingSend_Reliable);
             }
             break;
         }
@@ -312,8 +320,13 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
             m_bml->SendIngameMessage("Connect failed. (ClosedByPeer)");
+            m_bml->SendIngameMessage(pInfo->m_info.m_szEndDebug);
             GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
             break;
+        }
+        if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
+            std::string s = std::format("You've been disconnected from the server. Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
+            m_bml->SendIngameMessage(s.c_str());
         }
         cleanup();
         break;
@@ -415,7 +428,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->SendIngameMessage("Logged in.");
         bmmo::login_accepted_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        msg.deserialize();
+        if (!msg.deserialize()) {
+            GetLogger()->Error("Deserialize failed!");
+        }
         GetLogger()->Info("Online players: ");
 
         for (auto& i : msg.online_players) {
@@ -423,8 +438,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 db_.set_client_id(i.first);
             } else {
                 db_.create(i.first, i.second);
-                GetLogger()->Info(i.second.c_str());
             }
+            GetLogger()->Info(i.second.c_str());
         }
         break;
     }
@@ -495,6 +510,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         // TODO: Stop displaying objects on finish
         break;
     }
+    case bmmo::OwnedCheatState: {
+        assert(network_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
+        auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(network_msg->m_pData);
+        auto state = db_.get(ocs->content.player_id);
+        assert(state.has_value() || (db_.get_client_id() == ocs->content.player_id));
+        std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
+        m_bml->SendIngameMessage(s.c_str());
+        break;
+    }
     case bmmo::CheatToggle: {
         auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(network_msg->m_pData);
         bool cheat = msg->content.cheated;
@@ -504,6 +528,25 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::cheat_state_msg state_msg{};
         state_msg.content.cheated = m_bml->IsCheatEnabled();
         send(state_msg, k_nSteamNetworkingSend_Reliable);
+        break;
+    }
+    case bmmo::OwnedCheatToggle: {
+        auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(network_msg->m_pData);
+        std::string player_name = "";
+        if (msg->content.player_id == db_.get_client_id())
+            player_name = db_.get_nickname();
+        else {
+            auto player_state = db_.get(msg->content.player_id);
+            if (player_state.has_value()) {
+                player_name = player_state->name;
+            }
+        }
+        if (player_name != "") {
+            bool cheat = msg->content.state.cheated;
+            std::string str = std::format("{} toggled cheat [{}] globally!", player_name, cheat ? "on" : "off");
+            m_bml->EnableCheat(cheat);
+            m_bml->SendIngameMessage(str.c_str());
+        }
         break;
     }
     default:
