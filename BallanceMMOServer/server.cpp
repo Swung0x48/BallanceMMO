@@ -274,9 +274,10 @@ protected:
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
                 
                 // notify other client of the fact that this client goes online
-                bmmo::player_connected_msg connected_msg;
+                bmmo::player_connected_v2_msg connected_msg;
                 connected_msg.connection_id = networking_msg->m_conn;
                 connected_msg.name = msg.nickname;
+                connected_msg.cheated = msg.cheated;
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
                 break;
