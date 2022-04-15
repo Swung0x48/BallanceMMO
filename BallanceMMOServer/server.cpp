@@ -361,12 +361,13 @@ protected:
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
-                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
 
                 break;
             }
             case bmmo::CheatToggle: {
                 auto* state_msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
+                Printf("%s toggled cheat [%s] globally!", client_it->second.name.c_str(), state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_toggle_msg new_msg{};
                 new_msg.content.player_id = client_it->first;
                 new_msg.content.state.cheated = state_msg->content.cheated;
