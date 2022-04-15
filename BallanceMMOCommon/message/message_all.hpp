@@ -11,7 +11,7 @@
 #include "owned_ball_state_msg.hpp"
 #include "chat_msg.hpp"
 #include "level_finish_msg.hpp"
-#include "login_request_v2.hpp"
+#include "login_request_v2_msg.hpp"
 #include "cheat_state_msg.hpp"
 #include "owned_cheat_state_msg.hpp"
 #include "cheat_toggle_msg.hpp"
