@@ -233,7 +233,7 @@ protected:
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
         if (!(raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || client_it != clients_.end())) { // ignore limbo clients message
-            interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min + 1, "Invalid client", true);
+            interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
             return;
         }
 
@@ -265,10 +265,10 @@ protected:
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
                 // notify this client of other online players
-                bmmo::login_accepted_msg accepted_msg;
+                bmmo::login_accepted_v2_msg accepted_msg;
                 for (auto it = clients_.begin(); it != clients_.end(); ++it) {
-                    if (client_it != it)
-                        accepted_msg.online_players[it->first] = it->second.name;
+                    //if (client_it != it)
+                    accepted_msg.online_players[it->first] = { it->second.name, it->second.cheated };
                 }
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
