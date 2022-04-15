@@ -5,6 +5,7 @@
 namespace bmmo {
     struct cheat_state {
         uint8_t cheated;
+        uint8_t notify = 1;
     };
 
     typedef struct message<cheat_state, CheatState> cheat_state_msg;

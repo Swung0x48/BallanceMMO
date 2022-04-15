@@ -362,8 +362,8 @@ protected:
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
+                new_msg.content.notify = state_msg->content.notify;
                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
-
                 break;
             }
             case bmmo::CheatToggle: {

@@ -3,7 +3,7 @@
 IMod* BMLEntry(IBML* bml) {
     DeclareDumpFile();
     BallanceMMOClient::init_socket();
-	return new BallanceMMOClient(bml);
+  return new BallanceMMOClient(bml);
 }
 
 void BallanceMMOClient::OnLoad()
@@ -131,6 +131,7 @@ void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
 void BallanceMMOClient::OnCheatEnabled(bool enable) {
     bmmo::cheat_state_msg msg{};
     msg.content.cheated = enable;
+    msg.content.notify = notify_cheat_toggle_;
     send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
@@ -562,14 +563,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             db_.set_pending_flush(true);
         }
 
-        std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
-        m_bml->SendIngameMessage(s.c_str());
+        if (ocs->content.notify) {
+            std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
+            m_bml->SendIngameMessage(s.c_str());
+        };
         break;
     }
     case bmmo::CheatToggle: {
         auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(network_msg->m_pData);
         bool cheat = msg->content.cheated;
+        notify_cheat_toggle_ = false;
         m_bml->EnableCheat(cheat);
+        notify_cheat_toggle_ = true;
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
         m_bml->SendIngameMessage(str.c_str());
         bmmo::cheat_state_msg state_msg{};
@@ -591,7 +596,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (player_name != "") {
             bool cheat = msg->content.state.cheated;
             std::string str = std::format("{} toggled cheat [{}] globally!", player_name, cheat ? "on" : "off");
+            notify_cheat_toggle_ = false;
             m_bml->EnableCheat(cheat);
+            notify_cheat_toggle_ = true;
             m_bml->SendIngameMessage(str.c_str());
         }
         break;

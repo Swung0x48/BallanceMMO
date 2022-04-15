@@ -123,6 +123,8 @@ private:
 	bool logged_in_ = false;
 	float level_start_timestamp_ = 0.0f;
 
+	bool notify_cheat_toggle_ = true;
+
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
 	}

@@ -14,9 +14,9 @@ namespace bmmo {
     struct version_t {
         uint8_t major = 3;
         uint8_t minor = 1;
-        uint8_t subminor = 1;
+        uint8_t subminor = 2;
         stage_t stage = Alpha;
-        uint8_t build = 4;
+        uint8_t build = 5;
 
         std::string to_string() {
             std::string stage_s = "";
