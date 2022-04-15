@@ -383,12 +383,12 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         if (ping_thread_.joinable())
             ping_thread_.join();
         ping_thread_ = std::thread([this]() {
-            while (connected()) {
+            do {
                 auto status = get_status();
                 std::string str = pretty_status(status);
                 ping_->update(str, false);
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
+            } while (connected()); // here's a possible race condition
         });
         break;
     }
@@ -424,7 +424,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::LoginAccepted: {
-        status_->update("Connected");
+        /*status_->update("Connected");
         status_->paint(0xff00ff00);
         m_bml->SendIngameMessage("Logged in.");
         bmmo::login_accepted_msg msg;
@@ -441,10 +441,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 db_.create(i.first, i.second);
             }
             GetLogger()->Info(i.second.c_str());
-        }
+        }*/
+        GetLogger()->Warn("Outdated LoginAccepted msg received!");
         break;
     }
     case bmmo::LoginAcceptedV2: {
+        logged_in_ = true;
         status_->update("Connected");
         status_->paint(0xff00ff00);
         m_bml->SendIngameMessage("Logged in.");
@@ -466,20 +468,38 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerConnected: {
-        bmmo::player_connected_msg msg;
+        //bmmo::player_connected_msg msg;
+        //msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        //msg.deserialize();
+        //m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+        //if (m_bml->IsIngame()) {
+        //    GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
+        //    objects_.init_player(msg.connection_id, msg.name);
+        //}
+
+        //GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
+        //db_.create(msg.connection_id, msg.name);
+
+        //// TODO: call this when the player enters a map
+        GetLogger()->Warn("Outdated PlayerConnected msg received!");
+        
+        break;
+    }
+    case bmmo::PlayerConnectedV2: {
+        bmmo::player_connected_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+        m_bml->SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off").c_str());
         if (m_bml->IsIngame()) {
             GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
             objects_.init_player(msg.connection_id, msg.name);
         }
 
         GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
-        db_.create(msg.connection_id, msg.name);
+        db_.create(msg.connection_id, msg.name, msg.cheated);
 
         // TODO: call this when the player enters a map
-        
+
         break;
     }
     case bmmo::PlayerDisconnected: {

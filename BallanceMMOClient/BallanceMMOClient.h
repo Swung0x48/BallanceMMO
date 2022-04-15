@@ -120,10 +120,15 @@ private:
 	CK_ID current_level_array_ = 0;
 
 	std::atomic_bool resolving_endpoint_ = false;
+	bool logged_in_ = false;
 	float level_start_timestamp_ = 0.0f;
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
+	}
+
+	bool connected() override {
+		return client::connected() && logged_in_;
 	}
 
 	CK3dObject* get_current_ball() {
@@ -451,6 +456,7 @@ private:
 			io_ctx_.stop();
 
 		resolving_endpoint_ = false;
+		logged_in_ = false;
 
 		if (down) // Since the game's going down, we don't care about text shown.
 			return;

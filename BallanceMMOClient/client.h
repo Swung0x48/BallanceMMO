@@ -38,7 +38,7 @@ public:
         return estate_;
     }
 
-    bool connected() {
+    virtual bool connected() {
         return get_connection_state() == k_ESteamNetworkingConnectionState_Connected;
     }
 
