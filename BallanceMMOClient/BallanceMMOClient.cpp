@@ -247,10 +247,10 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
                 std::stringstream ss;
                 db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    ss << pair.second.name << ", ";
+                    ss << pair.second.name << (pair.second.cheated ? " [CHEAT]" : "") << ", ";
                     return true;
                 });
-                ss << db_.get_nickname();
+                ss << db_.get_nickname() << (m_bml->IsCheatEnabled() ? " [CHEAT]" : "");
 
                 m_bml->SendIngameMessage(ss.str().c_str());
             }
