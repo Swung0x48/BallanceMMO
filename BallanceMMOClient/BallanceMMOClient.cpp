@@ -292,6 +292,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         status_->paint(0xffff0000);
         break;
     case k_ESteamNetworkingConnectionState_ClosedByPeer: {
+        string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
@@ -299,11 +300,16 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
             break;
         }
+        if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
+            m_bml->SendIngameMessage("You've been disconnected from the server.");
+        }
+        m_bml->SendIngameMessage(s.c_str());
         cleanup();
         break;
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {
+        string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
         ping_->update("");
         status_->update("Disconnected");
         status_->paint(0xffff0000);
@@ -319,7 +325,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             m_bml->SendIngameMessage("Connect failed. (UnknownError)");
             GetLogger()->Warn("Unknown error. (%d->%d) %s", pInfo->m_eOldState, pInfo->m_info.m_eState, pInfo->m_info.m_szEndDebug);
         }
-
+        m_bml->SendIngameMessage(s.c_str());
         // Clean up the connection.  This is important!
         // The connection is "closed" in the network sense, but
         // it has not been destroyed.  We must close it on our end, too
