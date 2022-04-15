@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct player_connected_msg: public serializable_message {
-        HSteamNetConnection connection_id;
+        HSteamNetConnection connection_id = k_HSteamNetConnection_Invalid;
         std::string name;
 
         player_connected_msg(): serializable_message(bmmo::PlayerConnected) {}

@@ -27,6 +27,7 @@ namespace bmmo {
 
         LoginRequestV2,
         LoginAcceptedV2,
+        PlayerConnectedV2,
 
         CheatState,
         OwnedCheatState,
