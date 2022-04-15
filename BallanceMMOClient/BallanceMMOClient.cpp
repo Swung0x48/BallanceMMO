@@ -86,7 +86,7 @@ void BallanceMMOClient::OnProcess() {
                 assemble_and_send_state();
             });
 
-            objects_.update();
+            objects_.update(db_.flush());
         }
     }
 }
@@ -492,7 +492,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off").c_str());
         if (m_bml->IsIngame()) {
             GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
-            objects_.init_player(msg.connection_id, msg.name);
+            objects_.init_player(msg.connection_id, msg.name, msg.cheated);
         }
 
         GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
@@ -559,6 +559,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         assert(state.has_value() || (db_.get_client_id() == ocs->content.player_id));
         if (state.has_value()) {
             db_.update(ocs->content.player_id, ocs->content.state.cheated);
+            db_.set_pending_flush(true);
         }
 
         std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");

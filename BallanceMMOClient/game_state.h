@@ -169,6 +169,20 @@ public:
 	void toggle_nametag_visible() {
 		nametag_visible_ = !nametag_visible_;
 	}
+
+	void set_pending_flush(bool flag) {
+		pending_cheat_flush_ = flag;
+	}
+
+	bool get_pending_flush() {
+		return pending_cheat_flush_;
+	}
+
+	bool flush() {
+		bool f = pending_cheat_flush_;
+		pending_cheat_flush_ = false;
+		return f;
+	}
 private:
 	std::shared_mutex mutex_;
 	std::unordered_map<HSteamNetConnection, PlayerState> states_;
@@ -176,4 +190,5 @@ private:
 	std::string nickname_;
 	HSteamNetConnection assigned_id_;
 	std::atomic_bool nametag_visible_ = true;
+	std::atomic_bool pending_cheat_flush_ = false;
 };

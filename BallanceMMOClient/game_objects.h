@@ -28,7 +28,7 @@ public:
 		PlayerObjects::bml = bml;
 	}
 
-	void init_player(const HSteamNetConnection id, const std::string& name) {
+	void init_player(const HSteamNetConnection id, const std::string& name, bool cheat) {
 		auto& obj = objects_[id];
 		for (int i = 0; i < template_balls_.size(); ++i) {
 			auto* ball = init_spirit_ball(i, id);
@@ -41,14 +41,14 @@ public:
 		}
 		obj.username_label = std::make_unique<label_sprite>(
 			"Name_" + name,
-			name,
+			name + (cheat ? " [C]" : ""),
 			0.5, 0.5);
 	}
 
 	void init_players() {
 		db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			if (item.first != db_.get_client_id())
-				init_player(item.first, item.second.name);
+				init_player(item.first, item.second.name, item.second.cheated);
 			return true;
 		});
 	}
@@ -65,7 +65,7 @@ public:
 			new_ball->Show(CKSHOW);
 	}
 
-	void update() {
+	void update(bool update_cheat = false) {
 		// Can be costly
 		//cleanup();
 
@@ -76,14 +76,14 @@ public:
 		});*/
 
 		VxRect viewport; bml_->GetRenderContext()->GetViewRect(viewport);
-
-		db_.for_each([this, &viewport](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		auto* rc = bml_->GetRenderContext();
+		db_.for_each([this, &viewport, &rc, update_cheat](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			if (item.first == db_.get_client_id())
 				return true;
 
 			if (!objects_.contains(item.first)) {
-				init_player(item.first, item.second.name);
+				init_player(item.first, item.second.name, item.second.cheated);
 			}
 
 			uint32_t current_ball_type = item.second.ball_state.type;
@@ -111,10 +111,14 @@ public:
 
 			// Update username label
 			VxRect extent; current_ball->GetRenderExtents(extent);
-			if (extent.bottom < 0 && extent.right < 0) { // This player goes out of sight
+			if (!rc)
+				return false;
+			if (extent.bottom < 0 || extent.right < 0 || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
 				username_label->set_visible(false);
 				return true;
 			}
+			if (update_cheat)
+				username_label->update(item.second.name + (item.second.cheated ? " [C]" : ""));
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			username_label->set_position(pos);
 			username_label->set_visible(db_.is_nametag_visible());
