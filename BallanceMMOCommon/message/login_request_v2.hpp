@@ -10,7 +10,7 @@ namespace bmmo {
 
         std::string nickname;
         bmmo::version_t version;
-        uint8_t cheated;
+        uint8_t cheated = false;
 
         bool serialize() override {
             if (!serializable_message::serialize()) return false;

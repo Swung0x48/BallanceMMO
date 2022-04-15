@@ -26,6 +26,7 @@ namespace bmmo {
         LevelFinish,
 
         LoginRequestV2,
+        LoginAcceptedV2,
 
         CheatState,
         OwnedCheatState,

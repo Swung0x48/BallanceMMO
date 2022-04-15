@@ -30,9 +30,11 @@ namespace bmmo {
                 HSteamNetConnection conn;
                 if (!message_utils::read_string(raw, name))
                     return false;
-                if (sizeof(conn) > raw.gcount())
+                if (!raw.good())
                     return false;
                 raw.read(reinterpret_cast<char*>(&conn), sizeof(conn));
+                if (!raw.good() || raw.gcount() != sizeof(conn))
+                    return false;
 
                 online_players[conn] = name;
             }

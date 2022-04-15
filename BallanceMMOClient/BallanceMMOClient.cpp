@@ -444,6 +444,27 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         break;
     }
+    case bmmo::LoginAcceptedV2: {
+        status_->update("Connected");
+        status_->paint(0xff00ff00);
+        m_bml->SendIngameMessage("Logged in.");
+        bmmo::login_accepted_v2_msg msg;
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (!msg.deserialize()) {
+            GetLogger()->Error("Deserialize failed!");
+        }
+        GetLogger()->Info("Online players: ");
+        
+        for (auto& i : msg.online_players) {
+            if (i.second.name == db_.get_nickname()) {
+                db_.set_client_id(i.first);
+            } else {
+                db_.create(i.first, i.second.name, i.second.cheated);
+            }
+            GetLogger()->Info(i.second.name.c_str());
+        }
+        break;
+    }
     case bmmo::PlayerConnected: {
         bmmo::player_connected_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
