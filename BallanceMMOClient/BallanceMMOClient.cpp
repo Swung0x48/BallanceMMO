@@ -557,6 +557,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(network_msg->m_pData);
         auto state = db_.get(ocs->content.player_id);
         assert(state.has_value() || (db_.get_client_id() == ocs->content.player_id));
+        if (state.has_value()) {
+            db_.update(ocs->content.player_id, ocs->content.state.cheated);
+        }
+
         std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
         m_bml->SendIngameMessage(s.c_str());
         break;
