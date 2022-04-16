@@ -30,7 +30,7 @@ public:
 
 	void init_player(const HSteamNetConnection id, const std::string& name, bool cheat) {
 		auto& obj = objects_[id];
-		for (int i = 0; i < template_balls_.size(); ++i) {
+		for (auto i = 0; i < template_balls_.size(); ++i) {
 			auto* ball = init_spirit_ball(i, id);
 			if (ball)
 				obj.balls.emplace_back(CKOBJID(ball));
@@ -42,7 +42,7 @@ public:
 		obj.username_label = std::make_unique<label_sprite>(
 			"Name_" + name,
 			name + (cheat ? " [C]" : ""),
-			0.5, 0.5);
+			0.5f, 0.5f);
 	}
 
 	void init_players() {
@@ -110,6 +110,10 @@ public:
 			}
 
 			// Update username label
+			if (update_cheat) {
+				username_label->update(item.second.name + (item.second.cheated ? " [C]" : ""));
+				bml_->SendIngameMessage(std::format("Update nametag: {}", item.second.name + (item.second.cheated ? " [C]" : "")).c_str());
+			}
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (!rc)
 				return false;
@@ -117,8 +121,6 @@ public:
 				username_label->set_visible(false);
 				return true;
 			}
-			if (update_cheat)
-				username_label->update(item.second.name + (item.second.cheated ? " [C]" : ""));
 			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			username_label->set_position(pos);
 			username_label->set_visible(db_.is_nametag_visible());
