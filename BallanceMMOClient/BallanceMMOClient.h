@@ -436,9 +436,7 @@ private:
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
-		asio::post(thread_pool_, [this, linger] {
-			shutdown(linger);
-		});
+		shutdown(linger);
 		
 		// Weird bug if join thread here. Will join at the place before next use
 		// Actually since we're using std::jthread, we don't have to join threads manually
