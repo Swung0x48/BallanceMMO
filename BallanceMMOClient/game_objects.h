@@ -112,7 +112,6 @@ public:
 			// Update username label
 			if (update_cheat) {
 				username_label->update(item.second.name + (item.second.cheated ? " [C]" : ""));
-				bml_->SendIngameMessage(std::format("Update nametag: {}", item.second.name + (item.second.cheated ? " [C]" : "")).c_str());
 			}
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (!rc)

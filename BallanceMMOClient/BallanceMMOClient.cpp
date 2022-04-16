@@ -565,7 +565,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (ocs->content.notify) {
             std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
             m_bml->SendIngameMessage(s.c_str());
-        };
+        }
         break;
     }
     case bmmo::CheatToggle: {
