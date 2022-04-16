@@ -576,9 +576,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         notify_cheat_toggle_ = true;
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
         m_bml->SendIngameMessage(str.c_str());
-        bmmo::cheat_state_msg state_msg{};
-        state_msg.content.cheated = m_bml->IsCheatEnabled();
-        send(state_msg, k_nSteamNetworkingSend_Reliable);
         break;
     }
     case bmmo::OwnedCheatToggle: {
