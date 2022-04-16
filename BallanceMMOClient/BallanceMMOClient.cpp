@@ -560,7 +560,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         assert(state.has_value() || (db_.get_client_id() == ocs->content.player_id));
         if (state.has_value()) {
             db_.update(ocs->content.player_id, ocs->content.state.cheated);
-            db_.set_pending_flush(true);
         }
 
         if (ocs->content.notify) {

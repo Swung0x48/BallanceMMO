@@ -54,6 +54,7 @@ public:
 
 		std::unique_lock lk(mutex_);
 		states_[id].name = name;
+		set_pending_flush(true);
 		return true;
 	}
 
@@ -81,6 +82,7 @@ public:
 
 		std::unique_lock lk(mutex_);
 		states_[id].cheated = cheated;
+		set_pending_flush(true);
 		return true;
 	}
 
