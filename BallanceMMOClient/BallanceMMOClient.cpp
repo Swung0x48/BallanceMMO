@@ -3,7 +3,7 @@
 IMod* BMLEntry(IBML* bml) {
     DeclareDumpFile();
     BallanceMMOClient::init_socket();
-  return new BallanceMMOClient(bml);
+    return new BallanceMMOClient(bml);
 }
 
 void BallanceMMOClient::OnLoad()

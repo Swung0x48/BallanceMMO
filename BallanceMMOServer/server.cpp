@@ -261,7 +261,7 @@ protected:
 
                 // accepting client
                 Printf("%s logged in with cheat mode %s!\n", msg.nickname.c_str(), msg.cheated ? "on" : "off");
-                clients_[networking_msg->m_conn] = {msg.nickname, (bool) (bool)msg.cheated};  // add the client here
+                clients_[networking_msg->m_conn] = {msg.nickname, (bool)msg.cheated};  // add the client here
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
                 // notify this client of other online players
@@ -364,6 +364,7 @@ protected:
                 new_msg.content.state.cheated = state_msg->content.cheated;
                 new_msg.content.notify = state_msg->content.notify;
                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
+
                 break;
             }
             case bmmo::CheatToggle: {
