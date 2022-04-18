@@ -255,11 +255,11 @@ protected:
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
                 // verify client version
-                bmmo::version_t current_version;
-                if (msg.version < current_version) {
+                if (msg.version < bmmo::minimum_client_version) {
                     bmmo::login_denied_msg new_msg;
                     std::stringstream reason;
-                    reason << "Outdated client (server: " << current_version.to_string() << "; client: " << msg.version.to_string() << ")";
+                    reason << "Outdated client (client: " << msg.version.to_string()
+                            << "; minimum: " << bmmo::minimum_client_version.to_string() << ")";
                     send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
                     interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.str().c_str(), true);
                     break;
@@ -276,7 +276,7 @@ protected:
                 }
 
                 // accepting client
-                Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), current_version.to_string().c_str(), msg.cheated ? "on" : "off");
+                Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), msg.version.to_string().c_str(), msg.cheated ? "on" : "off");
                 clients_[networking_msg->m_conn] = {msg.nickname, (bool)msg.cheated};  // add the client here
                 username_[msg.nickname] = networking_msg->m_conn;
 
@@ -441,7 +441,8 @@ int main() {
 
     std::cout << "Bootstrapping server..." << std::endl;
     std::thread server_thread([&server]() { server.run(); });
-    std::cout << "Server v" << bmmo::version_t().to_string() << " started!" << std::endl;
+    std::cout << "Server (v" << bmmo::version_t().to_string() << "; client min v"
+            << bmmo::minimum_client_version.to_string() << ") started!" << std::endl;
 
     do {
         std::cout << "\r> " << std::flush;
