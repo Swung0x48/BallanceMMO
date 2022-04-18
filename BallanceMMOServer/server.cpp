@@ -8,7 +8,6 @@
 #include "../BallanceMMOCommon/role/role.hpp"
 #include <vector>
 #include "../BallanceMMOCommon/common.hpp"
-#include <asio.hpp>
 
 struct client_data {
     std::string name;
@@ -161,6 +160,9 @@ protected:
                     bmmo::player_disconnected_msg msg;
                     msg.content.connection_id = pInfo->m_hConn;
                     broadcast_message(msg, k_nSteamNetworkingSend_Reliable, &pInfo->m_hConn);
+                    std::string name = itClient->second.name;
+                    if (username_.find(name) != username_.end())
+                        username_.erase(name);
                     if (itClient != clients_.end())
                         clients_.erase(itClient);
                 } else {
@@ -251,52 +253,49 @@ protected:
                 msg.deserialize();
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
-                HSteamNetConnection conn = networking_msg->m_conn;
 
-                // Accepting logic should be made async here!
-                // Though accepting logic should be processed in serial, we don't
-                // want to make accepting logic block the process of other messages.
-                // A block here can have significant negative effect on performance!
-                // (Especially under high throughput)
-                asio::post(thread_pool_, [this, msg = std::move(msg), conn](){
-                    // verify client version
-                    bmmo::version_t current_version;
-                    if (msg.version < current_version) {
-                        bmmo::login_denied_msg new_msg;
-                        std::stringstream reason;
-                        reason << "Outdated client (server: " << current_version.to_string() << "; client: " << msg.version.to_string() << ")";
-                        send(conn, new_msg, k_nSteamNetworkingSend_Reliable);
-                        interface_->CloseConnection(conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.str().c_str(), true);
-                        return;
-                    }
+                // verify client version
+                bmmo::version_t current_version;
+                if (msg.version < current_version) {
+                    bmmo::login_denied_msg new_msg;
+                    std::stringstream reason;
+                    reason << "Outdated client (server: " << current_version.to_string() << "; client: " << msg.version.to_string() << ")";
+                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.str().c_str(), true);
+                    break;
+                }
 
-                    // Login must be processed in serial in case of multiple clients login at the same time
-                    std::unique_lock<std::mutex> lk(login_mtx_);
-                    // accepting client
-                    Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), current_version.to_string().c_str(), msg.cheated ? "on" : "off");
-                    clients_[conn] = {msg.nickname, (bool)msg.cheated};  // add the client here
+                // check if name exists
+                if (username_.find(msg.nickname) != username_.end()) {
+                    bmmo::login_denied_msg new_msg;
+                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                    std::stringstream reason;
+                    reason << "A player with a same username " << msg.nickname << " already exists on this serer.";
+                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 2, reason.str().c_str(), true);
+                    break;
+                }
 
-                    // notify this client of other online players
-                    bmmo::login_accepted_v2_msg accepted_msg;
-                    for (auto it = clients_.begin(); it != clients_.end(); ++it) {
-                        //if (client_it != it)
-                        accepted_msg.online_players[it->first] = { it->second.name, it->second.cheated };
-                    }
-                    accepted_msg.serialize();
-                    send(conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+                // accepting client
+                Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), current_version.to_string().c_str(), msg.cheated ? "on" : "off");
+                clients_[networking_msg->m_conn] = {msg.nickname, (bool)msg.cheated};  // add the client here
+                username_[msg.nickname] = networking_msg->m_conn;
 
-                    // notify other client of the fact that this client goes online
-                    bmmo::player_connected_v2_msg connected_msg;
-                    connected_msg.connection_id = conn;
-                    connected_msg.name = msg.nickname;
-                    connected_msg.cheated = msg.cheated;
-                    connected_msg.serialize();
-                    broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &conn);
-
-                    // Phew, since we've copied all the info we need to our own message structs(bmmo ones),
-                    // we don't need to worry about ISteamNetworkingMessage getting released.
-                });
-
+                // notify this client of other online players
+                bmmo::login_accepted_v2_msg accepted_msg;
+                for (auto it = clients_.begin(); it != clients_.end(); ++it) {
+                    //if (client_it != it)
+                    accepted_msg.online_players[it->first] = { it->second.name, it->second.cheated };
+                }
+                accepted_msg.serialize();
+                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+                
+                // notify other client of the fact that this client goes online
+                bmmo::player_connected_v2_msg connected_msg;
+                connected_msg.connection_id = networking_msg->m_conn;
+                connected_msg.name = msg.nickname;
+                connected_msg.cheated = msg.cheated;
+                connected_msg.serialize();
+                broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
                 break;
             }
             case bmmo::LoginAccepted:
@@ -429,8 +428,7 @@ protected:
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 //    std::thread server_thread_;
     std::unordered_map<HSteamNetConnection, client_data> clients_;
-    asio::thread_pool thread_pool_;
-    std::mutex login_mtx_;
+    std::unordered_map<std::string, HSteamNetConnection> username_;
 };
 
 int main() {
