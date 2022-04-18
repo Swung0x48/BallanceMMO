@@ -249,20 +249,22 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
+                interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
+
                 // verify client version
                 bmmo::version_t current_version;
-                Printf("Current server version: %s; client version: %s.", current_version.to_string().c_str(), msg.version.to_string().c_str());
                 if (msg.version < current_version) {
-                    bmmo::login_denied_msg msg;
-                    send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
-                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, "Outdated client", true);
+                    bmmo::login_denied_msg new_msg;
+                    std::stringstream reason;
+                    reason << "Outdated client (server: " << current_version.to_string() << "; client: " << msg.version.to_string() << ")";
+                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.str().c_str(), true);
                     break;
                 }
 
                 // accepting client
-                Printf("%s logged in with cheat mode %s!\n", msg.nickname.c_str(), msg.cheated ? "on" : "off");
+                Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), current_version.to_string().c_str(), msg.cheated ? "on" : "off");
                 clients_[networking_msg->m_conn] = {msg.nickname, (bool)msg.cheated};  // add the client here
-                interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
                 // notify this client of other online players
                 bmmo::login_accepted_v2_msg accepted_msg;
@@ -424,7 +426,7 @@ int main() {
 
     std::cout << "Bootstrapping server..." << std::endl;
     std::thread server_thread([&server]() { server.run(); });
-    std::cout << "Server started!" << std::endl;
+    std::cout << "Server v" << bmmo::version_t().to_string() << " started!" << std::endl;
 
     do {
         std::cout << "\r> " << std::flush;

@@ -16,7 +16,7 @@ namespace bmmo {
         uint8_t minor = 1;
         uint8_t subminor = 2;
         stage_t stage = Alpha;
-        uint8_t build = 8;
+        uint8_t build = 9;
 
         std::string to_string() {
             std::string stage_s = "";
