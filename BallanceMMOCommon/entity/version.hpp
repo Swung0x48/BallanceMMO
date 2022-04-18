@@ -18,7 +18,7 @@ namespace bmmo {
         stage_t stage = Alpha;
         uint8_t build = 9;
 
-        std::string to_string() {
+        std::string to_string() const {
             std::string stage_s = "";
             switch (stage) {
                 case Alpha: stage_s = "-alpha" + std::to_string((int)build); break;
@@ -31,7 +31,7 @@ namespace bmmo {
             return std::move(ss.str());
         }
 
-        bool operator<(const version_t& that) {
+        bool operator<(const version_t& that) const {
             if (major < that.major) return true;
             if (major > that.major) return false;
             if (minor < that.minor) return true;

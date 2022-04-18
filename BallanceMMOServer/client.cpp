@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cstdarg>
 #include <sstream>
+#include <chrono>
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
 
@@ -86,6 +87,7 @@ public:
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
 private:
