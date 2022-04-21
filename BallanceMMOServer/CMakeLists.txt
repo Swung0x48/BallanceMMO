@@ -20,3 +20,5 @@ add_executable(BallanceMMOServer server.cpp)
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::GameNetworkingSockets)
 add_executable(BallanceMMOMockClient client.cpp)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::GameNetworkingSockets)
+
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.sh ${CMAKE_CURRENT_BINARY_DIR}/start_ballancemmo_loop.sh COPYONLY)

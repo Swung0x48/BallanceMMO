@@ -9,6 +9,8 @@
 #include <vector>
 #include "../BallanceMMOCommon/common.hpp"
 
+#include <getopt.h>
+
 struct client_data {
     std::string name;
     bool cheated = false;
@@ -431,12 +433,53 @@ protected:
     std::unordered_map<std::string, HSteamNetConnection> username_;
 };
 
-int main() {
+// parse arguments (optional port and help/version) with getopt
+int parse_args(int argc, char** argv, uint16_t* port) {
+    static struct option long_options[] = {
+        {"port", required_argument, 0, 'p'},
+        {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'v'},
+        {0, 0, 0, 0}
+    };
+    int opt, opt_index = 0;
+    while ((opt = getopt_long(argc, argv, "p:hv", long_options, &opt_index)) != -1) {
+        switch (opt) {
+            case 'p':
+                *port = atoi(optarg);
+                break;
+            case 'h':
+                std::cout << "Usage: " << argv[0] << " [OPTION]..." << std::endl;
+                std::cout << "Options:" << std::endl;
+                std::cout << "\t-p, --port PORT\t start server at PORT, instead of the default 26676." << std::endl;
+                std::cout << "\t-h, --help\t display this help and exit." << std::endl;
+                std::cout << "\t-v, --version\t output version information and exit." << std::endl;
+                return -1;
+            case 'v':
+                std::cout << "Ballance MMO server by Swung0x48 and BallanceBug." << std::endl;
+                std::cout << "Version: " << bmmo::version_t().to_string() << "." << std::endl;
+                std::cout << "Minimum accepted client version: "
+                        << bmmo::minimum_client_version.to_string() << "."  << std::endl;
+                std::cout << "GitHub repository: https://github.com/Swung0x48/BallanceMMO" << std::endl;
+                return -1;
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    uint16_t port = 26676;
+    if (parse_args(argc, argv, &port) < 0)
+        return 0;
+
+    if (port <= 0 || port > 65535) {
+        std::cerr << "Fatal: invalid port number." << std::endl;
+        return 1;
+    };
+
     std::cout << "Initializing sockets..." << std::endl;
     server::init_socket();
 
-    uint16_t port = 26676;
-    std::cout << "Starting server at port " << port << std::endl;
+    std::cout << "Starting server at port " << port << "." << std::endl;
     server server(port);
 
     std::cout << "Bootstrapping server..." << std::endl;

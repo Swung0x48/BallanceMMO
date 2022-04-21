@@ -98,6 +98,23 @@ $ cmake -G Ninja .. -DOPENSSL_ROOT_DIR="/usr/local/opt/openssl@1.1/"
 $ ./BallanceMMOServer
 ```
 
+For help or customization, use the command line argument `--help`.
+
+```commandline
+$ ./BallanceMMOServer --help
+Usage: ./BallanceMMOServer [OPTION]...
+Options:
+    -p, --port PORT  start server at PORT, instead of the default 26676.
+    -h, --help       display this help and exit.
+    -v, --version    output version information and exit.
+```
+
+Alternatively, use the bash script `start_ballancemmo_loop.sh` which handles file logging and automatically restarts the server after crashes. *All command line arguments for the server executable also applies there.*
+
+```commandline
+$ ./start_ballancemmo_loop.sh
+```
+
 ## Building client (Game Mod)
 
 On Windows, we can use the vcpkg package manager. The following instructions assume that you will follow the steps and fetch vcpkg as a submodule. If you want to install vcpkg somewhere else, you're on your own.
