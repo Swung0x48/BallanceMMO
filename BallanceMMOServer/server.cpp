@@ -448,18 +448,17 @@ int parse_args(int argc, char** argv, uint16_t* port) {
                 *port = atoi(optarg);
                 break;
             case 'h':
-                std::cout << "Usage: " << argv[0] << " [OPTION]..." << std::endl;
-                std::cout << "Options:" << std::endl;
-                std::cout << "\t-p, --port PORT\t start server at PORT, instead of the default 26676." << std::endl;
-                std::cout << "\t-h, --help\t display this help and exit." << std::endl;
-                std::cout << "\t-v, --version\t output version information and exit." << std::endl;
+                printf("Usage: %s [OPTION]...\n", argv[0]);
+                printf("Options:\n");
+                printf("  -p, --port=PORT\t Use PORT as the server port.\n");
+                printf("  -h, --help\t\t Display this help and exit.\n");
+                printf("  -v, --version\t\t Display version information and exit.\n");
                 return -1;
             case 'v':
-                std::cout << "Ballance MMO server by Swung0x48 and BallanceBug." << std::endl;
-                std::cout << "Version: " << bmmo::version_t().to_string() << "." << std::endl;
-                std::cout << "Minimum accepted client version: "
-                        << bmmo::minimum_client_version.to_string() << "."  << std::endl;
-                std::cout << "GitHub repository: https://github.com/Swung0x48/BallanceMMO" << std::endl;
+                printf("Ballance MMO server by Swung0x48 and BallanceBug.\n");
+                printf("Version: %s.\n", bmmo::version_t().to_string().c_str());
+                printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
+                printf("GitHub repository: https://github.com/Swung0x48/BallanceMMO\n");
                 return -1;
         }
     }
@@ -476,16 +475,19 @@ int main(int argc, char** argv) {
         return 1;
     };
 
-    std::cout << "Initializing sockets..." << std::endl;
+    printf("Initializing sockets...\n");
     server::init_socket();
 
-    std::cout << "Starting server at port " << port << "." << std::endl;
+    printf("Starting server at port %d.\n", port);
     server server(port);
 
-    std::cout << "Bootstrapping server..." << std::endl;
+    printf("Bootstrapping server...\n");
     std::thread server_thread([&server]() { server.run(); });
-    std::cout << "Server (v" << bmmo::version_t().to_string() << "; client min v"
-            << bmmo::minimum_client_version.to_string() << ") started!" << std::endl;
+
+    printf("Server (v%s; client min. v%s) started.\n",
+            bmmo::version_t().to_string().c_str(),
+            bmmo::minimum_client_version.to_string().c_str());
+    std::cout << std::flush;
 
     do {
         std::cout << "\r> " << std::flush;
