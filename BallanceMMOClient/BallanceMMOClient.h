@@ -143,7 +143,7 @@ private:
 	static std::pair<std::string, std::string> parse_connection_string(const std::string& str) {
 		size_t pos = str.find(":");
 		std::string address = str.substr(0, pos);
-		std::string port = str.substr(pos + 1);
+		std::string port = (pos == -1 || (pos + 1) == str.length()) ? "26676" : str.substr(pos + 1);
 		return { address, port };
 	}
 
