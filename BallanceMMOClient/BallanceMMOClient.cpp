@@ -156,10 +156,12 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         bml->SendIngameMessage("/mmo say - Send message to each other.");
     };
 
-    switch (args.size()) {
+    size_t length = args.size();
+
+    switch (length) {
         case 1: {
             help(bml);
-            break;
+            return;
         }
         case 2: {
             if (args[1] == "connect" || args[1] == "c") {
@@ -244,7 +246,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             }
             else if (args[1] == "list" || args[1] == "l") {
                 if (!connected())
-                    break;
+                    return;
 
                 std::stringstream ss;
                 db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
@@ -262,33 +264,46 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             } else if (args[1] == "u") {
                 ExecuteBB::UnsetPhysicsForce(player_ball_);
             }*/
-            break;
+            return;
         }
         case 3: {
-            if (args[1] == "s" || args[1] == "say") {
-                if (!connected())
-                    break;
-
-                bmmo::chat_msg msg{};
-                msg.chat_content = args[2];
-                msg.serialize();
-
-                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            }
-            else if (args[1] == "cheat") {
+            if (args[1] == "cheat") {
                 bool cheat_state = false;
                 if (args[2] == "on")
                     cheat_state = true;
                 bmmo::cheat_toggle_msg msg{};
                 msg.content.cheated = cheat_state;
                 send(msg, k_nSteamNetworkingSend_Reliable);
+                return;
             }
-            break;
-        }
-        default: {
-            help(bml);
         }
     }
+
+    if (length >= 3 && length < 512) {
+        if (args[1] == "s" || args[1] == "say") {
+            if (!connected())
+                return;
+
+            std::string chat_content = args[2];
+            if (length > 3) {
+                for (size_t i = 3; i < length; i++)
+                    chat_content.append(" " + args[i]);
+            }
+            if (chat_content.length() > 65536) {
+                bml->SendIngameMessage("Error: message too long.");
+                return;
+            }
+
+            bmmo::chat_msg msg{};
+            msg.chat_content = chat_content;
+            msg.serialize();
+
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        return;
+    }
+
+    help(bml);
 }
 
 void BallanceMMOClient::OnTrafo(int from, int to)
