@@ -499,7 +499,8 @@ int main(int argc, char** argv) {
             server.print_clients();
         } else if (cmd == "say") {
             bmmo::chat_msg msg{};
-            std::cin >> msg.chat_content;
+            std::getline(std::cin, msg.chat_content);
+            msg.chat_content.erase(0, 1);
             msg.serialize();
 
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
