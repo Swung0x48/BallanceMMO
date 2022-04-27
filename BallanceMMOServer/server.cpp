@@ -450,7 +450,7 @@ int parse_args(int argc, char** argv, uint16_t* port) {
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 printf("Options:\n");
-                printf("  -p, --port=PORT\t Use PORT as the server port.\n");
+                printf("  -p, --port=PORT\t Use PORT as the server port instead (default: 26676).\n");
                 printf("  -h, --help\t\t Display this help and exit.\n");
                 printf("  -v, --version\t\t Display version information and exit.\n");
                 return -1;
@@ -470,7 +470,7 @@ int main(int argc, char** argv) {
     if (parse_args(argc, argv, &port) < 0)
         return 0;
 
-    if (port <= 0 || port > 65535) {
+    if (port == 0) {
         std::cerr << "Fatal: invalid port number." << std::endl;
         return 1;
     };
