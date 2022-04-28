@@ -78,7 +78,7 @@ public:
 protected:
     ISteamNetworkingSockets* interface_ = nullptr;
     static inline role* this_instance_ = nullptr;
-    // static inline SteamNetworkingMicroseconds init_timestamp_;
+    static inline SteamNetworkingMicroseconds init_timestamp_;
     std::atomic_bool running_ = false;
     ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
 
