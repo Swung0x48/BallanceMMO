@@ -7,3 +7,6 @@
 [submodule "submodule/asio"]
 	path = submodule/asio
 	url = https://github.com/chriskohlhoff/asio.git
+[submodule "submodule/ya_getopt"]
+	path = submodule/ya_getopt
+	url = https://github.com/kubo/ya_getopt.git

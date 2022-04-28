@@ -14,9 +14,9 @@ namespace bmmo {
     struct version_t {
         uint8_t major = 3;
         uint8_t minor = 1;
-        uint8_t subminor = 6;
+        uint8_t subminor = 7;
         stage_t stage = Beta;
-        uint8_t build = 7;
+        uint8_t build = 8;
 
         std::string to_string() const;
         bool operator<(const version_t& that) const;

@@ -9,7 +9,7 @@
 #include <vector>
 #include "../BallanceMMOCommon/common.hpp"
 
-#include <getopt.h>
+#include "ya_getopt.h"
 
 struct client_data {
     std::string name;
@@ -84,6 +84,18 @@ public:
         for (auto& i: clients_) {
             Printf("%u: %s%s", i.first, i.second.name.c_str(), (i.second.cheated ? " [CHEAT]" : ""));
         }
+    }
+
+    void print_version_info() {
+        Printf("Server version: %s; minimum accepted client version: %s.",
+                        bmmo::version_t().to_string().c_str(),
+                        bmmo::minimum_client_version.to_string().c_str());
+        auto uptime = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
+        std::string time_str(20, 0);
+        time_str.resize(std::strftime(&time_str[0], time_str.size(), 
+            "%F %X", std::localtime(&init_time_t_)));
+        Printf("Server uptime: %.2f seconds since %s.",
+                        uptime * 1e-6, time_str.c_str());
     }
 
     void toggle_cheat(bool cheat) {
@@ -511,6 +523,8 @@ int main(int argc, char** argv) {
             if (cheat_state_string == "on")
                 cheat_state = true;
             server.toggle_cheat(cheat_state);
+        } else if (cmd == "ver" || cmd == "version") {
+            server.print_version_info();
         }
     } while (server.running());
 

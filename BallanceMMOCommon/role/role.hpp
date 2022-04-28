@@ -9,7 +9,6 @@
 #include <cassert>
 #include <cstdarg>
 #include <ctime>
-#include <iomanip>
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
@@ -36,7 +35,8 @@ public:
         // certs.
         SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_IP_AllowWithoutAuth, 1);
 #endif
-        // init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
+        init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
+        init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, DebugOutput);
     }
 
@@ -79,6 +79,7 @@ protected:
     ISteamNetworkingSockets* interface_ = nullptr;
     static inline role* this_instance_ = nullptr;
     static inline SteamNetworkingMicroseconds init_timestamp_;
+    static inline time_t init_time_t_;
     std::atomic_bool running_ = false;
     ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
 
@@ -101,18 +102,18 @@ public:
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time), "%m-%d %X");
-        const char* time_str = ss.str().c_str();
+        std::string time_str(15, 0);
+        time_str.resize(std::strftime(&time_str[0], time_str.size(), 
+            "%m-%d %X", std::localtime(&time)));
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-            fprintf(stderr, "\r[%s] %s\n> ", time_str, pszMsg);
+            fprintf(stderr, "\r[%s] %s\n> ", time_str.c_str(), pszMsg);
             fflush(stdout);
             fflush(stderr);
             exit(1);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            printf("\r[%s] %s\n> ", time_str, pszMsg);
+            printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);
             fflush(stdout);
         }
     }

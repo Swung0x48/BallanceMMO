@@ -109,7 +109,7 @@ Options:
     -v, --version    output version information and exit.
 ```
 
-Alternatively, use the bash script `start_ballancemmo_loop.sh` which handles file logging and automatically restarts the server after crashes. *All command line arguments for the server executable also applies there.*
+Alternatively, use the bash script `start_ballancemmo_loop.sh` (`start_ballancemmo_loop.bat` on Windows) which handles file logging and automatically restarts the server after crashes. *All command line arguments for the server executable also applies there.*
 
 ```commandline
 $ ./start_ballancemmo_loop.sh
