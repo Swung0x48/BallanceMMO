@@ -174,6 +174,8 @@ protected:
                     bmmo::player_disconnected_msg msg;
                     msg.content.connection_id = pInfo->m_hConn;
                     broadcast_message(msg, k_nSteamNetworkingSend_Reliable, &pInfo->m_hConn);
+                    if (itClient == clients_.end())
+                        break;
                     std::string name = itClient->second.name;
                     if (username_.find(name) != username_.end())
                         username_.erase(name);
