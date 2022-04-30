@@ -1,8 +1,8 @@
 #! /bin/bash
 function archive_logs () {
-    gzip -v log_$current_time.log
+    gzip -v $log_name
     mkdir -p logs
-    mv log_$current_time.log.gz logs/
+    mv $log_name.gz logs/
 }
 function ctrlc_exit () {
     archive_logs
@@ -12,8 +12,8 @@ trap "ctrlc_exit" 2
 for (( ; ; ))
 do
     set -o pipefail
-    current_time=$(date +"%Y%m%d%H%M")
-    ./BallanceMMOServer "$@" 2>&1 | tee log_$current_time.log
+    log_name=$(date +"log_%Y%m%d%H%M.log")
+    ./BallanceMMOServer "$@" 2>&1 | tee $log_name
     server_status=$?
     archive_logs
     if [ $server_status -eq 0 ] || [ $server_status -eq 1 ]

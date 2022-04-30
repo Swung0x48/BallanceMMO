@@ -79,6 +79,32 @@ public:
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
     }
 
+    void kick_client(std::string username, HSteamNetConnection conn, std::string reason) {
+        HSteamNetConnection client_conn;
+        if (username != "") {
+            auto username_it = username_.find(username);
+            if (username_it == username_.end()) {
+                Printf("Error: client \"%s\" not found.", username.c_str());
+                return;
+            }
+            client_conn = username_it->second;
+        } else if (conn != 0) {
+            auto client_it = clients_.find(conn);
+            if (client_it == clients_.end()) {
+                Printf("Error: client %d not found.", conn);
+                return;
+            }
+            client_conn = conn;
+        } else {
+            return;
+        }
+        std::string kick_notice = "Kicked by the server";
+        if (reason != "")
+            kick_notice.append(" (" + reason + ")");
+        kick_notice.append(".");
+        interface_->CloseConnection(client_conn, k_ESteamNetConnectionEnd_App_Min + 3, kick_notice.c_str(), true);
+    }
+
     void print_clients() {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
@@ -133,54 +159,56 @@ protected:
         return true;
     }
 
+    void cleanup_disconnected_client(HSteamNetConnection* client) {
+        // Locate the client.  Note that it should have been found, because this
+        // is the only codepath where we remove clients (except on shutdown),
+        // and connection change callbacks are dispatched in queue order.
+        auto itClient = clients_.find(*client);
+        //assert(itClient != clients_.end()); // It might in limbo state...So may not yet to be found
+
+        bmmo::player_disconnected_msg msg;
+        msg.content.connection_id = *client;
+        broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
+        if (itClient == clients_.end())
+            return;
+        std::string name = itClient->second.name;
+        if (username_.find(name) != username_.end())
+            username_.erase(name);
+        if (itClient != clients_.end())
+            clients_.erase(itClient);
+    }
+
     void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
+        // Printf("Connection status changed: %d", pInfo->m_info.m_eState);
         switch (pInfo->m_info.m_eState) {
             case k_ESteamNetworkingConnectionState_None:
                 // NOTE: We will get callbacks here when we destroy connections.  You can ignore these.
-                break;
-
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
                 // Ignore if they were not previously connected.  (If they disconnected
                 // before we accepted the connection.)
                 if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
+                    // // Select appropriate log messages
+                    // const char* pszDebugLogAction;
+                    // if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
+                    //     pszDebugLogAction = "problem detected locally";
+                    // } else {
+                    //     // Note that here we could check the reason code to see if
+                    //     // it was a "usual" connection or an "unusual" one.
+                    //     pszDebugLogAction = "closed by peer";
+                    // }
 
-                    // Locate the client.  Note that it should have been found, because this
-                    // is the only codepath where we remove clients (except on shutdown),
-                    // and connection change callbacks are dispatched in queue order.
-                    auto itClient = clients_.find(pInfo->m_hConn);
-                    //assert(itClient != clients_.end()); // It might in limbo state...So may not yet to be found
-
-                    // Select appropriate log messages
-                    const char* pszDebugLogAction;
-                    if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-                        pszDebugLogAction = "problem detected locally";
-                    } else {
-                        // Note that here we could check the reason code to see if
-                        // it was a "usual" connection or an "unusual" one.
-                        pszDebugLogAction = "closed by peer";
-                    }
-
-                    // Spew something to our own log.  Note that because we put their nick
-                    // as the connection description, it will show up, along with their
-                    // transport-specific data (e.g. their IP address)
-                    Printf( "Connection %s %s, reason %d: %s\n",
-                            pInfo->m_info.m_szConnectionDescription,
-                            pszDebugLogAction,
-                            pInfo->m_info.m_eEndReason,
-                            pInfo->m_info.m_szEndDebug
-                    );
-
-                    bmmo::player_disconnected_msg msg;
-                    msg.content.connection_id = pInfo->m_hConn;
-                    broadcast_message(msg, k_nSteamNetworkingSend_Reliable, &pInfo->m_hConn);
-                    if (itClient == clients_.end())
-                        break;
-                    std::string name = itClient->second.name;
-                    if (username_.find(name) != username_.end())
-                        username_.erase(name);
-                    if (itClient != clients_.end())
-                        clients_.erase(itClient);
+                    // // Spew something to our own log.  Note that because we put their nick
+                    // // as the connection description, it will show up, along with their
+                    // // transport-specific data (e.g. their IP address)
+                    // Printf( "Connection %s %s, reason %d: %s\n",
+                    //         pInfo->m_info.m_szConnectionDescription,
+                    //         pszDebugLogAction,
+                    //         pInfo->m_info.m_eEndReason,
+                    //         pInfo->m_info.m_szEndDebug
+                    // );
+                    
+                    cleanup_disconnected_client(&pInfo->m_hConn);
                 } else {
                     assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting);
                 }
@@ -227,7 +255,7 @@ protected:
                 // but not logged on) until them.  I'm trying to keep this example
                 // code really simple.
                 char nick[64];
-                sprintf(nick, "Unidentified%d", 10000 + (rand() % 100000));
+                sprintf(nick, "Unidentified%d", 10000 + (rand() % 90000));
 
                 // DO NOT add client here.
                 //clients_[pInfo->m_hConn] = {nick};
@@ -527,6 +555,26 @@ int main(int argc, char** argv) {
             server.toggle_cheat(cheat_state);
         } else if (cmd == "ver" || cmd == "version") {
             server.print_version_info();
+        } else if (cmd == "kick" || cmd == "kick-id") {
+            std::string username = "", reason;
+            HSteamNetConnection conn = 0;
+            if (cmd == "kick-id") {
+                std::string id_string;
+                std::cin >> id_string;
+                conn = atoi(id_string.c_str());
+                if (conn == 0) {
+                    server.Printf("Error: invalid connection id.");
+                    continue;
+                }
+            } else {
+                std::cin >> username;
+            }
+            std::getline(std::cin, reason);
+            reason.erase(0, 1);
+            if (reason.find_first_not_of(' ') == std::string::npos) {
+                reason = "";
+            }
+            server.kick_client(username, conn, reason);
         }
     } while (server.running());
 
