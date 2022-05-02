@@ -448,6 +448,8 @@ protected:
                 new_msg.content.player_id = client_it->first;
                 new_msg.content.state.cheated = state_msg->content.cheated;
                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
+
+                break;
             }
             case bmmo::KickRequest: {
                 bmmo::kick_request_msg msg{};
@@ -462,6 +464,7 @@ protected:
                     Printf("%s requested to kick player %d!", client_it->second.name.c_str(), msg.player_id);
                 }
                 kick_client(player_id, msg.reason, client_it->first);
+
                 break;
             }
             case bmmo::KeyboardInput:
