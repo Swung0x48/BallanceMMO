@@ -16,6 +16,8 @@
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
 
+#include "ya_getopt.h"
+
 bool cheat = false;
 struct client_data {
     std::string name;
@@ -84,6 +86,10 @@ public:
         return status;
     }
 
+    void set_nickname(const std::string& name) {
+        nickname_ = name;
+    };
+
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
@@ -136,7 +142,7 @@ private:
                 Printf("Connected to server OK\n");
                 //bmmo::login_request_msg msg;
                 bmmo::login_request_v2_msg msg;
-                msg.nickname = "Swung";
+                msg.nickname = nickname_;
                 msg.cheated = 0;
                 // msg.version = bmmo::version_t{1, 0, 0, bmmo::Alpha, 0};
                 msg.serialize();
@@ -196,6 +202,7 @@ private:
                 Printf("Server toggled cheat %s globally!", cheat ? "on" : "off");
                 bmmo::cheat_state_msg state_msg{};
                 state_msg.content.cheated = cheat;
+                state_msg.content.notify = false;
                 send(state_msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
@@ -205,7 +212,16 @@ private:
                 Printf("#%u toggled cheat %s globally!", cheat ? "on" : "off");
                 bmmo::cheat_state_msg state_msg{};
                 state_msg.content.cheated = cheat;
+                state_msg.content.notify = false;
                 send(state_msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
+            case bmmo::PlayerKicked: {
+                bmmo::player_kicked_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                Printf("%s was kicked by %s%s.", msg.kicked_player_name.c_str(), (msg.executor_name == "")? "the server" : msg.executor_name.c_str(), (msg.reason == "")? "" : (" (" + msg.reason + ")").c_str());
                 break;
             }
             default:
@@ -248,17 +264,58 @@ private:
     }
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
+    std::string nickname_;
 };
 
-int main() {
+// parse command line arguments (server/name/help/version) with getopt
+int parse_args(int argc, char** argv, std::string& server, std::string& name) {
+    static struct option long_options[] = {
+        {"server", required_argument, 0, 's'},
+        {"name", required_argument, 0, 'n'},
+        {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'v'},
+        {0, 0, 0, 0}
+    };
+    int opt, opt_index = 0;
+    while ((opt = getopt_long(argc, argv, "s:n:hv", long_options, &opt_index))!= -1) {
+        switch (opt) {
+            case 's':
+                server = optarg;
+                break;
+            case 'n':
+                name = optarg;
+                break;
+            case 'h':
+                printf("Usage: %s [OPTION]...\n", argv[0]);
+                printf("Options:\n");
+                printf("  -s, --server=ADDRESS\t Connect to the server at ADDRESS instead (default: 127.0.0.1:26676).\n");
+                printf("  -n, --name=NAME\t Set your name to NAME (default: \"Swung\")\n");
+                printf("  -h, --help\t\t Display this help and exit.\n");
+                printf("  -v, --version\t\t Display version information and exit.\n");
+                return -1;
+            case 'v':
+                printf("Ballance MMO mock client by Swung0x48 and BallanceBug.\n");
+                printf("Version: %s.\n", bmmo::version_t().to_string().c_str());
+                return -1;
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    std::string server_addr = "127.0.0.1:26676", username = "Swung";
+    if (parse_args(argc, argv, server_addr, username) != 0)
+        return 0;
+
     std::cout << "Initializing sockets..." << std::endl;
     client::init_socket();
 
     std::cout << "Creating client instance..." << std::endl;
     client client;
+    client.set_nickname(username);
 
     std::cout << "Connecting to server..." << std::endl;
-    if (!client.connect("127.0.0.1:26676")) {
+    if (!client.connect(server_addr)) {
         std::cerr << "Cannot connect to server." << std::endl;
         return 1;
     }
@@ -309,7 +366,7 @@ int main() {
             if (client_thread.joinable())
                 client_thread.join();
 
-            if (!client.connect("127.0.0.1:26676")) {
+            if (!client.connect(server_addr)) {
                 std::cerr << "Cannot connect to server." << std::endl;
                 return 1;
             }

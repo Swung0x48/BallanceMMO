@@ -196,7 +196,7 @@ protected:
             return false;
         auto it = clients_.find(client);
         if (it == clients_.end()) {
-            Printf("Error: client %d not found.", client);
+            Printf("Error: client %u not found.", client);
             return false;
         }
         return true;
@@ -234,7 +234,8 @@ protected:
                     
                     cleanup_disconnected_client(&pInfo->m_hConn);
                 } else {
-                    assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting);
+                    assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting
+                           || pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_None);
                 }
 
                 // Clean up the connection.  This is important!
@@ -471,7 +472,7 @@ protected:
                     Printf("%s requested to kick player \"%s\"!", client_it->second.name.c_str(), msg.player_name.c_str());
                     player_id = get_client_id(msg.player_name);
                 } else {
-                    Printf("%s requested to kick player %d!", client_it->second.name.c_str(), msg.player_id);
+                    Printf("%s requested to kick player %u!", client_it->second.name.c_str(), msg.player_id);
                 }
                 kick_client(player_id, msg.reason, client_it->first);
 

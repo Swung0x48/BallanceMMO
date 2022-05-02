@@ -19,7 +19,7 @@ include_directories(../submodule/ya_getopt)
 
 add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::GameNetworkingSockets)
-add_executable(BallanceMMOMockClient client.cpp)
+add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::GameNetworkingSockets)
 
 # os specific scripts
