@@ -22,7 +22,7 @@ namespace bmmo {
         bool operator<(const version_t& that) const;
     };
 
-    const version_t minimum_client_version = {3, 1, 5, Beta, 5};
+    const version_t minimum_client_version = {3, 1, 8, Beta, 11};
 
     std::string version_t::to_string() const {
         std::string stage_s = "";
