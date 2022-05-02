@@ -32,7 +32,9 @@ namespace bmmo {
         CheatState,
         OwnedCheatState,
         CheatToggle,
-        OwnedCheatToggle
+        OwnedCheatToggle,
+
+        KickRequest
     };
 
     template<typename T, opcode C = None>

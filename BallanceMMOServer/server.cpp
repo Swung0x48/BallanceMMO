@@ -79,30 +79,33 @@ public:
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
     }
 
-    void kick_client(std::string username, HSteamNetConnection conn, std::string reason) {
-        HSteamNetConnection client_conn;
-        if (username != "") {
-            auto username_it = username_.find(username);
-            if (username_it == username_.end()) {
-                Printf("Error: client \"%s\" not found.", username.c_str());
-                return;
-            }
-            client_conn = username_it->second;
-        } else if (conn != 0) {
-            auto client_it = clients_.find(conn);
-            if (client_it == clients_.end()) {
-                Printf("Error: client %d not found.", conn);
-                return;
-            }
-            client_conn = conn;
-        } else {
-            return;
+    HSteamNetConnection get_client_id(std::string username) {
+        HSteamNetConnection client = k_HSteamNetConnection_Invalid;
+        auto username_it = username_.find(username);
+        if (username_it == username_.end()) {
+            Printf("Error: client \"%s\" not found.", username.c_str());
+            return k_HSteamNetConnection_Invalid;
         }
-        std::string kick_notice = "Kicked by the server";
+        client = username_it->second;
+        return client;
+    };
+
+    bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid) {
+        if (!client_exists(client))
+            return false;
+        std::string kick_notice = "Kicked by ";
+        if (executor != k_HSteamNetConnection_Invalid) {
+            if (!client_exists(executor))
+                return false;
+            kick_notice += clients_[executor].name;
+        } else {
+            kick_notice += "the server";
+        }
         if (reason != "")
             kick_notice.append(" (" + reason + ")");
         kick_notice.append(".");
-        interface_->CloseConnection(client_conn, k_ESteamNetConnectionEnd_App_Min + 3, kick_notice.c_str(), true);
+        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + 3, kick_notice.c_str(), true);
+        return true;
     }
 
     void print_clients() {
@@ -176,6 +179,17 @@ protected:
             username_.erase(name);
         if (itClient != clients_.end())
             clients_.erase(itClient);
+    }
+
+    bool client_exists(HSteamNetConnection client) {
+        if (client == k_HSteamNetConnection_Invalid)
+            return false;
+        auto it = clients_.find(client);
+        if (it == clients_.end()) {
+            Printf("Error: client %d not found.", client);
+            return false;
+        }
+        return true;
     }
 
     void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
@@ -422,7 +436,7 @@ protected:
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
-                new_msg.content.notify = state_msg->content.notify;
+                new_msg.content.state.notify = state_msg->content.notify;
                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
 
                 break;
@@ -434,6 +448,21 @@ protected:
                 new_msg.content.player_id = client_it->first;
                 new_msg.content.state.cheated = state_msg->content.cheated;
                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
+            }
+            case bmmo::KickRequest: {
+                bmmo::kick_request_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                HSteamNetConnection player_id = msg.player_id;
+                if (msg.player_name != "") {
+                    Printf("%s requested to kick player \"%s\"!", client_it->second.name.c_str(), msg.player_name.c_str());
+                    player_id = get_client_id(msg.player_name);
+                } else {
+                    Printf("%s requested to kick player %d!", client_it->second.name.c_str(), msg.player_id);
+                }
+                kick_client(player_id, msg.reason, client_it->first);
+                break;
             }
             case bmmo::KeyboardInput:
                 break;
@@ -557,24 +586,25 @@ int main(int argc, char** argv) {
             server.print_version_info();
         } else if (cmd == "kick" || cmd == "kick-id") {
             std::string username = "", reason;
-            HSteamNetConnection conn = 0;
+            HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             if (cmd == "kick-id") {
                 std::string id_string;
                 std::cin >> id_string;
-                conn = atoi(id_string.c_str());
-                if (conn == 0) {
+                client = atoi(id_string.c_str());
+                if (client == 0) {
                     server.Printf("Error: invalid connection id.");
                     continue;
                 }
             } else {
                 std::cin >> username;
+                client = server.get_client_id(username);
             }
             std::getline(std::cin, reason);
             reason.erase(0, 1);
             if (reason.find_first_not_of(' ') == std::string::npos) {
                 reason = "";
             }
-            server.kick_client(username, conn, reason);
+            server.kick_client(client, reason);
         }
     } while (server.running());
 

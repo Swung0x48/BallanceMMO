@@ -505,6 +505,21 @@ private:
 		return s;
 	}
 
+	std::string join_strings(const std::vector<std::string>& strings, int start) const {
+		std::string str = strings[start];
+		start++;
+		size_t length = strings.size();
+		if (length > start) {
+			for (size_t i = start; i < length; i++)
+				str.append(" " + strings[i]);
+		}
+		if (str.length() > 65536) {
+			throw "Error: message too long.";
+			return "";
+		}
+		return str;
+	}
+
 	/*CKBehavior* bbSetForce = nullptr;
 	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
 		using namespace ExecuteBB;

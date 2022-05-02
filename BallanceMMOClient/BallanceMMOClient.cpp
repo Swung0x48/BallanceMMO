@@ -221,7 +221,6 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         GetLogger()->Error(ec.message().c_str());
                         work_guard_.reset();
                         io_ctx_.stop();
-                        return;
                     });
                 }
             }
@@ -244,16 +243,27 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     status_->paint(0xffff0000);
                 }
             }
-            else if (args[1] == "list" || args[1] == "l") {
+            else if (args[1] == "list" || args[1] == "l" || args[1] == "list-id" || args[1] == "li") {
                 if (!connected())
                     return;
 
                 std::stringstream ss;
-                db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    ss << pair.second.name << (pair.second.cheated ? " [CHEAT]" : "") << ", ";
-                    return true;
-                });
-                ss << db_.get_nickname() << (m_bml->IsCheatEnabled() ? " [CHEAT]" : "");
+                if (args[1] == "list-id" || args[1] == "li") {
+                    db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                        ss << pair.second.name << (pair.second.cheated ? " [CHEAT]: " : ": ")
+                            << pair.first << ", ";
+                        return true;
+                    });
+                    ss << db_.get_nickname() << (m_bml->IsCheatEnabled() ? " [CHEAT]: " : ": ")
+                        << db_.get_client_id();
+                }
+                else {
+                    db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                        ss << pair.second.name << (pair.second.cheated ? " [CHEAT]" : "") << ", ";
+                        return true;
+                    });
+                    ss << db_.get_nickname() << (m_bml->IsCheatEnabled() ? " [CHEAT]" : "");
+                }
 
                 m_bml->SendIngameMessage(ss.str().c_str());
             }
@@ -280,24 +290,38 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     }
 
     if (length >= 3 && length < 512) {
+        if (!connected())
+            return;
         if (args[1] == "s" || args[1] == "say") {
-            if (!connected())
-                return;
-
-            std::string chat_content = args[2];
-            if (length > 3) {
-                for (size_t i = 3; i < length; i++)
-                    chat_content.append(" " + args[i]);
-            }
-            if (chat_content.length() > 65536) {
-                bml->SendIngameMessage("Error: message too long.");
-                return;
-            }
-
             bmmo::chat_msg msg{};
-            msg.chat_content = chat_content;
+            try {
+                msg.chat_content = join_strings(args, 2);
+            }
+            catch (const char* s) {
+                bml->SendIngameMessage(s);
+                return;
+            };
             msg.serialize();
 
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        else if (args[1] == "kick" || args[1] == "kick-id") {
+            bmmo::kick_request_msg msg{};
+            if (args[1] == "kick")
+                msg.player_name = args[2];
+            else
+                msg.player_id = atoi(args[2].c_str());
+            if (length > 3) {
+                try {
+                    msg.reason = join_strings(args, 3);
+                }
+                catch (const char* s) {
+                    bml->SendIngameMessage(s);
+                    return;
+                };
+            }
+
+            msg.serialize();
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
         return;
@@ -577,7 +601,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             db_.update(ocs->content.player_id, ocs->content.state.cheated);
         }
 
-        if (ocs->content.notify) {
+        if (ocs->content.state.notify) {
             std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
             m_bml->SendIngameMessage(s.c_str());
         }
