@@ -93,18 +93,28 @@ public:
     bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid) {
         if (!client_exists(client))
             return false;
+        bmmo::player_kicked_msg msg{};
+        msg.kicked_player_name = clients_[client].name;
+
         std::string kick_notice = "Kicked by ";
         if (executor != k_HSteamNetConnection_Invalid) {
             if (!client_exists(executor))
                 return false;
             kick_notice += clients_[executor].name;
+            msg.executor_name = clients_[executor].name;
         } else {
             kick_notice += "the server";
         }
-        if (reason != "")
+        if (reason != "") {
             kick_notice.append(" (" + reason + ")");
+            msg.reason = reason;
+        }
         kick_notice.append(".");
+
         interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + 3, kick_notice.c_str(), true);
+        msg.serialize();
+        broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+
         return true;
     }
 

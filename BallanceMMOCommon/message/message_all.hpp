@@ -19,5 +19,6 @@
 #include "cheat_toggle_msg.hpp"
 #include "owned_cheat_toggle_msg.hpp"
 #include "kick_request_msg.hpp"
+#include "player_kicked_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP
