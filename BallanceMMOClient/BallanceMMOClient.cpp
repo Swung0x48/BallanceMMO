@@ -57,6 +57,7 @@ void BallanceMMOClient::OnPostStartMenu()
         status_->paint(0xffff0000);
         
         m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
+        m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
     }
 }
