@@ -78,6 +78,8 @@ private:
 	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
 	void on_message(ISteamNetworkingMessage* network_msg) override;
 
+	static void terminate(long delay);
+
 	static void FatalError(const char* fmt, ...) {
 		char text[2048];
 		va_list ap;

@@ -345,6 +345,14 @@ void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
     peer.balls[to]->Show(CKSHOW);*/
 }
 
+void BallanceMMOClient::terminate(long delay) {
+    static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage(
+        std::format("Nuking process in {} seconds...", delay).c_str());
+    std::this_thread::sleep_for(std::chrono::seconds(delay));
+
+    std::terminate();
+}
+
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
 {
     GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
@@ -370,6 +378,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         }
         m_bml->SendIngameMessage(s.c_str());
         cleanup();
+        if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 4)
+            terminate(5);
         break;
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
@@ -677,9 +687,6 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
         static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
-        static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("Nuking process in 5 seconds...");
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-
-        std::terminate();
+        terminate(5);
     }
 }

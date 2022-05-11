@@ -90,7 +90,7 @@ public:
         return client;
     };
 
-    bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid) {
+    bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid, bool crash = false) {
         if (!client_exists(client))
             return false;
         bmmo::player_kicked_msg msg{};
@@ -111,7 +111,10 @@ public:
         }
         kick_notice.append(".");
 
-        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + 3, kick_notice.c_str(), true);
+        int nReason = k_ESteamNetConnectionEnd_App_Min + 3;
+        if (crash == true)
+            ++nReason;
+        interface_->CloseConnection(client, nReason, kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -598,10 +601,10 @@ int main(int argc, char** argv) {
             server.toggle_cheat(cheat_state);
         } else if (cmd == "ver" || cmd == "version") {
             server.print_version_info();
-        } else if (cmd == "kick" || cmd == "kick-id") {
+        } else if (cmd == "kick" || cmd == "kick-id" || cmd == "crash" || cmd == "crash-id") {
             std::string username = "", reason;
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
-            if (cmd == "kick-id") {
+            if (cmd == "kick-id" || cmd == "crash-id") {
                 std::string id_string;
                 std::cin >> id_string;
                 client = atoi(id_string.c_str());
@@ -618,7 +621,10 @@ int main(int argc, char** argv) {
             if (reason.find_first_not_of(' ') == std::string::npos) {
                 reason = "";
             }
-            server.kick_client(client, reason);
+            bool crash = false;
+            if (cmd == "crash" || cmd == "crash-id")
+                crash = true;
+            server.kick_client(client, reason, k_HSteamNetConnection_Invalid, crash);
         }
     } while (server.running());
 
