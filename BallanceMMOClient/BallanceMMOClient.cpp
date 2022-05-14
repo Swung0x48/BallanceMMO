@@ -76,6 +76,13 @@ void BallanceMMOClient::OnProcess() {
 
     if (bml_lk) {
         if (m_bml->IsIngame()) {
+            auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+            if (current_timestamp < next_update_timestamp_)
+                return;
+            if (current_timestamp - next_update_timestamp_ > 1000000)
+                next_update_timestamp_ = current_timestamp;
+            next_update_timestamp_ += MINIMUM_UPDATE_INTERVAL;
+
             auto ball = get_current_ball();
             if (player_ball_ == nullptr)
                 player_ball_ = ball;
