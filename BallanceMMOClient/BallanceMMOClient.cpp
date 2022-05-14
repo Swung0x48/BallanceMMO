@@ -76,13 +76,6 @@ void BallanceMMOClient::OnProcess() {
 
     if (bml_lk) {
         if (m_bml->IsIngame()) {
-            auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-            if (current_timestamp < next_update_timestamp_)
-                return;
-            if (current_timestamp - next_update_timestamp_ > 1000000)
-                next_update_timestamp_ = current_timestamp;
-            next_update_timestamp_ += MINIMUM_UPDATE_INTERVAL;
-
             auto ball = get_current_ball();
             if (player_ball_ == nullptr)
                 player_ball_ = ball;
@@ -90,9 +83,16 @@ void BallanceMMOClient::OnProcess() {
             check_on_trafo(ball);
             poll_player_ball_state();
 
-            asio::post(thread_pool_, [this]() {
-                assemble_and_send_state();
-            });
+            auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+            if (current_timestamp >= next_update_timestamp_) {
+                if (current_timestamp - next_update_timestamp_ > 1000000)
+                    next_update_timestamp_ = current_timestamp;
+                next_update_timestamp_ += MINIMUM_UPDATE_INTERVAL;
+
+                asio::post(thread_pool_, [this]() {
+                    assemble_and_send_state();
+                });
+            }
 
             objects_.update(db_.flush());
         }
@@ -255,25 +255,23 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 if (!connected())
                     return;
 
-                std::stringstream ss;
-                if (args[1] == "list-id" || args[1] == "li") {
-                    db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                        ss << pair.second.name << (pair.second.cheated ? " [CHEAT]: " : ": ")
-                            << pair.first << ", ";
-                        return true;
-                    });
-                    ss << db_.get_nickname() << (m_bml->IsCheatEnabled() ? " [CHEAT]: " : ": ")
-                        << db_.get_client_id();
-                }
-                else {
-                    db_.for_each([&ss](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                        ss << pair.second.name << (pair.second.cheated ? " [CHEAT]" : "") << ", ";
-                        return true;
-                    });
-                    ss << db_.get_nickname() << (m_bml->IsCheatEnabled() ? " [CHEAT]" : "");
-                }
-
-                m_bml->SendIngameMessage(ss.str().c_str());
+                std::string line = "";
+                int counter = 0;
+                bool show_id = (args[1] == "list-id" || args[1] == "li");
+                db_.for_each([bml, &line, &counter, &show_id](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    ++counter;
+                    line.append(pair.second.name + (pair.second.cheated ? " [CHEAT]" : "")
+                        + (show_id ? (": " + std::to_string(pair.first)): "") + ", ");
+                    if (counter == (show_id ? 2 : 3)) {
+                        bml->SendIngameMessage(line.c_str());
+                        counter = 0;
+                        line = "";
+                    }
+                    return true;
+                });
+                line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
+                    + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""));
+                m_bml->SendIngameMessage(line.c_str());
             }
             /*else if (args[1] == "p") {
                 objects_.physicalize_all();
@@ -340,6 +338,10 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
 void BallanceMMOClient::OnTrafo(int from, int to)
 {
+    poll_player_ball_state();
+    asio::post(thread_pool_, [this]() {
+        assemble_and_send_state();
+    });
     //throw std::runtime_error("On trafo");
 }
 
@@ -661,10 +663,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
-        m_bml->SendIngameMessage(std::format("{} was kicked by {}{}.",
+        m_bml->SendIngameMessage(std::format("{} was kicked by {}{}{}.",
             msg.kicked_player_name,
             (msg.executor_name == "") ? "the server" : msg.executor_name,
-            (msg.reason == "") ? "" : " (" + msg.reason + ")"
+            (msg.reason == "") ? "" : " (" + msg.reason + ")",
+            msg.crashed ? " and crashed subsequently" : ""
         ).c_str());
 
         break;

@@ -111,10 +111,9 @@ public:
         }
         kick_notice.append(".");
 
-        int nReason = k_ESteamNetConnectionEnd_App_Min + 3;
-        if (crash == true)
-            ++nReason;
-        interface_->CloseConnection(client, nReason, kick_notice.c_str(), true);
+        msg.crashed = crash;
+
+        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + (crash ? 4 : 3), kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 

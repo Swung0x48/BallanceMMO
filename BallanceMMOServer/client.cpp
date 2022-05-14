@@ -221,7 +221,12 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                Printf("%s was kicked by %s%s.", msg.kicked_player_name.c_str(), (msg.executor_name == "")? "the server" : msg.executor_name.c_str(), (msg.reason == "")? "" : (" (" + msg.reason + ")").c_str());
+                Printf("%s was kicked by %s%s%s.",
+                    msg.kicked_player_name.c_str(),
+                    (msg.executor_name == "")? "the server" : msg.executor_name.c_str(),
+                    (msg.reason == "")? "" : (" (" + msg.reason + ")").c_str(),
+                    msg.crashed ? " and crashed subsequently" : ""
+                );
                 break;
             }
             default:
