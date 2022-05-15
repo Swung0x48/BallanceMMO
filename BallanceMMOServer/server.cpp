@@ -606,7 +606,7 @@ int main(int argc, char** argv) {
             if (cmd == "kick-id" || cmd == "crash-id") {
                 std::string id_string;
                 std::cin >> id_string;
-                client = atoi(id_string.c_str());
+                client = atoll(id_string.c_str());
                 if (client == 0) {
                     server.Printf("Error: invalid connection id.");
                     continue;

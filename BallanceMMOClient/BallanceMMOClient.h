@@ -154,8 +154,8 @@ private:
 	void init_config() {
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 		IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
-		tmp_prop->SetComment("Remote server address with port. It could be an IP address or a domain name.");
-		tmp_prop->SetDefaultString("127.0.0.1:26676");
+		tmp_prop->SetComment("Remote server address with port (optional; default 26676). It could be an IPv4 address or a domain name.");
+		tmp_prop->SetDefaultString("127.0.0.1");
 		props_["remote_addr"] = tmp_prop;
 		/*tmp_prop = GetConfig()->GetProperty("Remote", "Port");
 		tmp_prop->SetComment("The port that server is running on.");
@@ -509,7 +509,7 @@ private:
 		return s;
 	}
 
-	std::string join_strings(const std::vector<std::string>& strings, int start) const {
+	static std::string join_strings(const std::vector<std::string>& strings, size_t start) {
 		std::string str = strings[start];
 		start++;
 		size_t length = strings.size();

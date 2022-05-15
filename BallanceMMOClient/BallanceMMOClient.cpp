@@ -83,7 +83,7 @@ void BallanceMMOClient::OnProcess() {
             check_on_trafo(ball);
             poll_player_ball_state();
 
-            auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+            const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
             if (current_timestamp >= next_update_timestamp_) {
                 if (current_timestamp - next_update_timestamp_ > 1000000)
                     next_update_timestamp_ = current_timestamp;
@@ -164,7 +164,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         bml->SendIngameMessage("/mmo say - Send message to each other.");
     };
 
-    size_t length = args.size();
+    const size_t length = args.size();
 
     switch (length) {
         case 1: {
@@ -262,7 +262,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     ++counter;
                     line.append(pair.second.name + (pair.second.cheated ? " [CHEAT]" : "")
                         + (show_id ? (": " + std::to_string(pair.first)): "") + ", ");
-                    if (counter == (show_id ? 2 : 3)) {
+                    if (counter == (show_id ? 2 : 4)) {
                         bml->SendIngameMessage(line.c_str());
                         counter = 0;
                         line = "";
@@ -316,7 +316,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             if (args[1] == "kick")
                 msg.player_name = args[2];
             else
-                msg.player_id = atoi(args[2].c_str());
+                msg.player_id = atoll(args[2].c_str());
             if (length > 3) {
                 try {
                     msg.reason = join_strings(args, 3);
