@@ -113,7 +113,7 @@ public:
 
         msg.crashed = crash;
 
-        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + (crash ? 4 : 3), kick_notice.c_str(), true);
+        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + (crash ? 102 : 101), kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -201,6 +201,45 @@ protected:
             Printf("Error: client %u not found.", client);
             return false;
         }
+        return true;
+    }
+
+    bool validate_client(HSteamNetConnection client, bmmo::login_request_v2_msg& msg) {
+        int nReason = k_ESteamNetConnectionEnd_Invalid;
+        std::stringstream reason;
+
+        // verify client version
+        if (msg.version < bmmo::minimum_client_version) {
+            reason << "Outdated client (client: " << msg.version.to_string()
+                    << "; minimum: " << bmmo::minimum_client_version.to_string() << ")";
+            nReason = k_ESteamNetConnectionEnd_App_Min + 1;
+        }
+        // check if name exists
+        else if (username_.find(msg.nickname) != username_.end()) {
+            reason << "A player with a same username \"" << msg.nickname << "\" already exists on this serer.";
+            nReason = k_ESteamNetConnectionEnd_App_Min + 2;
+        }
+        // validate nickname length
+        else if (!bmmo::name_validator::is_of_valid_length(msg.nickname)) {
+            reason << "Nickname must be between "
+                    << bmmo::name_validator::min_length << " and "
+                    << bmmo::name_validator::max_length << " characters in length.";
+            nReason = k_ESteamNetConnectionEnd_App_Min + 3;
+        }
+        // validate nickname characters
+        else if (size_t invalid_pos = bmmo::name_validator::get_invalid_char_pos(msg.nickname);
+                invalid_pos != std::string::npos) {
+            reason << "Invalid character '" << msg.nickname[invalid_pos] << "'; Nickname must contain only alphanumeric characters and underscores.";
+            nReason = k_ESteamNetConnectionEnd_App_Min + 4;
+        }
+
+        if (nReason != k_ESteamNetConnectionEnd_Invalid) {
+            bmmo::login_denied_msg new_msg;
+            send(client, new_msg, k_nSteamNetworkingSend_Reliable);
+            interface_->CloseConnection(client, nReason, reason.str().c_str(), true);
+            return false;
+        }
+
         return true;
     }
 
@@ -325,26 +364,8 @@ protected:
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
-                // verify client version
-                if (msg.version < bmmo::minimum_client_version) {
-                    bmmo::login_denied_msg new_msg;
-                    std::stringstream reason;
-                    reason << "Outdated client (client: " << msg.version.to_string()
-                            << "; minimum: " << bmmo::minimum_client_version.to_string() << ")";
-                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
-                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.str().c_str(), true);
+                if (!validate_client(networking_msg->m_conn, msg))
                     break;
-                }
-
-                // check if name exists
-                if (username_.find(msg.nickname) != username_.end()) {
-                    bmmo::login_denied_msg new_msg;
-                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
-                    std::stringstream reason;
-                    reason << "A player with a same username " << msg.nickname << " already exists on this serer.";
-                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 2, reason.str().c_str(), true);
-                    break;
-                }
 
                 // accepting client
                 Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), msg.version.to_string().c_str(), msg.cheated ? "on" : "off");

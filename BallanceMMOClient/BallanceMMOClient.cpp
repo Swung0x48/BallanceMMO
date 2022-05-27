@@ -143,6 +143,14 @@ void BallanceMMOClient::OnCheatEnabled(bool enable) {
     send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
+void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) {
+    if (strcmp(category, "Player") == 0 && strcmp(key, "Playername") == 0) {
+        if (prop != props_["playername"]) {
+            prop->SetString(get_valid_nickname(std::string(prop->GetString())).c_str());
+        }
+    }
+}
+
 void BallanceMMOClient::OnExitGame()
 {
     cleanup(true);
@@ -387,7 +395,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         }
         m_bml->SendIngameMessage(s.c_str());
         cleanup();
-        if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 4)
+        if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 102)
             terminate(5);
         break;
     }
@@ -434,8 +442,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         m_bml->SendIngameMessage("Connected to server.");
         m_bml->SendIngameMessage("Logging in...");
         bmmo::login_request_v2_msg msg;
-        db_.set_nickname(props_["playername"]->GetString());
-        msg.nickname = props_["playername"]->GetString();
+        db_.set_nickname(get_valid_nickname(std::string(props_["playername"]->GetString())));
+        msg.nickname = get_valid_nickname(std::string(props_["playername"]->GetString()));
         msg.version = version;
         msg.cheated = m_bml->IsCheatEnabled();
         msg.serialize();

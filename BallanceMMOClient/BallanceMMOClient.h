@@ -68,6 +68,7 @@ private:
 	void OnLevelFinish() override;
 	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
+	void OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) override;
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
@@ -522,6 +523,16 @@ private:
 			return "";
 		}
 		return str;
+	}
+
+	static std::string get_valid_nickname(std::string name) {
+		if (!bmmo::name_validator::is_of_valid_length(name))
+			name = (name + "___").substr(0, 20);
+		size_t invalid_pos = std::string::npos;
+		while ((invalid_pos = bmmo::name_validator::get_invalid_char_pos(name)) != std::string::npos) {
+			name[invalid_pos] = '_';
+		}
+		return name;
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;

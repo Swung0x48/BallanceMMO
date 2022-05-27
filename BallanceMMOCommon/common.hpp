@@ -9,5 +9,6 @@
 #include "entity/entity.hpp"
 #include "entity/version.hpp"
 #include "role/role.hpp"
+#include "utility/name_validator.hpp"
 
 #endif //BALLANCEMMOSERVER_COMMON_HPP
