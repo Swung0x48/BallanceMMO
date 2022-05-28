@@ -172,7 +172,9 @@ private:
 		ss << "Player" << std::setw(3) << std::setfill('0') << random_variable;
 		tmp_prop->SetDefaultString(ss.str().c_str());
 		props_["playername"] = tmp_prop;
-	}
+		// Validation of player names fails at this stage of initialization
+		// so we had to put it at the time of establishing connections.
+		}
 
 	struct KeyVector {
 		char x = 0;
@@ -475,6 +477,17 @@ private:
 		}
 	}
 
+	void validate_nickname(IProperty* name_prop) {
+		std::string name = name_prop->GetString();
+		if (!bmmo::name_validator::is_valid(name)) {
+			std::string valid_name = bmmo::name_validator::get_valid_nickname(name);
+			m_bml->SendIngameMessage(std::format(
+				"Invalid player name \"{}\", replaced with \"{}\".",
+				name, valid_name).c_str());
+			name_prop->SetString(valid_name.c_str());
+		}
+	}
+
 	static std::string pretty_percentage(float value) {
 		if (value < 0)
 			return "N/A";
@@ -523,16 +536,6 @@ private:
 			return "";
 		}
 		return str;
-	}
-
-	static std::string get_valid_nickname(std::string name) {
-		if (!bmmo::name_validator::is_of_valid_length(name))
-			name = (name + "___").substr(0, 20);
-		size_t invalid_pos = std::string::npos;
-		while ((invalid_pos = bmmo::name_validator::get_invalid_char_pos(name)) != std::string::npos) {
-			name[invalid_pos] = '_';
-		}
-		return name;
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;

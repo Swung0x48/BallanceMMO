@@ -216,7 +216,7 @@ protected:
         }
         // check if name exists
         else if (username_.find(msg.nickname) != username_.end()) {
-            reason << "A player with a same username \"" << msg.nickname << "\" already exists on this serer.";
+            reason << "A player with the same username \"" << msg.nickname << "\" already exists on this serer.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 2;
         }
         // validate nickname length
@@ -229,7 +229,7 @@ protected:
         // validate nickname characters
         else if (size_t invalid_pos = bmmo::name_validator::get_invalid_char_pos(msg.nickname);
                 invalid_pos != std::string::npos) {
-            reason << "Invalid character '" << msg.nickname[invalid_pos] << "'; Nickname must contain only alphanumeric characters and underscores.";
+            reason << "Invalid character '" << msg.nickname[invalid_pos] << "'; nicknames can only contain alphanumeric characters and underscores.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 4;
         }
 
