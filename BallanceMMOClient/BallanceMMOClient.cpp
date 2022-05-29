@@ -490,6 +490,21 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             state->ball_state.rotation.w);*/
         break;
     }
+    case bmmo::OwnedBallStateV2: {
+        bmmo::owned_ball_state_v2_msg msg;
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        assert(msg.deserialize());
+
+        for (auto& i : msg.balls) {
+            if (i.player_id != db_.get_client_id()) {
+                if (!db_.update(i.player_id, reinterpret_cast<const BallState&>(i.state))) {
+                    GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
+                }
+            }
+        }
+        
+        break;
+    }
     case bmmo::LoginAccepted: {
         /*status_->update("Connected");
         status_->paint(0xff00ff00);

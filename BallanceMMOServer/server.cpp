@@ -9,11 +9,16 @@
 #include <vector>
 #include "../BallanceMMOCommon/common.hpp"
 
+#include <mutex>
+// #include <shared_mutex>
+
 #include "ya_getopt.h"
 
 struct client_data {
     std::string name;
     bool cheated = false;
+    bmmo::ball_state state;
+    bool updated = true;
 };
 
 class server : public role {
@@ -28,8 +33,9 @@ public:
 
         running_ = true;
         while (running_) {
+            auto next_update = std::chrono::system_clock::now() + UPDATE_INTERVAL;
             update();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_until(next_update);
         }
 
 //        while (running_) {
@@ -90,6 +96,10 @@ public:
         return client;
     };
 
+    int get_client_count() {
+        return clients_.size();
+    }
+
     bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid, bool crash = false) {
         if (!client_exists(client))
             return false;
@@ -139,6 +149,19 @@ public:
                         uptime * 1e-6, time_str.c_str());
     }
 
+    void pull_unupdated_states(std::vector<bmmo::owned_ball_state>& balls) {
+        for (auto& i: clients_) {
+            if (i.second.updated)
+                continue;
+            bmmo::owned_ball_state obs;
+            std::unique_lock<std::mutex> lock(client_data_mutex_);
+            obs.player_id = i.first;
+            obs.state = i.second.state;
+            balls.push_back(obs);
+            i.second.updated = true;
+        }
+    }
+
     void toggle_cheat(bool cheat) {
         bmmo::cheat_toggle_msg msg;
         msg.content.cheated = (uint8_t)cheat;
@@ -149,6 +172,8 @@ public:
         for (auto& i: clients_) {
             interface_->CloseConnection(i.first, 0, "Server closed", true);
         }
+        if (ticking_)
+            stop_ticking();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         running_ = false;
 //        if (server_thread_.joinable())
@@ -287,6 +312,10 @@ protected:
                 // so we just pass 0's.
                 
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
+
+                if (get_client_count() <= 1 && ticking_)
+                    stop_ticking();
+
                 break;
             }
 
@@ -388,6 +417,10 @@ protected:
                 connected_msg.cheated = msg.cheated;
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+
+                if (get_client_count() > 1 && !ticking_)
+                    start_ticking();
+
                 break;
             }
             case bmmo::LoginAccepted:
@@ -402,6 +435,10 @@ protected:
                 break;
             case bmmo::BallState: {
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
+                
+                std::unique_lock<std::mutex> lock(client_data_mutex_);
+                clients_[networking_msg->m_conn].state = state_msg->content;
+                clients_[networking_msg->m_conn].updated = false;
 
                 // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
                 //        networking_msg->m_conn,
@@ -422,11 +459,11 @@ protected:
 //                          state_msg->state.quaternion.z << ", " <<
 //                          state_msg->state.quaternion.w << ")" << std::endl;
 
-                bmmo::owned_ball_state_msg new_msg;
-                new_msg.content.state = state_msg->content;
-//                std::memcpy(&(new_msg.content), &(state_msg->content), sizeof(state_msg->content));
-                new_msg.content.player_id = networking_msg->m_conn;
-                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_UnreliableNoDelay, &networking_msg->m_conn);
+//                 bmmo::owned_ball_state_msg new_msg;
+//                 new_msg.content.state = state_msg->content;
+// //                std::memcpy(&(new_msg.content), &(state_msg->content), sizeof(state_msg->content));
+//                 new_msg.content.player_id = networking_msg->m_conn;
+//                 broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_UnreliableNoDelay, &networking_msg->m_conn);
 
                 break;
             }
@@ -533,12 +570,45 @@ protected:
         return msg_count;
     }
 
+    inline void tick() {
+        std::vector<bmmo::owned_ball_state> balls;
+        pull_unupdated_states(balls);
+        if (balls.size() < 1)
+            return;
+        bmmo::owned_ball_state_v2_msg msg{};
+        msg.balls = balls;
+        msg.serialize();
+        broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+    };
+
+    void start_ticking() {
+        ticking_ = true;
+        Printf("Ticking started.");
+        ticking_thread_ = std::thread([&]() {
+            while (ticking_) {
+                auto next_tick = std::chrono::system_clock::now() + TICK_INTERVAL;
+                tick();
+                std::this_thread::sleep_until(next_tick);
+            }
+        });
+    }
+    void stop_ticking() {
+        ticking_ = false;
+        ticking_thread_.join();
+        Printf("Ticking stopped.");
+    }
+
     uint16_t port_ = 0;
     HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 //    std::thread server_thread_;
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_;
+    std::mutex client_data_mutex_;
+    constexpr static inline auto TICK_INTERVAL = std::chrono::nanoseconds((int)1e9 / 33);
+    constexpr static inline auto UPDATE_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
+    std::thread ticking_thread_;
+    std::atomic_bool ticking_ = false;
 };
 
 // parse arguments (optional port and help/version) with getopt

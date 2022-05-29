@@ -179,6 +179,26 @@ private:
                        obs->content.state.rotation.w);
                 break;
             }
+            case bmmo::OwnedBallStateV2: {
+                bmmo::owned_ball_state_v2_msg msg;
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                for (auto& ball : msg.balls) {
+                    Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+                           ball.player_id,
+                           ball.state.type,
+                           ball.state.position.x,
+                           ball.state.position.y,
+                           ball.state.position.z,
+                           ball.state.rotation.x,
+                           ball.state.rotation.y,
+                           ball.state.rotation.z,
+                           ball.state.rotation.w);
+                }
+
+                break;
+            }
             case bmmo::OwnedCheatState: {
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
                 auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(networking_msg->m_pData);

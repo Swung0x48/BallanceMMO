@@ -35,7 +35,9 @@ namespace bmmo {
         OwnedCheatToggle,
 
         KickRequest,
-        PlayerKicked
+        PlayerKicked,
+
+        OwnedBallStateV2
     };
 
     template<typename T, opcode C = None>
