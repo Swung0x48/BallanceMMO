@@ -493,7 +493,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OwnedBallStateV2: {
         bmmo::owned_ball_state_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        assert(msg.deserialize());
+        msg.deserialize();
 
         for (auto& i : msg.balls) {
             if (i.player_id != db_.get_client_id()) {

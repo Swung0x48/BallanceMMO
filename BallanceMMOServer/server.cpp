@@ -605,7 +605,7 @@ protected:
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_;
     std::mutex client_data_mutex_;
-    constexpr static inline auto TICK_INTERVAL = std::chrono::nanoseconds((int)1e9 / 33);
+    constexpr static inline auto TICK_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
     constexpr static inline auto UPDATE_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;

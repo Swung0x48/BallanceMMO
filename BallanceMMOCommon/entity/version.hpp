@@ -16,7 +16,7 @@ namespace bmmo {
         uint8_t minor = 2;
         uint8_t subminor = 0;
         stage_t stage = Alpha;
-        uint8_t build = 1;
+        uint8_t build = 2;
 
         std::string to_string() const;
         bool operator<(const version_t& that) const;
