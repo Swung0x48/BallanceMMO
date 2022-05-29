@@ -149,7 +149,7 @@ public:
                         uptime * 1e-6, time_str.c_str());
     }
 
-    void pull_unupdated_states(std::vector<bmmo::owned_ball_state>& balls) {
+    inline void pull_unupdated_ball_states(std::vector<bmmo::owned_ball_state>& balls) {
         for (auto& i: clients_) {
             if (i.second.updated)
                 continue;
@@ -313,7 +313,7 @@ protected:
                 
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
 
-                if (get_client_count() <= 1 && ticking_)
+                if (ticking_ && get_client_count() <= 1)
                     stop_ticking();
 
                 break;
@@ -418,7 +418,7 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
 
-                if (get_client_count() > 1 && !ticking_)
+                if (!ticking_ && get_client_count() > 1)
                     start_ticking();
 
                 break;
@@ -571,20 +571,18 @@ protected:
     }
 
     inline void tick() {
-        std::vector<bmmo::owned_ball_state> balls;
-        pull_unupdated_states(balls);
-        if (balls.size() < 1)
-            return;
         bmmo::owned_ball_state_v2_msg msg{};
-        msg.balls = balls;
+        pull_unupdated_ball_states(msg.balls);
+        if (msg.balls.size() < 1)
+            return;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
     };
 
     void start_ticking() {
         ticking_ = true;
-        Printf("Ticking started.");
         ticking_thread_ = std::thread([&]() {
+            Printf("Ticking started.");
             while (ticking_) {
                 auto next_tick = std::chrono::system_clock::now() + TICK_INTERVAL;
                 tick();
