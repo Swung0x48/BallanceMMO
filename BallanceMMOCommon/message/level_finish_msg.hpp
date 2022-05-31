@@ -7,8 +7,8 @@ namespace bmmo {
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
         int points = 0;
         int lifes = 0;
-        int lifeBouns = 0;
-        int levelBouns = 0;
+        int lifeBonus = 0;
+        int levelBonus = 0;
         float timeElapsed = 0.0f;
 
         int startPoints = 0;

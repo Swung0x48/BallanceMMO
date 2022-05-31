@@ -9,14 +9,18 @@
 #include <vector>
 #include "../BallanceMMOCommon/common.hpp"
 
+// #include <iomanip>
 #include <mutex>
 // #include <shared_mutex>
+#include <fstream>
 
 #include "ya_getopt.h"
+#include "nlohmann/json.hpp"
 
 struct client_data {
     std::string name;
     bool cheated = false;
+    uint8_t uuid[16];
     bmmo::ball_state state;
     bool updated = true;
 };
@@ -130,10 +134,14 @@ public:
         return true;
     }
 
-    void print_clients() {
+    void print_clients(bool print_uuid = false) {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
-            Printf("%u: %s%s", i.first, i.second.name.c_str(), (i.second.cheated ? " [CHEAT]" : ""));
+            Printf("%u: %s%s%s",
+                    i.first,
+                    i.second.name.c_str(),
+                    print_uuid ? (" (" + get_uuid_string(i.second.uuid) + ")").c_str() : "",
+                    i.second.cheated ? " [CHEAT]" : "");
         }
     }
 
@@ -182,6 +190,12 @@ public:
 
 protected:
     bool setup() {
+        Printf("Loading config...");
+        if (!load_config()) {
+            Printf("Error: failed to load config. Please try fixing or emptying it first.");
+            return false;
+        }
+
         SteamNetworkingIPAddr local_address{};
         local_address.Clear();
         local_address.m_port = port_;
@@ -196,6 +210,29 @@ protected:
             return false;
         }
 
+        return true;
+    }
+
+    bool load_config() {
+        std::ifstream ifile("config.json");
+        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
+            try {
+                ifile >> config_;
+                op_players_ = config_.at("op").get<std::vector<std::unordered_map<std::string, std::string>>>();
+            } catch (const std::exception& e) {
+                Printf("Error: failed to parse config: %s", e.what());
+                return false;
+            }
+        } else {
+            Printf("Config is empty. Generating default config...");
+            op_players_ = {
+                {{"name", "example_player"}, {"uuid", "00000001-0002-0003-0004-000000000005"}}
+            };
+            config_["op"] = op_players_;
+            std::ofstream ofile("config.json");
+            ofile << std::setw(4) << config_ << std::endl;
+        }
+        Printf("Config loaded successfully.");
         return true;
     }
 
@@ -229,7 +266,34 @@ protected:
         return true;
     }
 
-    bool validate_client(HSteamNetConnection client, bmmo::login_request_v2_msg& msg) {
+    std::string get_uuid_string(uint8_t* uuid) {
+        // std::stringstream ss;
+        // for (int i = 0; i < 16; i++) {
+        //     ss << std::hex << std::setfill('0') << std::setw(2) << (int)uuid[i];
+        //     if (i == 3 || i == 5 || i == 7 || i == 9)
+        //         ss << '-';
+        // }
+        // return ss.str();
+        char str[37] = {};
+        sprintf(str, 
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", 
+            uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+            uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
+        );
+        return std::string(str);
+    }
+
+    bool is_op(HSteamNetConnection client) {
+        if (!client_exists(client))
+            return false;
+        for (auto& i: op_players_) {
+            if (i.at("uuid") == get_uuid_string(clients_[client].uuid))
+                return true;
+        }
+        return false;
+    }
+
+    bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
 
@@ -374,7 +438,7 @@ protected:
         auto client_it = clients_.find(networking_msg->m_conn);
 
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
-        if (!(raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || client_it != clients_.end())) { // ignore limbo clients message
+        if (!(client_it != clients_.end() || raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || raw_msg->code == bmmo::LoginRequestV3)) { // ignore limbo clients message
             interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
             return;
         }
@@ -393,13 +457,32 @@ protected:
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
 
+                std::string reason = "Outdated client (client: " + msg.version.to_string()
+                        + "; minimum: " + bmmo::minimum_client_version.to_string() + ")";
+                bmmo::login_denied_msg new_msg;
+                send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.c_str(), true);
+                break;
+            }
+            case bmmo::LoginRequestV3: {
+                bmmo::login_request_v3_msg msg;
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
+
                 if (!validate_client(networking_msg->m_conn, msg))
                     break;
 
                 // accepting client
-                Printf("%s (v%s) logged in with cheat mode %s!\n", msg.nickname.c_str(), msg.version.to_string().c_str(), msg.cheated ? "on" : "off");
                 clients_[networking_msg->m_conn] = {msg.nickname, (bool)msg.cheated};  // add the client here
+                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(uint8_t) * 16);
                 username_[msg.nickname] = networking_msg->m_conn;
+                Printf("%s (%s; v%s) logged in with cheat mode %s!\n",
+                        msg.nickname.c_str(),
+                        get_uuid_string(msg.uuid).substr(0, 8).c_str(),
+                        msg.version.to_string().c_str(),
+                        msg.cheated ? "on" : "off");
 
                 // notify this client of other online players
                 bmmo::login_accepted_v2_msg accepted_msg;
@@ -492,11 +575,69 @@ protected:
                 msg->content.player_id = networking_msg->m_conn;
                 
                 // Cheat check
-                if (msg->content.currentLevel * 100 != msg->content.levelBouns || msg->content.levelBouns != 200) {
+                if (msg->content.currentLevel * 100 != msg->content.levelBonus || msg->content.levelBonus != 200) {
                     msg->content.cheated = true;
                 }
+                // Prepare data...
+                int score = msg->content.levelBonus + msg->content.points + msg->content.lifes * msg->content.lifeBonus;
+
+                int total = int(msg->content.timeElapsed);
+                int minutes = total / 60;
+                int seconds = total % 60;
+                int hours = minutes / 60;
+                minutes %= 60;
+                int ms = int((msg->content.timeElapsed - total) * 1000);
+
+                // Prepare message
+                Printf("%s%s (#%u) has finished a map, scored %d, elapsed %02d:%02d:%02d.%03d in real time.",
+                    msg->content.cheated ? "[CHEAT] " : "",
+                    clients_[msg->content.player_id].name.c_str(), msg->content.player_id,
+                    score, hours, minutes, seconds, ms);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+
+                break;
+            }
+            case bmmo::LevelFinishV2: {
+                bmmo::level_finish_v2_msg msg;
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+                msg.player_id = networking_msg->m_conn;
+
+                // Cheat check
+                if (msg.currentLevel * 100 != msg.levelBonus || msg.lifeBonus != 200) {
+                    msg.cheated = true;
+                }
+
+                // Prepare data...
+                int score = msg.levelBonus + msg.points + msg.lifes * msg.lifeBonus;
+
+                int total = int(msg.timeElapsed);
+                int minutes = total / 60;
+                int seconds = total % 60;
+                int hours = minutes / 60;
+                minutes = minutes % 60;
+                int ms = int((msg.timeElapsed - total) * 1000);
+
+                // Prepare message
+                std::string map_name = "";
+                if (msg.type == bmmo::Original && bmmo::is_original_level(msg.md5, msg.currentLevel)) {
+                    map_name = msg.map_name;
+                    map_name.replace(5, 1, " ");
+                }
+                else {
+                    map_name = "\"" + msg.map_name + "\"";
+                }
+                Printf("%s%s (#%u) just finished %s (score: %d; real time: %02d:%02d:%02d.%03d).",
+                    msg.cheated ? "[CHEAT] " : "",
+                    clients_[msg.player_id].name.c_str(), msg.player_id,
+                    map_name.c_str(),
+                    score, hours, minutes, seconds, ms);
+
+                msg.clear();
+                msg.serialize();
+
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 break;
             }
@@ -534,10 +675,15 @@ protected:
                 } else {
                     Printf("%s requested to kick player %u!", client_it->second.name.c_str(), msg.player_id);
                 }
-                kick_client(player_id, msg.reason, client_it->first);
+                if (!kick_client(player_id, msg.reason, client_it->first)) {
+                    bmmo::action_denied_msg new_msg{};
+                    new_msg.content.reason = bmmo::TargetNotFound;
+                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                };
 
                 break;
             }
+            case bmmo::ActionDenied:
             case bmmo::KeyboardInput:
                 break;
             default:
@@ -607,6 +753,8 @@ protected:
     constexpr static inline auto UPDATE_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
+    nlohmann::json config_;
+    std::vector<std::unordered_map<std::string, std::string>> op_players_;
 };
 
 // parse arguments (optional port and help/version) with getopt
@@ -673,6 +821,8 @@ int main(int argc, char** argv) {
             server.shutdown();
         } else if (cmd == "list") {
             server.print_clients();
+        } else if (cmd == "list-uuid") {
+            server.print_clients(true);
         } else if (cmd == "say") {
             bmmo::chat_msg msg{};
             std::getline(std::cin, msg.chat_content);

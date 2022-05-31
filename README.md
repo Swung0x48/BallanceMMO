@@ -150,12 +150,17 @@ if openssl fails to compile
 > vcpkg integrate install
 ```
 
-5. Extract BML Dev pack, and place the following:
+5. Extract BML Dev pack and [Boost Library](https://www.boost.org/users/download/), and place the following:
 
+*BML*:
 ```
 include\BML -> BallanceMMOClient\include\BML
 lib\Debug -> BallanceMMOClient\lib\BML\Debug
 lib\Release -> BallanceMMOClient\lib\BML\Release
+```
+*Boost*:
+```
+boost -> BallanceMMOClient\include\boost
 ```
 
 6. Open the Visual Studio project file `BallanceMMO.sln`. 

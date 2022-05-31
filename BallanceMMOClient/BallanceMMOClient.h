@@ -13,6 +13,15 @@
 #include <memory>
 #include <format>
 #include <asio.hpp>
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+#include <boost/uuid/uuid_io.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/regex.hpp>
+#include <boost/algorithm/string.hpp>
+#include <openssl/md5.h>
+#include <fstream>
+// #include <filesystem>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -121,6 +130,9 @@ private:
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
+	std::string current_map_name_;
+	bmmo::map_type current_map_type_ = bmmo::UnknownType;
+	uint8_t current_map_hash_[16];
 
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
@@ -129,6 +141,8 @@ private:
 	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = 1e6 / 66;
 
 	bool notify_cheat_toggle_ = true;
+
+	boost::uuids::uuid uuid_;
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
@@ -174,7 +188,19 @@ private:
 		props_["playername"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
 		// so we had to put it at the time of establishing connections.
+		GetConfig()->SetCategoryComment("Identity", "Identifiers of yourself. Cannot be modified.");
+		tmp_prop = GetConfig()->GetProperty("Identity", "UUID");
+		tmp_prop->SetComment("Universally unique identifier of yourself (please keep it secret). Cannot be modified.");
+		tmp_prop->SetDefaultString(boost::uuids::to_string(boost::uuids::random_generator()()).c_str());
+		try {
+			uuid_ = boost::lexical_cast<boost::uuids::uuid>(tmp_prop->GetString());
+		} catch (...) {
+			GetLogger()->Warn("Error: Invalid UUID. A new UUID has been generated.");
+			uuid_ = boost::uuids::random_generator()();
+			tmp_prop->SetString(boost::uuids::to_string(uuid_).c_str());
 		}
+		props_["uuid"] = tmp_prop;
+	}
 
 	struct KeyVector {
 		char x = 0;
@@ -536,6 +562,23 @@ private:
 			return "";
 		}
 		return str;
+	}
+
+	void md5_from_file(const std::string& path, uint8_t* result) {
+		std::ifstream file(path, std::ifstream::binary);
+		// std::stringstream ss;
+		// ss << std::filesystem::current_path() << " " << std::filesystem::absolute(path);
+		// GetLogger()->Info(ss.str().c_str());
+		if (!file.is_open())
+			return;
+		MD5_CTX md5Context;
+		MD5_Init(&md5Context);
+		char buf[1024 * 16];
+		while (file.good()) {
+			file.read(buf, sizeof(buf));
+			MD5_Update(&md5Context, buf, file.gcount());
+		}
+		MD5_Final(result, &md5Context);
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;

@@ -4,6 +4,7 @@
 #include "message.hpp"
 #include "login_request_msg.hpp"
 #include "login_request_v2_msg.hpp"
+#include "login_request_v3_msg.hpp"
 #include "login_accepted_msg.hpp"
 #include "login_accepted_v2_msg.hpp"
 #include "ball_state_msg.hpp"
@@ -15,11 +16,13 @@
 #include "owned_ball_state_v2_msg.hpp"
 #include "chat_msg.hpp"
 #include "level_finish_msg.hpp"
+#include "level_finish_v2_msg.hpp"
 #include "cheat_state_msg.hpp"
 #include "owned_cheat_state_msg.hpp"
 #include "cheat_toggle_msg.hpp"
 #include "owned_cheat_toggle_msg.hpp"
 #include "kick_request_msg.hpp"
 #include "player_kicked_msg.hpp"
+#include "action_denied_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

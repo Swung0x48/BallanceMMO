@@ -17,8 +17,16 @@ set(CMAKE_TOOLCHAIN_FILE ../submodule/vcpkg/scripts/buildsystems/vcpkg.cmake)
 include_directories(../submodule/asio/asio/include)
 include_directories(../submodule/ya_getopt)
 
+include(FetchContent)
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json
+    GIT_TAG v3.10.5
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
-target_link_libraries(BallanceMMOServer GameNetworkingSockets::GameNetworkingSockets)
+target_link_libraries(BallanceMMOServer GameNetworkingSockets::GameNetworkingSockets nlohmann_json)
 add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::GameNetworkingSockets)
 

@@ -27,7 +27,28 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     if (isMap) {
         GetLogger()->Info("Initializing peer objects...");
         objects_.init_players();
-        GetLogger()->Info("Initialize completed.");
+        boost::regex name_pattern(".*\\\\(Level|Maps)\\\\(.*).nmo", boost::regex::icase);
+        std::string path = std::string(filename);
+        boost::smatch matched;
+        if (boost::regex_search(path, matched, name_pattern)) {
+            current_map_name_ = matched[2].str();
+            if (boost::iequals(matched[1].str(), "Maps")) {
+                current_map_type_ = bmmo::Custom;
+            }
+            else {
+                current_map_type_ = bmmo::Original;
+                path = "..\\" + path;
+            }
+        } else {
+            current_map_name_ = std::string(filename);
+            current_map_type_ = bmmo::UnknownType;
+        }
+        md5_from_file(path, current_map_hash_);
+        std::string md5str;
+        bmmo::string_from_hex_chars(md5str, current_map_hash_, 16);
+        GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
+            current_map_name_.c_str(), (int)current_map_type_, md5str.c_str());
+        GetLogger()->Info("Initialization completed.");
     }
 
     /*if (isMap) {
@@ -114,16 +135,22 @@ void BallanceMMOClient::OnStartLevel()
 }
 
 void BallanceMMOClient::OnLevelFinish() {
-    bmmo::level_finish_msg msg{};
+    bmmo::level_finish_v2_msg msg{};
     auto* array_energy = m_bml->GetArrayByName("Energy");
-    array_energy->GetElementValue(0, 0, &msg.content.points);
-    array_energy->GetElementValue(0, 1, &msg.content.lifes);
-    array_energy->GetElementValue(0, 5, &msg.content.lifeBouns);
-    m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &msg.content.currentLevel);
-    m_bml->GetArrayByName("AllLevel")->GetElementValue(msg.content.currentLevel - 1, 6, &msg.content.levelBouns);
-    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_) / 1e3;
+    array_energy->GetElementValue(0, 0, &msg.points);
+    array_energy->GetElementValue(0, 1, &msg.lifes);
+    array_energy->GetElementValue(0, 5, &msg.lifeBonus);
+    m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &msg.currentLevel);
+    m_bml->GetArrayByName("AllLevel")->GetElementValue(msg.currentLevel - 1, 6, &msg.levelBonus);
+    msg.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_) / 1e3;
+    msg.cheated = m_bml->IsCheatEnabled();
+    msg.map_name = current_map_name_;
+    msg.type = current_map_type_;
+    memcpy(msg.md5, current_map_hash_, 16);
     GetLogger()->Info("Sending level finish message...");
-    send(msg, k_nSteamNetworkingSend_Reliable);
+    msg.serialize();
+
+    send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 }
 
 void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
@@ -146,6 +173,9 @@ void BallanceMMOClient::OnCheatEnabled(bool enable) {
 void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) {
     if (prop == props_["playername"]) {
         validate_nickname(prop);
+    } else if (prop == props_["uuid"]) {
+        prop->SetString(boost::uuids::to_string(uuid_).c_str());
+        GetLogger()->Warn("Warning: Unable to modify UUID.");
     }
 }
 
@@ -439,12 +469,13 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         //status_->paint(0xff00ff00);
         m_bml->SendIngameMessage("Connected to server.");
         m_bml->SendIngameMessage("Logging in...");
-        bmmo::login_request_v2_msg msg;
+        bmmo::login_request_v3_msg msg;
         validate_nickname(props_["playername"]);
         db_.set_nickname(props_["playername"]->GetString());
         msg.nickname = props_["playername"]->GetString();
         msg.version = version;
         msg.cheated = m_bml->IsCheatEnabled();
+        memcpy(msg.uuid, &uuid_, 16);
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         if (ping_thread_.joinable())
@@ -612,11 +643,46 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->SendIngameMessage(print_msg.c_str());
         break;
     }
+    case bmmo::LevelFinishV2: {
+        bmmo::level_finish_v2_msg msg;
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+
+        // Prepare data...
+        int score = msg.levelBonus + msg.points + msg.lifes * msg.lifeBonus;
+
+        int total = int(msg.timeElapsed);
+        int minutes = total / 60;
+        int seconds = total % 60;
+        int hours = minutes / 60;
+        minutes = minutes % 60;
+        int ms = int((msg.timeElapsed - total) * 1000);
+
+        // Prepare message
+        std::string map_name = "";
+        if (msg.type == bmmo::Original && bmmo::is_original_level(msg.md5, msg.currentLevel)) {
+            map_name = msg.map_name;
+            map_name.replace(5, 1, " ");
+        }
+        else {
+            map_name = "\"" + msg.map_name + "\"";
+        }
+        auto state = db_.get(msg.player_id);
+        assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
+        m_bml->SendIngameMessage(std::format(
+            "{}{} just finished {} (score: {}; real time: {:02d}:{:02d}:{:02d}.{:03d}).",
+            msg.cheated ? "[CHEAT] " : "",
+            state.has_value() ? state->name : db_.get_nickname(),
+            map_name,
+            score, hours, minutes, seconds, ms).c_str());
+        // TODO: Stop displaying objects on finish
+        break;
+    }
     case bmmo::LevelFinish: {
         auto* msg = reinterpret_cast<bmmo::level_finish_msg*>(network_msg->m_pData);
 
         // Prepare data...
-        int score = msg->content.levelBouns + msg->content.points + msg->content.lifes * msg->content.lifeBouns;
+        int score = msg->content.levelBonus + msg->content.points + msg->content.lifes * msg->content.lifeBonus;
 
         int total = int(msg->content.timeElapsed);
         int minutes = total / 60;
@@ -626,11 +692,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         int ms = int((msg->content.timeElapsed - total) * 1000);
 
         // Prepare message
-        const std::string fmt_string = "{} has finished a map, scored {}, elapsed {:02d}:{:02d}:{:02d}.{:03d} in real time.";
         auto state = db_.get(msg->content.player_id);
         assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
-        m_bml->SendIngameMessage(std::format(fmt_string,
-            state.has_value() ? state->name : db_.get_nickname(), score, hours, minutes, seconds, ms).c_str());
+        m_bml->SendIngameMessage(std::format(
+          "{}{} has finished a map, scored {}, elapsed {:02d}:{:02d}:{:02d}.{:03d} in real time.",
+          msg->content.cheated ? "[CHEAT] " : "",
+          state.has_value() ? state->name : db_.get_nickname(), score, hours, minutes, seconds, ms).c_str());
         // TODO: Stop displaying objects on finish
         break;
     }
@@ -692,6 +759,31 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg.crashed ? " and crashed subsequently" : ""
         ).c_str());
 
+        break;
+    }
+    case bmmo::ActionDenied: {
+        auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
+
+        std::string reason;
+        switch (msg->content.reason) {
+            case bmmo::NoPermission:
+                reason = "you don't have the permission to run this action.";
+                break;
+            case bmmo::InvalidAction:
+                reason = "invalid action.";
+                break;
+            case bmmo::InvalidTarget:
+                reason = "invalid target.";
+                break;
+            case bmmo::TargetNotFound:
+                reason = "target not found.";
+                break;
+            case bmmo::UnknownReason:
+            default:
+                reason = "unknown reason.";
+        }
+
+        m_bml->SendIngameMessage(("Action failed: " + reason).c_str());
         break;
     }
     default:

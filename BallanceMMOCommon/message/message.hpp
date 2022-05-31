@@ -37,7 +37,11 @@ namespace bmmo {
         KickRequest,
         PlayerKicked,
 
-        OwnedBallStateV2
+        OwnedBallStateV2,
+        LoginRequestV3,
+        LevelFinishV2,
+
+        ActionDenied
     };
 
     template<typename T, opcode C = None>
