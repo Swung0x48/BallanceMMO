@@ -643,6 +643,14 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
+                ///////////////////////////////////////////////////////////////
+                if (msg.chat_content == "Go!") {
+                    for (auto& i: map_ranks_) {
+                        i.second = 0;
+                    }
+                }
+                ///////////////////////////////////////////////////////////////
+
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
                 const HSteamNetConnection current_player_id  = networking_msg->m_conn;
@@ -716,6 +724,27 @@ protected:
                 else {
                     map_name = "\"" + msg.map_name + "\"";
                 }
+                //////////////////////
+                ++map_ranks_[map_name];
+                bmmo::chat_msg chat_msg{};
+                // convert map rank to ordinal number
+                std::string rank_str = "th";
+                if ((map_ranks_[map_name] / 10) % 10 != 1) {
+                    switch (map_ranks_[map_name] % 10) {
+                        case 1:
+                            rank_str = "st";
+                            break;
+                        case 2:
+                            rank_str = "nd";
+                            break;
+                        case 3:
+                            rank_str = "rd";
+                            break;
+                    }
+                }
+                chat_msg.chat_content = map_name + " | " + clients_[msg.player_id].name + " | " + std::to_string(map_ranks_[map_name]) + rank_str + " place";
+                Printf(chat_msg.chat_content.c_str());
+                //////////////////////
                 Printf("%s%s (#%u) just finished %s (score: %d; real time: %02d:%02d:%02d.%03d).",
                     msg.cheated ? "[CHEAT] " : "",
                     clients_[msg.player_id].name.c_str(), msg.player_id,
@@ -726,6 +755,10 @@ protected:
                 msg.serialize();
 
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                ///////////////////////
+                chat_msg.serialize();
+                broadcast_message(chat_msg.raw.str().data(), chat_msg.size(), k_nSteamNetworkingSend_Reliable);
+                ///////////////////////
 
                 break;
             }
@@ -844,6 +877,7 @@ protected:
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_;
+    std::unordered_map<std::string, int> map_ranks_;
 };
 
 // parse arguments (optional port and help/version) with getopt
