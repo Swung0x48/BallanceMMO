@@ -41,7 +41,8 @@ namespace bmmo {
         LoginRequestV3,
         LevelFinishV2,
 
-        ActionDenied
+        ActionDenied,
+        OpState,
     };
 
     template<typename T, opcode C = None>

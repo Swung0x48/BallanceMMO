@@ -786,6 +786,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->SendIngameMessage(("Action failed: " + reason).c_str());
         break;
     }
+    case bmmo::OpState: {
+        auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
+        m_bml->SendIngameMessage(std::format("You have been {} Operator permission.",
+                msg->content.op ? "granted" : "removed from").c_str());
+    }
     default:
         GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);
         break;

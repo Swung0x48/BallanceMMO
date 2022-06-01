@@ -15,7 +15,7 @@
 #include <fstream>
 
 #include "ya_getopt.h"
-#include "nlohmann/json.hpp"
+#include "yaml-cpp/yaml.h"
 
 struct client_data {
     std::string name;
@@ -137,11 +137,12 @@ public:
     void print_clients(bool print_uuid = false) {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
-            Printf("%u: %s%s%s",
+            Printf("%u: %s%s%s%s",
                     i.first,
                     i.second.name.c_str(),
                     print_uuid ? (" (" + get_uuid_string(i.second.uuid) + ")").c_str() : "",
-                    i.second.cheated ? " [CHEAT]" : "");
+                    i.second.cheated ? " [CHEAT]" : "",
+                    is_op(i.first) ? " [OP]" : "");
         }
     }
 
@@ -170,6 +171,28 @@ public:
         }
     }
 
+    void set_op(HSteamNetConnection client, bool op) {
+        if (!client_exists(client))
+            return;
+        std::string uuid_string = get_uuid_string(clients_[client].uuid),
+                    name = clients_[client].name;
+        if (op) {
+            if (op_players_.find(name) != op_players_.end())
+                return;
+            op_players_[name] = uuid_string;
+            Printf("%s is now an operator.", name.c_str());
+        } else {
+            if (op_players_.find(name) == op_players_.end())
+                return;
+            op_players_.erase(name);
+            Printf("%s is no longer an operator.", name.c_str());
+        }
+        save_config_to_file();
+        bmmo::op_state_msg msg{};
+        msg.content.op = op;
+        send(client, msg, k_nSteamNetworkingSend_Reliable);
+    }
+
     void toggle_cheat(bool cheat) {
         bmmo::cheat_toggle_msg msg;
         msg.content.cheated = (uint8_t)cheat;
@@ -190,7 +213,7 @@ public:
 
 protected:
     bool setup() {
-        Printf("Loading config...");
+        Printf("Loading config from config.yml...");
         if (!load_config()) {
             Printf("Error: failed to load config. Please try fixing or emptying it first.");
             return false;
@@ -213,25 +236,87 @@ protected:
         return true;
     }
 
-    bool load_config() {
-        std::ifstream ifile("config.json");
+    void save_login_data(HSteamNetConnection client) {
+        SteamNetConnectionInfo_t pInfo;
+        interface_->GetConnectionInfo(client, &pInfo);
+        SteamNetworkingIPAddr ip = pInfo.m_addrRemote;
+        std::string ip_str,
+                    uuid_str = get_uuid_string(clients_[client].uuid),
+                    name = clients_[client].name;
+        if (ip.IsIPv4()) {
+            for (int i = 0; i < 4; ++i)
+                ip_str.append("." + std::to_string(ip.m_ipv4.m_ip[i]));
+        } else {
+            std::stringstream ss;
+            for (int i = 0; i < 8; ++i)
+                ss << ":" << std::hex << std::setw(2) << std::setfill('0') << ip.m_ipv6[i];
+            ip_str.append(ss.str());
+        }
+        ip_str.erase(0, 1);
+        // snprintf(ipAddr, sizeof(ipAddr), "%u.%u.%u.%u", (ipAddress & 0xff000000) >> 24,
+        //                                                (ipAddress & 0x00ff0000) >> 16,
+        //                                                (ipAddress & 0x0000ff00) >> 8,
+        //                                                (ipAddress & 0x000000ff));
+        YAML::Node login_data;
+        std::ifstream ifile("login_data.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
             try {
-                ifile >> config_;
-                op_players_ = config_.at("op").get<std::vector<std::unordered_map<std::string, std::string>>>();
+                login_data = YAML::LoadFile("login_data.yml");
+            } catch (const std::exception& e) {
+                Printf("Error: failed to parse config: %s", e.what());
+                return;
+            }
+        }
+        ifile.close();
+        auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::string time_str(20, 0);
+        time_str.resize(std::strftime(&time_str[0], time_str.size(), 
+            "%F %X", std::localtime(&time)));
+        if (!login_data[uuid_str])
+            login_data[uuid_str] = YAML::Node(YAML::NodeType::Map);
+        if (!login_data[uuid_str][name])
+            login_data[uuid_str][name] = YAML::Node(YAML::NodeType::Map);
+        login_data[uuid_str][name][time_str] = ip_str;
+        std::ofstream ofile("login_data.yml");
+        if (ofile.is_open()) {
+            ofile << login_data;
+            ofile.close();
+        }
+    }
+
+    inline void save_config_to_file() {
+        config_["op_list"] = op_players_;
+        std::ofstream config_file("config.yml");
+        if (!config_file.is_open()) {
+            Printf("Error: failed to open config file for writing.");
+            return;
+        }
+        config_file << "# Config file for Ballance MMO Server" << std::endl;
+        config_file << config_;
+        config_file.close();
+    }
+
+    bool load_config() {
+        std::ifstream ifile("config.yml");
+        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
+            try {
+                config_ = YAML::LoadFile("config.yml");
+                if (config_["op_list"])
+                    op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
             } catch (const std::exception& e) {
                 Printf("Error: failed to parse config: %s", e.what());
                 return false;
             }
         } else {
             Printf("Config is empty. Generating default config...");
+            config_["usage_notes"] = "Player data style: - playername: uuid.";
             op_players_ = {
-                {{"name", "example_player"}, {"uuid", "00000001-0002-0003-0004-000000000005"}}
+                {{"example_player", "00000001-0002-0003-0004-000000000005"}}
             };
-            config_["op"] = op_players_;
-            std::ofstream ofile("config.json");
-            ofile << std::setw(4) << config_ << std::endl;
+
+            save_config_to_file();
         }
+        ifile.close();
         Printf("Config loaded successfully.");
         return true;
     }
@@ -286,10 +371,11 @@ protected:
     bool is_op(HSteamNetConnection client) {
         if (!client_exists(client))
             return false;
-        for (auto& i: op_players_) {
-            if (i.at("uuid") == get_uuid_string(clients_[client].uuid))
-                return true;
-        }
+        auto op_it = op_players_.find(clients_[client].name);
+        if (op_it == op_players_.end())
+            return false;
+        if (op_it->second == get_uuid_string(clients_[client].uuid))
+            return true;
         return false;
     }
 
@@ -492,6 +578,8 @@ protected:
                 }
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+
+                save_login_data(networking_msg->m_conn);
                 
                 // notify other client of the fact that this client goes online
                 bmmo::player_connected_v2_msg connected_msg;
@@ -684,6 +772,7 @@ protected:
                 break;
             }
             case bmmo::ActionDenied:
+            case bmmo::OpState:
             case bmmo::KeyboardInput:
                 break;
             default:
@@ -753,8 +842,8 @@ protected:
     constexpr static inline auto UPDATE_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
-    nlohmann::json config_;
-    std::vector<std::unordered_map<std::string, std::string>> op_players_;
+    YAML::Node config_;
+    std::unordered_map<std::string, std::string> op_players_;
 };
 
 // parse arguments (optional port and help/version) with getopt
@@ -863,6 +952,25 @@ int main(int argc, char** argv) {
             if (cmd == "crash" || cmd == "crash-id")
                 crash = true;
             server.kick_client(client, reason, k_HSteamNetConnection_Invalid, crash);
+        } else if (cmd == "op" || cmd == "op-id" || cmd == "deop" || cmd == "deop-id") {
+            std::string username = "";
+            HSteamNetConnection client = k_HSteamNetConnection_Invalid;
+            if (cmd == "op-id" || cmd == "deop-id") {
+                std::string id_string;
+                std::cin >> id_string;
+                client = atoll(id_string.c_str());
+                if (client == 0) {
+                    server.Printf("Error: invalid connection id.");
+                    continue;
+                }
+            } else {
+                std::cin >> username;
+                client = server.get_client_id(username);
+            }
+            bool op = false;
+            if (cmd == "op" || cmd == "op-id")
+                op = true;
+            server.set_op(client, op);
         }
     } while (server.running());
 

@@ -19,14 +19,14 @@ include_directories(../submodule/ya_getopt)
 
 include(FetchContent)
 FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json
-    GIT_TAG v3.10.5
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp
+    GIT_TAG 190ad502b5bc91b01fd2e73f5343cf7b40cfdc70
 )
-FetchContent_MakeAvailable(nlohmann_json)
+FetchContent_MakeAvailable(yaml-cpp)
 
 add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
-target_link_libraries(BallanceMMOServer GameNetworkingSockets::GameNetworkingSockets nlohmann_json)
+target_link_libraries(BallanceMMOServer GameNetworkingSockets::GameNetworkingSockets yaml-cpp)
 add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::GameNetworkingSockets)
 
