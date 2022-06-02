@@ -133,6 +133,34 @@ public:
 
         return true;
     }
+    
+    bool load_config() {
+        std::ifstream ifile("config.yml");
+        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
+            try {
+                config_ = YAML::LoadFile("config.yml");
+                if (config_["op_list"])
+                    op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
+                if (config_["enable_op_privileges"])
+                    op_mode_ = config_["enable_op_privileges"].as<bool>();
+                else
+                    config_["enable_op_privileges"] = true;
+            } catch (const std::exception& e) {
+                Printf("Error: failed to parse config: %s", e.what());
+                return false;
+            }
+        } else {
+            Printf("Config is empty. Generating default config...");
+            config_["usage_notes"] = "Player data style: - playername: uuid.";
+            op_players_ = {{"example_player", "00000001-0002-0003-0004-000000000005"}};
+            config_["enable_op_privileges"] = true;
+        }
+
+        ifile.close();
+        save_config_to_file();
+        Printf("Config loaded successfully.");
+        return true;
+    }
 
     void print_clients(bool print_uuid = false) {
         Printf("%d clients online:", clients_.size());
@@ -296,31 +324,6 @@ protected:
         config_file.close();
     }
 
-    bool load_config() {
-        std::ifstream ifile("config.yml");
-        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
-            try {
-                config_ = YAML::LoadFile("config.yml");
-                if (config_["op_list"])
-                    op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
-            } catch (const std::exception& e) {
-                Printf("Error: failed to parse config: %s", e.what());
-                return false;
-            }
-        } else {
-            Printf("Config is empty. Generating default config...");
-            config_["usage_notes"] = "Player data style: - playername: uuid.";
-            op_players_ = {
-                {{"example_player", "00000001-0002-0003-0004-000000000005"}}
-            };
-
-            save_config_to_file();
-        }
-        ifile.close();
-        Printf("Config loaded successfully.");
-        return true;
-    }
-
     void cleanup_disconnected_client(HSteamNetConnection* client) {
         // Locate the client.  Note that it should have been found, because this
         // is the only codepath where we remove clients (except on shutdown),
@@ -351,6 +354,16 @@ protected:
         return true;
     }
 
+    bool deny_action(HSteamNetConnection client) {
+        if (op_mode_ && op_online() && !is_op(client)) {
+            bmmo::action_denied_msg denied_msg;
+            denied_msg.content.reason = bmmo::NoPermission;
+            send(client, denied_msg, k_nSteamNetworkingSend_Reliable);
+            return true;
+        }
+        return false;
+    }
+
     std::string get_uuid_string(uint8_t* uuid) {
         // std::stringstream ss;
         // for (int i = 0; i < 16; i++) {
@@ -376,6 +389,14 @@ protected:
             return false;
         if (op_it->second == get_uuid_string(clients_[client].uuid))
             return true;
+        return false;
+    }
+
+    bool op_online() {
+        for (auto& op : op_players_) {
+            if (username_.find(op.first) != username_.end())
+                return true;
+        }
         return false;
     }
 
@@ -645,6 +666,8 @@ protected:
 
                 ///////////////////////////////////////////////////////////////
                 if (msg.chat_content == "Go!") {
+                    if (deny_action(networking_msg->m_conn))
+                        break;
                     for (auto& i: map_ranks_) {
                         i.second = 0;
                     }
@@ -796,6 +819,9 @@ protected:
                 } else {
                     Printf("%s requested to kick player %u!", client_it->second.name.c_str(), msg.player_id);
                 }
+                if (deny_action(networking_msg->m_conn))
+                    break;
+
                 if (!kick_client(player_id, msg.reason, client_it->first)) {
                     bmmo::action_denied_msg new_msg{};
                     new_msg.content.reason = bmmo::TargetNotFound;
@@ -878,6 +904,7 @@ protected:
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_;
     std::unordered_map<std::string, int> map_ranks_;
+    bool op_mode_ = true;
 };
 
 // parse arguments (optional port and help/version) with getopt
@@ -1005,6 +1032,9 @@ int main(int argc, char** argv) {
             if (cmd == "op" || cmd == "op-id")
                 op = true;
             server.set_op(client, op);
+        } else if (cmd == "reload") {
+            if (!server.load_config())
+                server.Printf("Error: failed to reload config.");
         }
     } while (server.running());
 

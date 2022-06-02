@@ -90,6 +90,13 @@ public:
         nickname_ = name;
     };
 
+    void set_uuid(std::string& uuid) {
+        while (uuid.find('-') != std::string::npos) {
+            uuid.erase(uuid.find('-'), 1);
+        }
+        bmmo::hex_chars_from_string(uuid_, uuid);
+    };
+
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
@@ -141,9 +148,10 @@ private:
             case k_ESteamNetworkingConnectionState_Connected: {
                 Printf("Connected to server OK\n");
                 //bmmo::login_request_msg msg;
-                bmmo::login_request_v2_msg msg;
+                bmmo::login_request_v3_msg msg;
                 msg.nickname = nickname_;
                 msg.cheated = 0;
+                memcpy(msg.uuid, uuid_, sizeof(uuid_));
                 // msg.version = bmmo::version_t{1, 0, 0, bmmo::Alpha, 0};
                 msg.serialize();
                 send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -290,19 +298,21 @@ private:
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     std::string nickname_;
+    uint8_t uuid_[16];
 };
 
-// parse command line arguments (server/name/help/version) with getopt
-int parse_args(int argc, char** argv, std::string& server, std::string& name) {
+// parse command line arguments (server/name/uuid/help/version) with getopt
+int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid) {
     static struct option long_options[] = {
         {"server", required_argument, 0, 's'},
         {"name", required_argument, 0, 'n'},
+        {"uuid", required_argument, 0, 'u'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "s:n:hv", long_options, &opt_index))!= -1) {
+    while ((opt = getopt_long(argc, argv, "s:n:u:hv", long_options, &opt_index))!= -1) {
         switch (opt) {
             case 's':
                 server = optarg;
@@ -310,11 +320,15 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name) {
             case 'n':
                 name = optarg;
                 break;
+            case 'u':
+                uuid = optarg;
+                break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 printf("Options:\n");
                 printf("  -s, --server=ADDRESS\t Connect to the server at ADDRESS instead (default: 127.0.0.1:26676).\n");
                 printf("  -n, --name=NAME\t Set your name to NAME (default: \"Swung\")\n");
+                printf("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")\n");
                 printf("  -h, --help\t\t Display this help and exit.\n");
                 printf("  -v, --version\t\t Display version information and exit.\n");
                 return -1;
@@ -328,8 +342,9 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name) {
 }
 
 int main(int argc, char** argv) {
-    std::string server_addr = "127.0.0.1:26676", username = "Swung";
-    if (parse_args(argc, argv, server_addr, username) != 0)
+    std::string server_addr = "127.0.0.1:26676", username = "Swung",
+                uuid = "00010002-0003-0004-0005-000600070008";
+    if (parse_args(argc, argv, server_addr, username, uuid) != 0)
         return 0;
 
     std::cout << "Initializing sockets..." << std::endl;
@@ -338,6 +353,7 @@ int main(int argc, char** argv) {
     std::cout << "Creating client instance..." << std::endl;
     client client;
     client.set_nickname(username);
+    client.set_uuid(uuid);
 
     std::cout << "Connecting to server..." << std::endl;
     if (!client.connect(server_addr)) {
