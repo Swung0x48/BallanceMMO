@@ -43,6 +43,8 @@ namespace bmmo {
 
         ActionDenied,
         OpState,
+
+        Countdown,
     };
 
     template<typename T, opcode C = None>

@@ -25,5 +25,6 @@
 #include "player_kicked_msg.hpp"
 #include "action_denied_msg.hpp"
 #include "op_state_msg.hpp"
+#include "countdown_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

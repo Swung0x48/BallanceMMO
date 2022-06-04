@@ -143,8 +143,8 @@ public:
                     op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
                 if (config_["enable_op_privileges"])
                     op_mode_ = config_["enable_op_privileges"].as<bool>();
-                else
-                    config_["enable_op_privileges"] = true;
+                if (config_["restart_level_after_countdown"])
+                    force_restart_level_ = config_["restart_level_after_countdown"].as<bool>();
             } catch (const std::exception& e) {
                 Printf("Error: failed to parse config: %s", e.what());
                 return false;
@@ -153,8 +153,10 @@ public:
             Printf("Config is empty. Generating default config...");
             config_["usage_notes"] = "Player data style: - playername: uuid.";
             op_players_ = {{"example_player", "00000001-0002-0003-0004-000000000005"}};
-            config_["enable_op_privileges"] = true;
         }
+
+        config_["enable_op_privileges"] = op_mode_;
+        config_["restart_level_after_countdown"] = force_restart_level_;
 
         ifile.close();
         save_config_to_file();
@@ -664,16 +666,6 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                ///////////////////////////////////////////////////////////////
-                if (msg.chat_content == "Go!") {
-                    if (deny_action(networking_msg->m_conn))
-                        break;
-                    for (auto& i: map_ranks_) {
-                        i.second = 0;
-                    }
-                }
-                ///////////////////////////////////////////////////////////////
-
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
                 const HSteamNetConnection current_player_id  = networking_msg->m_conn;
@@ -689,34 +681,39 @@ protected:
 
                 break;
             }
-            case bmmo::LevelFinish: {
-                auto* msg = reinterpret_cast<bmmo::level_finish_msg*>(networking_msg->m_pData);
-                msg->content.player_id = networking_msg->m_conn;
-                
-                // Cheat check
-                if (msg->content.currentLevel * 100 != msg->content.levelBonus || msg->content.levelBonus != 200) {
-                    msg->content.cheated = true;
+            case bmmo::Countdown: {
+                if (deny_action(networking_msg->m_conn))
+                    break;
+                bmmo::countdown_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                std::string map_name = msg.map.get_display_name();
+                switch (msg.type) {
+                    case bmmo::CountdownType_Go: {
+                        Printf("[%u, %s]: %s - Go!", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str());
+                        map_ranks_[map_name] = 0;
+                        break;
+                    }
+                    case bmmo::CountdownType_1:
+                    case bmmo::CountdownType_2:
+                    case bmmo::CountdownType_3:
+                        Printf("[%u, %s]: %s - %u", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str(), msg.type);
+                        break;
+                    case bmmo::CountdownType_Unknown:
+                    default:
+                        return;
                 }
-                // Prepare data...
-                int score = msg->content.levelBonus + msg->content.points + msg->content.lifes * msg->content.lifeBonus;
 
-                int total = int(msg->content.timeElapsed);
-                int minutes = total / 60;
-                int seconds = total % 60;
-                int hours = minutes / 60;
-                minutes %= 60;
-                int ms = int((msg->content.timeElapsed - total) * 1000);
-
-                // Prepare message
-                Printf("%s%s (#%u) has finished a map, scored %d, elapsed %02d:%02d:%02d.%03d in real time.",
-                    msg->content.cheated ? "[CHEAT] " : "",
-                    clients_[msg->content.player_id].name.c_str(), msg->content.player_id,
-                    score, hours, minutes, seconds, ms);
-
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
-
+                msg.sender = networking_msg->m_conn;
+                msg.restart_level = force_restart_level_;
+                msg.clear();
+                msg.serialize();
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
+            case bmmo::LevelFinish:
+                break;
             case bmmo::LevelFinishV2: {
                 bmmo::level_finish_v2_msg msg;
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
@@ -724,12 +721,12 @@ protected:
                 msg.player_id = networking_msg->m_conn;
 
                 // Cheat check
-                if (msg.currentLevel * 100 != msg.levelBonus || msg.lifeBonus != 200) {
+                if (msg.map.level * 100 != msg.levelBonus || msg.lifeBonus != 200) {
                     msg.cheated = true;
                 }
 
                 // Prepare data...
-                int score = msg.levelBonus + msg.points + msg.lifes * msg.lifeBonus;
+                int score = msg.levelBonus + msg.points + msg.lives * msg.lifeBonus;
 
                 int total = int(msg.timeElapsed);
                 int minutes = total / 60;
@@ -739,49 +736,27 @@ protected:
                 int ms = int((msg.timeElapsed - total) * 1000);
 
                 // Prepare message
-                std::string map_name = "";
-                if (msg.type == bmmo::Original && bmmo::is_original_level(msg.md5, msg.currentLevel)) {
-                    map_name = msg.map_name;
-                    map_name.replace(5, 1, " ");
-                }
-                else {
-                    map_name = "\"" + msg.map_name + "\"";
-                }
-                //////////////////////
-                ++map_ranks_[map_name];
-                bmmo::chat_msg chat_msg{};
+                std::string map_name = msg.map.get_display_name();
+                msg.rank = ++map_ranks_[map_name];
                 // convert map rank to ordinal number
                 std::string rank_str = "th";
                 if ((map_ranks_[map_name] / 10) % 10 != 1) {
                     switch (map_ranks_[map_name] % 10) {
-                        case 1:
-                            rank_str = "st";
-                            break;
-                        case 2:
-                            rank_str = "nd";
-                            break;
-                        case 3:
-                            rank_str = "rd";
-                            break;
+                        case 1: rank_str = "st"; break;
+                        case 2: rank_str = "nd"; break;
+                        case 3: rank_str = "rd"; break;
                     }
                 }
-                chat_msg.chat_content = map_name + " | " + clients_[msg.player_id].name + " | " + std::to_string(map_ranks_[map_name]) + rank_str + " place";
-                Printf(chat_msg.chat_content.c_str());
-                //////////////////////
-                Printf("%s%s (#%u) just finished %s (score: %d; real time: %02d:%02d:%02d.%03d).",
+                Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
                     msg.cheated ? "[CHEAT] " : "",
-                    clients_[msg.player_id].name.c_str(), msg.player_id,
-                    map_name.c_str(),
+                    msg.player_id, clients_[msg.player_id].name.c_str(),
+                    map_name.c_str(), map_ranks_[map_name], rank_str.c_str(),
                     score, hours, minutes, seconds, ms);
 
                 msg.clear();
                 msg.serialize();
 
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-                ///////////////////////
-                chat_msg.serialize();
-                broadcast_message(chat_msg.raw.str().data(), chat_msg.size(), k_nSteamNetworkingSend_Reliable);
-                ///////////////////////
 
                 break;
             }
@@ -897,14 +872,14 @@ protected:
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_;
     std::mutex client_data_mutex_;
-    constexpr static inline auto TICK_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
-    constexpr static inline auto UPDATE_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
+    constexpr static inline std::chrono::nanoseconds TICK_INTERVAL{(int)1e9 / 66},
+                                                     UPDATE_INTERVAL{(int)1e9 / 66};
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_;
     std::unordered_map<std::string, int> map_ranks_;
-    bool op_mode_ = true;
+    bool op_mode_ = true, force_restart_level_ = false;
 };
 
 // parse arguments (optional port and help/version) with getopt

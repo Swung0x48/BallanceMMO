@@ -9,33 +9,32 @@ namespace bmmo {
 
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
         int points = 0;
-        int lifes = 0;
+        int lives = 0;
         int lifeBonus = 0;
         int levelBonus = 0;
         float timeElapsed = 0.0f;
 
         int startPoints = 0;
-        int currentLevel = 0;
         bool cheated = false;
 
-        std::string map_name = "";
-        map_type type = UnknownType;
-        uint8_t md5[16];
+        struct map map;
+        int rank = 0;
 
         bool serialize() override {
             if (!serializable_message::serialize()) return false;
             raw.write(reinterpret_cast<const char*>(&player_id), sizeof(player_id));
             raw.write(reinterpret_cast<const char*>(&points), sizeof(points));
-            raw.write(reinterpret_cast<const char*>(&lifes), sizeof(lifes));
+            raw.write(reinterpret_cast<const char*>(&lives), sizeof(lives));
             raw.write(reinterpret_cast<const char*>(&lifeBonus), sizeof(lifeBonus));
             raw.write(reinterpret_cast<const char*>(&levelBonus), sizeof(levelBonus));
             raw.write(reinterpret_cast<const char*>(&timeElapsed), sizeof(timeElapsed));
             raw.write(reinterpret_cast<const char*>(&startPoints), sizeof(startPoints));
-            raw.write(reinterpret_cast<const char*>(&currentLevel), sizeof(currentLevel));
             raw.write(reinterpret_cast<const char*>(&cheated), sizeof(cheated));
-            message_utils::write_string(map_name, raw);
-            raw.write(reinterpret_cast<const char*>(&type), sizeof(type));
-            raw.write(reinterpret_cast<const char*>(md5), sizeof(uint8_t) * 16);
+            message_utils::write_string(map.name, raw);
+            raw.write(reinterpret_cast<const char*>(&map.type), sizeof(map.type));
+            raw.write(reinterpret_cast<const char*>(map.md5), sizeof(uint8_t) * 16);
+            raw.write(reinterpret_cast<const char*>(&map.level), sizeof(map.level));
+            raw.write(reinterpret_cast<const char*>(&rank), sizeof(rank));
             return (raw.good());
         }
 
@@ -49,8 +48,8 @@ namespace bmmo {
             raw.read(reinterpret_cast<char*>(&points), sizeof(points));
             if (!raw.good() || raw.gcount() != sizeof(points)) return false;
 
-            raw.read(reinterpret_cast<char*>(&lifes), sizeof(lifes));
-            if (!raw.good() || raw.gcount() != sizeof(lifes)) return false;
+            raw.read(reinterpret_cast<char*>(&lives), sizeof(lives));
+            if (!raw.good() || raw.gcount() != sizeof(lives)) return false;
 
             raw.read(reinterpret_cast<char*>(&lifeBonus), sizeof(lifeBonus));
             if (!raw.good() || raw.gcount() != sizeof(lifeBonus)) return false;
@@ -64,20 +63,23 @@ namespace bmmo {
             raw.read(reinterpret_cast<char*>(&startPoints), sizeof(startPoints));
             if (!raw.good() || raw.gcount() != sizeof(startPoints)) return false;
 
-            raw.read(reinterpret_cast<char*>(&currentLevel), sizeof(currentLevel));
-            if (!raw.good() || raw.gcount() != sizeof(currentLevel)) return false;
-
             raw.read(reinterpret_cast<char*>(&cheated), sizeof(cheated));
             if (!raw.good() || raw.gcount() != sizeof(cheated)) return false;
 
-            if (!message_utils::read_string(raw, map_name))
+            if (!message_utils::read_string(raw, map.name))
                 return false;
 
-            raw.read(reinterpret_cast<char*>(&type), sizeof(type));
-            if (!raw.good() || raw.gcount () != sizeof(type)) return false;
+            raw.read(reinterpret_cast<char*>(&map.type), sizeof(map.type));
+            if (!raw.good() || raw.gcount () != sizeof(map.type)) return false;
 
-            raw.read(reinterpret_cast<char*>(md5), sizeof(uint8_t) * 16);
+            raw.read(reinterpret_cast<char*>(map.md5), sizeof(uint8_t) * 16);
             if (!raw.good() || raw.gcount() != sizeof(uint8_t) * 16) return false;
+
+            raw.read(reinterpret_cast<char*>(&map.level), sizeof(map.level));
+            if (!raw.good() || raw.gcount() != sizeof(map.level)) return false;
+
+            raw.read(reinterpret_cast<char*>(&rank), sizeof(rank));
+            if (!raw.good() || raw.gcount() != sizeof(rank)) return false;
 
             return (raw.good());
         }

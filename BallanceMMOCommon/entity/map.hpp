@@ -10,8 +10,8 @@
 namespace bmmo {
     enum map_type : uint8_t {
         UnknownType,
-        Original,
-        Custom
+        OriginalLevel,
+        CustomMap
     };
 
     const std::vector<std::string> original_map_hashes = {
@@ -47,18 +47,58 @@ namespace bmmo {
         dest = ss.str();
     }
 
-    bool is_original_level(uint8_t* md5, int level) {
-        try {
-            uint8_t level_md5[16];
-            hex_chars_from_string(level_md5, original_map_hashes[level]);
-            if (memcmp(level_md5, md5, 16) == 0)
-                return true;
-        }
-        catch (...) {
+    struct map {
+        map_type type = UnknownType;
+        std::string name = "";
+        uint8_t md5[16];
+        uint32_t level = 0;
+
+        bool is_original_level() {
+            if (type != OriginalLevel) return false;
+            try {
+                uint8_t level_md5[16];
+                hex_chars_from_string(level_md5, original_map_hashes[level]);
+                if (memcmp(level_md5, md5, 16) == 0)
+                    return true;
+            }
+            catch (...) {
+                return false;
+            }
             return false;
         }
-        return false;
-    }
+
+        bool operator==(const map& that) const {
+            if (type != that.type) return false;
+            if (name != that.name) return false;
+            if (memcmp(md5, that.md5, 16) != 0) return false;
+            if (level != that.level) return false;
+            return true;
+        }
+
+        bool operator!=(const map& that) const {
+            return !(*this == that);
+        }
+
+        map& operator=(const map& that) {
+            type = that.type;
+            name = that.name;
+            memcpy(md5, that.md5, 16);
+            level = that.level;
+            return *this;
+        }
+
+        std::string get_display_name() {
+            std::string map_name;
+            if (is_original_level()) {
+                map_name = name;
+                map_name.replace(5, 1, " ");
+            }
+            else {
+                map_name = "\"" + name + "\"";
+            }
+            return map_name;
+        }
+    };
 }
 
 #endif //BALLANCEMMOSERVER_ENTITY_MAP_HPP

@@ -130,9 +130,7 @@ private:
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
-	std::string current_map_name_;
-	bmmo::map_type current_map_type_ = bmmo::UnknownType;
-	uint8_t current_map_hash_[16];
+	bmmo::map current_map_;
 
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
@@ -279,7 +277,7 @@ private:
 	}
 
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
-	const std::vector<std::string> init_args{ "mmo", "s" };
+	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
 		auto* input_manager = m_bml->GetInputManager();
 
@@ -297,42 +295,16 @@ private:
 		if (input_manager->IsKeyDown(CKKEY_LCONTROL)) {
 			for (int i = 0; i <= 3; ++i) {
 				if (input_manager->IsKeyPressed(keys_to_check[i])) {
-					std::vector<std::string> args(init_args);
-					if (i == 0) {
-						args.emplace_back("Go!");
-					}
-					else {
-						args.emplace_back(std::to_string(i));
-					}
-					OnCommand(m_bml, args);
+					// std::vector<std::string> args(init_args);
+					// OnCommand(m_bml, args);
+					bmmo::countdown_msg msg{};
+					msg.type = static_cast<bmmo::countdown_type>(i);
+					msg.map = current_map_;
+					msg.serialize();
+					send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 				}
 			}
 		}
-		
-		//if (input_manager->IsKeyPressed(CKKEY_5)) {
-		//	/*m_bml->OnBallNavInactive();
-		//	m_bml->OnPreResetLevel();
-		//	CK3dEntity* curBall = static_cast<CK3dEntity*>(m_bml->GetArrayByName("CurrentLevel")->GetElementObject(0, 1));
-		//	if (curBall) {
-		//		ExecuteBB::Unphysicalize(curBall);
-		//	}
-		//	auto* in = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(init_game));
-		//	in->ActivateInput(0);
-		//	in->Activate();
-		//	m_bml->OnPostResetLevel();
-		//	m_bml->OnStartLevel();*/
-		//	/*auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(pause_level_));
-		//	beh->ActivateInput(0);
-		//	beh->Activate();*/
-		//	m_bml->OnPauseLevel();
-		//	m_bml->OnBallNavInactive();
-		//	CKMessageManager* mm = m_bml->GetMessageManager();
-		//	CKMessageType blend = mm->AddMessageType("Blend FadeIn");
-		//	mm->SendMessageSingle(blend, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
-		//	auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(reset_level_));
-		//	beh->ActivateInput(0);
-		//	beh->Activate();
-		//}
 		
 		/*if (input_manager->IsKeyPressed(CKKEY_P)) {
 			auto* ctx = m_bml->GetCKContext();
@@ -501,6 +473,31 @@ private:
 			status_->update("Disconnected");
 			status_->paint(0xffff0000);
 		}
+	}
+
+	void restart_current_level() {
+		/*m_bml->OnBallNavInactive();
+		m_bml->OnPreResetLevel();
+		CK3dEntity* curBall = static_cast<CK3dEntity*>(m_bml->GetArrayByName("CurrentLevel")->GetElementObject(0, 1));
+		if (curBall) {
+			ExecuteBB::Unphysicalize(curBall);
+		}
+		auto* in = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(init_game));
+		in->ActivateInput(0);
+		in->Activate();
+		m_bml->OnPostResetLevel();
+		m_bml->OnStartLevel();*/
+		/*auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(pause_level_));
+		beh->ActivateInput(0);
+		beh->Activate();*/
+		m_bml->OnPauseLevel();
+		m_bml->OnBallNavInactive();
+		CKMessageManager* mm = m_bml->GetMessageManager();
+		CKMessageType blend = mm->AddMessageType("Blend FadeIn");
+		mm->SendMessageSingle(blend, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
+		auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(reset_level_));
+		beh->ActivateInput(0);
+		beh->Activate();
 	}
 
 	void validate_nickname(IProperty* name_prop) {
