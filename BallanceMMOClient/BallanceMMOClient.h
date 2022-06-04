@@ -276,6 +276,15 @@ private:
 		reset_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "reset Level"));
 	}
 
+	CK_ID restart_level_;
+	CK_ID menu_pause_;
+	CK_ID exit_;
+	void edit_Menu_Pause(CKBehavior* script) {
+		restart_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Restart Level"));
+		menu_pause_ = CKOBJID(script);
+		exit_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Exit"));
+	}
+
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
@@ -306,6 +315,13 @@ private:
 			}
 		}
 		
+		if (input_manager->IsKeyPressed(CKKEY_5)) {
+			restart_current_level();
+		}
+
+		if (input_manager->IsKeyPressed(CKKEY_6)) {
+			m_bml->RestoreIC(static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByName("Menu_Pause_ShowHide")));
+		}
 		/*if (input_manager->IsKeyPressed(CKKEY_P)) {
 			auto* ctx = m_bml->GetCKContext();
 			CKMessageManager* mm = m_bml->GetMessageManager();
@@ -490,14 +506,25 @@ private:
 		/*auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(pause_level_));
 		beh->ActivateInput(0);
 		beh->Activate();*/
-		m_bml->OnPauseLevel();
-		m_bml->OnBallNavInactive();
+		//m_bml->OnPauseLevel();
+		//m_bml->OnBallNavInactive();
+		// 
 		CKMessageManager* mm = m_bml->GetMessageManager();
-		CKMessageType blend = mm->AddMessageType("Blend FadeIn");
-		mm->SendMessageSingle(blend, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
-		auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(reset_level_));
-		beh->ActivateInput(0);
-		beh->Activate();
+
+		CKMessageType reset_level_msg = mm->AddMessageType("Reset Level");
+		mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
+		mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("All_Balls", CKCID_BEOBJECT, nullptr)));
+		
+		auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(restart_level_));
+		auto* output = beh->GetOutput(0);
+		output->Activate();
+		
+		//auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(menu_pause_));
+		//beh->Activate(FALSE);
+		
+		//beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(exit_));
+		//beh->ActivateInput(0);
+		//beh->Activate();
 	}
 
 	void validate_nickname(IProperty* name_prop) {

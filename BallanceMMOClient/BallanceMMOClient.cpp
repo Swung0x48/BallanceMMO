@@ -161,6 +161,8 @@ void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
         edit_Gameplay_Events(script);
     if (strcmp(script->GetName(), "Event_handler") == 0)
         edit_Event_handler(script);
+    if (strcmp(script->GetName(), "Menu_Pause") == 0)
+        edit_Menu_Pause(script);
 }
 
 void BallanceMMOClient::OnCheatEnabled(bool enable) {
@@ -698,7 +700,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         // Prepare message
         std::string map_name = msg.map.get_display_name();
         auto state = db_.get(msg.player_id);
-        assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
+        //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         // convert map rank to ordinal number
         std::string rank_str = "th";
         if ((msg.rank / 10) % 10 != 1) {
