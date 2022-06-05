@@ -325,6 +325,7 @@ private:
 			}
 		}
 		
+#ifdef DEBUG
 		if (input_manager->IsKeyPressed(CKKEY_5)) {
 			restart_current_level();
 		}
@@ -332,6 +333,7 @@ private:
 		if (input_manager->IsKeyPressed(CKKEY_6)) {
 			m_bml->RestoreIC(static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByName("Menu_Pause_ShowHide")));
 		}
+#endif
 		/*if (input_manager->IsKeyPressed(CKKEY_P)) {
 			auto* ctx = m_bml->GetCKContext();
 			CKMessageManager* mm = m_bml->GetMessageManager();

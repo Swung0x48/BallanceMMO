@@ -138,25 +138,27 @@ public:
         std::ifstream ifile("config.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
             try {
-                config_ = YAML::LoadFile("config.yml");
+                config_ = YAML::Load(ifile);
                 if (config_["op_list"])
                     op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
                 if (config_["enable_op_privileges"])
                     op_mode_ = config_["enable_op_privileges"].as<bool>();
                 if (config_["restart_level_after_countdown"])
-                    force_restart_level_ = config_["restart_level_after_countdown"].as<bool>();
+                    restart_level_ = config_["restart_level_after_countdown"].as<bool>();
+                if (config_["force_restart_after_countdown"])
+                    force_restart_level_ = config_["force_restart_after_countdown"].as<bool>();
             } catch (const std::exception& e) {
                 Printf("Error: failed to parse config: %s", e.what());
                 return false;
             }
         } else {
             Printf("Config is empty. Generating default config...");
-            config_["usage_notes"] = "Player data style: - playername: uuid.";
             op_players_ = {{"example_player", "00000001-0002-0003-0004-000000000005"}};
         }
 
         config_["enable_op_privileges"] = op_mode_;
-        config_["restart_level_after_countdown"] = force_restart_level_;
+        config_["restart_level_after_countdown"] = restart_level_;
+        config_["force_restart_after_countdown"] = force_restart_level_;
 
         ifile.close();
         save_config_to_file();
@@ -280,7 +282,7 @@ protected:
             std::stringstream ss;
             for (int i = 0; i < 8; ++i)
                 ss << ":" << std::hex << std::setw(2) << std::setfill('0') << ip.m_ipv6[i];
-            ip_str.append(ss.str());
+            ip_str = ss.str();
         }
         ip_str.erase(0, 1);
         // snprintf(ipAddr, sizeof(ipAddr), "%u.%u.%u.%u", (ipAddress & 0xff000000) >> 24,
@@ -291,7 +293,7 @@ protected:
         std::ifstream ifile("login_data.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
             try {
-                login_data = YAML::LoadFile("login_data.yml");
+                login_data = YAML::Load(ifile);
             } catch (const std::exception& e) {
                 Printf("Error: failed to parse config: %s", e.what());
                 return;
@@ -322,6 +324,9 @@ protected:
             return;
         }
         config_file << "# Config file for Ballance MMO Server" << std::endl;
+        config_file << "# Notes:\n"
+                    << "# - Op list player data style: \"playername: uuid\".\n"
+                    << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map." << std::endl;
         config_file << config_;
         config_file.close();
     }
@@ -693,6 +698,8 @@ protected:
                     case bmmo::CountdownType_Go: {
                         Printf("[%u, %s]: %s - Go!", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str());
                         map_ranks_[map_name] = 0;
+                        msg.restart_level = restart_level_;
+                        msg.force_restart = force_restart_level_;
                         break;
                     }
                     case bmmo::CountdownType_1:
@@ -706,7 +713,6 @@ protected:
                 }
 
                 msg.sender = networking_msg->m_conn;
-                msg.restart_level = force_restart_level_;
                 msg.clear();
                 msg.serialize();
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -879,7 +885,7 @@ protected:
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_;
     std::unordered_map<std::string, int> map_ranks_;
-    bool op_mode_ = true, force_restart_level_ = false;
+    bool op_mode_ = true, restart_level_ = false, force_restart_level_ = false;
 };
 
 // parse arguments (optional port and help/version) with getopt

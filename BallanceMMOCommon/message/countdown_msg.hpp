@@ -19,6 +19,7 @@ namespace bmmo {
         HSteamNetConnection sender = k_HSteamNetConnection_Invalid;
         struct map map;
         uint8_t restart_level = 0;
+        uint8_t force_restart = 0;
 
         bool serialize() override {
             if (!serializable_message::serialize()) return false;
@@ -29,6 +30,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(map.md5), sizeof(uint8_t) * 16);
             raw.write(reinterpret_cast<const char*>(&map.level), sizeof(map.level));
             raw.write(reinterpret_cast<const char*>(&restart_level), sizeof(restart_level));
+            raw.write(reinterpret_cast<const char*>(&force_restart), sizeof(force_restart));
             return (raw.good());
         }
 
@@ -51,6 +53,8 @@ namespace bmmo {
             if (!raw.good() || raw.gcount() != sizeof(map.level)) return false;
             raw.read(reinterpret_cast<char*>(&restart_level), sizeof(restart_level));
             if (!raw.good() || raw.gcount() != sizeof(restart_level)) return false;
+            raw.read(reinterpret_cast<char*>(&force_restart), sizeof(force_restart));
+            if (!raw.good() || raw.gcount() != sizeof(force_restart)) return false;
             return (raw.good());
         }
     };

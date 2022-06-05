@@ -658,7 +658,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         switch (msg.type) {
             case bmmo::CountdownType_Go: {
                 m_bml->SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
-                if (msg.map != current_map_)
+                if (!msg.force_restart && msg.map != current_map_)
                     break;
                 if (msg.restart_level) {
                     restart_current_level();
