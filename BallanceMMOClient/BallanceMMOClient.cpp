@@ -159,6 +159,8 @@ void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
         edit_Gameplay_Ingame(script);
     if (strcmp(script->GetName(), "Gameplay_Events") == 0)
         edit_Gameplay_Events(script);
+    if (strcmp(script->GetName(), "Gameplay_Energy") == 0)
+        edit_Gameplay_Energy(script);
     if (strcmp(script->GetName(), "Event_handler") == 0)
         edit_Event_handler(script);
     if (strcmp(script->GetName(), "Menu_Pause") == 0)

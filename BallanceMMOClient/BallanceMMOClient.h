@@ -21,6 +21,8 @@
 #include <boost/algorithm/string.hpp>
 #include <openssl/md5.h>
 #include <fstream>
+#include <windows.h>
+
 // #include <filesystem>
 
 extern "C" {
@@ -264,9 +266,18 @@ private:
 
 	//CKParameter* m_curSector = nullptr;
 	CK_ID m_curSector;
+	CK_ID esc_event_;
 	void edit_Gameplay_Events(CKBehavior* script) {
 		CKBehavior* id = ScriptHelper::FindNextBB(script, script->GetInput(0));
 		m_curSector = CKOBJID(id->GetOutputParameter(0)->GetDestination(0));
+
+		auto* esc = ScriptHelper::FindFirstBB(script, "Key Event");
+		esc_event_ = CKOBJID(esc->GetOutput(0));
+	}
+
+	//CK_ID ;
+	void edit_Gameplay_Energy(CKBehavior* script) {
+		//ScriptHelper::FindNextBB(script, script->GetInput(0));
 	}
 
 	CK_ID reset_level_;
@@ -503,21 +514,40 @@ private:
 		in->Activate();
 		m_bml->OnPostResetLevel();
 		m_bml->OnStartLevel();*/
-		/*auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(pause_level_));
-		beh->ActivateInput(0);
-		beh->Activate();*/
+		/*auto* pause = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(pause_level_));
+		pause->ActivateInput(0);
+		pause->Activate();*/
 		//m_bml->OnPauseLevel();
 		//m_bml->OnBallNavInactive();
-		// 
-		CKMessageManager* mm = m_bml->GetMessageManager();
-
-		CKMessageType reset_level_msg = mm->AddMessageType("Reset Level");
-		mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
-		mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("All_Balls", CKCID_BEOBJECT, nullptr)));
 		
-		auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(restart_level_));
-		auto* output = beh->GetOutput(0);
-		output->Activate();
+		//INPUT ip;
+		//ip.type = INPUT_KEYBOARD;
+		//ip.ki.wScan = 0; // hardware scan code for key
+		//ip.ki.time = 0;
+		//ip.ki.dwExtraInfo = 0;
+
+		//ip.ki.wVk = VK_ESCAPE;
+		//ip.ki.dwFlags = 0; // 0 for key press
+		//SendInput(1, &ip, sizeof(INPUT));
+
+		//ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+		//SendInput(1, &ip, sizeof(INPUT));
+		
+		auto* esc = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(esc_event_));
+		esc->Activate();
+
+		m_bml->AddTimer(3u, [this]() {
+			CKMessageManager* mm = m_bml->GetMessageManager();
+
+			CKMessageType reset_level_msg = mm->AddMessageType("Reset Level");
+			mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("Level", CKCID_BEOBJECT, nullptr)));
+			mm->SendMessageSingle(reset_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("All_Balls", CKCID_BEOBJECT, nullptr)));
+
+			auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(restart_level_));
+			auto* output = beh->GetOutput(0);
+			output->Activate();
+		});
+		
 		
 		//auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(menu_pause_));
 		//beh->Activate(FALSE);
