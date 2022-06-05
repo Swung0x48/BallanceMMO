@@ -697,9 +697,12 @@ protected:
                 switch (msg.type) {
                     case bmmo::CountdownType_Go: {
                         Printf("[%u, %s]: %s - Go!", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str());
-                        map_ranks_[map_name] = 0;
                         msg.restart_level = restart_level_;
                         msg.force_restart = force_restart_level_;
+                        if (force_restart_level_)
+                            map_ranks_.clear();
+                        else
+                            map_ranks_[map_name] = 0;
                         break;
                     }
                     case bmmo::CountdownType_1:

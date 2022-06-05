@@ -311,7 +311,7 @@ private:
 			db_.toggle_nametag_visible();
 		}
 
-		if (input_manager->IsKeyDown(CKKEY_LCONTROL)) {
+		if (input_manager->IsKeyDown(CKKEY_LCONTROL) && m_bml->IsIngame()) {
 			for (int i = 0; i <= 3; ++i) {
 				if (input_manager->IsKeyPressed(keys_to_check[i])) {
 					// std::vector<std::string> args(init_args);
