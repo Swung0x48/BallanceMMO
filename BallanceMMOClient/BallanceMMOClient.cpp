@@ -48,6 +48,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         bmmo::string_from_hex_chars(md5str, current_map_.md5, 16);
         GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
             current_map_.name.c_str(), (int)current_map_.md5, md5str.c_str());
+        reset_timer_ = true;
         GetLogger()->Info("Initialization completed.");
     }
 
@@ -128,7 +129,10 @@ void BallanceMMOClient::OnStartLevel()
     player_ball_ = get_current_ball();
     local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
 
-    level_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
+    if (reset_timer_) {
+        level_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
+        reset_timer_ = false;
+    }
 
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &current_map_.level);
 
@@ -330,8 +334,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 bmmo::cheat_toggle_msg msg{};
                 msg.content.cheated = cheat_state;
                 send(msg, k_nSteamNetworkingSend_Reliable);
-                return;
             }
+            if (args[1] == "rank" && args[2] == "reset") {
+                reset_rank_ = true;
+            }
+            return;            
         }
     }
 
@@ -661,6 +668,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 if ((!msg.force_restart && msg.map != current_map_) || !m_bml->IsIngame())
                     break;
                 if (msg.restart_level) {
+                    reset_timer_ = true;
                     restart_current_level();
                 }
                 else {
@@ -703,20 +711,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::string map_name = msg.map.get_display_name();
         auto state = db_.get(msg.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
-        // convert map rank to ordinal number
-        std::string rank_str = "th";
-        if ((msg.rank / 10) % 10 != 1) {
-          switch (msg.rank % 10) {
-            case 1: rank_str = "st"; break;
-            case 2: rank_str = "nd"; break;
-            case 3: rank_str = "rd"; break;
-          }
-        }
         m_bml->SendIngameMessage(std::format(
             "{}{} finished {} in {}{} place (score: {}; real time: {:02d}:{:02d}:{:02d}.{:03d}).",
             msg.cheated ? "[CHEAT] " : "",
             state.has_value() ? state->name : db_.get_nickname(),
-            map_name, msg.rank, rank_str,
+            map_name, msg.rank, bmmo::get_ordinal_rank(msg.rank),
             score, hours, minutes, seconds, ms).c_str());
         // TODO: Stop displaying objects on finish
         break;

@@ -11,5 +11,6 @@
 #include "entity/map.hpp"
 #include "role/role.hpp"
 #include "utility/name_validator.hpp"
+#include "utility/command_parser.hpp"
 
 #endif //BALLANCEMMOSERVER_COMMON_HPP

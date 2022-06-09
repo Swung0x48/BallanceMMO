@@ -206,12 +206,11 @@ public:
     void set_op(HSteamNetConnection client, bool op) {
         if (!client_exists(client))
             return;
-        std::string uuid_string = get_uuid_string(clients_[client].uuid),
-                    name = clients_[client].name;
+        std::string name = clients_[client].name;
         if (op) {
             if (op_players_.find(name) != op_players_.end())
                 return;
-            op_players_[name] = uuid_string;
+            op_players_[name] = get_uuid_string(clients_[client].uuid);
             Printf("%s is now an operator.", name.c_str());
         } else {
             if (op_players_.find(name) == op_players_.end())
@@ -696,13 +695,13 @@ protected:
                 std::string map_name = msg.map.get_display_name();
                 switch (msg.type) {
                     case bmmo::CountdownType_Go: {
-                        Printf("[%u, %s]: %s - Go!", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str());
-                        msg.restart_level = restart_level_;
-                        msg.force_restart = force_restart_level_;
-                        if (force_restart_level_)
+                        Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str(), msg.force_restart ? " (rank reset)" : "");
+                        if (force_restart_level_ || msg.force_restart)
                             map_ranks_.clear();
                         else
-                            map_ranks_[map_name] = 0;
+                            map_ranks_[msg.map.get_hash_string()] = 0;
+                        msg.restart_level = restart_level_;
+                        msg.force_restart = force_restart_level_;
                         break;
                     }
                     case bmmo::CountdownType_1:
@@ -745,21 +744,12 @@ protected:
                 int ms = int((msg.timeElapsed - total) * 1000);
 
                 // Prepare message
-                std::string map_name = msg.map.get_display_name();
-                msg.rank = ++map_ranks_[map_name];
-                // convert map rank to ordinal number
-                std::string rank_str = "th";
-                if ((map_ranks_[map_name] / 10) % 10 != 1) {
-                    switch (map_ranks_[map_name] % 10) {
-                        case 1: rank_str = "st"; break;
-                        case 2: rank_str = "nd"; break;
-                        case 3: rank_str = "rd"; break;
-                    }
-                }
+                std::string md5_str = msg.map.get_hash_string();
+                msg.rank = ++map_ranks_[md5_str];
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
                     msg.cheated ? "[CHEAT] " : "",
                     msg.player_id, clients_[msg.player_id].name.c_str(),
-                    map_name.c_str(), map_ranks_[map_name], rank_str.c_str(),
+                    msg.map.get_display_name().c_str(), map_ranks_[md5_str], bmmo::get_ordinal_rank(msg.rank).c_str(),
                     score, hours, minutes, seconds, ms);
 
                 msg.clear();
@@ -782,6 +772,8 @@ protected:
                 break;
             }
             case bmmo::CheatToggle: {
+                if (deny_action(networking_msg->m_conn))
+                    break;
                 auto* state_msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
                 Printf("%s toggled cheat [%s] globally!", client_it->second.name.c_str(), state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_toggle_msg new_msg{};
@@ -949,8 +941,11 @@ int main(int argc, char** argv) {
 
     do {
         std::cout << "\r> " << std::flush;
-        std::string cmd;
-        std::cin >> cmd;
+        std::string line, cmd;
+        std::getline(std::cin, line);
+        bmmo::command_parser parser(line);
+        
+        cmd = parser.get_next_word();
         if (cmd == "stop") {
             server.shutdown();
         } else if (cmd == "list") {
@@ -959,58 +954,43 @@ int main(int argc, char** argv) {
             server.print_clients(true);
         } else if (cmd == "say") {
             bmmo::chat_msg msg{};
-            std::getline(std::cin, msg.chat_content);
-            msg.chat_content.erase(0, 1);
+            msg.chat_content = parser.get_rest_of_line();
             msg.serialize();
 
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         } else if (cmd == "cheat") {
             bool cheat_state = false;
-            std::string cheat_state_string;
-            std::cin >> cheat_state_string;
-            if (cheat_state_string == "on")
+            if (parser.get_next_word() == "on")
                 cheat_state = true;
             server.toggle_cheat(cheat_state);
         } else if (cmd == "ver" || cmd == "version") {
             server.print_version_info();
         } else if (cmd == "kick" || cmd == "kick-id" || cmd == "crash" || cmd == "crash-id") {
-            std::string username = "", reason;
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             if (cmd == "kick-id" || cmd == "crash-id") {
-                std::string id_string;
-                std::cin >> id_string;
-                client = atoll(id_string.c_str());
+                client = atoll(parser.get_next_word().c_str());
                 if (client == 0) {
                     server.Printf("Error: invalid connection id.");
                     continue;
                 }
             } else {
-                std::cin >> username;
-                client = server.get_client_id(username);
+                client = server.get_client_id(parser.get_next_word());
             }
-            std::getline(std::cin, reason);
-            reason.erase(0, 1);
-            if (reason.find_first_not_of(' ') == std::string::npos) {
-                reason = "";
-            }
+            std::string reason = parser.get_rest_of_line();
             bool crash = false;
             if (cmd == "crash" || cmd == "crash-id")
                 crash = true;
             server.kick_client(client, reason, k_HSteamNetConnection_Invalid, crash);
         } else if (cmd == "op" || cmd == "op-id" || cmd == "deop" || cmd == "deop-id") {
-            std::string username = "";
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             if (cmd == "op-id" || cmd == "deop-id") {
-                std::string id_string;
-                std::cin >> id_string;
-                client = atoll(id_string.c_str());
+                client = atoll(parser.get_next_word().c_str());
                 if (client == 0) {
                     server.Printf("Error: invalid connection id.");
                     continue;
                 }
             } else {
-                std::cin >> username;
-                client = server.get_client_id(username);
+                client = server.get_client_id(parser.get_next_word());
             }
             bool op = false;
             if (cmd == "op" || cmd == "op-id")

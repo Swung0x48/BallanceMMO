@@ -140,6 +140,7 @@ private:
 	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = 1e6 / 66;
 
 	bool notify_cheat_toggle_ = true;
+	bool reset_rank_ = false, reset_timer_ = true;
 
 	boost::uuids::uuid uuid_;
 
@@ -319,6 +320,8 @@ private:
 					bmmo::countdown_msg msg{};
 					msg.type = static_cast<bmmo::countdown_type>(i);
 					msg.map = current_map_;
+          msg.force_restart = reset_rank_;
+					reset_rank_ = false;
 					msg.serialize();
 					send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 				}

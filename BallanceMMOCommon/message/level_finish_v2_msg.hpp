@@ -4,6 +4,17 @@
 #include "../entity/map.hpp"
 
 namespace bmmo {
+    std::string get_ordinal_rank(uint32_t rank) {
+        if ((rank / 10) % 10 != 1) {
+            switch (rank % 10) {
+                case 1: return "st";
+                case 2: return "nd";
+                case 3: return "rd";
+            }
+        }
+        return "th";
+    };
+
     struct level_finish_v2_msg: public serializable_message {
         level_finish_v2_msg(): serializable_message(bmmo::LevelFinishV2) {}
 

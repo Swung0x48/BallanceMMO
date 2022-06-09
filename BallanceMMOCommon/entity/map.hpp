@@ -1,5 +1,5 @@
-#ifndef BALLANCEMMOSERVER_ENTITY_MAP_HPP
-#define BALLANCEMMOSERVER_ENTITY_MAP_HPP
+#ifndef BALLANCEMMOSERVER_MAP_HPP
+#define BALLANCEMMOSERVER_MAP_HPP
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -53,7 +53,7 @@ namespace bmmo {
         uint8_t md5[16];
         uint32_t level = 0;
 
-        bool is_original_level() {
+        bool is_original_level() const {
             if (type != OriginalLevel) return false;
             try {
                 uint8_t level_md5[16];
@@ -87,7 +87,7 @@ namespace bmmo {
             return *this;
         }
 
-        std::string get_display_name() {
+        std::string get_display_name() const {
             std::string map_name;
             if (is_original_level()) {
                 map_name = name;
@@ -98,7 +98,13 @@ namespace bmmo {
             }
             return map_name;
         }
+
+        std::string get_hash_string() const {
+            std::string hash_string;
+            string_from_hex_chars(hash_string, md5, 16);
+            return hash_string;
+        }
     };
 }
 
-#endif //BALLANCEMMOSERVER_ENTITY_MAP_HPP
+#endif //BALLANCEMMOSERVER_MAP_HPP
