@@ -334,11 +334,12 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 bmmo::cheat_toggle_msg msg{};
                 msg.content.cheated = cheat_state;
                 send(msg, k_nSteamNetworkingSend_Reliable);
+                return;
             }
             if (args[1] == "rank" && args[2] == "reset") {
                 reset_rank_ = true;
-            }
-            return;            
+                return;
+            }    
         }
     }
 
