@@ -208,8 +208,12 @@ public:
             return;
         std::string name = clients_[client].name;
         if (op) {
-            if (op_players_.find(name) != op_players_.end())
-                return;
+            if (op_players_.find(name) != op_players_.end()) {
+                if (op_players_[name] == get_uuid_string(clients_[client].uuid)) {
+                    Printf("Error: client \"%s\" already has OP privileges.", name.c_str());
+                    return;
+                }
+            }
             op_players_[name] = get_uuid_string(clients_[client].uuid);
             Printf("%s is now an operator.", name.c_str());
         } else {
@@ -400,8 +404,10 @@ protected:
 
     bool op_online() {
         for (auto& op : op_players_) {
-            if (username_.find(op.first) != username_.end())
-                return true;
+            if (username_.find(op.first) != username_.end()) {
+                if (op.second == get_uuid_string(clients_[username_[op.first]].uuid))
+                    return true;
+            }
         }
         return false;
     }
