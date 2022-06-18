@@ -135,7 +135,7 @@ private:
 
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
-	float level_start_timestamp_ = 0.0f;
+	std::unordered_map<std::string, float> level_start_timestamp_;
 	SteamNetworkingMicroseconds next_update_timestamp_ = 0;
 	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = 1e6 / 66;
 

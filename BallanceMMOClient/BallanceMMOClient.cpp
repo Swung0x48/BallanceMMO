@@ -127,10 +127,10 @@ void BallanceMMOClient::OnStartLevel()
         return;*/
 
     player_ball_ = get_current_ball();
-    local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
+    local_ball_state_.type = db_.get_ball_id(player_ball_->GetName()); 
 
     if (reset_timer_) {
-        level_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
+        level_start_timestamp_[current_map_.get_hash_string()] = m_bml->GetTimeManager()->GetTime();
         reset_timer_ = false;
     }
 
@@ -148,7 +148,8 @@ void BallanceMMOClient::OnLevelFinish() {
     array_energy->GetElementValue(0, 5, &msg.lifeBonus);
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &current_map_.level);
     m_bml->GetArrayByName("AllLevel")->GetElementValue(current_map_.level - 1, 6, &msg.levelBonus);
-    msg.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_) / 1e3;
+    msg.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_string()]) / 1e3;
+    reset_timer_ = true;
     msg.cheated = m_bml->IsCheatEnabled();
     msg.map = current_map_;
     GetLogger()->Info("Sending level finish message...");
@@ -314,7 +315,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return true;
                 });
                 line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
-                    + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""));
+                    + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""))
+                    .append(" (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
                 m_bml->SendIngameMessage(line.c_str());
             }
             /*else if (args[1] == "p") {
@@ -574,13 +576,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         logged_in_ = true;
         status_->update("Connected");
         status_->paint(0xff00ff00);
-        m_bml->SendIngameMessage("Logged in.");
+        m_bml->SendIngameMessage((std::string("Logged in as ") + "\"" + props_["playername"]->GetString() + "\".").c_str());
         bmmo::login_accepted_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (!msg.deserialize()) {
-            GetLogger()->Error("Deserialize failed!");
+            GetLogger()->Error("Deserialization failed!");
         }
-        GetLogger()->Info("Online players: ");
+        GetLogger()->Info((std::to_string(msg.online_players.size()) + " players online: ").c_str());
         
         for (auto& i : msg.online_players) {
             if (i.second.name == db_.get_nickname()) {
@@ -669,17 +671,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 if ((!msg.force_restart && msg.map != current_map_) || !m_bml->IsIngame())
                     break;
                 if (msg.restart_level) {
-                    reset_timer_ = true;
                     restart_current_level();
                 }
                 else {
-                    level_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
                     auto* array_energy = m_bml->GetArrayByName("Energy");
                     int points = 999, lives = 3;
                     if (current_map_.level == 1) points = 1000;
                     array_energy->SetElementValue(0, 0, &points);
                     array_energy->SetElementValue(0, 1, &lives);
                 }
+                level_start_timestamp_[current_map_.get_hash_string()] = m_bml->GetTimeManager()->GetTime();
                 break;
             }
             case bmmo::CountdownType_1:
