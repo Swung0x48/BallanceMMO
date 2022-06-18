@@ -52,7 +52,7 @@ public:
 
     static SteamNetworkingConfigValue_t generate_opt() {
         SteamNetworkingConfigValue_t opt{};
-        SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected, 1500);
+        SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected, 2200);
         opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
                    (void*)SteamNetConnectionStatusChangedCallbackWrapper);
         return opt;
@@ -99,6 +99,10 @@ protected:
         this_instance_->on_connection_status_changed(pInfo);
     }
 
+    static void set_logging_level(ESteamNetworkingSocketsDebugOutputType eType) {
+        SteamNetworkingUtils()->SetDebugOutputFunction(eType, DebugOutput);
+    }
+
 public:
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
@@ -128,7 +132,7 @@ public:
         char* nl = strchr(text, '\0') - 1;
         if (nl >= text && *nl == '\n')
             *nl = '\0';
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Msg, text);
+        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
     }
 
     static void FatalError(const char* fmt, ...) {

@@ -135,6 +135,7 @@ public:
     }
     
     bool load_config() {
+        std::string logging_level_string = "important";
         std::ifstream ifile("config.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
             try {
@@ -147,6 +148,8 @@ public:
                     restart_level_ = config_["restart_level_after_countdown"].as<bool>();
                 if (config_["force_restart_after_countdown"])
                     force_restart_level_ = config_["force_restart_after_countdown"].as<bool>();
+                if (config_["logging_level"])
+                    logging_level_string = config_["logging_level"].as<std::string>();
             } catch (const std::exception& e) {
                 Printf("Error: failed to parse config: %s", e.what());
                 return false;
@@ -159,6 +162,15 @@ public:
         config_["enable_op_privileges"] = op_mode_;
         config_["restart_level_after_countdown"] = restart_level_;
         config_["force_restart_after_countdown"] = force_restart_level_;
+        if (logging_level_string == "msg")
+            logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Msg;
+        else if (logging_level_string == "warning")
+            logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Warning;
+        else {
+            logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
+            config_["logging_level"] = "important";
+        }
+        set_logging_level(logging_level_);
 
         ifile.close();
         save_config_to_file();
@@ -329,7 +341,8 @@ protected:
         config_file << "# Config file for Ballance MMO Server" << std::endl;
         config_file << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
-                    << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map." << std::endl;
+                    << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
+                    << "# - Options for log levels: important, warning, msg." << std::endl;
         config_file << config_;
         config_file.close();
     }
@@ -460,26 +473,29 @@ protected:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
                 // Ignore if they were not previously connected.  (If they disconnected
                 // before we accepted the connection.)
-                if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
-                    // // Select appropriate log messages
-                    // const char* pszDebugLogAction;
-                    // if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-                    //     pszDebugLogAction = "problem detected locally";
-                    // } else {
-                    //     // Note that here we could check the reason code to see if
-                    //     // it was a "usual" connection or an "unusual" one.
-                    //     pszDebugLogAction = "closed by peer";
-                    // }
+                if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected
+                        && logging_level_ != k_ESteamNetworkingSocketsDebugOutputType_Msg) {
+                    // Select appropriate log messages
+                    const char* pszDebugLogAction;
+                    if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
+                        pszDebugLogAction = "problem detected locally";
+                    } else if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer) {
+                        // Note that here we could check the reason code to see if
+                        // it was a "usual" connection or an "unusual" one.
+                        pszDebugLogAction = "closed by peer";
+                    } else {
+                        pszDebugLogAction = "closed by app";
+                    }
 
-                    // // Spew something to our own log.  Note that because we put their nick
-                    // // as the connection description, it will show up, along with their
-                    // // transport-specific data (e.g. their IP address)
-                    // Printf( "Connection %s %s, reason %d: %s\n",
-                    //         pInfo->m_info.m_szConnectionDescription,
-                    //         pszDebugLogAction,
-                    //         pInfo->m_info.m_eEndReason,
-                    //         pInfo->m_info.m_szEndDebug
-                    // );
+                    // Spew something to our own log.  Note that because we put their nick
+                    // as the connection description, it will show up, along with their
+                    // transport-specific data (e.g. their IP address)
+                    Printf( "[%s] %s (%d): %s\n",
+                            pInfo->m_info.m_szConnectionDescription,
+                            pszDebugLogAction,
+                            pInfo->m_info.m_eEndReason,
+                            pInfo->m_info.m_szEndDebug
+                    );
                     
                     cleanup_disconnected_client(&pInfo->m_hConn);
                 } else {
@@ -887,6 +903,7 @@ protected:
     std::unordered_map<std::string, std::string> op_players_;
     std::unordered_map<std::string, int> map_ranks_;
     bool op_mode_ = true, restart_level_ = false, force_restart_level_ = false;
+    ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
 };
 
 // parse arguments (optional port and help/version) with getopt
