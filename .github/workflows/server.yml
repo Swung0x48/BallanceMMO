@@ -46,11 +46,10 @@ jobs:
       run: ctest -C ${{env.BUILD_TYPE}}
 
     - name: Zipping Artifacts
-        - uses: actions/checkout@v2
-        - uses: vimtor/action-zip@v1
-          with:
-            files: BallanceMMOServer/build/
-            dest: BallanceMMOServer.zip
+      uses: vimtor/action-zip@v1
+      with:
+        files: BallanceMMOServer/build/
+        dest: BallanceMMOServer.zip
 
     - name: Release Artifact
       uses: actions/upload-artifact@v3
