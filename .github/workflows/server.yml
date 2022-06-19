@@ -11,11 +11,7 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  build:
-    # The CMake configure and build commands are platform agnostic and should work equally
-    # well on Windows or Mac.  You can convert this to a matrix build if you need
-    # cross-platform coverage.
-    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+  build-linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -54,5 +50,50 @@ jobs:
     - name: Release Artifact
       uses: actions/upload-artifact@v3
       with:
-        name: server
+        name: server-linux.zip
         path: BallanceMMOServer.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Fetch git submodules
+        run: git submodule update --init --recursive --remote
+
+      - name: Get vcpkg
+        run: git clone https://github.com/microsoft/vcpkg
+
+      - name: Bootstrap vcpkg
+        run: .\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Use vcpkg to install required packages
+        run: .\vcpkg\vcpkg install --triplet=x64-windows
+
+      - name: Install vcpkg integration
+        run: .\vcpkg\vcpkg integrate install
+
+      - name: Configure CMake
+        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+        run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+      - name: Build
+        # Build your program with the given configuration
+        run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
+
+      - name: Test
+        working-directory: ${{github.workspace}}/BallanceMMOServer
+        run: ctest -C ${{env.BUILD_TYPE}}
+
+      - name: Zipping Artifacts
+        uses: vimtor/action-zip@v1
+        with:
+          files: BallanceMMOServer/build/
+          dest: BallanceMMOServer.zip
+
+      - name: Release Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: server-windows.zip
+          path: BallanceMMOServer.zip
