@@ -25,10 +25,10 @@ jobs:
       run: git submodule update --init --recursive --remote
 
     - name: Install OpenSSL
-      run: apt install libssl-dev
+      run: sudo apt install libssl-dev
 
     - name: Install protobuf
-      run: apt install libprotobuf-dev protobuf-compiler
+      run: sudo apt install libprotobuf-dev protobuf-compiler
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
