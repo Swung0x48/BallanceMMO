@@ -48,6 +48,6 @@ jobs:
     - name: Release Artifact
       working-directory: ${{github.workspace}}/BallanceMMOServer/build
       uses: actions/upload-artifact@v3
-        with:
-          name: server
-          path: BallanceMMOServer
+      with:
+        name: server
+        path: BallanceMMOServer
