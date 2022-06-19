@@ -11,7 +11,7 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  build-linux:
+  build-server-linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -53,25 +53,32 @@ jobs:
         name: server-linux.zip
         path: BallanceMMOServer.zip
 
-  build-windows:
+  build-server-windows:
     runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
     steps:
       - uses: actions/checkout@v2
+
+      - uses: lukka/get-cmake@latest
 
       - name: Fetch git submodules
         run: git submodule update --init --recursive --remote
 
-      - name: Get vcpkg
-        run: git clone https://github.com/microsoft/vcpkg
+      - name: Restore artifacts, setup vcpkg
+        uses: lukka/run-vcpkg@v10
+        with:
+          vcpkgGitCommitId: e809a42f87565e803b2178a0c11263f462d1800a
+          vcpkgDirectory: '${{env.VCPKG_ROOT}}'
+          vcpkgJsonGlob: vcpkg.json
+          runVcpkgInstall: false
 
-      - name: Bootstrap vcpkg
-        run: .\vcpkg\bootstrap-vcpkg.bat
+      # Setup MSVC command prompt environment vars
+      - uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Use vcpkg to install required packages
-        run: .\vcpkg\vcpkg install --triplet=x64-windows
-
-      - name: Install vcpkg integration
-        run: .\vcpkg\vcpkg integrate install
+      - name: vcpkg check / install dependencies
+        working-directory: '${{ github.workspace }}'
+        run: '${{env.VCPKG_ROOT}}/vcpkg install'
 
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
