@@ -24,6 +24,12 @@ jobs:
     - name: Fetch git submodules
       run: git submodule update --init --recursive --remote
 
+    - name: Install OpenSSL
+        run: apt install libssl-dev
+
+    - name: Install protobuf
+        run: apt install libprotobuf-dev protobuf-compiler
+
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
@@ -38,4 +44,10 @@ jobs:
       # Execute tests defined by the CMake configuration.  
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
       run: ctest -C ${{env.BUILD_TYPE}}
-      
+
+    - name: Release Artifact
+      working-directory: ${{github.workspace}}/BallanceMMOServer/build
+      uses: actions/upload-artifact@v3
+        with:
+          name: server
+          path: BallanceMMOServer
