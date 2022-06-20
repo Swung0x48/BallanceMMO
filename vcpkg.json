@@ -3,5 +3,8 @@
   "name": "ballancemmo",
   "version-string": "1.0",
   "description": "Ballance MMO",
-  "dependencies": [ "gamenetworkingsockets" ]
+  "dependencies": [
+    { "name": "openssl", "version>=": "1.1.1n" },
+    "gamenetworkingsockets"
+  ]
 }
