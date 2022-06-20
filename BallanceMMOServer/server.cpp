@@ -364,6 +364,7 @@ protected:
             username_.erase(name);
         if (itClient != clients_.end())
             clients_.erase(itClient);
+        Printf("%s (#%d) disconnected.", name.c_str(), *client);
     }
 
     bool client_exists(HSteamNetConnection client) {
@@ -548,7 +549,7 @@ protected:
                 // and you would keep their client in a state of limbo (connected,
                 // but not logged on) until them.  I'm trying to keep this example
                 // code really simple.
-                char nick[64];
+                char nick[32];
                 sprintf(nick, "Unidentified%d", 10000 + (rand() % 90000));
 
                 // DO NOT add client here.
@@ -850,7 +851,7 @@ protected:
         int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, incoming_messages_, ONCE_RECV_MSG_COUNT);
         if (msg_count == 0)
             return 0;
-        if (msg_count < 0)
+        else if (msg_count < 0)
             FatalError("Error checking for messages.");
         assert(msg_count > 0);
 
@@ -865,7 +866,7 @@ protected:
     inline void tick() {
         bmmo::owned_ball_state_v2_msg msg{};
         pull_unupdated_ball_states(msg.balls);
-        if (msg.balls.size() < 1)
+        if (msg.balls.size() == 0)
             return;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);

@@ -6,6 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include "../message/message_utils.hpp"
 
 namespace bmmo {
     enum map_type : uint8_t {
@@ -43,7 +44,7 @@ namespace bmmo {
         std::stringstream ss;
         ss << std::hex << std::setfill('0');
         for (int i = 0; i < length; i++)
-          ss << std::setw(2) << (int)src[i];
+            ss << std::setw(2) << (int)src[i];
         dest = ss.str();
     }
 
@@ -103,6 +104,24 @@ namespace bmmo {
             std::string hash_string;
             string_from_hex_chars(hash_string, md5, 16);
             return hash_string;
+        }
+
+        void serialize(std::stringstream& raw) {
+            message_utils::write_string(name, raw);
+            raw.write(reinterpret_cast<const char*>(&type), sizeof(type));
+            raw.write(reinterpret_cast<const char*>(md5), sizeof(uint8_t) * 16);
+            raw.write(reinterpret_cast<const char*>(&level), sizeof(level));
+        }
+
+        bool deserialize(std::stringstream& raw) {
+            if (!message_utils::read_string(raw, name)) return false;
+            raw.read(reinterpret_cast<char*>(&type), sizeof(type));
+            if (!raw.good() || raw.gcount () != sizeof(type)) return false;
+            raw.read(reinterpret_cast<char*>(md5), sizeof(uint8_t) * 16);
+            if (!raw.good() || raw.gcount() != sizeof(uint8_t) * 16) return false;
+            raw.read(reinterpret_cast<char*>(&level), sizeof(level));
+            if (!raw.good() || raw.gcount() != sizeof(level)) return false;
+            return true;
         }
     };
 }
