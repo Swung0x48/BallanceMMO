@@ -76,20 +76,17 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: vcpkg check / install dependencies
-        working-directory: '${{github.workspace}}'
-        run: '${{env.VCPKG_ROOT}}/vcpkg install'
+        working-directory: ${{env.VCPKG_ROOT}}
+        run: vcpkg install --triplet=x64-windows
 
       - name: vcpkg integration install
-        working-directory: '${{ github.workspace }}'
-        run: '${{env.VCPKG_ROOT}}/vcpkg integrate install'
+        working-directory: ${{env.VCPKG_ROOT}}
+        run: vcpkg integrate install
 
       - name: Configure CMake
-        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-        run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake -DOPENSSL_ROOT_DIR="${{env.VCPKG_ROOT}}/installed/x64-windows-static"
+        run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake
 
       - name: Build
-        # Build your program with the given configuration
         run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
 
       - name: Test
