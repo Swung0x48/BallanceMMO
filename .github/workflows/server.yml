@@ -68,7 +68,6 @@ jobs:
       - name: Restore artifacts, setup vcpkg
         uses: lukka/run-vcpkg@v10
         with:
-          vcpkgGitCommitId: e809a42f87565e803b2178a0c11263f462d1800a
           vcpkgDirectory: '${{env.VCPKG_ROOT}}'
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
@@ -87,7 +86,7 @@ jobs:
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-        run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake
 
       - name: Build
         # Build your program with the given configuration
