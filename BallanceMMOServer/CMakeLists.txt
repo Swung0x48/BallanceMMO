@@ -13,7 +13,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "Windows")
             set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
         endif ()
     endif ()
-
+    find_package(OpenSSL REQUIRED)
     find_package(GameNetworkingSockets)
 endif ()
 
