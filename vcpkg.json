@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
   "name": "ballancemmo",
   "version-string": "1.0",
+  "builtin-baseline": "01d6f6ff1e5332b926099f0c23bda996940ad4e8",
   "description": "Ballance MMO",
   "dependencies": [
     { "name": "openssl", "version>=": "1.1.1n" },
