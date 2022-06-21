@@ -86,6 +86,10 @@ jobs:
         working-directory: ${{github.workspace}}/BallanceMMOServer/build
         run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
 
+      - name: List build dir
+        working-directory: ${{github.workspace}}/BallanceMMOServer/build
+        run: dir
+
       - name: Run post-build script
         working-directory: ${{github.workspace}}/BallanceMMOServer/build
         run: ${{github.workspace}}/BallanceMMOServer/build/postbuild.bat ${{env.BUILD_TYPE}}
