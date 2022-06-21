@@ -75,10 +75,6 @@ jobs:
       # Setup MSVC command prompt environment vars
       - uses: ilammy/msvc-dev-cmd@v1
 
-      - name: vcpkg integration install
-        working-directory: ${{env.VCPKG_ROOT}}
-        run: vcpkg integrate install
-
       - name: vcpkg check / install dependencies
         working-directory: ${{env.VCPKG_ROOT}}
         run: vcpkg install
@@ -93,14 +89,8 @@ jobs:
         working-directory: ${{github.workspace}}/BallanceMMOServer
         run: ctest -C ${{env.BUILD_TYPE}}
 
-      - name: Zipping Artifacts
-        uses: vimtor/action-zip@v1
-        with:
-          files: BallanceMMOServer/build/
-          dest: BallanceMMOServer.zip
-
       - name: Release Artifact
         uses: actions/upload-artifact@v3
         with:
           name: server-windows.zip
-          path: BallanceMMOServer.zip
+          path: BallanceMMOServer/build/${{env.BUILD_TYPE}}
