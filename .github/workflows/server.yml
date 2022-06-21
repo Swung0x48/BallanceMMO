@@ -88,7 +88,7 @@ jobs:
 
       - name: Run post-build script
         working-directory: ${{github.workspace}}/BallanceMMOServer/build
-        run: .\postbuild.bat ${{env.BUILD_TYPE}}
+        run: ${{github.workspace}}/BallanceMMOServer/build/postbuild.bat ${{env.BUILD_TYPE}}
 
       - name: Test
         working-directory: ${{github.workspace}}/BallanceMMOServer
