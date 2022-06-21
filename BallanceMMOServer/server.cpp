@@ -14,8 +14,8 @@
 // #include <shared_mutex>
 #include <fstream>
 
-#include "ya_getopt.h"
-#include "yaml-cpp/yaml.h"
+#include <ya_getopt.h>
+#include <yaml-cpp/yaml.h>
 
 struct client_data {
     std::string name;
@@ -133,7 +133,7 @@ public:
 
         return true;
     }
-    
+
     bool load_config() {
         std::string logging_level_string = "important";
         std::ifstream ifile("config.yml");
@@ -196,7 +196,7 @@ public:
                         bmmo::minimum_client_version.to_string().c_str());
         auto uptime = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         std::string time_str(20, 0);
-        time_str.resize(std::strftime(&time_str[0], time_str.size(), 
+        time_str.resize(std::strftime(&time_str[0], time_str.size(),
             "%F %X", std::localtime(&init_time_t_)));
         Printf("Server uptime: %.2f seconds since %s.",
                         uptime * 1e-6, time_str.c_str());
@@ -317,7 +317,7 @@ protected:
         ifile.close();
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::string time_str(20, 0);
-        time_str.resize(std::strftime(&time_str[0], time_str.size(), 
+        time_str.resize(std::strftime(&time_str[0], time_str.size(),
             "%F %X", std::localtime(&time)));
         if (!login_data[uuid_str])
             login_data[uuid_str] = YAML::Node(YAML::NodeType::Map);
@@ -364,7 +364,7 @@ protected:
             username_.erase(name);
         if (itClient != clients_.end())
             clients_.erase(itClient);
-        Printf("%s (#%d) disconnected.", name.c_str(), *client);
+        Printf("%s (#%u) disconnected.", name.c_str(), *client);
     }
 
     bool client_exists(HSteamNetConnection client) {
@@ -397,8 +397,8 @@ protected:
         // }
         // return ss.str();
         char str[37] = {};
-        sprintf(str, 
-        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", 
+        sprintf(str,
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
             uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
             uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
         );
@@ -497,7 +497,7 @@ protected:
                             pInfo->m_info.m_eEndReason,
                             pInfo->m_info.m_szEndDebug
                     );
-                    
+
                     cleanup_disconnected_client(&pInfo->m_hConn);
                 } else {
                     assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting
@@ -510,7 +510,7 @@ protected:
                 // to finish up.  The reason information do not matter in this case,
                 // and we cannot linger because it's already closed on the other end,
                 // so we just pass 0's.
-                
+
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
 
                 if (ticking_ && get_client_count() <= 1)
@@ -630,7 +630,7 @@ protected:
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
 
                 save_login_data(networking_msg->m_conn);
-                
+
                 // notify other client of the fact that this client goes online
                 bmmo::player_connected_v2_msg connected_msg;
                 connected_msg.connection_id = networking_msg->m_conn;
@@ -656,7 +656,7 @@ protected:
                 break;
             case bmmo::BallState: {
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
-                
+
                 std::unique_lock<std::mutex> lock(client_data_mutex_);
                 clients_[networking_msg->m_conn].state = state_msg->content;
                 clients_[networking_msg->m_conn].updated = false;
@@ -859,7 +859,7 @@ protected:
             on_message(incoming_messages_[i]);
             incoming_messages_[i]->Release();
         }
-        
+
         return msg_count;
     }
 
@@ -968,7 +968,7 @@ int main(int argc, char** argv) {
         std::string line, cmd;
         std::getline(std::cin, line);
         bmmo::command_parser parser(line);
-        
+
         cmd = parser.get_next_word();
         if (cmd == "stop") {
             server.shutdown();
