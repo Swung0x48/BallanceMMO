@@ -100,4 +100,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: server-windows
-          path: BallanceMMOServer/build
+          path: BallanceMMOServer/build/${{env.BUILD_TYPE}}
