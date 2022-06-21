@@ -83,6 +83,7 @@ jobs:
         run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR=${{github.workspace}}
 
       - name: Build
+        working-directory: ${{github.workspace}}/BallanceMMOServer/build
         run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
 
       - name: Test
