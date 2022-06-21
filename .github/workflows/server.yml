@@ -94,7 +94,7 @@ jobs:
 
       - name: Dry run
         working-directory: ${{github.workspace}}/BallanceMMOServer/build/${{env.BUILD_TYPE}}
-        run: echo "stop" | BallanceMMOServer.exe
+        run: echo "stop" | ${{github.workspace}}/BallanceMMOServer/build/${{env.BUILD_TYPE}}/BallanceMMOServer.exe
 
       - name: Release Artifact
         uses: actions/upload-artifact@v3
