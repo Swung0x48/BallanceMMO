@@ -41,17 +41,11 @@ jobs:
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
       run: ctest -C ${{env.BUILD_TYPE}}
 
-    - name: Zipping Artifacts
-      uses: vimtor/action-zip@v1
-      with:
-        files: BallanceMMOServer/build/
-        dest: BallanceMMOServer.zip
-
     - name: Release Artifact
       uses: actions/upload-artifact@v3
       with:
-        name: server-linux.zip
-        path: BallanceMMOServer.zip
+        name: server-linux
+        path: BallanceMMOServer/build/
 
   build-server-windows:
     runs-on: windows-latest
@@ -86,24 +80,24 @@ jobs:
         working-directory: ${{github.workspace}}/BallanceMMOServer/build
         run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
 
-      - name: List build dir
-        working-directory: ${{github.workspace}}/BallanceMMOServer/build
-        run: dir
-
-#      - name: Run post-build script
+#      - name: List build dir
 #        working-directory: ${{github.workspace}}/BallanceMMOServer/build
-#        run: ${{github.workspace}}/BallanceMMOServer/build/postbuild.bat ${{env.BUILD_TYPE}}
-#
-#      - name: Test
-#        working-directory: ${{github.workspace}}/BallanceMMOServer
-#        run: ctest -C ${{env.BUILD_TYPE}}
-#
-#      - name: Dry run
-#        working-directory: ${{github.workspace}}/BallanceMMOServer/build/${{env.BUILD_TYPE}}
-#        run: echo "stop" | BallanceMMOServer.exe
+#        run: dir
+
+      - name: Run post-build script
+        working-directory: ${{github.workspace}}/BallanceMMOServer/build
+        run: ${{github.workspace}}/BallanceMMOServer/build/postbuild.bat ${{env.BUILD_TYPE}}
+
+      - name: Test
+        working-directory: ${{github.workspace}}/BallanceMMOServer
+        run: ctest -C ${{env.BUILD_TYPE}}
+
+      - name: Dry run
+        working-directory: ${{github.workspace}}/BallanceMMOServer/build/${{env.BUILD_TYPE}}
+        run: echo "stop" | BallanceMMOServer.exe
 
       - name: Release Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: server-windows.zip
+          name: server-windows
           path: BallanceMMOServer/build
