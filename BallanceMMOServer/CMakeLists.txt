@@ -4,8 +4,8 @@ set(CMAKE_CXX_STANDARD 20)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # setting vcpkg toolchain file
-    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake
-            CACHE STRING "Vcpkg toolchain file")
+#    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake
+#            CACHE STRING "Vcpkg toolchain file")
 
     if (MINGW)  # if mingw
         # setting vcpkg
@@ -13,8 +13,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "Windows")
             set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
         endif ()
     endif ()
-    find_package(OpenSSL REQUIRED)
-    find_package(GameNetworkingSockets)
+    find_package(GameNetworkingSockets REQUIRED)
 endif ()
 
 #add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
