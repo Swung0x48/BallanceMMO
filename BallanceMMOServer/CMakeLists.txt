@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.12)
+
+# set (CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+# set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
 project(BallanceMMOServer)
 set(CMAKE_CXX_STANDARD 20)
+
 
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # setting vcpkg toolchain file
@@ -31,15 +36,16 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(yaml-cpp)
 
 add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
-target_link_libraries(BallanceMMOServer GameNetworkingSockets::static yaml-cpp)
+target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
 add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
-target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::static)
+target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
+
 
 # os specific scripts
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/powershell_wrapper.bat ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}/start_ballancemmo_loop.bat COPYONLY)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.ps1 ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}/bmmo_loop.ps1 COPYONLY)
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/postbuild.bat ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}/postbuild.bat COPYONLY)
+    # configure_file(${CMAKE_CURRENT_SOURCE_DIR}/postbuild.bat ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}/postbuild.bat COPYONLY)
 else()
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.sh ${CMAKE_CURRENT_BINARY_DIR}/start_ballancemmo_loop.sh COPYONLY)
 endif()
