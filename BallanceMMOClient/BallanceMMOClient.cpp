@@ -263,7 +263,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                 }
                             }
                             // but none of the resolve results are unreachable...
-                            bml->SendIngameMessage("Connect to server failed. All resolved address appears to be unresolvable.");
+                            bml->SendIngameMessage("Failed to connect to server. All resolved address appears to be unresolvable.");
                             work_guard_.reset();
                             io_ctx_.stop();
                             resolver_.reset();
@@ -482,7 +482,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         status_->update("Connected (Login requested)");
         //status_->paint(0xff00ff00);
         m_bml->SendIngameMessage("Connected to server.");
-        m_bml->SendIngameMessage("Logging in...");
+        m_bml->SendIngameMessage((std::string("Logging in as ") + "\"" + props_["playername"]->GetString() + "\"...").c_str());
         bmmo::login_request_v3_msg msg;
         validate_nickname(props_["playername"]);
         db_.set_nickname(props_["playername"]->GetString());
@@ -576,7 +576,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         logged_in_ = true;
         status_->update("Connected");
         status_->paint(0xff00ff00);
-        m_bml->SendIngameMessage((std::string("Logged in as ") + "\"" + props_["playername"]->GetString() + "\".").c_str());
+        m_bml->SendIngameMessage("Logged in.");
         bmmo::login_accepted_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (!msg.deserialize()) {

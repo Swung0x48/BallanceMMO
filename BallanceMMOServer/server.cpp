@@ -342,7 +342,8 @@ protected:
         config_file << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
                     << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
-                    << "# - Options for log levels: important, warning, msg." << std::endl;
+                    << "# - Options for log levels: important, warning, msg."
+                    << std::endl;
         config_file << config_;
         config_file.close();
     }
@@ -982,6 +983,7 @@ int main(int argc, char** argv) {
             msg.serialize();
 
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.Printf("([Server]): %s", msg.chat_content.c_str());
         } else if (cmd == "cheat") {
             bool cheat_state = false;
             if (parser.get_next_word() == "on")
