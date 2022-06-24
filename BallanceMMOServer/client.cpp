@@ -346,6 +346,9 @@ int main(int argc, char** argv) {
                 uuid = "00010002-0003-0004-0005-000600070008";
     if (parse_args(argc, argv, server_addr, username, uuid) != 0)
         return 0;
+    
+    bmmo::hostname_parser hp(server_addr);
+    server_addr = hp.get_address() + ":" + hp.get_port();
 
     std::cout << "Initializing sockets..." << std::endl;
     client::init_socket();
