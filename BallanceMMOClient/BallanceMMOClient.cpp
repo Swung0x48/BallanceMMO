@@ -316,7 +316,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
                 line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
                     + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""))
-                    .append(" (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
+                    .append("  (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
                 m_bml->SendIngameMessage(line.c_str());
             }
             /*else if (args[1] == "p") {
@@ -541,10 +541,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
 
         for (auto& i : msg.balls) {
-            if (i.player_id != db_.get_client_id()) {
-                if (!db_.update(i.player_id, reinterpret_cast<const BallState&>(i.state))) {
-                    GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
-                }
+            if (!db_.update(i.player_id, reinterpret_cast<const BallState&>(i.state)) && i.player_id != db_.get_client_id()) {
+                GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
         

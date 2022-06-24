@@ -24,16 +24,13 @@ namespace bmmo {
 
             uint32_t size = 0;
             raw.read(reinterpret_cast<char*>(&size), sizeof(size));
+            balls.resize(size);
             for (uint32_t i = 0; i < size; ++i) {
-                owned_ball_state state;
-
                 if (!raw.good())
                     return false;
-                raw.read(reinterpret_cast<char*>(&state), sizeof(state));
-                if (!raw.good() || raw.gcount() != sizeof(state))
+                raw.read(reinterpret_cast<char*>(&balls[i]), sizeof(owned_ball_state));
+                if (!raw.good() || raw.gcount() != sizeof(owned_ball_state))
                     return false;
-
-                balls.push_back(state);
             }
 
             return raw.good();
