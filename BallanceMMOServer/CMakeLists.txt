@@ -6,6 +6,10 @@ cmake_minimum_required(VERSION 3.12)
 project(BallanceMMOServer)
 set(CMAKE_CXX_STANDARD 20)
 
+# sets RPATH for *install*ed files
+set(CMAKE_INSTALL_RPATH "\$ORIGIN/bin") # Note CMake escaping around '$' sign.
+# *built* files will also used RPATH which has been set before
+set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # setting vcpkg toolchain file
