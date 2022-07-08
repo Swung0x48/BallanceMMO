@@ -369,7 +369,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             // temporarily disable /mmo s dnf
             if (boost::iequals(msg.chat_content, "dnf")) {
                 m_bml->SendIngameMessage("Note: please press Ctrl+D twice to send the DNF message.");
+                return;
             }
+            /////////////////////////////////
             msg.serialize();
 
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -707,7 +709,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::DidNotFinish: {
         auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
         m_bml->SendIngameMessage(std::format(
-            "[{}]{}: did not finish {} (aborted at sector #{}).",
+            "[{}]{}: did not finish {} (aborted at sector {}).",
             get_username(msg->content.player_id),
             msg->content.cheated ? " [CHEAT]" : "",
             msg->content.map.get_display_name(map_names_),

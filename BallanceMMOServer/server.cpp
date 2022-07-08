@@ -751,7 +751,7 @@ protected:
                 auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
                 msg->content.player_id = networking_msg->m_conn;
                 Printf(
-                    "[%u, %s]%s: did not finish %s (aborted at sector #%d).",
+                    "[%u, %s]%s: did not finish %s (aborted at sector %d).",
                     msg->content.player_id, clients_[msg->content.player_id].name.c_str(),
                     msg->content.cheated ? " [CHEAT]" : "",
                     msg->content.map.get_display_name(map_names_).c_str(),
