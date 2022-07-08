@@ -644,7 +644,7 @@ protected:
                     bmmo::map_names_msg names_msg;
                     names_msg.maps = map_names_;
                     names_msg.serialize();
-		            send(networking_msg->m_conn, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+		            send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
 
                 if (!ticking_ && get_client_count() > 1)
