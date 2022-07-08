@@ -305,17 +305,19 @@ private:
 			db_.toggle_nametag_visible();
 		}
 
-		if (input_manager->IsKeyDown(CKKEY_LCONTROL) && m_bml->IsIngame()) {
-			for (int i = 0; i <= 3; ++i) {
-				if (input_manager->IsKeyPressed(keys_to_check[i])) {
-					// std::vector<std::string> args(init_args);
-					// OnCommand(m_bml, args);
-					bmmo::countdown_msg msg{};
-					msg.content.type = static_cast<bmmo::countdown_type>(i);
-					msg.content.map = current_map_;
-					msg.content.force_restart = reset_rank_;
-					reset_rank_ = false;
-					send(msg, k_nSteamNetworkingSend_Reliable);
+		if (input_manager->IsKeyDown(CKKEY_LCONTROL)) {
+		  if (m_bml->IsIngame()) {
+				for (int i = 0; i <= 3; ++i) {
+					if (input_manager->IsKeyPressed(keys_to_check[i])) {
+						// std::vector<std::string> args(init_args);
+						// OnCommand(m_bml, args);
+						bmmo::countdown_msg msg{};
+						msg.content.type = static_cast<bmmo::countdown_type>(i);
+						msg.content.map = current_map_;
+						msg.content.force_restart = reset_rank_;
+						reset_rank_ = false;
+						send(msg, k_nSteamNetworkingSend_Reliable);
+					}
 				}
 			}
 			if (input_manager->IsKeyPressed(CKKEY_D)) {
