@@ -26,5 +26,8 @@
 #include "action_denied_msg.hpp"
 #include "op_state_msg.hpp"
 #include "countdown_msg.hpp"
+#include "did_not_finish_msg.hpp"
+#include "map_names_msg.hpp"
+#include "plain_text_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

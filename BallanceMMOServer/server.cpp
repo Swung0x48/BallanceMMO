@@ -640,6 +640,13 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
 
+                if (map_names_.size() != 0) {
+                    bmmo::map_names_msg names_msg;
+                    names_msg.maps = map_names_;
+                    names_msg.serialize();
+		            send(networking_msg->m_conn, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                }
+
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
 
@@ -712,75 +719,91 @@ protected:
             case bmmo::Countdown: {
                 if (deny_action(networking_msg->m_conn))
                     break;
-                bmmo::countdown_msg msg{};
-                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
-                msg.deserialize();
+                auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
 
-                std::string map_name = msg.map.get_display_name();
-                switch (msg.type) {
+                std::string map_name = msg->content.map.get_display_name(map_names_);
+                switch (msg->content.type) {
                     case bmmo::CountdownType_Go: {
-                        Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str(), msg.force_restart ? " (rank reset)" : "");
-                        if (force_restart_level_ || msg.force_restart)
+                        Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str(), msg->content.force_restart ? " (rank reset)" : "");
+                        if (force_restart_level_ || msg->content.force_restart)
                             map_ranks_.clear();
                         else
-                            map_ranks_[msg.map.get_hash_string()] = 0;
-                        msg.restart_level = restart_level_;
-                        msg.force_restart = force_restart_level_;
+                            map_ranks_[msg->content.map.get_hash_bytes_string()] = 0;
+                        msg->content.restart_level = restart_level_;
+                        msg->content.force_restart = force_restart_level_;
                         break;
                     }
                     case bmmo::CountdownType_1:
                     case bmmo::CountdownType_2:
                     case bmmo::CountdownType_3:
-                        Printf("[%u, %s]: %s - %u", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str(), msg.type);
+                        Printf("[%u, %s]: %s - %u", networking_msg->m_conn, client_it->second.name.c_str(), map_name.c_str(), msg->content.type);
                         break;
                     case bmmo::CountdownType_Unknown:
                     default:
                         return;
                 }
 
-                msg.sender = networking_msg->m_conn;
-                msg.clear();
-                msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                msg->content.sender = networking_msg->m_conn;
+                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
+            case bmmo::DidNotFinish: {
+                auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
+                msg->content.player_id = networking_msg->m_conn;
+                Printf(
+                    "[%u, %s]%s: did not finish %s (aborted at sector #%d).",
+                    msg->content.player_id, clients_[msg->content.player_id].name.c_str(),
+                    msg->content.cheated ? " [CHEAT]" : "",
+                    msg->content.map.get_display_name(map_names_).c_str(),
+                    msg->content.sector
+                );
+                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
             case bmmo::LevelFinish:
                 break;
             case bmmo::LevelFinishV2: {
-                bmmo::level_finish_v2_msg msg;
-                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
-                msg.deserialize();
-                msg.player_id = networking_msg->m_conn;
+                auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(networking_msg->m_pData);
+                msg->content.player_id = networking_msg->m_conn;
 
                 // Cheat check
-                if (msg.map.level * 100 != msg.levelBonus || msg.lifeBonus != 200) {
-                    msg.cheated = true;
+                if (msg->content.map.level * 100 != msg->content.levelBonus || msg->content.lifeBonus != 200) {
+                    msg->content.cheated = true;
                 }
 
                 // Prepare data...
-                int score = msg.levelBonus + msg.points + msg.lives * msg.lifeBonus;
+                int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
 
-                int total = int(msg.timeElapsed);
+                int total = int(msg->content.timeElapsed);
                 int minutes = total / 60;
                 int seconds = total % 60;
                 int hours = minutes / 60;
                 minutes = minutes % 60;
-                int ms = int((msg.timeElapsed - total) * 1000);
+                int ms = int((msg->content.timeElapsed - total) * 1000);
 
                 // Prepare message
-                std::string md5_str = msg.map.get_hash_string();
-                msg.rank = ++map_ranks_[md5_str];
+                std::string md5_str = msg->content.map.get_hash_bytes_string();
+                msg->content.rank = ++map_ranks_[md5_str];
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
-                    msg.cheated ? "[CHEAT] " : "",
-                    msg.player_id, clients_[msg.player_id].name.c_str(),
-                    msg.map.get_display_name().c_str(), map_ranks_[md5_str], bmmo::get_ordinal_rank(msg.rank).c_str(),
+                    msg->content.cheated ? "[CHEAT] " : "",
+                    msg->content.player_id, clients_[msg->content.player_id].name.c_str(),
+                    msg->content.map.get_display_name(map_names_).c_str(), map_ranks_[md5_str], bmmo::get_ordinal_rank(msg->content.rank).c_str(),
                     score, hours, minutes, seconds, ms);
+
+                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+
+                break;
+            }
+            case bmmo::MapNames: {
+                bmmo::map_names_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                map_names_.insert(msg.maps.begin(), msg.maps.end());
 
                 msg.clear();
                 msg.serialize();
-
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
                 break;
             }
             case bmmo::CheatState: {
@@ -833,6 +856,7 @@ protected:
             case bmmo::ActionDenied:
             case bmmo::OpState:
             case bmmo::KeyboardInput:
+            case bmmo::PlainText:
                 break;
             default:
                 FatalError("Invalid message with opcode %d received.", raw_msg->code);
@@ -902,7 +926,7 @@ protected:
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
-    std::unordered_map<std::string, std::string> op_players_;
+    std::unordered_map<std::string, std::string> op_players_, map_names_;
     std::unordered_map<std::string, int> map_ranks_;
     bool op_mode_ = true, restart_level_ = false, force_restart_level_ = false;
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
@@ -984,6 +1008,21 @@ int main(int argc, char** argv) {
 
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             server.Printf("([Server]): %s", msg.chat_content.c_str());
+        } else if (cmd == "plaintext") {
+            HSteamNetConnection client = server.get_client_id(parser.get_next_word());
+            if (client == k_HSteamNetConnection_Invalid)
+                continue;
+            bmmo::plain_text_msg msg{};
+            msg.text_content = parser.get_rest_of_line();
+            msg.serialize();
+            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.Printf("Sent \"%s\" to #%u.", msg.text_content.c_str(), client);
+        } else if (cmd == "plaintext-broadcast") {
+            bmmo::plain_text_msg msg{};
+            msg.text_content = parser.get_rest_of_line();
+            msg.serialize();
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.Printf("Broadcast \"%s\".", msg.text_content.c_str());
         } else if (cmd == "cheat") {
             bool cheat_state = false;
             if (parser.get_next_word() == "on")

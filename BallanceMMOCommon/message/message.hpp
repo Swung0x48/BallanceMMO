@@ -45,6 +45,10 @@ namespace bmmo {
         OpState,
 
         Countdown,
+        DidNotFinish,
+
+        MapNames,
+        PlainText,
     };
 
     template<typename T, opcode C = None>

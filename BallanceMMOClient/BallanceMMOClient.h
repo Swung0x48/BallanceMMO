@@ -44,7 +44,7 @@ public:
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetVersion() override { return version_string.c_str(); }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetAuthor() override { return "Swung0x48"; }
+	virtual CKSTRING GetAuthor() override { return "Swung0x48 & BallanceBug"; }
 	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
 	DECLARE_BML_VERSION;
 
@@ -131,12 +131,13 @@ private:
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
-	bmmo::map current_map_;
+	bmmo::named_map current_map_;
+	std::unordered_map<std::string, std::string> map_names_;
 
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
-	SteamNetworkingMicroseconds next_update_timestamp_ = 0;
+	SteamNetworkingMicroseconds next_update_timestamp_ = 0, last_dnf_hotkey_timestamp_ = 0;
 	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = 1e6 / 66;
 
 	bool notify_cheat_toggle_ = true;
@@ -289,11 +290,10 @@ private:
 		exit_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Exit"));
 	}
 
+	InputHook* input_manager;
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
-		auto* input_manager = m_bml->GetInputManager();
-
 		// Toggle status
 		if (input_manager->IsKeyPressed(CKKEY_F3)) {
 			ping_->toggle();
@@ -311,12 +311,26 @@ private:
 					// std::vector<std::string> args(init_args);
 					// OnCommand(m_bml, args);
 					bmmo::countdown_msg msg{};
-					msg.type = static_cast<bmmo::countdown_type>(i);
-					msg.map = current_map_;
-          msg.force_restart = reset_rank_;
+					msg.content.type = static_cast<bmmo::countdown_type>(i);
+					msg.content.map = current_map_;
+					msg.content.force_restart = reset_rank_;
 					reset_rank_ = false;
-					msg.serialize();
-					send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+					send(msg, k_nSteamNetworkingSend_Reliable);
+				}
+			}
+			if (input_manager->IsKeyPressed(CKKEY_D)) {
+				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+				if (timestamp - last_dnf_hotkey_timestamp_ <= 5000000) {
+					bmmo::did_not_finish_msg msg{};
+					m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
+					msg.content.map = current_map_;
+					msg.content.cheated = m_bml->IsCheatEnabled();
+					send(msg, k_nSteamNetworkingSend_Reliable);
+					last_dnf_hotkey_timestamp_ = 0;
+				}
+				else {
+					last_dnf_hotkey_timestamp_ = timestamp;
+					m_bml->SendIngameMessage("Note: please press Ctrl+D again in 5 seconds to send the DNF message.");
 				}
 			}
 		}
@@ -613,6 +627,18 @@ private:
 			return "";
 		}
 		return str;
+	}
+
+	void send_current_map_name() {
+		bmmo::map_names_msg msg{};
+		msg.maps[current_map_.get_hash_bytes_string()] = current_map_.name;
+		msg.serialize();
+		send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+	}
+
+	std::string get_username(HSteamNetConnection client_id) {
+		auto state = db_.get(client_id);
+		return state.has_value() ? state->name : db_.get_nickname();
 	}
 
 	void md5_from_file(const std::string& path, uint8_t* result) {

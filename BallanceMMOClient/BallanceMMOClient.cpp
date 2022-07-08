@@ -10,6 +10,7 @@ void BallanceMMOClient::OnLoad()
 {
     init_config();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
+    input_manager = m_bml->GetInputManager();
 }
 
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -44,11 +45,13 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
             current_map_.type = bmmo::UnknownType;
         }
         md5_from_file(path, current_map_.md5);
-        std::string md5str;
-        bmmo::string_from_hex_chars(md5str, current_map_.md5, 16);
+        map_names_[current_map_.get_hash_bytes_string()] = current_map_.name;
         GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
-            current_map_.name.c_str(), (int)current_map_.md5, md5str.c_str());
+            current_map_.name.c_str(), (int)current_map_.type, current_map_.get_hash_string().c_str());
         reset_timer_ = true;
+        if (connected()) {
+            send_current_map_name();
+        };
         GetLogger()->Info("Initialization completed.");
     }
 
@@ -143,19 +146,18 @@ void BallanceMMOClient::OnStartLevel()
 void BallanceMMOClient::OnLevelFinish() {
     bmmo::level_finish_v2_msg msg{};
     auto* array_energy = m_bml->GetArrayByName("Energy");
-    array_energy->GetElementValue(0, 0, &msg.points);
-    array_energy->GetElementValue(0, 1, &msg.lives);
-    array_energy->GetElementValue(0, 5, &msg.lifeBonus);
+    array_energy->GetElementValue(0, 0, &msg.content.points);
+    array_energy->GetElementValue(0, 1, &msg.content.lives);
+    array_energy->GetElementValue(0, 5, &msg.content.lifeBonus);
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &current_map_.level);
-    m_bml->GetArrayByName("AllLevel")->GetElementValue(current_map_.level - 1, 6, &msg.levelBonus);
-    msg.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_string()]) / 1e3;
+    m_bml->GetArrayByName("AllLevel")->GetElementValue(current_map_.level - 1, 6, &msg.content.levelBonus);
+    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_string()]) / 1e3;
     reset_timer_ = true;
-    msg.cheated = m_bml->IsCheatEnabled();
-    msg.map = current_map_;
+    msg.content.cheated = m_bml->IsCheatEnabled();
+    msg.content.map = current_map_;
     GetLogger()->Info("Sending level finish message...");
-    msg.serialize();
 
-    send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
 void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
@@ -316,8 +318,15 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
                 line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
                     + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""))
-                    .append("  (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
+                    .append("   (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
                 m_bml->SendIngameMessage(line.c_str());
+            }
+            else if (args[1] == "dnf") {
+                bmmo::did_not_finish_msg msg{};
+                m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
+                msg.content.map = current_map_;
+                msg.content.cheated = m_bml->IsCheatEnabled();
+                send(msg, k_nSteamNetworkingSend_Reliable);
             }
             /*else if (args[1] == "p") {
                 objects_.physicalize_all();
@@ -357,6 +366,10 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 bml->SendIngameMessage(s);
                 return;
             };
+            // temporarily disable /mmo s dnf
+            if (boost::iequals(msg.chat_content, "dnf")) {
+                m_bml->SendIngameMessage("Note: please press Ctrl+D twice to send the DNF message.");
+            }
             msg.serialize();
 
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -545,7 +558,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
-        
         break;
     }
     case bmmo::LoginAccepted: {
@@ -590,6 +602,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             }
             GetLogger()->Info(i.second.name.c_str());
         }
+
+        if (!current_map_.name.empty())
+            send_current_map_name();
         break;
     }
     case bmmo::PlayerConnected: {
@@ -656,19 +671,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::Countdown: {
-        bmmo::countdown_msg msg{};
-        msg.raw.write(static_cast<const char*>(network_msg->m_pData), network_msg->m_cbSize);
-        msg.deserialize();
-        auto state = db_.get(msg.sender);
-        std::string sender_name = state.has_value() ? state->name : db_.get_nickname(),
-                    map_name = msg.map.get_display_name();
+        auto* msg = reinterpret_cast<bmmo::countdown_msg*>(network_msg->m_pData);
+        std::string sender_name = get_username(msg->content.sender),
+                    map_name = msg->content.map.get_display_name(map_names_);
 
-        switch (msg.type) {
+        switch (msg->content.type) {
             case bmmo::CountdownType_Go: {
                 m_bml->SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
-                if ((!msg.force_restart && msg.map != current_map_) || !m_bml->IsIngame())
+                if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame())
                     break;
-                if (msg.restart_level) {
+                if (msg->content.restart_level) {
                     restart_current_level();
                 }
                 else {
@@ -684,7 +696,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             case bmmo::CountdownType_1:
             case bmmo::CountdownType_2:
             case bmmo::CountdownType_3:
-                m_bml->SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg.type).c_str());
+                m_bml->SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
                 break;
             case bmmo::CountdownType_Unknown:
             default:
@@ -692,36 +704,53 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         break;
     }
+    case bmmo::DidNotFinish: {
+        auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
+        m_bml->SendIngameMessage(std::format(
+            "[{}]{}: did not finish {} (aborted at sector #{}).",
+            get_username(msg->content.player_id),
+            msg->content.cheated ? " [CHEAT]" : "",
+            msg->content.map.get_display_name(map_names_),
+            msg->content.sector
+        ).c_str());
+        break;
+    }
     case bmmo::LevelFinishV2: {
-        bmmo::level_finish_v2_msg msg;
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        msg.deserialize();
+        auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(network_msg->m_pData);
 
         // Prepare data...
-        int score = msg.levelBonus + msg.points + msg.lives * msg.lifeBonus;
+        int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
 
-        int total = int(msg.timeElapsed);
+        int total = int(msg->content.timeElapsed);
         int minutes = total / 60;
         int seconds = total % 60;
         int hours = minutes / 60;
         minutes = minutes % 60;
-        int ms = int((msg.timeElapsed - total) * 1000);
+        int ms = int((msg->content.timeElapsed - total) * 1000);
 
         // Prepare message
-        std::string map_name = msg.map.get_display_name();
-        auto state = db_.get(msg.player_id);
+        std::string map_name = msg->content.map.get_display_name(map_names_);
+        //auto state = db_.get(msg->content.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         m_bml->SendIngameMessage(std::format(
             "{}{} finished {} in {}{} place (score: {}; real time: {:02d}:{:02d}:{:02d}.{:03d}).",
-            msg.cheated ? "[CHEAT] " : "",
-            state.has_value() ? state->name : db_.get_nickname(),
-            map_name, msg.rank, bmmo::get_ordinal_rank(msg.rank),
+            msg->content.cheated ? "[CHEAT] " : "",
+            get_username(msg->content.player_id),
+            map_name, msg->content.rank, bmmo::get_ordinal_rank(msg->content.rank),
             score, hours, minutes, seconds, ms).c_str());
         // TODO: Stop displaying objects on finish
         break;
     }
     case bmmo::LevelFinish:
         break;
+    case bmmo::MapNames: {
+        bmmo::map_names_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+
+        map_names_.insert(msg.maps.begin(), msg.maps.end());
+        break;
+    }
     case bmmo::OwnedCheatState: {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
         auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(network_msg->m_pData);
@@ -811,6 +840,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
         m_bml->SendIngameMessage(std::format("You have been {} Operator permission.",
                 msg->content.op ? "granted" : "removed from").c_str());
+        break;
+    }
+    case bmmo::PlainText: {
+        bmmo::plain_text_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+        m_bml->SendIngameMessage(msg.text_content.c_str());
         break;
     }
     default:

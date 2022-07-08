@@ -6,6 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <map>
 #include "../message/message_utils.hpp"
 
 namespace bmmo {
@@ -50,29 +51,21 @@ namespace bmmo {
 
     struct map {
         map_type type = UnknownType;
-        std::string name = "";
         uint8_t md5[16];
         uint32_t level = 0;
 
         bool is_original_level() const {
             if (type != OriginalLevel) return false;
-            try {
-                uint8_t level_md5[16];
-                hex_chars_from_string(level_md5, original_map_hashes[level]);
-                if (memcmp(level_md5, md5, 16) == 0)
-                    return true;
-            }
-            catch (...) {
-                return false;
-            }
+            uint8_t level_md5[16];
+            hex_chars_from_string(level_md5, original_map_hashes[level]);
+            if (memcmp(level_md5, md5, 16) == 0)
+                return true;
             return false;
         }
 
         bool operator==(const map& that) const {
             if (type != that.type) return false;
-            if (name != that.name) return false;
             if (memcmp(md5, that.md5, 16) != 0) return false;
-            if (level != that.level) return false;
             return true;
         }
 
@@ -80,7 +73,49 @@ namespace bmmo {
             return !(*this == that);
         }
 
-        map& operator=(const map& that) {
+        // map& operator=(const map& that) {
+        //   type = that.type;
+        //   memcpy(md5, that.md5, 16);
+        //   level = that.level;
+        //   return *this;
+        // }
+
+        std::string get_display_name(const std::string& name) const {
+            std::string map_name;
+            if (is_original_level()) {
+                map_name = name;
+                if (map_name.find('_') != std::string::npos)
+                    map_name.replace(map_name.find('_'), 1, " ");
+            }
+            else {
+                map_name = "\"" + name + "\"";
+            }
+            return map_name;
+        }
+
+        std::string get_display_name(const std::unordered_map<std::string, std::string>& map_names) const {
+            if (auto it = map_names.find(get_hash_bytes_string()); it != map_names.end()) {
+                return get_display_name(it->second);
+            }
+            return get_display_name(get_hash_string());
+        };
+
+        std::string get_hash_bytes_string() const {
+            std::string bytes(reinterpret_cast<const char*>(md5), 16);
+            return bytes;
+        };
+
+        std::string get_hash_string() const {
+            std::string hash_string;
+            string_from_hex_chars(hash_string, md5, 16);
+            return hash_string;
+        }
+    };
+
+    struct named_map : map {
+        std::string name;
+
+        map& operator=(const named_map& that) {
             type = that.type;
             name = that.name;
             memcpy(md5, that.md5, 16);
@@ -89,39 +124,25 @@ namespace bmmo {
         }
 
         std::string get_display_name() const {
-            std::string map_name;
-            if (is_original_level()) {
-                map_name = name;
-                map_name.replace(5, 1, " ");
-            }
-            else {
-                map_name = "\"" + name + "\"";
-            }
-            return map_name;
-        }
-
-        std::string get_hash_string() const {
-            std::string hash_string;
-            string_from_hex_chars(hash_string, md5, 16);
-            return hash_string;
+            return map::get_display_name(name);
         }
 
         void serialize(std::stringstream& raw) {
-            message_utils::write_string(name, raw);
-            raw.write(reinterpret_cast<const char*>(&type), sizeof(type));
-            raw.write(reinterpret_cast<const char*>(md5), sizeof(uint8_t) * 16);
-            raw.write(reinterpret_cast<const char*>(&level), sizeof(level));
+          message_utils::write_string(name, raw);
+          raw.write(reinterpret_cast<const char*>(&type), sizeof(type));
+          raw.write(reinterpret_cast<const char*>(md5), sizeof(uint8_t) * 16);
+          raw.write(reinterpret_cast<const char*>(&level), sizeof(level));
         }
 
         bool deserialize(std::stringstream& raw) {
-            if (!message_utils::read_string(raw, name)) return false;
-            raw.read(reinterpret_cast<char*>(&type), sizeof(type));
-            if (!raw.good() || raw.gcount () != sizeof(type)) return false;
-            raw.read(reinterpret_cast<char*>(md5), sizeof(uint8_t) * 16);
-            if (!raw.good() || raw.gcount() != sizeof(uint8_t) * 16) return false;
-            raw.read(reinterpret_cast<char*>(&level), sizeof(level));
-            if (!raw.good() || raw.gcount() != sizeof(level)) return false;
-            return true;
+          if (!message_utils::read_string(raw, name)) return false;
+          raw.read(reinterpret_cast<char*>(&type), sizeof(type));
+          if (!raw.good() || raw.gcount() != sizeof(type)) return false;
+          raw.read(reinterpret_cast<char*>(md5), sizeof(uint8_t) * 16);
+          if (!raw.good() || raw.gcount() != sizeof(uint8_t) * 16) return false;
+          raw.read(reinterpret_cast<char*>(&level), sizeof(level));
+          if (!raw.good() || raw.gcount() != sizeof(level)) return false;
+          return true;
         }
     };
 }

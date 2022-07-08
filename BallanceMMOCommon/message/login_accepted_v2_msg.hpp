@@ -42,7 +42,7 @@ namespace bmmo {
                 if (!raw.good() || raw.gcount() != sizeof(conn))
                     return false;
                 if (!message_utils::read_string(raw, name)) // check if read string successfully
-                   return false;
+                    return false;
                 raw.read(reinterpret_cast<char*>(&cheated), sizeof(cheated));
                 if (!raw.good() || raw.gcount() != sizeof(cheated))
                     return false;
