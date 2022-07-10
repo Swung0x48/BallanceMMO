@@ -2,7 +2,7 @@
 #define BALLANCEMMO_SERVER_MAP_NAMES_MSG_HPP
 #include "message.hpp"
 #include "../entity/map.hpp"
-#include <map>
+#include <unordered_map>
 
 namespace bmmo {
     struct map_names_msg: public serializable_message {
