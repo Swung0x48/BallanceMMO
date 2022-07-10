@@ -1,4 +1,6 @@
 #include "BallanceMMOClient.h"
+#include <io.h>
+#include <fcntl.h>
 
 IMod* BMLEntry(IBML* bml) {
     DeclareDumpFile();
@@ -6,11 +8,127 @@ IMod* BMLEntry(IBML* bml) {
     return new BallanceMMOClient(bml);
 }
 
+void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {
+  // Re-initialize the C runtime "FILE" handles with clean handles bound to "nul". We do this because it has been
+  // observed that the file number of our standard handle file objects can be assigned internally to a value of -2
+  // when not bound to a valid target, which represents some kind of unknown internal invalid state. In this state our
+  // call to "_dup2" fails, as it specifically tests to ensure that the target file number isn't equal to this value
+  // before allowing the operation to continue. We can resolve this issue by first "re-opening" the target files to
+  // use the "nul" device, which will place them into a valid state, after which we can redirect them to our target
+  // using the "_dup2" function.
+  if (bindStdIn) {
+    FILE* dummyFile;
+    freopen_s(&dummyFile, "nul", "r", stdin);
+  }
+  if (bindStdOut) {
+    FILE* dummyFile;
+    freopen_s(&dummyFile, "nul", "w", stdout);
+  }
+  if (bindStdErr) {
+    FILE* dummyFile;
+    freopen_s(&dummyFile, "nul", "w", stderr);
+  }
+
+  // Redirect unbuffered stdin from the current standard input handle
+  if (bindStdIn) {
+    HANDLE stdHandle = GetStdHandle(STD_INPUT_HANDLE);
+    if (stdHandle != INVALID_HANDLE_VALUE) {
+      int fileDescriptor = _open_osfhandle((intptr_t)stdHandle, _O_TEXT);
+      if (fileDescriptor != -1) {
+        FILE* file = _fdopen(fileDescriptor, "r");
+        if (file != NULL) {
+          int dup2Result = _dup2(_fileno(file), _fileno(stdin));
+          if (dup2Result == 0) {
+            setvbuf(stdin, NULL, _IONBF, 0);
+          }
+        }
+      }
+    }
+  }
+
+  // Redirect unbuffered stdout to the current standard output handle
+  if (bindStdOut) {
+    HANDLE stdHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (stdHandle != INVALID_HANDLE_VALUE) {
+      int fileDescriptor = _open_osfhandle((intptr_t)stdHandle, _O_TEXT);
+      if (fileDescriptor != -1) {
+        FILE* file = _fdopen(fileDescriptor, "w");
+        if (file != NULL) {
+          int dup2Result = _dup2(_fileno(file), _fileno(stdout));
+          if (dup2Result == 0) {
+            setvbuf(stdout, NULL, _IONBF, 0);
+          }
+        }
+      }
+    }
+  }
+
+  // Redirect unbuffered stderr to the current standard error handle
+  if (bindStdErr) {
+    HANDLE stdHandle = GetStdHandle(STD_ERROR_HANDLE);
+    if (stdHandle != INVALID_HANDLE_VALUE) {
+      int fileDescriptor = _open_osfhandle((intptr_t)stdHandle, _O_TEXT);
+      if (fileDescriptor != -1) {
+        FILE* file = _fdopen(fileDescriptor, "w");
+        if (file != NULL) {
+          int dup2Result = _dup2(_fileno(file), _fileno(stderr));
+          if (dup2Result == 0) {
+            setvbuf(stderr, NULL, _IONBF, 0);
+          }
+        }
+      }
+    }
+  }
+
+  // Clear the error state for each of the C++ standard stream objects. We need to do this, as attempts to access the
+  // standard streams before they refer to a valid target will cause the iostream objects to enter an error state. In
+  // versions of Visual Studio after 2005, this seems to always occur during startup regardless of whether anything
+  // has been read from or written to the targets or not.
+  if (bindStdIn) {
+    std::wcin.clear();
+    std::cin.clear();
+  }
+  if (bindStdOut) {
+    std::wcout.clear();
+    std::cout.clear();
+  }
+  if (bindStdErr) {
+    std::wcerr.clear();
+    std::cerr.clear();
+  }
+}
+
 void BallanceMMOClient::OnLoad()
 {
     init_config();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
     input_manager = m_bml->GetInputManager();
+    if (AllocConsole()) {
+        SetConsoleTitle("BallanceMMO Console");
+        BindCrtHandlesToStdHandles(true, true, true);
+/*        freopen("CONIN$", "r", stdin);
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);*/
+        console_thread_ = std::thread([&]() {
+            while (console_running_) {
+                std::cout << "\r> " << std::flush;
+                std::wstring wline;
+                _setmode(_fileno(stdin), _O_U16TEXT);
+                std::getline(std::wcin, wline);
+                // std::wcout << wline << std::endl;
+                std::string line = bmmo::message_utils::ConvertWideToANSI(wline),
+                            cmd = "ballancemmo";
+                line.erase(line.rfind('\r'));
+                std::vector<std::string> args;
+                bmmo::command_parser parser(line);
+                while (!cmd.empty()) {
+                    args.push_back(cmd);
+                    cmd = parser.get_next_word();
+                }
+                OnCommand(m_bml, args);
+            }
+        });
+    };
 }
 
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -60,7 +178,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         std::filesystem::path path = std::filesystem::current_path().parent_path().append(filename_string[0] == '.' ? filename_string.substr(3, filename_string.length()) : filename_string);
         std::ifstream map(path, std::ios::in | std::ios::binary);
         map_hash_ = hash_sha256(map);
-        m_bml->SendIngameMessage(map_hash_.c_str());
+        m_bml_SendIngameMessage(map_hash_.c_str());
         blcl::net::message<MsgType> msg;
         msg.header.id = MsgType::EnterMap;
         client_.send(msg);
@@ -204,11 +322,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 {
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
-        bml->SendIngameMessage("BallanceMMO Help");
-        bml->SendIngameMessage("/mmo connect - Connect to server.");
-        bml->SendIngameMessage("/mmo disconnect - Disconnect from server.");
-        bml->SendIngameMessage("/mmo list - List online players.");
-        bml->SendIngameMessage("/mmo say - Send message to each other.");
+        bml_SendIngameMessage("BallanceMMO Help");
+        bml_SendIngameMessage("/mmo connect - Connect to server.");
+        bml_SendIngameMessage("/mmo disconnect - Disconnect from server.");
+        bml_SendIngameMessage("/mmo list - List online players.");
+        bml_SendIngameMessage("/mmo say - Send message to each other.");
     };
 
     const size_t length = args.size();
@@ -222,14 +340,14 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             if (args[1] == "connect" || args[1] == "c") {
                 if (connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
-                    bml->SendIngameMessage("Already connected.");
+                    bml_SendIngameMessage("Already connected.");
                 }
                 else if (connecting()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
-                    bml->SendIngameMessage("Connecting in process, please wait...");
+                    bml_SendIngameMessage("Connecting in process, please wait...");
                 }
                 else {
-                    bml->SendIngameMessage("Resolving server address...");
+                    bml_SendIngameMessage("Resolving server address...");
                     resolving_endpoint_ = true;
                     // Bootstrap io_context
                     work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());
@@ -247,14 +365,14 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         std::lock_guard<std::mutex> lk(bml_mtx_);
                         // If address correctly resolved...
                         if (!ec) {
-                            bml->SendIngameMessage("Server address resolved.");
+                            bml_SendIngameMessage("Server address resolved.");
                             
                             for (const auto& i : results) {
                                 auto endpoint = i.endpoint();
                                 std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
                                 GetLogger()->Info("Trying %s", connection_string.c_str());
                                 if (connect(connection_string)) {
-                                    bml->SendIngameMessage("Connecting...");
+                                    bml_SendIngameMessage("Connecting...");
                                     if (network_thread_.joinable())
                                         network_thread_.join();
                                     network_thread_ = std::thread([this]() { run(); });
@@ -265,14 +383,14 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                 }
                             }
                             // but none of the resolve results are unreachable...
-                            bml->SendIngameMessage("Failed to connect to server. All resolved address appears to be unresolvable.");
+                            bml_SendIngameMessage("Failed to connect to server. All resolved address appears to be unresolvable.");
                             work_guard_.reset();
                             io_ctx_.stop();
                             resolver_.reset();
                             return;
                         }
                         // If not correctly resolved...
-                        bml->SendIngameMessage("Failed to resolve hostname.");
+                        bml_SendIngameMessage("Failed to resolve hostname.");
                         GetLogger()->Error(ec.message().c_str());
                         work_guard_.reset();
                         io_ctx_.stop();
@@ -282,7 +400,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             else if (args[1] == "disconnect" || args[1] == "d") {
                 if (!connecting() && !connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
-                    bml->SendIngameMessage("Already disconnected.");
+                    bml_SendIngameMessage("Already disconnected.");
                 }
                 else {
                     //client_.disconnect();
@@ -291,7 +409,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     //status_->paint(0xffff0000);
                     cleanup();
                     std::lock_guard<std::mutex> lk(bml_mtx_);
-                    bml->SendIngameMessage("Disconnected.");
+                    bml_SendIngameMessage("Disconnected.");
 
                     ping_->update("");
                     status_->update("Disconnected");
@@ -305,12 +423,12 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 std::string line = "";
                 int counter = 0;
                 bool show_id = (args[1] == "list-id" || args[1] == "li");
-                db_.for_each([bml, &line, &counter, &show_id](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                db_.for_each([this, &line, &counter, &show_id](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     ++counter;
                     line.append(pair.second.name + (pair.second.cheated ? " [CHEAT]" : "")
                         + (show_id ? (": " + std::to_string(pair.first)): "") + ", ");
                     if (counter == (show_id ? 2 : 4)) {
-                        bml->SendIngameMessage(line.c_str());
+                        bml_SendIngameMessage(line.c_str());
                         counter = 0;
                         line = "";
                     }
@@ -319,7 +437,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
                     + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""))
                     .append("   (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
-                m_bml->SendIngameMessage(line.c_str());
+                m_bml_SendIngameMessage(line.c_str());
             }
             else if (args[1] == "dnf") {
                 bmmo::did_not_finish_msg msg{};
@@ -363,12 +481,12 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 msg.chat_content = join_strings(args, 2);
             }
             catch (const char* s) {
-                bml->SendIngameMessage(s);
+                bml_SendIngameMessage(s);
                 return;
             };
             // temporarily disable /mmo s dnf
             if (boost::iequals(msg.chat_content, "dnf")) {
-                m_bml->SendIngameMessage("Note: please press Ctrl+D twice to send the DNF message.");
+                m_bml_SendIngameMessage("Note: please press Ctrl+D twice to send the DNF message.");
                 return;
             }
             /////////////////////////////////
@@ -387,7 +505,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     msg.reason = join_strings(args, 3);
                 }
                 catch (const char* s) {
-                    bml->SendIngameMessage(s);
+                    bml_SendIngameMessage(s);
                     return;
                 };
             }
@@ -420,7 +538,7 @@ void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
 }
 
 void BallanceMMOClient::terminate(long delay) {
-    static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage(
+    static_cast<BallanceMMOClient*>(this_instance_)->m_bml_SendIngameMessage(
         std::format("Nuking process in {} seconds...", delay).c_str());
     std::this_thread::sleep_for(std::chrono::seconds(delay));
 
@@ -443,14 +561,14 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
-            m_bml->SendIngameMessage("Connect failed. (ClosedByPeer)");
+            m_bml_SendIngameMessage("Connect failed. (ClosedByPeer)");
             GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
             break;
         }
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
-            m_bml->SendIngameMessage("You've been disconnected from the server.");
+            m_bml_SendIngameMessage("You've been disconnected from the server.");
         }
-        m_bml->SendIngameMessage(s.c_str());
+        m_bml_SendIngameMessage(s.c_str());
         cleanup();
         if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 102)
             terminate(5);
@@ -466,15 +584,15 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
-            m_bml->SendIngameMessage("Connect failed. (ProblemDetectedLocally)");
+            m_bml_SendIngameMessage("Connect failed. (ProblemDetectedLocally)");
             GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
         }
         else {
             // NOTE: We could check the reason code for a normal disconnection
-            m_bml->SendIngameMessage("Connect failed. (UnknownError)");
+            m_bml_SendIngameMessage("Connect failed. (UnknownError)");
             GetLogger()->Warn("Unknown error. (%d->%d) %s", pInfo->m_eOldState, pInfo->m_info.m_eState, pInfo->m_info.m_szEndDebug);
         }
-        m_bml->SendIngameMessage(s.c_str());
+        m_bml_SendIngameMessage(s.c_str());
         // Clean up the connection.  This is important!
         // The connection is "closed" in the network sense, but
         // it has not been destroyed.  We must close it on our end, too
@@ -496,8 +614,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
     case k_ESteamNetworkingConnectionState_Connected: {
         status_->update("Connected (Login requested)");
         //status_->paint(0xff00ff00);
-        m_bml->SendIngameMessage("Connected to server.");
-        m_bml->SendIngameMessage((std::string("Logging in as ") + "\"" + props_["playername"]->GetString() + "\"...").c_str());
+        m_bml_SendIngameMessage("Connected to server.");
+        m_bml_SendIngameMessage((std::string("Logging in as ") + "\"" + props_["playername"]->GetString() + "\"...").c_str());
         bmmo::login_request_v3_msg msg;
         validate_nickname(props_["playername"]);
         db_.set_nickname(props_["playername"]->GetString());
@@ -565,7 +683,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::LoginAccepted: {
         /*status_->update("Connected");
         status_->paint(0xff00ff00);
-        m_bml->SendIngameMessage("Logged in.");
+        m_bml_SendIngameMessage("Logged in.");
         bmmo::login_accepted_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (!msg.deserialize()) {
@@ -588,7 +706,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         logged_in_ = true;
         status_->update("Connected");
         status_->paint(0xff00ff00);
-        m_bml->SendIngameMessage("Logged in.");
+        m_bml_SendIngameMessage("Logged in.");
         bmmo::login_accepted_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (!msg.deserialize()) {
@@ -613,7 +731,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         //bmmo::player_connected_msg msg;
         //msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         //msg.deserialize();
-        //m_bml->SendIngameMessage((msg.name + " joined the game.").c_str());
+        //m_bml_SendIngameMessage((msg.name + " joined the game.").c_str());
         //if (m_bml->IsIngame()) {
         //    GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
         //    objects_.init_player(msg.connection_id, msg.name);
@@ -631,7 +749,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::player_connected_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        m_bml->SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off").c_str());
+        m_bml_SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off").c_str());
         if (m_bml->IsIngame()) {
             GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
             objects_.init_player(msg.connection_id, msg.name, msg.cheated);
@@ -649,7 +767,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto state = db_.get(msg->content.connection_id);
         //assert(state.has_value());
         if (state.has_value()) {
-            m_bml->SendIngameMessage((state->name + " left the game.").c_str());
+            m_bml_SendIngameMessage((state->name + " left the game.").c_str());
             db_.remove(msg->content.connection_id);
             objects_.remove(msg->content.connection_id);
         }
@@ -669,7 +787,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             assert(state.has_value() || (db_.get_client_id() == msg.player_id));
             print_msg = std::format("{}: {}", state.has_value() ? state->name : db_.get_nickname(), msg.chat_content);
         }
-        m_bml->SendIngameMessage(print_msg.c_str());
+        m_bml_SendIngameMessage(print_msg.c_str());
         break;
     }
     case bmmo::Countdown: {
@@ -679,7 +797,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         switch (msg->content.type) {
             case bmmo::CountdownType_Go: {
-                m_bml->SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
+                m_bml_SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame())
                     break;
                 if (msg->content.restart_level) {
@@ -698,7 +816,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             case bmmo::CountdownType_1:
             case bmmo::CountdownType_2:
             case bmmo::CountdownType_3:
-                m_bml->SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
+                m_bml_SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
                 break;
             case bmmo::CountdownType_Unknown:
             default:
@@ -708,7 +826,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::DidNotFinish: {
         auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
-        m_bml->SendIngameMessage(std::format(
+        m_bml_SendIngameMessage(std::format(
             "[{}]{}: did not finish {} (aborted at sector {}).",
             get_username(msg->content.player_id),
             msg->content.cheated ? " [CHEAT]" : "",
@@ -734,7 +852,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::string map_name = msg->content.map.get_display_name(map_names_);
         //auto state = db_.get(msg->content.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
-        m_bml->SendIngameMessage(std::format(
+        m_bml_SendIngameMessage(std::format(
             "{}{} finished {} in {}{} place (score: {}; real time: {:02d}:{:02d}:{:02d}.{:03d}).",
             msg->content.cheated ? "[CHEAT] " : "",
             get_username(msg->content.player_id),
@@ -764,7 +882,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         if (ocs->content.state.notify) {
             std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
-            m_bml->SendIngameMessage(s.c_str());
+            m_bml_SendIngameMessage(s.c_str());
         }
         break;
     }
@@ -775,7 +893,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         m_bml->EnableCheat(cheat);
         notify_cheat_toggle_ = true;
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
-        m_bml->SendIngameMessage(str.c_str());
+        m_bml_SendIngameMessage(str.c_str());
         break;
     }
     case bmmo::OwnedCheatToggle: {
@@ -795,7 +913,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             notify_cheat_toggle_ = false;
             m_bml->EnableCheat(cheat);
             notify_cheat_toggle_ = true;
-            m_bml->SendIngameMessage(str.c_str());
+            m_bml_SendIngameMessage(str.c_str());
         }
         break;
     }
@@ -804,7 +922,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
-        m_bml->SendIngameMessage(std::format("{} was kicked by {}{}{}.",
+        m_bml_SendIngameMessage(std::format("{} was kicked by {}{}{}.",
             msg.kicked_player_name,
             (msg.executor_name == "") ? "the server" : msg.executor_name,
             (msg.reason == "") ? "" : " (" + msg.reason + ")",
@@ -835,12 +953,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 reason = "unknown reason.";
         }
 
-        m_bml->SendIngameMessage(("Action failed: " + reason).c_str());
+        m_bml_SendIngameMessage(("Action failed: " + reason).c_str());
         break;
     }
     case bmmo::OpState: {
         auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
-        m_bml->SendIngameMessage(std::format("You have been {} Operator permission.",
+        m_bml_SendIngameMessage(std::format("You have been {} Operator permission.",
                 msg->content.op ? "granted" : "removed from").c_str());
         break;
     }
@@ -848,7 +966,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::plain_text_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        m_bml->SendIngameMessage(msg.text_content.c_str());
+        m_bml_SendIngameMessage(msg.text_content.c_str());
         break;
     }
     default:
@@ -875,7 +993,7 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-        static_cast<BallanceMMOClient*>(this_instance_)->m_bml->SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
+        static_cast<BallanceMMOClient*>(this_instance_)->m_bml_SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
         terminate(5);
     }
 }

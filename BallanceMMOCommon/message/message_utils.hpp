@@ -1,12 +1,15 @@
 #ifndef BALLANCEMMOSERVER_MESSAGE_UTILS_HPP
 #define BALLANCEMMOSERVER_MESSAGE_UTILS_HPP
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
+# ifndef WIN32_LEAN_AND_MEAN
+# define WIN32_LEAN_AND_MEAN
+# endif
 #include <Windows.h>
 #endif
 
 namespace bmmo {
     class message_utils {
+    public:
 #ifdef _WIN32
         static std::string ConvertWideToANSI(const std::wstring& wstr) {
             int count = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), wstr.length(), NULL, 0, NULL, NULL);
@@ -36,7 +39,7 @@ namespace bmmo {
             return wstr;
         }
 #endif
-    public:
+
         static void write_string(std::string str, std::stringstream& stream) {
 #ifdef _WIN32
             str = ConvertWideToUtf8(ConvertAnsiToWide(str));

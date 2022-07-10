@@ -6,7 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
-#include <map>
+#include <unordered_map>
 #include "../message/message_utils.hpp"
 
 namespace bmmo {

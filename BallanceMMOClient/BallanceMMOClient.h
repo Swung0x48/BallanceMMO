@@ -305,7 +305,7 @@ private:
 			db_.toggle_nametag_visible();
 		}
 
-		if (input_manager->IsKeyDown(CKKEY_LCONTROL)) {
+		if (input_manager->IsKeyDown(CKKEY_LCONTROL) && connected()) {
 		  if (m_bml->IsIngame()) {
 				for (int i = 0; i <= 3; ++i) {
 					if (input_manager->IsKeyPressed(keys_to_check[i])) {
@@ -332,7 +332,7 @@ private:
 				}
 				else {
 					last_dnf_hotkey_timestamp_ = timestamp;
-					m_bml->SendIngameMessage("Note: please press Ctrl+D again in 5 seconds to send the DNF message.");
+					m_bml_SendIngameMessage("Note: please press Ctrl+D again in 5 seconds to send the DNF message.");
 				}
 			}
 		}
@@ -482,6 +482,13 @@ private:
 
 	void cleanup(bool down = false, bool linger = true) {
 		shutdown(linger);
+
+		console_running_ = false;
+		/*if (console_thread_.joinable()) {
+			console_thread_.join();
+			printf("\r");
+		}*/
+		FreeConsole();
 		
 		// Weird bug if join thread here. Will join at the place before next use
 		// Actually since we're using std::jthread, we don't have to join threads manually
@@ -574,7 +581,7 @@ private:
 		std::string name = name_prop->GetString();
 		if (!bmmo::name_validator::is_valid(name)) {
 			std::string valid_name = bmmo::name_validator::get_valid_nickname(name);
-			m_bml->SendIngameMessage(std::format(
+			m_bml_SendIngameMessage(std::format(
 				"Invalid player name \"{}\", replaced with \"{}\".",
 				name, valid_name).c_str());
 			name_prop->SetString(valid_name.c_str());
@@ -660,6 +667,16 @@ private:
 		MD5_Final(result, &md5Context);
 	}
 
+	std::thread console_thread_;
+	std::atomic_bool console_running_ = true;
+
+	void bml_SendIngameMessage (const char* msg) {
+		return m_bml_SendIngameMessage (msg);
+	}
+	void m_bml_SendIngameMessage (const char* msg) {
+		Printf (msg);
+		m_bml->SendIngameMessage (msg);
+	}
 	/*CKBehavior* bbSetForce = nullptr;
 	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
 		using namespace ExecuteBB;
