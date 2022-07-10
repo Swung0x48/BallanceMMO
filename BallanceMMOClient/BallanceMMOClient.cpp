@@ -251,7 +251,7 @@ void BallanceMMOClient::OnStartLevel()
     local_ball_state_.type = db_.get_ball_id(player_ball_->GetName()); 
 
     if (reset_timer_) {
-        level_start_timestamp_[current_map_.get_hash_string()] = m_bml->GetTimeManager()->GetTime();
+        level_start_timestamp_[current_map_.get_hash_bytes_string()] = m_bml->GetTimeManager()->GetTime();
         reset_timer_ = false;
     }
 
@@ -269,7 +269,7 @@ void BallanceMMOClient::OnLevelFinish() {
     array_energy->GetElementValue(0, 5, &msg.content.lifeBonus);
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &current_map_.level);
     m_bml->GetArrayByName("AllLevel")->GetElementValue(current_map_.level - 1, 6, &msg.content.levelBonus);
-    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_string()]) / 1e3;
+    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_bytes_string()]) / 1e3;
     reset_timer_ = true;
     msg.content.cheated = m_bml->IsCheatEnabled();
     msg.content.map = current_map_;
@@ -441,6 +441,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             }
             else if (args[1] == "dnf") {
                 bmmo::did_not_finish_msg msg{};
+                if (current_map_.get_hash_string() == bmmo::original_map_hashes[0])
+                    return;
                 m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
                 msg.content.map = current_map_;
                 msg.content.cheated = m_bml->IsCheatEnabled();
@@ -810,7 +812,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     array_energy->SetElementValue(0, 0, &points);
                     array_energy->SetElementValue(0, 1, &lives);
                 }
-                level_start_timestamp_[current_map_.get_hash_string()] = m_bml->GetTimeManager()->GetTime();
+                level_start_timestamp_[current_map_.get_hash_bytes_string()] = m_bml->GetTimeManager()->GetTime();
                 break;
             }
             case bmmo::CountdownType_1:
@@ -827,9 +829,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::DidNotFinish: {
         auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
         m_bml_SendIngameMessage(std::format(
-            "[{}]{}: did not finish {} (aborted at sector {}).",
+            "{}{} did not finish {} (aborted at sector {}).",
+            msg->content.cheated ? "[CHEAT] " : "",
             get_username(msg->content.player_id),
-            msg->content.cheated ? " [CHEAT]" : "",
             msg->content.map.get_display_name(map_names_),
             msg->content.sector
         ).c_str());

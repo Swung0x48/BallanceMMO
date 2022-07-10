@@ -366,17 +366,20 @@ int main(int argc, char** argv) {
 
     std::thread client_thread([&client]() { client.run(); });
     do {
-        std::string input;
-        std::cin >> input;
-        if (input == "stop") {
+        std::string input, cmd;
+        std::getline(std::cin, input);
+        bmmo::command_parser parser(input);
+        cmd = parser.get_next_word();
+        // std::cin >> input;
+        if (cmd == "stop") {
             client.shutdown();
-        } else if (input == "1") {
+        } else if (cmd == "move") {
             bmmo::ball_state_msg msg;
             msg.content.position.x = 1;
             msg.content.rotation.y = 2;
 //            for (int i = 0; i < 50; ++i)
             client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
-        } else if (input == "2") {
+        } else if (cmd == "getinfo-detailed") {
             std::atomic_bool running = true;
             std::thread output_thread([&]() {
                 while (running) {
@@ -400,13 +403,13 @@ int main(int argc, char** argv) {
             }
             if (output_thread.joinable())
                 output_thread.join();
-        } else if (input == "3") {
+        } else if (cmd == "getinfo") {
             auto status = client.get_info();
             client::Printf("Ping: %dms\n", status.m_nPing);
             client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
             auto l_status = client.get_lane_info();
             client::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
-        } else if (input == "4") {
+        } else if (cmd == "reconnect") {
             if (client_thread.joinable())
                 client_thread.join();
 
@@ -416,14 +419,14 @@ int main(int argc, char** argv) {
             }
 
             client_thread = std::move(std::thread([&client]() { client.run(); }));
-        } else if (input == "cheat") {
+        } else if (cmd == "cheat") {
             cheat = !cheat;
             bmmo::cheat_state_msg msg;
             msg.content.cheated = cheat;
             client.send(msg, k_nSteamNetworkingSend_Reliable);
-        } else {
+        } else if (cmd != "") {
             bmmo::chat_msg msg{};
-            msg.chat_content = input;
+            msg.chat_content = cmd;
             msg.serialize();
             client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }

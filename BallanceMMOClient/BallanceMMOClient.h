@@ -321,6 +321,8 @@ private:
 				}
 			}
 			if (input_manager->IsKeyPressed(CKKEY_D)) {
+				if (current_map_.get_hash_string() == bmmo::original_map_hashes[0])
+					return;
 				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 				if (timestamp - last_dnf_hotkey_timestamp_ <= 5000000) {
 					bmmo::did_not_finish_msg msg{};

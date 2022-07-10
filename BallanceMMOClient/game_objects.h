@@ -30,7 +30,7 @@ public:
 
 	void init_player(const HSteamNetConnection id, const std::string& name, bool cheat) {
 		auto& obj = objects_[id];
-		for (auto i = 0; i < template_balls_.size(); ++i) {
+		for (size_t i = 0; i < template_balls_.size(); ++i) {
 			auto* ball = init_spirit_ball(i, id);
 			if (ball)
 				obj.balls.emplace_back(CKOBJID(ball));
