@@ -752,7 +752,7 @@ protected:
                 msg->content.player_id = networking_msg->m_conn;
                 Printf(
                     "%s(#%u, %s) did not finish %s (aborted at sector %d).",
-                    msg->content.cheated ? " [CHEAT]" : "",
+                    msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, clients_[msg->content.player_id].name.c_str(),
                     msg->content.map.get_display_name(map_names_).c_str(),
                     msg->content.sector

@@ -323,7 +323,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             }
             else if (args[1] == "dnf") {
                 bmmo::did_not_finish_msg msg{};
-                if (current_map_.get_hash_string() == bmmo::original_map_hashes[0])
+                if (current_map_.level == 0)
                     return;
                 m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
                 msg.content.map = current_map_;
