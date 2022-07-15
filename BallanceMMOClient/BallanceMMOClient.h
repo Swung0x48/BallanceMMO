@@ -19,6 +19,7 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/regex.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/circular_buffer.hpp>
 #include <openssl/md5.h>
 #include <fstream>
 
@@ -88,6 +89,9 @@ private:
 	static void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
 	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
 	void on_message(ISteamNetworkingMessage* network_msg) override;
+
+	bool show_console();
+	bool hide_console();
 
 	static void terminate(long delay);
 
@@ -334,7 +338,7 @@ private:
 				}
 				else {
 					last_dnf_hotkey_timestamp_ = timestamp;
-					m_bml_SendIngameMessage("Note: please press Ctrl+D again in 5 seconds to send the DNF message.");
+					SendIngameMessage("Note: please press Ctrl+D again in 5 seconds to send the DNF message.");
 				}
 			}
 		}
@@ -485,12 +489,12 @@ private:
 	void cleanup(bool down = false, bool linger = true) {
 		shutdown(linger);
 
-		console_running_ = false;
-		/*if (console_thread_.joinable()) {
-			console_thread_.join();
-			printf("\r");
-		}*/
-		FreeConsole();
+		if (down) {
+			console_running_ = false;
+			FreeConsole();
+			if (console_thread_.joinable())
+				console_thread_.join();
+		}
 		
 		// Weird bug if join thread here. Will join at the place before next use
 		// Actually since we're using std::jthread, we don't have to join threads manually
@@ -583,7 +587,7 @@ private:
 		std::string name = name_prop->GetString();
 		if (!bmmo::name_validator::is_valid(name)) {
 			std::string valid_name = bmmo::name_validator::get_valid_nickname(name);
-			m_bml_SendIngameMessage(std::format(
+			SendIngameMessage(std::format(
 				"Invalid player name \"{}\", replaced with \"{}\".",
 				name, valid_name).c_str());
 			name_prop->SetString(valid_name.c_str());
@@ -670,14 +674,23 @@ private:
 	}
 
 	std::thread console_thread_;
-	std::atomic_bool console_running_ = true;
+	std::atomic_bool console_running_ = false;
 
-	void bml_SendIngameMessage (const char* msg) {
-		return m_bml_SendIngameMessage (msg);
+	boost::circular_buffer<std::string> previous_msg_ = boost::circular_buffer<std::string>(8);
+
+	void SendIngameMessage(const std::string& msg) {
+		SendIngameMessage(msg.c_str());
 	}
-	void m_bml_SendIngameMessage (const char* msg) {
-		Printf (msg);
-		m_bml->SendIngameMessage (msg);
+
+	void SendIngameMessage(const char* msg) {
+		if (previous_msg_.size() == 8) {
+			previous_msg_.pop_front();
+		}
+		previous_msg_.push_back(msg);
+		if (console_running_) {
+			Printf(msg);
+		}
+		m_bml->SendIngameMessage(msg);
 	}
 	/*CKBehavior* bbSetForce = nullptr;
 	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {

@@ -64,9 +64,7 @@ namespace bmmo {
         }
 
         bool operator==(const map& that) const {
-            if (type != that.type) return false;
-            if (memcmp(md5, that.md5, 16) != 0) return false;
-            return true;
+            return (type == that.type && memcmp(md5, that.md5, 16) == 0);
         }
 
         bool operator!=(const map& that) const {
