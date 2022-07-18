@@ -12,7 +12,7 @@ namespace bmmo {
         None,
         LoginRequest,
         LoginAccepted,
-        LoginDenied,
+        SimpleAction,
         PlayerDisconnected,
         PlayerConnected,
 
@@ -49,6 +49,7 @@ namespace bmmo {
 
         MapNames,
         PlainText,
+        CurrentMap,
     };
 
     template<typename T, opcode C = None>

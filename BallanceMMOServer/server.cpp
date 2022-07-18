@@ -457,7 +457,8 @@ protected:
         }
 
         if (nReason != k_ESteamNetConnectionEnd_Invalid) {
-            bmmo::login_denied_msg new_msg;
+            bmmo::simple_action_msg new_msg;
+            new_msg.content.action = bmmo::LoginDenied;
             send(client, new_msg, k_nSteamNetworkingSend_Reliable);
             interface_->CloseConnection(client, nReason, reason.str().c_str(), true);
             return false;
@@ -582,7 +583,8 @@ protected:
 
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
-                bmmo::login_denied_msg msg;
+                bmmo::simple_action_msg msg;
+                msg.content.action = bmmo::LoginDenied;
                 send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
                 interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, "Outdated client", true);
                 break;
@@ -596,7 +598,8 @@ protected:
 
                 std::string reason = "Outdated client (client: " + msg.version.to_string()
                         + "; minimum: " + bmmo::minimum_client_version.to_string() + ")";
-                bmmo::login_denied_msg new_msg;
+                bmmo::simple_action_msg new_msg;
+                new_msg.content.action = bmmo::LoginDenied;
                 send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
                 interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.c_str(), true);
                 break;
@@ -654,7 +657,7 @@ protected:
             }
             case bmmo::LoginAccepted:
                 break;
-            case bmmo::LoginDenied:
+            case bmmo::SimpleAction:
                 break;
             case bmmo::PlayerDisconnected:
                 break;
@@ -853,6 +856,15 @@ protected:
 
                 break;
             }
+            case bmmo::CurrentMap:  {
+                auto* msg = reinterpret_cast<bmmo::current_map_msg*>(networking_msg->m_pData);
+                Printf("(#%u, %s) is at the %d%s sector of %s.",
+                    networking_msg->m_conn, clients_[networking_msg->m_conn].name.c_str(),
+                    msg->content.sector, bmmo::get_ordinal_rank(msg->content.sector).c_str(),
+                    msg->content.map.get_display_name(map_names_).c_str());
+                // broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
             case bmmo::ActionDenied:
             case bmmo::OpState:
             case bmmo::KeyboardInput:
@@ -1030,6 +1042,10 @@ int main(int argc, char** argv) {
             server.toggle_cheat(cheat_state);
         } else if (cmd == "ver" || cmd == "version") {
             server.print_version_info();
+        } else if (cmd == "getmap") {
+            bmmo::simple_action_msg msg;
+            msg.content.action = bmmo::CurrentMapQuery;
+            server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
         } else if (cmd == "kick" || cmd == "kick-id" || cmd == "crash" || cmd == "crash-id") {
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             if (cmd == "kick-id" || cmd == "crash-id") {

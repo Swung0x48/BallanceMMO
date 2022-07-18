@@ -8,7 +8,7 @@
 #include "login_accepted_msg.hpp"
 #include "login_accepted_v2_msg.hpp"
 #include "ball_state_msg.hpp"
-#include "login_denied_msg.hpp"
+#include "simple_action_msg.hpp"
 #include "player_connected_msg.hpp"
 #include "player_connected_v2_msg.hpp"
 #include "player_disconnected_msg.hpp"
@@ -29,5 +29,6 @@
 #include "did_not_finish_msg.hpp"
 #include "map_names_msg.hpp"
 #include "plain_text_msg.hpp"
+#include "current_map_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

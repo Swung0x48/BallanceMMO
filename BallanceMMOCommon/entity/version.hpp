@@ -15,14 +15,14 @@ namespace bmmo {
         uint8_t major = 3;
         uint8_t minor = 2;
         uint8_t subminor = 8;
-        stage_t stage = Alpha;
-        uint8_t build = 6;
+        stage_t stage = Beta;
+        uint8_t build = 11;
 
         std::string to_string() const;
         bool operator<(const version_t& that) const;
     };
 
-    const version_t minimum_client_version = {3, 2, 7, Beta, 9};
+    const version_t minimum_client_version = {3, 2, 8, Beta, 11};
 
     std::string version_t::to_string() const {
         std::string stage_s = "";

@@ -120,11 +120,14 @@ bool BallanceMMOClient::show_console() {
             for (const auto& i : previous_msg_) {
                 Printf(i.c_str());
             }
-            while (console_running_) {
+            while (true) {
                 std::cout << "\r> " << std::flush;
                 std::wstring wline;
                 _setmode(_fileno(stdin), _O_U16TEXT);
                 std::getline(std::wcin, wline);
+                std::wcout << wline << std::endl;
+                if (!console_running_)
+                    break;
                 std::string line = bmmo::message_utils::ConvertWideToANSI(wline),
                   cmd = "ballancemmo";
                 if (auto pos = line.rfind('\r'); pos != std::string::npos)
@@ -137,8 +140,8 @@ bool BallanceMMOClient::show_console() {
                 }
                 if (args[1] == "mmo" || args[1] == "ballancemmo")
                     args.erase(args.begin());
-                if (console_running_)
-                    OnCommand(m_bml, args);
+                GetLogger()->Info("Execute command from console: %s", line.c_str());
+                OnCommand(m_bml, args);
             }
         });
         return true;
@@ -493,11 +496,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     SendIngameMessage("Error: console is already visible.");
                     return;
                 }
-                /*GetLogger()->Info("111222");
-                _dup2(old_stdin, _fileno(stdin));
+                /*_dup2(old_stdin, _fileno(stdin));
                 _dup2(old_stdout, _fileno(stdout));
-                _dup2(old_stderr, _fileno(stderr));
-                GetLogger()->Info("111333");*/
+                _dup2(old_stderr, _fileno(stderr));*/
                 show_console();
             }
             else if (args[1] == "hide") {
@@ -990,6 +991,26 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg.crashed ? " and crashed subsequently" : ""
         ).c_str());
 
+        break;
+    }
+    case bmmo::SimpleAction: {
+        auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(network_msg->m_pData);
+        switch (msg->content.action) {
+            case bmmo::LoginDenied:
+                SendIngameMessage("Login denied.");
+                break;
+            case bmmo::CurrentMapQuery: {
+                bmmo::current_map_msg new_msg;
+                new_msg.content.map = current_map_;
+                m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &new_msg.content.sector);
+                if (current_map_.level == 0) new_msg.content.sector = 0;
+                send(new_msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
+            case bmmo::UnknownAction:
+            default:
+                GetLogger()->Error("Unknown action request received.");
+        }
         break;
     }
     case bmmo::ActionDenied: {
