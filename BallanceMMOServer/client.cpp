@@ -366,6 +366,7 @@ int main(int argc, char** argv) {
 
     std::thread client_thread([&client]() { client.run(); });
     do {
+        std::cout << "\r> " << std::flush;
         std::string input, cmd;
         std::getline(std::cin, input);
         bmmo::command_parser parser(input);

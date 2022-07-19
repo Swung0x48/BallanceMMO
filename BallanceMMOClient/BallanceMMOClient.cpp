@@ -117,15 +117,27 @@ bool BallanceMMOClient::show_console() {
             console_thread_.join();
         console_thread_ = std::thread([&]() {
             console_running_ = true;
+            DWORD mode;
+            GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
+            SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            _setmode(_fileno(stdin), _O_U16TEXT);
             for (const auto& i : previous_msg_) {
                 Printf(i.c_str());
             }
             while (true) {
                 std::cout << "\r> " << std::flush;
                 std::wstring wline;
-                _setmode(_fileno(stdin), _O_U16TEXT);
+                /*wchar_t wc;
+                do {
+                    wc = _getwch();
+                    wline += wc;
+                    ungetwc(wc, stdin);
+                    std::wcout << wc;
+                }
+                while (wc != L'\n');
+                std::cout << '\n';*/
                 std::getline(std::wcin, wline);
-                std::wcout << wline << std::endl;
+                // std::wcout << wline << std::endl;
                 if (!console_running_)
                     break;
                 std::string line = bmmo::message_utils::ConvertWideToANSI(wline),

@@ -657,8 +657,6 @@ protected:
             }
             case bmmo::LoginAccepted:
                 break;
-            case bmmo::SimpleAction:
-                break;
             case bmmo::PlayerDisconnected:
                 break;
             case bmmo::PlayerConnected:
@@ -863,6 +861,17 @@ protected:
                     msg->content.sector, bmmo::get_ordinal_rank(msg->content.sector).c_str(),
                     msg->content.map.get_display_name(map_names_).c_str());
                 // broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
+            case bmmo::SimpleAction: {
+                auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
+                switch (msg->content.action) {
+                    case bmmo::CurrentMapQuery: {
+                        break;
+                    }
+                    default:
+                        break;
+                }
                 break;
             }
             case bmmo::ActionDenied:

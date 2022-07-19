@@ -118,7 +118,7 @@ public:
             exit(1);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);
+            printf("\033[s\033[1L\033[G[%s] %s\n> \033[u\033[1B", time_str.c_str(), pszMsg);
             fflush(stdout);
         }
     }
