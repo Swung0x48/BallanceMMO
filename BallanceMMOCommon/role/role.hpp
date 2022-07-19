@@ -9,6 +9,14 @@
 #include <cassert>
 #include <cstdarg>
 #include <ctime>
+#ifdef _WIN32
+# ifndef WIN32_LEAN_AND_MEAN
+# define WIN32_LEAN_AND_MEAN
+# endif
+#include <Windows.h>
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
