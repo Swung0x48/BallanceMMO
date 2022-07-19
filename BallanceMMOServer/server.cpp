@@ -403,7 +403,7 @@ protected:
             uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
             uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
         );
-        return std::string(str);
+        return {str};
     }
 
     bool is_op(HSteamNetConnection client) {
@@ -643,7 +643,7 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
 
-                if (map_names_.size() != 0) {
+                if (!map_names_.empty()) {
                     bmmo::map_names_msg names_msg;
                     names_msg.maps = map_names_;
                     names_msg.serialize();
@@ -837,7 +837,7 @@ protected:
                 msg.deserialize();
 
                 HSteamNetConnection player_id = msg.player_id;
-                if (msg.player_name != "") {
+                if (!msg.player_name.empty()) {
                     Printf("%s requested to kick player \"%s\"!", client_it->second.name.c_str(), msg.player_name.c_str());
                     player_id = get_client_id(msg.player_name);
                 } else {
@@ -912,7 +912,7 @@ protected:
     inline void tick() {
         bmmo::owned_ball_state_v2_msg msg{};
         pull_unupdated_ball_states(msg.balls);
-        if (msg.balls.size() == 0)
+        if (msg.balls.empty())
             return;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
