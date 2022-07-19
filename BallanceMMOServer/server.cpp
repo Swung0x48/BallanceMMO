@@ -7,6 +7,7 @@
 
 #include "../BallanceMMOCommon/role/role.hpp"
 #include <vector>
+#include <condition_variable>
 #include "../BallanceMMOCommon/common.hpp"
 
 // #include <iomanip>
