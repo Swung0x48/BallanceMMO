@@ -36,6 +36,7 @@ public:
             FatalError("Server failed on setup.");
 
         running_ = true;
+        startup_cv_.notify_all();
         while (running_) {
             auto next_update = std::chrono::system_clock::now() + UPDATE_INTERVAL;
             update();
@@ -119,7 +120,7 @@ public:
         } else {
             kick_notice += "the server";
         }
-        if (reason != "") {
+        if (!reason.empty()) {
             kick_notice.append(" (" + reason + ")");
             msg.reason = reason;
         }
@@ -256,6 +257,13 @@ public:
         running_ = false;
 //        if (server_thread_.joinable())
 //            server_thread_.join();
+    }
+
+    void wait_till_server_started() {
+        while (!running()) {
+            std::unique_lock<std::mutex> lk(startup_mutex_);
+            startup_cv_.wait(lk);
+        }
     }
 
 protected:
@@ -944,6 +952,10 @@ protected:
     std::mutex client_data_mutex_;
     constexpr static inline std::chrono::nanoseconds TICK_INTERVAL{(int)1e9 / 66},
                                                      UPDATE_INTERVAL{(int)1e9 / 66};
+
+    std::mutex startup_mutex_;
+    std::condition_variable startup_cv_;
+
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
@@ -1004,6 +1016,7 @@ int main(int argc, char** argv) {
     printf("Bootstrapping server...\n");
     std::thread server_thread([&server]() { server.run(); });
 
+    server.wait_till_server_started();
     printf("Server (v%s; client min. v%s) started.\n",
             bmmo::version_t().to_string().c_str(),
             bmmo::minimum_client_version.to_string().c_str());
