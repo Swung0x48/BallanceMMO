@@ -1012,7 +1012,15 @@ int main(int argc, char** argv) {
     do {
         std::cout << "\r> " << std::flush;
         std::string line, cmd;
+#ifdef _WIN32
+        std::wstring wline;
+        std::getline(std::wcin, wline);
+        line = bmmo::message_utils::ConvertWideToANSI(wline);
+        if (auto pos = line.rfind('\r'); pos != std::string::npos)
+            line.erase(pos);
+#else
         std::getline(std::cin, line);
+#endif
         bmmo::command_parser parser(line);
 
         cmd = parser.get_next_word();

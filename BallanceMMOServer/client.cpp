@@ -368,7 +368,15 @@ int main(int argc, char** argv) {
     do {
         std::cout << "\r> " << std::flush;
         std::string input, cmd;
+#ifdef _WIN32
+        std::wstring wline;
+        std::getline(std::wcin, wline);
+        input = bmmo::message_utils::ConvertWideToANSI(wline);
+        if (auto pos = input.rfind('\r'); pos != std::string::npos)
+            input.erase(pos);
+#else
         std::getline(std::cin, input);
+#endif
         bmmo::command_parser parser(input);
         cmd = parser.get_next_word();
         // std::cin >> input;

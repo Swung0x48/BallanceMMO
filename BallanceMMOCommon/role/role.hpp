@@ -35,6 +35,12 @@ public:
         // certs.
         SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_IP_AllowWithoutAuth, 1);
 #endif
+#ifdef _WIN32
+        DWORD mode;
+        GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
+        SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        _setmode(_fileno(stdin), _O_U16TEXT);
+#endif
         init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
         init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, DebugOutput);
