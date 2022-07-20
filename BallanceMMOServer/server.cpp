@@ -1064,6 +1064,7 @@ int main(int argc, char** argv) {
 #else
         std::getline(std::cin, line);
 #endif
+        server.LogFileOutput(("> " + line).c_str());
         bmmo::command_parser parser(line);
 
         cmd = parser.get_next_word();

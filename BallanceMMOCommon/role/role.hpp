@@ -127,6 +127,17 @@ protected:
     }
 
 public:
+    static void LogFileOutput(const char* pMsg) {
+        if (log_file_) {
+            auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            std::string time_str(15, 0);
+            time_str.resize(std::strftime(&time_str[0], time_str.size(), 
+                "%m-%d %X", std::localtime(&time)));
+            fprintf(log_file_, "[%s] %s\n", time_str.c_str(), pMsg);
+            fflush(log_file_);
+        }
+    }
+
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());

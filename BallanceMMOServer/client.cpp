@@ -337,15 +337,15 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
                 break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
-                printf("Options:\n");
-                printf("  -s, --server=ADDRESS\t Connect to the server at ADDRESS instead (default: 127.0.0.1:26676).\n");
-                printf("  -n, --name=NAME\t Set your name to NAME (default: \"Swung\")\n");
-                printf("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")\n");
-                printf("  -h, --help\t\t Display this help and exit.\n");
-                printf("  -v, --version\t\t Display version information and exit.\n");
+                puts("Options:");
+                puts("  -s, --server=ADDRESS\t Connect to the server at ADDRESS instead (default: 127.0.0.1:26676).");
+                puts("  -n, --name=NAME\t Set your name to NAME (default: \"Swung\")");
+                puts("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")");
+                puts("  -h, --help\t\t Display this help and exit.");
+                puts("  -v, --version\t\t Display version information and exit.");
                 return -1;
             case 'v':
-                printf("Ballance MMO mock client by Swung0x48 and BallanceBug.\n");
+                puts("Ballance MMO mock client by Swung0x48 and BallanceBug.");
                 printf("Version: %s.\n", bmmo::version_t().to_string().c_str());
                 return -1;
         }
