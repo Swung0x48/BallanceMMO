@@ -7,7 +7,7 @@ function ArchiveLogs {
 try {
   while ($true) {
     $LogName = Get-Date -UFormat "log_%Y%m%d%H%M.log"
-    .\BallanceMMOServer.exe $args 2>&1 | Tee-Object -FilePath "$LogName"
+    .\BallanceMMOServer.exe --log=$LogName $args
     if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1) {
       break
     }

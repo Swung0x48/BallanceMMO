@@ -1,6 +1,4 @@
 #include "BallanceMMOClient.h"
-#include <io.h>
-#include <fcntl.h>
 
 IMod* BMLEntry(IBML* bml) {
     DeclareDumpFile();
@@ -385,6 +383,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     };
 
     const size_t length = args.size();
+    std::string lower1;
+    if (length > 1) lower1 = boost::algorithm::to_lower_copy(args[1]);
 
     switch (length) {
         case 1: {
@@ -392,7 +392,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             return;
         }
         case 2: {
-            if (args[1] == "connect" || args[1] == "c") {
+            if (lower1 == "connect" || lower1 == "c") {
                 if (connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     SendIngameMessage("Already connected.");
@@ -452,7 +452,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     });
                 }
             }
-            else if (args[1] == "disconnect" || args[1] == "d") {
+            else if (lower1 == "disconnect" || lower1 == "d") {
                 if (!connecting() && !connected()) {
                     std::lock_guard<std::mutex> lk(bml_mtx_);
                     SendIngameMessage("Already disconnected.");
@@ -471,13 +471,13 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     status_->paint(0xffff0000);
                 }
             }
-            else if (args[1] == "list" || args[1] == "l" || args[1] == "list-id" || args[1] == "li") {
+            else if (lower1 == "list" || lower1 == "l" || lower1 == "list-id" || lower1 == "li") {
                 if (!connected())
                     return;
 
                 std::string line = "";
                 int counter = 0;
-                bool show_id = (args[1] == "list-id" || args[1] == "li");
+                bool show_id = (lower1 == "list-id" || lower1 == "li");
                 db_.for_each([this, &line, &counter, &show_id](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     ++counter;
                     line.append(pair.second.name + (pair.second.cheated ? " [CHEAT]" : "")
@@ -494,7 +494,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     .append("   (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
                 SendIngameMessage(line.c_str());
             }
-            else if (args[1] == "dnf") {
+            else if (lower1 == "dnf") {
                 bmmo::did_not_finish_msg msg{};
                 if (current_map_.level == 0)
                     return;
@@ -503,7 +503,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 msg.content.cheated = m_bml->IsCheatEnabled();
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
-            else if (args[1] == "show") {
+            else if (lower1 == "show") {
                 if (console_running_) {
                     SendIngameMessage("Error: console is already visible.");
                     return;
@@ -513,33 +513,33 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 _dup2(old_stderr, _fileno(stderr));*/
                 show_console();
             }
-            else if (args[1] == "hide") {
+            else if (lower1 == "hide") {
                 if (!console_running_) {
                     SendIngameMessage("Error: console is already hidden.");
                     return;
                 }
                 hide_console();
             }
-            /*else if (args[1] == "p") {
+            /*else if (lower1 == "p") {
                 objects_.physicalize_all();
-            } else if (args[1] == "f") {
+            } else if (lower1 == "f") {
                 ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
-            } else if (args[1] == "u") {
+            } else if (lower1 == "u") {
                 ExecuteBB::UnsetPhysicsForce(player_ball_);
             }*/
             return;
         }
         case 3: {
-            if (args[1] == "cheat") {
+            if (lower1 == "cheat") {
                 bool cheat_state = false;
-                if (args[2] == "on")
+                if (boost::iequals(args[2], "on"))
                     cheat_state = true;
                 bmmo::cheat_toggle_msg msg{};
                 msg.content.cheated = cheat_state;
                 send(msg, k_nSteamNetworkingSend_Reliable);
                 return;
             }
-            if (args[1] == "rank" && args[2] == "reset") {
+            if (lower1 == "rank" && boost::iequals(args[2], "reset")) {
                 reset_rank_ = true;
                 return;
             }
@@ -549,7 +549,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     if (length >= 3 && length < 512) {
         if (!connected())
             return;
-        if (args[1] == "s" || args[1] == "say") {
+        if (lower1 == "s" || lower1 == "say") {
             bmmo::chat_msg msg{};
             try {
                 msg.chat_content = join_strings(args, 2);
@@ -568,9 +568,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-        else if (args[1] == "kick" || args[1] == "kick-id") {
+        else if (lower1 == "kick" || lower1 == "kick-id") {
             bmmo::kick_request_msg msg{};
-            if (args[1] == "kick")
+            if (lower1 == "kick")
                 msg.player_name = args[2];
             else
                 msg.player_id = atoll(args[2].c_str());

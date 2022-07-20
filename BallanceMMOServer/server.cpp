@@ -38,6 +38,11 @@ public:
 
         running_ = true;
         startup_cv_.notify_all();
+        
+        Printf("Server (v%s; client min. v%s) started at port %u.\n",
+                bmmo::version_t().to_string().c_str(),
+                bmmo::minimum_client_version.to_string().c_str(), port_);
+
         while (running_) {
             auto next_update = std::chrono::system_clock::now() + UPDATE_INTERVAL;
             update();
@@ -249,6 +254,7 @@ public:
     }
 
     void shutdown() {
+        Printf("Shutting down...");
         for (auto& i: clients_) {
             interface_->CloseConnection(i.first, 0, "Server closed", true);
         }
@@ -966,26 +972,31 @@ protected:
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
 };
 
-// parse arguments (optional port and help/version) with getopt
-int parse_args(int argc, char** argv, uint16_t* port, bool* dry_run) {
+// parse arguments (optional port and help/version/log) with getopt
+int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, bool* dry_run) {
     constexpr static const int DRYRUN_VALUE = 256;
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
+        {"log", required_argument, 0, 'l'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {"dry-run", no_argument, 0, DRYRUN_VALUE},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "p:hv", long_options, &opt_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:l:hv", long_options, &opt_index)) != -1) {
         switch (opt) {
             case 'p':
                 *port = atoi(optarg);
+                break;
+            case 'l':
+                log_path = optarg;
                 break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
                 puts("  -p, --port=PORT\t Use PORT as the server port instead (default: 26676).");
+                puts("  -l, --log=PATH\t Log to PATH in addition of stdout.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
                 puts("  --dry-run\t\t Test the server by starting it and exiting immediately.");
@@ -998,7 +1009,7 @@ int parse_args(int argc, char** argv, uint16_t* port, bool* dry_run) {
                 return -1;
             case DRYRUN_VALUE:
                 *dry_run = true;
-                return 0;
+                break;
         }
     }
     return 0;
@@ -1007,7 +1018,8 @@ int parse_args(int argc, char** argv, uint16_t* port, bool* dry_run) {
 int main(int argc, char** argv) {
     uint16_t port = 26676;
     bool dry_run = false;
-    if (parse_args(argc, argv, &port, &dry_run) < 0)
+    std::string log_path;
+    if (parse_args(argc, argv, &port, log_path, &dry_run) < 0)
         return 0;
 
     if (port == 0) {
@@ -1015,20 +1027,27 @@ int main(int argc, char** argv) {
         return 1;
     };
 
+    FILE* log_file = nullptr;
+    if (!log_path.empty()) {
+        log_file = fopen(log_path.c_str(), "a");
+        if (log_file == nullptr) {
+            std::cerr << "Fatal: failed to open log file." << std::endl;
+            return 1;
+        }
+        server::set_log_file(log_file);
+    }
+
     printf("Initializing sockets...\n");
     server::init_socket();
 
-    printf("Starting server at port %d.\n", port);
+    printf("Starting server at port %u.\n", port);
     server server(port);
 
     printf("Bootstrapping server...\n");
+    fflush(stdout);
     std::thread server_thread([&server]() { server.run(); });
 
     server.wait_till_started();
-    printf("Server (v%s; client min. v%s) started.\n",
-            bmmo::version_t().to_string().c_str(),
-            bmmo::minimum_client_version.to_string().c_str());
-    std::cout << std::flush;
 
     if (dry_run)
         server.shutdown();

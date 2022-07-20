@@ -22,6 +22,8 @@
 #include <boost/circular_buffer.hpp>
 #include <openssl/md5.h>
 #include <fstream>
+#include <io.h>
+#include <fcntl.h>
 
 // #include <filesystem>
 

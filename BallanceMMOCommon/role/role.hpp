@@ -54,6 +54,10 @@ public:
         SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, DebugOutput);
     }
 
+    static void set_log_file(FILE* file) {
+        log_file_ = file;
+    }
+
     role() {
         interface_ = SteamNetworkingSockets();
     }
@@ -88,6 +92,10 @@ public:
 #else
         SteamDatagramClient_Kill();
 #endif
+        if (log_file_) {
+            fclose(log_file_);
+            log_file_ = nullptr;
+        }
     }
 
 protected:
@@ -97,6 +105,7 @@ protected:
     static inline time_t init_time_t_;
     std::atomic_bool running_ = false;
     ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
+    static inline FILE* log_file_ = nullptr;
 
     virtual int poll_incoming_messages() = 0;
 
@@ -124,6 +133,11 @@ public:
         std::string time_str(15, 0);
         time_str.resize(std::strftime(&time_str[0], time_str.size(), 
             "%m-%d %X", std::localtime(&time)));
+
+        if (log_file_) {
+            fprintf(log_file_, "[%s] %s\n", time_str.c_str(), pszMsg);
+            fflush(log_file_);
+        }
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
             fprintf(stderr, "\r[%s] %s\n> ", time_str.c_str(), pszMsg);
