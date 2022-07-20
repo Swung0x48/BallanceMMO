@@ -104,11 +104,11 @@ BallanceMMO is a project which brings online experiences to Ballance.
     $ ./BallanceMMOServer --help
     Usage: ./BallanceMMOServer [OPTION]...
     Options:
-        -p, --port=PORT      Use PORT as the server port instead (default: 26676).
-        -l, --log=PATH       Log to PATH in addition of stdout.
-        -h, --help           Display this help and exit.
-        -v, --version        Display version information and exit.
-        --dry-run            Test the server by starting it and exiting immediately.
+    -p, --port=PORT      Use PORT as the server port instead (default: 26676).
+    -l, --log=PATH       Log to the file at PATH in addition to stdout.
+    -h, --help           Display this help and exit.
+    -v, --version        Display version information and exit.
+        --dry-run        Test the server by starting it and exiting immediately.
     ```
 
     Alternatively, use the bash script `start_ballancemmo_loop.sh` (`start_ballancemmo_loop.bat` on Windows) which handles file logging and automatically restarts the server after crashes. *All command line arguments for the server executable also applies there.*

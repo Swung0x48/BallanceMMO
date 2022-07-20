@@ -996,10 +996,10 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
                 puts("  -p, --port=PORT\t Use PORT as the server port instead (default: 26676).");
-                puts("  -l, --log=PATH\t Log to PATH in addition of stdout.");
+                puts("  -l, --log=PATH\t Log to the file at PATH in addition to stdout.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
-                puts("  --dry-run\t\t Test the server by starting it and exiting immediately.");
+                puts("      --dry-run\t\t Test the server by starting it and exiting immediately.");
                 return -1;
             case 'v':
                 puts("Ballance MMO server by Swung0x48 and BallanceBug.");
