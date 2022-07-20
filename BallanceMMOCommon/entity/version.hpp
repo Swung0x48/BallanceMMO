@@ -14,7 +14,7 @@ namespace bmmo {
     struct version_t {
         uint8_t major = 3;
         uint8_t minor = 2;
-        uint8_t subminor = 8;
+        uint8_t subminor = 9;
         stage_t stage = Beta;
         uint8_t build = 12;
 
@@ -22,7 +22,7 @@ namespace bmmo {
         bool operator<(const version_t& that) const;
     };
 
-    const version_t minimum_client_version = {3, 2, 8, Beta, 11};
+    const version_t minimum_client_version = {3, 2, 9, Beta, 12};
 
     std::string version_t::to_string() const {
         std::string stage_s = "";
