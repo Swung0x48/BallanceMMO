@@ -13,6 +13,8 @@
 #include <cstdarg>
 #include <sstream>
 #include <chrono>
+#include <mutex>
+#include <condition_variable>
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
 
@@ -40,6 +42,7 @@ public:
 
     void run() override {
         running_ = true;
+        startup_cv_.notify_all();
         while (running_) {
             if (!update())
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -101,6 +104,13 @@ public:
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
         std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    void wait_till_started() {
+        while (!running()) {
+            std::unique_lock<std::mutex> lk(startup_mutex_);
+            startup_cv_.wait(lk);
+        }
     }
 
 private:
@@ -296,6 +306,8 @@ private:
         }
     }
 
+    std::mutex startup_mutex_;
+    std::condition_variable startup_cv_;
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     std::string nickname_;
     uint8_t uuid_[16];
@@ -365,7 +377,9 @@ int main(int argc, char** argv) {
     }
 
     std::thread client_thread([&client]() { client.run(); });
-    do {
+
+    client.wait_till_started();
+    while (client.running()) {
         std::cout << "\r> " << std::flush;
         std::string input, cmd;
 #ifdef _WIN32
@@ -439,7 +453,7 @@ int main(int argc, char** argv) {
             msg.serialize();
             client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-    } while (client.running());
+    }
 
     std::cout << "Stopping..." << std::endl;
     if (client_thread.joinable())

@@ -260,7 +260,7 @@ public:
 //            server_thread_.join();
     }
 
-    void wait_till_server_started() {
+    void wait_till_started() {
         while (!running()) {
             std::unique_lock<std::mutex> lk(startup_mutex_);
             startup_cv_.wait(lk);
@@ -967,11 +967,13 @@ protected:
 };
 
 // parse arguments (optional port and help/version) with getopt
-int parse_args(int argc, char** argv, uint16_t* port) {
+int parse_args(int argc, char** argv, uint16_t* port, bool* dry_run) {
+    constexpr static const int DRYRUN_VALUE = 256;
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
+        {"dry-run", no_argument, 0, DRYRUN_VALUE},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
@@ -982,17 +984,21 @@ int parse_args(int argc, char** argv, uint16_t* port) {
                 break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
-                printf("Options:\n");
-                printf("  -p, --port=PORT\t Use PORT as the server port instead (default: 26676).\n");
-                printf("  -h, --help\t\t Display this help and exit.\n");
-                printf("  -v, --version\t\t Display version information and exit.\n");
+                puts("Options:");
+                puts("  -p, --port=PORT\t Use PORT as the server port instead (default: 26676).");
+                puts("  -h, --help\t\t Display this help and exit.");
+                puts("  -v, --version\t\t Display version information and exit.");
+                puts("  --dry-run\t\t Test the server by starting it and exiting immediately.");
                 return -1;
             case 'v':
-                printf("Ballance MMO server by Swung0x48 and BallanceBug.\n");
+                puts("Ballance MMO server by Swung0x48 and BallanceBug.");
                 printf("Version: %s.\n", bmmo::version_t().to_string().c_str());
                 printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
-                printf("GitHub repository: https://github.com/Swung0x48/BallanceMMO\n");
+                puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;
+            case DRYRUN_VALUE:
+                *dry_run = true;
+                return 0;
         }
     }
     return 0;
@@ -1000,7 +1006,8 @@ int parse_args(int argc, char** argv, uint16_t* port) {
 
 int main(int argc, char** argv) {
     uint16_t port = 26676;
-    if (parse_args(argc, argv, &port) < 0)
+    bool dry_run = false;
+    if (parse_args(argc, argv, &port, &dry_run) < 0)
         return 0;
 
     if (port == 0) {
@@ -1017,13 +1024,16 @@ int main(int argc, char** argv) {
     printf("Bootstrapping server...\n");
     std::thread server_thread([&server]() { server.run(); });
 
-    server.wait_till_server_started();
+    server.wait_till_started();
     printf("Server (v%s; client min. v%s) started.\n",
             bmmo::version_t().to_string().c_str(),
             bmmo::minimum_client_version.to_string().c_str());
     std::cout << std::flush;
 
-    do {
+    if (dry_run)
+        server.shutdown();
+
+    while (server.running()) {
         std::cout << "\r> " << std::flush;
         std::string line, cmd;
 #ifdef _WIN32
@@ -1112,7 +1122,7 @@ int main(int argc, char** argv) {
             if (!server.load_config())
                 server.Printf("Error: failed to reload config.");
         }
-    } while (server.running());
+    }
 
     std::cout << "Stopping..." << std::endl;
     if (server_thread.joinable())
