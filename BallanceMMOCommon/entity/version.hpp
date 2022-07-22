@@ -20,20 +20,21 @@ namespace bmmo {
 
         std::string to_string() const;
         bool operator<(const version_t& that) const;
+        bool operator>(const version_t& that) const;
     };
 
     const version_t minimum_client_version = {3, 2, 9, Beta, 12};
 
     std::string version_t::to_string() const {
-        std::string stage_s = "";
-        switch (stage) {
-            case Alpha: stage_s = "-alpha" + std::to_string((int)build); break;
-            case Beta: stage_s = "-beta" + std::to_string((int)build); break;
-            case RC: stage_s = "-rc" + std::to_string((int)build); break;
-            case Release: break;
-        };
         std::stringstream ss;
-        ss << (int)major << "." << (int)minor << "." << (int)subminor << stage_s;
+        ss << (int)major << '.' << (int)minor << '.' << (int)subminor;
+        switch (stage) {
+            case Alpha: ss << "-alpha" << (int)build; break;
+            case Beta: ss << "-beta" << (int)build; break;
+            case RC: ss << "-rc" << (int)build; break;
+            case Release:
+            default: break;
+        };
         return std::move(ss.str());
     }
 
@@ -49,6 +50,10 @@ namespace bmmo {
         if (build < that.build) return true;
         if (build > that.build) return false;
         return false;
+    }
+
+    bool version_t::operator>(const version_t& that) const {
+        return that < *this;
     }
 }
 

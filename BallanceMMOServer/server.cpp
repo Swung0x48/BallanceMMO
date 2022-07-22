@@ -968,7 +968,7 @@ protected:
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_, map_names_;
     std::unordered_map<std::string, int> map_ranks_;
-    bool op_mode_ = true, restart_level_ = false, force_restart_level_ = false;
+    bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false;
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
 };
 
@@ -996,7 +996,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
                 puts("  -p, --port=PORT\t Use PORT as the server port instead (default: 26676).");
-                puts("  -l, --log=PATH\t Log to the file at PATH in addition to stdout.");
+                puts("  -l, --log=PATH\t Write log to the file at PATH in addition to stdout.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
                 puts("      --dry-run\t\t Test the server by starting it and exiting immediately.");
