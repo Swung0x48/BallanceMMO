@@ -18,7 +18,7 @@ public:
 		callback_(bml, args);
 	}
 	virtual const std::vector<std::string> GetTabCompletion(IBML* bml, const std::vector<std::string>& args) override {
-		return args.size() == 2 ? std::vector<std::string>{ "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset" } : std::vector<std::string>{};
+		return args.size() == 2 ? std::vector<std::string>{ "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap" } : std::vector<std::string>{};
 	};
 };
 

@@ -74,7 +74,7 @@ private:
 	void OnLoad() override;
 	void OnPostStartMenu() override;
 	void OnExitGame() override;
-	void OnUnload() override;
+	//void OnUnload() override;
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;

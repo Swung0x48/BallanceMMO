@@ -71,13 +71,6 @@ namespace bmmo {
             return !(*this == that);
         }
 
-        // map& operator=(const map& that) {
-        //   type = that.type;
-        //   memcpy(md5, that.md5, 16);
-        //   level = that.level;
-        //   return *this;
-        // }
-
         std::string get_display_name(const std::string& name) const {
             std::string map_name;
             if (is_original_level()) {
@@ -95,7 +88,7 @@ namespace bmmo {
             if (auto it = map_names.find(get_hash_bytes_string()); it != map_names.end()) {
                 return get_display_name(it->second);
             }
-            return get_display_name(get_hash_string());
+            return get_display_name(get_hash_string().substr(0, 24));
         };
 
         std::string get_hash_bytes_string() const {

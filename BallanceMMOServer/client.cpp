@@ -314,17 +314,18 @@ private:
 };
 
 // parse command line arguments (server/name/uuid/help/version) with getopt
-int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid) {
+int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid, std::string& log_path) {
     static struct option long_options[] = {
         {"server", required_argument, 0, 's'},
         {"name", required_argument, 0, 'n'},
         {"uuid", required_argument, 0, 'u'},
+        {"log", required_argument, 0, 'l'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "s:n:u:hv", long_options, &opt_index))!= -1) {
+    while ((opt = getopt_long(argc, argv, "s:n:u:l:hv", long_options, &opt_index))!= -1) {
         switch (opt) {
             case 's':
                 server = optarg;
@@ -334,6 +335,9 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
                 break;
             case 'u':
                 uuid = optarg;
+                break;
+            case 'l':
+                log_path = optarg;
                 break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
@@ -355,12 +359,23 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
 
 int main(int argc, char** argv) {
     std::string server_addr = "127.0.0.1:26676", username = "Swung",
-                uuid = "00010002-0003-0004-0005-000600070008";
-    if (parse_args(argc, argv, server_addr, username, uuid) != 0)
+                uuid = "00010002-0003-0004-0005-000600070008",
+                log_path;
+    if (parse_args(argc, argv, server_addr, username, uuid, log_path) != 0)
         return 0;
     
     bmmo::hostname_parser hp(server_addr);
     server_addr = hp.get_address() + ":" + hp.get_port();
+
+    FILE* log_file = nullptr;
+    if (!log_path.empty()) {
+        log_file = fopen(log_path.c_str(), "a");
+        if (log_file == nullptr) {
+            std::cerr << "Fatal: failed to open log file." << std::endl;
+            return 1;
+        }
+        client::set_log_file(log_file);
+    }
 
     std::cout << "Initializing sockets..." << std::endl;
     client::init_socket();
@@ -447,7 +462,7 @@ int main(int argc, char** argv) {
             bmmo::cheat_state_msg msg;
             msg.content.cheated = cheat;
             client.send(msg, k_nSteamNetworkingSend_Reliable);
-        } else if (cmd != "") {
+        } else if (!cmd.empty()) {
             bmmo::chat_msg msg{};
             msg.chat_content = cmd;
             msg.serialize();

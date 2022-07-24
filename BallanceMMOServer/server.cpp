@@ -346,7 +346,7 @@ protected:
         }
     }
 
-    inline void save_config_to_file() {
+    void save_config_to_file() {
         config_["op_list"] = op_players_;
         std::ofstream config_file("config.yml");
         if (!config_file.is_open()) {
@@ -357,9 +357,10 @@ protected:
         config_file << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
                     << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
-                    << "# - Options for log levels: important, warning, msg."
+                    << "# - Options for log levels: important, warning, msg.\n"
                     << std::endl;
         config_file << config_;
+        config_file << std::endl;
         config_file.close();
     }
 
@@ -869,19 +870,31 @@ protected:
 
                 break;
             }
-            case bmmo::CurrentMap:  {
+            case bmmo::CurrentMap: {
                 auto* msg = reinterpret_cast<bmmo::current_map_msg*>(networking_msg->m_pData);
+                if (map_data_inquirer_ != k_HSteamNetConnection_Invalid) {
+                    msg->content.player_id = networking_msg->m_conn;
+                    send(map_data_inquirer_, *msg, k_nSteamNetworkingSend_Reliable);
+                    map_data_count_++;
+                    if (map_data_count_ == get_client_count()) {
+                        map_data_inquirer_ = k_HSteamNetConnection_Invalid;
+                        map_data_count_ = 0;
+                    }
+                    break;
+                }
                 Printf("(#%u, %s) is at the %d%s sector of %s.",
                     networking_msg->m_conn, clients_[networking_msg->m_conn].name.c_str(),
                     msg->content.sector, bmmo::get_ordinal_rank(msg->content.sector).c_str(),
                     msg->content.map.get_display_name(map_names_).c_str());
-                // broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
             case bmmo::SimpleAction: {
                 auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
                 switch (msg->content.action) {
                     case bmmo::CurrentMapQuery: {
+                        map_data_inquirer_ = networking_msg->m_conn;
+                        map_data_count_ = 0;
+                        broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
                         break;
                     }
                     default:
@@ -963,6 +976,8 @@ protected:
     std::mutex startup_mutex_;
     std::condition_variable startup_cv_;
 
+    int map_data_count_ = 0;
+    HSteamNetConnection map_data_inquirer_ = k_HSteamNetConnection_Invalid;
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;

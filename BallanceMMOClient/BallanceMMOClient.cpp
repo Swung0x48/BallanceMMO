@@ -364,12 +364,13 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
 void BallanceMMOClient::OnExitGame()
 {
     cleanup(true);
-}
-
-void BallanceMMOClient::OnUnload() {
-    cleanup(true);
     client::destroy();
 }
+
+//void BallanceMMOClient::OnUnload() {
+//    cleanup(true);
+//    client::destroy();
+//}
 
 void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& args)
 {
@@ -519,6 +520,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return;
                 }
                 hide_console();
+            }
+            else if (lower1 == "getmap") {
+                bmmo::simple_action_msg msg;
+                msg.content.action = bmmo::CurrentMapQuery;
+                send(msg, k_nSteamNetworkingSend_Reliable);
             }
             /*else if (lower1 == "p") {
                 objects_.physicalize_all();
@@ -1016,6 +1022,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 new_msg.content.map = current_map_;
                 m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &new_msg.content.sector);
                 if (current_map_.level == 0) new_msg.content.sector = 0;
+                new_msg.content.cheated = m_bml->IsCheatEnabled();
                 send(new_msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
@@ -1048,6 +1055,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
 
         SendIngameMessage(("Action failed: " + reason).c_str());
+        break;
+    }
+    case bmmo::CurrentMap: {
+        auto* msg = reinterpret_cast<bmmo::current_map_msg*>(network_msg->m_pData);
+        SendIngameMessage(std::format("{} is at the {}{} sector of {}.",
+                                      get_username(msg->content.player_id), msg->content.sector,
+                                      bmmo::get_ordinal_rank(msg->content.sector),
+                                      msg->content.map.get_display_name(map_names_)));
         break;
     }
     case bmmo::OpState: {
