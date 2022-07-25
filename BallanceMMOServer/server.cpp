@@ -882,7 +882,8 @@ protected:
                     }
                     break;
                 }
-                Printf("(#%u, %s) is at the %d%s sector of %s.",
+                Printf("%s(#%u, %s) is at the %d%s sector of %s.",
+                    msg->content.cheated ? "[CHEAT] " : "",
                     networking_msg->m_conn, clients_[networking_msg->m_conn].name.c_str(),
                     msg->content.sector, bmmo::get_ordinal_rank(msg->content.sector).c_str(),
                     msg->content.map.get_display_name(map_names_).c_str());

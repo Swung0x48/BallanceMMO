@@ -1076,7 +1076,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::CurrentMap: {
         auto* msg = reinterpret_cast<bmmo::current_map_msg*>(network_msg->m_pData);
-        SendIngameMessage(std::format("{} is at the {}{} sector of {}.",
+        SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
+                                      msg->content.cheated ? "[CHEAT] " : "",
                                       get_username(msg->content.player_id), msg->content.sector,
                                       bmmo::get_ordinal_rank(msg->content.sector),
                                       msg->content.map.get_display_name(map_names_)));
