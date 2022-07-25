@@ -29,7 +29,7 @@ public:
     void run() override {
         running_ = true;
         while (running_) {
-            auto next_update = std::chrono::system_clock::now() + UPDATE_INTERVAL;
+            auto next_update = std::chrono::steady_clock::now() + UPDATE_INTERVAL;
             if (!update())
                 std::this_thread::sleep_until(next_update);
         }

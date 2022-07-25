@@ -44,7 +44,7 @@ public:
                 bmmo::minimum_client_version.to_string().c_str(), port_);
 
         while (running_) {
-            auto next_update = std::chrono::system_clock::now() + UPDATE_INTERVAL;
+            auto next_update = std::chrono::steady_clock::now() + UPDATE_INTERVAL;
             update();
             std::this_thread::sleep_until(next_update);
         }
@@ -951,7 +951,7 @@ protected:
         ticking_thread_ = std::thread([&]() {
             Printf("Ticking started.");
             while (ticking_) {
-                auto next_tick = std::chrono::system_clock::now() + TICK_INTERVAL;
+                auto next_tick = std::chrono::steady_clock::now() + TICK_INTERVAL;
                 tick();
                 std::this_thread::sleep_until(next_tick);
             }

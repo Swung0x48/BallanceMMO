@@ -236,6 +236,12 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     }*/
 }
 
+void BallanceMMOClient::OnPreLoadLevel() {
+    if (tutorial_exit_event_)
+        return;
+    edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
+}
+
 void BallanceMMOClient::OnPostStartMenu()
 {
     if (init_) {
@@ -310,6 +316,14 @@ void BallanceMMOClient::OnStartLevel()
 
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &current_map_.level);
 
+    if (current_map_.level == 1 && countdown_restart_ && connected()) {
+        m_bml->AddTimer(10u, [this]() {
+            auto* tutorial_exit = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(tutorial_exit_event_));
+            tutorial_exit->Activate();
+        });
+        countdown_restart_ = false;
+    }
+
     //objects_.destroy_all_objects();
     //objects_.init_players();
 }
@@ -339,6 +353,10 @@ void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
         edit_Gameplay_Events(script);
     if (strcmp(script->GetName(), "Gameplay_Energy") == 0)
         edit_Gameplay_Energy(script);
+    // Weird. Gameplay_Tutorial doesn't trigger OnLoadScript, so we have to
+    // get it from the PreLoadLevel event.
+    // if (strcmp(script->GetName(), "Gameplay_Tutorial") == 0)
+    //     edit_Gameplay_Tutorial(script);
     if (strcmp(script->GetName(), "Event_handler") == 0)
         edit_Event_handler(script);
     if (strcmp(script->GetName(), "Menu_Pause") == 0)
@@ -881,6 +899,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame())
                     break;
                 if (msg->content.restart_level) {
+                    countdown_restart_ = true;
                     restart_current_level();
                 }
                 else {

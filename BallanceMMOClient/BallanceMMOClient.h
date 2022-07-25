@@ -21,6 +21,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/circular_buffer.hpp>
 #include <openssl/md5.h>
+#include <openssl/sha.h>
 #include <fstream>
 #include <io.h>
 #include <fcntl.h>
@@ -78,6 +79,7 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
+	void OnPreLoadLevel() override;
 	void OnLevelFinish() override;
 	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
@@ -148,6 +150,7 @@ private:
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;
+	bool countdown_restart_ = false;
 
 	boost::uuids::uuid uuid_;
 
@@ -280,6 +283,17 @@ private:
 		//ScriptHelper::FindNextBB(script, script->GetInput(0));
 	}
 
+	CK_ID tutorial_exit_event_ = 0;
+	void edit_Gameplay_Tutorial(CKBehavior* script) {
+		auto* tutorial_logic =
+			ScriptHelper::FindFirstBB(ScriptHelper::FindFirstBB(script,
+			"Kapitel Aktion"), "Tut continue/exit");
+		auto* tutorial_exit =
+			ScriptHelper::FindPreviousBB(tutorial_logic,
+				ScriptHelper::FindFirstBB(tutorial_logic, "Set Physics Globals")->GetInput(0));
+		tutorial_exit_event_ = CKOBJID(tutorial_exit->GetOutput(0));
+	}
+
 	CK_ID reset_level_;
 	CK_ID pause_level_;
 	void edit_Event_handler(CKBehavior* script) {
@@ -344,7 +358,7 @@ private:
 				}
 			}
 		}
-		
+
 #ifdef DEBUG
 		if (input_manager->IsKeyPressed(CKKEY_5)) {
 			restart_current_level();
