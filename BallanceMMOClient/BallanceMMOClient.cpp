@@ -259,8 +259,6 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMO([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
-
-        SendIngameMessage("New: use \"/mmo show\" and \"/mmo hide\" to show/hide BallanceMMO console.");
     }
 }
 
