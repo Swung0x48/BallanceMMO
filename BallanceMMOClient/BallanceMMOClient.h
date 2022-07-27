@@ -141,6 +141,7 @@ private:
 	CK_ID current_level_array_ = 0;
 	bmmo::named_map current_map_;
 	std::unordered_map<std::string, std::string> map_names_;
+	uint8_t balls_nmo_md5_[16];
 
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
@@ -674,9 +675,6 @@ private:
 
 	void md5_from_file(const std::string& path, uint8_t* result) {
 		std::ifstream file(path, std::ifstream::binary);
-		// std::stringstream ss;
-		// ss << std::filesystem::current_path() << " " << std::filesystem::absolute(path);
-		// GetLogger()->Info(ss.str().c_str());
 		if (!file.is_open())
 			return;
 		MD5_CTX md5Context;

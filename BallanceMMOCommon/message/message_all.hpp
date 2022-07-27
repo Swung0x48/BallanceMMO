@@ -30,5 +30,6 @@
 #include "map_names_msg.hpp"
 #include "plain_text_msg.hpp"
 #include "current_map_msg.hpp"
+#include "hash_data_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

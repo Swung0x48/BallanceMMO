@@ -50,6 +50,7 @@ namespace bmmo {
         MapNames,
         PlainText,
         CurrentMap,
+        HashData,
     };
 
     template<typename T, opcode C = None>

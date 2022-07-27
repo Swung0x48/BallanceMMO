@@ -16,6 +16,9 @@
 #include <Windows.h>
 #include <io.h>
 #include <fcntl.h>
+#else
+#include <sys/ioctl.h>
+#include <unistd.h>
 #endif
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
@@ -157,7 +160,17 @@ public:
             exit(1);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            printf("\033[s\033[1L\033[G[%s] %s\n> \033[u\033[1B", time_str.c_str(), pszMsg);
+#ifdef _WIN32
+            CONSOLE_SCREEN_BUFFER_INFO csbi;
+            GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+            short width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+#else
+            struct winsize w;
+            ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+            short width = w.ws_col;
+#endif
+            unsigned short lines = (strlen(pszMsg) + 17) / width + 1;
+            printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, time_str.c_str(), pszMsg, lines);
             fflush(stdout);
         }
     }

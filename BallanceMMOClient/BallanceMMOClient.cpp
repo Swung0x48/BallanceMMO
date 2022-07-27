@@ -188,6 +188,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         objects_.destroy_all_objects();
         objects_.init_template_balls();
         //objects_.init_players();
+        md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
     }
 
     if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
@@ -819,8 +820,23 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             GetLogger()->Info(i.second.name.c_str());
         }
 
+        // post-connection actions
         if (!current_map_.name.empty())
             send_current_map_name();
+        auto count = m_bml->GetModCount();
+        bmmo::plain_text_msg mod_msg{};
+        for (auto i = 1; i < count; i++) {
+            mod_msg.text_content.append(", ").append(m_bml->GetMod(i)->GetName());
+        }
+        mod_msg.text_content.erase(0, 2);
+        mod_msg.serialize();
+        send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
+
+        bmmo::hash_data_msg hash_msg{};
+        hash_msg.data_name = "Balls.nmo";
+        memcpy(hash_msg.md5, balls_nmo_md5_, 16);
+        hash_msg.serialize();
+        send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
         break;
     }
     case bmmo::PlayerConnected: {
