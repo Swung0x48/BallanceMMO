@@ -809,7 +809,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (!msg.deserialize()) {
             GetLogger()->Error("Deserialization failed!");
         }
-        GetLogger()->Info((std::to_string(msg.online_players.size()) + " players online: ").c_str());
+        GetLogger()->Info((std::to_string(msg.online_players.size()) + " player(s) online: ").c_str());
         
         for (auto& i : msg.online_players) {
             if (i.second.name == db_.get_nickname()) {

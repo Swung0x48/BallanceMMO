@@ -79,8 +79,8 @@ public:
 		auto* rc = bml_->GetRenderContext();
 		db_.for_each([this, &viewport, &rc, update_cheat](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
-			if (item.first == db_.get_client_id())
-				return true;
+			//if (item.first == db_.get_client_id())
+			//	return true;
 
 			if (!objects_.contains(item.first)) {
 				init_player(item.first, item.second.name, item.second.cheated);

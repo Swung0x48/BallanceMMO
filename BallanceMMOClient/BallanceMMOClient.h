@@ -311,6 +311,24 @@ private:
 		exit_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Exit"));
 	}
 
+	std::atomic_bool own_ball_visible_ = false;
+	std::mutex ball_toggle_mutex_;
+	void toggle_own_spirit_ball(bool visible) {
+		std::lock_guard lk(ball_toggle_mutex_);
+		GetLogger()->Info("Toggling visibility of own ball to %s", visible ? "on" : "off");
+		if (own_ball_visible_ == visible)
+			return;
+		if (visible) {
+			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
+			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
+		}
+		else {
+			db_.remove(db_.get_client_id());
+			objects_.remove(db_.get_client_id());
+		}
+		own_ball_visible_ = visible;
+	}
+
 	InputHook* input_manager;
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
@@ -324,6 +342,11 @@ private:
 		// Toggle nametag
 		if (input_manager->IsKeyPressed(CKKEY_TAB)) {
 			db_.toggle_nametag_visible();
+		}
+
+		// Toggle own ball
+		if (input_manager->IsKeyPressed(CKKEY_GRAVE) && m_bml->IsIngame()) {
+			toggle_own_spirit_ball(!own_ball_visible_);
 		}
 
 		if (input_manager->IsKeyDown(CKKEY_LCONTROL) && connected()) {
@@ -524,6 +547,7 @@ private:
 			//network_thread_.join();
 		
 		//thread_pool_.stop();
+		toggle_own_spirit_ball(false);
 		db_.clear();
 		objects_.destroy_all_objects();
 
