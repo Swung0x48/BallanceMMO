@@ -345,7 +345,7 @@ private:
 		}
 
 		// Toggle own ball
-		if (input_manager->IsKeyPressed(CKKEY_GRAVE) && m_bml->IsIngame()) {
+		if (input_manager->IsKeyPressed(CKKEY_GRAVE) && m_bml->IsIngame() && connected()) {
 			toggle_own_spirit_ball(!own_ball_visible_);
 		}
 

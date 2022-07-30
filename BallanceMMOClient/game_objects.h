@@ -8,7 +8,7 @@ struct PlayerObjects {
 	static inline IBML* bml;
 	std::vector<CK_ID> balls;
 	std::unique_ptr<label_sprite> username_label;
-	uint32_t visible_ball_type = 0;
+	uint32_t visible_ball_type = UINT32_MAX;
 	bool physicalized = false;
 
 	~PlayerObjects() {
