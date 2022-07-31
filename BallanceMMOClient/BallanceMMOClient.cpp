@@ -497,6 +497,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 int counter = 0;
                 bool show_id = (lower1 == "list-id" || lower1 == "li");
                 db_.for_each([this, &line, &counter, &show_id](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    if (pair.first == db_.get_client_id())
+                        return true;
                     ++counter;
                     line.append(pair.second.name + (pair.second.cheated ? " [CHEAT]" : "")
                         + (show_id ? (": " + std::to_string(pair.first)): "") + ", ");
@@ -509,7 +511,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
                 line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
                     + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""))
-                    .append("   (" + std::to_string(db_.player_count(db_.get_client_id()) + 1) + " total)");
+                    .append("   (" + std::to_string(db_.player_count(db_.get_client_id()) + !own_ball_visible_) + " total)");
                 SendIngameMessage(line.c_str());
             }
             else if (lower1 == "dnf") {
