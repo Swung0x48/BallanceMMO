@@ -823,14 +823,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         // post-connection actions
         if (!current_map_.name.empty())
             send_current_map_name();
-        auto count = m_bml->GetModCount();
+        /*auto count = m_bml->GetModCount();
         bmmo::plain_text_msg mod_msg{};
         for (auto i = 1; i < count; i++) {
             mod_msg.text_content.append(", ").append(m_bml->GetMod(i)->GetName());
         }
         mod_msg.text_content.erase(0, 2);
         mod_msg.serialize();
-        send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);*/
 
         bmmo::hash_data_msg hash_msg{};
         hash_msg.data_name = "Balls.nmo";

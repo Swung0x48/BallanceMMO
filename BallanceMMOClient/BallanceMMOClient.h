@@ -315,9 +315,9 @@ private:
 	std::mutex ball_toggle_mutex_;
 	void toggle_own_spirit_ball(bool visible) {
 		std::lock_guard lk(ball_toggle_mutex_);
-		GetLogger()->Info("Toggling visibility of own ball to %s", visible ? "on" : "off");
 		if (own_ball_visible_ == visible)
 			return;
+		GetLogger()->Info("Toggling visibility of own ball to %s", visible ? "on" : "off");
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
