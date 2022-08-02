@@ -88,7 +88,7 @@ namespace bmmo {
             if (auto it = map_names.find(get_hash_bytes_string()); it != map_names.end()) {
                 return get_display_name(it->second);
             }
-            return get_display_name(get_hash_string().substr(0, 24));
+            return get_display_name(get_hash_string().substr(0, 20).append(".."));
         };
 
         std::string get_hash_bytes_string() const {

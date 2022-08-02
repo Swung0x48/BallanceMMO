@@ -926,6 +926,13 @@ protected:
                 }
                 break;
             }
+            case bmmo::OwnedBallState:
+            case bmmo::OwnedBallStateV2:
+            case bmmo::LoginAcceptedV2:
+            case bmmo::PlayerConnectedV2:
+            case bmmo::OwnedCheatState:
+            case bmmo::OwnedCheatToggle:
+            case bmmo::PlayerKicked:
             case bmmo::ActionDenied:
             case bmmo::OpState:
             case bmmo::KeyboardInput:
@@ -1012,7 +1019,7 @@ protected:
 
 // parse arguments (optional port and help/version/log) with getopt
 int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, bool* dry_run) {
-    constexpr static const int DRYRUN_VALUE = 256;
+    constexpr static const int DRYRUN_VALUE = UINT8_MAX + 1;
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"log", required_argument, 0, 'l'},

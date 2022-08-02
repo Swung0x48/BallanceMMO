@@ -100,6 +100,10 @@ public:
         bmmo::hex_chars_from_string(uuid_, uuid);
     };
 
+    void set_print_states(bool print_states) {
+        print_states_ = print_states;
+    }
+
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
@@ -182,7 +186,31 @@ private:
 //        Printf(reinterpret_cast<const char*>(msg->m_pData));
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
         switch (raw_msg->code) {
+            case bmmo::LoginAcceptedV2: {
+                bmmo::login_accepted_v2_msg msg{};
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+                Printf("%d player(s) online:", msg.online_players.size());
+                for (const auto& i: msg.online_players) {
+                    Printf("%s (#%u)%s", i.second.name.c_str(), i.first, (i.second.cheated ? " [CHEAT]" : ""));
+                }
+                break;
+            }
+            case bmmo::PlayerConnectedV2: {
+                bmmo::player_connected_v2_msg msg{};
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+                Printf("%s (#%u) logged in with cheat mode %s.", msg.name.c_str(), msg.connection_id, (msg.cheated ? "on" : "off"));
+                break;
+            }
+            case bmmo::PlayerDisconnected: {
+                auto* msg = reinterpret_cast<bmmo::player_disconnected_msg*>(networking_msg->m_pData);
+                Printf("#%u disconnected.", msg->content.connection_id);
+                break;
+            }
             case bmmo::OwnedBallState: {
+                if (!print_states_)
+                    break;
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
                 auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
                 Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
@@ -198,6 +226,8 @@ private:
                 break;
             }
             case bmmo::OwnedBallStateV2: {
+                if (!print_states_)
+                    break;
                 bmmo::owned_ball_state_v2_msg msg;
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
@@ -267,6 +297,25 @@ private:
                 );
                 break;
             }
+            case bmmo::SimpleAction: {
+                auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
+                switch (msg->content.action) {
+                    case bmmo::LoginDenied: {
+                        Printf("Login denied.");
+                        break;
+                    }
+                    case bmmo::CurrentMapQuery: {
+                        bmmo::current_map_msg new_msg{};
+                        send(new_msg, k_nSteamNetworkingSend_Reliable);
+                        break;
+                    }
+                    case bmmo::UnknownAction: {
+                        Printf("Unknown action request received.");
+                        break;
+                    }
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -311,21 +360,23 @@ private:
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     std::string nickname_;
     uint8_t uuid_[16];
+    bool print_states_ = false;
 };
 
 // parse command line arguments (server/name/uuid/help/version) with getopt
-int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid, std::string& log_path) {
+int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid, std::string& log_path, bool* print_states) {
     static struct option long_options[] = {
         {"server", required_argument, 0, 's'},
         {"name", required_argument, 0, 'n'},
         {"uuid", required_argument, 0, 'u'},
         {"log", required_argument, 0, 'l'},
+        {"print", no_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "s:n:u:l:hv", long_options, &opt_index))!= -1) {
+    while ((opt = getopt_long(argc, argv, "s:n:u:l:phv", long_options, &opt_index))!= -1) {
         switch (opt) {
             case 's':
                 server = optarg;
@@ -339,12 +390,17 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
             case 'l':
                 log_path = optarg;
                 break;
+            case 'p':
+                *print_states = true;
+                break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
                 puts("  -s, --server=ADDRESS\t Connect to the server at ADDRESS instead (default: 127.0.0.1:26676).");
                 puts("  -n, --name=NAME\t Set your name to NAME (default: \"Swung\")");
                 puts("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")");
+                puts("  -l, --log=PATH\t Write log to the file at PATH in addition to stdout.");
+                puts("  -p, --print\t\t Print player state changes.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
                 return -1;
@@ -361,7 +417,8 @@ int main(int argc, char** argv) {
     std::string server_addr = "127.0.0.1:26676", username = "Swung",
                 uuid = "00010002-0003-0004-0005-000600070008",
                 log_path;
-    if (parse_args(argc, argv, server_addr, username, uuid, log_path) != 0)
+    bool print_states = false;
+    if (parse_args(argc, argv, server_addr, username, uuid, log_path, &print_states) != 0)
         return 0;
     
     bmmo::hostname_parser hp(server_addr);
@@ -384,6 +441,7 @@ int main(int argc, char** argv) {
     client client;
     client.set_nickname(username);
     client.set_uuid(uuid);
+    client.set_print_states(print_states);
 
     std::cout << "Connecting to server..." << std::endl;
     if (!client.connect(server_addr)) {
@@ -457,6 +515,7 @@ int main(int argc, char** argv) {
             }
 
             client_thread = std::move(std::thread([&client]() { client.run(); }));
+            client.wait_till_started();
         } else if (cmd == "cheat") {
             cheat = !cheat;
             bmmo::cheat_state_msg msg;
