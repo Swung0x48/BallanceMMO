@@ -275,9 +275,9 @@ private:
                 break;
             }
             case bmmo::OwnedCheatToggle: {
-                auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
-                cheat = msg->content.cheated;
-                Printf("#%u toggled cheat %s globally!", cheat ? "on" : "off");
+                auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(networking_msg->m_pData);
+                cheat = msg->content.state.cheated;
+                Printf("#%u toggled cheat %s globally!", msg->content.player_id, cheat ? "on" : "off");
                 bmmo::cheat_state_msg state_msg{};
                 state_msg.content.cheated = cheat;
                 state_msg.content.notify = false;
@@ -471,8 +471,22 @@ int main(int argc, char** argv) {
             client.shutdown();
         } else if (cmd == "move") {
             bmmo::ball_state_msg msg;
-            msg.content.position.x = 1;
-            msg.content.rotation.y = 2;
+            if (std::string temp = parser.get_next_word(); !temp.empty()) {
+                msg.content.position.x = atof(temp.c_str());
+                msg.content.position.y = atof(parser.get_next_word().c_str());
+                msg.content.position.z = atof(parser.get_next_word().c_str());
+            } else {
+                msg.content.position.x = (rand() % 2000 - 1000) / 100.0f;
+                msg.content.position.y = (rand() % 2000 - 1000) / 100.0f;
+                msg.content.position.z = (rand() % 2000 - 1000) / 100.0f;
+            }
+            msg.content.rotation.x = (rand() % 3600 - 1800) / 10.0f;
+            msg.content.rotation.y = (rand() % 3600 - 1800) / 10.0f;
+            msg.content.rotation.z = (rand() % 3600 - 1800) / 10.0f;
+            msg.content.rotation.w = (rand() % 3600 - 1800) / 10.0f;
+            client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
+                msg.content.position.x, msg.content.position.y, msg.content.position.z,
+                msg.content.rotation.x, msg.content.rotation.y, msg.content.rotation.z, msg.content.rotation.w);
 //            for (int i = 0; i < 50; ++i)
             client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         } else if (cmd == "getinfo-detailed") {

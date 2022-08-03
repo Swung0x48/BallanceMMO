@@ -197,6 +197,23 @@ public:
         }
     }
 
+    void print_positions() {
+        for (auto& i: clients_) {
+            Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
+                    i.first,
+                    i.second.name.c_str(),
+                    i.second.state.position.x,
+                    i.second.state.position.y,
+                    i.second.state.position.z,
+                    (i.second.state.type == 0 ? "paper" : 
+                        (i.second.state.type == 1 ? "stone" : 
+                            (i.second.state.type == 2 ? "wood" : "unknown")
+                        )
+                    )
+            );
+        }
+    }
+
     void print_version_info() {
         Printf("Server version: %s; minimum accepted client version: %s.",
                         bmmo::version_t().to_string().c_str(),
@@ -1152,6 +1169,8 @@ int main(int argc, char** argv) {
             bmmo::simple_action_msg msg;
             msg.content.action = bmmo::CurrentMapQuery;
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+        } else if (cmd == "getpos") {
+            server.print_positions();
         } else if (cmd == "kick" || cmd == "kick-id" || cmd == "crash" || cmd == "crash-id") {
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             if (cmd == "kick-id" || cmd == "crash-id") {
