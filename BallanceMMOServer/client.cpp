@@ -300,16 +300,16 @@ private:
             case bmmo::SimpleAction: {
                 auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
                 switch (msg->content.action) {
-                    case bmmo::LoginDenied: {
+                    case bmmo::action_type::LoginDenied: {
                         Printf("Login denied.");
                         break;
                     }
-                    case bmmo::CurrentMapQuery: {
+                    case bmmo::action_type::CurrentMapQuery: {
                         bmmo::current_map_msg new_msg{};
                         send(new_msg, k_nSteamNetworkingSend_Reliable);
                         break;
                     }
-                    case bmmo::UnknownAction: {
+                    case bmmo::action_type::Unknown: {
                         Printf("Unknown action request received.");
                         break;
                     }

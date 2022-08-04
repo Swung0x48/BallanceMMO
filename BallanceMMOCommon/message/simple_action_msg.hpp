@@ -4,14 +4,14 @@
 #include <cstdint>
 
 namespace bmmo {
-    enum simple_action_type: uint8_t {
-        UnknownAction,
+    enum class action_type: uint8_t {
+        Unknown,
         LoginDenied,
         CurrentMapQuery,
     };
 
     struct simple_action {
-        simple_action_type action = UnknownAction;
+        action_type action = action_type::Unknown;
     };
 
     typedef struct message<simple_action, SimpleAction> simple_action_msg;

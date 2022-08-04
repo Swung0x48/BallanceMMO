@@ -4,8 +4,8 @@
 #include <cstdint>
 
 namespace bmmo {
-    enum action_denied_reason: uint8_t {
-        UnknownReason,
+    enum class deny_reason: uint8_t {
+        Unknown,
         NoPermission,
         InvalidAction,
         InvalidTarget,
@@ -13,7 +13,7 @@ namespace bmmo {
     };
 
     struct action_denied {
-        action_denied_reason reason = UnknownReason;
+        deny_reason reason = deny_reason::Unknown;
     };
 
     typedef struct message<action_denied, ActionDenied> action_denied_msg;

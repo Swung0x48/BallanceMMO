@@ -4,16 +4,16 @@
 #include <cstdint>
 
 namespace bmmo {
-    enum countdown_type: uint8_t {
-        CountdownType_Go,
-        CountdownType_1,
-        CountdownType_2,
-        CountdownType_3,
-        CountdownType_Unknown = 255
+    enum class countdown_type: uint8_t {
+        Go = 0,
+        Countdown_1 = 1,
+        Countdown_2 = 2,
+        Countdown_3 = 3,
+        Unknown = 255
     };
 
     struct countdown {
-        countdown_type type = CountdownType_Unknown;
+        countdown_type type = countdown_type::Unknown;
         HSteamNetConnection sender = k_HSteamNetConnection_Invalid;
         struct map map;
         uint8_t restart_level = 0;

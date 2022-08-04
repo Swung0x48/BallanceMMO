@@ -3,6 +3,12 @@
 #include "message.hpp"
 
 namespace bmmo {
+    enum class crash_type : uint8_t {
+        None = 0U, // no crash
+        Crash = 1U,
+        FatalError = 2U,
+    };
+
     struct player_kicked_msg: public serializable_message {
         player_kicked_msg(): serializable_message(bmmo::PlayerKicked) {}
         

@@ -10,8 +10,8 @@
 #include "../message/message_utils.hpp"
 
 namespace bmmo {
-    enum map_type : uint8_t {
-        UnknownType,
+    enum class map_type : uint8_t {
+        Unknown,
         OriginalLevel,
         CustomMap
     };
@@ -35,8 +35,8 @@ namespace bmmo {
 
     void hex_chars_from_string(uint8_t* dest, const std::string& src) {
         for (unsigned int i = 0; i < src.length(); i += 2) {
-            std::string byteString = src.substr(i, 2);
-            uint8_t byte = (uint8_t) strtol(byteString.c_str(), NULL, 16);
+            std::string byte_string = src.substr(i, 2);
+            uint8_t byte = (uint8_t) strtol(byte_string.c_str(), NULL, 16);
             dest[i / 2] = byte;
         }
     };
@@ -50,12 +50,12 @@ namespace bmmo {
     }
 
     struct map {
-        map_type type = UnknownType;
+        map_type type = map_type::Unknown;
         uint8_t md5[16];
         uint32_t level = 0;
 
         bool is_original_level() const {
-            if (type != OriginalLevel) return false;
+            if (type != map_type::OriginalLevel) return false;
             uint8_t level_md5[16];
             hex_chars_from_string(level_md5, original_map_hashes[level]);
             if (memcmp(level_md5, md5, 16) == 0)

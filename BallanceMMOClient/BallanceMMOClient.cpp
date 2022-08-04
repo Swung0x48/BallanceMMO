@@ -204,15 +204,15 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         if (boost::regex_search(path, matched, name_pattern)) {
             current_map_.name = matched[2].str();
             if (boost::iequals(matched[1].str(), "Maps")) {
-                current_map_.type = bmmo::CustomMap;
+                current_map_.type = bmmo::map_type::CustomMap;
             }
             else {
-                current_map_.type = bmmo::OriginalLevel;
+                current_map_.type = bmmo::map_type::OriginalLevel;
                 path = "..\\" + path;
             }
         } else {
             current_map_.name = std::string(filename);
-            current_map_.type = bmmo::UnknownType;
+            current_map_.type = bmmo::map_type::Unknown;
         }
         md5_from_file(path, current_map_.md5);
         map_names_[current_map_.get_hash_bytes_string()] = current_map_.name;
@@ -277,18 +277,18 @@ void BallanceMMOClient::OnProcess() {
 
     if (bml_lk) {
         if (m_bml->IsIngame()) {
-            auto ball = get_current_ball();
-            if (player_ball_ == nullptr)
-                player_ball_ = ball;
-
-            check_on_trafo(ball);
-            poll_player_ball_state();
-
             const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
             if (current_timestamp >= next_update_timestamp_) {
                 if (current_timestamp - next_update_timestamp_ > 1000000)
                     next_update_timestamp_ = current_timestamp;
                 next_update_timestamp_ += MINIMUM_UPDATE_INTERVAL;
+
+                auto ball = get_current_ball();
+                if (player_ball_ == nullptr)
+                    player_ball_ = ball;
+
+                check_on_trafo(ball);
+                poll_player_ball_state();
 
                 asio::post(thread_pool_, [this]() {
                     assemble_and_send_state();
@@ -542,7 +542,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             }
             else if (lower1 == "getmap") {
                 bmmo::simple_action_msg msg;
-                msg.content.action = bmmo::CurrentMapQuery;
+                msg.content.action = bmmo::action_type::CurrentMapQuery;
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
             /*else if (lower1 == "p") {
@@ -593,12 +593,12 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-        else if (lower1 == "kick" || lower1 == "kick-id") {
+        else if (lower1 == "kick") {
             bmmo::kick_request_msg msg{};
-            if (lower1 == "kick")
-                msg.player_name = args[2];
+            if (args[2][0] == '#')
+                msg.player_id = atoll(args[2].substr(1).c_str());
             else
-                msg.player_id = atoll(args[2].c_str());
+                msg.player_name = args[2];
             if (length > 3) {
                 try {
                     msg.reason = join_strings(args, 3);
@@ -910,7 +910,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     map_name = msg->content.map.get_display_name(map_names_);
 
         switch (msg->content.type) {
-            case bmmo::CountdownType_Go: {
+            case bmmo::countdown_type::Go: {
                 SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame())
                     break;
@@ -928,12 +928,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 level_start_timestamp_[current_map_.get_hash_bytes_string()] = m_bml->GetTimeManager()->GetTime();
                 break;
             }
-            case bmmo::CountdownType_1:
-            case bmmo::CountdownType_2:
-            case bmmo::CountdownType_3:
+            case bmmo::countdown_type::Countdown_1:
+            case bmmo::countdown_type::Countdown_2:
+            case bmmo::countdown_type::Countdown_3:
                 SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
                 break;
-            case bmmo::CountdownType_Unknown:
+            case bmmo::countdown_type::Unknown:
             default:
                 return;
         }
@@ -1049,10 +1049,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::SimpleAction: {
         auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(network_msg->m_pData);
         switch (msg->content.action) {
-            case bmmo::LoginDenied:
+            case bmmo::action_type::LoginDenied:
                 SendIngameMessage("Login denied.");
                 break;
-            case bmmo::CurrentMapQuery: {
+            case bmmo::action_type::CurrentMapQuery: {
                 bmmo::current_map_msg new_msg;
                 new_msg.content.map = current_map_;
                 m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &new_msg.content.sector);
@@ -1061,7 +1061,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 send(new_msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
-            case bmmo::UnknownAction:
+            case bmmo::action_type::Unknown:
             default:
                 GetLogger()->Error("Unknown action request received.");
         }
@@ -1072,19 +1072,19 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         std::string reason;
         switch (msg->content.reason) {
-            case bmmo::NoPermission:
+            case bmmo::deny_reason::NoPermission:
                 reason = "you don't have the permission to run this action.";
                 break;
-            case bmmo::InvalidAction:
+            case bmmo::deny_reason::InvalidAction:
                 reason = "invalid action.";
                 break;
-            case bmmo::InvalidTarget:
+            case bmmo::deny_reason::InvalidTarget:
                 reason = "invalid target.";
                 break;
-            case bmmo::TargetNotFound:
+            case bmmo::deny_reason::TargetNotFound:
                 reason = "target not found.";
                 break;
-            case bmmo::UnknownReason:
+            case bmmo::deny_reason::Unknown:
             default:
                 reason = "unknown reason.";
         }

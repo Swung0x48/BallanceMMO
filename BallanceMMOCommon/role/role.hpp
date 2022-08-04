@@ -175,12 +175,32 @@ public:
         }
     }
 
-    static void Printf(const char* fmt, ...) {
+    template <typename T>
+    static inline const T ConvertArgument(const T& arg) noexcept {
+        return arg;
+    }
+
+    static inline const char* ConvertArgument(const std::string& str) noexcept {
+        return str.c_str();
+    }
+
+    static void Printf(const char* fmt) {
         char text[2048];
-        va_list ap;
-        va_start(ap, fmt);
-        vsprintf(text, fmt, ap);
-        va_end(ap);
+        strcpy(text, fmt);
+        char* nl = strchr(text, '\0') - 1;
+        if (nl >= text && *nl == '\n')
+            *nl = '\0';
+        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
+    }
+
+    template <typename ... Args>
+    static void Printf(const char* fmt, const Args& ... args) {
+        char text[2048];
+        sprintf(text, fmt, ConvertArgument(args)...);
+        // va_list ap;
+        // va_start(ap, fmt);
+        // vsprintf(text, fmt, ap);
+        // va_end(ap);
         char* nl = strchr(text, '\0') - 1;
         if (nl >= text && *nl == '\n')
             *nl = '\0';
