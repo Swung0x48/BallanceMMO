@@ -1,7 +1,6 @@
 #include "BallanceMMOClient.h"
 
 IMod* BMLEntry(IBML* bml) {
-    DeclareDumpFile();
     BallanceMMOClient::init_socket();
     return new BallanceMMOClient(bml);
 }
@@ -656,7 +655,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         status_->paint(0xffff0000);
         break;
     case k_ESteamNetworkingConnectionState_ClosedByPeer: {
-        string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
+        std::string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
@@ -675,7 +674,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {
-        string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
+        std::string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
         ping_->update("");
         status_->update("Disconnected");
         status_->paint(0xffff0000);

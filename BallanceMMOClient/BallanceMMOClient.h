@@ -21,7 +21,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/circular_buffer.hpp>
 #include <openssl/md5.h>
-#include <openssl/sha.h>
+// #include <openssl/sha.h>
 #include <fstream>
 #include <io.h>
 #include <fcntl.h>
@@ -40,11 +40,12 @@ public:
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
+		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this));
 		this_instance_ = this;
 	}
 
 	bmmo::version_t version;
-	string version_string = version.to_string();
+	std::string version_string = version.to_string();
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetVersion() override { return version_string.c_str(); }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
@@ -93,6 +94,12 @@ private:
 	static void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
 	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
 	void on_message(ISteamNetworkingMessage* network_msg) override;
+
+	void on_fatal_error() {
+		bmmo::simple_action_msg msg{};
+		msg.content.action = bmmo::action_type::FatalError;
+		send(msg, k_nSteamNetworkingSend_Reliable);
+	};
 
 	bool show_console();
 	bool hide_console();
@@ -344,11 +351,6 @@ private:
 			db_.toggle_nametag_visible();
 		}
 
-		// Toggle own ball
-		if (input_manager->IsKeyPressed(CKKEY_GRAVE) && m_bml->IsIngame() && connected()) {
-			toggle_own_spirit_ball(!own_ball_visible_);
-		}
-
 		if (input_manager->IsKeyDown(CKKEY_LCONTROL) && connected()) {
 		  if (m_bml->IsIngame()) {
 				for (int i = 0; i <= 3; ++i) {
@@ -361,6 +363,10 @@ private:
 						msg.content.force_restart = reset_rank_;
 						reset_rank_ = false;
 						send(msg, k_nSteamNetworkingSend_Reliable);
+					}
+					if (input_manager->IsKeyPressed(CKKEY_GRAVE)) {
+						// toggle own ball
+						toggle_own_spirit_ball(!own_ball_visible_);
 					}
 				}
 			}

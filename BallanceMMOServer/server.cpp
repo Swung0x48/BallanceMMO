@@ -924,6 +924,13 @@ protected:
                         broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
                         break;
                     }
+                    case bmmo::action_type::FatalError: {
+                        Printf("(#%u, %s) has encountered a fatal error!",
+                            networking_msg->m_conn, client_it->second.name);
+                        // they already got their own fatal error, so we don't need to induce one here.
+                        kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::crash_type::Crash);
+                        break;
+                    }
                     default:
                         break;
                 }

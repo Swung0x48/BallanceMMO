@@ -8,6 +8,7 @@ namespace bmmo {
         Unknown,
         LoginDenied,
         CurrentMapQuery,
+        FatalError,
     };
 
     struct simple_action {

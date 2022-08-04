@@ -4,7 +4,6 @@
 #include <iostream>
 #include <vector>
 #include <tchar.h>
-using namespace std;
 
 
 #pragma comment(lib, "Dbghelp.lib")
@@ -16,13 +15,13 @@ namespace NSDumpFile
 
     void CreateDumpFile(LPCSTR lpstrDumpFilePathName, EXCEPTION_POINTERS* pException)
     {
-        // 创建Dump文件
+        // create dump file
         //
         HANDLE hDumpFile = CreateFile(lpstrDumpFilePathName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         //HANDLE hTest = CreateFileA("C:\\Users\\Swung0x48\\Desktop\\dump\\test.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         
 
-        // Dump信息
+        // dump info
         //
         MINIDUMP_EXCEPTION_INFORMATION dumpInfo;
         dumpInfo.ExceptionPointers = pException;
@@ -32,7 +31,7 @@ namespace NSDumpFile
         HMODULE mhLib = ::LoadLibrary(_T("dbghelp.dll"));
         MINIDUMPWRITEDUMP pDump = (MINIDUMPWRITEDUMP)::GetProcAddress(mhLib, "MiniDumpWriteDump");
 
-        // 写入Dump文件内容
+        // write in dump file
         //
         if (pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, MiniDumpNormal, &dumpInfo, NULL, NULL)) {
         //    //DWORD bytesWritten;
@@ -86,6 +85,7 @@ namespace NSDumpFile
         return bRet;
     }
 
+    std::function<void()> CrashCallback{};
     LONG WINAPI UnhandledExceptionFilterEx(struct _EXCEPTION_POINTERS* pException)
     {
         TCHAR szMbsFile[MAX_PATH] = { 0 };
@@ -100,17 +100,19 @@ namespace NSDumpFile
 
 
         // TODO: MiniDumpWriteDump
+        CrashCallback();
         FatalAppExit(-1, _T("Fatal Error"));
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
 
-    void RunCrashHandler()
+    void RunCrashHandler(std::function<void()> Callback)
     {
+        CrashCallback = Callback;
         SetUnhandledExceptionFilter(UnhandledExceptionFilterEx);
         PreventSetUnhandledExceptionFilter();
     }
 };
 
 
-#define DeclareDumpFile() NSDumpFile::RunCrashHandler();
+#define DeclareDumpFile(Callback) NSDumpFile::RunCrashHandler(Callback);
