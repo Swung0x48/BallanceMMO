@@ -40,6 +40,18 @@ namespace bmmo {
         }
 #endif
 
+        static std::string join_strings(const std::vector<std::string>& strings, size_t start) {
+            constexpr const size_t MAX_LENGTH = UINT16_MAX;
+            std::string str = strings[start];
+            start++;
+            size_t length = strings.size();
+            if (length > start) {
+                for (size_t i = start; i < length; i++)
+                    str.append(" " + strings[i]);
+            }
+            return str.substr(0, MAX_LENGTH);
+        }
+
         static void write_string(std::string str, std::stringstream& stream) {
 #ifdef _WIN32
             str = ConvertWideToUtf8(ConvertAnsiToWide(str));

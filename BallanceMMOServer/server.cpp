@@ -128,7 +128,9 @@ public:
         }
 
         if (crash == bmmo::crash_type::FatalError) {
-            // send a message without serialization
+            // Send a message without serialization; this effectively kills the client
+            // at deserialization. A dirty hack, but it works and we don't need to
+            // worry about the outcome; the client will just terminate immediately.
             bmmo::plain_text_msg ptm{};
             ptm.text_content = "BallanceMMO has encountered a fatal error. Game will be terminated.";
             send(client, ptm.raw.str().data(), ptm.raw.str().size(), k_nSteamNetworkingSend_Reliable);
@@ -494,7 +496,8 @@ protected:
         // validate nickname characters
         else if (size_t invalid_pos = bmmo::name_validator::get_invalid_char_pos(msg.nickname);
                 invalid_pos != std::string::npos) {
-            reason << "Invalid character '" << msg.nickname[invalid_pos] << "'; nicknames can only contain alphanumeric characters and underscores.";
+            reason << "Invalid character '" << msg.nickname[invalid_pos] << "' at position "
+                    << invalid_pos << "; nicknames can only contain alphanumeric characters and underscores.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 4;
         }
 
@@ -557,8 +560,18 @@ protected:
 
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
 
-                if (ticking_ && get_client_count() <= 1)
-                    stop_ticking();
+                switch (get_client_count()) {
+                    case 0:
+                        map_ranks_.clear();
+                        map_names_.clear();
+                        // fallthrough
+                    case 1:
+                        if (ticking_)
+                            stop_ticking();
+                        break;
+                    default:
+                        break;
+                }
 
                 break;
             }

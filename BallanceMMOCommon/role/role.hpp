@@ -176,7 +176,7 @@ public:
     }
 
     template <typename T>
-    static inline const T ConvertArgument(const T& arg) noexcept {
+    static inline const T& ConvertArgument(const T& arg) noexcept {
         return arg;
     }
 

@@ -80,7 +80,6 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
-	void OnPreLoadLevel() override;
 	void OnLevelFinish() override;
 	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
@@ -96,6 +95,8 @@ private:
 	void on_message(ISteamNetworkingMessage* network_msg) override;
 
 	void on_fatal_error() {
+		if (!connected())
+			return;
 		bmmo::simple_action_msg msg{};
 		msg.content.action = bmmo::action_type::FatalError;
 		send(msg, k_nSteamNetworkingSend_Reliable);
@@ -191,11 +192,7 @@ private:
 		GetConfig()->SetCategoryComment("Player", "Who are you?");
 		tmp_prop = GetConfig()->GetProperty("Player", "Playername");
 		tmp_prop->SetComment("Your name please?");
-		std::srand(std::time(nullptr));
-		int random_variable = std::rand() % 1000;
-		std::stringstream ss;
-		ss << "Player" << std::setw(3) << std::setfill('0') << random_variable;
-		tmp_prop->SetDefaultString(ss.str().c_str());
+		tmp_prop->SetDefaultString(bmmo::name_validator::get_random_nickname().c_str());
 		props_["playername"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
 		// so we had to put it at the time of establishing connections.
@@ -674,21 +671,6 @@ private:
 		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
 		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
 		return s;
-	}
-
-	static std::string join_strings(const std::vector<std::string>& strings, size_t start) {
-		std::string str = strings[start];
-		start++;
-		size_t length = strings.size();
-		if (length > start) {
-			for (size_t i = start; i < length; i++)
-				str.append(" " + strings[i]);
-		}
-		if (str.length() > 65536) {
-			throw "Error: message too long.";
-			return "";
-		}
-		return str;
 	}
 
 	void send_current_map_name() {

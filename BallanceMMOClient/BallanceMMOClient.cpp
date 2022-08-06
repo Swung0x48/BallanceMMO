@@ -236,12 +236,6 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     }*/
 }
 
-void BallanceMMOClient::OnPreLoadLevel() {
-    if (tutorial_exit_event_)
-        return;
-    edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
-}
-
 void BallanceMMOClient::OnPostStartMenu()
 {
     if (init_) {
@@ -249,8 +243,7 @@ void BallanceMMOClient::OnPostStartMenu()
         objects_.destroy_all_objects();
         GetLogger()->Info("Destroy completed.");
     }
-
-    if (!init_) {
+    else {
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
@@ -260,6 +253,11 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
         init_ = true;
     }
+
+    if (!tutorial_exit_event_)
+        edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
+
+    validate_nickname(props_["playername"]);
 }
 
 void BallanceMMOClient::OnProcess() {
@@ -352,7 +350,7 @@ void BallanceMMOClient::OnLoadScript(CKSTRING filename, CKBehavior* script)
     if (strcmp(script->GetName(), "Gameplay_Energy") == 0)
         edit_Gameplay_Energy(script);
     // Weird. Gameplay_Tutorial doesn't trigger OnLoadScript, so we have to
-    // get it from the PreLoadLevel event.
+    // get it from the PostStartMenu event.
     // if (strcmp(script->GetName(), "Gameplay_Tutorial") == 0)
     //     edit_Gameplay_Tutorial(script);
     if (strcmp(script->GetName(), "Event_handler") == 0)
@@ -575,19 +573,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             return;
         if (lower1 == "s" || lower1 == "say") {
             bmmo::chat_msg msg{};
-            try {
-                msg.chat_content = join_strings(args, 2);
-            }
-            catch (const char* s) {
-                SendIngameMessage(s);
-                return;
-            };
-            // temporarily disable /mmo s dnf
-            if (boost::iequals(msg.chat_content, "dnf")) {
-                SendIngameMessage("Note: please press Ctrl+D twice to send the DNF message.");
-                return;
-            }
-            /////////////////////////////////
+            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
             msg.serialize();
 
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -599,13 +585,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             else
                 msg.player_name = args[2];
             if (length > 3) {
-                try {
-                    msg.reason = join_strings(args, 3);
-                }
-                catch (const char* s) {
-                    SendIngameMessage(s);
-                    return;
-                };
+                msg.reason = bmmo::message_utils::join_strings(args, 3);
             }
 
             msg.serialize();
@@ -715,7 +695,6 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         SendIngameMessage("Connected to server.");
         SendIngameMessage((std::string("Logging in as ") + "\"" + props_["playername"]->GetString() + "\"...").c_str());
         bmmo::login_request_v3_msg msg;
-        validate_nickname(props_["playername"]);
         db_.set_nickname(props_["playername"]->GetString());
         msg.nickname = props_["playername"]->GetString();
         msg.version = version;

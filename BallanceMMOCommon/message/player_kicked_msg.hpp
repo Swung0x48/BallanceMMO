@@ -4,17 +4,21 @@
 
 namespace bmmo {
     enum class crash_type : uint8_t {
-        None = 0U, // no crash
-        Crash = 1U,
-        FatalError = 2U,
+        None = 0, // not crashed
+        Crash = 1,
+        FatalError = 2
     };
 
+    // This message is only intended to be a notification about kicking itself.
+    // Disconnection events are still handled by the *player_disconnected_msg*.
     struct player_kicked_msg: public serializable_message {
         player_kicked_msg(): serializable_message(bmmo::PlayerKicked) {}
         
-        std::string kicked_player_name = "";
-        std::string executor_name = "";
-        std::string reason = "";
+        // By the time clients receive this message the kicked player may
+        // already be offline, so we have to directly send their name.
+        std::string kicked_player_name;
+        std::string executor_name;
+        std::string reason;
         uint8_t crashed = 0;
         
         bool serialize() override {
