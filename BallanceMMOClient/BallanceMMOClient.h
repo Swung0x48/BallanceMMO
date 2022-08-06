@@ -361,10 +361,10 @@ private:
 						reset_rank_ = false;
 						send(msg, k_nSteamNetworkingSend_Reliable);
 					}
-					if (input_manager->IsKeyPressed(CKKEY_GRAVE)) {
-						// toggle own ball
-						toggle_own_spirit_ball(!own_ball_visible_);
-					}
+				}
+				if (input_manager->IsKeyPressed(CKKEY_GRAVE)) {
+					// toggle own ball
+					toggle_own_spirit_ball(!own_ball_visible_);
 				}
 			}
 			if (input_manager->IsKeyPressed(CKKEY_D)) {
