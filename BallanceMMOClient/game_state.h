@@ -9,17 +9,56 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <atomic>
+#include <boost/circular_buffer.hpp>
 
 struct BallState {
 	uint32_t type = 0;
-	VxVector position;
-	VxQuaternion rotation;
+	VxVector position{};
+	VxQuaternion rotation{};
+};
+
+struct TimedBallState : BallState {
+	uint64_t timestamp = 0;
 };
 
 struct PlayerState {
 	std::string name;
 	bool cheated = false;
-	BallState ball_state;
+	boost::circular_buffer<TimedBallState> ball_state;
+	SteamNetworkingMicroseconds time_diff = 0;
+	// BallState ball_state;
+
+	PlayerState(): ball_state(3) {
+		ball_state.assign(3, TimedBallState());
+	}
+
+	// use linear extrapolation to get current position and rotation
+	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const TimedBallState& first, const TimedBallState& second) {
+		const auto time_interval = second.timestamp - first.timestamp;
+		if (time_interval == 0)
+			return { second.position, second.rotation };
+
+		const auto factor = static_cast<double>(SteamNetworkingUtils()->GetLocalTimestamp() - second.timestamp) / time_interval;
+
+		return { second.position + (second.position - first.position) * factor, second.rotation + (second.rotation - first.rotation) * factor };
+	}
+
+	// quadratic extrapolation
+	static inline const std::pair<VxVector, VxQuaternion> get_quadratic_extrapolated_state(const TimedBallState& first, const TimedBallState& second, const TimedBallState& third) {
+		const auto t21 = second.timestamp - first.timestamp,
+			t32 = third.timestamp - second.timestamp,
+			t31 = third.timestamp - first.timestamp;
+		if (t32 == 0) return {third.position, third.rotation};
+		if (t21 == 0) return get_linear_extrapolated_state(third, second);
+
+		const auto tc = SteamNetworkingUtils()->GetLocalTimestamp();
+
+		const auto f1 = ((tc - second.timestamp) * (tc - third.timestamp)) / static_cast<double>(t21 * t31),
+			f2 = ((tc - first.timestamp) * (tc - third.timestamp)) / static_cast<double>(t21 * t32),
+			f3 = ((tc - first.timestamp) * (tc - second.timestamp)) / static_cast<double>(t31 * t32);
+
+		return { first.position * f1 - second.position * f2 + third.position * f3, first.rotation * f1 - second.rotation * f2 + third.rotation * f3 };
+	}
 };
 
 class game_state
@@ -67,12 +106,21 @@ public:
 		return true;
 	}
 
-	bool update(HSteamNetConnection id, const BallState& state) {
+	bool update(HSteamNetConnection id, TimedBallState& state) {
 		if (!exists(id))
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states_[id].ball_state = state;
+		// We have to assign a new timestamp here to reduce
+		// errors caused by lags for our extrapolation to work.
+		// Not setting new timestamps can get us almost accurate
+		// real-time position of our own spirit balls, but everyone
+		// has a different timestamp, so we have to account for this.
+		states_[id].time_diff = (states_[id].time_diff + SteamNetworkingUtils()->GetLocalTimestamp() - state.timestamp) / 2;
+		state.timestamp += states_[id].time_diff;
+		if (state.timestamp < states_[id].ball_state.back().timestamp)
+			return true;
+		states_[id].ball_state.push_back(state);
 		return true;
 	}
 

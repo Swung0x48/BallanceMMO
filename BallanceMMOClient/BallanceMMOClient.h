@@ -143,7 +143,7 @@ private:
 	game_objects objects_;
 
 	CK3dObject* player_ball_ = nullptr;
-	BallState local_ball_state_;
+	TimedBallState local_ball_state_;
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
@@ -208,6 +208,12 @@ private:
 			tmp_prop->SetString(boost::uuids::to_string(uuid_).c_str());
 		}
 		props_["uuid"] = tmp_prop;
+		GetConfig()->SetCategoryComment("Gameplay", "Settings for your actual gameplay experience in multiplayer.");
+		tmp_prop = GetConfig()->GetProperty("Gameplay", "Enable Extrapolation");
+		tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother. Can be slightly inaccurate.");
+		tmp_prop->SetDefaultBoolean(true);
+		objects_.toggle_extrapolation(tmp_prop->GetBoolean());
+		props_["extrapolation"] = tmp_prop;
 	}
 
 	struct KeyVector {
@@ -509,10 +515,11 @@ private:
 	void poll_player_ball_state() {
 		player_ball_->GetPosition(&local_ball_state_.position);
 		player_ball_->GetQuaternion(&local_ball_state_.rotation);
+		local_ball_state_.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 	}
 
 	void assemble_and_send_state() {
-		bmmo::ball_state_msg msg{};
+		bmmo::timed_ball_state_msg msg{};
 		assert(sizeof(msg.content) == sizeof(local_ball_state_));
 		std::memcpy(&(msg.content), &local_ball_state_, sizeof(msg.content));
 		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
@@ -709,9 +716,6 @@ private:
 	}
 
 	void SendIngameMessage(const char* msg) {
-		if (previous_msg_.size() == 8) {
-			previous_msg_.pop_front();
-		}
 		previous_msg_.push_back(msg);
 		if (console_running_) {
 			Printf(msg);

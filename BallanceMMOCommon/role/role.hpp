@@ -184,6 +184,19 @@ public:
         return str.c_str();
     }
 
+    template <typename ... Args>
+    static void Sprintf(std::string& buf, const char* fmt, Args&& ... args) {
+        buf.resize(snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...));
+    }
+
+    // create a new string and format it
+    template <typename ... Args>
+    static std::string Sprintf(const char* fmt, Args&& ... args) {
+        std::string buf(2048, 0);
+        buf.resize(snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...));
+        return buf;
+    }
+
     static void Printf(const char* fmt) {
         char text[2048];
         strcpy(text, fmt);
@@ -194,7 +207,7 @@ public:
     }
 
     template <typename ... Args>
-    static void Printf(const char* fmt, const Args& ... args) {
+    static void Printf(const char* fmt, Args&& ... args) {
         char text[2048];
         sprintf(text, fmt, ConvertArgument(args)...);
         // va_list ap;

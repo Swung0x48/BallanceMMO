@@ -247,6 +247,28 @@ private:
 
                 break;
             }
+            case bmmo::OwnedTimedBallState: {
+                if (!print_states_)
+                    break;
+                bmmo::owned_timed_ball_state_msg msg;
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                for (auto& ball : msg.balls) {
+                    Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+                           ball.player_id,
+                           ball.state.type,
+                           ball.state.position.x,
+                           ball.state.position.y,
+                           ball.state.position.z,
+                           ball.state.rotation.x,
+                           ball.state.rotation.y,
+                           ball.state.rotation.z,
+                           ball.state.rotation.w);
+                }
+
+                break;
+            }
             case bmmo::OwnedCheatState: {
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
                 auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(networking_msg->m_pData);
@@ -470,7 +492,7 @@ int main(int argc, char** argv) {
         if (cmd == "stop") {
             client.shutdown();
         } else if (cmd == "move") {
-            bmmo::ball_state_msg msg;
+            bmmo::timed_ball_state_msg msg;
             if (std::string temp = parser.get_next_word(); !temp.empty()) {
                 msg.content.position.x = atof(temp.c_str());
                 msg.content.position.y = atof(parser.get_next_word().c_str());
@@ -484,6 +506,7 @@ int main(int argc, char** argv) {
             msg.content.rotation.y = (rand() % 3600 - 1800) / 10.0f;
             msg.content.rotation.z = (rand() % 3600 - 1800) / 10.0f;
             msg.content.rotation.w = (rand() % 3600 - 1800) / 10.0f;
+            msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
             client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
                 msg.content.position.x, msg.content.position.y, msg.content.position.z,
                 msg.content.rotation.x, msg.content.rotation.y, msg.content.rotation.z, msg.content.rotation.w);

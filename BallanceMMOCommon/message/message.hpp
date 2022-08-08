@@ -51,6 +51,9 @@ namespace bmmo {
         PlainText,
         CurrentMap,
         HashData,
+
+        TimedBallState,
+        OwnedTimedBallState,
     };
 
     template<typename T, opcode C = None>

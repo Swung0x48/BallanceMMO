@@ -22,7 +22,7 @@ struct client_data {
     std::string name;
     bool cheated = false;
     uint8_t uuid[16];
-    bmmo::ball_state state;
+    bmmo::timed_ball_state state;
     bool updated = true;
 };
 
@@ -237,15 +237,15 @@ public:
                         uptime * 1e-6, time_str);
     }
 
-    inline void pull_unupdated_ball_states(std::vector<bmmo::owned_ball_state>& balls) {
+    inline void pull_unupdated_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls) {
         for (auto& i: clients_) {
             if (i.second.updated)
                 continue;
-            bmmo::owned_ball_state obs;
+            bmmo::owned_timed_ball_state otbs;
             std::unique_lock<std::mutex> lock(client_data_mutex_);
-            obs.player_id = i.first;
-            obs.state = i.second.state;
-            balls.push_back(obs);
+            otbs.player_id = i.first;
+            otbs.state = i.second.state;
+            balls.push_back(otbs);
             i.second.updated = true;
         }
     }
@@ -381,7 +381,7 @@ protected:
             Printf("Error: failed to open config file for writing.");
             return;
         }
-        config_file << "# Config file for Ballance MMO Server\n"
+        config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t().to_string() << "\n"
                     << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
                     << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
@@ -607,7 +607,7 @@ protected:
                 // but not logged on) until them.  I'm trying to keep this example
                 // code really simple.
                 char nick[32];
-                sprintf(nick, "Unidentified%d", 10000 + (rand() % 90000));
+                sprintf(nick, "Unidentified%05d", rand() % 100000);
 
                 // DO NOT add client here.
                 //clients_[pInfo->m_hConn] = {nick};
@@ -722,7 +722,7 @@ protected:
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
                 std::unique_lock<std::mutex> lock(client_data_mutex_);
-                clients_[networking_msg->m_conn].state = state_msg->content;
+                // clients_[networking_msg->m_conn].state = state_msg->content;
                 clients_[networking_msg->m_conn].updated = false;
 
                 // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
@@ -752,10 +752,23 @@ protected:
 
                 break;
             }
+            case bmmo::TimedBallState: {
+                auto* state_msg = reinterpret_cast<bmmo::timed_ball_state_msg*>(networking_msg->m_pData);
+                std::unique_lock<std::mutex> lock(client_data_mutex_);
+                if (state_msg->content.timestamp < client_it->second.state.timestamp)
+                    break;
+                client_it->second.state = state_msg->content;
+                client_it->second.updated = false;
+                break;
+            }
             case bmmo::Chat: {
                 bmmo::chat_msg msg{};
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
+
+                // sanitize chat message (remove control characters)
+                std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
+                    [](char c) { return std::iscntrl(c); }, ' ');
 
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
@@ -900,6 +913,9 @@ protected:
                 }
                 if (deny_action(networking_msg->m_conn))
                     break;
+                
+                std::replace_if(msg.reason.begin(), msg.reason.end(),
+                    [](char c) { return std::iscntrl(c); }, ' ');
 
                 if (!kick_client(player_id, msg.reason, client_it->first)) {
                     bmmo::action_denied_msg new_msg{};
@@ -974,6 +990,7 @@ protected:
             }
             case bmmo::OwnedBallState:
             case bmmo::OwnedBallStateV2:
+            case bmmo::OwnedTimedBallState:
             case bmmo::LoginAcceptedV2:
             case bmmo::PlayerConnectedV2:
             case bmmo::OwnedCheatState:
@@ -1014,7 +1031,7 @@ protected:
     }
 
     inline void tick() {
-        bmmo::owned_ball_state_v2_msg msg{};
+        bmmo::owned_timed_ball_state_msg msg{};
         pull_unupdated_ball_states(msg.balls);
         if (msg.balls.empty())
             return;

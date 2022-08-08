@@ -107,7 +107,7 @@ protected:
         int msg_count = interface_->ReceiveMessagesOnConnection(connection_, incoming_message, ONCE_RECV_MSG_COUNT);
         if (msg_count == 0)
             return 0;
-        if (msg_count < 0)
+        else if (msg_count < 0)
             //break;
             FatalError("Error checking for messages.");
         assert(msg_count > 0);

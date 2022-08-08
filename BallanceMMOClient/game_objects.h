@@ -86,7 +86,7 @@ public:
 				init_player(item.first, item.second.name, item.second.cheated);
 			}
 
-			uint32_t current_ball_type = item.second.ball_state.type;
+			uint32_t current_ball_type = item.second.ball_state.back().type;
 			auto* ctx = bml_->GetCKContext();
 
 			if (current_ball_type != objects_[item.first].visible_ball_type) {
@@ -103,10 +103,18 @@ public:
 			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
 				return true;
 
-			// Update ball
+			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
-				current_ball->SetPosition(item.second.ball_state.position);
-				current_ball->SetQuaternion(item.second.ball_state.rotation);
+				if (extrapolation_) {
+					auto state_it = item.second.ball_state.begin();
+					const auto [position, rotation] = PlayerState::get_quadratic_extrapolated_state(*state_it, *(++state_it), *(++state_it));
+					current_ball->SetPosition(position);
+					current_ball->SetQuaternion(rotation);
+				}
+				else {
+					current_ball->SetPosition(item.second.ball_state.back().position);
+					current_ball->SetQuaternion(item.second.ball_state.back().rotation);
+				}
 			}
 
 			// Update username label
@@ -131,7 +139,7 @@ public:
 	void physicalize(HSteamNetConnection id) {
 		CKDataArray* physBall = bml_->GetArrayByName("Physicalize_GameBall");
 
-		uint32_t current_ball_type = db_.get(id)->ball_state.type;
+		uint32_t current_ball_type = db_.get(id)->ball_state.back().type;
 		auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(objects_[id].balls[current_ball_type]));
 		objects_[id].physicalized = true;
 		std::string ballName(physBall->GetElementStringValue(current_ball_type, 0, nullptr), '\0');
@@ -232,6 +240,10 @@ public:
 		return ball;
 	}
 
+	void toggle_extrapolation(bool enabled) {
+		extrapolation_ = enabled;
+	}
+
 	void destroy_all_objects() {
 		objects_.clear();
 	}
@@ -254,4 +266,5 @@ private:
 	IBML* bml_ = nullptr;
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
+	bool extrapolation_ = false;
 };

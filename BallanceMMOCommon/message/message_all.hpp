@@ -31,5 +31,7 @@
 #include "plain_text_msg.hpp"
 #include "current_map_msg.hpp"
 #include "hash_data_msg.hpp"
+#include "timed_ball_state_msg.hpp"
+#include "owned_timed_ball_state_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

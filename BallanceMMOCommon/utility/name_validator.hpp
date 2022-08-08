@@ -4,7 +4,7 @@
 
 namespace bmmo {
     class name_validator {
-        static inline const char *valid_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+=@~()";
+        static inline const char *valid_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+=.~()";
 
     public:
         static inline const std::size_t max_length = 20, min_length = 3;
@@ -18,7 +18,7 @@ namespace bmmo {
         };
 
         // Valid usernames must be 3~20 characters long and contain only valid characters,
-        // which are a-z, A-Z, 0-9, plus "_", "-", "+", "=", "@", "~", "(", and ")".
+        // which are a-z, A-Z, 0-9, plus "_", "-", "+", "=", ".", "~", "(", and ")".
         // They also must not be consisted of only underlines.
         static bool is_valid(const std::string& name) {
             return (get_invalid_char_pos(name) == std::string::npos
