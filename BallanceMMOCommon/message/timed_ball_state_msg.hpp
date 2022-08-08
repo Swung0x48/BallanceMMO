@@ -5,7 +5,7 @@
 
 namespace bmmo {
     struct timed_ball_state: ball_state {
-        uint64_t timestamp = 0;
+        int64_t timestamp = 0;
     };
 
     typedef struct message<timed_ball_state, TimedBallState> timed_ball_state_msg;

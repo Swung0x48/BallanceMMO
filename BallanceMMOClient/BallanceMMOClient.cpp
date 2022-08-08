@@ -377,7 +377,6 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
     else if (prop == props_["extrapolation"]) {
         objects_.toggle_extrapolation(prop->GetBoolean());
     }
-    m_bml->GetCollisionManager();
 }
 
 void BallanceMMOClient::OnExitGame()

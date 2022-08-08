@@ -18,7 +18,7 @@ struct BallState {
 };
 
 struct TimedBallState : BallState {
-	uint64_t timestamp = 0;
+	int64_t timestamp = 0;
 };
 
 struct PlayerState {
