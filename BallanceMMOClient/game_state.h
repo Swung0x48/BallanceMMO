@@ -25,7 +25,7 @@ struct PlayerState {
 	std::string name;
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state;
-	SteamNetworkingMicroseconds time_diff = 0;
+	SteamNetworkingMicroseconds time_diff = -68719476736;
 	// BallState ball_state;
 
 	PlayerState(): ball_state(3) {
@@ -111,12 +111,12 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		// We have to assign a new timestamp here to reduce
+		// We have to assign recalibrated timestamp here to reduce
 		// errors caused by lags for our extrapolation to work.
 		// Not setting new timestamps can get us almost accurate
 		// real-time position of our own spirit balls, but everyone
 		// has a different timestamp, so we have to account for this.
-		states_[id].time_diff = (states_[id].time_diff + SteamNetworkingUtils()->GetLocalTimestamp() - state.timestamp) / 2;
+		states_[id].time_diff = (3 * states_[id].time_diff - state.timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / 4; // weighted average
 		state.timestamp += states_[id].time_diff;
 		if (state.timestamp < states_[id].ball_state.back().timestamp)
 			return true;
