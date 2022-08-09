@@ -106,9 +106,8 @@ public:
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
 				if (extrapolation_) {
-					std::unique_lock<std::mutex>(extrapolation_mutex_);
 					auto state_it = item.second.ball_state.begin();
-					const auto [position, rotation] = PlayerState::get_quadratic_extrapolated_state(*state_it, *(state_it + 1), *(state_it + 2));
+					const auto [position, rotation] = PlayerState::get_quadratic_extrapolated_state(state_it[0], state_it[1], state_it[2]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
 				}
@@ -243,6 +242,7 @@ public:
 
 	void toggle_extrapolation(bool enabled) {
 		extrapolation_ = enabled;
+		db_.toggle_extrapolation(enabled);
 	}
 
 	void destroy_all_objects() {
@@ -268,5 +268,4 @@ private:
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false;
-	std::mutex extrapolation_mutex_;
 };

@@ -25,7 +25,7 @@ struct PlayerState {
 	std::string name;
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state;
-	SteamNetworkingMicroseconds time_diff = -68719476736;
+	SteamNetworkingMicroseconds time_diff = INT64_MIN; // Minus ~19 hours. Should be sufficient for most uses.
 	// BallState ball_state;
 
 	PlayerState(): ball_state(3) {
@@ -33,31 +33,31 @@ struct PlayerState {
 	}
 
 	// use linear extrapolation to get current position and rotation
-	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const TimedBallState& first, const TimedBallState& second) {
-		const auto time_interval = second.timestamp - first.timestamp;
+	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const TimedBallState& state1, const TimedBallState& state2) {
+		const auto time_interval = state2.timestamp - state1.timestamp;
 		if (time_interval == 0)
-			return { second.position, second.rotation };
+			return { state2.position, state2.rotation };
 
-		const auto factor = static_cast<double>(SteamNetworkingUtils()->GetLocalTimestamp() - second.timestamp) / time_interval;
+		const auto factor = static_cast<double>(SteamNetworkingUtils()->GetLocalTimestamp() - state2.timestamp) / time_interval;
 
-		return { second.position + (second.position - first.position) * factor, second.rotation + (second.rotation - first.rotation) * factor };
+		return { state2.position + (state2.position - state1.position) * factor, state2.rotation + (state2.rotation - state1.rotation) * factor };
 	}
 
 	// quadratic extrapolation
-	static inline const std::pair<VxVector, VxQuaternion> get_quadratic_extrapolated_state(const TimedBallState& first, const TimedBallState& second, const TimedBallState& third) {
-		const auto t21 = second.timestamp - first.timestamp,
-			t32 = third.timestamp - second.timestamp,
-			t31 = third.timestamp - first.timestamp;
-		if (t32 == 0) return {third.position, third.rotation};
-		if (t21 == 0) return get_linear_extrapolated_state(third, second);
+	static inline const std::pair<VxVector, VxQuaternion> get_quadratic_extrapolated_state(const TimedBallState& state1, const TimedBallState& state2, const TimedBallState& state3) {
+		const auto t21 = state2.timestamp - state1.timestamp,
+			t32 = state3.timestamp - state2.timestamp,
+			t31 = state3.timestamp - state1.timestamp;
+		if (t32 == 0) return {state3.position, state3.rotation};
+		if (t21 == 0) return get_linear_extrapolated_state(state2, state3);
 
 		const auto tc = SteamNetworkingUtils()->GetLocalTimestamp();
 
-		const auto f1 = ((tc - second.timestamp) * (tc - third.timestamp)) / static_cast<double>(t21 * t31),
-			f2 = ((tc - first.timestamp) * (tc - third.timestamp)) / static_cast<double>(t21 * t32),
-			f3 = ((tc - first.timestamp) * (tc - second.timestamp)) / static_cast<double>(t31 * t32);
+		const auto f1 = ((tc - state2.timestamp) * (tc - state3.timestamp)) / static_cast<double>(t21 * t31),
+			f2 = ((tc - state1.timestamp) * (tc - state3.timestamp)) / static_cast<double>(-t21 * t32),
+			f3 = ((tc - state1.timestamp) * (tc - state2.timestamp)) / static_cast<double>(t31 * t32);
 
-		return { first.position * f1 - second.position * f2 + third.position * f3, first.rotation * f1 - second.rotation * f2 + third.rotation * f3 };
+		return { state1.position * f1 + state2.position * f2 + state3.position * f3, state1.rotation * f1 + state2.rotation * f2 + state3.rotation * f3 };
 	}
 };
 
@@ -111,14 +111,20 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		// We have to assign recalibrated timestamp here to reduce
+		// We have to assign a recalibrated timestamp here to reduce
 		// errors caused by lags for our extrapolation to work.
 		// Not setting new timestamps can get us almost accurate
 		// real-time position of our own spirit balls, but everyone
-		// has a different timestamp, so we have to account for this.
-		states_[id].time_diff = (3 * states_[id].time_diff - state.timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / 4; // weighted average
+		// has a different timestamp, so we have to account for this
+		// and record everyone's average timestamp differences.
+		states_[id].time_diff = (states_[id].time_diff == INT64_MIN) ? (SteamNetworkingUtils()->GetLocalTimestamp() - state.timestamp) : (PREV_DIFF_WEIGHT * states_[id].time_diff - state.timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / (PREV_DIFF_WEIGHT + 1);
+		// Weighted average - more weight on the previous value means more resistance
+		// to random lag spikes, which in turn results in overall smoother movement;
+		// however this also makes initial values converge into actual timestamp
+		// differences slower and cause prolonged random flickering when average
+		// lag values changed. We have to pick a value comfortable to both aspects.
 		state.timestamp += states_[id].time_diff;
-		if (state.timestamp < states_[id].ball_state.back().timestamp)
+		if (no_extrapolation_ && state.timestamp < states_[id].ball_state.back().timestamp)
 			return true;
 		states_[id].ball_state.push_back(state);
 		return true;
@@ -220,6 +226,10 @@ public:
 		nametag_visible_ = !nametag_visible_;
 	}
 
+	void toggle_extrapolation(bool enabled) {
+		no_extrapolation_ = !enabled;
+	}
+
 	void set_pending_flush(bool flag) {
 		pending_cheat_flush_ = flag;
 	}
@@ -241,4 +251,6 @@ private:
 	HSteamNetConnection assigned_id_;
 	std::atomic_bool nametag_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
+	bool no_extrapolation_ = true;
+	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15;
 };
