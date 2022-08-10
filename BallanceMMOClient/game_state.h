@@ -25,7 +25,7 @@ struct PlayerState {
 	std::string name;
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state;
-	SteamNetworkingMicroseconds time_diff = INT64_MIN; // Minus ~19 hours. Should be sufficient for most uses.
+	SteamNetworkingMicroseconds time_diff = INT64_MIN;
 	// BallState ball_state;
 
 	PlayerState(): ball_state(3) {
@@ -38,12 +38,12 @@ struct PlayerState {
 		if (time_interval == 0)
 			return { state2.position, state2.rotation };
 
-		const auto factor = static_cast<double>(SteamNetworkingUtils()->GetLocalTimestamp() - state2.timestamp) / time_interval;
+		const auto factor = static_cast<double>(SteamNetworkingUtils()->GetLocalTimestamp() - state1.timestamp) / time_interval;
 
-		return { state2.position + (state2.position - state1.position) * factor, state2.rotation + (state2.rotation - state1.rotation) * factor };
+		return { state1.position + (state2.position - state1.position) * factor, Slerp(factor, state1.rotation, state2.rotation) };
 	}
 
-	// quadratic extrapolation
+	// quadratic extrapolation of position (extrapolation for rotation is still linear)
 	static inline const std::pair<VxVector, VxQuaternion> get_quadratic_extrapolated_state(const TimedBallState& state1, const TimedBallState& state2, const TimedBallState& state3) {
 		const auto t21 = state2.timestamp - state1.timestamp,
 			t32 = state3.timestamp - state2.timestamp,
@@ -53,11 +53,12 @@ struct PlayerState {
 
 		const auto tc = SteamNetworkingUtils()->GetLocalTimestamp();
 
-		const auto f1 = ((tc - state2.timestamp) * (tc - state3.timestamp)) / static_cast<double>(t21 * t31),
-			f2 = ((tc - state1.timestamp) * (tc - state3.timestamp)) / static_cast<double>(-t21 * t32),
-			f3 = ((tc - state1.timestamp) * (tc - state2.timestamp)) / static_cast<double>(t31 * t32);
-
-		return { state1.position * f1 + state2.position * f2 + state3.position * f3, state1.rotation * f1 + state2.rotation * f2 + state3.rotation * f3 };
+		return {
+			state1.position * (((tc - state2.timestamp) * (tc - state3.timestamp)) / static_cast<double>(t21 * t31))
+			+ state2.position * (((tc - state1.timestamp) * (tc - state3.timestamp)) / -static_cast<double>(t21 * t32))
+			+ state3.position * (((tc - state1.timestamp) * (tc - state2.timestamp)) / static_cast<double>(t31 * t32)),
+			Slerp(static_cast<double>(tc - state2.timestamp) / t32, state2.rotation, state3.rotation)
+		};
 	}
 };
 
@@ -124,7 +125,7 @@ public:
 		// differences slower and cause prolonged random flickering when average
 		// lag values changed. We have to pick a value comfortable to both aspects.
 		state.timestamp += states_[id].time_diff;
-		if (no_extrapolation_ && state.timestamp < states_[id].ball_state.back().timestamp)
+		if (state.timestamp < states_[id].ball_state.back().timestamp)
 			return true;
 		states_[id].ball_state.push_back(state);
 		return true;
@@ -226,10 +227,6 @@ public:
 		nametag_visible_ = !nametag_visible_;
 	}
 
-	void toggle_extrapolation(bool enabled) {
-		no_extrapolation_ = !enabled;
-	}
-
 	void set_pending_flush(bool flag) {
 		pending_cheat_flush_ = flag;
 	}
@@ -251,6 +248,5 @@ private:
 	HSteamNetConnection assigned_id_;
 	std::atomic_bool nametag_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
-	bool no_extrapolation_ = true;
 	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15;
 };

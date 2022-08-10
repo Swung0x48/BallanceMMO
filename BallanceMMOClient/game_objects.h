@@ -106,8 +106,8 @@ public:
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
 				if (extrapolation_) {
-					auto state_it = item.second.ball_state.begin();
-					const auto [position, rotation] = PlayerState::get_quadratic_extrapolated_state(state_it[0], state_it[1], state_it[2]);
+					const auto& state_it = item.second.ball_state.begin();
+					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(state_it[0], state_it[1], state_it[2]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
 				}
@@ -242,7 +242,6 @@ public:
 
 	void toggle_extrapolation(bool enabled) {
 		extrapolation_ = enabled;
-		db_.toggle_extrapolation(enabled);
 	}
 
 	void destroy_all_objects() {
