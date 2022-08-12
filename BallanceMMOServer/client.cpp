@@ -45,7 +45,7 @@ public:
         startup_cv_.notify_all();
         while (running_) {
             if (!update())
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::nanoseconds((int)1e9 / 66));
         }
 
 //        while (running_) {
@@ -381,7 +381,7 @@ private:
     std::condition_variable startup_cv_;
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     std::string nickname_;
-    uint8_t uuid_[16];
+    uint8_t uuid_[16]{};
     bool print_states_ = false;
 };
 
