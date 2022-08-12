@@ -161,16 +161,22 @@ public:
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
 #ifdef _WIN32
+#  if WINVER < _WIN32_WINNT_WIN10  // ansi sequences cannot be used on windows versions below 10
+            printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);
+#  else
+#    ifdef _WIN32
             CONSOLE_SCREEN_BUFFER_INFO csbi;
             GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
             short width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-#else
+#    else
             struct winsize w;
             ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
             short width = w.ws_col;
-#endif
+#    endif
             unsigned short lines = (strlen(pszMsg) + 17) / width + 1;
             printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, time_str.c_str(), pszMsg, lines);
+#  endif
+#endif
             fflush(stdout);
         }
     }

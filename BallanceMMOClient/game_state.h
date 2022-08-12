@@ -28,9 +28,7 @@ struct PlayerState {
 	SteamNetworkingMicroseconds time_diff = INT64_MIN;
 	// BallState ball_state;
 
-	PlayerState(): ball_state(3) {
-		ball_state.assign(3, TimedBallState());
-	}
+	PlayerState(): ball_state(3, TimedBallState()) {}
 
 	// use linear extrapolation to get current position and rotation
 	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const TimedBallState& state1, const TimedBallState& state2) {
@@ -245,7 +243,7 @@ private:
 	std::unordered_map<HSteamNetConnection, PlayerState> states_;
 	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
 	std::string nickname_;
-	HSteamNetConnection assigned_id_;
+	HSteamNetConnection assigned_id_ = k_HSteamNetConnection_Invalid;
 	std::atomic_bool nametag_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
 	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15;

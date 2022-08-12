@@ -149,7 +149,7 @@ private:
 	CK_ID current_level_array_ = 0;
 	bmmo::named_map current_map_;
 	std::unordered_map<std::string, std::string> map_names_;
-	uint8_t balls_nmo_md5_[16];
+	uint8_t balls_nmo_md5_[16]{};
 
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
@@ -161,7 +161,7 @@ private:
 	bool reset_rank_ = false, reset_timer_ = true;
 	bool countdown_restart_ = false;
 
-	boost::uuids::uuid uuid_;
+	boost::uuids::uuid uuid_{};
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
@@ -268,7 +268,7 @@ private:
 	//CKContext* ctx = m_bml->GetCKContext();
 	CKDataArray* m_curLevel = m_bml->GetArrayByName("CurrentLevel");
 	CKDataArray* m_ingameParam = m_bml->GetArrayByName("IngameParameter");
-	CK_ID init_game;
+	CK_ID init_game{};
 	void edit_Gameplay_Ingame(CKBehavior* script) {
 		CKBehavior* init_ingame = ScriptHelper::FindFirstBB(script, "Init Ingame");
 		init_game = CKOBJID(init_ingame);
@@ -279,8 +279,8 @@ private:
 	}
 
 	//CKParameter* m_curSector = nullptr;
-	CK_ID m_curSector;
-	CK_ID esc_event_;
+	CK_ID m_curSector{};
+	CK_ID esc_event_{};
 	void edit_Gameplay_Events(CKBehavior* script) {
 		CKBehavior* id = ScriptHelper::FindNextBB(script, script->GetInput(0));
 		m_curSector = CKOBJID(id->GetOutputParameter(0)->GetDestination(0));
@@ -294,7 +294,7 @@ private:
 		//ScriptHelper::FindNextBB(script, script->GetInput(0));
 	}
 
-	CK_ID tutorial_exit_event_ = 0;
+	CK_ID tutorial_exit_event_{};
 	void edit_Gameplay_Tutorial(CKBehavior* script) {
 		auto* tutorial_logic =
 			ScriptHelper::FindFirstBB(ScriptHelper::FindFirstBB(script,
@@ -305,16 +305,16 @@ private:
 		tutorial_exit_event_ = CKOBJID(tutorial_exit->GetOutput(0));
 	}
 
-	CK_ID reset_level_;
-	CK_ID pause_level_;
+	CK_ID reset_level_{};
+	CK_ID pause_level_{};
 	void edit_Event_handler(CKBehavior* script) {
 		pause_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Pause Level"));
 		reset_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "reset Level"));
 	}
 
-	CK_ID restart_level_;
-	CK_ID menu_pause_;
-	CK_ID exit_;
+	CK_ID restart_level_{};
+	CK_ID menu_pause_{};
+	CK_ID exit_{};
 	void edit_Menu_Pause(CKBehavior* script) {
 		restart_level_ = CKOBJID(ScriptHelper::FindFirstBB(script, "Restart Level"));
 		menu_pause_ = CKOBJID(script);
@@ -339,7 +339,7 @@ private:
 		own_ball_visible_ = visible;
 	}
 
-	InputHook* input_manager;
+	InputHook* input_manager = nullptr;
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
