@@ -146,7 +146,7 @@ public:
 		return true;
 	}
 
-	size_t player_count(HSteamNetConnection id) {
+	size_t player_count() {
 		std::shared_lock lk(mutex_);
 		return states_.size();
 	}

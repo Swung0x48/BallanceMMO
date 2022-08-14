@@ -456,7 +456,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
                 line.append(db_.get_nickname() + (m_bml->IsCheatEnabled() ? " [CHEAT]" : "")
                     + (show_id ? (": " + std::to_string(db_.get_client_id())) : ""))
-                    .append("   (" + std::to_string(db_.player_count(db_.get_client_id()) + !own_ball_visible_) + " total)");
+                    .append("   (" + std::to_string(db_.player_count() + !own_ball_visible_) + " total)");
                 SendIngameMessage(line.c_str());
             }
             else if (lower1 == "dnf") {
@@ -486,29 +486,40 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 hide_console();
             }
             else if (lower1 == "getpos" || lower1 == "gp") {
-                db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    const auto& state = pair.second.ball_state.front();
+                if (!connected())
+                    return;
+                std::map<std::string, TimedBallState> states;
+                db_.for_each([this, &states](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    if (pair.first != db_.get_client_id())
+                        states[pair.second.name] = pair.second.ball_state.front();
+                    return true;
+                });
+                states[db_.get_nickname()] = local_ball_state_;
+                for (const auto& i: states) {
                     std::string type;
-                    switch (state.type) {
+                    switch (i.second.type) {
                         case 0: type = "paper"; break;
                         case 1: type = "stone"; break;
                         case 2: type = "wood"; break;
-                        default: type = "unknown (id #" + std::to_string(state.type) + ")";
+                        default: type = "unknown (id #" + std::to_string(i.second.type) + ")";
                     }
                     SendIngameMessage(std::format("{} is at {:.2f}, {:.2f}, {:.2f} with {} ball.",
-                                      pair.second.name,
-                                      state.position.x, state.position.y, state.position.z,
+                                      i.first,
+                                      i.second.position.x, i.second.position.y, i.second.position.z,
                                       type
                     ));
-                    return true;
-                });
+                }
             }
             else if (lower1 == "getmap" || lower1 == "gm") {
+                if (!connected())
+                    return;
                 bmmo::simple_action_msg msg;
                 msg.content.action = bmmo::action_type::CurrentMapQuery;
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
             else if (lower1 == "announcemap" || lower1 == "am") {
+                if (!connected())
+                    return;
                 bmmo::current_map_msg msg;
                 msg.content.map = current_map_;
                 m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);

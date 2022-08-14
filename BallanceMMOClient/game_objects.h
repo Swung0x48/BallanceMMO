@@ -107,8 +107,11 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
-				if (extrapolation_ && state_it->timestamp > timestamp - 262144) {
-					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(timestamp, state_it[2], state_it[1], state_it[0]);
+				if (extrapolation_) {
+					SteamNetworkingMicroseconds tc = timestamp;
+					if (state_it->timestamp + 262144 < timestamp)
+						tc = state_it->timestamp + 262144;
+					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(tc, state_it[2], state_it[1], state_it[0]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
 				}
