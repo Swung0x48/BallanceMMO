@@ -31,25 +31,23 @@ struct PlayerState {
 	PlayerState(): ball_state(3, TimedBallState()) {}
 
 	// use linear extrapolation to get current position and rotation
-	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const TimedBallState& state1, const TimedBallState& state2) {
+	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const SteamNetworkingMicroseconds tc, const TimedBallState& state1, const TimedBallState& state2) {
 		const auto time_interval = state2.timestamp - state1.timestamp;
 		if (time_interval == 0)
 			return { state2.position, state2.rotation };
 
-		const auto factor = static_cast<double>(SteamNetworkingUtils()->GetLocalTimestamp() - state1.timestamp) / time_interval;
+		const auto factor = static_cast<float>(tc - state1.timestamp) / time_interval;
 
 		return { state1.position + (state2.position - state1.position) * factor, Slerp(factor, state1.rotation, state2.rotation) };
 	}
 
 	// quadratic extrapolation of position (extrapolation for rotation is still linear)
-	static inline const std::pair<VxVector, VxQuaternion> get_quadratic_extrapolated_state(const TimedBallState& state1, const TimedBallState& state2, const TimedBallState& state3) {
+	static inline const std::pair<VxVector, VxQuaternion> get_quadratic_extrapolated_state(const SteamNetworkingMicroseconds tc, const TimedBallState& state1, const TimedBallState& state2, const TimedBallState& state3) {
 		const auto t21 = state2.timestamp - state1.timestamp,
 			t32 = state3.timestamp - state2.timestamp,
 			t31 = state3.timestamp - state1.timestamp;
 		if (t32 == 0) return {state3.position, state3.rotation};
-		if (t21 == 0) return get_linear_extrapolated_state(state2, state3);
-
-		const auto tc = SteamNetworkingUtils()->GetLocalTimestamp();
+		if (t21 == 0) return get_linear_extrapolated_state(tc, state2, state3);
 
 		return {
 			state1.position * (((tc - state2.timestamp) * (tc - state3.timestamp)) / static_cast<double>(t21 * t31))
@@ -123,9 +121,9 @@ public:
 		// differences slower and cause prolonged random flickering when average
 		// lag values changed. We have to pick a value comfortable to both aspects.
 		state.timestamp += states_[id].time_diff;
-		if (state.timestamp < states_[id].ball_state.back().timestamp)
+		if (state.timestamp < states_[id].ball_state.front().timestamp)
 			return true;
-		states_[id].ball_state.push_back(state);
+		states_[id].ball_state.push_front(state);
 		return true;
 	}
 

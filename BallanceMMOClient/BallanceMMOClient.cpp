@@ -275,6 +275,9 @@ void BallanceMMOClient::OnProcess() {
     if (bml_lk) {
         if (m_bml->IsIngame()) {
             const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+
+            objects_.update(current_timestamp, db_.flush());
+
             if (current_timestamp >= next_update_timestamp_) {
                 if (current_timestamp - next_update_timestamp_ > 1000000)
                     next_update_timestamp_ = current_timestamp;
@@ -291,8 +294,6 @@ void BallanceMMOClient::OnProcess() {
                     assemble_and_send_state();
                 });
             }
-
-            objects_.update(db_.flush());
         }
     }
 }
@@ -412,64 +413,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         }
         case 2: {
             if (lower1 == "connect" || lower1 == "c") {
-                if (connected()) {
-                    std::lock_guard<std::mutex> lk(bml_mtx_);
-                    SendIngameMessage("Already connected.");
-                }
-                else if (connecting()) {
-                    std::lock_guard<std::mutex> lk(bml_mtx_);
-                    SendIngameMessage("Connecting in process, please wait...");
-                }
-                else {
-                    SendIngameMessage("Resolving server address...");
-                    resolving_endpoint_ = true;
-                    // Bootstrap io_context
-                    work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());
-                    asio::post(thread_pool_, [this]() {
-                        if (io_ctx_.stopped())
-                            io_ctx_.reset();
-                        io_ctx_.run();
-                        });
-
-                    // Resolve address
-                    auto p = bmmo::hostname_parser(props_["remote_addr"]->GetString()).get_host_components();
-                    resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
-                    resolver_->async_resolve(p.first, p.second, [this, bml](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
-                        resolving_endpoint_ = false;
-                        std::lock_guard<std::mutex> lk(bml_mtx_);
-                        // If address correctly resolved...
-                        if (!ec) {
-                            SendIngameMessage("Server address resolved.");
-                            
-                            for (const auto& i : results) {
-                                auto endpoint = i.endpoint();
-                                std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
-                                GetLogger()->Info("Trying %s", connection_string.c_str());
-                                if (connect(connection_string)) {
-                                    SendIngameMessage("Connecting...");
-                                    if (network_thread_.joinable())
-                                        network_thread_.join();
-                                    network_thread_ = std::thread([this]() { run(); });
-                                    work_guard_.reset();
-                                    io_ctx_.stop();
-                                    resolver_.reset();
-                                    return;
-                                }
-                            }
-                            // but none of the resolve results are unreachable...
-                            SendIngameMessage("Failed to connect to server. All resolved address appears to be unresolvable.");
-                            work_guard_.reset();
-                            io_ctx_.stop();
-                            resolver_.reset();
-                            return;
-                        }
-                        // If not correctly resolved...
-                        SendIngameMessage("Failed to resolve hostname.");
-                        GetLogger()->Error(ec.message().c_str());
-                        work_guard_.reset();
-                        io_ctx_.stop();
-                    });
-                }
+                init_connection();
             }
             else if (lower1 == "disconnect" || lower1 == "d") {
                 if (!connecting() && !connected()) {
@@ -541,9 +485,36 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 }
                 hide_console();
             }
-            else if (lower1 == "getmap") {
+            else if (lower1 == "getpos" || lower1 == "gp") {
+                db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    const auto& state = pair.second.ball_state.front();
+                    std::string type;
+                    switch (state.type) {
+                        case 0: type = "paper"; break;
+                        case 1: type = "stone"; break;
+                        case 2: type = "wood"; break;
+                        default: type = "unknown (id #" + std::to_string(state.type) + ")";
+                    }
+                    SendIngameMessage(std::format("{} is at {:.2f}, {:.2f}, {:.2f} with {} ball.",
+                                      pair.second.name,
+                                      state.position.x, state.position.y, state.position.z,
+                                      type
+                    ));
+                    return true;
+                });
+            }
+            else if (lower1 == "getmap" || lower1 == "gm") {
                 bmmo::simple_action_msg msg;
                 msg.content.action = bmmo::action_type::CurrentMapQuery;
+                send(msg, k_nSteamNetworkingSend_Reliable);
+            }
+            else if (lower1 == "announcemap" || lower1 == "am") {
+                bmmo::current_map_msg msg;
+                msg.content.map = current_map_;
+                m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
+                if (current_map_.level == 0) msg.content.sector = 0;
+                msg.content.cheated = m_bml->IsCheatEnabled();
+                msg.content.player_id = db_.get_client_id();
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
             /*else if (lower1 == "p") {
@@ -556,7 +527,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             return;
         }
         case 3: {
-            if (lower1 == "cheat") {
+            if (lower1 == "connect" || lower1 == "c") {
+                init_connection(args[2]);
+                return;
+            }
+            else if (lower1 == "cheat") {
                 bool cheat_state = false;
                 if (boost::iequals(args[2], "on"))
                     cheat_state = true;
@@ -565,7 +540,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 send(msg, k_nSteamNetworkingSend_Reliable);
                 return;
             }
-            if (lower1 == "rank" && boost::iequals(args[2], "reset")) {
+            else if (lower1 == "rank" && boost::iequals(args[2], "reset")) {
                 reset_rank_ = true;
                 return;
             }
@@ -625,6 +600,69 @@ void BallanceMMOClient::terminate(long delay) {
     std::this_thread::sleep_for(std::chrono::seconds(delay));
 
     std::terminate();
+}
+
+void BallanceMMOClient::init_connection(std::string address) {
+    if (connected()) {
+        std::lock_guard<std::mutex> lk(bml_mtx_);
+        SendIngameMessage("Already connected.");
+    }
+    else if (connecting()) {
+        std::lock_guard<std::mutex> lk(bml_mtx_);
+        SendIngameMessage("Connecting in process, please wait...");
+    }
+    else {
+        SendIngameMessage("Resolving server address...");
+        resolving_endpoint_ = true;
+        // Bootstrap io_context
+        work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());
+        asio::post(thread_pool_, [this]() {
+            if (io_ctx_.stopped())
+                io_ctx_.reset();
+            io_ctx_.run();
+            });
+
+        // Resolve address
+        if (address.empty())
+            address = props_["remote_addr"]->GetString();
+        const auto& [host, port] = bmmo::hostname_parser(address).get_host_components();
+        resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
+        resolver_->async_resolve(host, port, [this](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
+            resolving_endpoint_ = false;
+            std::lock_guard<std::mutex> lk(bml_mtx_);
+            // If address correctly resolved...
+            if (!ec) {
+                SendIngameMessage("Server address resolved.");
+
+                for (const auto& i : results) {
+                    auto endpoint = i.endpoint();
+                    std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+                    GetLogger()->Info("Trying %s", connection_string.c_str());
+                    if (connect(connection_string)) {
+                        SendIngameMessage("Connecting...");
+                        if (network_thread_.joinable())
+                            network_thread_.join();
+                        network_thread_ = std::thread([this]() { run(); });
+                        work_guard_.reset();
+                        io_ctx_.stop();
+                        resolver_.reset();
+                        return;
+                    }
+                }
+                // but none of the resolve results are unreachable...
+                SendIngameMessage("Failed to connect to server. All resolved address appears to be unresolvable.");
+                work_guard_.reset();
+                io_ctx_.stop();
+                resolver_.reset();
+                return;
+            }
+            // If not correctly resolved...
+            SendIngameMessage("Failed to resolve hostname.");
+            GetLogger()->Error(ec.message().c_str());
+            work_guard_.reset();
+            io_ctx_.stop();
+        });
+    }
 }
 
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)

@@ -105,6 +105,8 @@ private:
 	bool show_console();
 	bool hide_console();
 
+	void init_connection(std::string address = "");
+
 	static void terminate(long delay);
 
 	static void FatalError(const char* fmt, ...) {
@@ -210,7 +212,7 @@ private:
 		props_["uuid"] = tmp_prop;
 		GetConfig()->SetCategoryComment("Gameplay", "Settings for your actual gameplay experience in multiplayer.");
 		tmp_prop = GetConfig()->GetProperty("Gameplay", "Enable Extrapolation");
-		tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother. Can be slightly inaccurate.");
+		tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother at a slight cost of accuracy.");
 		tmp_prop->SetDefaultBoolean(true);
 		objects_.toggle_extrapolation(tmp_prop->GetBoolean());
 		props_["extrapolation"] = tmp_prop;
@@ -665,6 +667,7 @@ private:
 		return std::format("{:.1f}{}", bytes, suffixes[s]);
 	}
 
+	static inline const std::string mu = bmmo::message_utils::ConvertWideToANSI(bmmo::message_utils::ConvertUtf8ToWide("μ"));
 	static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
 		std::string s;
 		s.reserve(2048);
@@ -674,7 +677,7 @@ private:
 		s += std::format("Tx: {:.0f}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
 		s += std::format("Rx: {:.0f}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
 		s += "Est. MaxBandwidth: " + pretty_bytes(status.m_nSendRateBytesPerSecond) + "/s\n";
-		s += std::format("Queue time: {}us\n", status.m_usecQueueTime);
+		s += std::format("Queue time: {}" + mu + "s\n", status.m_usecQueueTime);
 		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
 		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
 		return s;

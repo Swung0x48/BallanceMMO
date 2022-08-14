@@ -210,17 +210,18 @@ public:
 
     void print_positions() {
         for (auto& i: clients_) {
+            std::string type;
+            switch (i.second.state.type) {
+                case 0: type = "paper"; break;
+                case 1: type = "stone"; break;
+                case 2: type = "wood"; break;
+                default: type = "unknown (id #" + std::to_string(i.second.state.type) + ")";
+            }
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     i.first,
                     i.second.name,
-                    i.second.state.position.x,
-                    i.second.state.position.y,
-                    i.second.state.position.z,
-                    (i.second.state.type == 0 ? "paper" : 
-                        (i.second.state.type == 1 ? "stone" : 
-                            (i.second.state.type == 2 ? "wood" : "unknown")
-                        )
-                    )
+                    i.second.state.position.x, i.second.state.position.y, i.second.state.position.z,
+                    type
             );
         }
     }
@@ -927,7 +928,10 @@ protected:
             }
             case bmmo::CurrentMap: {
                 auto* msg = reinterpret_cast<bmmo::current_map_msg*>(networking_msg->m_pData);
-                if (map_data_inquirer_ != k_HSteamNetConnection_Invalid) {
+                if (msg->content.player_id != k_HSteamNetConnection_Invalid) {
+                    broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                }
+                else if (map_data_inquirer_ != k_HSteamNetConnection_Invalid) {
                     msg->content.player_id = networking_msg->m_conn;
                     send(map_data_inquirer_, *msg, k_nSteamNetworkingSend_Reliable);
                     map_data_count_++;
@@ -939,7 +943,7 @@ protected:
                 }
                 Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                     msg->content.cheated ? "[CHEAT] " : "",
-                    networking_msg->m_conn, clients_[networking_msg->m_conn].name,
+                    networking_msg->m_conn, client_it->second.name,
                     msg->content.sector, bmmo::get_ordinal_rank(msg->content.sector),
                     msg->content.map.get_display_name(map_names_));
                 break;

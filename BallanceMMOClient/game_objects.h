@@ -65,7 +65,7 @@ public:
 			new_ball->Show(CKSHOW);
 	}
 
-	void update(bool update_cheat = false) {
+	void update(SteamNetworkingMicroseconds timestamp, bool update_cheat = false) {
 		// Can be costly
 		//cleanup();
 
@@ -77,7 +77,7 @@ public:
 
 		VxRect viewport; bml_->GetRenderContext()->GetViewRect(viewport);
 		auto* rc = bml_->GetRenderContext();
-		db_.for_each([this, &viewport, &rc, update_cheat](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		db_.for_each([this, &viewport, &rc, update_cheat, timestamp](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -86,7 +86,9 @@ public:
 				init_player(item.first, item.second.name, item.second.cheated);
 			}
 
-			uint32_t current_ball_type = item.second.ball_state.back().type;
+			const auto& state_it = item.second.ball_state.begin();
+
+			uint32_t current_ball_type = state_it->type;
 			auto* ctx = bml_->GetCKContext();
 
 			if (current_ball_type != objects_[item.first].visible_ball_type) {
@@ -105,15 +107,14 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
-				if (extrapolation_) {
-					const auto& state_it = item.second.ball_state.begin();
-					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(state_it[0], state_it[1], state_it[2]);
+				if (extrapolation_ && state_it->timestamp > timestamp - 262144) {
+					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(timestamp, state_it[2], state_it[1], state_it[0]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
 				}
 				else {
-					current_ball->SetPosition(item.second.ball_state.back().position);
-					current_ball->SetQuaternion(item.second.ball_state.back().rotation);
+					current_ball->SetPosition(state_it->position);
+					current_ball->SetQuaternion(state_it->rotation);
 				}
 			}
 
@@ -139,7 +140,7 @@ public:
 	void physicalize(HSteamNetConnection id) {
 		CKDataArray* physBall = bml_->GetArrayByName("Physicalize_GameBall");
 
-		uint32_t current_ball_type = db_.get(id)->ball_state.back().type;
+		uint32_t current_ball_type = db_.get(id)->ball_state.front().type;
 		auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(objects_[id].balls[current_ball_type]));
 		objects_[id].physicalized = true;
 		std::string ballName(physBall->GetElementStringValue(current_ball_type, 0, nullptr), '\0');
