@@ -54,6 +54,7 @@ namespace bmmo {
 
         TimedBallState,
         OwnedTimedBallState,
+        Timestamp
     };
 
     template<typename T, opcode C = None>

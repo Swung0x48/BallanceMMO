@@ -198,7 +198,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         GetLogger()->Info("Initializing peer objects...");
         objects_.init_players();
         boost::regex name_pattern(".*\\\\(Level|Maps)\\\\(.*).nmo", boost::regex::icase);
-        std::string path = std::string(filename);
+        std::string path(filename);
         boost::smatch matched;
         if (boost::regex_search(path, matched, name_pattern)) {
             current_map_.name = matched[2].str();
@@ -287,8 +287,10 @@ void BallanceMMOClient::OnProcess() {
                 if (player_ball_ == nullptr)
                     player_ball_ = ball;
 
-                check_on_trafo(ball);
                 poll_player_ball_state();
+                check_on_trafo(ball);
+                // Check on trafo after polling states.
+                // We have to keep track of whether our ball state is changed.
 
                 asio::post(thread_pool_, [this]() {
                     assemble_and_send_state();
@@ -555,6 +557,45 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 reset_rank_ = true;
                 return;
             }
+            else if (lower1 == "teleport" || lower1 == "tp") {
+                if (!(connected() && m_bml->IsIngame() && m_bml->IsCheatEnabled()))
+                    return;
+                std::optional<PlayerState> state;
+                if (args[2][0] == '#')
+                    state = db_.get(atoll(args[2].substr(1).c_str()));
+                else
+                    state = db_.get_from_nickname(args[2]);
+                if (!state.has_value()) {
+                    SendIngameMessage("Error: requested player \"" + args[2] + "\" does not exist.");
+                    return;
+                }
+                const std::string name = state.value().name;
+                const VxVector& position = state.value().ball_state.front().position;
+
+                CKMessageManager* mm = m_bml->GetMessageManager();
+                CKMessageType ballDeact = mm->AddMessageType("BallNav deactivate");
+                mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Gameplay"));
+                mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Sound"));
+
+                m_bml->AddTimer(2u, [this, &position, name]() {
+                    ExecuteBB::Unphysicalize(get_current_ball());
+                    get_current_ball()->SetPosition(position);
+                    CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
+                    VxVector orient[2];
+                    camMF->GetOrientation(orient, orient + 1);
+                    m_bml->RestoreIC(camMF, true);
+                    camMF->SetPosition(position);
+                    camMF->SetOrientation(orient[0], orient[1]);
+                    m_dynamicPos->ActivateInput(0);
+                    m_dynamicPos->Activate();
+                    m_phyNewBall->ActivateInput(0);
+                    m_phyNewBall->Activate();
+                    m_phyNewBall->GetParent()->Activate();
+                    SendIngameMessage(std::format("Teleported to \"{}\" at ({:.3f}, {:.3f}, {:.3f}).",
+                                      name, position.x, position.y, position.z));
+                });
+                return;
+            }
         }
     }
 
@@ -701,7 +742,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         }
         SendIngameMessage(s.c_str());
         cleanup();
-        if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 102)
+        if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 102 || pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 103)
             terminate(5);
         break;
     }
@@ -780,7 +821,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OwnedBallState: {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
         auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
-        bool success = db_.update(obs->content.player_id, reinterpret_cast<TimedBallState&>(obs->content.state));
+        bool success = db_.update(obs->content.player_id, TimedBallState(&obs->content.state));
         //assert(success);
         if (!success) {
             GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", obs->content.player_id);
@@ -804,7 +845,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
 
         for (auto& i : msg.balls) {
-            if (!db_.update(i.player_id, reinterpret_cast<TimedBallState&>(i.state)) && i.player_id != db_.get_client_id()) {
+            if (!db_.update(i.player_id, TimedBallState(&i.state)) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
@@ -816,7 +857,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
 
         for (auto& i : msg.balls) {
-            if (!db_.update(i.player_id, reinterpret_cast<TimedBallState&>(i.state)) && i.player_id != db_.get_client_id()) {
+            if (!db_.update(i.player_id, TimedBallState(&i.state)) && i.player_id != db_.get_client_id()) {
+                GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
+            }
+        }
+        for (auto& i : msg.unchanged_balls) {
+            if (!db_.update(i.player_id, i.timestamp) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
@@ -1035,7 +1081,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto state = db_.get(ocs->content.player_id);
         assert(state.has_value() || (db_.get_client_id() == ocs->content.player_id));
         if (state.has_value()) {
-            db_.update(ocs->content.player_id, ocs->content.state.cheated);
+            db_.update(ocs->content.player_id, (bool) ocs->content.state.cheated);
         }
 
         if (ocs->content.state.notify) {

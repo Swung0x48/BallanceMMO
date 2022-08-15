@@ -18,7 +18,16 @@ struct BallState {
 };
 
 struct TimedBallState : BallState {
-	int64_t timestamp = 0;
+	SteamNetworkingMicroseconds timestamp{};
+
+	TimedBallState() {};
+	TimedBallState(bmmo::ball_state* state) {
+		std::memcpy(this, state, sizeof(BallState));
+	}
+	TimedBallState(bmmo::timed_ball_state* state) {
+		std::memcpy(this, state, sizeof(BallState));
+		timestamp = (int64_t) state->timestamp;
+	};
 };
 
 struct PlayerState {
@@ -78,11 +87,35 @@ public:
 		return states_[id];
 	}
 
+	std::optional<const PlayerState> get_from_nickname(std::string name) {
+		auto it = std::find_if(states_.begin(), states_.end(),
+													 [&name](const auto& s) { return s.second.name == name; });
+		if (it == states_.end())
+			return {};
+		return it->second;
+	}
+
 	bool exists(HSteamNetConnection id) {
 		std::shared_lock lk(mutex_);
 
 		return states_.find(id) != states_.end();
 	}
+
+	SteamNetworkingMicroseconds get_updated_timestamp(const HSteamNetConnection id, const SteamNetworkingMicroseconds timestamp) {
+		// We have to assign a recalibrated timestamp here to reduce
+		// errors caused by lags for our extrapolation to work.
+		// Not setting new timestamps can get us almost accurate
+		// real-time position of our own spirit balls, but everyone
+		// has a different timestamp, so we have to account for this
+		// and record everyone's average timestamp differences.
+		states_[id].time_diff = (states_[id].time_diff == INT64_MIN) ? (SteamNetworkingUtils()->GetLocalTimestamp() - timestamp) : (PREV_DIFF_WEIGHT * states_[id].time_diff - timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / (PREV_DIFF_WEIGHT + 1);
+		// Weighted average - more weight on the previous value means more resistance
+		// to random lag spikes, which in turn results in overall smoother movement;
+		// however this also makes initial values converge into actual timestamp
+		// differences slower and cause prolonged random flickering when average
+		// lag values changed. We have to pick a value comfortable to both aspects.
+		return (timestamp + states_[id].time_diff);
+	};
 
 	bool update(HSteamNetConnection id, const std::string& name) {
 		if (!exists(id))
@@ -103,27 +136,29 @@ public:
 		return true;
 	}
 
-	bool update(HSteamNetConnection id, TimedBallState& state) {
+	bool update(HSteamNetConnection id, TimedBallState&& state) {
 		if (!exists(id))
 			return false;
 
 		std::unique_lock lk(mutex_);
-		// We have to assign a recalibrated timestamp here to reduce
-		// errors caused by lags for our extrapolation to work.
-		// Not setting new timestamps can get us almost accurate
-		// real-time position of our own spirit balls, but everyone
-		// has a different timestamp, so we have to account for this
-		// and record everyone's average timestamp differences.
-		states_[id].time_diff = (states_[id].time_diff == INT64_MIN) ? (SteamNetworkingUtils()->GetLocalTimestamp() - state.timestamp) : (PREV_DIFF_WEIGHT * states_[id].time_diff - state.timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / (PREV_DIFF_WEIGHT + 1);
-		// Weighted average - more weight on the previous value means more resistance
-		// to random lag spikes, which in turn results in overall smoother movement;
-		// however this also makes initial values converge into actual timestamp
-		// differences slower and cause prolonged random flickering when average
-		// lag values changed. We have to pick a value comfortable to both aspects.
-		state.timestamp += states_[id].time_diff;
+		state.timestamp = get_updated_timestamp(id, state.timestamp);
 		if (state.timestamp < states_[id].ball_state.front().timestamp)
 			return true;
 		states_[id].ball_state.push_front(state);
+		return true;
+	}
+
+	bool update(HSteamNetConnection id, SteamNetworkingMicroseconds timestamp) {
+		if (!exists(id))
+			return false;
+
+		std::unique_lock lk(mutex_);
+		TimedBallState last_state_copy(states_[id].ball_state.front());
+		timestamp = get_updated_timestamp(id, timestamp);
+		if (timestamp < last_state_copy.timestamp)
+			return true;
+		last_state_copy.timestamp = timestamp;
+		states_[id].ball_state.push_front(last_state_copy);
 		return true;
 	}
 

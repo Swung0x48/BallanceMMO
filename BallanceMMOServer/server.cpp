@@ -21,9 +21,10 @@
 struct client_data {
     std::string name;
     bool cheated = false;
-    uint8_t uuid[16];
+    uint8_t uuid[16]{};
     bmmo::timed_ball_state state;
-    bool updated = true;
+    bool state_updated = true;
+    bool timestamp_updated = true;
 };
 
 class server : public role {
@@ -145,7 +146,7 @@ public:
 
         msg.crashed = (bool) crash;
 
-        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + ((bool) crash ? 102 : 101), kick_notice.c_str(), true);
+        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + 101 + static_cast<int>(crash), kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -238,16 +239,17 @@ public:
                         uptime * 1e-6, time_str);
     }
 
-    inline void pull_unupdated_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls) {
+    inline void pull_unupdated_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls, std::vector<bmmo::owned_timestamp>& unchanged_balls) {
         for (auto& i: clients_) {
-            if (i.second.updated)
-                continue;
-            bmmo::owned_timed_ball_state otbs;
             std::unique_lock<std::mutex> lock(client_data_mutex_);
-            otbs.player_id = i.first;
-            otbs.state = i.second.state;
-            balls.push_back(otbs);
-            i.second.updated = true;
+            if (!i.second.state_updated) {
+                balls.push_back({i.second.state, i.first});
+                i.second.state_updated = true;
+            }
+            if (!i.second.timestamp_updated) {
+                unchanged_balls.push_back({i.second.state.timestamp, i.first});
+                i.second.timestamp_updated = true;
+            }
         }
     }
 
@@ -724,7 +726,7 @@ protected:
 
                 std::unique_lock<std::mutex> lock(client_data_mutex_);
                 // clients_[networking_msg->m_conn].state = state_msg->content;
-                clients_[networking_msg->m_conn].updated = false;
+                client_it->second.state_updated = false;
 
                 // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
                 //        networking_msg->m_conn,
@@ -759,7 +761,16 @@ protected:
                 if (state_msg->content.timestamp < client_it->second.state.timestamp)
                     break;
                 client_it->second.state = state_msg->content;
-                client_it->second.updated = false;
+                client_it->second.state_updated = false;
+                break;
+            }
+            case bmmo::Timestamp: {
+                auto* timestamp_msg = reinterpret_cast<bmmo::timestamp_msg*>(networking_msg->m_pData);
+                std::unique_lock<std::mutex> lock(client_data_mutex_);
+                if (timestamp_msg->content < client_it->second.state.timestamp)
+                    break;
+                client_it->second.state.timestamp = timestamp_msg->content;
+                client_it->second.timestamp_updated = false;
                 break;
             }
             case bmmo::Chat: {
@@ -1036,8 +1047,8 @@ protected:
 
     inline void tick() {
         bmmo::owned_timed_ball_state_msg msg{};
-        pull_unupdated_ball_states(msg.balls);
-        if (msg.balls.empty())
+        pull_unupdated_ball_states(msg.balls, msg.unchanged_balls);
+        if (msg.balls.empty() && msg.unchanged_balls.empty())
             return;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);

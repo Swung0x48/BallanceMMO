@@ -145,7 +145,8 @@ private:
 	game_objects objects_;
 
 	CK3dObject* player_ball_ = nullptr;
-	TimedBallState local_ball_state_;
+	TimedBallState local_ball_state_{};
+	std::atomic_bool local_ball_state_changed_ = true;
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
@@ -511,20 +512,38 @@ private:
 			// Update current player ball
 			player_ball_ = ball;
 			local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
+			local_ball_state_changed_ = true;
 		}
 	}
 
 	void poll_player_ball_state() {
-		player_ball_->GetPosition(&local_ball_state_.position);
-		player_ball_->GetQuaternion(&local_ball_state_.rotation);
+		VxVector position; VxQuaternion rotation;
+		player_ball_->GetPosition(&position);
+		player_ball_->GetQuaternion(&rotation);
+		if (position == local_ball_state_.position && rotation == local_ball_state_.rotation) {
+			local_ball_state_changed_ = false;
+		}
+		else {
+			memcpy(&local_ball_state_.position, &position, sizeof(VxVector));
+			memcpy(&local_ball_state_.rotation, &rotation, sizeof(VxQuaternion));
+			local_ball_state_changed_ = true;
+		}
 		local_ball_state_.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 	}
 
 	void assemble_and_send_state() {
-		bmmo::timed_ball_state_msg msg{};
-		assert(sizeof(msg.content) == sizeof(local_ball_state_));
-		std::memcpy(&(msg.content), &local_ball_state_, sizeof(msg.content));
-		send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
+		if (local_ball_state_changed_) {
+			bmmo::timed_ball_state_msg msg{};
+			// assert(sizeof(msg.content) == sizeof(local_ball_state_));
+			std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
+			msg.content.timestamp = local_ball_state_.timestamp;
+			send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
+		}
+		else {
+			bmmo::timestamp_msg msg{};
+			msg.content = local_ball_state_.timestamp;
+			send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
+		}
 #ifdef DEBUG
 		GetLogger()->Info("(%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
 			local_ball_state_.position.x,
