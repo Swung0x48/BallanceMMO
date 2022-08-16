@@ -6,7 +6,7 @@
 #include "timestamp_msg.hpp"
 
 namespace bmmo {
-    // We cannot inherit from ball_state or use it as a struct member here;
+    // We cannot just use a int64_t (taking 8 bits) here;
     // ball_state has the size of 32, but opcode comes before it and has a size of 4.
     // No matter how the order is, we will always get a padding of 4 bytes.
     struct timed_ball_state: ball_state {

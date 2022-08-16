@@ -23,6 +23,8 @@
 bool cheat = false;
 struct client_data {
     std::string name;
+    bool cheated;
+    bmmo::ball_state state{};
 };
 
 class client: public role {
@@ -89,6 +91,20 @@ public:
         return status;
     }
 
+    bmmo::timed_ball_state_msg& get_local_state_msg() {
+        return local_state_msg_;
+    }
+
+    void print_clients() {
+        Printf("%d clients online:", clients_.size());
+        for (auto& i: clients_) {
+            Printf("%u: %s%s",
+                    i.first,
+                    i.second.name,
+                    i.second.cheated ? " [CHEAT]" : "");
+        }
+    }
+
     void set_nickname(const std::string& name) {
         nickname_ = name;
     };
@@ -108,6 +124,21 @@ public:
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
         std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    void teleport_to(const HSteamNetConnection player_id) {
+        if (auto it = clients_.find(player_id); it != clients_.end()) {
+            auto& client = it->second;
+            local_state_msg_.content.position = client.state.position;
+            local_state_msg_.content.rotation = client.state.rotation;
+            // local_state_msg_.content.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count(); // wtf is this from github copilot
+            local_state_msg_.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+            send(local_state_msg_, k_nSteamNetworkingSend_Reliable);
+            Printf("Teleported to %s at (%.3f, %.3f, %.3f).", client.name, client.state.position.x, client.state.position.y, client.state.position.z);
+        }
+        else {
+            Printf("Player not found.");
+        }
     }
 
     void wait_till_started() {
@@ -193,6 +224,7 @@ private:
                 Printf("%d player(s) online:", msg.online_players.size());
                 for (const auto& i: msg.online_players) {
                     Printf("%s (#%u)%s", i.second.name.c_str(), i.first, (i.second.cheated ? " [CHEAT]" : ""));
+                    clients_[i.first] = { i.second.name, (bool) i.second.cheated };
                 }
                 break;
             }
@@ -201,11 +233,15 @@ private:
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
                 Printf("%s (#%u) logged in with cheat mode %s.", msg.name.c_str(), msg.connection_id, (msg.cheated ? "on" : "off"));
+                clients_[msg.connection_id] = { msg.name, (bool) msg.cheated };
                 break;
             }
             case bmmo::PlayerDisconnected: {
                 auto* msg = reinterpret_cast<bmmo::player_disconnected_msg*>(networking_msg->m_pData);
-                Printf("#%u disconnected.", msg->content.connection_id);
+                Printf("%s (#%u) disconnected.", clients_[msg->content.connection_id].name, msg->content.connection_id);
+                if (clients_.find(msg->content.connection_id) != clients_.end()) {
+                    clients_.erase(msg->content.connection_id);
+                }
                 break;
             }
             case bmmo::OwnedBallState: {
@@ -213,7 +249,7 @@ private:
                     break;
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
                 auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
-                Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+                Printf("#%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
                        obs->content.player_id,
                        obs->content.state.type,
                        obs->content.state.position.x,
@@ -226,45 +262,45 @@ private:
                 break;
             }
             case bmmo::OwnedBallStateV2: {
-                if (!print_states_)
-                    break;
                 bmmo::owned_ball_state_v2_msg msg;
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
                 for (auto& ball : msg.balls) {
-                    Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
-                           ball.player_id,
-                           ball.state.type,
-                           ball.state.position.x,
-                           ball.state.position.y,
-                           ball.state.position.z,
-                           ball.state.rotation.x,
-                           ball.state.rotation.y,
-                           ball.state.rotation.z,
-                           ball.state.rotation.w);
+                    if (print_states_)
+                        Printf("#%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+                            ball.player_id,
+                            ball.state.type,
+                            ball.state.position.x,
+                            ball.state.position.y,
+                            ball.state.position.z,
+                            ball.state.rotation.x,
+                            ball.state.rotation.y,
+                            ball.state.rotation.z,
+                            ball.state.rotation.w);
+                    clients_[ball.player_id].state = ball.state;
                 }
 
                 break;
             }
             case bmmo::OwnedTimedBallState: {
-                if (!print_states_)
-                    break;
                 bmmo::owned_timed_ball_state_msg msg;
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
                 for (auto& ball : msg.balls) {
-                    Printf("%ld: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
-                           ball.player_id,
-                           ball.state.type,
-                           ball.state.position.x,
-                           ball.state.position.y,
-                           ball.state.position.z,
-                           ball.state.rotation.x,
-                           ball.state.rotation.y,
-                           ball.state.rotation.z,
-                           ball.state.rotation.w);
+                    if (print_states_)
+                        Printf("%u: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+                            ball.player_id,
+                            ball.state.type,
+                            ball.state.position.x,
+                            ball.state.position.y,
+                            ball.state.position.z,
+                            ball.state.rotation.x,
+                            ball.state.rotation.y,
+                            ball.state.rotation.z,
+                            ball.state.rotation.w);
+                    clients_[ball.player_id].state = ball.state;
                 }
 
                 break;
@@ -272,7 +308,9 @@ private:
             case bmmo::OwnedCheatState: {
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
                 auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(networking_msg->m_pData);
-                Printf("%ld turned cheat %s.", ocs->content.player_id, ocs->content.state.cheated ? "on" : "off");
+                if (ocs->content.state.notify)
+                    Printf("(%u, %s) turned cheat %s.", ocs->content.player_id, clients_[ocs->content.player_id].name, ocs->content.state.cheated ? "on" : "off");
+                clients_[ocs->content.player_id].cheated = ocs->content.state.cheated;
                 break;
             }
             case bmmo::Chat: {
@@ -283,7 +321,7 @@ private:
                 if (msg.player_id == k_HSteamNetConnection_Invalid)
                     Printf("[Server]: %s", msg.chat_content.c_str());
                 else
-                    Printf("%u: %s", msg.player_id, msg.chat_content.c_str());
+                    Printf("(%u, %s): %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
                 break;
             }
             case bmmo::CheatToggle: {
@@ -382,6 +420,8 @@ private:
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     std::string nickname_;
     uint8_t uuid_[16]{};
+    std::unordered_map<HSteamNetConnection, client_data> clients_;
+    bmmo::timed_ball_state_msg local_state_msg_;
     bool print_states_ = false;
 };
 
@@ -491,25 +531,27 @@ int main(int argc, char** argv) {
         // std::cin >> input;
         if (cmd == "stop") {
             client.shutdown();
-        } else if (cmd == "move") {
-            bmmo::timed_ball_state_msg msg;
-            if (std::string temp = parser.get_next_word(); !temp.empty()) {
-                msg.content.position.x = atof(temp.c_str());
-                msg.content.position.y = atof(parser.get_next_word().c_str());
-                msg.content.position.z = atof(parser.get_next_word().c_str());
-            } else {
-                msg.content.position.x = (rand() % 2000 - 1000) / 100.0f;
-                msg.content.position.y = (rand() % 2000 - 1000) / 100.0f;
-                msg.content.position.z = (rand() % 2000 - 1000) / 100.0f;
+        } else if (cmd == "move" || cmd == "translate") {
+            bool translate = false;
+            if (cmd == "translate") translate = true;
+            auto msg = client.get_local_state_msg();
+            float* pos = msg.content.position.v;
+            for (int i = 0; i < 3; ++i) {
+                if (!parser.empty())
+                    pos[i] = atof(parser.get_next_word().c_str()) + ((translate) ? pos[i] : 0.0f);
+                else
+                    pos[i] = (rand() % 2000 - 1000) / 100.0f + ((translate) ? pos[i] : 0.0f);
             }
-            msg.content.rotation.x = (rand() % 3600 - 1800) / 10.0f;
-            msg.content.rotation.y = (rand() % 3600 - 1800) / 10.0f;
-            msg.content.rotation.z = (rand() % 3600 - 1800) / 10.0f;
-            msg.content.rotation.w = (rand() % 3600 - 1800) / 10.0f;
+            float* rot = msg.content.rotation.v;
+            for (int i = 0; i < 4; ++i) {
+                if (!parser.empty())
+                    rot[i] = atof(parser.get_next_word().c_str()) + ((translate) ? rot[i] : 0.0f);
+                else
+                    rot[i] = (rand() % 3600 - 1800) / 10.0f + ((translate) ? rot[i] : 0.0f);
+            }
             msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
             client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
-                msg.content.position.x, msg.content.position.y, msg.content.position.z,
-                msg.content.rotation.x, msg.content.rotation.y, msg.content.rotation.z, msg.content.rotation.w);
+                pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
 //            for (int i = 0; i < 50; ++i)
             client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
         } else if (cmd == "getinfo-detailed") {
@@ -558,9 +600,20 @@ int main(int argc, char** argv) {
             bmmo::cheat_state_msg msg;
             msg.content.cheated = cheat;
             client.send(msg, k_nSteamNetworkingSend_Reliable);
+        } else if (cmd == "list") {
+            client.print_clients();
+        } else if (cmd == "print") {
+            print_states = !print_states;
+            client.set_print_states(print_states);
+        } else if (cmd == "teleport") {
+            client.teleport_to(atoll(parser.get_next_word().c_str()));
+        } else if (cmd == "balltype") {
+            auto msg = client.get_local_state_msg();
+            msg.content.type = atoi(parser.get_next_word().c_str());
+            client.send(msg, k_nSteamNetworkingSend_Reliable);
         } else if (!cmd.empty()) {
             bmmo::chat_msg msg{};
-            msg.chat_content = cmd;
+            msg.chat_content = cmd + " " + parser.get_rest_of_line();
             msg.serialize();
             client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }

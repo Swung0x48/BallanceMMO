@@ -10,6 +10,10 @@ namespace bmmo {
             this->cmd = cmd;
         }
 
+        bool empty() {
+            return cmd.find_first_not_of(" \t\n\v\f\r") == std::string::npos;
+        }
+
         std::string get_next_word() {
             std::string word;
             while (cmd.length() > 0 && cmd[0] == ' ')

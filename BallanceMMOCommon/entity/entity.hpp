@@ -2,17 +2,18 @@
 #define BALLANCEMMOSERVER_ENTITY_HPP
 
 namespace bmmo {
-    struct vec3 {
-        float x = 0.0;
-        float y = 0.0;
-        float z = 0.0;
+    union vec3 {
+        struct {
+            float x, y, z;
+        };
+        float v[3] = {};
     };
 
-    struct quaternion {
-        float x = 0.0;
-        float y = 0.0;
-        float z = 0.0;
-        float w = 0.0;
+    union quaternion {
+        struct {
+            float x, y, z, w;
+        };
+        float v[4] = {};
     };
 }
 
