@@ -157,9 +157,14 @@ public:
             fprintf(stderr, "\r[%s] %s\n> ", time_str.c_str(), pszMsg);
             fflush(stdout);
             fflush(stderr);
-            exit(1);
+            exit(2);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
+            if (!isatty(fileno(stdout))) {
+                printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);
+                fflush(stdout);
+                return;
+            }
 #ifdef _WIN32
 #  if WINVER < _WIN32_WINNT_WIN10  // ansi sequences cannot be used on windows versions below 10
             printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);

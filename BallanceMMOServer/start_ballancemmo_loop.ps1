@@ -8,7 +8,7 @@ try {
   while ($true) {
     $LogName = Get-Date -UFormat "log_%Y%m%d%H%M.log"
     .\BallanceMMOServer.exe --log=$LogName $args
-    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1) {
+    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1 -or ((Get-History)[-1].EndExecutionTime - (Get-History)[-1].StartExecutionTime).TotalSeconds -lt 10) {
       break
     }
     else {

@@ -34,5 +34,6 @@
 #include "timed_ball_state_msg.hpp"
 #include "owned_timed_ball_state_msg.hpp"
 #include "timestamp_msg.hpp"
+#include "private_chat_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

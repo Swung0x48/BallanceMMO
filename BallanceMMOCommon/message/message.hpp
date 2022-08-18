@@ -54,7 +54,9 @@ namespace bmmo {
 
         TimedBallState,
         OwnedTimedBallState,
-        Timestamp
+        Timestamp,
+
+        PrivateChat,
     };
 
     template<typename T, opcode C = None>

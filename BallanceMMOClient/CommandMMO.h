@@ -4,10 +4,11 @@
 class CommandMMO: public ICommand
 {
 private:
-	std::function<void(IBML* bml, const std::vector<std::string>& args)> callback_;
+	std::function<void(IBML* bml, const std::vector<std::string>& args)> execute_callback_;
+	std::function<const std::vector<std::string>(IBML* bml, const std::vector<std::string>& args)> tab_callback_;
 public:
-	CommandMMO(std::function<void(IBML* bml, const std::vector<std::string>& args)> callback):
-		callback_(std::move(callback))
+	CommandMMO(std::function<void(IBML* bml, const std::vector<std::string>& args)> execute_callback, std::function<const std::vector<std::string>(IBML* bml, const std::vector<std::string>& args)> tab_callback):
+		execute_callback_(std::move(execute_callback)), tab_callback_(std::move(tab_callback))
 	{}
 	virtual std::string GetName() override { return "ballancemmo"; };
 	virtual std::string GetAlias() override { return "mmo"; };
@@ -15,10 +16,10 @@ public:
 	virtual bool IsCheat() override { return false; };
 
 	virtual void Execute(IBML* bml, const std::vector<std::string>& args) override {
-		callback_(bml, args);
+		execute_callback_(bml, args);
 	}
 	virtual const std::vector<std::string> GetTabCompletion(IBML* bml, const std::vector<std::string>& args) override {
-		return args.size() == 2 ? std::vector<std::string>{ "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport" } : std::vector<std::string>{};
+		return tab_callback_(bml, args);
 	};
 };
 

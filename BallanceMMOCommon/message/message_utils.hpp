@@ -1,5 +1,8 @@
 #ifndef BALLANCEMMOSERVER_MESSAGE_UTILS_HPP
 #define BALLANCEMMOSERVER_MESSAGE_UTILS_HPP
+#include <string>
+#include <sstream>
+#include <vector>
 #ifdef _WIN32
 # ifndef WIN32_LEAN_AND_MEAN
 # define WIN32_LEAN_AND_MEAN
@@ -39,6 +42,12 @@ namespace bmmo {
             return wstr;
         }
 #endif
+
+        static std::string to_lower(std::string data) {
+            std::transform(data.begin(), data.end(), data.begin(),
+                [](unsigned char c){ return std::tolower(c); });
+            return data;
+        }
 
         static std::string join_strings(const std::vector<std::string>& strings, size_t start) {
             constexpr const size_t MAX_LENGTH = UINT16_MAX;

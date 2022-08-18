@@ -97,11 +97,15 @@ public:
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
     }
 
-    HSteamNetConnection get_client_id(std::string username) {
+    HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) {
         HSteamNetConnection client = k_HSteamNetConnection_Invalid;
-        auto username_it = username_.find(username);
+        std::string lower_username = bmmo::message_utils::to_lower(username);
+        auto username_it = find_if(username_.begin(), username_.end(), [&lower_username](const auto& i) {
+            return bmmo::message_utils::to_lower(i.first) == lower_username;
+        });
         if (username_it == username_.end()) {
-            Printf("Error: client \"%s\" not found.", username);
+            if (!suppress_error)
+                Printf("Error: client \"%s\" not found.", username);
             return k_HSteamNetConnection_Invalid;
         }
         client = username_it->second;
@@ -239,6 +243,15 @@ public:
                         uptime * 1e-6, time_str);
     }
 
+    inline void pull_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls) {
+        for (auto& i: clients_) {
+            std::unique_lock<std::mutex> lock(client_data_mutex_);
+            if (i.second.state.timestamp == 0L)
+                continue;
+            balls.push_back({i.second.state, i.first});
+        }
+    }
+
     inline void pull_unupdated_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls, std::vector<bmmo::owned_timestamp>& unchanged_balls) {
         for (auto& i: clients_) {
             std::unique_lock<std::mutex> lock(client_data_mutex_);
@@ -333,23 +346,10 @@ protected:
         SteamNetConnectionInfo_t pInfo;
         interface_->GetConnectionInfo(client, &pInfo);
         SteamNetworkingIPAddr ip = pInfo.m_addrRemote;
-        std::string ip_str,
-                    uuid_str = get_uuid_string(clients_[client].uuid),
+        char ip_str[64]{};
+        std::string uuid_str = get_uuid_string(clients_[client].uuid),
                     name = clients_[client].name;
-        if (ip.IsIPv4()) {
-            for (int i = 0; i < 4; ++i)
-                ip_str.append("." + std::to_string(ip.m_ipv4.m_ip[i]));
-        } else {
-            std::stringstream ss;
-            for (int i = 0; i < 8; ++i)
-                ss << ":" << std::hex << std::setw(2) << std::setfill('0') << ip.m_ipv6[i];
-            ip_str = ss.str();
-        }
-        ip_str.erase(0, 1);
-        // snprintf(ipAddr, sizeof(ipAddr), "%u.%u.%u.%u", (ipAddress & 0xff000000) >> 24,
-        //                                                (ipAddress & 0x00ff0000) >> 16,
-        //                                                (ipAddress & 0x0000ff00) >> 8,
-        //                                                (ipAddress & 0x000000ff));
+        ip.ToString(ip_str, 64, false);
         YAML::Node login_data;
         std::ifstream ifile("login_data.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
@@ -415,12 +415,13 @@ protected:
         Printf("%s (#%u) disconnected.", name, *client);
     }
 
-    bool client_exists(HSteamNetConnection client) {
+    bool client_exists(HSteamNetConnection client, bool suppress_error = false) {
         if (client == k_HSteamNetConnection_Invalid)
             return false;
         auto it = clients_.find(client);
         if (it == clients_.end()) {
-            Printf("Error: client #%u not found.", client);
+            if (!suppress_error)
+                Printf("Error: client #%u not found.", client);
             return false;
         }
         return true;
@@ -485,7 +486,7 @@ protected:
             nReason = k_ESteamNetConnectionEnd_App_Min + 1;
         }
         // check if name exists
-        else if (username_.find(msg.nickname) != username_.end()) {
+        else if (get_client_id(msg.nickname, true) != k_HSteamNetConnection_Invalid) {
             reason << "A player with the same username \"" << msg.nickname << "\" already exists on this serer.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 2;
         }
@@ -708,6 +709,11 @@ protected:
 		            send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
 
+                bmmo::owned_timed_ball_state_msg state_msg{};
+                pull_ball_states(state_msg.balls);
+                state_msg.serialize();
+                send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
 
@@ -795,6 +801,33 @@ protected:
                 // No need to ignore the sender, 'cause we will send the message back
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
+                break;
+            }
+            case bmmo::PrivateChat: {
+                bmmo::private_chat_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
+                    [](char c) { return std::iscntrl(c); }, ' ');
+                const HSteamNetConnection receiver = msg.player_id;
+                msg.player_id = networking_msg->m_conn;
+
+                if (client_exists(receiver, true)) {
+                    Printf("(%u, %s) -> (%u, %s): %s",
+                        msg.player_id, client_it->second.name, receiver, clients_[receiver].name, msg.chat_content);
+                    msg.clear();
+                    msg.serialize();
+                    send(receiver, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                } else {
+                    Printf("(%u, %s) -> (%u, %s): %s",
+                        msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
+                    if (receiver != k_HSteamNetConnection_Invalid) {
+                        bmmo::action_denied_msg denied_msg;
+                        denied_msg.content.reason = bmmo::deny_reason::TargetNotFound;
+                        send(msg.player_id, denied_msg, k_nSteamNetworkingSend_Reliable);
+                    }
+                };
                 break;
             }
             case bmmo::Countdown: {
@@ -1232,7 +1265,7 @@ int main(int argc, char** argv) {
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
         } else if (cmd == "getpos") {
             server.print_positions();
-        } else if (cmd == "kick" || cmd == "crash" || cmd == "fatalerror") {
+        } else if (cmd == "kick" || cmd == "crash" || cmd == "fatalerror" || cmd == "whisper") {
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             std::string client_input = parser.get_next_word();
             if (client_input.length() > 0 && client_input[0] == '#') {
@@ -1244,13 +1277,21 @@ int main(int argc, char** argv) {
             } else {
                 client = server.get_client_id(client_input);
             }
-            std::string reason = parser.get_rest_of_line();
-            bmmo::crash_type crash = bmmo::crash_type::None;
-            if (cmd == "crash")
-                crash = bmmo::crash_type::Crash;
-            else if (cmd == "fatalerror")
-                crash = bmmo::crash_type::FatalError;
-            server.kick_client(client, reason, k_HSteamNetConnection_Invalid, crash);
+            std::string text = parser.get_rest_of_line();
+            if (cmd == "whisper") {
+                bmmo::private_chat_msg msg{};
+                msg.chat_content = text;
+                msg.serialize();
+                server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                server.Printf("([Server]) -> #%u: %s.", client, msg.chat_content);
+            } else {
+                bmmo::crash_type crash = bmmo::crash_type::None;
+                if (cmd == "crash")
+                    crash = bmmo::crash_type::Crash;
+                else if (cmd == "fatalerror")
+                    crash = bmmo::crash_type::FatalError;
+                server.kick_client(client, text, k_HSteamNetConnection_Invalid, crash);
+            }
         } else if (cmd == "op" || cmd == "deop") {
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             std::string client_input = parser.get_next_word();

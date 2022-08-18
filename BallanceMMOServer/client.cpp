@@ -18,7 +18,9 @@
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
 
-#include "ya_getopt.h"
+#include <asio/io_service.hpp>
+#include <asio/ip/tcp.hpp>
+#include <ya_getopt.h>
 
 bool cheat = false;
 struct client_data {
@@ -30,16 +32,28 @@ struct client_data {
 class client: public role {
 public:
     bool connect(const std::string& connection_string) {
-        SteamNetworkingIPAddr server_address{};
-        if (!server_address.ParseString(connection_string.c_str())) {
-            return false;
+        bmmo::hostname_parser hp(connection_string);
+        using asio::ip::tcp; // tired of writing it out
+        asio::io_service io_service;
+        tcp::resolver resolver(io_service);
+        tcp::resolver::query query(hp.get_address(), hp.get_port());
+        tcp::resolver::iterator iter = resolver.resolve(query), end;
+        while (iter != end) {
+            tcp::endpoint ep = *iter++;
+            std::string resolved_addr = ep.address().to_string() + ":" + std::to_string(ep.port());
+            Printf("Trying %s...", resolved_addr);
+            SteamNetworkingIPAddr server_address{};
+            if (!server_address.ParseString(resolved_addr.c_str())) {
+                return false;
+            }
+            SteamNetworkingConfigValue_t opt = generate_opt();
+            connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
+            if (connection_ == k_HSteamNetConnection_Invalid)
+                continue;
+            io_service.stop();
+            return true;
         }
-        SteamNetworkingConfigValue_t opt = generate_opt();
-        connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
-        if (connection_ == k_HSteamNetConnection_Invalid)
-            return false;
-
-        return true;
+        return false;
     }
 
     void run() override {
@@ -98,10 +112,11 @@ public:
     void print_clients() {
         Printf("%d clients online:", clients_.size());
         for (auto& i: clients_) {
-            Printf("%u: %s%s",
+            Printf("%u: %s%s, (%.2f, %.2f, %.2f)",
                     i.first,
                     i.second.name,
-                    i.second.cheated ? " [CHEAT]" : "");
+                    i.second.cheated ? " [CHEAT]" : "",
+                    i.second.state.position.v[0], i.second.state.position.v[1], i.second.state.position.v[2]);
         }
     }
 
@@ -145,6 +160,21 @@ public:
         while (!running()) {
             std::unique_lock<std::mutex> lk(startup_mutex_);
             startup_cv_.wait(lk);
+        }
+    }
+
+    void whisper_to(const HSteamNetConnection player_id, const std::string& message) {
+        if (auto it = clients_.find(player_id); it != clients_.end() || player_id == k_HSteamNetConnection_Invalid) {
+            Printf("Whispering to (%u, %s): %s", player_id,
+                (player_id == k_HSteamNetConnection_Invalid) ? "[Server]" : it->second.name, message);
+            bmmo::private_chat_msg msg{};
+            msg.player_id = player_id;
+            msg.chat_content = message;
+            msg.serialize();
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        else {
+            Printf("Player not found.");
         }
     }
 
@@ -324,6 +354,17 @@ private:
                     Printf("(%u, %s): %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
                 break;
             }
+            case bmmo::PrivateChat: {
+                bmmo::private_chat_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                if (msg.player_id == k_HSteamNetConnection_Invalid)
+                    Printf("[Server] whispers to you: %s", msg.chat_content.c_str());
+                else
+                    Printf("(%u, %s) whispers to you: %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
+                break;
+            }
             case bmmo::CheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
                 cheat = msg->content.cheated;
@@ -482,9 +523,6 @@ int main(int argc, char** argv) {
     bool print_states = false;
     if (parse_args(argc, argv, server_addr, username, uuid, log_path, &print_states) != 0)
         return 0;
-    
-    bmmo::hostname_parser hp(server_addr);
-    server_addr = hp.get_address() + ":" + hp.get_port();
 
     FILE* log_file = nullptr;
     if (!log_path.empty()) {
@@ -587,6 +625,9 @@ int main(int argc, char** argv) {
         } else if (cmd == "reconnect") {
             if (client_thread.joinable())
                 client_thread.join();
+            
+            if (!parser.empty())
+                server_addr = parser.get_next_word();
 
             if (!client.connect(server_addr)) {
                 std::cerr << "Cannot connect to server." << std::endl;
@@ -596,7 +637,10 @@ int main(int argc, char** argv) {
             client_thread = std::move(std::thread([&client]() { client.run(); }));
             client.wait_till_started();
         } else if (cmd == "cheat") {
-            cheat = !cheat;
+            if (!parser.empty())
+                cheat = (parser.get_next_word() == "on") ? true : false;
+            else
+                cheat = !cheat;
             bmmo::cheat_state_msg msg;
             msg.content.cheated = cheat;
             client.send(msg, k_nSteamNetworkingSend_Reliable);
@@ -611,6 +655,9 @@ int main(int argc, char** argv) {
             auto msg = client.get_local_state_msg();
             msg.content.type = atoi(parser.get_next_word().c_str());
             client.send(msg, k_nSteamNetworkingSend_Reliable);
+        } else if (cmd == "whisper") {
+            HSteamNetConnection dest = atoll(parser.get_next_word().c_str());
+            client.whisper_to(dest, parser.get_rest_of_line());
         } else if (!cmd.empty()) {
             bmmo::chat_msg msg{};
             msg.chat_content = cmd + " " + parser.get_rest_of_line();

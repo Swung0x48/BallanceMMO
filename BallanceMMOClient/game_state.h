@@ -88,11 +88,10 @@ public:
 	}
 
 	std::optional<const PlayerState> get_from_nickname(std::string name) {
-		auto it = std::find_if(states_.begin(), states_.end(),
-													 [&name](const auto& s) { return s.second.name == name; });
-		if (it == states_.end())
+		auto id = get_client_id(name);
+		if (id == k_HSteamNetConnection_Invalid)
 			return {};
-		return it->second;
+		return states_[id];
 	}
 
 	bool exists(HSteamNetConnection id) {
@@ -236,6 +235,14 @@ public:
 
 	HSteamNetConnection get_client_id() {
 		return assigned_id_;
+	}
+
+	HSteamNetConnection get_client_id(std::string name) {
+		auto it = std::find_if(states_.begin(), states_.end(),
+													 [&name](const auto& s) { return boost::iequals(s.second.name, name); });
+		if (it == states_.end())
+			return k_HSteamNetConnection_Invalid;
+		return it->first;
 	}
 
 	void set_ball_id(const std::string& name, const uint32_t id) {

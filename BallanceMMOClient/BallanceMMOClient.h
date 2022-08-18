@@ -86,6 +86,7 @@ private:
 	void OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) override;
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
+	const std::vector<std::string> OnTabComplete(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
 
@@ -342,25 +343,25 @@ private:
 		own_ball_visible_ = visible;
 	}
 
-	InputHook* input_manager = nullptr;
+	InputHook* input_manager_ = nullptr;
 	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
 		// Toggle status
-		if (input_manager->IsKeyPressed(CKKEY_F3)) {
+		if (input_manager_->IsKeyPressed(CKKEY_F3)) {
 			ping_->toggle();
 			status_->toggle();
 		}
 
 		// Toggle nametag
-		if (input_manager->IsKeyPressed(CKKEY_TAB)) {
+		if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
 			db_.toggle_nametag_visible();
 		}
 
-		if (input_manager->IsKeyDown(CKKEY_LCONTROL) && connected()) {
+		if (input_manager_->IsKeyDown(CKKEY_LCONTROL) && connected()) {
 		  if (m_bml->IsIngame()) {
 				for (int i = 0; i <= 3; ++i) {
-					if (input_manager->IsKeyPressed(keys_to_check[i])) {
+					if (input_manager_->IsKeyPressed(keys_to_check[i])) {
 						// std::vector<std::string> args(init_args);
 						// OnCommand(m_bml, args);
 						bmmo::countdown_msg msg{};
@@ -371,12 +372,23 @@ private:
 						send(msg, k_nSteamNetworkingSend_Reliable);
 					}
 				}
-				if (input_manager->IsKeyPressed(CKKEY_GRAVE)) {
+				if (input_manager_->IsKeyPressed(CKKEY_GRAVE)) {
 					// toggle own ball
 					toggle_own_spirit_ball(!own_ball_visible_);
 				}
+				if (input_manager_->IsKeyDown(CKKEY_LSHIFT) && input_manager_->IsKeyPressed(CKKEY_UP)) {
+					CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
+					VxVector orient[3] = { {0, 0, -1}, {0, 1, 0}, {-1, 0, 0} };
+					VxVector pos;
+					camMF->GetPosition(&pos);
+					m_bml->RestoreIC(camMF, true);
+					camMF->SetOrientation(orient[0], orient[1], orient + 2);
+					camMF->SetPosition(pos);
+					m_dynamicPos->ActivateInput(0);
+					m_dynamicPos->Activate();
+				}
 			}
-			if (input_manager->IsKeyPressed(CKKEY_D)) {
+			if (input_manager_->IsKeyPressed(CKKEY_D)) {
 				if (current_map_.level == 0)
 					return;
 				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
@@ -532,9 +544,10 @@ private:
 	}
 
 	void assemble_and_send_state() {
+		static_assert(sizeof(VxVector) == sizeof(bmmo::vec3));
+		static_assert(sizeof(VxQuaternion) == sizeof(bmmo::quaternion));
 		if (local_ball_state_changed_) {
 			bmmo::timed_ball_state_msg msg{};
-			// assert(sizeof(msg.content) == sizeof(local_ball_state_));
 			std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
 			msg.content.timestamp = local_ball_state_.timestamp;
 			send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
@@ -555,6 +568,13 @@ private:
 			local_ball_state_.rotation.w
 		);
 #endif // DEBUG
+	}
+
+	void assemble_and_send_state_forced() {
+		bmmo::timed_ball_state_msg msg{};
+		std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
+		msg.content.timestamp = local_ball_state_.timestamp;
+		send(msg, k_nSteamNetworkingSend_Reliable);
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
