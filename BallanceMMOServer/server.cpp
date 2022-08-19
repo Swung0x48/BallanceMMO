@@ -246,7 +246,7 @@ public:
     inline void pull_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls) {
         for (auto& i: clients_) {
             std::unique_lock<std::mutex> lock(client_data_mutex_);
-            if (i.second.state.timestamp == 0L)
+            if (i.second.state.timestamp.is_zero())
                 continue;
             balls.push_back({i.second.state, i.first});
         }

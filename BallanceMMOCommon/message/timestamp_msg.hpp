@@ -25,6 +25,9 @@ namespace bmmo {
         bool operator==(const int64_t t) const {
             return ((int64_t)v[0] << 32 | v[1]) == t;
         }
+        bool is_zero() const {
+            return v[0] == 0 && v[1] == 0;
+        }
     };
 
     typedef struct message<timestamp_t, Timestamp> timestamp_msg;
