@@ -44,6 +44,13 @@ add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
 add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
+if (MSVC)
+    target_compile_options(BallanceMMOServer PRIVATE /Wall)
+    target_compile_options(BallanceMMOMockClient PRIVATE /Wall)
+else()
+    target_compile_options(BallanceMMOServer PRIVATE -Wall -Wextra)
+    target_compile_options(BallanceMMOMockClient PRIVATE -Wall -Wextra)
+endif()
 
 
 # os specific scripts

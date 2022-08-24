@@ -30,7 +30,7 @@ namespace bmmo {
         static std::string get_random_nickname() {
             time_t current_time = std::time(nullptr);
             auto time_struct = std::localtime(&current_time);
-            std::srand(current_time);
+            std::srand((unsigned int) current_time);
             std::string name(15, 0);
             name.resize(std::sprintf(name.data(), "Player%03d_%02d%02d",
                 std::rand() % 1000, time_struct->tm_mon + 1, time_struct->tm_mday));

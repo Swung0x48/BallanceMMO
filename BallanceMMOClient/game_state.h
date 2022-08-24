@@ -26,7 +26,7 @@ struct TimedBallState : BallState {
 	}
 	TimedBallState(bmmo::timed_ball_state* state) {
 		std::memcpy(this, state, sizeof(BallState));
-		timestamp = (int64_t) state->timestamp;
+		timestamp = static_cast<int64_t>(state->timestamp);
 	};
 };
 
@@ -62,7 +62,7 @@ struct PlayerState {
 			state1.position * (((tc - state2.timestamp) * (tc - state3.timestamp)) / static_cast<double>(t21 * t31))
 			+ state2.position * (((tc - state1.timestamp) * (tc - state3.timestamp)) / -static_cast<double>(t21 * t32))
 			+ state3.position * (((tc - state1.timestamp) * (tc - state2.timestamp)) / static_cast<double>(t31 * t32)),
-			Slerp(static_cast<double>(tc - state2.timestamp) / t32, state2.rotation, state3.rotation)
+			Slerp(static_cast<float>(tc - state2.timestamp) / t32, state2.rotation, state3.rotation)
 		};
 	}
 };

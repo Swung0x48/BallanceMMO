@@ -17,17 +17,17 @@ namespace bmmo {
 
     struct level_finish_v2 {
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
-        int points = 0;
-        int lives = 0;
-        int lifeBonus = 0;
-        int levelBonus = 0;
+        int32_t points = 0;
+        int32_t lives = 0;
+        int32_t lifeBonus = 0;
+        int32_t levelBonus = 0;
         float timeElapsed = 0.0f;
 
-        int startPoints = 0;
+        int32_t startPoints = 0;
         bool cheated = false;
 
         struct map map;
-        int rank = 0;
+        int32_t rank = 0;
     };
 
     typedef struct message<level_finish_v2, LevelFinishV2> level_finish_v2_msg;

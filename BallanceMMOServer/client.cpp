@@ -414,6 +414,8 @@ private:
                         Printf("Unknown action request received.");
                         break;
                     }
+                    default:
+                        break;
                 }
                 break;
             }

@@ -107,10 +107,10 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
-				if (extrapolation_) {
+				if (extrapolation_ && (SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE)) {
 					SteamNetworkingMicroseconds tc = timestamp;
-					if (state_it->timestamp + 262144 < timestamp)
-						tc = state_it->timestamp + 262144;
+					if (state_it->timestamp + MAX_EXTRAPOLATION_TIME < timestamp)
+						tc = state_it->timestamp + MAX_EXTRAPOLATION_TIME;
 					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(tc, state_it[2], state_it[1], state_it[0]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
@@ -271,4 +271,6 @@ private:
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false;
+	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 131072;
+	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
 };

@@ -22,7 +22,7 @@ struct client_data {
     std::string name;
     bool cheated = false;
     uint8_t uuid[16]{};
-    bmmo::timed_ball_state state;
+    bmmo::timed_ball_state state{};
     bool state_updated = true;
     bool timestamp_updated = true;
 };
@@ -731,7 +731,7 @@ protected:
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
                 std::unique_lock<std::mutex> lock(client_data_mutex_);
-                // clients_[networking_msg->m_conn].state = state_msg->content;
+                clients_[networking_msg->m_conn].state = {state_msg->content, SteamNetworkingUtils()->GetLocalTimestamp()};
                 client_it->second.state_updated = false;
 
                 // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",

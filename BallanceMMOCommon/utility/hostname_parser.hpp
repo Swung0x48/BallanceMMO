@@ -10,7 +10,7 @@ namespace bmmo {
         hostname_parser(const std::string& str) {
             size_t pos = str.rfind(":");
             address = (pos == str.rfind("::") + 1) ? str : str.substr(0, pos);
-            port = (pos == -1 || (pos + 1) == str.length() || pos == str.rfind("::") + 1) ? "26676" : str.substr(pos + 1);
+            port = (pos == str.npos || (pos + 1) == str.length() || pos == str.rfind("::") + 1) ? "26676" : str.substr(pos + 1);
         };
 
         std::pair<std::string, std::string> get_host_components() const {

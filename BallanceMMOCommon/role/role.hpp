@@ -179,7 +179,7 @@ public:
             short width = w.ws_col;
 #endif
 #if WINVER >= _WIN32_WINNT_WIN10
-            unsigned short lines = (strlen(pszMsg) + 17) / width + 1;
+            unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
             printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, time_str.c_str(), pszMsg, lines);
             fflush(stdout);
 #endif

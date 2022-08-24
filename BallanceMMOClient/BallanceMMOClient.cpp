@@ -220,6 +220,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         reset_timer_ = true;
         if (connected()) {
             send_current_map_name();
+            assemble_and_send_state_forced();
         };
         GetLogger()->Info("Initialization completed.");
     }
@@ -246,7 +247,9 @@ void BallanceMMOClient::OnPostStartMenu()
     else {
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
+        ping_->sprite_->SetFont("Arial", 10, 500, false, false);
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
+        status_->sprite_->SetFont("Times New Roman", 11, 500, false, false);
         status_->paint(0xffff0000);
 
         using namespace std::placeholders;
@@ -337,7 +340,7 @@ void BallanceMMOClient::OnLevelFinish() {
     array_energy->GetElementValue(0, 5, &msg.content.lifeBonus);
     m_bml->GetArrayByName("CurrentLevel")->GetElementValue(0, 0, &current_map_.level);
     m_bml->GetArrayByName("AllLevel")->GetElementValue(current_map_.level - 1, 6, &msg.content.levelBonus);
-    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_bytes_string()]) / 1e3;
+    msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - level_start_timestamp_[current_map_.get_hash_bytes_string()]) / 1e3f;
     reset_timer_ = true;
     msg.content.cheated = m_bml->IsCheatEnabled();
     msg.content.map = current_map_;
@@ -532,6 +535,19 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 msg.content.player_id = db_.get_client_id();
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
+            else if (lower1 == "reload" || lower1 == "rl") {
+                if (!connected() || !m_bml->IsIngame())
+                    return;
+                objects_.destroy_all_objects();
+                objects_.init_players();
+                SendIngameMessage("Reload completed.");
+            }
+            else if (lower1 == "g") {
+                db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    SendIngameMessage(Sprintf("%s: %lld, %lld", pair.second.name, pair.second.time_diff, pair.second.ball_state.front().timestamp));
+                    return true;
+                });
+            }
             /*else if (lower1 == "p") {
                 objects_.physicalize_all();
             } else if (lower1 == "f") {
@@ -564,7 +580,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return;
                 std::optional<PlayerState> state;
                 if (args[2][0] == '#')
-                    state = db_.get(atoll(args[2].substr(1).c_str()));
+                    state = db_.get((HSteamNetConnection) atoll(args[2].substr(1).c_str()));
                 else
                     state = db_.get_from_nickname(args[2]);
                 if (!state.has_value()) {
@@ -613,7 +629,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         else if (lower1 == "kick") {
             bmmo::kick_request_msg msg{};
             if (args[2][0] == '#')
-                msg.player_id = atoll(args[2].substr(1).c_str());
+                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
             else
                 msg.player_name = args[2];
             if (length > 3) {
@@ -626,7 +642,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         else if (length >= 4 && (lower1 == "whisper" || lower1 == "w")) {
             bmmo::private_chat_msg msg{};
             if (args[2][0] == '#')
-                msg.player_id = atoll(args[2].substr(1).c_str());
+                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
             else
                 msg.player_id = (args[2] == db_.get_nickname()) ? db_.get_client_id() : db_.get_client_id(args[2]);
             msg.chat_content = bmmo::message_utils::join_strings(args, 3);

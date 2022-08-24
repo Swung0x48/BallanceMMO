@@ -52,7 +52,7 @@ namespace bmmo {
     struct map {
         map_type type = map_type::Unknown;
         uint8_t md5[16];
-        uint32_t level = 0;
+        int32_t level = 0;
 
         bool is_original_level() const {
             if (type != map_type::OriginalLevel) return false;

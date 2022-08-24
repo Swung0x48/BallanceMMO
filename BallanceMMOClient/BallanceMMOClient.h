@@ -159,7 +159,7 @@ private:
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
 	SteamNetworkingMicroseconds next_update_timestamp_ = 0, last_dnf_hotkey_timestamp_ = 0;
-	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = 1e6 / 66;
+	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = (int)1e6 / 66;
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;
@@ -335,6 +335,7 @@ private:
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
+			db_.update(db_.get_client_id(), std::move(local_ball_state_));
 		}
 		else {
 			db_.remove(db_.get_client_id());
@@ -715,7 +716,7 @@ private:
 		s += "ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n";
 		s += std::format("Tx: {:.0f}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
 		s += std::format("Rx: {:.0f}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
-		s += "Est. MaxBandwidth: " + pretty_bytes(status.m_nSendRateBytesPerSecond) + "/s\n";
+		s += "Est. MaxBandwidth: " + pretty_bytes((float)status.m_nSendRateBytesPerSecond) + "/s\n";
 		s += std::format("Queue time: {}" + mu + "s\n", status.m_usecQueueTime);
 		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
 		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
@@ -743,7 +744,7 @@ private:
 		char buf[1024 * 16];
 		while (file.good()) {
 			file.read(buf, sizeof(buf));
-			MD5_Update(&md5Context, buf, file.gcount());
+			MD5_Update(&md5Context, buf, (size_t) file.gcount());
 		}
 		MD5_Final(result, &md5Context);
 	}
