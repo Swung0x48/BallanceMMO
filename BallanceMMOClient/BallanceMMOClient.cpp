@@ -220,7 +220,10 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         reset_timer_ = true;
         if (connected()) {
             send_current_map_name();
-            assemble_and_send_state_forced();
+            if (get_current_ball() != nullptr) {
+                poll_player_ball_state();
+                assemble_and_send_state_forced();
+            }
         };
         GetLogger()->Info("Initialization completed.");
     }
@@ -542,9 +545,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 objects_.init_players();
                 SendIngameMessage("Reload completed.");
             }
-            else if (lower1 == "g") {
+            else if (lower1 == "gettimestamp") {
                 db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    SendIngameMessage(Sprintf("%s: %lld, %lld", pair.second.name, pair.second.time_diff, pair.second.ball_state.front().timestamp));
+                    SendIngameMessage(Sprintf("%s: last recalibrated timestamp: %lld; mean time diff: %.4lf s.", pair.second.name, pair.second.ball_state.front().timestamp, pair.second.time_diff / 1e6l));
                     return true;
                 });
             }
@@ -991,8 +994,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         memcpy(hash_msg.md5, balls_nmo_md5_, 16);
         hash_msg.serialize();
         send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
-        if (m_bml->IsIngame())
+        if (m_bml->IsIngame() && get_current_ball() != nullptr) {
+            poll_player_ball_state();
             assemble_and_send_state_forced();
+        }
         break;
     }
     case bmmo::PlayerConnected: {
