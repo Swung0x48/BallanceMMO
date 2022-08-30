@@ -80,7 +80,7 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
-	void OnPreEndLevel() override;
+	void OnLevelFinish() override;
 	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
 	void OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) override;

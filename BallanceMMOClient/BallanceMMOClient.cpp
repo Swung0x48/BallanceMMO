@@ -328,9 +328,8 @@ void BallanceMMOClient::OnStartLevel()
     //objects_.init_players();
 }
 
-// OnLevelFinish may give wrong values of extra points
-//void BallanceMMOClient::OnLevelFinish() {
-void BallanceMMOClient::OnPreEndLevel() {
+// may give wrong values of extra points
+void BallanceMMOClient::OnLevelFinish() {
     if (spectator_mode_)
         return;
     bmmo::level_finish_v2_msg msg{};
@@ -1112,7 +1111,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         switch (msg->content.type) {
             case bmmo::countdown_type::Go: {
                 SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
-                if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame())
+                if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
                 if (msg->content.restart_level) {
                     countdown_restart_ = true;
