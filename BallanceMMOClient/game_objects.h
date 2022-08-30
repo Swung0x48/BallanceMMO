@@ -271,6 +271,6 @@ private:
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false;
-	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 131072;
+	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 196608;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
 };

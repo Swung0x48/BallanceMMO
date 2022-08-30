@@ -1,6 +1,7 @@
 #ifndef BALLANCEMMOSERVER_NAME_VALIDATOR_HPP
 #define BALLANCEMMOSERVER_NAME_VALIDATOR_HPP
 #include <string>
+#include <ctime>
 
 namespace bmmo {
     class name_validator {
@@ -12,6 +13,17 @@ namespace bmmo {
         static std::size_t get_invalid_char_pos(const std::string& name) {
             return name.find_first_not_of(valid_chars);
         };
+
+        static bool is_spectator(const std::string& name) {
+            return name.starts_with('*');
+        }
+
+        // spectator name pattern: *NICKNAME
+        static std::string get_real_nickname(std::string name) {
+            if (is_spectator(name))
+                name.erase(0, 1);
+            return name;
+        }
 
         static bool is_of_valid_length(const std::string& name) {
             return (name.length() >= min_length && name.length() <= max_length);

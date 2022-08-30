@@ -269,7 +269,7 @@ public:
     void set_op(HSteamNetConnection client, bool op) {
         if (!client_exists(client))
             return;
-        std::string name = clients_[client].name;
+        std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
         if (op) {
             if (op_players_.find(name) != op_players_.end()) {
                 if (op_players_[name] == get_uuid_string(clients_[client].uuid)) {
@@ -457,7 +457,8 @@ protected:
     bool is_op(HSteamNetConnection client) {
         if (!client_exists(client))
             return false;
-        auto op_it = op_players_.find(clients_[client].name);
+        std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
+        auto op_it = op_players_.find(name);
         if (op_it == op_players_.end())
             return false;
         if (op_it->second == get_uuid_string(clients_[client].uuid))
@@ -466,11 +467,9 @@ protected:
     }
 
     bool op_online() {
-        for (auto& op : op_players_) {
-            if (username_.find(op.first) != username_.end()) {
-                if (op.second == get_uuid_string(clients_[username_[op.first]].uuid))
-                    return true;
-            }
+        for (auto& client : clients_) {
+            if (is_op(client.first))
+                return true;
         }
         return false;
     }
@@ -478,6 +477,7 @@ protected:
     bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
+        std::string real_nickname = bmmo::name_validator::get_real_nickname(msg.nickname);
 
         // verify client version
         if (msg.version < bmmo::minimum_client_version) {
@@ -491,16 +491,16 @@ protected:
             nReason = k_ESteamNetConnectionEnd_App_Min + 2;
         }
         // validate nickname length
-        else if (!bmmo::name_validator::is_of_valid_length(msg.nickname)) {
+        else if (!bmmo::name_validator::is_of_valid_length(real_nickname)) {
             reason << "Nickname must be between "
                     << bmmo::name_validator::min_length << " and "
                     << bmmo::name_validator::max_length << " characters in length.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 3;
         }
         // validate nickname characters
-        else if (size_t invalid_pos = bmmo::name_validator::get_invalid_char_pos(msg.nickname);
+        else if (size_t invalid_pos = bmmo::name_validator::get_invalid_char_pos(real_nickname);
                 invalid_pos != std::string::npos) {
-            reason << "Invalid character '" << msg.nickname[invalid_pos] << "' at position "
+            reason << "Invalid character '" << real_nickname[invalid_pos] << "' at position "
                     << invalid_pos << "; nicknames can only contain alphanumeric characters and underscores.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 4;
         }

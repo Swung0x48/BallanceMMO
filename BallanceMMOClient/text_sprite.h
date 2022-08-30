@@ -5,7 +5,7 @@
 struct text_sprite {
 	std::unique_ptr<BGui::Text> sprite_;
 	std::mutex mtx_;
-	bool visible_ = true;
+	bool visible_ = false;
 
 	text_sprite() = delete;
 	text_sprite(const text_sprite&) = delete;
@@ -45,9 +45,12 @@ struct text_sprite {
 		std::unique_lock lk(mtx_);
 		sprite_->SetTextColor(color);
 	}
-	void toggle() {
+	void set_visible(bool visible) {
 		std::unique_lock lk(mtx_);
-		visible_ = !visible_;
+		visible_ = visible;
 		sprite_->SetVisible(visible_);
+	}
+	void toggle() {
+		set_visible(!visible_);
 	}
 };

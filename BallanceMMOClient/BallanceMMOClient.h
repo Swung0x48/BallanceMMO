@@ -7,6 +7,7 @@
 #include "client.h"
 #include "game_state.h"
 #include "game_objects.h"
+#include "local_state_handler_impl.h"
 #include "dumpfile.h"
 #include <unordered_map>
 #include <mutex>
@@ -18,7 +19,6 @@
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/regex.hpp>
-#include <boost/algorithm/string.hpp>
 #include <boost/circular_buffer.hpp>
 #include <openssl/md5.h>
 // #include <openssl/sha.h>
@@ -80,7 +80,7 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
-	void OnLevelFinish() override;
+	void OnPreEndLevel() override;
 	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
 	void OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) override;
@@ -106,7 +106,8 @@ private:
 	bool show_console();
 	bool hide_console();
 
-	void init_connection(std::string address = "");
+	void connect_to_server(std::string address = "");
+	void disconnect_from_server();
 
 	static void terminate(long delay);
 
@@ -141,13 +142,12 @@ private:
 	//uint64_t id_ = 0;
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
+	std::shared_ptr<text_sprite> spectator_label_;
 
 	game_state db_;
 	game_objects objects_;
 
 	CK3dObject* player_ball_ = nullptr;
-	TimedBallState local_ball_state_{};
-	std::atomic_bool local_ball_state_changed_ = true;
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
@@ -155,6 +155,9 @@ private:
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
 
+	std::unique_ptr<local_state_handler_interface> local_state_handler_;
+	bool spectator_mode_ = false;
+	std::string server_addr;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
@@ -192,6 +195,10 @@ private:
 		tmp_prop->SetComment("The port that server is running on.");
 		tmp_prop->SetDefaultInteger(50000);
 		props_["remote_port"] = tmp_prop;*/
+		tmp_prop = GetConfig()->GetProperty("Remote", "SpectatorMode");
+		tmp_prop->SetComment("Whether to connect to the server as a spectator. Spectators are invisible to other players.");
+		tmp_prop->SetDefaultBoolean(false);
+		props_["spectator"] = tmp_prop;
 
 		GetConfig()->SetCategoryComment("Player", "Who are you?");
 		tmp_prop = GetConfig()->GetProperty("Player", "Playername");
@@ -213,7 +220,7 @@ private:
 		}
 		props_["uuid"] = tmp_prop;
 		GetConfig()->SetCategoryComment("Gameplay", "Settings for your actual gameplay experience in multiplayer.");
-		tmp_prop = GetConfig()->GetProperty("Gameplay", "Enable Extrapolation");
+		tmp_prop = GetConfig()->GetProperty("Gameplay", "Extrapolation");
 		tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother at a slight cost of accuracy.");
 		tmp_prop->SetDefaultBoolean(true);
 		objects_.toggle_extrapolation(tmp_prop->GetBoolean());
@@ -335,7 +342,7 @@ private:
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
-			db_.update(db_.get_client_id(), std::move(local_ball_state_));
+			db_.update(db_.get_client_id(), std::move(local_state_handler_->get_local_state()));
 		}
 		else {
 			db_.remove(db_.get_client_id());
@@ -390,7 +397,7 @@ private:
 				}
 			}
 			if (input_manager_->IsKeyPressed(CKKEY_D)) {
-				if (current_map_.level == 0)
+				if (current_map_.level == 0 || spectator_mode_)
 					return;
 				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 				if (timestamp - last_dnf_hotkey_timestamp_ <= 5000000) {
@@ -524,58 +531,8 @@ private:
 			OnTrafo(db_.get_ball_id(player_ball_->GetName()), db_.get_ball_id(ball->GetName()));
 			// Update current player ball
 			player_ball_ = ball;
-			local_ball_state_.type = db_.get_ball_id(player_ball_->GetName());
-			local_ball_state_changed_ = true;
+			local_state_handler_->set_ball_type(db_.get_ball_id(player_ball_->GetName()));
 		}
-	}
-
-	void poll_player_ball_state() {
-		VxVector position; VxQuaternion rotation;
-		player_ball_->GetPosition(&position);
-		player_ball_->GetQuaternion(&rotation);
-		if (position == local_ball_state_.position && rotation == local_ball_state_.rotation) {
-			local_ball_state_changed_ = false;
-		}
-		else {
-			memcpy(&local_ball_state_.position, &position, sizeof(VxVector));
-			memcpy(&local_ball_state_.rotation, &rotation, sizeof(VxQuaternion));
-			local_ball_state_changed_ = true;
-		}
-		local_ball_state_.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-	}
-
-	void assemble_and_send_state() {
-		static_assert(sizeof(VxVector) == sizeof(bmmo::vec3));
-		static_assert(sizeof(VxQuaternion) == sizeof(bmmo::quaternion));
-		if (local_ball_state_changed_) {
-			bmmo::timed_ball_state_msg msg{};
-			std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
-			msg.content.timestamp = local_ball_state_.timestamp;
-			send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
-		}
-		else {
-			bmmo::timestamp_msg msg{};
-			msg.content = local_ball_state_.timestamp;
-			send(msg, k_nSteamNetworkingSend_UnreliableNoNagle);
-		}
-#ifdef DEBUG
-		GetLogger()->Info("(%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
-			local_ball_state_.position.x,
-			local_ball_state_.position.y,
-			local_ball_state_.position.z,
-			local_ball_state_.rotation.x,
-			local_ball_state_.rotation.y,
-			local_ball_state_.rotation.z,
-			local_ball_state_.rotation.w
-		);
-#endif // DEBUG
-	}
-
-	void assemble_and_send_state_forced() {
-		bmmo::timed_ball_state_msg msg{};
-		std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
-		msg.content.timestamp = local_ball_state_.timestamp;
-		send(msg, k_nSteamNetworkingSend_Reliable);
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
@@ -603,6 +560,8 @@ private:
 		db_.clear();
 		objects_.destroy_all_objects();
 
+		local_state_handler_.reset();
+
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();
 
@@ -618,6 +577,11 @@ private:
 		if (status_) {
 			status_->update("Disconnected");
 			status_->paint(0xffff0000);
+		}
+
+		if (spectator_label_) {
+			spectator_label_->set_visible(false);
+			spectator_label_.reset();
 		}
 	}
 

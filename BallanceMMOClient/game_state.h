@@ -10,6 +10,7 @@
 #include <shared_mutex>
 #include <atomic>
 #include <boost/circular_buffer.hpp>
+#include <boost/algorithm/string.hpp>
 
 struct BallState {
 	uint32_t type = 0;
@@ -141,7 +142,7 @@ public:
 
 		std::unique_lock lk(mutex_);
 		state.timestamp = get_updated_timestamp(id, state.timestamp);
-		if (state.timestamp < states_[id].ball_state.front().timestamp)
+		if (state.timestamp <= states_[id].ball_state.front().timestamp)
 			return true;
 		states_[id].ball_state.push_front(state);
 		return true;
@@ -154,7 +155,7 @@ public:
 		std::unique_lock lk(mutex_);
 		TimedBallState last_state_copy(states_[id].ball_state.front());
 		timestamp = get_updated_timestamp(id, timestamp);
-		if (timestamp < last_state_copy.timestamp)
+		if (timestamp <= last_state_copy.timestamp)
 			return true;
 		last_state_copy.timestamp = timestamp;
 		states_[id].ball_state.push_front(last_state_copy);

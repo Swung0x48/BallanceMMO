@@ -42,6 +42,12 @@
     <ClInclude Include="dumpfile.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="local_state_handler_interface.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="local_state_handler_impl.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp">

@@ -654,7 +654,7 @@ int main(int argc, char** argv) {
         } else if (cmd == "teleport") {
             client.teleport_to(atoll(parser.get_next_word().c_str()));
         } else if (cmd == "balltype") {
-            auto msg = client.get_local_state_msg();
+            auto& msg = client.get_local_state_msg();
             msg.content.type = atoi(parser.get_next_word().c_str());
             client.send(msg, k_nSteamNetworkingSend_Reliable);
         } else if (cmd == "whisper") {
