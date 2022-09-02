@@ -206,7 +206,7 @@ private:
 		tmp_prop->SetDefaultString(bmmo::name_validator::get_random_nickname().c_str());
 		props_["playername"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
-		// so we had to put it at the time of establishing connections.
+		// so we had to put it at the time of post startmenu events.
 		GetConfig()->SetCategoryComment("Identity", "Identifiers of yourself. Cannot be modified.");
 		tmp_prop = GetConfig()->GetProperty("Identity", "UUID");
 		tmp_prop->SetComment("Universally unique identifier of yourself (please keep it secret). Cannot be modified.");
@@ -356,9 +356,16 @@ private:
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
 		// Toggle status
-		if (input_manager_->IsKeyPressed(CKKEY_F3)) {
-			ping_->toggle();
-			status_->toggle();
+		if (input_manager_->IsKeyDown(CKKEY_F3)) {
+			if (input_manager_->IsKeyPressed(CKKEY_A)) {
+				if (!connected() || !m_bml->IsIngame())
+					return;
+				objects_.reload();
+				SendIngameMessage("Reload completed.");
+			} else if (input_manager_->IsKeyPressed(CKKEY_F3)) {
+				ping_->toggle();
+				status_->toggle();
+			}
 		}
 
 		// Toggle nametag
@@ -372,12 +379,7 @@ private:
 					if (input_manager_->IsKeyPressed(keys_to_check[i])) {
 						// std::vector<std::string> args(init_args);
 						// OnCommand(m_bml, args);
-						bmmo::countdown_msg msg{};
-						msg.content.type = static_cast<bmmo::countdown_type>(i);
-						msg.content.map = current_map_;
-						msg.content.force_restart = reset_rank_;
-						reset_rank_ = false;
-						send(msg, k_nSteamNetworkingSend_Reliable);
+						send_countdown_message(static_cast<bmmo::countdown_type>(i));
 					}
 				}
 				if (input_manager_->IsKeyPressed(CKKEY_GRAVE)) {
@@ -557,6 +559,7 @@ private:
 		
 		//thread_pool_.stop();
 		toggle_own_spirit_ball(false);
+		map_names_.clear();
 		db_.clear();
 		objects_.destroy_all_objects();
 
@@ -687,6 +690,15 @@ private:
 		return s;
 	}
 
+	void send_countdown_message(bmmo::countdown_type type) {
+		bmmo::countdown_msg msg{};
+		msg.content.type = type;
+		msg.content.map = current_map_;
+		msg.content.force_restart = reset_rank_;
+		reset_rank_ = false;
+		send(msg, k_nSteamNetworkingSend_Reliable);
+	}
+
 	void send_current_map_name() {
 		bmmo::map_names_msg msg{};
 		msg.maps[current_map_.get_hash_bytes_string()] = current_map_.name;
@@ -695,7 +707,10 @@ private:
 	}
 
 	std::string get_username(HSteamNetConnection client_id) {
+		if (client_id == k_HSteamNetConnection_Invalid)
+			return {"[Server]"};
 		auto state = db_.get(client_id);
+		assert(state.has_value() || (db_.get_client_id() == msg.player_id));
 		return state.has_value() ? state->name : db_.get_nickname();
 	}
 

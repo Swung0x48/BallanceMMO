@@ -6,7 +6,7 @@ namespace bmmo {
     class timestamp_t {
         uint32_t v[2]{};
     public:
-        operator int64_t() {
+        operator int64_t() const {
             return (int64_t)v[0] << 32 | v[1];
         }
         timestamp_t(int64_t t = 0) {

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <BML/BMLAll.h>
 #include <asio/thread_pool.hpp>
 #include <asio/post.hpp>
 #include "client.h"
@@ -8,7 +7,7 @@
 
 class local_state_handler_interface {
 public:
-	virtual void poll_and_send_state(CK3dObject* old_ball, CK3dObject* ball) = 0;
+	virtual void poll_and_send_state(CK3dObject* ball) = 0;
 
 	virtual void poll_and_send_state_forced(CK3dObject* ball) = 0;
 
@@ -19,17 +18,15 @@ public:
 		local_ball_state_changed_ = true;
 	}
 
-	local_state_handler_interface(asio::thread_pool& pool, IBML* bml, client* client_ptr, ILogger* logger, game_state& db) :
-		thread_pool_(pool), bml_(bml), client_(client_ptr), logger_(logger), db_(db) {};
+	local_state_handler_interface(asio::thread_pool& pool, client* client_ptr, ILogger* logger):
+		thread_pool_(pool), client_(client_ptr), logger_(logger) {};
 
 protected:
 	asio::thread_pool& thread_pool_;
-	IBML* bml_;
 	client* client_;
 	ILogger* logger_;
 	TimedBallState local_ball_state_{};
 	std::atomic_bool local_ball_state_changed_ = true;
-	game_state& db_;
 
 	void assemble_and_send_state() {
 		static_assert(sizeof(VxVector) == sizeof(bmmo::vec3));
@@ -57,18 +54,6 @@ protected:
 									local_ball_state_.rotation.w
 		);
 #endif // DEBUG
-	}
-
-	void poll_player_ball_state(CK3dObject* player_ball) {
-		VxVector position; VxQuaternion rotation;
-		player_ball->GetPosition(&position);
-		player_ball->GetQuaternion(&rotation);
-		if (position != local_ball_state_.position || rotation != local_ball_state_.rotation) {
-			memcpy(&local_ball_state_.position, &position, sizeof(VxVector));
-			memcpy(&local_ball_state_.rotation, &rotation, sizeof(VxQuaternion));
-			local_ball_state_changed_ = true;
-		}
-		local_ball_state_.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 	}
 
 	void assemble_and_send_state_forced() const {

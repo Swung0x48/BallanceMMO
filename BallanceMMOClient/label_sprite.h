@@ -5,7 +5,7 @@
 struct label_sprite {
 	std::unique_ptr<BGui::Label> sprite_;
 	std::mutex mtx_;
-	bool visible_ = true;
+	bool visible_ = false;
 
 	label_sprite() = delete;
 	label_sprite(const label_sprite&) = delete;
@@ -18,7 +18,7 @@ struct label_sprite {
 
 		sprite_ = std::make_unique<BGui::Label>(("MMO_Name_" + name).c_str());
 		sprite_->SetAlignment(ALIGN_CENTER);
-		sprite_->SetSize(Vx2DVector(0.1f, 0.03f));
+		sprite_->SetSize(Vx2DVector(0.06f, 0.03f));
 		sprite_->SetPosition(Vx2DVector(x_pos, y_pos));
 		sprite_->SetText(content.c_str());
 		sprite_->SetFont(ExecuteBB::GAMEFONT_03);
@@ -38,6 +38,8 @@ struct label_sprite {
 
 	void set_visible(bool visible) {
 		std::unique_lock lk(mtx_);
+		if (visible_ == visible)
+			return;
 		visible_ = visible;
 		sprite_->SetVisible(visible_);
 	}

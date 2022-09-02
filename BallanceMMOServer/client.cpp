@@ -125,8 +125,8 @@ public:
     };
 
     void set_uuid(std::string& uuid) {
-        while (uuid.find('-') != std::string::npos) {
-            uuid.erase(uuid.find('-'), 1);
+        while (auto pos = uuid.find('-') != std::string::npos) {
+            uuid.erase(pos, 1);
         }
         bmmo::hex_chars_from_string(uuid_, uuid);
     };
@@ -268,9 +268,9 @@ private:
             }
             case bmmo::PlayerDisconnected: {
                 auto* msg = reinterpret_cast<bmmo::player_disconnected_msg*>(networking_msg->m_pData);
-                Printf("%s (#%u) disconnected.", clients_[msg->content.connection_id].name, msg->content.connection_id);
-                if (clients_.find(msg->content.connection_id) != clients_.end()) {
-                    clients_.erase(msg->content.connection_id);
+                if (auto it = clients_.find(msg->content.connection_id); it != clients_.end()) {
+                    Printf("%s (#%u) disconnected.", it->second, it->first);
+                    clients_.erase(it);
                 }
                 break;
             }
@@ -375,6 +375,40 @@ private:
                 send(state_msg, k_nSteamNetworkingSend_Reliable);
                 break;
             }
+            case bmmo::Countdown: {
+                auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
+                Printf("[%u, %s]: %s - %s",
+                    msg->content.sender,
+                    clients_[msg->content.sender].name,
+                    msg->content.map.get_display_name(map_names_),
+                    msg->content.type == bmmo::countdown_type::Go ? "Go!" : std::to_string((int) msg->content.type));
+                break;
+            }
+            case bmmo::LevelFinishV2: {
+                auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(networking_msg->m_pData);
+                int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
+                int total = int(msg->content.timeElapsed);
+                int minutes = total / 60;
+                int seconds = total % 60;
+                int hours = minutes / 60;
+                minutes = minutes % 60;
+                int ms = int((msg->content.timeElapsed - total) * 1000);
+
+                Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
+                    msg->content.cheated ? "[CHEAT] " : "",
+                    msg->content.player_id, clients_[msg->content.player_id].name,
+                    msg->content.map.get_display_name(map_names_), msg->content.rank, bmmo::get_ordinal_rank(msg->content.rank),
+                    score, hours, minutes, seconds, ms);
+                break;
+            }
+            case bmmo::MapNames: {
+                bmmo::map_names_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                map_names_.insert(msg.maps.begin(), msg.maps.end());
+                break;
+            }
             case bmmo::OwnedCheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(networking_msg->m_pData);
                 cheat = msg->content.state.cheated;
@@ -464,7 +498,8 @@ private:
     std::string nickname_;
     uint8_t uuid_[16]{};
     std::unordered_map<HSteamNetConnection, client_data> clients_;
-    bmmo::timed_ball_state_msg local_state_msg_;
+    std::unordered_map<std::string, std::string> map_names_;
+    bmmo::timed_ball_state_msg local_state_msg_{};
     bool print_states_ = false;
 };
 

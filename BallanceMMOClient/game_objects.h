@@ -107,7 +107,7 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
-				if (extrapolation_ && (SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE)) {
+				if (extrapolation_ && SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE) {
 					SteamNetworkingMicroseconds tc = timestamp;
 					if (state_it->timestamp + MAX_EXTRAPOLATION_TIME < timestamp)
 						tc = state_it->timestamp + MAX_EXTRAPOLATION_TIME;
@@ -128,12 +128,12 @@ public:
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (!rc)
 				return false;
-			if (extent.bottom < 0 || extent.right < 0 || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
+			if (isnan(extent.bottom) || extent.bottom < 0 || extent.right < 0 || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
 				username_label->set_visible(false);
 				return true;
 			}
-			Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
-			username_label->set_position(pos);
+			// Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
+			username_label->set_position({ extent.GetCenter() / viewport.GetBottomRight() });
 			username_label->set_visible(db_.is_nametag_visible());
 			username_label->process();
 			return true;
@@ -258,6 +258,11 @@ public:
 			auto* obj = ctx->GetObject(i);
 			bml_->GetCKContext()->DestroyObject(obj);
 		}
+	}
+
+	void reload() {
+		destroy_all_objects();
+		init_players();
 	}
 
 	~game_objects() {

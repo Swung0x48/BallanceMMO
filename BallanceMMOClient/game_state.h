@@ -21,13 +21,12 @@ struct BallState {
 struct TimedBallState : BallState {
 	SteamNetworkingMicroseconds timestamp{};
 
-	TimedBallState() {};
-	TimedBallState(bmmo::ball_state* state) {
-		std::memcpy(this, state, sizeof(BallState));
+	TimedBallState(const bmmo::ball_state& state) {
+		std::memcpy(this, &state, sizeof(BallState));
 	}
-	TimedBallState(bmmo::timed_ball_state* state) {
-		std::memcpy(this, state, sizeof(BallState));
-		timestamp = static_cast<int64_t>(state->timestamp);
+	TimedBallState(const bmmo::timed_ball_state& state = {}) {
+		std::memcpy(this, &state, sizeof(BallState));
+		timestamp = static_cast<int64_t>(state.timestamp);
 	};
 };
 
@@ -56,7 +55,7 @@ struct PlayerState {
 		const auto t21 = state2.timestamp - state1.timestamp,
 			t32 = state3.timestamp - state2.timestamp,
 			t31 = state3.timestamp - state1.timestamp;
-		if (t32 == 0) return {state3.position, state3.rotation};
+		if (t32 == 0 || t31 == 0) return {state3.position, state3.rotation};
 		if (t21 == 0) return get_linear_extrapolated_state(tc, state2, state3);
 
 		return {

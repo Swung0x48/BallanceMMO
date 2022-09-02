@@ -15,7 +15,7 @@ namespace bmmo {
     struct countdown {
         countdown_type type = countdown_type::Unknown;
         HSteamNetConnection sender = k_HSteamNetConnection_Invalid;
-        struct map map;
+        struct map map{};
         uint8_t restart_level = 0;
         uint8_t force_restart = 0;
     };

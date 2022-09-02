@@ -51,7 +51,7 @@ namespace bmmo {
 
     struct map {
         map_type type = map_type::Unknown;
-        uint8_t md5[16];
+        uint8_t md5[16] = {};
         int32_t level = 0;
 
         bool is_original_level() const {
@@ -64,7 +64,7 @@ namespace bmmo {
         }
 
         bool operator==(const map& that) const {
-            return (type == that.type && memcmp(md5, that.md5, 16) == 0);
+            return (is_original_level() == that.is_original_level() && memcmp(md5, that.md5, 16) == 0);
         }
 
         bool operator!=(const map& that) const {
@@ -88,7 +88,9 @@ namespace bmmo {
             if (auto it = map_names.find(get_hash_bytes_string()); it != map_names.end()) {
                 return get_display_name(it->second);
             }
-            return get_display_name(get_hash_string().substr(0, 20).append(".."));
+            std::string hash_string = get_hash_string();
+            return get_display_name(
+                (hash_string == std::string(32, '0')) ? "N/A" : hash_string.substr(0, 20).append(".."));
         };
 
         std::string get_hash_bytes_string() const {

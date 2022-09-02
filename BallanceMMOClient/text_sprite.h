@@ -47,6 +47,8 @@ struct text_sprite {
 	}
 	void set_visible(bool visible) {
 		std::unique_lock lk(mtx_);
+		if (visible_ == visible)
+			return;
 		visible_ = visible;
 		sprite_->SetVisible(visible_);
 	}

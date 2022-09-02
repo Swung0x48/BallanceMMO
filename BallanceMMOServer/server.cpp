@@ -271,8 +271,8 @@ public:
             return;
         std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
         if (op) {
-            if (op_players_.find(name) != op_players_.end()) {
-                if (op_players_[name] == get_uuid_string(clients_[client].uuid)) {
+            if (auto it = op_players_.find(name); it != op_players_.end()) {
+                if (it->second == get_uuid_string(clients_[client].uuid)) {
                     Printf("Error: client \"%s\" already has OP privileges.", name);
                     return;
                 }
@@ -280,9 +280,10 @@ public:
             op_players_[name] = get_uuid_string(clients_[client].uuid);
             Printf("%s is now an operator.", name);
         } else {
-            if (op_players_.find(name) == op_players_.end())
+            auto it = op_players_.find(name);
+            if (it == op_players_.end())
                 return;
-            op_players_.erase(name);
+            op_players_.erase(it);
             Printf("%s is no longer an operator.", name);
         }
         save_config_to_file();
@@ -401,15 +402,15 @@ protected:
         // and connection change callbacks are dispatched in queue order.
         auto itClient = clients_.find(*client);
         //assert(itClient != clients_.end()); // It might in limbo state...So may not yet to be found
+        if (itClient == clients_.end())
+            return;
 
         bmmo::player_disconnected_msg msg;
         msg.content.connection_id = *client;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
-        if (itClient == clients_.end())
-            return;
         std::string name = itClient->second.name;
-        if (username_.find(name) != username_.end())
-            username_.erase(name);
+        if (auto itName = username_.find(name); itName != username_.end())
+            username_.erase(itName);
         if (itClient != clients_.end())
             clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, *client);
@@ -418,8 +419,7 @@ protected:
     bool client_exists(HSteamNetConnection client, bool suppress_error = false) {
         if (client == k_HSteamNetConnection_Invalid)
             return false;
-        auto it = clients_.find(client);
-        if (it == clients_.end()) {
+        if (!clients_.contains(client)) {
             if (!suppress_error)
                 Printf("Error: client #%u not found.", client);
             return false;
@@ -482,7 +482,7 @@ protected:
         // verify client version
         if (msg.version < bmmo::minimum_client_version) {
             reason << "Outdated client (client: " << msg.version.to_string()
-                    << "; minimum: " << bmmo::minimum_client_version.to_string() << ")";
+                    << "; minimum: " << bmmo::minimum_client_version.to_string() << ").";
             nReason = k_ESteamNetConnectionEnd_App_Min + 1;
         }
         // check if name exists
@@ -1311,6 +1311,19 @@ int main(int argc, char** argv) {
         } else if (cmd == "reload") {
             if (!server.load_config())
                 server.Printf("Error: failed to reload config.");
+        } else if (cmd == "countdown") {
+            bmmo::countdown_msg msg{};
+            msg.content.restart_level = msg.content.force_restart = true;
+            msg.content.map.type = bmmo::map_type::OriginalLevel;
+            for (int i = 3; i >= 0; --i) {
+                msg.content.type = static_cast<bmmo::countdown_type>(i);
+                server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+                server.Printf("[[Server]]: Countdown - %s", i == 0 ? "Go!" : std::to_string(i));
+                if (i != 0)
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        } else if (!cmd.empty()) {
+            server.Printf("Error: unknown command \"%s\".", cmd);
         }
     }
 
