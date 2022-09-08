@@ -57,6 +57,7 @@ namespace bmmo {
         Timestamp,
 
         PrivateChat,
+        PlayerReady,
     };
 
     template<typename T, opcode C = None>

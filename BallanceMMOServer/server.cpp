@@ -25,6 +25,12 @@ struct client_data {
     bmmo::timed_ball_state state{};
     bool state_updated = true;
     bool timestamp_updated = true;
+    bool ready = false;
+};
+
+struct map_data {
+    int rank = 0;
+    SteamNetworkingMicroseconds start_time = 0;
 };
 
 class server : public role {
@@ -566,8 +572,10 @@ protected:
 
                 switch (get_client_count()) {
                     case 0:
-                        map_ranks_.clear();
+                        map_data_.clear();
                         map_names_.clear();
+                        std::for_each(clients_.begin(), clients_.end(),
+                            [](auto& i) { i.second.ready = false; });
                         // fallthrough
                     case 1:
                         if (ticking_)
@@ -830,6 +838,19 @@ protected:
                 };
                 break;
             }
+            case bmmo::PlayerReady: {
+                auto* msg = reinterpret_cast<bmmo::player_ready_msg*>(networking_msg->m_pData);
+                msg->content.player_id = networking_msg->m_conn;
+                client_it->second.ready = msg->content.ready;
+                msg->content.count = std::count_if(clients_.begin(), clients_.end(),
+                    [](const auto& i) { return i.second.ready; });
+                Printf("(#%u, %s) is%s ready to start (%u player%s ready).",
+                    networking_msg->m_conn, client_it->second.name,
+                    msg->content.ready ? "" : " not",
+                    msg->content.count, msg->content.count == 1 ? "" : "s");
+                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                break;
+            }
             case bmmo::Countdown: {
                 if (deny_action(networking_msg->m_conn))
                     break;
@@ -840,17 +861,21 @@ protected:
                     case bmmo::countdown_type::Go: {
                         Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name, map_name, msg->content.force_restart ? " (rank reset)" : "");
                         if (force_restart_level_ || msg->content.force_restart)
-                            map_ranks_.clear();
-                        else
-                            map_ranks_[msg->content.map.get_hash_bytes_string()] = 0;
+                            map_data_.clear();
+                        map_data_[msg->content.map.get_hash_bytes_string()] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
                         msg->content.restart_level = restart_level_;
                         msg->content.force_restart = force_restart_level_;
+                        std::for_each(clients_.begin(), clients_.end(),
+                            [](auto& i) { i.second.ready = false; });
                         break;
                     }
                     case bmmo::countdown_type::Countdown_1:
                     case bmmo::countdown_type::Countdown_2:
                     case bmmo::countdown_type::Countdown_3:
                         Printf("[%u, %s]: %s - %u", networking_msg->m_conn, client_it->second.name, map_name, msg->content.type);
+                        break;
+                    case bmmo::countdown_type::Ready:
+                        Printf("[%u, %s]: %s - Ready", networking_msg->m_conn, client_it->second.name, map_name);
                         break;
                     case bmmo::countdown_type::Unknown:
                     default:
@@ -887,7 +912,11 @@ protected:
 
                 // Prepare data...
                 int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
+                std::string md5_str = msg->content.map.get_hash_bytes_string();
+                auto& current_map = map_data_[md5_str];
 
+                if (current_map.start_time != 0 && msg->content.timeElapsed - current_map.start_time / 1e6f < 9000)
+                    msg->content.timeElapsed = (SteamNetworkingUtils()->GetLocalTimestamp() - current_map.start_time) / 1e6f;
                 int total = int(msg->content.timeElapsed);
                 int minutes = total / 60;
                 int seconds = total % 60;
@@ -896,12 +925,11 @@ protected:
                 int ms = int((msg->content.timeElapsed - total) * 1000);
 
                 // Prepare message
-                std::string md5_str = msg->content.map.get_hash_bytes_string();
-                msg->content.rank = ++map_ranks_[md5_str];
+                msg->content.rank = ++map_data_[md5_str].rank;
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, clients_[msg->content.player_id].name,
-                    msg->content.map.get_display_name(map_names_), map_ranks_[md5_str], bmmo::get_ordinal_rank(msg->content.rank),
+                    msg->content.map.get_display_name(map_names_), map_data_[md5_str].rank, bmmo::get_ordinal_rank(msg->content.rank),
                     score, hours, minutes, seconds, ms);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
@@ -1123,7 +1151,7 @@ protected:
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_, map_names_;
-    std::unordered_map<std::string, int> map_ranks_;
+    std::unordered_map<std::string, map_data> map_data_;
     bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false;
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
 };

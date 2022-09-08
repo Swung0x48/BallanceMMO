@@ -33,7 +33,7 @@ namespace bmmo {
         "9b5be1ca6a92ce56683fa208dd3453b4"
     };
 
-    void hex_chars_from_string(uint8_t* dest, const std::string& src) {
+    inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
         for (unsigned int i = 0; i < src.length(); i += 2) {
             std::string byte_string = src.substr(i, 2);
             uint8_t byte = (uint8_t) strtol(byte_string.c_str(), NULL, 16);
@@ -41,7 +41,7 @@ namespace bmmo {
         }
     };
 
-    void string_from_hex_chars(std::string& dest, const uint8_t* src, const int length) {
+    inline void string_from_hex_chars(std::string& dest, const uint8_t* src, const int length) {
         std::stringstream ss;
         ss << std::hex << std::setfill('0');
         for (int i = 0; i < length; i++)

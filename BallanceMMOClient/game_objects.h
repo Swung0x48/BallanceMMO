@@ -128,7 +128,7 @@ public:
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (!rc)
 				return false;
-			if (isnan(extent.bottom) || extent.bottom < 0 || extent.right < 0 || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
+			if (isnan(extent.left) || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
 				username_label->set_visible(false);
 				return true;
 			}

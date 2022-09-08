@@ -269,7 +269,7 @@ private:
             case bmmo::PlayerDisconnected: {
                 auto* msg = reinterpret_cast<bmmo::player_disconnected_msg*>(networking_msg->m_pData);
                 if (auto it = clients_.find(msg->content.connection_id); it != clients_.end()) {
-                    Printf("%s (#%u) disconnected.", it->second, it->first);
+                    Printf("%s (#%u) disconnected.", it->second.name, it->first);
                     clients_.erase(it);
                 }
                 break;

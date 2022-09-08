@@ -352,7 +352,7 @@ private:
 	}
 
 	InputHook* input_manager_ = nullptr;
-	const CKKEYBOARD keys_to_check[4] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3 };
+	const CKKEYBOARD keys_to_check[5] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
 		// Toggle status
@@ -375,7 +375,7 @@ private:
 
 		if (input_manager_->IsKeyDown(CKKEY_LCONTROL) && connected()) {
 		  if (m_bml->IsIngame()) {
-				for (int i = 0; i <= 3; ++i) {
+				for (int i = 0; i <= 4; ++i) {
 					if (input_manager_->IsKeyPressed(keys_to_check[i])) {
 						// std::vector<std::string> args(init_args);
 						// OnCommand(m_bml, args);
@@ -402,7 +402,7 @@ private:
 				if (current_map_.level == 0 || spectator_mode_)
 					return;
 				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-				if (timestamp - last_dnf_hotkey_timestamp_ <= 5000000) {
+				if (timestamp - last_dnf_hotkey_timestamp_ <= 3000000) {
 					bmmo::did_not_finish_msg msg{};
 					m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
 					msg.content.map = current_map_;
@@ -412,7 +412,7 @@ private:
 				}
 				else {
 					last_dnf_hotkey_timestamp_ = timestamp;
-					SendIngameMessage("Note: please press Ctrl+D again in 5 seconds to send the DNF message.");
+					SendIngameMessage("Note: please press Ctrl+D again in 3 seconds to send the DNF message.");
 				}
 			}
 		}
@@ -681,8 +681,8 @@ private:
 		s += std::format("Ping: {} ms\n", status.m_nPing);
 		s += "ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n";
 		s += "ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n";
-		s += std::format("Tx: {:.0f}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
-		s += std::format("Rx: {:.0f}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
+		s += std::format("Tx: {:.3g}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
+		s += std::format("Rx: {:.3g}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
 		s += "Est. MaxBandwidth: " + pretty_bytes((float)status.m_nSendRateBytesPerSecond) + "/s\n";
 		s += std::format("Queue time: {}" + mu + "s\n", status.m_usecQueueTime);
 		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);

@@ -50,14 +50,14 @@ namespace bmmo {
             return data;
         }
 
-        static std::string join_strings(const std::vector<std::string>& strings, size_t start) {
+        static std::string join_strings(const std::vector<std::string>& strings, size_t start, const char* delim = " ") {
             constexpr const size_t MAX_LENGTH = UINT16_MAX;
             std::string str = strings[start];
             start++;
             size_t length = strings.size();
             if (length > start) {
                 for (size_t i = start; i < length; i++)
-                    str.append(" " + strings[i]);
+                    str.append(delim + strings[i]);
             }
             return str.substr(0, MAX_LENGTH);
         }
