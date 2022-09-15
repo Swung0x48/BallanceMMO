@@ -352,7 +352,7 @@ private:
 	}
 
 	InputHook* input_manager_ = nullptr;
-	const CKKEYBOARD keys_to_check[5] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4 };
+	static constexpr CKKEYBOARD KEYS_TO_CHECK[6] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
 		// Toggle status
@@ -375,8 +375,8 @@ private:
 
 		if (input_manager_->IsKeyDown(CKKEY_LCONTROL) && connected()) {
 		  if (m_bml->IsIngame()) {
-				for (int i = 0; i <= 4; ++i) {
-					if (input_manager_->IsKeyPressed(keys_to_check[i])) {
+				for (int i = 0; i <= 5; ++i) {
+					if (input_manager_->IsKeyPressed(KEYS_TO_CHECK[i])) {
 						// std::vector<std::string> args(init_args);
 						// OnCommand(m_bml, args);
 						send_countdown_message(static_cast<bmmo::countdown_type>(i));

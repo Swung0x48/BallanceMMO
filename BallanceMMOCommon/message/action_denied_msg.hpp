@@ -9,7 +9,8 @@ namespace bmmo {
         NoPermission,
         InvalidAction,
         InvalidTarget,
-        TargetNotFound
+        TargetNotFound,
+        PlayerMuted
     };
 
     struct action_denied {

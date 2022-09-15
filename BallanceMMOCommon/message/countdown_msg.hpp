@@ -10,6 +10,7 @@ namespace bmmo {
         Countdown_2 = 2,
         Countdown_3 = 3,
         Ready = 4,
+        ConfirmReady = 5,
         Unknown = UINT8_MAX
     };
 

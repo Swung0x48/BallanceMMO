@@ -44,6 +44,10 @@ add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
 add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
+
+get_target_property(_inc yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
+target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warnings
+
 if (MSVC)
     target_compile_options(BallanceMMOServer PRIVATE /Wall)
     target_compile_options(BallanceMMOMockClient PRIVATE /Wall)

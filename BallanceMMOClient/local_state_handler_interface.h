@@ -11,7 +11,7 @@ public:
 
 	virtual void poll_and_send_state_forced(CK3dObject* ball) = 0;
 
-	inline TimedBallState& get_local_state() { return local_ball_state_; }
+	inline constexpr TimedBallState& get_local_state() { return local_ball_state_; }
 
 	inline void set_ball_type(uint32_t type) {
 		local_ball_state_.type = type;

@@ -582,10 +582,14 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
             }
             else if (lower1 == "ready") {
+                if (!connected() || !m_bml->IsIngame() || spectator_mode_)
+                    return;
                 bmmo::player_ready_msg msg{.content = {.ready = true}};
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
             else if (lower1 == "ready-cancel") {
+                if (!connected() || !m_bml->IsIngame() || spectator_mode_)
+                    return;
                 bmmo::player_ready_msg msg{.content = {.ready = false}};
                 send(msg, k_nSteamNetworkingSend_Reliable);
             }
@@ -1175,7 +1179,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
                 break;
             case bmmo::countdown_type::Ready:
-                SendIngameMessage(std::format("[{}]: {} - Ready", sender_name, map_name).c_str());
+                SendIngameMessage(std::format("[{}]: {} - Get ready", sender_name, map_name).c_str());
+                break;
+            case bmmo::countdown_type::ConfirmReady:
+                SendIngameMessage(std::format("[{}]: {} - Please use \"/mmo ready\" to confirm if you are ready", sender_name, map_name).c_str());
                 break;
             case bmmo::countdown_type::Unknown:
             default:
@@ -1331,6 +1338,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 break;
             case bmmo::deny_reason::TargetNotFound:
                 reason = "target not found.";
+                break;
+            case bmmo::deny_reason::PlayerMuted:
+                reason = "you are not allowed to post public messages on this server.";
                 break;
             case bmmo::deny_reason::Unknown:
             default:

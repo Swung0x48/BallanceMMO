@@ -7,6 +7,7 @@
 
 #include "../BallanceMMOCommon/role/role.hpp"
 #include <vector>
+#include <unordered_set>
 #include <condition_variable>
 #include "../BallanceMMOCommon/common.hpp"
 
@@ -106,7 +107,7 @@ public:
     HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) {
         HSteamNetConnection client = k_HSteamNetConnection_Invalid;
         std::string lower_username = bmmo::message_utils::to_lower(username);
-        auto username_it = find_if(username_.begin(), username_.end(), [&lower_username](const auto& i) {
+        auto username_it = std::find_if(username_.begin(), username_.end(), [&lower_username](const auto& i) {
             return bmmo::message_utils::to_lower(i.first) == lower_username;
         });
         if (username_it == username_.end()) {
@@ -173,6 +174,12 @@ public:
                     op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
                 if (config_["enable_op_privileges"])
                     op_mode_ = config_["enable_op_privileges"].as<bool>();
+                if (config_["ban_list"])
+                    banned_players_ = config_["ban_list"].as<std::unordered_map<std::string, std::string>>();
+                if (config_["mute_list"]) {
+                    auto muted_vector = config_["mute_list"].as<std::vector<std::string>>();
+                    muted_players_ = std::unordered_set(muted_vector.begin(), muted_vector.end());
+                }
                 if (config_["restart_level_after_countdown"])
                     restart_level_ = config_["restart_level_after_countdown"].as<bool>();
                 if (config_["force_restart_after_countdown"])
@@ -186,6 +193,8 @@ public:
         } else {
             Printf("Config is empty. Generating default config...");
             op_players_ = {{"example_player", "00000001-0002-0003-0004-000000000005"}};
+            banned_players_ = {{"00000001-0002-0003-0004-000000000005", "You're banned from this server."}};
+            muted_players_ = {"00000001-0002-0003-0004-000000000005"};
         }
 
         config_["enable_op_privileges"] = op_mode_;
@@ -272,11 +281,34 @@ public:
         }
     }
 
-    void set_op(HSteamNetConnection client, bool op) {
+    void set_ban(HSteamNetConnection client, const std::string& reason) {
+        if (!client_exists(client))
+            return;
+        banned_players_[get_uuid_string(clients_[client].uuid)] = reason;
+        Printf("Banned %s%s.", clients_[client].name, reason.empty() ? "" : ": " + reason);
+        save_config_to_file();
+    }
+
+    void set_mute(HSteamNetConnection client, bool action) {
+        if (!client_exists(client))
+            return;
+        if (action) {
+            Printf("Muted %s%s.", clients_[client].name,
+                muted_players_.insert(get_uuid_string(clients_[client].uuid)).second
+                ? "" : " (client was already muted previously)");
+        } else {
+            Printf("Unmuted %s%s.", clients_[client].name,
+                muted_players_.erase(get_uuid_string(clients_[client].uuid)) != 0
+                ? "" : " (client was already unmuted previously)");
+        }
+        save_config_to_file();
+    }
+
+    void set_op(HSteamNetConnection client, bool action) {
         if (!client_exists(client))
             return;
         std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
-        if (op) {
+        if (action) {
             if (auto it = op_players_.find(name); it != op_players_.end()) {
                 if (it->second == get_uuid_string(clients_[client].uuid)) {
                     Printf("Error: client \"%s\" already has OP privileges.", name);
@@ -294,7 +326,7 @@ public:
         }
         save_config_to_file();
         bmmo::op_state_msg msg{};
-        msg.content.op = op;
+        msg.content.op = action;
         send(client, msg, k_nSteamNetworkingSend_Reliable);
     }
 
@@ -353,10 +385,10 @@ protected:
         SteamNetConnectionInfo_t pInfo;
         interface_->GetConnectionInfo(client, &pInfo);
         SteamNetworkingIPAddr ip = pInfo.m_addrRemote;
-        char ip_str[64]{};
+        char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
         std::string uuid_str = get_uuid_string(clients_[client].uuid),
                     name = clients_[client].name;
-        ip.ToString(ip_str, 64, false);
+        ip.ToString(ip_str, SteamNetworkingIPAddr::k_cchMaxString, false);
         YAML::Node login_data;
         std::ifstream ifile("login_data.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
@@ -386,6 +418,8 @@ protected:
 
     void save_config_to_file() {
         config_["op_list"] = op_players_;
+        config_["ban_list"] = banned_players_;
+        config_["mute_list"] = std::vector<std::string>(muted_players_.begin(), muted_players_.end());
         std::ofstream config_file("config.yml");
         if (!config_file.is_open()) {
             Printf("Error: failed to open config file for writing.");
@@ -394,6 +428,8 @@ protected:
         config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t().to_string() << "\n"
                     << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
+                    << "# - Ban list style: \"uuid: reason\".\n"
+                    << "# - Mute list style: \"- uuid\".\n"
                     << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
                     << "# - Options for log levels: important, warning, msg.\n"
                     << std::endl;
@@ -435,8 +471,7 @@ protected:
 
     bool deny_action(HSteamNetConnection client) {
         if (op_mode_ && op_online() && !is_op(client)) {
-            bmmo::action_denied_msg denied_msg;
-            denied_msg.content.reason = bmmo::deny_reason::NoPermission;
+            bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::NoPermission}};
             send(client, denied_msg, k_nSteamNetworkingSend_Reliable);
             return true;
         }
@@ -485,8 +520,16 @@ protected:
         std::stringstream reason;
         std::string real_nickname = bmmo::name_validator::get_real_nickname(msg.nickname);
 
+        // check if client is banned
+        if (auto it = banned_players_.find(get_uuid_string(msg.uuid)); it != banned_players_.end()) {
+            reason << "You are banned from this server";
+            if (!it->second.empty())
+                reason << ": " << it->second;
+            reason << ".";
+            nReason = k_ESteamNetConnectionEnd_App_Min + 50;
+        }
         // verify client version
-        if (msg.version < bmmo::minimum_client_version) {
+        else if (msg.version < bmmo::minimum_client_version) {
             reason << "Outdated client (client: " << msg.version.to_string()
                     << "; minimum: " << bmmo::minimum_client_version.to_string() << ").";
             nReason = k_ESteamNetConnectionEnd_App_Min + 1;
@@ -512,8 +555,7 @@ protected:
         }
 
         if (nReason != k_ESteamNetConnectionEnd_Invalid) {
-            bmmo::simple_action_msg new_msg;
-            new_msg.content.action = bmmo::action_type::LoginDenied;
+            bmmo::simple_action_msg new_msg{.content = {bmmo::action_type::LoginDenied}};
             send(client, new_msg, k_nSteamNetworkingSend_Reliable);
             interface_->CloseConnection(client, nReason, reason.str().c_str(), true);
             return false;
@@ -572,7 +614,7 @@ protected:
 
                 switch (get_client_count()) {
                     case 0:
-                        map_data_.clear();
+                        maps_.clear();
                         map_names_.clear();
                         std::for_each(clients_.begin(), clients_.end(),
                             [](auto& i) { i.second.ready = false; });
@@ -650,8 +692,7 @@ protected:
 
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
-                bmmo::simple_action_msg msg;
-                msg.content.action = bmmo::action_type::LoginDenied;
+                bmmo::simple_action_msg msg{.content = {bmmo::action_type::LoginDenied}};
                 send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
                 interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, "Outdated client", true);
                 break;
@@ -665,8 +706,7 @@ protected:
 
                 std::string reason = "Outdated client (client: " + msg.version.to_string()
                         + "; minimum: " + bmmo::minimum_client_version.to_string() + ")";
-                bmmo::simple_action_msg new_msg;
-                new_msg.content.action = bmmo::action_type::LoginDenied;
+                bmmo::simple_action_msg new_msg{.content = {bmmo::action_type::LoginDenied}};
                 send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
                 interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.c_str(), true);
                 break;
@@ -795,11 +835,19 @@ protected:
                 // sanitize chat message (remove control characters)
                 std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
                     [](char c) { return std::iscntrl(c); }, ' ');
+                
+                bool muted = muted_players_.contains(get_uuid_string(client_it->second.uuid));
 
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
                 const HSteamNetConnection current_player_id  = networking_msg->m_conn;
-                Printf("(%u, %s): %s", current_player_id, current_player_name, msg.chat_content);
+                Printf("%s(%u, %s): %s", muted ? "[Muted] " : "", current_player_id, current_player_name, msg.chat_content);
+
+                if (muted) {
+                    bmmo::action_denied_msg msg{.content = {bmmo::deny_reason::PlayerMuted}};
+                    send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
+                    break;
+                }
 
                 // Broatcast chat message to other player
                 msg.player_id = current_player_id;
@@ -831,8 +879,7 @@ protected:
                     Printf("(%u, %s) -> (%u, %s): %s",
                         msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
                     if (receiver != k_HSteamNetConnection_Invalid) {
-                        bmmo::action_denied_msg denied_msg;
-                        denied_msg.content.reason = bmmo::deny_reason::TargetNotFound;
+                        bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::TargetNotFound}};
                         send(msg.player_id, denied_msg, k_nSteamNetworkingSend_Reliable);
                     }
                 };
@@ -861,8 +908,8 @@ protected:
                     case bmmo::countdown_type::Go: {
                         Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name, map_name, msg->content.force_restart ? " (rank reset)" : "");
                         if (force_restart_level_ || msg->content.force_restart)
-                            map_data_.clear();
-                        map_data_[msg->content.map.get_hash_bytes_string()] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
+                            maps_.clear();
+                        maps_[msg->content.map.get_hash_bytes_string()] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
                         msg->content.restart_level = restart_level_;
                         msg->content.force_restart = force_restart_level_;
                         std::for_each(clients_.begin(), clients_.end(),
@@ -875,7 +922,10 @@ protected:
                         Printf("[%u, %s]: %s - %u", networking_msg->m_conn, client_it->second.name, map_name, msg->content.type);
                         break;
                     case bmmo::countdown_type::Ready:
-                        Printf("[%u, %s]: %s - Ready", networking_msg->m_conn, client_it->second.name, map_name);
+                        Printf("[%u, %s]: %s - Get ready", networking_msg->m_conn, client_it->second.name, map_name);
+                        break;
+                    case bmmo::countdown_type::ConfirmReady:
+                        Printf("[%u, %s]: %s - Please use \"/mmo ready\" to confirm if you are ready", networking_msg->m_conn, client_it->second.name, map_name);
                         break;
                     case bmmo::countdown_type::Unknown:
                     default:
@@ -913,7 +963,7 @@ protected:
                 // Prepare data...
                 int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
                 std::string md5_str = msg->content.map.get_hash_bytes_string();
-                auto& current_map = map_data_[md5_str];
+                auto& current_map = maps_[md5_str];
 
                 if (current_map.start_time != 0 && msg->content.timeElapsed - current_map.start_time / 1e6f < 9000)
                     msg->content.timeElapsed = (SteamNetworkingUtils()->GetLocalTimestamp() - current_map.start_time) / 1e6f;
@@ -925,11 +975,11 @@ protected:
                 int ms = int((msg->content.timeElapsed - total) * 1000);
 
                 // Prepare message
-                msg->content.rank = ++map_data_[md5_str].rank;
+                msg->content.rank = ++maps_[md5_str].rank;
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, clients_[msg->content.player_id].name,
-                    msg->content.map.get_display_name(map_names_), map_data_[md5_str].rank, bmmo::get_ordinal_rank(msg->content.rank),
+                    msg->content.map.get_display_name(map_names_), maps_[md5_str].rank, bmmo::get_ordinal_rank(msg->content.rank),
                     score, hours, minutes, seconds, ms);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
@@ -1150,8 +1200,9 @@ protected:
     std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
-    std::unordered_map<std::string, std::string> op_players_, map_names_;
-    std::unordered_map<std::string, map_data> map_data_;
+    std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_;
+    std::unordered_set<std::string> muted_players_;
+    std::unordered_map<std::string, map_data> maps_;
     bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false;
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
 };
@@ -1215,7 +1266,7 @@ int main(int argc, char** argv) {
     if (!log_path.empty()) {
         log_file = fopen(log_path.c_str(), "a");
         if (log_file == nullptr) {
-            std::cerr << "Fatal: failed to open log file." << std::endl;
+            std::cerr << "Fatal: failed to open the log file." << std::endl;
             return 1;
         }
         server::set_log_file(log_file);
@@ -1293,7 +1344,7 @@ int main(int argc, char** argv) {
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
         } else if (cmd == "getpos") {
             server.print_positions();
-        } else if (cmd == "kick" || cmd == "crash" || cmd == "fatalerror" || cmd == "whisper") {
+        } else if (cmd == "kick" || cmd == "crash" || cmd == "fatalerror" || cmd == "whisper" || cmd == "ban") {
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             std::string client_input = parser.get_next_word();
             if (client_input.length() > 0 && client_input[0] == '#') {
@@ -1312,6 +1363,8 @@ int main(int argc, char** argv) {
                 msg.serialize();
                 server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 server.Printf("([Server]) -> #%u: %s.", client, msg.chat_content);
+            } else if (cmd == "ban") {
+                server.set_ban(client, text);
             } else {
                 bmmo::crash_type crash = bmmo::crash_type::None;
                 if (cmd == "crash")
@@ -1320,7 +1373,7 @@ int main(int argc, char** argv) {
                     crash = bmmo::crash_type::FatalError;
                 server.kick_client(client, text, k_HSteamNetConnection_Invalid, crash);
             }
-        } else if (cmd == "op" || cmd == "deop") {
+        } else if (cmd == "op" || cmd == "deop" || cmd == "mute" || cmd == "unmute") {
             HSteamNetConnection client = k_HSteamNetConnection_Invalid;
             std::string client_input = parser.get_next_word();
             if (client_input.length() > 0 && client_input[0] == '#') {
@@ -1332,10 +1385,13 @@ int main(int argc, char** argv) {
             } else {
                 client = server.get_client_id(client_input);
             }
-            bool op = false;
-            if (cmd == "op")
-                op = true;
-            server.set_op(client, op);
+            bool action = false;
+            if (cmd == "op" || cmd == "mute")
+                action = true;
+            if (cmd == "op" || cmd == "deop")
+                server.set_op(client, action);
+            else
+                server.set_mute(client, action);
         } else if (cmd == "reload") {
             if (!server.load_config())
                 server.Printf("Error: failed to reload config.");
