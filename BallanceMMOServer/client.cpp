@@ -365,6 +365,17 @@ private:
                     Printf("(%u, %s) whispers to you: %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
                 break;
             }
+            case bmmo::ImportantNotification: {
+                bmmo::important_notification_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                if (msg.player_id == k_HSteamNetConnection_Invalid)
+                    Printf("[Announcement] [Server]: %s", msg.chat_content);
+                else
+                    Printf("[Announcement] (%u, %s): %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content);
+                break;
+            }
             case bmmo::CheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
                 cheat = msg->content.cheated;

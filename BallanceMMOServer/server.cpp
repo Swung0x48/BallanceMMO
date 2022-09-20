@@ -105,7 +105,6 @@ public:
     }
 
     HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) {
-        HSteamNetConnection client = k_HSteamNetConnection_Invalid;
         std::string lower_username = bmmo::message_utils::to_lower(username);
         auto username_it = std::find_if(username_.begin(), username_.end(), [&lower_username](const auto& i) {
             return bmmo::message_utils::to_lower(i.first) == lower_username;
@@ -115,8 +114,7 @@ public:
                 Printf("Error: client \"%s\" not found.", username);
             return k_HSteamNetConnection_Invalid;
         }
-        client = username_it->second;
-        return client;
+        return username_it->second;
     };
 
     int get_client_count() {
@@ -885,6 +883,23 @@ protected:
                 };
                 break;
             }
+            case bmmo::ImportantNotification: {
+                if (deny_action(networking_msg->m_conn))
+                    break;
+                bmmo::important_notification_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.deserialize();
+
+                std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
+                    [](char c) { return std::iscntrl(c); }, ' ');
+                msg.player_id = networking_msg->m_conn;
+
+                Printf("[Announcement] (%u, %s): %s", msg.player_id, client_it->second.name, msg.chat_content);
+                msg.clear();
+                msg.serialize();
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                break;
+            }
             case bmmo::PlayerReady: {
                 auto* msg = reinterpret_cast<bmmo::player_ready_msg*>(networking_msg->m_pData);
                 msg->content.player_id = networking_msg->m_conn;
@@ -1238,6 +1253,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
                 return -1;
             case 'v':
                 puts("Ballance MMO server by Swung0x48 and BallanceBug.");
+                printf("Build time: %s %s.\n", __DATE__, __TIME__);
                 printf("Version: %s.\n", bmmo::version_t().to_string().c_str());
                 printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
@@ -1331,6 +1347,12 @@ int main(int argc, char** argv) {
             msg.serialize();
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             server.Printf("Broadcast \"%s\".", msg.text_content);
+        } else if (cmd == "announce") {
+            bmmo::important_notification_msg msg{};
+            msg.chat_content = parser.get_rest_of_line();
+            msg.serialize();
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.Printf("[Announcement] ([Server]): %s.", msg.chat_content);
         } else if (cmd == "cheat") {
             bool cheat_state = false;
             if (parser.get_next_word() == "on")

@@ -36,5 +36,6 @@
 #include "timestamp_msg.hpp"
 #include "private_chat_msg.hpp"
 #include "player_ready_msg.hpp"
+#include "important_notification_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

@@ -423,6 +423,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
         SendIngameMessage("BallanceMMO Help");
+        SendIngameMessage(std::format("BallanceMMO version: {}; build time: {} {}.",
+                                      version_string, __DATE__, __TIME__));
         SendIngameMessage("/mmo connect - Connect to server.");
         SendIngameMessage("/mmo disconnect - Disconnect from server.");
         SendIngameMessage("/mmo list - List online players.");
@@ -671,6 +673,13 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
+        else if (lower1 == "announce") {
+            bmmo::important_notification_msg msg{};
+            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
+            msg.serialize();
+
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
         else if (lower1 == "kick") {
             bmmo::kick_request_msg msg{};
             if (args[2][0] == '#')
@@ -709,7 +718,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 
     switch (length) {
         case 2: {
-            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel" };
+            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce" };
             break;
         }
         case 3: {
@@ -1139,6 +1148,42 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         SendIngameMessage(std::format("{} whispers to you: {}",
                                       get_username(msg.player_id), msg.chat_content));
+        break;
+    }
+    case bmmo::ImportantNotification: {
+        bmmo::important_notification_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        msg.deserialize();
+        std::string name = get_username(msg.player_id);
+        SendIngameMessage(std::format("[Announcement] {}: {}",
+                                      name, msg.chat_content));
+        std::wstring wtext = bmmo::message_utils::ConvertAnsiToWide(msg.chat_content);
+        asio::post(thread_pool_, [this, name, wtext]() mutable {
+            std::string text;
+            while (wtext.length() > 22) {
+                text += bmmo::message_utils::ConvertWideToANSI(wtext.substr(0, 22)) + '\n';
+                wtext.erase(0, 22);
+            };
+            text += bmmo::message_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
+            auto notification = std::make_shared<text_sprite>(
+                std::format("Notification{}_{}", SteamNetworkingUtils()->GetLocalTimestamp(), rand() % 1000),
+                text, 0.0f, 0.4f);
+            VxRect viewport; m_bml->GetRenderContext()->GetViewRect(viewport);
+            notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
+            notification->sprite_->SetZOrder(1048576);
+            notification->sprite_->SetSize(Vx2DVector(1.0f, 0.4f));
+            notification->sprite_->SetFont("Arial", (int)std::round(viewport.GetHeight() / 42), 700, false, false);
+            notification->set_visible(true);
+            for (int i = 1; i < 15; ++i) {
+              notification->sprite_->SetTextColor(0x11FF1190 + i * 0x11001001);
+              std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(9));
+            for (int i = 1; i < 15; ++i) {
+                notification->sprite_->SetTextColor(0xFFFFF19E - i * 0x11100000);
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            }
+        });
         break;
     }
     case bmmo::PlayerReady: {

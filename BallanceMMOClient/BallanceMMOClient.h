@@ -45,7 +45,7 @@ public:
 	}
 
 	bmmo::version_t version;
-	std::string version_string = version.to_string();
+	const std::string version_string = version.to_string();
 	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
 	virtual CKSTRING GetVersion() override { return version_string.c_str(); }
 	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
