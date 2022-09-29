@@ -677,7 +677,7 @@ private:
 	static inline const std::string mu = bmmo::message_utils::ConvertWideToANSI(bmmo::message_utils::ConvertUtf8ToWide("μ"));
 	static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
 		std::string s;
-		s.reserve(2048);
+		s.reserve(512);
 		s += std::format("Ping: {} ms\n", status.m_nPing);
 		s += "ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n";
 		s += "ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n";

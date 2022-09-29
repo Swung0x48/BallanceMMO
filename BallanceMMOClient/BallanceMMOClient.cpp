@@ -423,7 +423,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
         SendIngameMessage("BallanceMMO Help");
-        SendIngameMessage(std::format("BallanceMMO version: {}; build time: {} {}.",
+        SendIngameMessage(std::format("Version: {}; build time: {} {}.",
                                       version_string, __DATE__, __TIME__));
         SendIngameMessage("/mmo connect - Connect to server.");
         SendIngameMessage("/mmo disconnect - Disconnect from server.");
@@ -1008,12 +1008,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
-        for (auto& i : msg.balls) {
+        for (const auto& i : msg.balls) {
             if (!db_.update(i.player_id, TimedBallState(i.state)) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
-        for (auto& i : msg.unchanged_balls) {
+        for (const auto& i : msg.unchanged_balls) {
             if (!db_.update(i.player_id, i.timestamp) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
@@ -1064,28 +1064,33 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
 
         // post-connection actions
+        player_ball_ = get_current_ball();
+        if (m_bml->IsIngame() && player_ball_ != nullptr) {
+            local_state_handler_->poll_and_send_state_forced(player_ball_);
+        }
         if (!current_map_.name.empty()) {
             send_current_map_name();
             map_names_[current_map_.get_hash_bytes_string()] = current_map_.name;
         }
-        /*auto count = m_bml->GetModCount();
-        bmmo::plain_text_msg mod_msg{};
+
+        if (spectator_mode_)
+            break;
+
+        const auto count = m_bml->GetModCount();
+        bmmo::mod_list_msg mod_msg{};
+        mod_msg.mods.reserve(count);
         for (auto i = 1; i < count; i++) {
-            mod_msg.text_content.append(", ").append(m_bml->GetMod(i)->GetName());
+            auto* mod = m_bml->GetMod(i);
+            mod_msg.mods[mod->GetID()] = mod->GetVersion();
         }
-        mod_msg.text_content.erase(0, 2);
         mod_msg.serialize();
-        send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);*/
+        send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
 
         bmmo::hash_data_msg hash_msg{};
         hash_msg.data_name = "Balls.nmo";
         memcpy(hash_msg.md5, balls_nmo_md5_, 16);
         hash_msg.serialize();
         send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
-        player_ball_ = get_current_ball();
-        if (m_bml->IsIngame() && player_ball_ != nullptr) {
-            local_state_handler_->poll_and_send_state_forced(player_ball_);
-        }
         break;
     }
     case bmmo::PlayerConnected: {

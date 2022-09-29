@@ -172,8 +172,9 @@ public:
                     op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
                 if (config_["enable_op_privileges"])
                     op_mode_ = config_["enable_op_privileges"].as<bool>();
-                if (config_["ban_list"])
+                if (config_["ban_list"]) {
                     banned_players_ = config_["ban_list"].as<std::unordered_map<std::string, std::string>>();
+                }
                 if (config_["mute_list"]) {
                     auto muted_vector = config_["mute_list"].as<std::vector<std::string>>();
                     muted_players_ = std::unordered_set(muted_vector.begin(), muted_vector.end());
@@ -1129,6 +1130,9 @@ protected:
                 }
                 break;
             }
+            case bmmo::ModList: {
+                break;
+            }
             case bmmo::OwnedBallState:
             case bmmo::OwnedBallStateV2:
             case bmmo::OwnedTimedBallState:
@@ -1352,7 +1356,7 @@ int main(int argc, char** argv) {
             msg.chat_content = parser.get_rest_of_line();
             msg.serialize();
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("[Announcement] ([Server]): %s.", msg.chat_content);
+            server.Printf("[Announcement] ([Server]): %s", msg.chat_content);
         } else if (cmd == "cheat") {
             bool cheat_state = false;
             if (parser.get_next_word() == "on")

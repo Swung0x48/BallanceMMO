@@ -59,6 +59,7 @@ namespace bmmo {
         PrivateChat,
         PlayerReady,
         ImportantNotification,
+        ModList,
     };
 
     template<typename T, opcode C = None>
