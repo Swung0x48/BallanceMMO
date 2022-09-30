@@ -177,6 +177,8 @@ public:
             struct winsize w;
             ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
             short width = w.ws_col;
+            if (width <= 0)
+                width = 80;
 #endif
 #if WINVER >= _WIN32_WINNT_WIN10
             unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
