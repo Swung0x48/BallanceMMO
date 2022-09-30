@@ -34,8 +34,8 @@ public:
     bool connect(const std::string& connection_string) {
         bmmo::hostname_parser hp(connection_string);
         using asio::ip::tcp; // tired of writing it out
-        asio::io_service io_service;
-        tcp::resolver resolver(io_service);
+        asio::io_context io_context;
+        tcp::resolver resolver(io_context);
         tcp::resolver::query query(hp.get_address(), hp.get_port());
         tcp::resolver::iterator iter = resolver.resolve(query), end;
         while (iter != end) {
@@ -50,7 +50,7 @@ public:
             connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
             if (connection_ == k_HSteamNetConnection_Invalid)
                 continue;
-            io_service.stop();
+            io_context.stop();
             return true;
         }
         return false;
@@ -239,12 +239,6 @@ private:
     }
 
     void on_message(ISteamNetworkingMessage* networking_msg) override {
-//        printf("\b");
-//        fwrite(msg->m_pData, 1, msg->m_cbSize, stdout);
-//        fputc('\n', stdout);
-
-//        printf("\b> ");
-//        Printf(reinterpret_cast<const char*>(msg->m_pData));
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
         switch (raw_msg->code) {
             case bmmo::LoginAcceptedV2: {
