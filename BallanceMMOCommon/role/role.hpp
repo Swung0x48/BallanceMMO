@@ -136,7 +136,7 @@ public:
             auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
             std::string time_str(15, 0);
             time_str.resize(std::strftime(&time_str[0], time_str.size(), 
-                "%m-%d %X", std::localtime(&time)));
+                "%m-%d %T", std::localtime(&time)));
             fprintf(log_file_, "[%s] %s\n", time_str.c_str(), pMsg);
             fflush(log_file_);
         }
@@ -147,7 +147,7 @@ public:
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::string time_str(15, 0);
         time_str.resize(std::strftime(&time_str[0], time_str.size(), 
-            "%m-%d %X", std::localtime(&time)));
+            "%m-%d %T", std::localtime(&time)));
 
         if (log_file_) {
             fprintf(log_file_, "[%s] %s\n", time_str.c_str(), pszMsg);

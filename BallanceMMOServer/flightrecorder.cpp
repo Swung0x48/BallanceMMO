@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
+#include "../BallanceMMOCommon/entity/record_entry.hpp"
 
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
@@ -59,13 +60,14 @@ public:
     }
 
     bool setup() override {
-        auto time_struct = std::time(nullptr);
+        auto current_time = std::time(nullptr);
         char record_name[32];
-        std::strftime(record_name, 32, "record_%Y%m%d%H%M.bin", std::localtime(&time_struct));
+        std::strftime(record_name, 32, "record_%Y%m%d%H%M.bin", std::localtime(&current_time));
         record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
         if (!record_stream_.is_open())
             return false;
-        record_stream_ << "BallanceMMO FlightRecorder\0";
+        record_stream_ << "BallanceMMO FlightRecorder";
+        record_stream_.put('\0');
         bmmo::version_t version;
         record_stream_.write(reinterpret_cast<const char*>(&version), sizeof(version));
         record_stream_.write(reinterpret_cast<const char*>(&init_time_t_), sizeof(init_time_t_));
@@ -159,7 +161,7 @@ public:
         std::this_thread::sleep_for(std::chrono::seconds(1));
         while (!message_queue_.empty()) {
             Printf("Waiting for %d messages to be processed...", message_queue_.size());
-            record_entry entry = std::move(message_queue_.front());
+            bmmo::record_entry entry = std::move(message_queue_.front());
             record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
             message_queue_.pop_front();
         }
@@ -210,7 +212,7 @@ public:
         std::unique_lock<std::mutex> lk(message_queue_mutex_);
 
         while (!message_queue_.empty()) {
-            record_entry entry = std::move(message_queue_.front());
+            bmmo::record_entry entry = std::move(message_queue_.front());
             record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
             message_queue_.pop_front();
         }
@@ -520,35 +522,8 @@ private:
         return msg_count;
     }
 
-    struct record_entry {
-        int32_t size = 0;
-        std::byte* data = nullptr;
-        record_entry(int64_t time, int32_t size, std::byte* msg) {
-            assert(size >= 0);
-            data = new std::byte[size + sizeof(time) + sizeof(size)];
-            std::memcpy(data, &time, sizeof(time));
-            std::memcpy(data + sizeof(time), &size, sizeof(size));
-            std::memcpy(data + sizeof(time) + sizeof(size), msg, size);
-
-            this->size = size + sizeof(time) + sizeof(size);
-        }
-
-        record_entry(record_entry& other) = delete;
-        record_entry(record_entry&& other) noexcept {
-            this->data = other.data;
-            this->size = other.size;
-            other.data = nullptr;
-            other.size = 0;
-        }
-
-        ~record_entry() {
-            assert(size >= 0);
-            delete[] data;
-        }
-    };
-
     void enqueue_log_message(const ISteamNetworkingMessage* msg) {
-        record_entry entry(SteamNetworkingUtils()->GetLocalTimestamp(), msg->m_cbSize, reinterpret_cast<std::byte*>(msg->m_pData));
+        bmmo::record_entry entry(SteamNetworkingUtils()->GetLocalTimestamp(), msg->m_cbSize, reinterpret_cast<std::byte*>(msg->m_pData));
         
         std::unique_lock<std::mutex> lk(message_queue_mutex_);
         message_queue_.emplace_back(std::move(entry));
@@ -558,7 +533,7 @@ private:
     std::mutex message_queue_mutex_;
     std::mutex message_available_mutex_;
     std::condition_variable message_available_cv_;
-    std::list<record_entry> message_queue_;
+    std::list<bmmo::record_entry> message_queue_;
     std::ofstream record_stream_;
 
     void poll_connection_state_changes() override {
@@ -677,7 +652,7 @@ int main(int argc, char** argv) {
     std::thread client_thread([&client]() { client.run(); });
 
     client.wait_till_started();
-    std::jthread record_thread([&client]() {
+    std::thread record_thread([&client]() {
         while (client.running()) {
             client.write_record();
         }

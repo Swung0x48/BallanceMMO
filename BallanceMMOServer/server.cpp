@@ -242,7 +242,7 @@ public:
         auto uptime = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         std::string time_str(20, 0);
         time_str.resize(std::strftime(&time_str[0], time_str.size(),
-            "%F %X", std::localtime(&init_time_t_)));
+            "%F %T", std::localtime(&init_time_t_)));
         Printf("Server uptime: %.2f seconds since %s.",
                         uptime * 1e-6, time_str);
     }
