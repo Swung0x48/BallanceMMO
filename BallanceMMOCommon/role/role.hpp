@@ -65,6 +65,7 @@ public:
         interface_ = SteamNetworkingSockets();
     }
 
+    virtual bool setup() { return true; };
     virtual void run() = 0;
 
     virtual bool running() {

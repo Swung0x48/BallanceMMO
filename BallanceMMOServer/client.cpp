@@ -124,8 +124,9 @@ public:
         nickname_ = name;
     };
 
-    void set_uuid(std::string& uuid) {
-        while (auto pos = uuid.find('-') != std::string::npos) {
+    void set_uuid(std::string uuid) {
+        size_t pos;
+        while ((pos = uuid.find('-')) != std::string::npos) {
             uuid.erase(pos, 1);
         }
         bmmo::hex_chars_from_string(uuid_, uuid);
@@ -565,7 +566,7 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
 }
 
 int main(int argc, char** argv) {
-    std::string server_addr = "101.34.225.147:26676", username = "FlightRecorder",
+    std::string server_addr = "127.0.0.1:26676", username = "MockClient",
                 uuid = "00010002-0003-0004-0005-000600070008",
                 log_path;
     bool print_states = false;

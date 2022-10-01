@@ -14,6 +14,8 @@
 #include <sstream>
 #include <chrono>
 #include <mutex>
+#include <list>
+#include <fstream>
 #include <condition_variable>
 #include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
@@ -29,7 +31,7 @@ struct client_data {
     bmmo::ball_state state{};
 };
 
-class client: public role {
+class recorder_client: public role {
 public:
     bool connect(const std::string& connection_string) {
         bmmo::hostname_parser hp(connection_string);
@@ -54,6 +56,21 @@ public:
             return true;
         }
         return false;
+    }
+
+    bool setup() override {
+        auto time_struct = std::time(nullptr);
+        char record_name[32];
+        std::strftime(record_name, 32, "record_%Y%m%d%H%M.bin", std::localtime(&time_struct));
+        record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
+        if (!record_stream_.is_open())
+            return false;
+        record_stream_ << "BallanceMMO FlightRecorder\0";
+        bmmo::version_t version;
+        record_stream_.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        record_stream_.write(reinterpret_cast<const char*>(&init_time_t_), sizeof(init_time_t_));
+        record_stream_.write(reinterpret_cast<const char*>(&init_timestamp_), sizeof(init_timestamp_));
+        return true;
     }
 
     void run() override {
@@ -124,8 +141,9 @@ public:
         nickname_ = name;
     };
 
-    void set_uuid(std::string& uuid) {
-        while (auto pos = uuid.find('-') != std::string::npos) {
+    void set_uuid(std::string uuid) {
+        size_t pos;
+        while ((pos = uuid.find('-')) != std::string::npos) {
             uuid.erase(pos, 1);
         }
         bmmo::hex_chars_from_string(uuid_, uuid);
@@ -139,6 +157,13 @@ public:
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
         std::this_thread::sleep_for(std::chrono::seconds(1));
+        while (!message_queue_.empty()) {
+            Printf("Waiting for %d messages to be processed...", message_queue_.size());
+            record_entry entry = std::move(message_queue_.front());
+            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
+            message_queue_.pop_front();
+        }
+        message_available_cv_.notify_all();
     }
 
     void teleport_to(const HSteamNetConnection player_id) {
@@ -176,6 +201,21 @@ public:
         else {
             Printf("Player not found.");
         }
+    }
+
+    void write_record() {
+        std::unique_lock<std::mutex> available_lk(message_available_mutex_);
+        while (message_queue_.empty() && running())
+            message_available_cv_.wait(available_lk);
+        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+
+        while (!message_queue_.empty()) {
+            record_entry entry = std::move(message_queue_.front());
+            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
+            message_queue_.pop_front();
+        }
+        lk.unlock();
+        record_stream_.flush();
     }
 
 private:
@@ -472,12 +512,54 @@ private:
         assert(msg_count > 0);
 
         for (int i = 0; i < msg_count; ++i) {
+            enqueue_log_message(incoming_messages_[i]);
             on_message(incoming_messages_[i]);
             incoming_messages_[i]->Release();
         }
         
         return msg_count;
     }
+
+    struct record_entry {
+        int32_t size = 0;
+        std::byte* data = nullptr;
+        record_entry(int64_t time, int32_t size, std::byte* msg) {
+            assert(size >= 0);
+            data = new std::byte[size + sizeof(time) + sizeof(size)];
+            std::memcpy(data, &time, sizeof(time));
+            std::memcpy(data + sizeof(time), &size, sizeof(size));
+            std::memcpy(data + sizeof(time) + sizeof(size), msg, size);
+
+            this->size = size + sizeof(time) + sizeof(size);
+        }
+
+        record_entry(record_entry& other) = delete;
+        record_entry(record_entry&& other) noexcept {
+            this->data = other.data;
+            this->size = other.size;
+            other.data = nullptr;
+            other.size = 0;
+        }
+
+        ~record_entry() {
+            assert(size >= 0);
+            delete[] data;
+        }
+    };
+
+    void enqueue_log_message(const ISteamNetworkingMessage* msg) {
+        record_entry entry(SteamNetworkingUtils()->GetLocalTimestamp(), msg->m_cbSize, reinterpret_cast<std::byte*>(msg->m_pData));
+        
+        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+        message_queue_.emplace_back(std::move(entry));
+        message_available_cv_.notify_one();
+    }
+
+    std::mutex message_queue_mutex_;
+    std::mutex message_available_mutex_;
+    std::condition_variable message_available_cv_;
+    std::list<record_entry> message_queue_;
+    std::ofstream record_stream_;
 
     void poll_connection_state_changes() override {
         this_instance_ = this;
@@ -559,8 +641,8 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
 }
 
 int main(int argc, char** argv) {
-    std::string server_addr = "101.34.225.147:26676", username = "FlightRecorder",
-                uuid = "00010002-0003-0004-0005-000600070008",
+    std::string server_addr = "127.0.0.1:26676", username = "FlightRecorder",
+                uuid = "01020304-0506-0708-090a-0b0c0d0e0f00",
                 log_path;
     bool print_states = false;
     if (parse_args(argc, argv, server_addr, username, uuid, log_path, &print_states) != 0)
@@ -573,17 +655,18 @@ int main(int argc, char** argv) {
             std::cerr << "Fatal: failed to open log file." << std::endl;
             return 1;
         }
-        client::set_log_file(log_file);
+        recorder_client::set_log_file(log_file);
     }
 
     std::cout << "Initializing sockets..." << std::endl;
-    client::init_socket();
+    recorder_client::init_socket();
 
     std::cout << "Creating client instance..." << std::endl;
-    client client;
+    recorder_client client;
     client.set_nickname(username);
     client.set_uuid(uuid);
     client.set_print_states(print_states);
+    client.setup();
 
     std::cout << "Connecting to server..." << std::endl;
     if (!client.connect(server_addr)) {
@@ -594,6 +677,11 @@ int main(int argc, char** argv) {
     std::thread client_thread([&client]() { client.run(); });
 
     client.wait_till_started();
+    std::jthread record_thread([&client]() {
+        while (client.running()) {
+            client.write_record();
+        }
+    });
     while (client.running()) {
         std::cout << "\r> " << std::flush;
         std::string input, cmd;
@@ -630,7 +718,7 @@ int main(int argc, char** argv) {
                     rot[i] = (rand() % 3600 - 1800) / 10.0f + ((translate) ? rot[i] : 0.0f);
             }
             msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-            client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
+            role::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
                 pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
 //            for (int i = 0; i < 50; ++i)
             client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
@@ -660,10 +748,10 @@ int main(int argc, char** argv) {
                 output_thread.join();
         } else if (cmd == "getinfo") {
             auto status = client.get_info();
-            client::Printf("Ping: %dms\n", status.m_nPing);
-            client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
+            role::Printf("Ping: %dms\n", status.m_nPing);
+            role::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
             auto l_status = client.get_lane_info();
-            client::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
+            role::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
         } else if (cmd == "reconnect") {
             if (client_thread.joinable())
                 client_thread.join();
@@ -711,5 +799,7 @@ int main(int argc, char** argv) {
     std::cout << "Stopping..." << std::endl;
     if (client_thread.joinable())
         client_thread.join();
-    client::destroy();
+    if (record_thread.joinable())
+        record_thread.join();
+    recorder_client::destroy();
 }

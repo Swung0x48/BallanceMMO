@@ -41,16 +41,6 @@ public:
     }
 
     void run() override {
-        if (!setup())
-            FatalError("Server failed on setup.");
-
-        running_ = true;
-        startup_cv_.notify_all();
-        
-        Printf("Server (v%s; client min. v%s) started at port %u.\n",
-                bmmo::version_t().to_string(),
-                bmmo::minimum_client_version.to_string(), port_);
-
         while (running_) {
             auto next_update = std::chrono::steady_clock::now() + UPDATE_INTERVAL;
             update();
@@ -216,7 +206,7 @@ public:
     }
 
     void print_clients(bool print_uuid = false) {
-        Printf("%d clients online:", clients_.size());
+        Printf("%d client(s) online:", clients_.size());
         for (auto& i: clients_) {
             Printf("%u: %s%s%s%s",
                     i.first,
@@ -355,8 +345,7 @@ public:
         }
     }
 
-protected:
-    bool setup() {
+    bool setup() override {
         Printf("Loading config from config.yml...");
         if (!load_config()) {
             Printf("Error: failed to load config. Please try fixing or emptying it first.");
@@ -377,9 +366,17 @@ protected:
             return false;
         }
 
+        running_ = true;
+        startup_cv_.notify_all();
+        
+        Printf("Server (v%s; client min. v%s) started at port %u.\n",
+                bmmo::version_t().to_string(),
+                bmmo::minimum_client_version.to_string(), port_);
+
         return true;
     }
 
+protected:
     void save_login_data(HSteamNetConnection client) {
         SteamNetConnectionInfo_t pInfo;
         interface_->GetConnectionInfo(client, &pInfo);
@@ -1300,6 +1297,8 @@ int main(int argc, char** argv) {
 
     printf("Bootstrapping server...\n");
     fflush(stdout);
+    if (!server.setup())
+        server::FatalError("Server failed on setup.");
     std::thread server_thread([&server]() { server.run(); });
 
     server.wait_till_started();
