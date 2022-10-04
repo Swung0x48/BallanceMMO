@@ -549,8 +549,8 @@ private:
 int main(int argc, char** argv) {
     std::string filename;
     if (argc <= 1) {
-        std::cout << "Record name: ";
-        std::cin >> filename;
+        std::cerr << "Please provide the filename of the record." << std::endl;
+        exit(1);
     }
     else
         filename = argv[1];
@@ -576,7 +576,15 @@ int main(int argc, char** argv) {
     while (replayer.running()) {
         std::cout << "\r> " << std::flush;
         std::string line, cmd;
+#ifdef _WIN32
+        std::wstring wline;
+        std::getline(std::wcin, wline);
+        line = bmmo::message_utils::ConvertWideToANSI(wline);
+        if (auto pos = line.rfind('\r'); pos != std::string::npos)
+            line.erase(pos);
+#else
         std::getline(std::cin, line);
+#endif
         bmmo::command_parser parser(line);
 
         cmd = parser.get_next_word();
