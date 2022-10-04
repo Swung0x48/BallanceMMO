@@ -110,7 +110,7 @@ public:
         }
 
         running_ = true;
-        
+        Printf("Record file loaded successfully.");
         startup_cv_.notify_all();
 
         return true;
@@ -137,6 +137,7 @@ public:
     void play() {
         playing_ = true;
         while (running_ && playing_ && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
+            std::unique_lock<std::mutex> lk(record_data_mutex_);
             current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
             auto size = read_variable<int32_t>(record_stream_);
             bmmo::record_entry entry(size);
@@ -180,6 +181,7 @@ public:
         if (playing_) {
             pause();
         }
+        std::unique_lock<std::mutex> lk(record_data_mutex_);
         time_zero_ -= std::chrono::microseconds(dest_time - current_record_time_);
         while (running_ && current_record_time_ < dest_time
                 && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
@@ -189,7 +191,7 @@ public:
             record_stream_.read(reinterpret_cast<char*>(entry.data), size);
             parse_message(entry);
         }
-        Printf("Sought to %.3lfs.", current_record_time_ / 1e6);
+        Printf("Sought to %.3lfs successfully.", current_record_time_ / 1e6);
     }
 
     void wait_till_started() {
@@ -423,6 +425,7 @@ private:
 
     message_action parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
+        // std::unique_lock<std::mutex> lk(record_data_mutex_);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
             case bmmo::LoginAcceptedV2: {
@@ -430,7 +433,7 @@ private:
                 for (const auto& i: msg.online_players) {
                     record_clients_.insert({i.first, {i.second.name, i.second.cheated}});
                 }
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
                 // printf("Code: LoginAcceptedV2\n");
                 // bmmo::login_accepted_v2_msg msg{};
                 // msg.raw.write(reinterpret_cast<char*>(entry.data), entry.size);
@@ -440,10 +443,11 @@ private:
             }
             case bmmo::PlayerDisconnected: {
                 auto msg = deserialize_message<bmmo::player_disconnected_msg>(entry.data, entry.size);
-                if (auto it = record_clients_.find(msg.content.connection_id); it != record_clients_.end()) {
-                    record_clients_.erase(it);
+                if (record_clients_.contains(msg.content.connection_id)) {
+                    record_clients_.erase(msg.content.connection_id);
+                    // don't use iterator here
                 }
-                broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
                 return message_action::None;
             }
             case bmmo::PlayerConnectedV2: {
@@ -526,7 +530,7 @@ private:
     std::chrono::steady_clock::time_point time_zero_, time_pause_;
 
     uint16_t port_ = 0;
-    std::mutex startup_mutex_;
+    std::mutex startup_mutex_, record_data_mutex_;
     std::condition_variable startup_cv_;
     bool print_states = true;
     std::atomic_bool playing_ = false;
@@ -559,13 +563,13 @@ int main(int argc, char** argv) {
     record_replayer::init_socket();
 
     uint16_t port = 26677;
-    printf("Starting server at port %u.\n", port);
+    printf("Starting fake server at port %u.\n", port);
     record_replayer replayer(port, filename);
 
     printf("Bootstrapping server...\n");
     fflush(stdout);
     if (!replayer.setup())
-        role::FatalError("Server failed on setup.");
+        role::FatalError("Fake server failed on setup.");
     
     std::thread server_thread([&replayer]() { replayer.run(); });
     std::thread replayer_thread;
@@ -609,7 +613,7 @@ int main(int argc, char** argv) {
             replayer.print_current_record_time();
         } else if (cmd == "pause") {
             if (!replayer.is_playing()) {
-                replayer.Printf("Record is already not playing.");
+                replayer.Printf("Already not playing.");
                 continue;
             }
             replayer.pause();
