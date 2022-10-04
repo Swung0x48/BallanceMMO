@@ -137,13 +137,10 @@ public:
             auto size = read_variable<int32_t>(record_stream_);
             bmmo::record_entry entry(size);
             record_stream_.read(reinterpret_cast<char*>(entry.data), size);
-            // record_stream_.seekg(size, std::ios::cur);
-            // printf("Record | Time: %7.2lf | Size: %5d\n", 
-            //     (timestamp - init_timestamp) / 1e6, size);
             std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
 
             // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
-            // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", timestamp / 1e6, raw_msg->code, entry.size);
+            // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
             switch (parse_message(entry, current_record_time_)) {
                 case message_action::BroadcastNoDelay:
                     broadcast_message(entry.data, size, k_nSteamNetworkingSend_UnreliableNoDelay);
@@ -170,16 +167,23 @@ public:
     }
 
     void seek(double seconds) {
+        SteamNetworkingMicroseconds dest_time = seconds * 1e6;
+        if (dest_time <= current_record_time_) {
+            Printf("Error: cannot seek to %.3lfs which is earlier than the current timestamp (%.3lfs)!", 
+                seconds, current_record_time_);
+            return;
+        }
         if (playing_) {
             pause();
         }
-        SteamNetworkingMicroseconds dest_time = seconds * 1e6;
+        time_zero_ -= std::chrono::microseconds(dest_time - current_record_time_);
         while (running_ && current_record_time_ < dest_time
                 && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
             current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
             auto size = read_variable<int32_t>(record_stream_);
             bmmo::record_entry entry(size);
             record_stream_.read(reinterpret_cast<char*>(entry.data), size);
+            parse_message(entry, current_record_time_);
         }
         Printf("Sought to %.3lfs.", current_record_time_ / 1e6);
     }
@@ -354,7 +358,6 @@ private:
 
     void on_message(ISteamNetworkingMessage* networking_msg) {
         auto client_it = clients_.find(networking_msg->m_conn);
-
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
 
         if (!(client_it != clients_.end() || raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || raw_msg->code == bmmo::LoginRequestV3)) { // ignore limbo clients message
@@ -365,7 +368,6 @@ private:
         switch (raw_msg->code) {
             case bmmo::LoginRequestV3: {
                 auto msg = deserialize_message<bmmo::login_request_v3_msg>(networking_msg);
-                Printf("%s", msg.version.to_string());
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
                 if (std::memcmp(&msg.version, &record_version_, sizeof(bmmo::version_t)) != 0) {
@@ -380,6 +382,11 @@ private:
                 Printf("%s (v%s) logged in!\n",
                         msg.nickname,
                         msg.version.to_string());
+                
+                bmmo::login_accepted_v2_msg accepted_msg{};
+                accepted_msg.online_players = record_clients_;
+                accepted_msg.serialize();
+                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             default:
@@ -433,6 +440,12 @@ private:
             case bmmo::PlayerConnectedV2: {
                 auto msg = deserialize_message<bmmo::player_connected_v2_msg>(entry.data, entry.size);
                 record_clients_.insert({msg.connection_id, {msg.name, msg.cheated}});
+                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
+                return message_action::None;
+            }
+            case bmmo::OwnedCheatState: {
+                auto msg = deserialize_message<bmmo::owned_cheat_state_msg>(entry.data, entry.size);
+                record_clients_[msg.content.player_id].cheated = msg.content.state.cheated;
                 broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
                 return message_action::None;
             }
@@ -495,7 +508,7 @@ private:
     bmmo::version_t record_version_;
     std::ifstream record_stream_;
     SteamNetworkingMicroseconds record_start_time_;
-    std::chrono::_V2::steady_clock::time_point time_zero_, time_pause_;
+    std::chrono::steady_clock::time_point time_zero_, time_pause_;
 
     uint16_t port_ = 0;
     std::mutex startup_mutex_;
