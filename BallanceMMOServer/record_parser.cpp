@@ -124,6 +124,10 @@ public:
         }
     }
 
+    bool is_playing() {
+        return playing_;
+    }
+
     void start() {
         time_zero_ = std::chrono::steady_clock::now();
         Printf("Playing started.");
@@ -170,7 +174,7 @@ public:
         SteamNetworkingMicroseconds dest_time = seconds * 1e6;
         if (dest_time <= current_record_time_) {
             Printf("Error: cannot seek to %.3lfs which is earlier than the current timestamp (%.3lfs)!", 
-                seconds, current_record_time_);
+                seconds, current_record_time_ / 1e6);
             return;
         }
         if (playing_) {
@@ -572,19 +576,15 @@ int main(int argc, char** argv) {
     while (replayer.running()) {
         std::cout << "\r> " << std::flush;
         std::string line, cmd;
-#ifdef _WIN32
-        std::wstring wline;
-        std::getline(std::wcin, wline);
-        line = bmmo::message_utils::ConvertWideToANSI(wline);
-        if (auto pos = line.rfind('\r'); pos != std::string::npos)
-            line.erase(pos);
-#else
         std::getline(std::cin, line);
-#endif
         bmmo::command_parser parser(line);
 
         cmd = parser.get_next_word();
         if (cmd == "play") {
+            if (replayer.is_playing()) {
+                replayer.Printf("Record is already playing.");
+                continue;
+            }
             if (replayer_thread.joinable())
                 replayer_thread.join();
             if (started) {
@@ -600,6 +600,10 @@ int main(int argc, char** argv) {
         } else if (cmd == "time") {
             replayer.print_current_record_time();
         } else if (cmd == "pause") {
+            if (!replayer.is_playing()) {
+                replayer.Printf("Record is already not playing.");
+                continue;
+            }
             replayer.pause();
         } else if (cmd == "seek") {
             if (!started) {
