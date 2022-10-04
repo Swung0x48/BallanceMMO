@@ -874,9 +874,18 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         }
         SendIngameMessage(s.c_str());
         cleanup();
+        int nReason = pInfo->m_info.m_eEndReason - k_ESteamNetConnectionEnd_App_Min;
         // 102 - crash; 103 - fatal error
-        if (pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 102 || pInfo->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + 103)
+        if (nReason == 102 || nReason == 103)
             terminate(5);
+        else if (nReason >= 150 && nReason < 200) {
+            asio::post(thread_pool_, [this, nReason]() {
+                SendIngameMessage(std::format("Attempting to reconnect in {}s ...", nReason - 150));
+                std::this_thread::sleep_for(std::chrono::seconds(nReason - 150));
+                if (!connecting() && !connected())
+                    connect_to_server(server_addr);
+            });
+        }
         break;
     }
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
@@ -1172,7 +1181,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             auto notification = std::make_shared<text_sprite>(
                 std::format("Notification{}_{}", current_second, rand() % 1000), text, 0.0f, 0.4f);
             notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-            notification->sprite_->SetZOrder(65536 + current_second);
+            notification->sprite_->SetZOrder(65536 + static_cast<int>(current_second));
             notification->sprite_->SetSize({1.0f, 0.4f});
             notification->sprite_->SetFont(system_font_, (int)std::round(m_bml->GetRenderContext()->GetHeight() / 42.0f), 700, false, false);
             notification->set_visible(true);

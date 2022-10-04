@@ -325,10 +325,11 @@ public:
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
     }
 
-    void shutdown() {
+    void shutdown(int reconnection_delay = 0) {
         Printf("Shutting down...");
+        int nReason = reconnection_delay == 0 ? 0 : k_ESteamNetConnectionEnd_App_Min + 150 + reconnection_delay;
         for (auto& i: clients_) {
-            interface_->CloseConnection(i.first, 0, "Server closed", true);
+            interface_->CloseConnection(i.first, nReason, "Server closed", true);
         }
         if (ticking_)
             stop_ticking();
@@ -511,6 +512,12 @@ protected:
         return false;
     }
 
+    // nReason: 
+    // - 0~99: denied at joining
+    // -- 0~49: denied from incorrect configuration
+    // -- 50~99: banned
+    // - 100~199: kicked when online
+    // -- 150+n: auto reconnect in n seconds
     bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
@@ -1327,7 +1334,7 @@ int main(int argc, char** argv) {
 
         cmd = parser.get_next_word();
         if (cmd == "stop") {
-            server.shutdown();
+            server.shutdown(atoi(parser.get_next_word().c_str()));
         } else if (cmd == "list") {
             server.print_clients();
         } else if (cmd == "list-uuid") {

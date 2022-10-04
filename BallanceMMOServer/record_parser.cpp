@@ -79,7 +79,7 @@ public:
         }
         std::string read_data;
         std::getline(record_stream_, read_data, '\0');
-        if (read_data != "BallanceMMO FlightRecorder") {
+        if (read_data != HEADER) {
             FatalError("Error: invalid record file.");
             return false;
         }
@@ -124,38 +124,19 @@ public:
         }
     }
 
-    bool is_playing() {
-        return playing_;
-    }
-
-    void start() {
-        time_zero_ = std::chrono::steady_clock::now();
-        Printf("Playing started.");
-        play();
-    }
+    bool playing() { return playing_; }
+    bool started() { return started_; }
 
     void play() {
-        playing_ = true;
-        while (running_ && playing_ && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
-            std::unique_lock<std::mutex> lk(record_data_mutex_);
-            current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
-            auto size = read_variable<int32_t>(record_stream_);
-            bmmo::record_entry entry(size);
-            record_stream_.read(reinterpret_cast<char*>(entry.data), size);
-            std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
-
-            // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
-            // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
-            switch (parse_message(entry)) {
-                case message_action::BroadcastNoDelay:
-                    broadcast_message(entry.data, size, k_nSteamNetworkingSend_UnreliableNoDelay);
-                    break;
-                case message_action::None:
-                    break;
-                default:
-                    broadcast_message(entry.data, size, k_nSteamNetworkingSend_Reliable);
-            }
-            
+        if (!started_) {
+            time_zero_ = std::chrono::steady_clock::now();
+            Printf("Playing started.");
+            play_record();
+            started_ = true;
+        } else {
+            time_zero_ += (std::chrono::steady_clock::now() - time_pause_);
+            Printf("Playing resumed at %.3lfs.", current_record_time_ / 1e6);
+            play_record();
         }
     }
 
@@ -165,32 +146,21 @@ public:
         Printf("Playing paused at %.3lfs.", current_record_time_ / 1e6);
     }
 
-    void resume() {
-        time_zero_ += (std::chrono::steady_clock::now() - time_pause_);
-        Printf("Playing resumed at %.3lfs.", current_record_time_ / 1e6);
-        play();
-    }
-
     void seek(double seconds) {
-        SteamNetworkingMicroseconds dest_time = seconds * 1e6;
-        if (dest_time <= current_record_time_) {
-            Printf("Error: cannot seek to %.3lfs which is earlier than the current timestamp (%.3lfs)!", 
-                seconds, current_record_time_ / 1e6);
-            return;
-        }
         if (playing_) {
             pause();
         }
-        std::unique_lock<std::mutex> lk(record_data_mutex_);
-        time_zero_ -= std::chrono::microseconds(dest_time - current_record_time_);
-        while (running_ && current_record_time_ < dest_time
-                && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
-            current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
-            auto size = read_variable<int32_t>(record_stream_);
-            bmmo::record_entry entry(size);
-            record_stream_.read(reinterpret_cast<char*>(entry.data), size);
-            parse_message(entry);
+        SteamNetworkingMicroseconds dest_time = seconds * 1e6;
+        for (auto& i: clients_) {
+            interface_->CloseConnection(i.first, k_ESteamNetConnectionEnd_App_Min + 150 + 3, "Seeking data, please wait", true);
         }
+        seeking_ = true;
+        if (dest_time <= current_record_time_) {
+            backward_seek(dest_time);
+        } else {
+            forward_seek(dest_time);
+        }
+        seeking_ = false;
         Printf("Sought to %.3lfs successfully.", current_record_time_ / 1e6);
     }
 
@@ -206,8 +176,10 @@ public:
         for (auto& i: clients_) {
             interface_->CloseConnection(i.first, 0, "Server closed", true);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         running_ = false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (player_thread_.joinable())
+            player_thread_.join();
     }
 
     void print_clients() {
@@ -242,6 +214,62 @@ public:
     }
 
 private:
+    void play_record() {
+        if (player_thread_.joinable())
+            player_thread_.join();
+        playing_ = true;
+        player_thread_ = std::thread([this]() {
+            while (running_ && playing_ && record_stream_.good()
+                    && record_stream_.peek() != std::ifstream::traits_type::eof()) {
+                std::unique_lock<std::mutex> lk(record_data_mutex_);
+                current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
+                auto size = read_variable<int32_t>(record_stream_);
+                bmmo::record_entry entry(size);
+                record_stream_.read(reinterpret_cast<char*>(entry.data), size);
+                std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
+
+                // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
+                // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
+                switch (parse_message(entry)) {
+                    case message_action::BroadcastNoDelay:
+                        broadcast_message(entry.data, size, k_nSteamNetworkingSend_UnreliableNoDelay);
+                        break;
+                    case message_action::Broadcast:
+                        broadcast_message(entry.data, size, k_nSteamNetworkingSend_Reliable);
+                    default:
+                        break;
+                }
+            }
+        });
+    }
+
+    void forward_seek(SteamNetworkingMicroseconds dest_time) {
+        std::unique_lock<std::mutex> lk(record_data_mutex_);
+        time_zero_ -= std::chrono::microseconds(dest_time - current_record_time_);
+        while (running_ && current_record_time_ < dest_time
+                && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
+            current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
+            auto size = read_variable<int32_t>(record_stream_);
+            bmmo::record_entry entry(size);
+            record_stream_.read(reinterpret_cast<char*>(entry.data), size);
+            parse_message(entry);
+        }
+    }
+
+    void backward_seek(SteamNetworkingMicroseconds dest_time) {
+        {
+            std::unique_lock<std::mutex> lk(record_data_mutex_);
+            record_stream_.seekg(strlen(HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(time_t) + sizeof(SteamNetworkingMicroseconds));
+            started_ = false;
+            record_clients_.clear();
+            record_map_names_.clear();
+            time_zero_ = std::chrono::steady_clock::now();
+            current_record_time_ = 0;
+            started_ = true;
+        }
+        forward_seek(dest_time);
+    }
+
     void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
         // Printf("Connection status changed: %d", pInfo->m_info.m_eState);
         switch (pInfo->m_info.m_eState) {
@@ -376,9 +404,14 @@ private:
                 auto msg = deserialize_message<bmmo::login_request_v3_msg>(networking_msg);
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
-                if (std::memcmp(&msg.version, &record_version_, sizeof(bmmo::version_t)) != 0) {
+                if (std::memcmp(&msg.version, &record_version_, sizeof(bmmo::version_t) - sizeof(uint8_t)) != 0) {
                     interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1,
                         Sprintf("Incorrect version; please use BMMO v%s", record_version_.to_string()).c_str(), true);
+                    break;
+                }
+                if (seeking_) {
+                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 150 + 2,
+                        "Seeking data, please wait", true);
                     break;
                 }
                 
@@ -433,13 +466,12 @@ private:
                 for (const auto& i: msg.online_players) {
                     record_clients_.insert({i.first, {i.second.name, i.second.cheated}});
                 }
-                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
                 // printf("Code: LoginAcceptedV2\n");
                 // bmmo::login_accepted_v2_msg msg{};
                 // msg.raw.write(reinterpret_cast<char*>(entry.data), entry.size);
                 // msg.deserialize();
                 // printf("\t%d player(s) online: \n", msg.online_players.size());
-                return message_action::None;
+                break;
             }
             case bmmo::PlayerDisconnected: {
                 auto msg = deserialize_message<bmmo::player_disconnected_msg>(entry.data, entry.size);
@@ -447,26 +479,22 @@ private:
                     record_clients_.erase(msg.content.connection_id);
                     // don't use iterator here
                 }
-                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
-                return message_action::None;
+                break;
             }
             case bmmo::PlayerConnectedV2: {
                 auto msg = deserialize_message<bmmo::player_connected_v2_msg>(entry.data, entry.size);
                 record_clients_.insert({msg.connection_id, {msg.name, msg.cheated}});
-                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
-                return message_action::None;
+                break;
             }
             case bmmo::OwnedCheatState: {
                 auto msg = deserialize_message<bmmo::owned_cheat_state_msg>(entry.data, entry.size);
                 record_clients_[msg.content.player_id].cheated = msg.content.state.cheated;
-                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
-                return message_action::None;
+                break;
             }
             case bmmo::MapNames: {
                 auto msg = deserialize_message<bmmo::map_names_msg>(entry.data, entry.size);
                 record_map_names_.insert(msg.maps.begin(), msg.maps.end());
-                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
-                return message_action::None;
+                break;
             }
             case bmmo::OwnedTimedBallState: {
                 return message_action::BroadcastNoDelay;
@@ -518,9 +546,10 @@ private:
                 */
             default: {
                 // printf("Code: %d\n", raw_msg->code);
-                return message_action::BroadcastNoDelay;
+                break;
             }
         }
+        return message_action::Broadcast;
         // std::cout.write(entry.data, entry.size);
     }
 
@@ -533,7 +562,8 @@ private:
     std::mutex startup_mutex_, record_data_mutex_;
     std::condition_variable startup_cv_;
     bool print_states = true;
-    std::atomic_bool playing_ = false;
+    std::atomic_bool playing_ = false, started_ = false, seeking_ = false;
+    std::thread player_thread_;
 
     SteamNetworkingMicroseconds current_record_time_;
     std::unordered_map<HSteamNetConnection, bmmo::player_status> record_clients_;
@@ -546,6 +576,7 @@ private:
     std::unordered_map<std::string, HSteamNetConnection> username_;
 
     constexpr static inline std::chrono::nanoseconds UPDATE_INTERVAL{(int)1e9 / 66};
+    constexpr static inline const char* HEADER = "BallanceMMO FlightRecorder";
 };
 
 
@@ -572,9 +603,6 @@ int main(int argc, char** argv) {
         role::FatalError("Fake server failed on setup.");
     
     std::thread server_thread([&replayer]() { replayer.run(); });
-    std::thread replayer_thread;
-
-    bool started = false;
 
     replayer.wait_till_started();
     while (replayer.running()) {
@@ -593,18 +621,11 @@ int main(int argc, char** argv) {
 
         cmd = parser.get_next_word();
         if (cmd == "play") {
-            if (replayer.is_playing()) {
+            if (replayer.playing()) {
                 replayer.Printf("Record is already playing.");
                 continue;
             }
-            if (replayer_thread.joinable())
-                replayer_thread.join();
-            if (started) {
-                replayer_thread = std::thread([&replayer]() { replayer.resume(); });
-            } else {
-                replayer_thread = std::thread([&replayer]() { replayer.start(); });
-                started = true;
-            }
+            replayer.play();
         } else if (cmd == "stop") {
             replayer.shutdown();
         } else if (cmd == "list") {
@@ -612,15 +633,14 @@ int main(int argc, char** argv) {
         } else if (cmd == "time") {
             replayer.print_current_record_time();
         } else if (cmd == "pause") {
-            if (!replayer.is_playing()) {
+            if (!replayer.playing()) {
                 replayer.Printf("Already not playing.");
                 continue;
             }
             replayer.pause();
         } else if (cmd == "seek") {
-            if (!started) {
-                replayer_thread = std::thread([&replayer]() { replayer.start(); });
-                started = true;
+            if (!replayer.started()) {
+                replayer.play();
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
             replayer.seek(atof(parser.get_next_word().c_str()));
@@ -630,8 +650,6 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Stopping..." << std::endl;
-    if (replayer_thread.joinable())
-        replayer_thread.join();
     if (server_thread.joinable())
         server_thread.join();
 
