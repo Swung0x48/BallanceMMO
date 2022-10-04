@@ -42,6 +42,10 @@ public:
 	{
 		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this));
 		this_instance_ = this;
+
+		LOGFONT font_struct{};
+		SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(font_struct), &font_struct, 0);
+		strcpy(system_font_, font_struct.lfFaceName);
 	}
 
 	bmmo::version_t version;
@@ -169,6 +173,8 @@ private:
 	bool countdown_restart_ = false;
 
 	boost::uuids::uuid uuid_{};
+
+	char system_font_[32]{};
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;

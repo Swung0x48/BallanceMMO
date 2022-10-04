@@ -250,13 +250,12 @@ void BallanceMMOClient::OnPostStartMenu()
         GetLogger()->Info("Destroy completed.");
     }
     else {
-        VxRect viewport; m_bml->GetRenderContext()->GetViewRect(viewport);
-        float height = viewport.GetHeight();
+        auto height = (float) m_bml->GetRenderContext()->GetHeight();
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
         ping_->sprite_->SetFont("Arial", (int)std::round(height / 77), 500, false, false);
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
-        status_->sprite_->SetFont("Times New Roman", (int)std::round(height / 70), 500, false, false);
+        status_->sprite_->SetFont("Times New Roman", (int)std::round(height / 70), 700, false, false);
         status_->paint(0xffff0000);
 
         using namespace std::placeholders;
@@ -928,8 +927,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
             local_state_handler_ = std::make_unique<spectator_state_handler>(thread_pool_, this, GetLogger());
             spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.96f);
-            VxRect viewport; m_bml->GetRenderContext()->GetViewRect(viewport);
-            spectator_label_->sprite_->SetFont("Arial", (int)std::roundf(viewport.GetHeight() / 64), 500, false, false);
+            spectator_label_->sprite_->SetFont("Arial", (int)std::round(m_bml->GetRenderContext()->GetHeight() / 64.0f), 500, false, false);
             spectator_label_->set_visible(true);
         }
         else {
@@ -1160,24 +1158,23 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         std::string name = get_username(msg.player_id);
-        SendIngameMessage(std::format("[Announcement] {}: {}",
-                                      name, msg.chat_content));
+        SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content));
         std::wstring wtext = bmmo::message_utils::ConvertAnsiToWide(msg.chat_content);
         asio::post(thread_pool_, [this, name, wtext]() mutable {
             std::string text;
-            while (wtext.length() > 22) {
-                text += bmmo::message_utils::ConvertWideToANSI(wtext.substr(0, 22)) + '\n';
-                wtext.erase(0, 22);
+            constexpr static size_t MAX_LINE_LENGTH = 22;
+            while (wtext.length() > MAX_LINE_LENGTH) {
+                text += bmmo::message_utils::ConvertWideToANSI(wtext.substr(0, MAX_LINE_LENGTH)) + '\n';
+                wtext.erase(0, MAX_LINE_LENGTH);
             };
             text += bmmo::message_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
+            auto current_second = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
             auto notification = std::make_shared<text_sprite>(
-                std::format("Notification{}_{}", SteamNetworkingUtils()->GetLocalTimestamp(), rand() % 1000),
-                text, 0.0f, 0.4f);
-            VxRect viewport; m_bml->GetRenderContext()->GetViewRect(viewport);
+                std::format("Notification{}_{}", current_second, rand() % 1000), text, 0.0f, 0.4f);
             notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-            notification->sprite_->SetZOrder(1048576);
-            notification->sprite_->SetSize(Vx2DVector(1.0f, 0.4f));
-            notification->sprite_->SetFont("Arial", (int)std::round(viewport.GetHeight() / 42), 700, false, false);
+            notification->sprite_->SetZOrder(65536 + current_second);
+            notification->sprite_->SetSize({1.0f, 0.4f});
+            notification->sprite_->SetFont(system_font_, (int)std::round(m_bml->GetRenderContext()->GetHeight() / 42.0f), 700, false, false);
             notification->set_visible(true);
             for (int i = 1; i < 15; ++i) {
               notification->sprite_->SetTextColor(0x11FF1190 + i * 0x11001001);

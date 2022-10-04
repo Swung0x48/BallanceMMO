@@ -616,7 +616,7 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
 }
 
 int main(int argc, char** argv) {
-    std::string server_addr = "127.0.0.1:26676", username = "FlightRecorder",
+    std::string server_addr = "127.0.0.1:26676", username = "*FlightRecorder",
                 uuid = "01020304-0506-0708-090a-0b0c0d0e0f00",
                 log_path;
     bool print_states = false;

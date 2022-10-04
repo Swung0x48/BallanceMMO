@@ -920,9 +920,13 @@ protected:
                 switch (msg->content.type) {
                     case bmmo::countdown_type::Go: {
                         Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name, map_name, msg->content.force_restart ? " (rank reset)" : "");
-                        if (force_restart_level_ || msg->content.force_restart)
+                        if (force_restart_level_ || msg->content.force_restart) {
                             maps_.clear();
-                        maps_[msg->content.map.get_hash_bytes_string()] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
+                            std::for_each(map_names_.begin(), map_names_.end(), [this](const auto map)
+                                { maps_[map.first] = {0, SteamNetworkingUtils()->GetLocalTimestamp()}; });
+                        } else {
+                            maps_[msg->content.map.get_hash_bytes_string()] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
+                        }
                         msg->content.restart_level = restart_level_;
                         msg->content.force_restart = force_restart_level_;
                         std::for_each(clients_.begin(), clients_.end(),
@@ -1143,7 +1147,7 @@ protected:
             case bmmo::KeyboardInput:
                 break;
             default:
-                FatalError("Invalid message with opcode %d received.", raw_msg->code);
+                Printf("Error: invalid message with opcode %d received.", raw_msg->code);
         }
 
         // TODO: replace with actual message data structure handling
