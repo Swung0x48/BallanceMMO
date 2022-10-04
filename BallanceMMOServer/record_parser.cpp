@@ -141,7 +141,7 @@ public:
 
             // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
             // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
-            switch (parse_message(entry, current_record_time_)) {
+            switch (parse_message(entry)) {
                 case message_action::BroadcastNoDelay:
                     broadcast_message(entry.data, size, k_nSteamNetworkingSend_UnreliableNoDelay);
                     break;
@@ -183,7 +183,7 @@ public:
             auto size = read_variable<int32_t>(record_stream_);
             bmmo::record_entry entry(size);
             record_stream_.read(reinterpret_cast<char*>(entry.data), size);
-            parse_message(entry, current_record_time_);
+            parse_message(entry);
         }
         Printf("Sought to %.3lfs.", current_record_time_ / 1e6);
     }
@@ -387,6 +387,11 @@ private:
                 accepted_msg.online_players = record_clients_;
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
+
+                bmmo::map_names_msg names_msg;
+                names_msg.maps = record_map_names_;
+                names_msg.serialize();
+                send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             default:
@@ -412,7 +417,7 @@ private:
         return deserialize_message<T>(networking_msg->m_pData, networking_msg->m_cbSize);
     }
 
-    message_action parse_message(bmmo::record_entry& entry, SteamNetworkingMicroseconds time) {
+    message_action parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
@@ -446,6 +451,12 @@ private:
             case bmmo::OwnedCheatState: {
                 auto msg = deserialize_message<bmmo::owned_cheat_state_msg>(entry.data, entry.size);
                 record_clients_[msg.content.player_id].cheated = msg.content.state.cheated;
+                broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
+                return message_action::None;
+            }
+            case bmmo::MapNames: {
+                auto msg = deserialize_message<bmmo::map_names_msg>(entry.data, entry.size);
+                record_map_names_.insert(msg.maps.begin(), msg.maps.end());
                 broadcast_message(entry.data, entry.size, k_nSteamNetworkingSend_Reliable);
                 return message_action::None;
             }
@@ -518,6 +529,7 @@ private:
 
     SteamNetworkingMicroseconds current_record_time_;
     std::unordered_map<HSteamNetConnection, bmmo::player_status> record_clients_;
+    std::unordered_map<std::string, std::string> record_map_names_;
 
     HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
@@ -590,8 +602,12 @@ int main(int argc, char** argv) {
         } else if (cmd == "pause") {
             replayer.pause();
         } else if (cmd == "seek") {
-            double timestamp = atof(parser.get_next_word().c_str());
-            replayer.seek(timestamp);
+            if (!started) {
+                replayer_thread = std::thread([&replayer]() { replayer.start(); });
+                started = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+            replayer.seek(atof(parser.get_next_word().c_str()));
         } else if (!cmd.empty()) {
             replayer.Printf("Error: unknown command \"%s\".", cmd);
         }
