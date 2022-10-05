@@ -603,8 +603,6 @@ private:
     constexpr static inline const char* HEADER = "BallanceMMO FlightRecorder";
 };
 
-
-
 int main(int argc, char** argv) {
     printf("Initializing sockets...\n");
     record_replayer::init_socket();
@@ -620,7 +618,7 @@ int main(int argc, char** argv) {
     }
     if (!replayer.setup())
         role::FatalError("Fake server failed on setup.");
-    
+
     std::thread server_thread([&replayer]() { replayer.run(); });
 
     replayer.wait_till_started();
@@ -677,7 +675,7 @@ int main(int argc, char** argv) {
             replayer.set_record_file(parser.get_rest_of_line());
             if (!replayer.setup())
                 role::FatalError("Fake server failed on setup.");
-            std::thread server_thread([&replayer]() { replayer.run(); });
+            server_thread = std::thread([&replayer]() { replayer.run(); });
             replayer.wait_till_started();
         } else if (!cmd.empty()) {
             replayer.Printf("Error: unknown command \"%s\".", cmd);
