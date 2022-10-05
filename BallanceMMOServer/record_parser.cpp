@@ -32,9 +32,8 @@ struct client_data {
 
 class record_replayer: public role {
 public:
-    explicit record_replayer(uint16_t port, std::string filename) {
+    explicit record_replayer(uint16_t port) {
         port_ = port;
-        record_stream_.open(filename, std::ios::binary);
         set_logging_level(k_ESteamNetworkingSocketsDebugOutputType_Important);
     }
 
@@ -72,11 +71,20 @@ public:
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
     }
 
+    void set_record_file(std::string filename) {
+        if (record_stream_.is_open()) {
+            record_stream_.close();
+            record_stream_.clear();
+        }
+        record_stream_.open(filename, std::ios::binary);
+    }
+
     bool setup() override {
         if (!record_stream_.is_open()) {
             FatalError("Error: cannot open record file.");
             return false;
         }
+        record_stream_.seekg(0);
         std::string read_data;
         std::getline(record_stream_, read_data, '\0');
         if (read_data != HEADER) {
@@ -94,19 +102,23 @@ public:
         Printf("Record start time: \t%s\n", time_str);
         read_variable(record_stream_, record_start_time_);
 
-        SteamNetworkingIPAddr local_address{};
-        local_address.Clear();
-        local_address.m_port = port_;
-        SteamNetworkingConfigValue_t opt = generate_opt();
-        
-        listen_socket_ = interface_->CreateListenSocketIP(local_address, 1, &opt);
-        if (listen_socket_ == k_HSteamListenSocket_Invalid) {
-            return false;
-        }
+        if (!init_) {
+            SteamNetworkingIPAddr local_address{};
+            local_address.Clear();
+            local_address.m_port = port_;
+            SteamNetworkingConfigValue_t opt = generate_opt();
+            
+            listen_socket_ = interface_->CreateListenSocketIP(local_address, 1, &opt);
+            if (listen_socket_ == k_HSteamListenSocket_Invalid) {
+                return false;
+            }
 
-        poll_group_ = interface_->CreatePollGroup();
-        if (poll_group_ == k_HSteamNetPollGroup_Invalid) {
-            return false;
+            poll_group_ = interface_->CreatePollGroup();
+            if (poll_group_ == k_HSteamNetPollGroup_Invalid) {
+                return false;
+            }
+
+            init_ = true;
         }
 
         running_ = true;
@@ -147,8 +159,10 @@ public:
     }
 
     void seek(double seconds) {
+        bool was_playing = false;
         if (playing_) {
             pause();
+            was_playing = true;
         }
         SteamNetworkingMicroseconds dest_time = seconds * 1e6;
         for (auto& i: clients_) {
@@ -162,6 +176,8 @@ public:
         }
         seeking_ = false;
         Printf("Sought to %.3lfs successfully.", current_record_time_ / 1e6);
+        if (was_playing)
+            play();
     }
 
     void wait_till_started() {
@@ -171,10 +187,11 @@ public:
         }
     }
 
-    void shutdown() {
+    void shutdown(int reconnection_delay = 0) {
         Printf("Shutting down...");
+        int nReason = reconnection_delay == 0 ? 0 : k_ESteamNetConnectionEnd_App_Min + 150 + reconnection_delay;
         for (auto& i: clients_) {
-            interface_->CloseConnection(i.first, 0, "Server closed", true);
+            interface_->CloseConnection(i.first, nReason, "Server closed", true);
         }
         running_ = false;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -239,6 +256,9 @@ private:
                     default:
                         break;
                 }
+            }
+            if (!(record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof())) {
+                Printf("Playing finished at %.3lfs.", current_record_time_);
             }
         });
     }
@@ -388,6 +408,12 @@ private:
         if (itClient != clients_.end())
             clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, *client);
+        
+        bmmo::plain_text_msg text_msg;
+        text_msg.text_content.resize(128);
+        Sprintf(text_msg.text_content, "[Reality] %s disconnected.", name);
+        text_msg.serialize();
+        broadcast_message(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
     }
 
     void on_message(ISteamNetworkingMessage* networking_msg) {
@@ -401,7 +427,7 @@ private:
 
         switch (raw_msg->code) {
             case bmmo::LoginRequestV3: {
-                auto msg = deserialize_message<bmmo::login_request_v3_msg>(networking_msg);
+                auto msg = bmmo::message_utils::deserialize<bmmo::login_request_v3_msg>(networking_msg);
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
                 if (std::memcmp(&msg.version, &record_version_, sizeof(bmmo::version_t) - sizeof(uint8_t)) != 0) {
@@ -431,29 +457,27 @@ private:
                 names_msg.maps = record_map_names_;
                 names_msg.serialize();
                 send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), k_nSteamNetworkingSend_Reliable);
+
+                bmmo::plain_text_msg text_msg;
+                text_msg.text_content.resize(128);
+                Sprintf(text_msg.text_content, "[Reality] %s joined the game.", msg.nickname);
+                text_msg.serialize();
+                broadcast_message(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
+                break;
+            }
+            case bmmo::Chat: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::chat_msg>(networking_msg);
+                Printf("(%u, %s): %s", networking_msg->m_conn, client_it->second.name, msg.chat_content);
+                bmmo::plain_text_msg text_msg;
+                text_msg.text_content.resize(2048);
+                Sprintf(text_msg.text_content, "[Reality] %s: %s", client_it->second.name, msg.chat_content);
+                text_msg.serialize();
+                broadcast_message(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             default:
                 break;
         }
-    }
-
-    template<typename T>
-    static inline T deserialize_message(void* data, int size) {
-        if constexpr (std::is_trivially_copyable<T>()) {
-            return *reinterpret_cast<T*>(data);
-        }
-        else {
-            T msg{};
-            msg.raw.write(reinterpret_cast<char*>(data), size);
-            msg.deserialize();
-            return msg;
-        }
-    }
-    
-    template<typename T>
-    static inline T deserialize_message(ISteamNetworkingMessage* networking_msg) {
-        return deserialize_message<T>(networking_msg->m_pData, networking_msg->m_cbSize);
     }
 
     message_action parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
@@ -462,7 +486,7 @@ private:
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
             case bmmo::LoginAcceptedV2: {
-                auto msg = deserialize_message<bmmo::login_accepted_v2_msg>(entry.data, entry.size);
+                auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v2_msg>(entry.data, entry.size);
                 for (const auto& i: msg.online_players) {
                     record_clients_.insert({i.first, {i.second.name, i.second.cheated}});
                 }
@@ -474,7 +498,7 @@ private:
                 break;
             }
             case bmmo::PlayerDisconnected: {
-                auto msg = deserialize_message<bmmo::player_disconnected_msg>(entry.data, entry.size);
+                auto msg = bmmo::message_utils::deserialize<bmmo::player_disconnected_msg>(entry.data, entry.size);
                 if (record_clients_.contains(msg.content.connection_id)) {
                     record_clients_.erase(msg.content.connection_id);
                     // don't use iterator here
@@ -482,17 +506,17 @@ private:
                 break;
             }
             case bmmo::PlayerConnectedV2: {
-                auto msg = deserialize_message<bmmo::player_connected_v2_msg>(entry.data, entry.size);
+                auto msg = bmmo::message_utils::deserialize<bmmo::player_connected_v2_msg>(entry.data, entry.size);
                 record_clients_.insert({msg.connection_id, {msg.name, msg.cheated}});
                 break;
             }
             case bmmo::OwnedCheatState: {
-                auto msg = deserialize_message<bmmo::owned_cheat_state_msg>(entry.data, entry.size);
+                auto msg = bmmo::message_utils::deserialize<bmmo::owned_cheat_state_msg>(entry.data, entry.size);
                 record_clients_[msg.content.player_id].cheated = msg.content.state.cheated;
                 break;
             }
             case bmmo::MapNames: {
-                auto msg = deserialize_message<bmmo::map_names_msg>(entry.data, entry.size);
+                auto msg = bmmo::message_utils::deserialize<bmmo::map_names_msg>(entry.data, entry.size);
                 record_map_names_.insert(msg.maps.begin(), msg.maps.end());
                 break;
             }
@@ -562,7 +586,7 @@ private:
     std::mutex startup_mutex_, record_data_mutex_;
     std::condition_variable startup_cv_;
     bool print_states = true;
-    std::atomic_bool playing_ = false, started_ = false, seeking_ = false;
+    std::atomic_bool playing_ = false, started_ = false, seeking_ = false, init_ = false;
     std::thread player_thread_;
 
     SteamNetworkingMicroseconds current_record_time_;
@@ -582,23 +606,18 @@ private:
 
 
 int main(int argc, char** argv) {
-    std::string filename;
-    if (argc <= 1) {
-        std::cerr << "Please provide the filename of the record." << std::endl;
-        exit(1);
-    }
-    else
-        filename = argv[1];
-
     printf("Initializing sockets...\n");
     record_replayer::init_socket();
 
     uint16_t port = 26677;
     printf("Starting fake server at port %u.\n", port);
-    record_replayer replayer(port, filename);
+    record_replayer replayer(port);
 
     printf("Bootstrapping server...\n");
     fflush(stdout);
+    if (argc > 1) {
+        replayer.set_record_file(argv[1]);
+    }
     if (!replayer.setup())
         role::FatalError("Fake server failed on setup.");
     
@@ -627,7 +646,7 @@ int main(int argc, char** argv) {
             }
             replayer.play();
         } else if (cmd == "stop") {
-            replayer.shutdown();
+            replayer.shutdown(atoi(parser.get_next_word().c_str()));
         } else if (cmd == "list") {
             replayer.print_clients();
         } else if (cmd == "time") {
@@ -644,6 +663,22 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
             replayer.seek(atof(parser.get_next_word().c_str()));
+        } else if (cmd == "say") {
+            bmmo::plain_text_msg text_msg;
+            auto text = parser.get_rest_of_line();
+            text_msg.text_content = "[Reality] [Server]: " + text;
+            text_msg.serialize();
+            replayer.broadcast_message(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
+            replayer.Printf("[Server]: %s", text);
+        } else if (cmd == "load") {
+            replayer.shutdown(4);
+            if (server_thread.joinable())
+                server_thread.join();
+            replayer.set_record_file(parser.get_rest_of_line());
+            if (!replayer.setup())
+                role::FatalError("Fake server failed on setup.");
+            std::thread server_thread([&replayer]() { replayer.run(); });
+            replayer.wait_till_started();
         } else if (!cmd.empty()) {
             replayer.Printf("Error: unknown command \"%s\".", cmd);
         }

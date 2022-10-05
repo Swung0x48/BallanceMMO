@@ -6,7 +6,7 @@ namespace bmmo {
     class command_parser {
         std::string cmd;
     public:
-        command_parser(std::string cmd = "") {
+        command_parser(const std::string& cmd = "") {
             this->cmd = cmd;
         }
 
