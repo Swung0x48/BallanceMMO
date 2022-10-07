@@ -5,7 +5,9 @@ namespace bmmo {
     struct record_entry {
         int32_t size = 0;
         std::byte* data = nullptr;
-        record_entry(int32_t s) {
+        record_entry(): size(0), data(nullptr) {}
+
+        explicit record_entry(int32_t s) {
             assert(size >= 0);
             size = s;
             if (s > 0)
@@ -28,6 +30,14 @@ namespace bmmo {
             this->size = other.size;
             other.data = nullptr;
             other.size = 0;
+        }
+
+        record_entry& operator=(record_entry&& other)  noexcept {
+            this->data = other.data;
+            this->size = other.size;
+            other.data = nullptr;
+            other.size = 0;
+            return *this;
         }
 
         ~record_entry() {

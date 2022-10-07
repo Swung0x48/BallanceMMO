@@ -46,7 +46,7 @@ add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
 add_executable(BallanceMMOFlightRecorder flightrecorder.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOFlightRecorder GameNetworkingSockets::shared)
-add_executable(BallanceMMORecordParser record_parser.cpp)
+add_executable(BallanceMMORecordParser record_parser.cpp console.cpp)
 target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared)
 
 get_target_property(_inc yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
