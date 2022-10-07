@@ -453,7 +453,7 @@ private:
                 }
                 if (!running_ || !playing_)
                     break;
-                Printf("%" PRIu64, current_record_time_);
+                // Printf("%" PRIu64, current_record_time_);
                 std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
 
                 // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
