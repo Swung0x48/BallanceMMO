@@ -4,6 +4,7 @@
 #ifdef _WIN32
 #undef max
 #endif
+#define NOMINMAX
 
 #include "message/message_all.hpp"
 #include "entity/entity.hpp"
