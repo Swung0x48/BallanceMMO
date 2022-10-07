@@ -11,6 +11,13 @@
 #include <fstream>
 #include <condition_variable>
 #include <cinttypes>
+#include <thread>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <filesystem>
+
 #include "console.hpp"
 
 template<typename T>
