@@ -339,8 +339,8 @@ public:
                     record_clients_[it->id] = {username, static_cast<uint8_t>((it->state & Cheating) ? 1 : 0)};
                     
                 }
-                std::cout << "\rRebuilding state for " << username << " #" << it->id << " [" << it->begin << ", " << current_record_time_
-                              << ", " << it->end << "] " << (valid ? "valid" : "invalid");
+                // std::cout << "\rRebuilding state for " << username << " #" << it->id << " [" << it->begin << ", " << current_record_time_
+                //               << ", " << it->end << "] " << (valid ? "valid" : "invalid");
             }
         }
 
@@ -453,7 +453,6 @@ private:
                 }
                 if (!running_ || !playing_)
                     break;
-                // Printf("%" PRIu64, current_record_time_);
                 std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
 
                 // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
