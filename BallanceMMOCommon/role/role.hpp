@@ -223,7 +223,7 @@ public:
     template <typename ... Args>
     static void Printf(const char* fmt, Args&& ... args) {
         char text[2048];
-        sprintf(text, fmt, ConvertArgument(args)...);
+        snprintf(text, 2048, fmt, ConvertArgument(args)...);
         // va_list ap;
         // va_start(ap, fmt);
         // vsprintf(text, fmt, ap);

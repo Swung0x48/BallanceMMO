@@ -75,8 +75,10 @@ public:
 			return true;
 		});*/
 
-		VxRect viewport; bml_->GetRenderContext()->GetViewRect(viewport);
 		auto* rc = bml_->GetRenderContext();
+		if (!rc)
+			return;
+		VxRect viewport; rc->GetViewRect(viewport);
 		db_.for_each([this, &viewport, &rc, update_cheat, timestamp](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
@@ -126,8 +128,6 @@ public:
 				username_label->update(item.second.name + (item.second.cheated ? " [C]" : ""));
 			}
 			VxRect extent; current_ball->GetRenderExtents(extent);
-			if (!rc)
-				return false;
 			if (isnan(extent.left) || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
 				username_label->set_visible(false);
 				return true;

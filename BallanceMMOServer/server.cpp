@@ -1361,6 +1361,24 @@ int main(int argc, char** argv) {
             msg.serialize();
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             server.Printf("Broadcast \"%s\".", msg.text_content);
+        } else if (cmd == "popup" || cmd == "popup-broadcast") {
+            HSteamNetConnection client = k_HSteamNetConnection_Invalid;
+            if (cmd == "popup") {
+                client = server.get_client_id(parser.get_next_word());
+                if (client == k_HSteamNetConnection_Invalid)
+                    continue;
+            }
+            std::string line = parser.get_rest_of_line();
+            bmmo::popup_box_msg msg{};
+            auto pos = line.find("||");
+            msg.title = pos == std::string::npos ? "BallanceMMO - Message" : line.substr(0, pos);
+            msg.text_content = pos == std::string::npos ? line : line.substr(pos + 2);
+            msg.serialize();
+            if (cmd == "popup")
+                server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            else
+                server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.Printf("[Popup -> %s] {%s}: %s", client == k_HSteamNetConnection_Invalid ? "[all]" : std::to_string(client), msg.title, msg.text_content);
         } else if (cmd == "announce") {
             bmmo::important_notification_msg msg{};
             msg.chat_content = parser.get_rest_of_line();

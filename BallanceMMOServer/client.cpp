@@ -366,6 +366,11 @@ private:
                     Printf("(%u, %s) whispers to you: %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
                 break;
             }
+            case bmmo::PlainText: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::plain_text_msg>(networking_msg);
+                Printf(msg.text_content.c_str());
+                break;
+            }
             case bmmo::ImportantNotification: {
                 bmmo::important_notification_msg msg{};
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
@@ -375,6 +380,11 @@ private:
                     Printf("[Announcement] [Server]: %s", msg.chat_content);
                 else
                     Printf("[Announcement] (%u, %s): %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content);
+                break;
+            }
+            case bmmo::PopupBox: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(networking_msg);
+                Printf("[Popup] {%s}: %s", msg.title, msg.text_content);
                 break;
             }
             case bmmo::CheatToggle: {

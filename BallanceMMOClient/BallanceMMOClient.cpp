@@ -1050,17 +1050,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::LoginAcceptedV2: {
-        logged_in_ = true;
-        status_->update("Connected");
-        status_->paint(0xff00ff00);
-        SendIngameMessage("Logged in.");
         bmmo::login_accepted_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (!msg.deserialize()) {
             GetLogger()->Error("Deserialization failed!");
         }
+
+        if (logged_in_) {
+            db_.clear();
+            objects_.destroy_all_objects();
+        }
         GetLogger()->Info((std::to_string(msg.online_players.size()) + " player(s) online: ").c_str());
-        
         for (auto& i : msg.online_players) {
             if (i.second.name == db_.get_nickname()) {
                 db_.set_client_id(i.first);
@@ -1069,6 +1069,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             }
             GetLogger()->Info(i.second.name.c_str());
         }
+
+        if (logged_in_)
+            break;
+        logged_in_ = true;
+        status_->update("Connected");
+        status_->paint(0xff00ff00);
+        SendIngameMessage("Logged in.");
 
         // post-connection actions
         player_ball_ = get_current_ball();
@@ -1168,22 +1175,22 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         std::string name = get_username(msg.player_id);
         SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content));
-        std::wstring wtext = bmmo::message_utils::ConvertAnsiToWide(msg.chat_content);
-        asio::post(thread_pool_, [this, name, wtext]() mutable {
+        asio::post(thread_pool_, [this, name, wtext = bmmo::message_utils::ConvertAnsiToWide(msg.chat_content)]() mutable {
             std::string text;
             constexpr static size_t MAX_LINE_LENGTH = 22;
-            while (wtext.length() > MAX_LINE_LENGTH) {
+            int line_count;
+            for (line_count = 0; wtext.length() > MAX_LINE_LENGTH; ++line_count) {
                 text += bmmo::message_utils::ConvertWideToANSI(wtext.substr(0, MAX_LINE_LENGTH)) + '\n';
                 wtext.erase(0, MAX_LINE_LENGTH);
             };
             text += bmmo::message_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
             auto current_second = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
-            auto notification = std::make_shared<text_sprite>(
-                std::format("Notification{}_{}", current_second, rand() % 1000), text, 0.0f, 0.4f);
+            auto notification = std::make_shared<text_sprite>(std::format("Notification{}_{}",
+                                    current_second, rand() % 1000), text, 0.0f, 0.4f - 0.02f * line_count);
             notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
             notification->sprite_->SetZOrder(65536 + static_cast<int>(current_second));
-            notification->sprite_->SetSize({1.0f, 0.4f});
-            notification->sprite_->SetFont(system_font_, (int)std::round(m_bml->GetRenderContext()->GetHeight() / 42.0f), 700, false, false);
+            notification->sprite_->SetSize({1.0f, 0.2f + 0.08f * line_count});
+            notification->sprite_->SetFont(system_font_, (int)std::round(m_bml->GetRenderContext()->GetHeight() / 40.0f), 700, false, false);
             notification->set_visible(true);
             for (int i = 1; i < 15; ++i) {
               notification->sprite_->SetTextColor(0x11FF1190 + i * 0x11001001);
@@ -1426,6 +1433,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         SendIngameMessage(msg.text_content.c_str());
+        break;
+    }
+    case bmmo::PopupBox: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
+        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content);
+        std::thread popup_thread([msg = std::move(msg)] {
+            int popup = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
+        });
+        popup_thread.detach();
         break;
     }
     default:

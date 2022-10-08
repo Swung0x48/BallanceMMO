@@ -312,16 +312,15 @@ public:
         }
         seeking_ = true;
 
-        // actually seeking
-
-        // place stream read pointer to appropriate place
-        int index = get_segment_index(dest_time);
-        auto& segment = segments_[index];
-        current_record_time_ = segment.time;
-        record_stream_.seekg(segment.position);
+        { // actually seeking
+            std::unique_lock lk(record_data_mutex_);
+            // place stream read pointer to appropriate place
+            int index = get_segment_index(dest_time);
+            auto& segment = segments_[index];
+            current_record_time_ = segment.time;
+            record_stream_.seekg(segment.position);
+        }
         forward_seek(dest_time, false);
-        // TODO: broadcast reconciliation message
-
 
         // figure out states at that timepoint and rebuild it
         record_clients_.clear();
@@ -643,8 +642,8 @@ private:
                 auto msg = bmmo::message_utils::deserialize<bmmo::login_request_v3_msg>(networking_msg);
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
-                // different build number is allowed
-                if (std::memcmp(&msg.version, &record_version_, sizeof(bmmo::version_t) - sizeof(uint8_t)) != 0) {
+                // only major and minor is required to be the same
+                if (std::memcmp(&msg.version, &record_version_, sizeof(msg.version.major) + sizeof(msg.version.minor)) != 0) {
                     interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1,
                         Sprintf("Incorrect version; please use BMMO v%s", record_version_.to_string()).c_str(), true);
                     break;
@@ -815,8 +814,6 @@ private:
 
     constexpr static inline std::chrono::nanoseconds UPDATE_INTERVAL{(int)1e9 / 66};
     constexpr static inline const char* HEADER = "BallanceMMO FlightRecorder";
-
-    
 };
 
 int main(int argc, char** argv) {

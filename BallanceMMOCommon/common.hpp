@@ -2,9 +2,10 @@
 #define BALLANCEMMOSERVER_COMMON_HPP
 
 #ifdef _WIN32
+#undef min
 #undef max
-#endif
 #define NOMINMAX
+#endif
 
 #include "message/message_all.hpp"
 #include "entity/entity.hpp"

@@ -60,6 +60,7 @@ namespace bmmo {
         PlayerReady,
         ImportantNotification,
         ModList,
+        PopupBox,
     };
 
     template<typename T, opcode C = None>

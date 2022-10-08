@@ -340,7 +340,7 @@ private:
 
 	std::atomic_bool own_ball_visible_ = false;
 	std::mutex ball_toggle_mutex_;
-	void toggle_own_spirit_ball(bool visible) {
+	void toggle_own_spirit_ball(bool visible, bool notify = false) {
 		std::lock_guard lk(ball_toggle_mutex_);
 		if (own_ball_visible_ == visible)
 			return;
@@ -355,10 +355,12 @@ private:
 			objects_.remove(db_.get_client_id());
 		}
 		own_ball_visible_ = visible;
+		if (notify)
+			SendIngameMessage(std::string("Set own spirit ball to ") + (visible ? "visible" : "hidden"));
 	}
 
 	InputHook* input_manager_ = nullptr;
-	static constexpr CKKEYBOARD KEYS_TO_CHECK[6] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5 };
+	static constexpr CKKEYBOARD KEYS_TO_CHECK[] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
 		// Toggle status
@@ -381,7 +383,7 @@ private:
 
 		if (input_manager_->IsKeyDown(CKKEY_LCONTROL) && connected()) {
 		  if (m_bml->IsIngame()) {
-				for (int i = 0; i <= 5; ++i) {
+				for (int i = 0; i < sizeof(KEYS_TO_CHECK) / sizeof(CKKEYBOARD); ++i) {
 					if (input_manager_->IsKeyPressed(KEYS_TO_CHECK[i])) {
 						// std::vector<std::string> args(init_args);
 						// OnCommand(m_bml, args);
@@ -390,7 +392,7 @@ private:
 				}
 				if (input_manager_->IsKeyPressed(CKKEY_GRAVE)) {
 					// toggle own ball
-					toggle_own_spirit_ball(!own_ball_visible_);
+					toggle_own_spirit_ball(!own_ball_visible_, true);
 				}
 				if (input_manager_->IsKeyDown(CKKEY_LSHIFT) && input_manager_->IsKeyPressed(CKKEY_UP)) {
 					CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
@@ -726,12 +728,14 @@ private:
 			return;
 		MD5_CTX md5Context;
 		MD5_Init(&md5Context);
-		char buf[1024 * 16];
+		constexpr static size_t SIZE = 1024 * 16;
+		char *buf = new char[SIZE];
 		while (file.good()) {
-			file.read(buf, sizeof(buf));
+			file.read(buf, SIZE);
 			MD5_Update(&md5Context, buf, (size_t) file.gcount());
 		}
 		MD5_Final(result, &md5Context);
+		delete[] buf;
 	}
 
 	std::thread console_thread_;
