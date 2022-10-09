@@ -1057,10 +1057,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
 
         if (logged_in_) {
+            GetLogger()->Info("New LoginAccepted message received. Resetting current data.");
             db_.clear();
             objects_.destroy_all_objects();
         }
-        GetLogger()->Info((std::to_string(msg.online_players.size()) + " player(s) online: ").c_str());
+        GetLogger()->Info("%d player(s) online: ", msg.online_players.size());
         for (auto& i : msg.online_players) {
             if (i.second.name == db_.get_nickname()) {
                 db_.set_client_id(i.first);
@@ -1070,8 +1071,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             GetLogger()->Info(i.second.name.c_str());
         }
 
-        if (logged_in_)
+        if (logged_in_) {
+            asio::post(thread_pool_, [this] {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                db_.reset_time_data();
+            });
             break;
+        }
         logged_in_ = true;
         status_->update("Connected");
         status_->paint(0xff00ff00);

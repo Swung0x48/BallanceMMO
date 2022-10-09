@@ -5,7 +5,6 @@
 #include <steam/steam_api.h>
 #endif
 
-
 #include "../BallanceMMOCommon/common.hpp"
 #include "../BallanceMMOCommon/entity/record_entry.hpp"
 #include <fstream>
@@ -17,6 +16,8 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+
+#include <ya_getopt.h>
 
 #include "console.hpp"
 
@@ -235,6 +236,7 @@ public:
             Printf("Seek index build failed.");
             return false;
         }
+        Printf("Record length: \t%.3lfs", duration_ / 1e6);
 
         if (!init_) {
             SteamNetworkingIPAddr local_address{};
@@ -258,6 +260,7 @@ public:
         running_ = true;
         Printf("Record file loaded successfully.");
         startup_cv_.notify_all();
+        Printf("Fake server started at port %u.", port_);
 
         return true;
     }
@@ -468,6 +471,7 @@ private:
             }
             if (!(record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof())) {
                 Printf("Playing finished at %.3lfs.", current_record_time_ / 1e6);
+                playing_ = false;
             }
         });
     }
@@ -816,24 +820,60 @@ private:
     constexpr static inline const char* HEADER = "BallanceMMO FlightRecorder";
 };
 
+// parse arguments (optional port and help/version) with getopt
+int parse_args(int argc, char** argv, uint16_t* port, std::string& filename) {
+    static struct option long_options[] = {
+        {"port", required_argument, 0, 'p'},
+        {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'v'},
+        {0, 0, 0, 0}
+    };
+    int opt, opt_index = 0;
+    while ((opt = getopt_long(argc, argv, "p:hv", long_options, &opt_index)) != -1) {
+        switch (opt) {
+            case 'p':
+                *port = atoi(optarg);
+                break;
+            case 'h':
+                printf("Usage: %s [RECORD_FILE] [OPTION]...\n", argv[0]);
+                puts("Options:");
+                puts("  -p, --port=PORT\t Use PORT as the server port instead (default: 26677).");
+                puts("  -h, --help\t\t Display this help and exit.");
+                puts("  -v, --version\t\t Display version information and exit.");
+                return -1;
+            case 'v':
+                puts("Ballance MMO record replayer by Swung0x48 and BallanceBug.");
+                printf("Build time: \t%s %s.\n", __DATE__, __TIME__);
+                printf("Version: \t%s.\n", bmmo::version_t().to_string().c_str());
+                puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
+                return -1;
+        }
+    }
+    if (optind != argc) {
+        filename = argv[optind];
+        printf("Using %s as the record file.\n", filename.c_str());
+        return 0;
+    }
+    printf("Error: please set a record file (use \"%s <record_file>\") before starting the replayer!\n", argv[0]);
+    return 1;
+}
+
 int main(int argc, char** argv) {
+    uint16_t port = 26677;
+    std::string filename;
+    if (int v = parse_args(argc, argv, &port, filename); v != 0)
+        return std::max(v, 0);
+
     printf("Initializing sockets...\n");
     record_replayer::init_socket();
 
-    uint16_t port = 26677;
     printf("Starting fake server at port %u.\n", port);
     record_replayer replayer(port);
 
     printf("Bootstrapping server...\n");
     fflush(stdout);
 
-    
-    if (argc > 1) {
-        replayer.set_record_file(argv[1]);
-    }
-    else {
-        role::FatalError("Error: please set a record file (use \"%s <record_file>\") before starting the replayer!", argv[0]);
-    }
+    replayer.set_record_file(filename);
     if (!replayer.setup())
         role::FatalError("Fake server failed on setup.");
     std::thread server_thread([&replayer]() { replayer.run(); });

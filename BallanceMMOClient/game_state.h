@@ -171,6 +171,16 @@ public:
 		return true;
 	}
 
+	void reset_time_data() {
+		std::unique_lock lk(mutex_);
+		for (auto& i : states_) {
+			i.second.time_diff = INT64_MIN;
+			for (auto& i : i.second.ball_state) {
+				i.timestamp = INT64_MIN;
+			}
+		}
+	}
+
 	bool remove(HSteamNetConnection id) {
 		if (!exists(id))
 			return false;
