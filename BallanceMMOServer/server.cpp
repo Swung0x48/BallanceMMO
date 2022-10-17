@@ -42,9 +42,13 @@ public:
 
     void run() override {
         while (running_) {
-            auto next_update = std::chrono::steady_clock::now() + UPDATE_INTERVAL;
+            auto update_begin = std::chrono::steady_clock::now();
             update();
-            std::this_thread::sleep_until(next_update);
+            if (ticking_) {
+                std::this_thread::sleep_until(update_begin + TICK_DELAY);
+                tick();
+            }
+            std::this_thread::sleep_until(update_begin + UPDATE_INTERVAL);
         }
 
 //        while (running_) {
@@ -133,7 +137,7 @@ public:
             // worry about the outcome; the client will just terminate immediately.
             bmmo::plain_text_msg ptm{};
             ptm.text_content = "BallanceMMO has encountered a fatal error. Game will be terminated.";
-            send(client, ptm.raw.str().data(), ptm.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+            send(client, ptm.raw.str().data(), ptm.size(), k_nSteamNetworkingSend_Reliable);
             reason = "fatal error";
         }
 
@@ -206,15 +210,26 @@ public:
     }
 
     void print_clients(bool print_uuid = false) {
-        Printf("%d client(s) online:", clients_.size());
-        for (auto& i: clients_) {
+        decltype(clients_) spectators;
+        auto print_client = [&](auto i) {
             Printf("%u: %s%s%s%s",
                     i.first,
                     i.second.name,
                     print_uuid ? (" (" + get_uuid_string(i.second.uuid) + ")") : "",
                     i.second.cheated ? " [CHEAT]" : "",
                     is_op(i.first) ? " [OP]" : "");
+        };
+        for (const auto& i: clients_) {
+            if (bmmo::name_validator::is_spectator(i.second.name)) {
+                spectators.insert(i);
+                continue;
+            }
+            print_client(i);
         }
+        for (const auto& i: spectators)
+            print_client(i);
+        Printf("%d client(s) online: %d player(s), %d spectator(s).",
+            clients_.size(), clients_.size() - spectators.size(), spectators.size());
     }
 
     void print_positions() {
@@ -741,7 +756,7 @@ protected:
                     accepted_msg.online_players[it->first] = { it->second.name, it->second.cheated };
                 }
                 accepted_msg.serialize();
-                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 save_login_data(networking_msg->m_conn);
 
@@ -763,7 +778,7 @@ protected:
                 bmmo::owned_timed_ball_state_msg state_msg{};
                 pull_ball_states(state_msg.balls);
                 state_msg.serialize();
-                send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.raw.str().size(), k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
@@ -1194,18 +1209,16 @@ protected:
 
     void start_ticking() {
         ticking_ = true;
-        ticking_thread_ = std::thread([&]() {
-            Printf("Ticking started.");
-            while (ticking_) {
-                auto next_tick = std::chrono::steady_clock::now() + TICK_INTERVAL;
-                tick();
-                std::this_thread::sleep_until(next_tick);
-            }
-        });
+        // ticking_thread_ = std::thread([&]() {
+        Printf("Ticking started.");
+        //     while (ticking_) {
+        //         auto next_tick = std::chrono::steady_clock::now() + TICK_INTERVAL;
+        //         tick();
+        //         std::this_thread::sleep_until(next_tick);
     }
     void stop_ticking() {
         ticking_ = false;
-        ticking_thread_.join();
+        // ticking_thread_.join();
         Printf("Ticking stopped.");
     }
 
@@ -1216,7 +1229,7 @@ protected:
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_;
     std::mutex client_data_mutex_;
-    constexpr static inline std::chrono::nanoseconds TICK_INTERVAL{(int)1e9 / 66},
+    constexpr static inline std::chrono::nanoseconds TICK_DELAY{(int)1e9 / 200},
                                                      UPDATE_INTERVAL{(int)1e9 / 66};
 
     std::mutex startup_mutex_;
@@ -1224,7 +1237,7 @@ protected:
 
     int map_data_count_ = 0;
     HSteamNetConnection map_data_inquirer_ = k_HSteamNetConnection_Invalid;
-    std::thread ticking_thread_;
+    // std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
     std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_;

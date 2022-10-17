@@ -8,7 +8,7 @@ struct PlayerObjects {
 	static inline IBML* bml;
 	std::vector<CK_ID> balls;
 	std::unique_ptr<label_sprite> username_label;
-	uint32_t visible_ball_type = UINT32_MAX;
+	uint32_t visible_ball_type = std::numeric_limits<decltype(visible_ball_type)>::max();
 	bool physicalized = false;
 
 	~PlayerObjects() {
@@ -109,7 +109,12 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!objects_[item.first].physicalized) {
-				if (extrapolation_ && SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE) {
+				if (extrapolation_ && [&] {
+					if (SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE)
+						return true;
+					db_.remove_earlier_states(item.first);
+					return false;
+				}()) {
 					SteamNetworkingMicroseconds tc = timestamp;
 					if (state_it->timestamp + MAX_EXTRAPOLATION_TIME < timestamp)
 						tc = state_it->timestamp + MAX_EXTRAPOLATION_TIME;
@@ -191,6 +196,7 @@ public:
 			if (!ball) {
 				auto msg = std::format("Failed to init template ball: {} {}", i);
 				bml_->SendIngameMessage(msg.c_str());
+				continue;
 			}
 			for (int j = 0; j < ball->GetMeshCount(); j++) {
 				CKMesh* mesh = ball->GetMesh(j);
@@ -276,6 +282,6 @@ private:
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false;
-	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 196608;
+	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
 };

@@ -34,7 +34,7 @@ struct PlayerState {
 	std::string name;
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state;
-	SteamNetworkingMicroseconds time_diff = INT64_MIN;
+	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
 	// BallState ball_state;
 
 	PlayerState(): ball_state(3, TimedBallState()) {}
@@ -94,10 +94,16 @@ public:
 		return states_[id];
 	}
 
-	bool exists(HSteamNetConnection id) {
-		std::shared_lock lk(mutex_);
+	bool exists(HSteamNetConnection id) const {
+		// std::shared_lock lk(mutex_);
 
-		return states_.find(id) != states_.end();
+		return states_.contains(id);
+	}
+
+	void remove_earlier_states(HSteamNetConnection id) {
+		auto& state = states_[id].ball_state;
+		state.push_back(state.front());
+		state.push_back(state.front());
 	}
 
 	SteamNetworkingMicroseconds get_updated_timestamp(const HSteamNetConnection id, const SteamNetworkingMicroseconds timestamp) {
@@ -107,7 +113,11 @@ public:
 		// real-time position of our own spirit balls, but everyone
 		// has a different timestamp, so we have to account for this
 		// and record everyone's average timestamp differences.
-		states_[id].time_diff = (states_[id].time_diff == INT64_MIN) ? (SteamNetworkingUtils()->GetLocalTimestamp() - timestamp) : (PREV_DIFF_WEIGHT * states_[id].time_diff - timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / (PREV_DIFF_WEIGHT + 1);
+		states_[id].time_diff =
+			(states_[id].time_diff == std::numeric_limits<decltype(states_[id].time_diff)>::min())
+			? (SteamNetworkingUtils()->GetLocalTimestamp() - timestamp)
+			: (PREV_DIFF_WEIGHT * states_[id].time_diff
+				 - timestamp + SteamNetworkingUtils()->GetLocalTimestamp()) / (PREV_DIFF_WEIGHT + 1);
 		// Weighted average - more weight on the previous value means more resistance
 		// to random lag spikes, which in turn results in overall smoother movement;
 		// however this also makes initial values converge into actual timestamp
@@ -174,9 +184,9 @@ public:
 	void reset_time_data() {
 		std::unique_lock lk(mutex_);
 		for (auto& i : states_) {
-			i.second.time_diff = INT64_MIN;
-			for (auto& i : i.second.ball_state) {
-				i.timestamp = INT64_MIN;
+			i.second.time_diff = std::numeric_limits<decltype(i.second.time_diff)>::min();
+			for (auto& j : i.second.ball_state) {
+				j.timestamp = std::numeric_limits<decltype(j.timestamp)>::min();
 			}
 		}
 	}

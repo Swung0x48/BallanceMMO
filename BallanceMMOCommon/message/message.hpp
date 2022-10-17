@@ -78,8 +78,13 @@ namespace bmmo {
         opcode code;
         std::stringstream raw;
 
-        size_t size() const {
-            return raw.str().size();
+        size_t size() {
+            // return raw.str().size();
+            return static_cast<size_t>(raw.tellp()); // why this is non-const!!!
+        }
+
+        inline auto data() noexcept {
+            return raw.str().data();
         }
 
         virtual void clear() {

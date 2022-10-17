@@ -1196,7 +1196,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
             notification->sprite_->SetZOrder(65536 + static_cast<int>(current_second));
             notification->sprite_->SetSize({1.0f, 0.2f + 0.08f * line_count});
-            notification->sprite_->SetFont(system_font_, (int)std::round(m_bml->GetRenderContext()->GetHeight() / 40.0f), 700, false, false);
+            VxRect viewport; m_bml->GetRenderContext()->GetWindowRect(viewport);
+            notification->sprite_->SetFont(system_font_, (int)std::round(viewport.GetHeight() / 40.0f), 700, false, false);
             notification->set_visible(true);
             for (int i = 1; i < 15; ++i) {
               notification->sprite_->SetTextColor(0x11FF1190 + i * 0x11001001);
