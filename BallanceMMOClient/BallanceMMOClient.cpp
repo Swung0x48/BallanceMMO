@@ -250,12 +250,11 @@ void BallanceMMOClient::OnPostStartMenu()
         GetLogger()->Info("Destroy completed.");
     }
     else {
-        auto height = (float) m_bml->GetRenderContext()->GetHeight();
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
-        ping_->sprite_->SetFont("Arial", (int)std::round(height / 77), 500, false, false);
+        ping_->sprite_->SetFont("Arial", get_display_font_size(10), 500, false, false);
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
-        status_->sprite_->SetFont("Times New Roman", (int)std::round(height / 70), 700, false, false);
+        status_->sprite_->SetFont("Times New Roman", get_display_font_size(11), 700, false, false);
         status_->paint(0xffff0000);
 
         using namespace std::placeholders;
@@ -452,22 +451,25 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
                 bool show_id = (lower1 == "list-id" || lower1 == "li");
                 
-                std::vector<std::tuple<HSteamNetConnection, std::string, bool>> players, spectators;
+                typedef std::tuple<HSteamNetConnection, std::string, bool> player_data;
+                std::vector<player_data> players, spectators;
                 players.reserve(db_.player_count() + 1);
                 db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     if (pair.first == db_.get_client_id())
                         return true;
                     if (bmmo::name_validator::is_spectator(pair.second.name))
-                        spectators.push_back({ pair.first, pair.second.name, pair.second.cheated });
+                        spectators.emplace_back(pair.first, pair.second.name, pair.second.cheated);
                     else
-                        players.push_back({ pair.first, pair.second.name, pair.second.cheated });
+                        players.emplace_back(pair.first, pair.second.name, pair.second.cheated);
                     return true;
                 });
                 if (spectator_mode_)
-                    spectators.push_back({ db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled() });
+                    spectators.emplace_back(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
                 else
-                    players.push_back({ db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled() });
+                    players.emplace_back(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
                 int player_count = players.size();
+                std::sort(players.begin(), players.end(), [](const player_data& i1, const player_data& i2)
+                          { return std::get<1>(i1).compare(std::get<1>(i2)) < 0; });
                 players.insert(players.begin(), spectators.begin(), spectators.end());
 
                 SendIngameMessage(std::format("{} player{} and {} spectator{} ({} total) online:",
@@ -526,13 +528,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
                 states[db_.get_nickname()] = local_state_handler_->get_local_state();
                 for (const auto& i: states) {
-                    std::string type;
-                    switch (i.second.type) {
-                        case 0: type = "paper"; break;
-                        case 1: type = "stone"; break;
-                        case 2: type = "wood"; break;
-                        default: type = "unknown (id #" + std::to_string(i.second.type) + ")";
-                    }
+                    std::string type = std::unordered_map<int, std::string>{ {0, "paper"}, {1, "stone"}, {2, "wood"} }[i.second.type];
+                    if (type.empty()) type = "unknown (id #" + std::to_string(i.second.type) + ")";
                     SendIngameMessage(std::format("{} is at {:.2f}, {:.2f}, {:.2f} with {} ball.",
                                       i.first,
                                       i.second.position.x, i.second.position.y, i.second.position.z,
@@ -936,7 +933,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
             local_state_handler_ = std::make_unique<spectator_state_handler>(thread_pool_, this, GetLogger());
             spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.96f);
-            spectator_label_->sprite_->SetFont("Arial", (int)std::round(m_bml->GetRenderContext()->GetHeight() / 64.0f), 500, false, false);
+            spectator_label_->sprite_->SetFont("Arial", get_display_font_size(12), 500, false, false);
             spectator_label_->set_visible(true);
         }
         else {
@@ -1101,7 +1098,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         mod_msg.mods.reserve(count);
         for (auto i = 1; i < count; i++) {
             auto* mod = m_bml->GetMod(i);
-            mod_msg.mods[mod->GetID()] = mod->GetVersion();
+            mod_msg.mods.emplace(mod->GetID(), mod->GetVersion());
         }
         mod_msg.serialize();
         send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1196,12 +1193,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
             notification->sprite_->SetZOrder(65536 + static_cast<int>(current_second));
             notification->sprite_->SetSize({1.0f, 0.2f + 0.08f * line_count});
-            VxRect viewport; m_bml->GetRenderContext()->GetWindowRect(viewport);
-            notification->sprite_->SetFont(system_font_, (int)std::round(viewport.GetHeight() / 40.0f), 700, false, false);
+            notification->sprite_->SetFont(system_font_, get_display_font_size(19), 700, false, false);
             notification->set_visible(true);
             for (int i = 1; i < 15; ++i) {
               notification->sprite_->SetTextColor(0x11FF1190 + i * 0x11001001);
-              std::this_thread::sleep_for(std::chrono::milliseconds(40));
+              std::this_thread::sleep_for(std::chrono::milliseconds(44));
             }
             std::this_thread::sleep_for(std::chrono::seconds(9));
             for (int i = 1; i < 15; ++i) {
@@ -1395,27 +1391,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::ActionDenied: {
         auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
 
-        std::string reason;
-        switch (msg->content.reason) {
-            case bmmo::deny_reason::NoPermission:
-                reason = "you don't have the permission to run this action.";
-                break;
-            case bmmo::deny_reason::InvalidAction:
-                reason = "invalid action.";
-                break;
-            case bmmo::deny_reason::InvalidTarget:
-                reason = "invalid target.";
-                break;
-            case bmmo::deny_reason::TargetNotFound:
-                reason = "target not found.";
-                break;
-            case bmmo::deny_reason::PlayerMuted:
-                reason = "you are not allowed to post public messages on this server.";
-                break;
-            case bmmo::deny_reason::Unknown:
-            default:
-                reason = "unknown reason.";
-        }
+        using bmmo::deny_reason;
+        std::string reason = std::unordered_map<deny_reason, const char*>{
+            {deny_reason::NoPermission, "you don't have the permission to run this action."},
+            {deny_reason::InvalidAction, "invalid action."},
+            {deny_reason::InvalidTarget, "invalid target."},
+            {deny_reason::TargetNotFound, "target not found."},
+            {deny_reason::PlayerMuted, "you are not allowed to post public messages on this server."},
+        }[msg->content.reason];
+        if (reason.empty()) reason = "unknown reason.";
 
         SendIngameMessage(("Action failed: " + reason).c_str());
         break;
@@ -1445,10 +1429,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::PopupBox: {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
         SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content);
-        std::thread popup_thread([msg = std::move(msg)] {
+        std::thread([msg = std::move(msg)] {
             int popup = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
-        });
-        popup_thread.detach();
+        }).detach();
         break;
     }
     default:
@@ -1459,7 +1442,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
 void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg)
 {
-    const char* fmt_string = "[%d] %10.6f %s";
+    static const char* fmt_string = "[%d] %10.6f %s";
     SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
     switch (eType) {
         case k_ESteamNetworkingSocketsDebugOutputType_Bug:

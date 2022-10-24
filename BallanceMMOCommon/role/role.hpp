@@ -110,6 +110,20 @@ protected:
     std::atomic_bool running_ = false;
     ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
     static inline FILE* log_file_ = nullptr;
+#ifdef _WIN32
+    static inline const bool LOWER_THAN_WIN10 = [] {
+        typedef void (WINAPI* RtlGetVersionPtr) (PRTL_OSVERSIONINFOW);
+        HMODULE hMod = GetModuleHandleW(L"ntdll.dll");
+        if (hMod) {
+            auto func = (RtlGetVersionPtr)GetProcAddress(hMod, "RtlGetVersion");
+            if (func) {
+                RTL_OSVERSIONINFOW VersionInformation{}; func(&VersionInformation);
+                return VersionInformation.dwMajorVersion < 10;
+            };
+        }
+        return true;
+    }(); // no manifest; we cannot use GetVersion or IsWindowsVersionXXXorGreater
+#endif
 
     virtual int poll_incoming_messages() = 0;
 
@@ -134,10 +148,9 @@ public:
     static void LogFileOutput(const char* pMsg) {
         if (log_file_) {
             auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            std::string time_str(15, 0);
-            time_str.resize(std::strftime(&time_str[0], time_str.size(), 
-                "%m-%d %T", std::localtime(&time)));
-            fprintf(log_file_, "[%s] %s\n", time_str.c_str(), pMsg);
+            char time_str[15];
+            std::strftime(time_str, 15, "%m-%d %T", std::localtime(&time));
+            fprintf(log_file_, "[%s] %s\n", time_str, pMsg);
             fflush(log_file_);
         }
     }
@@ -145,35 +158,37 @@ public:
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::string time_str(15, 0);
+        /*std::string time_str(15, 0);
         time_str.resize(std::strftime(&time_str[0], time_str.size(), 
-            "%m-%d %T", std::localtime(&time)));
+            "%m-%d %T", std::localtime(&time)));*/
+        char time_str[15];
+        std::strftime(time_str, 15, "%m-%d %T", std::localtime(&time));
 
         if (log_file_) {
-            fprintf(log_file_, "[%s] %s\n", time_str.c_str(), pszMsg);
+            fprintf(log_file_, "[%s] %s\n", time_str, pszMsg);
             fflush(log_file_);
         }
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-            fprintf(stderr, "\r[%s] %s\n> ", time_str.c_str(), pszMsg);
+            fprintf(stderr, "\r[%s] %s\n> ", time_str, pszMsg);
             fflush(stdout);
             fflush(stderr);
             exit(2);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            if (!isatty(fileno(stdout))) {
-                printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);
+            if (!isatty(fileno(stdout))
+#ifdef _WIN32
+                || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
+#endif
+            ) {
+                printf("\r[%s] %s\n> ", time_str, pszMsg);
                 fflush(stdout);
                 return;
             }
 #ifdef _WIN32
-#  if WINVER < _WIN32_WINNT_WIN10  // ansi sequences cannot be used on windows versions below 10
-            printf("\r[%s] %s\n> ", time_str.c_str(), pszMsg);
-#  else
             CONSOLE_SCREEN_BUFFER_INFO csbi;
             GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
             short width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-#  endif
 #else
             struct winsize w;
             ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
@@ -181,11 +196,9 @@ public:
             if (width <= 0)
                 width = 80;
 #endif
-#if WINVER >= _WIN32_WINNT_WIN10
             unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
-            printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, time_str.c_str(), pszMsg, lines);
+            printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, time_str, pszMsg, lines);
             fflush(stdout);
-#endif
         }
     }
 

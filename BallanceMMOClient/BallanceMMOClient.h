@@ -743,6 +743,12 @@ private:
 
 	boost::circular_buffer<std::string> previous_msg_ = boost::circular_buffer<std::string>(8);
 
+	// input: desired font size on BallanceBug's screen
+	// window size: 1024x768; dpi: 119
+	int get_display_font_size(int size) {
+		return (int)std::round(m_bml->GetRenderContext()->GetHeight() / (768.0f / size) * 119 / GetDpiForSystem());
+	}
+
 	void SendIngameMessage(const std::string& msg) {
 		SendIngameMessage(msg.c_str());
 	}

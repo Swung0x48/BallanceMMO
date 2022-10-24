@@ -234,16 +234,10 @@ public:
 
     void print_positions() {
         for (auto& i: clients_) {
-            std::string type;
-            switch (i.second.state.type) {
-                case 0: type = "paper"; break;
-                case 1: type = "stone"; break;
-                case 2: type = "wood"; break;
-                default: type = "unknown (id #" + std::to_string(i.second.state.type) + ")";
-            }
+            std::string type = std::unordered_map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[i.second.state.type];
+            if (type.empty()) type = "unknown (id #" + std::to_string(i.second.state.type) + ")";
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
-                    i.first,
-                    i.second.name,
+                    i.first, i.second.name,
                     i.second.state.position.x, i.second.state.position.y, i.second.state.position.z,
                     type
             );
