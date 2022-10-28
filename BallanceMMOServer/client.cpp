@@ -15,12 +15,14 @@
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
-#include "../BallanceMMOCommon/role/role.hpp"
-#include "../BallanceMMOCommon/common.hpp"
 
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <ya_getopt.h>
+
+#include "../BallanceMMOCommon/role/role.hpp"
+#include "../BallanceMMOCommon/common.hpp"
+#include "console.hpp"
 
 bool cheat = false;
 struct client_data {
@@ -406,6 +408,17 @@ private:
                     msg->content.type == bmmo::countdown_type::Go ? "Go!" : std::to_string((int) msg->content.type));
                 break;
             }
+            case bmmo::DidNotFinish: {
+                auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
+                Printf(
+                    "%s(#%u, %s) did not finish %s (aborted at sector %d).",
+                    msg->content.cheated ? "[CHEAT] " : "",
+                    msg->content.player_id, clients_[msg->content.player_id].name,
+                    msg->content.map.get_display_name(map_names_),
+                    msg->content.sector
+                );
+                break;
+            }
             case bmmo::LevelFinishV2: {
                 auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(networking_msg->m_pData);
                 int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
@@ -434,7 +447,8 @@ private:
             case bmmo::OwnedCheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(networking_msg->m_pData);
                 cheat = msg->content.state.cheated;
-                Printf("#%u toggled cheat %s globally!", msg->content.player_id, cheat ? "on" : "off");
+                Printf("(#%u, %s) toggled cheat %s globally!",
+                    msg->content.player_id, clients_[msg->content.player_id].name, cheat ? "on" : "off");
                 bmmo::cheat_state_msg state_msg{};
                 state_msg.content.cheated = cheat;
                 state_msg.content.notify = false;
@@ -610,10 +624,109 @@ int main(int argc, char** argv) {
 
     std::thread client_thread([&client]() { client.run(); });
 
+    console console;
+    console.register_command("help", [&] { role::Printf(console.get_help_string().c_str()); });
+    console.register_command("stop", [&] { client.shutdown(); });
+    auto pos_function = [&](bool translate = false) {
+        auto msg = client.get_local_state_msg();
+        float* pos = msg.content.position.v;
+        for (int i = 0; i < 3; ++i) {
+            if (!console.empty())
+                pos[i] = atof(console.get_next_word().c_str()) + ((translate) ? pos[i] : 0.0f);
+            else
+                pos[i] = (rand() % 2000 - 1000) / 100.0f + ((translate) ? pos[i] : 0.0f);
+        }
+        float* rot = msg.content.rotation.v;
+        for (int i = 0; i < 4; ++i) {
+            if (!console.empty())
+                rot[i] = atof(console.get_next_word().c_str()) + ((translate) ? rot[i] : 0.0f);
+            else
+                rot[i] = (rand() % 3600 - 1800) / 10.0f + ((translate) ? rot[i] : 0.0f);
+        }
+        msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+        client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
+            pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
+//        for (int i = 0; i < 50; ++i)
+        client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+    };
+    console.register_command("move", pos_function);
+    console.register_command("translate", std::bind(pos_function, true));
+    console.register_command("getinfo-detailed", [&] {
+        std::atomic_bool running = true;
+        std::thread output_thread([&]() {
+            while (running) {
+                // bmmo::ball_state_msg msg;
+                // msg.content.position.x = 1;
+                // msg.content.rotation.y = 2;
+                // for (int i = 0; i < 50; ++i)
+                //     client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+
+                std::cout << client.get_detailed_info() << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds (500));
+                std::cout << "\033[2J\033[H" << std::flush;
+            }
+        });
+        while (running) {
+            std::string in;
+            std::cin >> in;
+            if (in == "q") {
+                running = false;
+            }
+        }
+        if (output_thread.joinable())
+            output_thread.join();
+    });
+    console.register_command("getinfo", [&] {
+        auto status = client.get_info();
+        client::Printf("Ping: %dms\n", status.m_nPing);
+        client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
+        auto l_status = client.get_lane_info();
+        client::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
+    });
+    console.register_command("reconnect", [&] {
+        if (client_thread.joinable())
+            client_thread.join();
+
+        if (!console.empty())
+            server_addr = console.get_next_word();
+
+        if (!client.connect(server_addr)) {
+            std::cerr << "Cannot connect to server." << std::endl;
+            return;
+        }
+
+        client_thread = std::move(std::thread([&client]() { client.run(); }));
+        client.wait_till_started();
+    });
+    console.register_command("cheat", [&] {
+        if (!console.empty())
+            cheat = (console.get_next_word() == "on") ? true : false;
+        else
+            cheat = !cheat;
+        bmmo::cheat_state_msg msg;
+        msg.content.cheated = cheat;
+        client.send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("list", [&] { client.print_clients(); });
+    console.register_command("print", [&] {
+        print_states = !print_states;
+        client.set_print_states(print_states);
+    });
+    console.register_command("teleport", [&] { client.teleport_to(atoll(console.get_next_word().c_str())); });
+    console.register_command("balltype", [&] {
+        auto& msg = client.get_local_state_msg();
+        msg.content.type = atoi(console.get_next_word().c_str());
+        client.send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("whisper", [&] {
+        HSteamNetConnection dest = atoll(console.get_next_word().c_str());
+        client.whisper_to(dest, console.get_rest_of_line());
+    });
+
     client.wait_till_started();
     while (client.running()) {
         std::cout << "\r> " << std::flush;
-        std::string input, cmd;
+        std::string input;
 #ifdef _WIN32
         std::wstring wline;
         std::getline(std::wcin, wline);
@@ -623,103 +736,10 @@ int main(int argc, char** argv) {
 #else
         std::getline(std::cin, input);
 #endif
-        bmmo::command_parser parser(input);
-        cmd = parser.get_next_word();
         // std::cin >> input;
-        if (cmd == "stop") {
-            client.shutdown();
-        } else if (cmd == "move" || cmd == "translate") {
-            bool translate = false;
-            if (cmd == "translate") translate = true;
-            auto msg = client.get_local_state_msg();
-            float* pos = msg.content.position.v;
-            for (int i = 0; i < 3; ++i) {
-                if (!parser.empty())
-                    pos[i] = atof(parser.get_next_word().c_str()) + ((translate) ? pos[i] : 0.0f);
-                else
-                    pos[i] = (rand() % 2000 - 1000) / 100.0f + ((translate) ? pos[i] : 0.0f);
-            }
-            float* rot = msg.content.rotation.v;
-            for (int i = 0; i < 4; ++i) {
-                if (!parser.empty())
-                    rot[i] = atof(parser.get_next_word().c_str()) + ((translate) ? rot[i] : 0.0f);
-                else
-                    rot[i] = (rand() % 3600 - 1800) / 10.0f + ((translate) ? rot[i] : 0.0f);
-            }
-            msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-            client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
-                pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
-//            for (int i = 0; i < 50; ++i)
-            client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
-        } else if (cmd == "getinfo-detailed") {
-            std::atomic_bool running = true;
-            std::thread output_thread([&]() {
-                while (running) {
-                    // bmmo::ball_state_msg msg;
-                    // msg.content.position.x = 1;
-                    // msg.content.rotation.y = 2;
-                    // for (int i = 0; i < 50; ++i)
-                    //     client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
-
-                    std::cout << client.get_detailed_info() << std::endl;
-                    std::this_thread::sleep_for(std::chrono::milliseconds (500));
-                    std::cout << "\033[2J\033[H" << std::flush;
-                }
-            });
-            while (running) {
-                std::string in;
-                std::cin >> in;
-                if (in == "q") {
-                    running = false;
-                }
-            }
-            if (output_thread.joinable())
-                output_thread.join();
-        } else if (cmd == "getinfo") {
-            auto status = client.get_info();
-            client::Printf("Ping: %dms\n", status.m_nPing);
-            client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
-            auto l_status = client.get_lane_info();
-            client::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
-        } else if (cmd == "reconnect") {
-            if (client_thread.joinable())
-                client_thread.join();
-            
-            if (!parser.empty())
-                server_addr = parser.get_next_word();
-
-            if (!client.connect(server_addr)) {
-                std::cerr << "Cannot connect to server." << std::endl;
-                return 1;
-            }
-
-            client_thread = std::move(std::thread([&client]() { client.run(); }));
-            client.wait_till_started();
-        } else if (cmd == "cheat") {
-            if (!parser.empty())
-                cheat = (parser.get_next_word() == "on") ? true : false;
-            else
-                cheat = !cheat;
-            bmmo::cheat_state_msg msg;
-            msg.content.cheated = cheat;
-            client.send(msg, k_nSteamNetworkingSend_Reliable);
-        } else if (cmd == "list") {
-            client.print_clients();
-        } else if (cmd == "print") {
-            print_states = !print_states;
-            client.set_print_states(print_states);
-        } else if (cmd == "teleport") {
-            client.teleport_to(atoll(parser.get_next_word().c_str()));
-        } else if (cmd == "balltype") {
-            auto& msg = client.get_local_state_msg();
-            msg.content.type = atoi(parser.get_next_word().c_str());
-            client.send(msg, k_nSteamNetworkingSend_Reliable);
-        } else if (cmd == "whisper") {
-            HSteamNetConnection dest = atoll(parser.get_next_word().c_str());
-            client.whisper_to(dest, parser.get_rest_of_line());
-        } else if (!cmd.empty()) {
+        if (!console.execute(input) && !console.get_command_name().empty()) {
             bmmo::chat_msg msg{};
-            msg.chat_content = cmd + " " + parser.get_rest_of_line();
+            msg.chat_content = input;
             msg.serialize();
             client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }

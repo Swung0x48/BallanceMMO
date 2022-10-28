@@ -10,7 +10,7 @@ namespace bmmo {
             this->cmd = cmd;
         }
 
-        bool empty() {
+        bool empty() const noexcept {
             return cmd.find_first_not_of(" \t\n\v\f\r") == std::string::npos;
         }
 

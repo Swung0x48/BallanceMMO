@@ -40,9 +40,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(yaml-cpp)
 
-add_executable(BallanceMMOServer server.cpp ../submodule/ya_getopt/ya_getopt.c)
+add_executable(BallanceMMOServer server.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
-add_executable(BallanceMMOMockClient client.cpp ../submodule/ya_getopt/ya_getopt.c)
+add_executable(BallanceMMOMockClient client.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
 add_executable(BallanceMMOFlightRecorder flightrecorder.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOFlightRecorder GameNetworkingSockets::shared)

@@ -1,8 +1,8 @@
 #pragma once
 
-#include "local_state_handler_interface.h"
+#include "local_state_handler_base.h"
 
-class player_state_handler : public local_state_handler_interface {
+class player_state_handler : public local_state_handler_base {
 private:
 	void poll_player_ball_state(CK3dObject* player_ball) {
 		VxVector position; VxQuaternion rotation;
@@ -31,10 +31,10 @@ public:
 		});
 	};
 
-	using local_state_handler_interface::local_state_handler_interface;
+	using local_state_handler_base::local_state_handler_base;
 };
 
-class spectator_state_handler : public local_state_handler_interface {
+class spectator_state_handler : public local_state_handler_base {
 public:
 	void poll_and_send_state(CK3dObject* ball) override {}; // dummy method
 
@@ -46,7 +46,7 @@ public:
 	};
 
 	spectator_state_handler(asio::thread_pool& pool, client* client_ptr, ILogger* logger):
-			local_state_handler_interface(pool, client_ptr, logger) {
+			local_state_handler_base(pool, client_ptr, logger) {
 		local_ball_state_.position = { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), 0.0f};
 	};
 };

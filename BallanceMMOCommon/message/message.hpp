@@ -61,6 +61,8 @@ namespace bmmo {
         ImportantNotification,
         ModList,
         PopupBox,
+        CurrentSector,
+        CurrentMapList,
     };
 
     template<typename T, opcode C = None>
@@ -83,9 +85,10 @@ namespace bmmo {
             return static_cast<size_t>(raw.tellp()); // why this is non-const!!!
         }
 
-        inline auto data() noexcept {
-            return raw.str().data();
-        }
+        // returns garbage
+        // inline char* data() noexcept {
+        //     return raw.str().data();
+        // }
 
         virtual void clear() {
             std::stringstream temp;

@@ -36,7 +36,7 @@
     <ClInclude Include="game_state.h" />
     <ClInclude Include="label_sprite.h" />
     <ClInclude Include="local_state_handler_impl.h" />
-    <ClInclude Include="local_state_handler_interface.h" />
+    <ClInclude Include="local_state_handler_base.h" />
     <ClInclude Include="text_sprite.h" />
   </ItemGroup>
   <ItemGroup>

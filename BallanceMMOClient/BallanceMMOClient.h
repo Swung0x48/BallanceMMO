@@ -13,6 +13,7 @@
 #include <mutex>
 #include <memory>
 #include <format>
+#include <ranges>
 #include <asio.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
@@ -84,6 +85,9 @@ private:
 	void OnProcess() override;
 	void OnStartLevel() override;
 	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
+	void OnPostCheckpointReached() override;
+	void OnPostExitLevel() override;
+	void OnCounterActive() override;
 	void OnLevelFinish() override;
 	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
@@ -109,6 +113,7 @@ private:
 
 	bool show_console();
 	bool hide_console();
+	void show_player_list();
 
 	void connect_to_server(std::string address = "");
 	void disconnect_from_server();
@@ -139,6 +144,11 @@ private:
 	asio::thread_pool thread_pool_;
 	std::thread network_thread_;
 	std::thread ping_thread_;
+	std::thread console_thread_;
+	std::thread player_list_thread_;
+
+	std::atomic_bool console_running_ = false;
+	std::atomic_bool player_list_visible_ = false;
 
 	const float RIGHT_MOST = 0.98f;
 
@@ -155,11 +165,13 @@ private:
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
-	bmmo::named_map current_map_;
+	CK_ID ingame_parameter_array_ = 0;
+	bmmo::named_map current_map_{};
+	int32_t current_sector_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
 
-	std::unique_ptr<local_state_handler_interface> local_state_handler_;
+	std::unique_ptr<local_state_handler_base> local_state_handler_;
 	bool spectator_mode_ = false;
 	std::string server_addr;
 	std::atomic_bool resolving_endpoint_ = false;
@@ -189,6 +201,13 @@ private:
 			return static_cast<CK3dObject*>(static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementObject(0, 1));
 
 		return nullptr;
+	}
+
+	void get_current_sector(int* sector) {
+		if (ingame_parameter_array_ != 0)
+			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, sector);
+		else
+			*sector = 0;
 	}
 
 	void init_config() {
@@ -348,7 +367,7 @@ private:
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
-			db_.update(db_.get_client_id(), std::move(local_state_handler_->get_local_state()));
+			db_.update(db_.get_client_id(), TimedBallState(local_state_handler_->get_local_state()));
 		}
 		else {
 			db_.remove(db_.get_client_id());
@@ -370,6 +389,13 @@ private:
 					return;
 				objects_.reload();
 				SendIngameMessage("Reload completed.");
+			} else if (input_manager_->IsKeyPressed(CKKEY_H)) {
+				if (!connected())
+					return;
+				if (player_list_visible_)
+					player_list_visible_ = false;
+				else
+					show_player_list();
 			} else if (input_manager_->IsKeyPressed(CKKEY_F3)) {
 				ping_->toggle();
 				status_->toggle();
@@ -573,6 +599,13 @@ private:
 
 		local_state_handler_.reset();
 
+		if (player_list_visible_) {
+			player_list_visible_ = false;
+			asio::post(thread_pool_, [this] {
+				if (player_list_thread_.joinable()) player_list_thread_.join();
+			});
+		}
+
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();
 
@@ -714,6 +747,18 @@ private:
 		send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 	}
 
+	void send_current_map(bmmo::current_map_state::state_type type = bmmo::current_map_state::EnteringMap) {
+		bmmo::current_map_msg msg{};
+		msg.content.map = current_map_;
+		msg.content.type = type;
+		msg.content.sector = current_sector_;
+		send(msg, k_nSteamNetworkingSend_Reliable);
+	}
+
+	void send_current_sector() {
+		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_Reliable);
+	}
+
 	std::string get_username(HSteamNetConnection client_id) {
 		if (client_id == k_HSteamNetConnection_Invalid)
 			return {"[Server]"};
@@ -729,17 +774,13 @@ private:
 		MD5_CTX md5Context;
 		MD5_Init(&md5Context);
 		constexpr static size_t SIZE = 1024 * 16;
-		char *buf = new char[SIZE];
+		auto buf = std::make_unique_for_overwrite<char[]>(SIZE);
 		while (file.good()) {
-			file.read(buf, SIZE);
-			MD5_Update(&md5Context, buf, (size_t) file.gcount());
+			file.read(buf.get(), SIZE);
+			MD5_Update(&md5Context, buf.get(), (size_t)file.gcount());
 		}
 		MD5_Final(result, &md5Context);
-		delete[] buf;
 	}
-
-	std::thread console_thread_;
-	std::atomic_bool console_running_ = false;
 
 	boost::circular_buffer<std::string> previous_msg_ = boost::circular_buffer<std::string>(8);
 

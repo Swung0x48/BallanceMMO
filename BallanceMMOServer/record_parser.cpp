@@ -881,7 +881,7 @@ int main(int argc, char** argv) {
     replayer.wait_till_started();
 
     console console;
-    console.register_command("help", [&]() { role::Printf(console.get_command_list().c_str()); });
+    console.register_command("help", [&]() { role::Printf(console.get_help_string().c_str()); });
     console.register_command("play", [&]() {
         if (replayer.playing()) {
             replayer.Printf("Record is already playing.");

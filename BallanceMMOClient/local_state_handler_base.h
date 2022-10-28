@@ -5,20 +5,20 @@
 #include "client.h"
 #include "game_state.h"
 
-class local_state_handler_interface {
+class local_state_handler_base {
 public:
 	virtual void poll_and_send_state(CK3dObject* ball) = 0;
 
 	virtual void poll_and_send_state_forced(CK3dObject* ball) = 0;
 
-	inline constexpr TimedBallState& get_local_state() { return local_ball_state_; }
+	inline constexpr const TimedBallState& get_local_state() const { return local_ball_state_; }
 
 	inline void set_ball_type(uint32_t type) {
 		local_ball_state_.type = type;
 		local_ball_state_changed_ = true;
 	}
 
-	local_state_handler_interface(asio::thread_pool& pool, client* client_ptr, ILogger* logger):
+	local_state_handler_base(asio::thread_pool& pool, client* client_ptr, ILogger* logger):
 		thread_pool_(pool), client_(client_ptr), logger_(logger) {};
 
 protected:

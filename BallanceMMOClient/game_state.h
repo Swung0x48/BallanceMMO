@@ -33,11 +33,11 @@ struct TimedBallState : BallState {
 struct PlayerState {
 	std::string name;
 	bool cheated = false;
-	boost::circular_buffer<TimedBallState> ball_state;
+	boost::circular_buffer<TimedBallState> ball_state = decltype(ball_state)(3, TimedBallState());
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
+	std::string current_map_name;
+	int32_t current_sector = 0;
 	// BallState ball_state;
-
-	PlayerState(): ball_state(3, TimedBallState()) {}
 
 	// use linear extrapolation to get current position and rotation
 	static inline const std::pair<VxVector, VxQuaternion> get_linear_extrapolated_state(const SteamNetworkingMicroseconds tc, const TimedBallState& state1, const TimedBallState& state2) {
@@ -102,8 +102,8 @@ public:
 
 	void remove_earlier_states(HSteamNetConnection id) {
 		auto& state = states_[id].ball_state;
-		state.push_back(state.front());
-		state.push_back(state.front());
+		state.push_front(state.front());
+		state.push_front(state.front());
 	}
 
 	SteamNetworkingMicroseconds get_updated_timestamp(const HSteamNetConnection id, const SteamNetworkingMicroseconds timestamp) {
@@ -178,6 +178,22 @@ public:
 		std::unique_lock lk(mutex_);
 		states_[id].cheated = cheated;
 		set_pending_flush(true);
+		return true;
+	}
+
+	bool update_map_name(HSteamNetConnection id, const std::string& map_name) {
+		if (!exists(id))
+			return false;
+		std::unique_lock lk(mutex_);
+		states_[id].current_map_name = map_name;
+		return true;
+	}
+
+	bool update_sector(HSteamNetConnection id, const int32_t sector) {
+		if (!exists(id))
+			return false;
+		std::unique_lock lk(mutex_);
+		states_[id].current_sector = sector;
 		return true;
 	}
 
