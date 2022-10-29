@@ -181,10 +181,10 @@ void BallanceMMOClient::show_player_list() {
         if (player_list_thread_.joinable())
             player_list_thread_.join();
         player_list_thread_ = std::thread([&] {
-            text_sprite player_list("PlayerList", "", RIGHT_MOST, 0.41f);
-            player_list.sprite_->SetSize({RIGHT_MOST, 0.59f});
+            text_sprite player_list("PlayerList", "", RIGHT_MOST, 0.412f);
+            player_list.sprite_->SetSize({RIGHT_MOST, 0.588f});
             player_list.sprite_->SetZOrder(128);
-            player_list.sprite_->SetFont(system_font_, get_display_font_size(10), 400, false, false);
+            player_list.sprite_->SetFont(system_font_, get_display_font_size(9.65f), 400, false, false);
             player_list.paint(0xFFFFE3A1);
             player_list.set_visible(true);
             player_list_visible_ = true;
@@ -205,14 +205,15 @@ void BallanceMMOClient::show_player_list() {
                 if (!spectator_mode_)
                     insert_status(status_list, current_map_.get_display_name(), current_sector_, db_.get_nickname(), m_bml->IsCheatEnabled());
                 std::ranges::sort(status_list, [](const auto& i1, const auto& i2) {
-                    if (boost::algorithm::ilexicographical_compare(i1.first, i2.first))
-                        return true; // Weird. We have to sort like that and then reverse
-                    return !boost::algorithm::ilexicographical_compare(i1.second, i2.second);
-                });
+                    std::string s1 = boost::to_lower_copy(i1.second), s2 = boost::to_lower_copy(i2.second);
+                    std::transform(s1.begin(), s1.end(), s1.begin(), [](char c) { return -c - 1; });
+                    std::transform(s2.begin(), s2.end(), s2.begin(), [](char c) { return -c - 1; });
+                    return (boost::to_lower_copy(i1.first).append(s1)) > (boost::to_lower_copy(i2.first).append(s2));
+                }); // two comparisons don't work for some unknown reason
                 auto size = status_list.size();
                 std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
                 text.reserve(1024);
-                for (const auto& [status_text, name]: status_list | std::views::reverse)
+                for (const auto& [status_text, name]: status_list /* | std::views::reverse */)
                     text.append(name + ": " + status_text + "\n");
                 player_list.update(text);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -1469,15 +1470,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::CurrentMap: {
-        GetLogger()->Info("111");
         auto* msg = reinterpret_cast<bmmo::current_map_msg*>(network_msg->m_pData);
         if (msg->content.type == bmmo::current_map_state::Announcement) {
             SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
-                                      (db_.get_client_id() == msg->content.player_id ? m_bml->IsCheatEnabled()
-                                      : db_.get(msg->content.player_id).value().cheated) ? "[CHEAT] " : "",
-                                      get_username(msg->content.player_id), msg->content.sector,
-                                      bmmo::get_ordinal_rank(msg->content.sector),
-                                      msg->content.map.get_display_name(map_names_)));
+                              (db_.get_client_id() == msg->content.player_id ? m_bml->IsCheatEnabled()
+                              : db_.get(msg->content.player_id).value().cheated) ? "[CHEAT] " : "",
+                              get_username(msg->content.player_id), msg->content.sector,
+                              bmmo::get_ordinal_rank(msg->content.sector),
+                              msg->content.map.get_display_name(map_names_)));
         }
         else {
             db_.update_map_name(msg->content.player_id, msg->content.map.get_display_name(map_names_));

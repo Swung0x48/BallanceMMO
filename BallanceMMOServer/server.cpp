@@ -794,7 +794,8 @@ protected:
                 bmmo::current_map_list_msg map_msg;
                 map_msg.states.reserve(clients_.size());
                 for (const auto& [id, data]: clients_) {
-                    map_msg.states.emplace_back(id, data.current_map, data.current_sector, bmmo::current_map_state::EnteringMap);
+                    // Oops. Some older compilers don't support emplace_back with aggregate initialization
+                    map_msg.states.push_back({id, data.current_map, data.current_sector, bmmo::current_map_state::EnteringMap});
                 }
                 map_msg.serialize();
                 send(networking_msg->m_conn, map_msg.raw.str().data(), map_msg.size(), k_nSteamNetworkingSend_Reliable);

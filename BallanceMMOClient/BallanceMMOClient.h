@@ -572,15 +572,23 @@ private:
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
-		shutdown(linger);
-
+		if (player_list_visible_) {
+			player_list_visible_ = false;
+			asio::post(thread_pool_, [this] {
+				if (player_list_thread_.joinable()) player_list_thread_.join();
+			});
+		}
 		if (down) {
 			console_running_ = false;
-			FreeConsole();
-			if (console_thread_.joinable())
-				console_thread_.join();
+			asio::post(thread_pool_, [this] {
+				FreeConsole();
+				if (console_thread_.joinable())
+					console_thread_.join();
+			});
 		}
-		
+
+		shutdown(linger);
+
 		// Weird bug if join thread here. Will join at the place before next use
 		// Actually since we're using std::jthread, we don't have to join threads manually
 		// Welp, std::jthread does not work on some of the clients. Switching back to std::thread. QwQ
@@ -596,15 +604,7 @@ private:
 		map_names_.clear();
 		db_.clear();
 		objects_.destroy_all_objects();
-
 		local_state_handler_.reset();
-
-		if (player_list_visible_) {
-			player_list_visible_ = false;
-			asio::post(thread_pool_, [this] {
-				if (player_list_thread_.joinable()) player_list_thread_.join();
-			});
-		}
 
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();
@@ -783,11 +783,21 @@ private:
 	}
 
 	boost::circular_buffer<std::string> previous_msg_ = boost::circular_buffer<std::string>(8);
+	
+	// Windows 7 does not have GetDpiForSystem
+	typedef UINT (WINAPI* GetDpiForSystemPtr) (void);
+	GetDpiForSystemPtr const get_system_dpi = [] {
+		auto hMod = GetModuleHandleW(L"user32.dll");
+		if (hMod) {
+			return (GetDpiForSystemPtr)GetProcAddress(hMod, "GetDpiForSystem");
+		}
+		return (GetDpiForSystemPtr)nullptr;
+	}();
 
 	// input: desired font size on BallanceBug's screen
 	// window size: 1024x768; dpi: 119
-	int get_display_font_size(int size) {
-		return (int)std::round(m_bml->GetRenderContext()->GetHeight() / (768.0f / size) * 119 / GetDpiForSystem());
+	int get_display_font_size(float size) {
+		return (int)std::round(m_bml->GetRenderContext()->GetHeight() / (768.0f / 119) * size / ((get_system_dpi == nullptr) ? 96 : get_system_dpi()));
 	}
 
 	void SendIngameMessage(const std::string& msg) {

@@ -29,6 +29,8 @@ struct client_data {
     std::string name;
     bool cheated;
     bmmo::ball_state state{};
+    bmmo::map current_map{};
+    int32_t current_sector = 0;
 };
 
 class client: public role {
@@ -119,6 +121,22 @@ public:
                     i.second.name,
                     i.second.cheated ? " [CHEAT]" : "",
                     i.second.state.position.v[0], i.second.state.position.v[1], i.second.state.position.v[2]);
+        }
+    }
+
+    void print_player_maps() {
+        for (const auto& [id, data]: clients_)
+            Printf("%s(#%u, %s) is at the %d%s sector of %s.",
+                data.cheated ? "[CHEAT] " : "", id, data.name,
+                data.current_sector, bmmo::get_ordinal_rank(data.current_sector),
+                data.current_map.get_display_name(map_names_));
+    }
+
+    void print_maps() {
+        for (const auto& [hash, name]: map_names_) {
+            std::string hash_string;
+            bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), 16);
+            Printf("%s: %s", hash_string, name);
         }
     }
 
@@ -406,6 +424,25 @@ private:
                     clients_[msg->content.sender].name,
                     msg->content.map.get_display_name(map_names_),
                     msg->content.type == bmmo::countdown_type::Go ? "Go!" : std::to_string((int) msg->content.type));
+                break;
+            }
+            case bmmo::CurrentMap: {
+                auto* msg = reinterpret_cast<bmmo::current_map_msg*>(networking_msg->m_pData);
+                clients_[msg->content.player_id].current_map = msg->content.map;
+                clients_[msg->content.player_id].current_sector = msg->content.sector;
+                break;
+            }
+            case bmmo::CurrentMapList: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::current_map_list_msg>(networking_msg);
+                for (const auto& i: msg.states) {
+                    clients_[i.player_id].current_map = i.map;
+                    clients_[i.player_id].current_sector = i.sector;
+                }
+                break;
+            }
+            case bmmo::CurrentSector: {
+                auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(networking_msg->m_pData);
+                clients_[msg->content.player_id].current_sector = msg->content.sector;
                 break;
             }
             case bmmo::DidNotFinish: {
@@ -722,6 +759,8 @@ int main(int argc, char** argv) {
         HSteamNetConnection dest = atoll(console.get_next_word().c_str());
         client.whisper_to(dest, console.get_rest_of_line());
     });
+    console.register_command("getmap", [&] { client.print_player_maps(); });
+    console.register_command("listmap", [&] { client.print_maps(); });
 
     client.wait_till_started();
     while (client.running()) {
