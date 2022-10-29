@@ -168,6 +168,7 @@ private:
 	CK_ID ingame_parameter_array_ = 0;
 	bmmo::named_map current_map_{};
 	int32_t current_sector_ = 0;
+	int32_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
 
@@ -203,11 +204,15 @@ private:
 		return nullptr;
 	}
 
-	void get_current_sector(int* sector) {
-		if (ingame_parameter_array_ != 0)
-			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, sector);
-		else
-			*sector = 0;
+	bool get_current_sector() {
+		int sector = 0;
+		if (ingame_parameter_array_ != 0) {
+			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
+			if (sector == current_sector_) return false;
+		} else if (current_sector_ == 0) return false;
+		current_sector_ = sector;
+		current_sector_timestamp_ = (int32_t)((SteamNetworkingUtils()->GetLocalTimestamp() - (int32_t)3e12) / 1024);
+		return true;
 	}
 
 	void init_config() {

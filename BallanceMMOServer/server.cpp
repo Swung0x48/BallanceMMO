@@ -783,7 +783,7 @@ protected:
                     bmmo::map_names_msg name_msg;
                     name_msg.maps = map_names_;
                     name_msg.serialize();
-		            send(networking_msg->m_conn, name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    send(networking_msg->m_conn, name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
 
                 bmmo::owned_timed_ball_state_msg state_msg{};

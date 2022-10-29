@@ -188,33 +188,37 @@ void BallanceMMOClient::show_player_list() {
             player_list.paint(0xFFFFE3A1);
             player_list.set_visible(true);
             player_list_visible_ = true;
-            auto insert_status = [&](auto& list, const auto& map_name, int sector, const auto& name, bool cheat) {
-                std::string temp(128, '\0');
-                Sprintf(temp, "%s, S%02d", map_name, sector);
-                list.emplace_back(temp, name + (cheat ? " [C]" : ""));
-            };
+            struct list_entry { std::string map_name, name; int sector; int32_t timestamp; bool cheated; };
             while (player_list_visible_) {
-                std::vector<std::pair<std::string, std::string>> status_list; // status text, player name
+                std::vector<list_entry> status_list;
                 status_list.reserve(db_.player_count() + !spectator_mode_);
                 db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     if (pair.first == db_.get_client_id() || bmmo::name_validator::is_spectator(pair.second.name))
                         return true;
-                    insert_status(status_list, pair.second.current_map_name, pair.second.current_sector, pair.second.name, pair.second.cheated);
+                    status_list.push_back({ pair.second.current_map_name, pair.second.name, pair.second.current_sector, pair.second.current_sector_timestamp, pair.second.cheated });
                     return true;
                 });
                 if (!spectator_mode_)
-                    insert_status(status_list, current_map_.get_display_name(), current_sector_, db_.get_nickname(), m_bml->IsCheatEnabled());
-                std::ranges::sort(status_list, [](const auto& i1, const auto& i2) {
-                    std::string s1 = boost::to_lower_copy(i1.second), s2 = boost::to_lower_copy(i2.second);
-                    std::transform(s1.begin(), s1.end(), s1.begin(), [](char c) { return -c - 1; });
-                    std::transform(s2.begin(), s2.end(), s2.begin(), [](char c) { return -c - 1; });
-                    return (boost::to_lower_copy(i1.first).append(s1)) > (boost::to_lower_copy(i2.first).append(s2));
+                    status_list.push_back({ current_map_.get_display_name(), db_.get_nickname(), current_sector_, current_sector_timestamp_, m_bml->IsCheatEnabled() });
+                std::sort(status_list.begin(), status_list.end(), [](const auto& i1, const auto& i2) {
+                    const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
+                    if (map_cmp > 0) return true;
+                    if (map_cmp == 0) {
+                      const int sector_cmp = i1.sector - i2.sector;
+                      if (sector_cmp != 0) return sector_cmp > 0;
+                      if (i1.sector != 1) {
+                        const int32_t time_cmp = i1.timestamp - i2.timestamp;
+                        if (time_cmp != 0) return time_cmp < 0;
+                      }
+                      return boost::ilexicographical_compare(i1.name, i2.name);
+                    }
+                    return false;
                 }); // two comparisons don't work for some unknown reason
                 auto size = status_list.size();
                 std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
                 text.reserve(1024);
-                for (const auto& [status_text, name]: status_list /* | std::views::reverse */)
-                    text.append(name + ": " + status_text + "\n");
+                for (const auto& i: status_list /* | std::views::reverse */)
+                    text.append(std::format("{}{}: {}, S{:02d}\n", i.name, i.cheated ? " [C]" : "", i.map_name, i.sector));
                 player_list.update(text);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
@@ -273,7 +277,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
             if (player_ball_ != nullptr) {
                 local_state_handler_->poll_and_send_state_forced(player_ball_);
             }
-            get_current_sector(&current_sector_);
+            OnPostCheckpointReached();
             send_current_map();
         };
         GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
@@ -295,8 +299,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 }
 
 void BallanceMMOClient::OnPostCheckpointReached() {
-    get_current_sector(&current_sector_);
-    if (connected()) send_current_sector();
+    if (get_current_sector() && connected()) send_current_sector();
 }
 
 void BallanceMMOClient::OnPostExitLevel() {
@@ -304,11 +307,7 @@ void BallanceMMOClient::OnPostExitLevel() {
 }
 
 void BallanceMMOClient::OnCounterActive() {
-    int sector; get_current_sector(&sector);
-    if (sector != current_sector_) {
-        current_sector_ = sector;
-        send_current_sector();
-    }
+    OnPostCheckpointReached();
 }
 
 void BallanceMMOClient::OnPostStartMenu()
@@ -1480,17 +1479,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               msg->content.map.get_display_name(map_names_)));
         }
         else {
-            db_.update_map_name(msg->content.player_id, msg->content.map.get_display_name(map_names_));
-            db_.update_sector(msg->content.player_id, msg->content.sector);
+            db_.update_map(msg->content.player_id, msg->content.map.get_display_name(map_names_), msg->content.sector);
         }
         break;
     }
     case bmmo::CurrentMapList: {
         auto msg = bmmo::message_utils::deserialize<bmmo::current_map_list_msg>(network_msg);
-        for (const auto& i: msg.states) {
-            db_.update_map_name(i.player_id, i.map.get_display_name(map_names_));
-            db_.update_sector(i.player_id, i.sector);
-        }
+        for (const auto& i: msg.states)
+            db_.update_map(i.player_id, i.map.get_display_name(map_names_), i.sector);
         break;
     }
     case bmmo::CurrentSector: {

@@ -37,6 +37,7 @@ struct PlayerState {
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
 	std::string current_map_name;
 	int32_t current_sector = 0;
+	int32_t current_sector_timestamp = 0;
 	// BallState ball_state;
 
 	// use linear extrapolation to get current position and rotation
@@ -181,11 +182,14 @@ public:
 		return true;
 	}
 
-	bool update_map_name(HSteamNetConnection id, const std::string& map_name) {
+	bool update_map(HSteamNetConnection id, const std::string& map_name, const int32_t sector) {
 		if (!exists(id))
 			return false;
 		std::unique_lock lk(mutex_);
-		states_[id].current_map_name = map_name;
+		auto& state = states_[id];
+		state.current_map_name = map_name;
+		state.current_sector = sector;
+		state.current_sector_timestamp = (int32_t)((SteamNetworkingUtils()->GetLocalTimestamp() - (int32_t)3e12) / 1024);
 		return true;
 	}
 
@@ -194,6 +198,15 @@ public:
 			return false;
 		std::unique_lock lk(mutex_);
 		states_[id].current_sector = sector;
+		states_[id].current_sector_timestamp = (int32_t)((SteamNetworkingUtils()->GetLocalTimestamp() - (int32_t)3e12) / 1024);
+		return true;
+	}
+
+	bool update_sector_timestamp(HSteamNetConnection id, const int32_t sector_timestamp) {
+		if (!exists(id))
+			return false;
+		std::unique_lock lk(mutex_);
+		states_[id].current_sector_timestamp = sector_timestamp;
 		return true;
 	}
 
