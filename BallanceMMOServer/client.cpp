@@ -114,14 +114,25 @@ public:
     }
 
     void print_clients() {
-        Printf("%d clients online:", clients_.size());
-        for (auto& i: clients_) {
-            Printf("%u: %s%s, (%.2f, %.2f, %.2f)",
-                    i.first,
-                    i.second.name,
-                    i.second.cheated ? " [CHEAT]" : "",
-                    i.second.state.position.v[0], i.second.state.position.v[1], i.second.state.position.v[2]);
+        decltype(clients_) spectators;
+        std::vector<std::pair<HSteamNetConnection, client_data>> players;
+        players.reserve(clients_.size());
+        auto print_client = [&](auto i) {
+            Printf("%u: %s%s", i.first, i.second.name, i.second.cheated ? " [CHEAT]" : "");
+        };
+        for (const auto& i: clients_) {
+            if (bmmo::name_validator::is_spectator(i.second.name)) {
+                spectators.insert(i);
+                continue;
+            }
+            players.push_back(i);
         }
+        std::ranges::sort(players, [](const auto& i1, const auto& i2)
+            { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
+        for (const auto& i: spectators) print_client(i);
+        for (const auto& i: players) print_client(i);
+        Printf("%d client(s) online: %d player(s), %d spectator(s).",
+            clients_.size(), players.size(), spectators.size());
     }
 
     void print_player_maps() {
@@ -137,6 +148,18 @@ public:
             std::string hash_string;
             bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), 16);
             Printf("%s: %s", hash_string, name);
+        }
+    }
+
+    void print_positions() {
+        for (const auto& [id, data]: clients_) {
+            std::string type = std::unordered_map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
+            if (type.empty()) type = "unknown (id #" + std::to_string(data.state.type) + ")";
+            Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
+                    id, data.name,
+                    data.state.position.x, data.state.position.y, data.state.position.z,
+                    type
+            );
         }
     }
 
@@ -407,6 +430,22 @@ private:
                 Printf("[Popup] {%s}: %s", msg.title, msg.text_content);
                 break;
             }
+            case bmmo::ActionDenied: {
+                auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(networking_msg->m_pData);
+
+                using dr = bmmo::deny_reason;
+                std::string reason = std::unordered_map<dr, const char*>{
+                    {dr::NoPermission, "you don't have the permission to run this action."},
+                    {dr::InvalidAction, "invalid action."},
+                    {dr::InvalidTarget, "invalid target."},
+                    {dr::TargetNotFound, "target not found."},
+                    {dr::PlayerMuted, "you are not allowed to post public messages on this server."},
+                }[msg->content.reason];
+                if (reason.empty()) reason = "unknown reason.";
+
+                Printf("Action failed: %s", reason);
+                break;
+            }
             case bmmo::CheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
                 cheat = msg->content.cheated;
@@ -419,11 +458,15 @@ private:
             }
             case bmmo::Countdown: {
                 auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
+                using ct = bmmo::countdown_type;
                 Printf("[%u, %s]: %s - %s",
                     msg->content.sender,
                     clients_[msg->content.sender].name,
                     msg->content.map.get_display_name(map_names_),
-                    msg->content.type == bmmo::countdown_type::Go ? "Go!" : std::to_string((int) msg->content.type));
+                    std::map<ct, const char*>{
+                        {ct::Ready, "Get Ready"}, {ct::ConfirmReady, "Confirm if you're ready"},
+                        {ct::Go, "Go!"}, {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"}
+                    }[msg->content.type]);
                 break;
             }
             case bmmo::CurrentMap: {
@@ -479,6 +522,11 @@ private:
                 msg.deserialize();
 
                 map_names_.insert(msg.maps.begin(), msg.maps.end());
+                break;
+            }
+            case bmmo::OpState: {
+                auto* msg = reinterpret_cast<bmmo::op_state_msg*>(networking_msg->m_pData);
+                Printf("You have been %s Operator permission.", msg->content.op ? "granted" : "removed from");
                 break;
             }
             case bmmo::OwnedCheatToggle: {
@@ -543,7 +591,7 @@ private:
             on_message(incoming_messages_[i]);
             incoming_messages_[i]->Release();
         }
-        
+
         return msg_count;
     }
 
@@ -761,6 +809,56 @@ int main(int argc, char** argv) {
     });
     console.register_command("getmap", [&] { client.print_player_maps(); });
     console.register_command("listmap", [&] { client.print_maps(); });
+    console.register_command("countdown", [&] {
+        auto print_hint = [] {
+            role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
+            role::Printf("Usage: \"countdown level <level number> [type]\" or \"countdown <hash> <level number> [type]\".");
+            role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
+        };
+        if (console.empty()) { print_hint(); return; }
+        std::string hash = console.get_next_word();
+        if (console.empty()) { print_hint(); return; }
+        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = atoi(console.get_next_word().c_str())};
+        if (hash == "level")
+            bmmo::hex_chars_from_string(map.md5, bmmo::map::original_map_hashes[map.level]);
+        else
+            bmmo::hex_chars_from_string(map.md5, hash);
+        bmmo::countdown_msg msg{.content = {.map = map}};
+        if (console.empty()) {
+            for (int i = 3; i >= 0; --i) {
+                msg.content.type = static_cast<bmmo::countdown_type>(i);
+                client.send(msg, k_nSteamNetworkingSend_Reliable);
+                if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        } else {
+            msg.content.type = static_cast<bmmo::countdown_type>(atoi(console.get_next_word().c_str()));
+            client.send(msg, k_nSteamNetworkingSend_Reliable);
+        }
+    });
+    console.register_aliases("countdown", {"cd"});
+    console.register_command("announce", [&] {
+        bmmo::important_notification_msg msg{};
+        msg.chat_content = console.get_rest_of_line();
+        msg.serialize();
+        client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("kick", [&] {
+        auto name = console.get_next_word();
+        bmmo::kick_request_msg msg{};
+        if (name[0] == '#') msg.player_id = static_cast<HSteamNetConnection>(atoll(console.get_next_word().c_str()));
+        else msg.player_name = name;
+        msg.reason = console.get_rest_of_line();
+        msg.serialize();
+        client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("say", [&] {
+        bmmo::chat_msg msg{};
+        msg.chat_content = console.get_rest_of_line();
+        msg.serialize();
+        client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_aliases("say", {"s"});
+    console.register_command("getpos", [&] { client.print_positions(); });
 
     client.wait_till_started();
     while (client.running()) {
@@ -777,10 +875,10 @@ int main(int argc, char** argv) {
 #endif
         // std::cin >> input;
         if (!console.execute(input) && !console.get_command_name().empty()) {
-            bmmo::chat_msg msg{};
-            msg.chat_content = input;
-            msg.serialize();
-            client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            std::string extra_text;
+            if (auto hints = console.get_command_hints(true); !hints.empty())
+                extra_text = " Did you mean: " + bmmo::message_utils::join_strings(hints, 0, ", ") + "?";
+            role::Printf("Error: unknown command \"%s\".%s", console.get_command_name(), extra_text);
         }
     }
 

@@ -16,23 +16,6 @@ namespace bmmo {
         CustomMap
     };
 
-    const std::vector<std::string> original_map_hashes = {
-        "00000000000000000000000000000000", // 0
-        "a364b408fffaab4344806b427e37f1a7",
-        "e90b2f535c8bf881e9cb83129fba241d",
-        "22f895812942f954bab73a2924181d0d",
-        "478faf2e028a7f352694fb2ab7326fec",
-        "5797e3a9489a1cd6213c38c7ffcfb02a",
-        "0dde7ec92927563bb2f34b8799b49e4c",
-        "3473005097612bd0c0e9de5c4ea2e5de",
-        "8b81694d53e6c5c87a6c7a5fa2e39a8d",
-        "21283cde62e0f6d3847de85ae5abd147",
-        "d80f54ffaa19be193a455908f8ff6e1d",
-        "47f936f45540d67a0a1865eac334d2db",
-        "2a1d29359b9802d4c6501dd2088884db",
-        "9b5be1ca6a92ce56683fa208dd3453b4"
-    };
-
     inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
         for (unsigned int i = 0; i < src.length(); i += 2) {
             std::string byte_string = src.substr(i, 2);
@@ -53,6 +36,23 @@ namespace bmmo {
         map_type type = map_type::Unknown;
         uint8_t md5[16] = {};
         int32_t level = 0;
+
+        static inline const char* const original_map_hashes[] = {
+            "00000000000000000000000000000000", // 0
+            "a364b408fffaab4344806b427e37f1a7",
+            "e90b2f535c8bf881e9cb83129fba241d",
+            "22f895812942f954bab73a2924181d0d",
+            "478faf2e028a7f352694fb2ab7326fec",
+            "5797e3a9489a1cd6213c38c7ffcfb02a",
+            "0dde7ec92927563bb2f34b8799b49e4c",
+            "3473005097612bd0c0e9de5c4ea2e5de",
+            "8b81694d53e6c5c87a6c7a5fa2e39a8d",
+            "21283cde62e0f6d3847de85ae5abd147",
+            "d80f54ffaa19be193a455908f8ff6e1d",
+            "47f936f45540d67a0a1865eac334d2db",
+            "2a1d29359b9802d4c6501dd2088884db",
+            "9b5be1ca6a92ce56683fa208dd3453b4"
+        };
 
         bool is_original_level() const {
             if (type != map_type::OriginalLevel) return false;

@@ -151,6 +151,7 @@ private:
 	std::atomic_bool player_list_visible_ = false;
 
 	const float RIGHT_MOST = 0.98f;
+	CKDWORD player_list_color_ = 0xFFFFFFFF;
 
 	bool init_ = false;
 	//uint64_t id_ = 0;
@@ -215,6 +216,23 @@ private:
 		return true;
 	}
 
+	void parse_and_set_player_list_color(IProperty* prop) {
+		CKDWORD color = 0xFFFFE3A1;
+		try {
+			color = (CKDWORD) std::stoul(prop->GetString(), nullptr, 16);
+		} catch (const std::exception& e) {
+			GetLogger()->Warn("Error parsing the color code: %s. Resetting to %06X.", e.what(), color & 0x00FFFFFF);
+			prop->SetString(std::format("{:06X}", color & 0x00FFFFFF).data());
+		}
+		if (player_list_color_ == color) return;
+		player_list_color_ = color | 0xFF000000;
+		prop->SetString(std::format("{:06X}", color & 0x00FFFFFF).data());
+		if (player_list_visible_) {
+			player_list_visible_ = false;
+			show_player_list();
+		}
+	}
+
 	void init_config() {
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 		IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
@@ -255,6 +273,11 @@ private:
 		tmp_prop->SetDefaultBoolean(true);
 		objects_.toggle_extrapolation(tmp_prop->GetBoolean());
 		props_["extrapolation"] = tmp_prop;
+		tmp_prop = GetConfig()->GetProperty("Gameplay", "PlayerListColor");
+		tmp_prop->SetComment("Text color of the player list (press Ctrl+Tab to toggle visibility) in hexadecimal RGB format. Default: FFE3A1");
+		tmp_prop->SetDefaultString("FFE3A1");
+		parse_and_set_player_list_color(tmp_prop);
+		props_["player_list_color"] = tmp_prop;
 	}
 
 	struct KeyVector {
@@ -397,19 +420,10 @@ private:
 			} else if (input_manager_->IsKeyPressed(CKKEY_H)) {
 				if (!connected())
 					return;
-				if (player_list_visible_)
-					player_list_visible_ = false;
-				else
-					show_player_list();
 			} else if (input_manager_->IsKeyPressed(CKKEY_F3)) {
 				ping_->toggle();
 				status_->toggle();
 			}
-		}
-
-		// Toggle nametag
-		if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
-			db_.toggle_nametag_visible();
 		}
 
 		if (input_manager_->IsKeyDown(CKKEY_LCONTROL) && connected()) {
@@ -454,6 +468,18 @@ private:
 					SendIngameMessage("Note: please press Ctrl+D again in 3 seconds to send the DNF message.");
 				}
 			}
+			if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
+				if (player_list_visible_)
+					player_list_visible_ = false;
+				else
+					show_player_list();
+				return;
+			}
+		}
+
+		// Toggle nametag
+		if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
+			db_.toggle_nametag_visible();
 		}
 
 #ifdef DEBUG

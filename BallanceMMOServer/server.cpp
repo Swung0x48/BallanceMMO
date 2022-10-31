@@ -214,11 +214,9 @@ public:
         decltype(clients_) spectators;
         auto print_client = [&](auto i) {
             Printf("%u: %s%s%s%s",
-                    i.first,
-                    i.second.name,
+                    i.first, i.second.name,
                     print_uuid ? (" (" + get_uuid_string(i.second.uuid) + ")") : "",
-                    i.second.cheated ? " [CHEAT]" : "",
-                    is_op(i.first) ? " [OP]" : "");
+                    i.second.cheated ? " [CHEAT]" : "", is_op(i.first) ? " [OP]" : "");
         };
         for (const auto& i: clients_) {
             if (bmmo::name_validator::is_spectator(i.second.name)) {
@@ -250,12 +248,12 @@ public:
     }
 
     void print_positions() {
-        for (auto& i: clients_) {
-            std::string type = std::unordered_map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[i.second.state.type];
-            if (type.empty()) type = "unknown (id #" + std::to_string(i.second.state.type) + ")";
+        for (const auto& [id, data]: clients_) {
+            std::string type = std::unordered_map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
+            if (type.empty()) type = "unknown (id #" + std::to_string(data.state.type) + ")";
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
-                    i.first, i.second.name,
-                    i.second.state.position.x, i.second.state.position.y, i.second.state.position.z,
+                    id, data.name,
+                    data.state.position.x, data.state.position.y, data.state.position.z,
                     type
             );
         }
@@ -395,7 +393,7 @@ public:
 
         running_ = true;
         startup_cv_.notify_all();
-        
+
         Printf("Server (v%s; client min. v%s) started at port %u.\n",
                 bmmo::version_t().to_string(),
                 bmmo::minimum_client_version.to_string(), port_);
@@ -538,7 +536,7 @@ protected:
         return false;
     }
 
-    // nReason: 
+    // nReason:
     // - 0~99: denied at joining
     // -- 0~49: denied from incorrect configuration
     // -- 50~99: banned
@@ -873,7 +871,7 @@ protected:
                 // sanitize chat message (remove control characters)
                 std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
                     [](char c) { return std::iscntrl(c); }, ' ');
-                
+
                 bool muted = muted_players_.contains(get_uuid_string(client_it->second.uuid));
 
                 // Print chat message to console
@@ -1095,7 +1093,7 @@ protected:
                 }
                 if (deny_action(networking_msg->m_conn))
                     break;
-                
+
                 std::replace_if(msg.reason.begin(), msg.reason.end(),
                     [](char c) { return std::iscntrl(c); }, ' ');
 

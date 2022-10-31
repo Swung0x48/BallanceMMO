@@ -185,7 +185,7 @@ void BallanceMMOClient::show_player_list() {
             player_list.sprite_->SetSize({RIGHT_MOST, 0.588f});
             player_list.sprite_->SetZOrder(128);
             player_list.sprite_->SetFont(system_font_, get_display_font_size(9.65f), 400, false, false);
-            player_list.paint(0xFFFFE3A1);
+            player_list.paint(player_list_color_);
             player_list.set_visible(true);
             player_list_visible_ = true;
             struct list_entry { std::string map_name, name; int sector; int32_t timestamp; bool cheated; };
@@ -471,6 +471,9 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
             connect_to_server(server_addr);
         }
     }
+    else if (prop == props_["player_list_color"]) {
+        parse_and_set_player_list_color(prop);
+    }
 }
 
 void BallanceMMOClient::OnExitGame()
@@ -723,6 +726,18 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     SendIngameMessage(std::format("Teleported to \"{}\" at ({:.3f}, {:.3f}, {:.3f}).",
                                       name, position.x, position.y, position.z));
                 });
+                return;
+            }
+            else if (lower1 == "custommap") {
+                if (args[2] == "reset") { send_current_map(); return; }
+                bmmo::map map; srand((uint32_t)time(nullptr));
+                for (auto& i: map.md5) i = rand() % std::numeric_limits<uint8_t>::max();
+                bmmo::map_names_msg name_msg{};
+                name_msg.maps.emplace(map.get_hash_bytes_string(), args[2]);
+                name_msg.serialize();
+                send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+                send(bmmo::current_map_msg{.content = {.map = map, .type = bmmo::current_map_state::EnteringMap}}, k_nSteamNetworkingSend_Reliable);
+                SendIngameMessage(std::format("Set current map name to \"{}\".", args[2]));
                 return;
             }
         }
@@ -1455,13 +1470,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::ActionDenied: {
         auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
 
-        using bmmo::deny_reason;
-        std::string reason = std::unordered_map<deny_reason, const char*>{
-            {deny_reason::NoPermission, "you don't have the permission to run this action."},
-            {deny_reason::InvalidAction, "invalid action."},
-            {deny_reason::InvalidTarget, "invalid target."},
-            {deny_reason::TargetNotFound, "target not found."},
-            {deny_reason::PlayerMuted, "you are not allowed to post public messages on this server."},
+        using dr = bmmo::deny_reason;
+        std::string reason = std::unordered_map<dr, const char*>{
+            {dr::NoPermission, "you don't have the permission to run this action."},
+            {dr::InvalidAction, "invalid action."},
+            {dr::InvalidTarget, "invalid target."},
+            {dr::TargetNotFound, "target not found."},
+            {dr::PlayerMuted, "you are not allowed to post public messages on this server."},
         }[msg->content.reason];
         if (reason.empty()) reason = "unknown reason.";
 
