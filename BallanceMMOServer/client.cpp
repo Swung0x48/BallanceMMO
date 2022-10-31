@@ -127,7 +127,7 @@ public:
             }
             players.push_back(i);
         }
-        std::ranges::sort(players, [](const auto& i1, const auto& i2)
+        std::sort(players.begin(), players.end(), [](const auto& i1, const auto& i2)
             { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
         for (const auto& i: spectators) print_client(i);
         for (const auto& i: players) print_client(i);
