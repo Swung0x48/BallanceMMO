@@ -818,7 +818,7 @@ int main(int argc, char** argv) {
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word();
         if (console.empty()) { print_hint(); return; }
-        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = atoi(console.get_next_word().c_str())};
+        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)};
         if (hash == "level")
             bmmo::hex_chars_from_string(map.md5, bmmo::map::original_map_hashes[map.level]);
         else
@@ -859,6 +859,32 @@ int main(int argc, char** argv) {
     });
     console.register_aliases("say", {"s"});
     console.register_command("getpos", [&] { client.print_positions(); });
+    console.register_command("setmap", [&] {
+        if (console.empty()) {
+            role::Printf("Usage: \"setmap level <level number>\", \"setmap <hash>\" or \"setmap <hash> <name>\".");
+            return;
+        }
+        std::string hash = console.get_next_word();
+        bmmo::current_map_msg msg{.content = {.map = {
+            .type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)
+        }, .type = bmmo::current_map_state::EnteringMap}};
+        if (hash == "level")
+            bmmo::hex_chars_from_string(msg.content.map.md5, bmmo::map::original_map_hashes[msg.content.map.level]);
+        else
+            bmmo::hex_chars_from_string(msg.content.map.md5, hash);
+        if (!console.empty()) {
+            bmmo::map_names_msg name_msg{};
+            name_msg.maps.emplace(msg.content.map.get_hash_bytes_string(), console.get_rest_of_line());
+            name_msg.serialize();
+            client.send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        client.send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("setsector", [&] {
+        bmmo::current_sector_msg msg{};
+        msg.content.sector = atoi(console.get_next_word().c_str());
+        client.send(msg, k_nSteamNetworkingSend_Reliable);
+    });
 
     client.wait_till_started();
     while (client.running()) {

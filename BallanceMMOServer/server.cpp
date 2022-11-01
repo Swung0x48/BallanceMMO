@@ -101,6 +101,27 @@ public:
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
     }
 
+    template<typename T>
+    void receive(T& msg, HSteamNetConnection client = k_HSteamNetConnection_Invalid) {
+        if (get_client_count() == 0) { Printf("Error: no online players found."); return; }
+        auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
+        if (client == k_HSteamNetConnection_Invalid) // random player
+            client = std::next(clients_.begin(), rand() % clients_.size())->first;
+        networking_msg->m_conn = client;
+        std::string temp;
+        if constexpr (std::is_base_of<bmmo::serializable_message, T>::value) {
+            msg.serialize();
+            networking_msg->m_cbSize = msg.size();
+            temp = msg.raw.str();
+            networking_msg->m_pData = temp.data();
+        } else {
+            networking_msg->m_cbSize = sizeof(T);
+            networking_msg->m_pData = &msg;
+        }
+        on_message(networking_msg);
+        networking_msg->Release();
+    }
+
     HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) {
         std::string lower_username = bmmo::message_utils::to_lower(username);
         auto username_it = std::find_if(username_.begin(), username_.end(), [&lower_username](const auto& i) {
@@ -1470,6 +1491,32 @@ int main(int argc, char** argv) {
     });
     console.register_command("listmap", [&] { server.print_maps(); });
     console.register_command("countdown", [&] {
+        auto print_hint = [] {
+            role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
+            role::Printf("Usage: \"countdown level <level number> [type]\" or \"countdown <hash> <level number> [type]\".");
+            role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
+        };
+        if (console.empty()) { print_hint(); return; }
+        std::string hash = console.get_next_word();
+        if (console.empty()) { print_hint(); return; }
+        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)};
+        if (hash == "level")
+            bmmo::hex_chars_from_string(map.md5, bmmo::map::original_map_hashes[map.level]);
+        else
+            bmmo::hex_chars_from_string(map.md5, hash);
+        bmmo::countdown_msg msg{.content = {.map = map}};
+        if (console.empty()) {
+            for (int i = 3; i >= 0; --i) {
+                msg.content.type = static_cast<bmmo::countdown_type>(i);
+                server.receive(msg);
+                if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        } else {
+            msg.content.type = static_cast<bmmo::countdown_type>(atoi(console.get_next_word().c_str()));
+            server.receive(msg);
+        }
+    });
+    console.register_command("countdown-fake", [&] {
         bmmo::countdown_msg msg{};
         msg.content.restart_level = msg.content.force_restart = true;
         msg.content.map.type = bmmo::map_type::OriginalLevel;
