@@ -14,14 +14,16 @@
 #include <sstream>
 #include <chrono>
 #include <mutex>
+#include <list>
+#include <fstream>
 #include <condition_variable>
 
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <ya_getopt.h>
 
-#include "../BallanceMMOCommon/role/role.hpp"
 #include "../BallanceMMOCommon/common.hpp"
+#include "../BallanceMMOCommon/entity/record_entry.hpp"
 #include "console.hpp"
 
 bool cheat = false;
@@ -38,8 +40,8 @@ public:
     bool connect(const std::string& connection_string) {
         bmmo::hostname_parser hp(connection_string);
         using asio::ip::tcp; // tired of writing it out
-        asio::io_service io_service;
-        tcp::resolver resolver(io_service);
+        asio::io_context io_context;
+        tcp::resolver resolver(io_context);
         tcp::resolver::query query(hp.get_address(), hp.get_port());
         tcp::resolver::iterator iter = resolver.resolve(query), end;
         while (iter != end) {
@@ -54,10 +56,27 @@ public:
             connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
             if (connection_ == k_HSteamNetConnection_Invalid)
                 continue;
-            io_service.stop();
+            io_context.stop();
             return true;
         }
         return false;
+    }
+
+    bool setup_recorder() {
+        recorder_mode_ = true;
+        auto current_time = std::time(nullptr);
+        char record_name[32];
+        std::strftime(record_name, 32, "record_%Y%m%d%H%M.bin", std::localtime(&current_time));
+        record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
+        if (!record_stream_.is_open())
+            return false;
+        record_stream_ << "BallanceMMO FlightRecorder";
+        record_stream_.put('\0');
+        bmmo::version_t version;
+        record_stream_.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        record_stream_.write(reinterpret_cast<const char*>(&init_time_t_), sizeof(init_time_t_));
+        record_stream_.write(reinterpret_cast<const char*>(&init_timestamp_), sizeof(init_timestamp_));
+        return true;
     }
 
     void run() override {
@@ -163,9 +182,7 @@ public:
         }
     }
 
-    void set_nickname(const std::string& name) {
-        nickname_ = name;
-    };
+    void set_nickname(const std::string& name) { nickname_ = name; };
 
     void set_uuid(std::string uuid) {
         size_t pos;
@@ -175,14 +192,21 @@ public:
         bmmo::hex_chars_from_string(uuid_, uuid);
     };
 
-    void set_print_states(bool print_states) {
-        print_states_ = print_states;
-    }
+    void set_print_states(bool print_states) { print_states_ = print_states; }
 
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
         std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!recorder_mode_)
+            return;
+        while (!message_queue_.empty()) {
+            Printf("Waiting for %d messages to be processed...", message_queue_.size());
+            bmmo::record_entry entry = std::move(message_queue_.front());
+            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
+            message_queue_.pop_front();
+        }
+        message_available_cv_.notify_all();
     }
 
     void teleport_to(const HSteamNetConnection player_id) {
@@ -220,6 +244,21 @@ public:
         else {
             Printf("Player not found.");
         }
+    }
+
+    void write_record() {
+        std::unique_lock<std::mutex> available_lk(message_available_mutex_);
+        while (message_queue_.empty() && running())
+            message_available_cv_.wait(available_lk);
+        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+
+        while (!message_queue_.empty()) {
+            bmmo::record_entry entry = std::move(message_queue_.front());
+            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
+            message_queue_.pop_front();
+        }
+        lk.unlock();
+        record_stream_.flush();
     }
 
 private:
@@ -588,12 +627,28 @@ private:
         assert(msg_count > 0);
 
         for (int i = 0; i < msg_count; ++i) {
+            if (recorder_mode_)
+                enqueue_log_message(incoming_messages_[i]);
             on_message(incoming_messages_[i]);
             incoming_messages_[i]->Release();
         }
 
         return msg_count;
     }
+
+    void enqueue_log_message(const ISteamNetworkingMessage* msg) {
+        bmmo::record_entry entry(SteamNetworkingUtils()->GetLocalTimestamp(), msg->m_cbSize, reinterpret_cast<std::byte*>(msg->m_pData));
+        
+        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+        message_queue_.emplace_back(std::move(entry));
+        message_available_cv_.notify_one();
+    }
+
+    std::mutex message_queue_mutex_;
+    std::mutex message_available_mutex_;
+    std::condition_variable message_available_cv_;
+    std::list<bmmo::record_entry> message_queue_;
+    std::ofstream record_stream_;
 
     void poll_connection_state_changes() override {
         this_instance_ = this;
@@ -621,12 +676,13 @@ private:
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, std::string> map_names_;
     bmmo::timed_ball_state_msg local_state_msg_{};
-    bool print_states_ = false;
+    std::atomic_bool print_states_ = false, recorder_mode_ = false;
 };
 
 // parse command line arguments (server/name/uuid/help/version) with getopt
-int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid, std::string& log_path, bool* print_states) {
+int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid, std::string& log_path, bool* print_states, bool* recorder) {
     static struct option long_options[] = {
+        {"recorder-mode", required_argument, 0, 'r'},
         {"server", required_argument, 0, 's'},
         {"name", required_argument, 0, 'n'},
         {"uuid", required_argument, 0, 'u'},
@@ -637,7 +693,7 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "s:n:u:l:phv", long_options, &opt_index))!= -1) {
+    while ((opt = getopt_long(argc, argv, "s:n:u:l:rphv", long_options, &opt_index))!= -1) {
         switch (opt) {
             case 's':
                 server = optarg;
@@ -651,6 +707,11 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
             case 'l':
                 log_path = optarg;
                 break;
+            case 'r':
+                *recorder = true;
+                name = "*FlightRecorder";
+                uuid = "01020304-0506-0708-090a-0b0c0d0e0f00";
+                break;
             case 'p':
                 *print_states = true;
                 break;
@@ -658,9 +719,10 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
                 puts("  -s, --server=ADDRESS\t Connect to the server at ADDRESS instead (default: 127.0.0.1:26676).");
-                puts("  -n, --name=NAME\t Set your name to NAME (default: \"Swung\")");
+                puts("  -n, --name=NAME\t Set your name to NAME (default: \"MockClient\")");
                 puts("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")");
                 puts("  -l, --log=PATH\t Write log to the file at PATH in addition to stdout.");
+                puts("  -r, --recorder-mode\t Record data received from the server and save them to a binary file.");
                 puts("  -p, --print\t\t Print player state changes.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
@@ -678,8 +740,8 @@ int main(int argc, char** argv) {
     std::string server_addr = "127.0.0.1:26676", username = "MockClient",
                 uuid = "00010002-0003-0004-0005-000600070008",
                 log_path;
-    bool print_states = false;
-    if (parse_args(argc, argv, server_addr, username, uuid, log_path, &print_states) != 0)
+    bool print_states = false, recorder_mode = false;
+    if (parse_args(argc, argv, server_addr, username, uuid, log_path, &print_states, &recorder_mode) != 0)
         return 0;
 
     FILE* log_file = nullptr;
@@ -700,6 +762,8 @@ int main(int argc, char** argv) {
     client.set_nickname(username);
     client.set_uuid(uuid);
     client.set_print_states(print_states);
+    if (recorder_mode)
+        client.setup_recorder();
 
     std::cout << "Connecting to server..." << std::endl;
     if (!client.connect(server_addr)) {
@@ -887,6 +951,13 @@ int main(int argc, char** argv) {
     });
 
     client.wait_till_started();
+    std::thread record_thread;
+    if (recorder_mode) {
+        record_thread = std::thread([&client]() {
+            while (client.running())
+                client.write_record();
+        });
+    }
     while (client.running()) {
         std::cout << "\r> " << std::flush;
         std::string input;
@@ -911,5 +982,7 @@ int main(int argc, char** argv) {
     std::cout << "Stopping..." << std::endl;
     if (client_thread.joinable())
         client_thread.join();
+    if (record_thread.joinable())
+        record_thread.join();
     client::destroy();
 }

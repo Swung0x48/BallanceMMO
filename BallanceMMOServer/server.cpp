@@ -101,23 +101,14 @@ public:
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
     }
 
-    template<typename T>
-    void receive(T& msg, HSteamNetConnection client = k_HSteamNetConnection_Invalid) {
+    void receive(void* data, size_t size, HSteamNetConnection client = k_HSteamNetConnection_Invalid) {
         if (get_client_count() == 0) { Printf("Error: no online players found."); return; }
         auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
         if (client == k_HSteamNetConnection_Invalid) // random player
             client = std::next(clients_.begin(), rand() % clients_.size())->first;
         networking_msg->m_conn = client;
-        std::string temp;
-        if constexpr (std::is_base_of<bmmo::serializable_message, T>::value) {
-            msg.serialize();
-            networking_msg->m_cbSize = msg.size();
-            temp = msg.raw.str();
-            networking_msg->m_pData = temp.data();
-        } else {
-            networking_msg->m_cbSize = sizeof(T);
-            networking_msg->m_pData = &msg;
-        }
+        networking_msg->m_pData = data;
+        networking_msg->m_cbSize = size;
         on_message(networking_msg);
         networking_msg->Release();
     }
@@ -1421,6 +1412,12 @@ int main(int argc, char** argv) {
     };
     console.register_command("popup", send_popup_msg);
     console.register_command("popup-broadcast", std::bind(send_popup_msg, true));
+    console.register_command("announce", [&] {
+        bmmo::important_notification_msg msg{};
+        msg.chat_content = console.get_rest_of_line();
+        msg.serialize();
+        server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
     console.register_command("cheat", [&] {
         bool cheat_state = false;
         if (console.get_next_word() == "on")
@@ -1508,15 +1505,15 @@ int main(int argc, char** argv) {
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
                 msg.content.type = static_cast<bmmo::countdown_type>(i);
-                server.receive(msg);
+                server.receive(&msg, sizeof(msg));
                 if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } else {
             msg.content.type = static_cast<bmmo::countdown_type>(atoi(console.get_next_word().c_str()));
-            server.receive(msg);
+            server.receive(&msg, sizeof(msg));
         }
     });
-    console.register_command("countdown-fake", [&] {
+    console.register_command("countdown-forced", [&] {
         bmmo::countdown_msg msg{};
         msg.content.restart_level = msg.content.force_restart = true;
         msg.content.map.type = bmmo::map_type::OriginalLevel;

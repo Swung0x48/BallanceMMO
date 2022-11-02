@@ -44,8 +44,6 @@ add_executable(BallanceMMOServer server.cpp console.cpp ../submodule/ya_getopt/y
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
 add_executable(BallanceMMOMockClient client.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
-add_executable(BallanceMMOFlightRecorder flightrecorder.cpp ../submodule/ya_getopt/ya_getopt.c)
-target_link_libraries(BallanceMMOFlightRecorder GameNetworkingSockets::shared)
 add_executable(BallanceMMORecordParser record_parser.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
 target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared)
 
@@ -55,12 +53,10 @@ target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warning
 if (MSVC)
     target_compile_options(BallanceMMOServer PRIVATE /Wall)
     target_compile_options(BallanceMMOMockClient PRIVATE /Wall)
-    target_compile_options(BallanceMMOFlightRecorder PRIVATE /Wall)
     target_compile_options(BallanceMMORecordParser PRIVATE /Wall)
 else()
     target_compile_options(BallanceMMOServer PRIVATE -Wall -Wextra)
     target_compile_options(BallanceMMOMockClient PRIVATE -Wall -Wextra)
-    target_compile_options(BallanceMMOFlightRecorder PRIVATE -Wall -Wextra)
     target_compile_options(BallanceMMORecordParser PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
 endif()
 
