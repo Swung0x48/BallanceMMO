@@ -273,7 +273,7 @@ public:
 
     void print_version_info() {
         Printf("Server version: %s; minimum accepted client version: %s.",
-                        bmmo::version_t().to_string(),
+                        bmmo::version_t{}.to_string(),
                         bmmo::minimum_client_version.to_string());
         auto uptime = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         std::string time_str(20, 0);
@@ -407,7 +407,7 @@ public:
         startup_cv_.notify_all();
 
         Printf("Server (v%s; client min. v%s) started at port %u.\n",
-                bmmo::version_t().to_string(),
+                bmmo::version_t{}.to_string(),
                 bmmo::minimum_client_version.to_string(), port_);
 
         return true;
@@ -458,7 +458,7 @@ protected:
             Printf("Error: failed to open config file for writing.");
             return;
         }
-        config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t().to_string() << "\n"
+        config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t{}.to_string() << "\n"
                     << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
                     << "# - Ban list style: \"uuid: reason\".\n"
@@ -1313,7 +1313,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
             case 'v':
                 puts("Ballance MMO server by Swung0x48 and BallanceBug.");
                 printf("Build time: \t%s %s.\n", __DATE__, __TIME__);
-                printf("Version: \t%s.\n", bmmo::version_t().to_string().c_str());
+                printf("Version: \t%s.\n", bmmo::version_t{}.to_string().c_str());
                 printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;
@@ -1417,6 +1417,7 @@ int main(int argc, char** argv) {
         msg.chat_content = console.get_rest_of_line();
         msg.serialize();
         server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        server.Printf("[Announcement] ([Server]): %s", msg.chat_content);
     });
     console.register_command("cheat", [&] {
         bool cheat_state = false;

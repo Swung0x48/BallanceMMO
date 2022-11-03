@@ -182,7 +182,9 @@ public:
         }
     }
 
+    using role::set_logging_level;
     void set_nickname(const std::string& name) { nickname_ = name; };
+    void set_print_states(bool print_states) { print_states_ = print_states; }
 
     void set_uuid(std::string uuid) {
         size_t pos;
@@ -191,8 +193,6 @@ public:
         }
         bmmo::hex_chars_from_string(uuid_, uuid);
     };
-
-    void set_print_states(bool print_states) { print_states_ = print_states; }
 
     void shutdown() {
         running_ = false;
@@ -679,42 +679,48 @@ private:
     std::atomic_bool print_states_ = false, recorder_mode_ = false;
 };
 
+static struct option_t {
+    std::string server_addr = "127.0.0.1:26676", username = "MockClient",
+                uuid = "00010002-0003-0004-0005-000600070008", log_path;
+    bool print_states = false, recorder_mode = false;
+    ESteamNetworkingSocketsDebugOutputType detail = k_ESteamNetworkingSocketsDebugOutputType_Important;
+} options;
+
 // parse command line arguments (server/name/uuid/help/version) with getopt
-int parse_args(int argc, char** argv, std::string& server, std::string& name, std::string& uuid, std::string& log_path, bool* print_states, bool* recorder) {
+int parse_args(int argc, char** argv) {
     static struct option long_options[] = {
         {"recorder-mode", required_argument, 0, 'r'},
         {"server", required_argument, 0, 's'},
         {"name", required_argument, 0, 'n'},
         {"uuid", required_argument, 0, 'u'},
         {"log", required_argument, 0, 'l'},
+        {"detail", required_argument, 0, 'd'},
         {"print", no_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "s:n:u:l:rphv", long_options, &opt_index))!= -1) {
+    while ((opt = getopt_long(argc, argv, "s:n:u:l:d:rphv", long_options, &opt_index))!= -1) {
         switch (opt) {
             case 's':
-                server = optarg;
-                break;
+                options.server_addr = optarg; break;
             case 'n':
-                name = optarg;
-                break;
+                options.username = optarg; break;
             case 'u':
-                uuid = optarg;
-                break;
+                options.uuid = optarg; break;
             case 'l':
-                log_path = optarg;
+                options.log_path = optarg; break;
+            case 'd':
+                options.detail = (decltype(options.detail))(option_t{}.detail + std::clamp(atoi(optarg), 0, 2));
                 break;
             case 'r':
-                *recorder = true;
-                name = "*FlightRecorder";
-                uuid = "01020304-0506-0708-090a-0b0c0d0e0f00";
+                options.recorder_mode = true;
+                options.username = "*FlightRecorder";
+                options.uuid = "01020304-0506-0708-090a-0b0c0d0e0f00";
                 break;
             case 'p':
-                *print_states = true;
-                break;
+                options.print_states = true; break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
@@ -722,6 +728,7 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
                 puts("  -n, --name=NAME\t Set your name to NAME (default: \"MockClient\")");
                 puts("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")");
                 puts("  -l, --log=PATH\t Write log to the file at PATH in addition to stdout.");
+                puts("  -d, --detail=LEVEL\t Set the detail level (0 to 2, from low to high) of output (default: 0).");
                 puts("  -r, --recorder-mode\t Record data received from the server and save them to a binary file.");
                 puts("  -p, --print\t\t Print player state changes.");
                 puts("  -h, --help\t\t Display this help and exit.");
@@ -729,7 +736,7 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
                 return -1;
             case 'v':
                 puts("Ballance MMO mock client by Swung0x48 and BallanceBug.");
-                printf("Version: %s.\n", bmmo::version_t().to_string().c_str());
+                printf("Version: %s.\n", bmmo::version_t{}.to_string().c_str());
                 return -1;
         }
     }
@@ -737,16 +744,12 @@ int parse_args(int argc, char** argv, std::string& server, std::string& name, st
 }
 
 int main(int argc, char** argv) {
-    std::string server_addr = "127.0.0.1:26676", username = "MockClient",
-                uuid = "00010002-0003-0004-0005-000600070008",
-                log_path;
-    bool print_states = false, recorder_mode = false;
-    if (parse_args(argc, argv, server_addr, username, uuid, log_path, &print_states, &recorder_mode) != 0)
+    if (parse_args(argc, argv) != 0)
         return 0;
 
     FILE* log_file = nullptr;
-    if (!log_path.empty()) {
-        log_file = fopen(log_path.c_str(), "a");
+    if (!options.log_path.empty()) {
+        log_file = fopen(options.log_path.c_str(), "a");
         if (log_file == nullptr) {
             std::cerr << "Fatal: failed to open log file." << std::endl;
             return 1;
@@ -759,14 +762,14 @@ int main(int argc, char** argv) {
 
     std::cout << "Creating client instance..." << std::endl;
     client client;
-    client.set_nickname(username);
-    client.set_uuid(uuid);
-    client.set_print_states(print_states);
-    if (recorder_mode)
-        client.setup_recorder();
+    client.set_nickname(options.username);
+    client.set_uuid(options.uuid);
+    client.set_print_states(options.print_states);
+    client.set_logging_level(options.detail);
+    if (options.recorder_mode) client.setup_recorder();
 
     std::cout << "Connecting to server..." << std::endl;
-    if (!client.connect(server_addr)) {
+    if (!client.connect(options.server_addr)) {
         std::cerr << "Cannot connect to server." << std::endl;
         return 1;
     }
@@ -830,16 +833,16 @@ int main(int argc, char** argv) {
         client::Printf("Ping: %dms\n", status.m_nPing);
         client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
         auto l_status = client.get_lane_info();
-        client::Printf("PendingReliable: ", l_status.m_cbPendingReliable);
+        client::Printf("PendingReliable: %d", l_status.m_cbPendingReliable);
     });
     console.register_command("reconnect", [&] {
         if (client_thread.joinable())
             client_thread.join();
 
         if (!console.empty())
-            server_addr = console.get_next_word();
+            options.server_addr = console.get_next_word();
 
-        if (!client.connect(server_addr)) {
+        if (!client.connect(options.server_addr)) {
             std::cerr << "Cannot connect to server." << std::endl;
             return;
         }
@@ -848,6 +851,11 @@ int main(int argc, char** argv) {
         client.wait_till_started();
     });
     console.register_command("cheat", [&] {
+        bmmo::cheat_toggle_msg msg{};
+        msg.content.cheated = (console.get_next_word() == "on") ? true : false;
+        client.send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("cheat-self", [&] {
         if (!console.empty())
             cheat = (console.get_next_word() == "on") ? true : false;
         else
@@ -858,8 +866,8 @@ int main(int argc, char** argv) {
     });
     console.register_command("list", [&] { client.print_clients(); });
     console.register_command("print", [&] {
-        print_states = !print_states;
-        client.set_print_states(print_states);
+        options.print_states = !options.print_states;
+        client.set_print_states(options.print_states);
     });
     console.register_command("teleport", [&] { client.teleport_to(atoll(console.get_next_word().c_str())); });
     console.register_command("balltype", [&] {
@@ -952,7 +960,7 @@ int main(int argc, char** argv) {
 
     client.wait_till_started();
     std::thread record_thread;
-    if (recorder_mode) {
+    if (options.recorder_mode) {
         record_thread = std::thread([&client]() {
             while (client.running())
                 client.write_record();
