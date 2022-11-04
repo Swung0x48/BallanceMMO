@@ -40,6 +40,6 @@
 #include "mod_list_msg.hpp"
 #include "popup_box_msg.hpp"
 #include "current_sector_msg.hpp"
-#include "current_map_list_msg.hpp"
+#include "login_accepted_v3_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

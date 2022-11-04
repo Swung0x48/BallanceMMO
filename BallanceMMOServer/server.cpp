@@ -762,19 +762,27 @@ protected:
 
                 // accepting client
                 clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}});  // add the client here
-                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(uint8_t) * 16);
+                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
                 username_[msg.nickname] = networking_msg->m_conn;
                 Printf("%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
                         get_uuid_string(msg.uuid).substr(0, 8),
                         msg.version.to_string(),
                         msg.cheated ? "on" : "off");
+                
+                if (!map_names_.empty()) { // do this before login_accepted_msg since the latter contains map info
+                    bmmo::map_names_msg name_msg;
+                    name_msg.maps = map_names_;
+                    name_msg.serialize();
+                    send(networking_msg->m_conn, name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+                }
 
                 // notify this client of other online players
-                bmmo::login_accepted_v2_msg accepted_msg;
+                bmmo::login_accepted_v3_msg accepted_msg;
                 for (const auto& [id, data]: clients_) {
                     //if (client_it != it)
-                    accepted_msg.online_players.insert({id, {data.name, data.cheated}});
+                    accepted_msg.online_players.reserve(clients_.size());
+                    accepted_msg.online_players.push_back({{id, data.current_map, data.current_sector, {}}, data.name, data.cheated});
                 }
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -789,26 +797,10 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
 
-                if (!map_names_.empty()) {
-                    bmmo::map_names_msg name_msg;
-                    name_msg.maps = map_names_;
-                    name_msg.serialize();
-                    send(networking_msg->m_conn, name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
-                }
-
                 bmmo::owned_timed_ball_state_msg state_msg{};
                 pull_ball_states(state_msg.balls);
                 state_msg.serialize();
                 send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_Reliable);
-
-                bmmo::current_map_list_msg map_msg;
-                map_msg.states.reserve(clients_.size());
-                for (const auto& [id, data]: clients_) {
-                    // Oops. Some older compilers don't support emplace_back with aggregate initialization
-                    map_msg.states.push_back({id, data.current_map, data.current_sector, bmmo::current_map_state::EnteringMap});
-                }
-                map_msg.serialize();
-                send(networking_msg->m_conn, map_msg.raw.str().data(), map_msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
@@ -1191,11 +1183,11 @@ protected:
             case bmmo::ModList: {
                 break;
             }
-            case bmmo::CurrentMapList:
             case bmmo::OwnedBallState:
             case bmmo::OwnedBallStateV2:
             case bmmo::OwnedTimedBallState:
             case bmmo::LoginAcceptedV2:
+            case bmmo::LoginAcceptedV3:
             case bmmo::PlayerConnectedV2:
             case bmmo::OwnedCheatState:
             case bmmo::OwnedCheatToggle:

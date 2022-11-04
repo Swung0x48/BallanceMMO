@@ -67,6 +67,7 @@ public:
         auto current_time = std::time(nullptr);
         char record_name[32];
         std::strftime(record_name, 32, "record_%Y%m%d%H%M.bin", std::localtime(&current_time));
+        Printf("Flight recorder started.", record_name);
         record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
         if (!record_stream_.is_open())
             return false;
@@ -330,14 +331,14 @@ private:
 //        Printf(reinterpret_cast<const char*>(msg->m_pData));
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
         switch (raw_msg->code) {
-            case bmmo::LoginAcceptedV2: {
-                bmmo::login_accepted_v2_msg msg{};
+            case bmmo::LoginAcceptedV3: {
+                bmmo::login_accepted_v3_msg msg{};
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
                 Printf("%d player(s) online:", msg.online_players.size());
                 for (const auto& i: msg.online_players) {
-                    Printf("%s (#%u)%s", i.second.name.c_str(), i.first, (i.second.cheated ? " [CHEAT]" : ""));
-                    clients_[i.first] = { i.second.name, (bool) i.second.cheated };
+                    Printf("%s (#%u)%s", i.name, i.player_id, (i.cheated ? " [CHEAT]" : ""));
+                    clients_[i.player_id] = { i.name, (bool) i.cheated, {}, i.map, i.sector };
                 }
                 break;
             }
@@ -512,14 +513,6 @@ private:
                 auto* msg = reinterpret_cast<bmmo::current_map_msg*>(networking_msg->m_pData);
                 clients_[msg->content.player_id].current_map = msg->content.map;
                 clients_[msg->content.player_id].current_sector = msg->content.sector;
-                break;
-            }
-            case bmmo::CurrentMapList: {
-                auto msg = bmmo::message_utils::deserialize<bmmo::current_map_list_msg>(networking_msg);
-                for (const auto& i: msg.states) {
-                    clients_[i.player_id].current_map = i.map;
-                    clients_[i.player_id].current_sector = i.sector;
-                }
                 break;
             }
             case bmmo::CurrentSector: {
@@ -716,8 +709,8 @@ int parse_args(int argc, char** argv) {
                 break;
             case 'r':
                 options.recorder_mode = true;
-                options.username = "*FlightRecorder";
-                options.uuid = "01020304-0506-0708-090a-0b0c0d0e0f00";
+                if (options.username == option_t{}.username) options.username = "*FlightRecorder";
+                if (options.uuid == option_t{}.uuid) options.uuid = "01020304-0506-0708-090a-0b0c0d0e0f00";
                 break;
             case 'p':
                 options.print_states = true; break;
@@ -780,7 +773,7 @@ int main(int argc, char** argv) {
     console.register_command("help", [&] { role::Printf(console.get_help_string().c_str()); });
     console.register_command("stop", [&] { client.shutdown(); });
     auto pos_function = [&](bool translate = false) {
-        auto msg = client.get_local_state_msg();
+        auto& msg = client.get_local_state_msg();
         float* pos = msg.content.position.v;
         for (int i = 0; i < 3; ++i) {
             if (!console.empty())

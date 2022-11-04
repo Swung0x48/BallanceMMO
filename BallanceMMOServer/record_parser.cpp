@@ -129,13 +129,13 @@ public:
             record_stream_.read(reinterpret_cast<char*>(entry.data), size);
             auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
             switch (raw_msg->code) {
-                case bmmo::LoginAcceptedV2: {
-                    auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v2_msg>(entry.data, entry.size);
+                case bmmo::LoginAcceptedV3: {
+                    auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(entry.data, entry.size);
                     for (const auto& i: msg.online_players) {
-                        auto state = static_cast<player_state>(Online | ((i.second.cheated) ? Cheating : None));
-                        auto period = time_period_t(current_record_time_, std::numeric_limits<int64_t>::max(), i.first, state);
-                        timeline_[i.second.name].emplace_back(period);
-                        record_clients_.insert({i.first, {i.second.name, i.second.cheated}});
+                        auto state = static_cast<player_state>(Online | ((i.cheated) ? Cheating : None));
+                        auto period = time_period_t(current_record_time_, std::numeric_limits<int64_t>::max(), i.player_id, state);
+                        timeline_[i.name].emplace_back(period);
+                        record_clients_.insert({i.player_id, {i.name, i.cheated}});
                     }
                     break;
                 }
@@ -347,8 +347,9 @@ public:
         }
 
         // broadcast LoginAccepted message for client to rebuild states
-        bmmo::login_accepted_v2_msg msg;
-        msg.online_players = record_clients_;
+        bmmo::login_accepted_v3_msg msg;
+        for (const auto& [id, status]: record_clients_)
+            msg.online_players.push_back({{id}, status.name, status.cheated});
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -702,10 +703,10 @@ private:
         // std::unique_lock<std::mutex> lk(record_data_mutex_);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
-            case bmmo::LoginAcceptedV2: {
-                auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v2_msg>(entry.data, entry.size);
+            case bmmo::LoginAcceptedV3: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(entry.data, entry.size);
                 for (const auto& i: msg.online_players) {
-                    record_clients_.insert({i.first, {i.second.name, i.second.cheated}});
+                    record_clients_.insert({i.player_id, {i.name, i.cheated}});
                 }
                 // printf("Code: LoginAcceptedV2\n");
                 // bmmo::login_accepted_v2_msg msg{};

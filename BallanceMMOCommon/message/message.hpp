@@ -62,7 +62,7 @@ namespace bmmo {
         ModList,
         PopupBox,
         CurrentSector,
-        CurrentMapList,
+        LoginAcceptedV3,
     };
 
     template<typename T, opcode C = None>

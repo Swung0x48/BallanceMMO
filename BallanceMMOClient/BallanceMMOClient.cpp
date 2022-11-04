@@ -1108,6 +1108,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         break;
     }
+    case bmmo::LoginAcceptedV2:
     case bmmo::LoginAccepted: {
         /*status_->update("Connected");
         status_->paint(0xff00ff00);
@@ -1127,15 +1128,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             }
             GetLogger()->Info(i.second.c_str());
         }*/
-        GetLogger()->Warn("Outdated LoginAccepted msg received!");
+        GetLogger()->Warn("Outdated LoginAccepted%s msg received!", (raw_msg->code == bmmo::LoginAcceptedV2) ? "V2" : "");
         break;
     }
-    case bmmo::LoginAcceptedV2: {
-        bmmo::login_accepted_v2_msg msg;
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (!msg.deserialize()) {
-            GetLogger()->Error("Deserialization failed!");
-        }
+    case bmmo::LoginAcceptedV3: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(network_msg);
 
         if (logged_in_) {
             GetLogger()->Info("New LoginAccepted message received. Resetting current data.");
@@ -1144,12 +1141,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         GetLogger()->Info("%d player(s) online: ", msg.online_players.size());
         for (auto& i : msg.online_players) {
-            if (i.second.name == db_.get_nickname()) {
-                db_.set_client_id(i.first);
+            if (i.name == db_.get_nickname()) {
+                db_.set_client_id(i.player_id);
             } else {
-                db_.create(i.first, i.second.name, i.second.cheated);
+                db_.create(i.player_id, i.name, i.cheated);
+                db_.update_map(i.player_id, i.map.get_display_name(map_names_), i.sector);
             }
-            GetLogger()->Info(i.second.name.c_str());
+            GetLogger()->Info(i.name.c_str());
         }
 
         if (logged_in_) {
@@ -1496,12 +1494,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         else {
             db_.update_map(msg->content.player_id, msg->content.map.get_display_name(map_names_), msg->content.sector);
         }
-        break;
-    }
-    case bmmo::CurrentMapList: {
-        auto msg = bmmo::message_utils::deserialize<bmmo::current_map_list_msg>(network_msg);
-        for (const auto& i: msg.states)
-            db_.update_map(i.player_id, i.map.get_display_name(map_names_), i.sector);
         break;
     }
     case bmmo::CurrentSector: {
