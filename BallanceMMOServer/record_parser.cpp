@@ -33,7 +33,7 @@ inline T read_variable(std::istream& stream) {
     return t;
 }
 
-enum class message_action: uint8_t { None, Broadcast, BroadcastNoDelay };
+enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
 
 struct client_data {
     std::string name;
@@ -93,20 +93,25 @@ public:
     uintmax_t file_size_ = 0;
 #pragma endregion
 #pragma region SeekStateManagement
-    enum player_state: uint32_t {
+    enum player_mode_t: uint32_t {
         None = 0,
         Online = (1 << 0),
         Cheating = (1 << 1)
     };
+    struct player_state_t {
+        player_mode_t mode = None;
+        bmmo::map map{};
+        int32_t sector{};
+    };
 
     struct time_period_t {
-        time_period_t(SteamNetworkingMicroseconds begin, SteamNetworkingMicroseconds end, HSteamNetConnection id, player_state state)
+        time_period_t(SteamNetworkingMicroseconds begin, SteamNetworkingMicroseconds end, HSteamNetConnection id, player_state_t state)
             : begin(begin), end(end), id(id), state(state) {}
 
         SteamNetworkingMicroseconds begin = 0;
         SteamNetworkingMicroseconds end = 0;
         HSteamNetConnection id = k_HSteamNetConnection_Invalid;
-        player_state state = player_state::None;
+        player_state_t state{};
     };
 
     int get_segment_index(SteamNetworkingMicroseconds time) {
@@ -120,9 +125,11 @@ public:
         segments_.emplace_back(segment_info_t{ position, 0 });
         while (record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
             current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
+            bool print_status = false;
             if (current_record_time_ - last_segmented_timestamp > (int)1e7) {
                 last_segmented_timestamp = current_record_time_;
                 segments_.emplace_back(segment_info_t{ (int64_t)record_stream_.tellg() - (int64_t)sizeof(SteamNetworkingMicroseconds), current_record_time_ });
+                print_status = true;
             }
             auto size = read_variable<int32_t>(record_stream_);
             bmmo::record_entry entry(size);
@@ -131,11 +138,14 @@ public:
             switch (raw_msg->code) {
                 case bmmo::LoginAcceptedV3: {
                     auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(entry.data, entry.size);
-                    for (const auto& i: msg.online_players) {
-                        auto state = static_cast<player_state>(Online | ((i.cheated) ? Cheating : None));
-                        auto period = time_period_t(current_record_time_, std::numeric_limits<int64_t>::max(), i.player_id, state);
-                        timeline_[i.name].emplace_back(period);
-                        record_clients_.insert({i.player_id, {i.name, i.cheated}});
+                    for (const auto& [id, data]: msg.online_players) {
+                        player_state_t state = {
+                            static_cast<player_mode_t>(Online | ((data.cheated) ? Cheating : None)),
+                            data.map,
+                            data.sector,
+                        };
+                        timeline_[data.name].emplace_back(current_record_time_, std::numeric_limits<int64_t>::max(), id, state);
+                        record_clients_.insert({id, {data.name, data.cheated}});
                     }
                     break;
                 }
@@ -152,9 +162,8 @@ public:
                 }
                 case bmmo::PlayerConnectedV2: {
                     auto msg = bmmo::message_utils::deserialize<bmmo::player_connected_v2_msg>(entry.data, entry.size);
-                    auto state = static_cast<player_state>(Online | ((msg.cheated) ? Cheating : None));
-                    auto period = time_period_t(current_record_time_, std::numeric_limits<int64_t>::max(), msg.connection_id, state);
-                    timeline_[msg.name].emplace_back(period);
+                    player_state_t state = { static_cast<player_mode_t>(Online | ((msg.cheated) ? Cheating : None)) };
+                    timeline_[msg.name].emplace_back(current_record_time_, std::numeric_limits<int64_t>::max(), msg.connection_id, state);
                     record_clients_.insert({msg.connection_id, {msg.name, msg.cheated}});
                     break;
                 }
@@ -164,10 +173,34 @@ public:
                     auto& last_time_period = timeline_[username].back();
                     last_time_period.end = current_record_time_;
 
-                    auto state = static_cast<player_state>(Online | ((msg.content.state.cheated) ? Cheating : None));
-                    auto period = time_period_t(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
-                    timeline_[username].emplace_back(period);
+                    auto state(last_time_period.state);
+                    state.mode = static_cast<player_mode_t>(Online | ((msg.content.state.cheated) ? Cheating : None));
+                    timeline_[username].emplace_back(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
                     record_clients_[msg.content.player_id].cheated = msg.content.state.cheated;
+                    break;
+                }
+                case bmmo::CurrentMap: {
+                    auto msg = bmmo::message_utils::deserialize<bmmo::current_map_msg>(entry.data, entry.size);
+                    if (msg.content.type == bmmo::current_map_state::Announcement) break;
+                    auto username = record_clients_[msg.content.player_id].name;
+                    auto& last_time_period = timeline_[username].back();
+                    last_time_period.end = current_record_time_;
+
+                    auto state(last_time_period.state);
+                    state.map = msg.content.map;
+                    state.sector = msg.content.sector;
+                    timeline_[username].emplace_back(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
+                    break;
+                }
+                case bmmo::CurrentSector: {
+                    auto msg = bmmo::message_utils::deserialize<bmmo::current_sector_msg>(entry.data, entry.size);
+                    auto username = record_clients_[msg.content.player_id].name;
+                    auto& last_time_period = timeline_[username].back();
+                    last_time_period.end = current_record_time_;
+
+                    auto state(last_time_period.state);
+                    state.sector = msg.content.sector;
+                    timeline_[username].emplace_back(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
                     break;
                 }
                 case bmmo::MapNames: {
@@ -180,10 +213,11 @@ public:
                 }
             }
 
-            printf("\rBuilding seek index...[%" PRIu64 "/%" PRIu64 "] %.2lf%%",
-                            (uint64_t)record_stream_.tellg() - position,
-                            (uint64_t)(file_size_ - position),
-                            ((double)((uint64_t)record_stream_.tellg() - position) / (double)(file_size_ - position)) * 100.0);
+            if (print_status)
+                printf("\rBuilding seek index...[%" PRIu64 "/%" PRIu64 "] %.2lf%%",
+                        (uint64_t)record_stream_.tellg() - position,
+                        (uint64_t)(file_size_ - position),
+                        ((double)((uint64_t)record_stream_.tellg() - position) / (double)(file_size_ - position)) * 100.0);
         }
 
         if (!(record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof())) {
@@ -338,8 +372,12 @@ public:
                     valid = true;
                 }
                 if (valid) {
-                    record_clients_[it->id] = {username, static_cast<uint8_t>((it->state & Cheating) ? 1 : 0)};
-                    
+                    record_clients_[it->id] = {
+                        username,
+                        static_cast<uint8_t>((it->state.mode & Cheating) ? 1 : 0),
+                        it->state.map,
+                        it->state.sector,
+                    };
                 }
                 // std::cout << "\rRebuilding state for " << username << " #" << it->id << " [" << it->begin << ", " << current_record_time_
                 //               << ", " << it->end << "] " << (valid ? "valid" : "invalid");
@@ -348,8 +386,7 @@ public:
 
         // broadcast LoginAccepted message for client to rebuild states
         bmmo::login_accepted_v3_msg msg;
-        for (const auto& [id, status]: record_clients_)
-            msg.online_players.push_back({{id}, status.name, status.cheated});
+        msg.online_players = record_clients_;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -461,10 +498,10 @@ private:
                 // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
                 // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
                 switch (parse_message(entry)) {
-                    case message_action::BroadcastNoDelay:
+                    case message_action_t::BroadcastNoDelay:
                         broadcast_message(entry.data, size, k_nSteamNetworkingSend_UnreliableNoDelay);
                         break;
-                    case message_action::Broadcast:
+                    case message_action_t::Broadcast:
                         broadcast_message(entry.data, size, k_nSteamNetworkingSend_Reliable);
                     default:
                         break;
@@ -666,7 +703,7 @@ private:
                         msg.nickname,
                         msg.version.to_string());
                 
-                bmmo::login_accepted_v2_msg accepted_msg{};
+                bmmo::login_accepted_v3_msg accepted_msg{};
                 accepted_msg.online_players = record_clients_;
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -698,16 +735,14 @@ private:
         }
     }
 
-    message_action parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
+    message_action_t parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
         // std::unique_lock<std::mutex> lk(record_data_mutex_);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
             case bmmo::LoginAcceptedV3: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(entry.data, entry.size);
-                for (const auto& i: msg.online_players) {
-                    record_clients_.insert({i.player_id, {i.name, i.cheated}});
-                }
+                record_clients_ = msg.online_players;
                 // printf("Code: LoginAcceptedV2\n");
                 // bmmo::login_accepted_v2_msg msg{};
                 // msg.raw.write(reinterpret_cast<char*>(entry.data), entry.size);
@@ -738,8 +773,20 @@ private:
 //                record_map_names_.insert(msg.maps.begin(), msg.maps.end());
                 break;
             }
+            case bmmo::CurrentMap: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::current_map_msg>(entry.data, entry.size);
+                if (msg.content.type != msg.content.EnteringMap) break;
+                record_clients_[msg.content.player_id].map = msg.content.map;
+                record_clients_[msg.content.player_id].sector = msg.content.sector;
+                break;
+            }
+            case bmmo::CurrentSector: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::current_sector_msg>(entry.data, entry.size);
+                record_clients_[msg.content.player_id].sector = msg.content.sector;
+                break;
+            }
             case bmmo::OwnedTimedBallState: {
-                return message_action::BroadcastNoDelay;
+                return message_action_t::BroadcastNoDelay;
             }
             /*case bmmo::OwnedBallStateV2: {
                     bmmo::owned_ball_state_v2_msg msg;
@@ -791,7 +838,7 @@ private:
                 break;
             }
         }
-        return message_action::Broadcast;
+        return message_action_t::Broadcast;
         // std::cout.write(entry.data, entry.size);
     }
 
@@ -808,7 +855,7 @@ private:
     std::thread player_thread_;
 
     SteamNetworkingMicroseconds current_record_time_{};
-    std::unordered_map<HSteamNetConnection, bmmo::player_status> record_clients_;
+    std::unordered_map<HSteamNetConnection, bmmo::player_status_v3> record_clients_;
     std::unordered_map<std::string, std::string> record_map_names_;
 
     HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
@@ -879,8 +926,6 @@ int main(int argc, char** argv) {
         role::FatalError("Fake server failed on setup.");
     std::thread server_thread([&replayer]() { replayer.run(); });
 
-    replayer.wait_till_started();
-
     console console;
     console.register_command("help", [&]() { role::Printf(console.get_help_string().c_str()); });
     console.register_command("play", [&]() {
@@ -928,6 +973,8 @@ int main(int argc, char** argv) {
     });
 
     role::Printf("To see all available commands, type \"help\".");
+
+    replayer.wait_till_started();
 
     while (replayer.running()) {
         std::cout << "\r> " << std::flush;

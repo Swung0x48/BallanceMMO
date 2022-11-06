@@ -484,10 +484,8 @@ protected:
         msg.content.connection_id = *client;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
         std::string name = itClient->second.name;
-        if (auto itName = username_.find(name); itName != username_.end())
-            username_.erase(itName);
-        if (itClient != clients_.end())
-            clients_.erase(itClient);
+        username_.erase(name);
+        clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, *client);
     }
 
@@ -782,7 +780,7 @@ protected:
                 for (const auto& [id, data]: clients_) {
                     //if (client_it != it)
                     accepted_msg.online_players.reserve(clients_.size());
-                    accepted_msg.online_players.push_back({{id, data.current_map, data.current_sector, {}}, data.name, data.cheated});
+                    accepted_msg.online_players.insert({id, {data.name, data.cheated, data.current_map, data.current_sector}});
                 }
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);

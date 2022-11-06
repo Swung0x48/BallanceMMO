@@ -239,7 +239,6 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         objects_.destroy_all_objects();
         objects_.init_template_balls();
         //objects_.init_players();
-        md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
     }
 
     if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
@@ -269,10 +268,12 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         md5_from_file(path, current_map_.md5);
         static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementValue(0, 0, &current_map_.level);
         if (connected()) {
-            if (!map_names_.contains(current_map_.get_hash_bytes_string())) {
-                map_names_[current_map_.get_hash_bytes_string()] = current_map_.name;
+            const auto name_it = map_names_.find(current_map_.get_hash_bytes_string());
+            if (name_it == map_names_.end()) {
+                map_names_.try_emplace(current_map_.get_hash_bytes_string(), current_map_.name);
                 send_current_map_name();
-            }
+            } else
+                current_map_.name = name_it->second;
             player_ball_ = get_current_ball();
             if (player_ball_ != nullptr) {
                 local_state_handler_->poll_and_send_state_forced(player_ball_);
@@ -331,6 +332,7 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
 
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
+        md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
 
         init_ = true;
     }
@@ -1140,14 +1142,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             objects_.destroy_all_objects();
         }
         GetLogger()->Info("%d player(s) online: ", msg.online_players.size());
-        for (auto& i : msg.online_players) {
-            if (i.name == db_.get_nickname()) {
-                db_.set_client_id(i.player_id);
+        for (const auto& [id, data] : msg.online_players) {
+            if (data.name == db_.get_nickname()) {
+                db_.set_client_id(id);
             } else {
-                db_.create(i.player_id, i.name, i.cheated);
-                db_.update_map(i.player_id, i.map.get_display_name(map_names_), i.sector);
+                db_.create(id, data.name, data.cheated);
+                db_.update_map(id, data.map.get_display_name(map_names_), data.sector);
             }
-            GetLogger()->Info(i.name.c_str());
+            GetLogger()->Info(data.name.c_str());
         }
 
         if (logged_in_) {
@@ -1168,8 +1170,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             local_state_handler_->poll_and_send_state_forced(player_ball_);
         }
         if (!current_map_.name.empty()) {
-            send_current_map_name();
-            map_names_[current_map_.get_hash_bytes_string()] = current_map_.name;
+            if (const auto name_it = map_names_.find(current_map_.get_hash_bytes_string()); name_it == map_names_.end()) {
+                send_current_map_name();
+                map_names_.try_emplace(current_map_.get_hash_bytes_string(), current_map_.name);
+            } else
+                current_map_.name = name_it->second;
         }
         send_current_map();
 
@@ -1181,7 +1186,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         mod_msg.mods.reserve(count);
         for (auto i = 1; i < count; i++) {
             auto* mod = m_bml->GetMod(i);
-            mod_msg.mods.emplace(mod->GetID(), mod->GetVersion());
+            mod_msg.mods.try_emplace(mod->GetID(), mod->GetVersion());
         }
         mod_msg.serialize();
         send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);

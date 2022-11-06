@@ -336,9 +336,9 @@ private:
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
                 Printf("%d player(s) online:", msg.online_players.size());
-                for (const auto& i: msg.online_players) {
-                    Printf("%s (#%u)%s", i.name, i.player_id, (i.cheated ? " [CHEAT]" : ""));
-                    clients_[i.player_id] = { i.name, (bool) i.cheated, {}, i.map, i.sector };
+                for (const auto& [id, data]: msg.online_players) {
+                    Printf("%s (#%u)%s", data.name, id, (data.cheated ? " [CHEAT]" : ""));
+                    clients_.insert({ id, { data.name, (bool) data.cheated, {}, data.map, data.sector } });
                 }
                 break;
             }
