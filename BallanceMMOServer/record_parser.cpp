@@ -702,16 +702,16 @@ private:
                 Printf("%s (v%s) logged in!\n",
                         msg.nickname,
                         msg.version.to_string());
-                
-                bmmo::login_accepted_v3_msg accepted_msg{};
-                accepted_msg.online_players = record_clients_;
-                accepted_msg.serialize();
-                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 bmmo::map_names_msg names_msg;
                 names_msg.maps = record_map_names_;
                 names_msg.serialize();
                 send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), k_nSteamNetworkingSend_Reliable);
+                
+                bmmo::login_accepted_v3_msg accepted_msg{};
+                accepted_msg.online_players = record_clients_;
+                accepted_msg.serialize();
+                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
 
                 bmmo::plain_text_msg text_msg;
                 text_msg.text_content.resize(128);
@@ -788,51 +788,6 @@ private:
             case bmmo::OwnedTimedBallState: {
                 return message_action_t::BroadcastNoDelay;
             }
-            /*case bmmo::OwnedBallStateV2: {
-                    bmmo::owned_ball_state_v2_msg msg;
-                    msg.raw.write(reinterpret_cast<char*>(entry.data), entry.size);
-                    msg.deserialize();
-
-                    for (auto& ball : msg.balls) {
-                        if (print_states)
-                            Printf("%llu, %u, %d, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf\n",
-                                time,
-                                ball.player_id,
-                                ball.state.type,
-                                ball.state.position.x,
-                                ball.state.position.y,
-                                ball.state.position.z,
-                                ball.state.rotation.x,
-                                ball.state.rotation.y,
-                                ball.state.rotation.z,
-                                ball.state.rotation.w);
-                    }
-
-                    break;
-                }
-                case bmmo::OwnedTimedBallState: {
-                    bmmo::owned_timed_ball_state_msg msg;
-                msg.raw.write(reinterpret_cast<char*>(entry.data), entry.size);
-                    msg.deserialize();
-
-                    for (auto& ball : msg.balls) {
-                        if (print_states)
-                            Printf("%llu, %u, %d, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf\n",
-                                time,
-                                ball.player_id,
-                                ball.state.type,
-                                ball.state.position.x,
-                                ball.state.position.y,
-                                ball.state.position.z,
-                                ball.state.rotation.x,
-                                ball.state.rotation.y,
-                                ball.state.rotation.z,
-                                ball.state.rotation.w);
-                    }
-
-                    break;
-                }
-                */
             default: {
                 // printf("Code: %d\n", raw_msg->code);
                 break;

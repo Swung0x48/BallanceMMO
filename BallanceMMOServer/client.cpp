@@ -133,6 +133,14 @@ public:
         return local_state_msg_;
     }
 
+    std::string get_player_name(HSteamNetConnection player_id) {
+        if (player_id == k_HSteamNetConnection_Invalid) return "[Server]";
+        if (auto it = clients_.find(player_id); it != clients_.end())
+            return it->second.name;
+        else
+            return "#" + std::to_string(player_id);
+    }
+
     void print_clients() {
         decltype(clients_) spectators;
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
@@ -238,8 +246,7 @@ public:
 
     void whisper_to(const HSteamNetConnection player_id, const std::string& message) {
         if (auto it = clients_.find(player_id); it != clients_.end() || player_id == k_HSteamNetConnection_Invalid) {
-            Printf("Whispering to (%u, %s): %s", player_id,
-                (player_id == k_HSteamNetConnection_Invalid) ? "[Server]" : it->second.name, message);
+            Printf("Whispering to (%u, %s): %s", player_id, get_player_name(player_id), message);
             bmmo::private_chat_msg msg{};
             msg.player_id = player_id;
             msg.chat_content = message;
@@ -423,10 +430,7 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                if (msg.player_id == k_HSteamNetConnection_Invalid)
-                    Printf("[Server]: %s", msg.chat_content.c_str());
-                else
-                    Printf("(%u, %s): %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
+                Printf("(%u, %s): %s", msg.player_id, get_player_name(msg.player_id), msg.chat_content.c_str());
                 break;
             }
             case bmmo::PrivateChat: {
@@ -434,10 +438,7 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                if (msg.player_id == k_HSteamNetConnection_Invalid)
-                    Printf("[Server] whispers to you: %s", msg.chat_content.c_str());
-                else
-                    Printf("(%u, %s) whispers to you: %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content.c_str());
+                Printf("(%u, %s) whispers to you: %s", msg.player_id, get_player_name(msg.player_id), msg.chat_content.c_str());
                 break;
             }
             case bmmo::PlainText: {
@@ -450,10 +451,7 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                if (msg.player_id == k_HSteamNetConnection_Invalid)
-                    Printf("[Announcement] [Server]: %s", msg.chat_content);
-                else
-                    Printf("[Announcement] (%u, %s): %s", msg.player_id, clients_[msg.player_id].name, msg.chat_content);
+                Printf("[Announcement] (%u, %s): %s", msg.player_id, get_player_name(msg.player_id), msg.chat_content);
                 break;
             }
             case bmmo::PopupBox: {
