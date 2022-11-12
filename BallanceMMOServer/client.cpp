@@ -185,13 +185,17 @@ public:
 
     using role::set_logging_level;
     void set_nickname(const std::string& name) { nickname_ = name; };
+    void set_own_map(const bmmo::map& current_map, const std::string& map_name = "") {
+        clients_[own_id_].current_map = current_map;
+        if (!map_name.empty()) map_names_.try_emplace(current_map.get_hash_bytes_string(), map_name);
+    }
     void set_print_states(bool print_states) { print_states_ = print_states; }
+    void set_own_sector(const int32_t sector) { clients_[own_id_].current_sector = sector; }
 
     void set_uuid(std::string uuid) {
         size_t pos;
-        while ((pos = uuid.find('-')) != std::string::npos) {
+        while ((pos = uuid.find('-')) != std::string::npos)
             uuid.erase(pos, 1);
-        }
         bmmo::hex_chars_from_string(uuid_, uuid);
     };
 
@@ -337,6 +341,7 @@ private:
                 msg.deserialize();
                 Printf("%d player(s) online:", msg.online_players.size());
                 for (const auto& [id, data]: msg.online_players) {
+                    if (data.name == nickname_) own_id_ = id;
                     Printf("%s (#%u)%s", data.name, id, (data.cheated ? " [CHEAT]" : ""));
                     clients_.insert({ id, { data.name, (bool) data.cheated, {}, data.map, data.sector } });
                 }
@@ -363,16 +368,12 @@ private:
                     break;
                 assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
                 auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
+                const auto& state = obs->content.state;
                 Printf("#%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
                        obs->content.player_id,
-                       obs->content.state.type,
-                       obs->content.state.position.x,
-                       obs->content.state.position.y,
-                       obs->content.state.position.z,
-                       obs->content.state.rotation.x,
-                       obs->content.state.rotation.y,
-                       obs->content.state.rotation.z,
-                       obs->content.state.rotation.w);
+                       state.type,
+                       state.position.x, state.position.y, state.position.z,
+                       state.rotation.x, state.rotation.y, state.rotation.z, state.rotation.w);
                 break;
             }
             case bmmo::OwnedBallStateV2: {
@@ -385,13 +386,8 @@ private:
                         Printf("#%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
                             ball.player_id,
                             ball.state.type,
-                            ball.state.position.x,
-                            ball.state.position.y,
-                            ball.state.position.z,
-                            ball.state.rotation.x,
-                            ball.state.rotation.y,
-                            ball.state.rotation.z,
-                            ball.state.rotation.w);
+                            ball.state.position.x, ball.state.position.y, ball.state.position.z,
+                            ball.state.rotation.x, ball.state.rotation.y, ball.state.rotation.z, ball.state.rotation.w);
                     clients_[ball.player_id].state = ball.state;
                 }
 
@@ -407,13 +403,8 @@ private:
                         Printf("%u: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
                             ball.player_id,
                             ball.state.type,
-                            ball.state.position.x,
-                            ball.state.position.y,
-                            ball.state.position.z,
-                            ball.state.rotation.x,
-                            ball.state.rotation.y,
-                            ball.state.rotation.z,
-                            ball.state.rotation.w);
+                            ball.state.position.x, ball.state.position.y, ball.state.position.z,
+                            ball.state.rotation.x, ball.state.rotation.y, ball.state.rotation.z, ball.state.rotation.w);
                     clients_[ball.player_id].state = ball.state;
                 }
 
@@ -664,6 +655,7 @@ private:
     std::mutex startup_mutex_;
     std::condition_variable startup_cv_;
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
+    HSteamNetConnection own_id_{};
     std::string nickname_;
     uint8_t uuid_[16]{};
     std::unordered_map<HSteamNetConnection, client_data> clients_;
@@ -858,6 +850,7 @@ int main(int argc, char** argv) {
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("list", [&] { client.print_clients(); });
+    console.register_aliases("list", {"l"});
     console.register_command("print", [&] {
         options.print_states = !options.print_states;
         client.set_print_states(options.print_states);
@@ -926,10 +919,10 @@ int main(int argc, char** argv) {
     console.register_command("getpos", [&] { client.print_positions(); });
     console.register_command("setmap", [&] {
         if (console.empty()) {
-            role::Printf("Usage: \"setmap level <level number>\", \"setmap <hash>\" or \"setmap <hash> <name>\".");
+            role::Printf("Usage: \"setmap level <level number>\", \"setmap <hash> [<level number> <name>]\".");
             return;
         }
-        std::string hash = console.get_next_word();
+        std::string hash = console.get_next_word(), map_name;
         bmmo::current_map_msg msg{.content = {.map = {
             .type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)
         }, .type = bmmo::current_map_state::EnteringMap}};
@@ -939,15 +932,18 @@ int main(int argc, char** argv) {
             bmmo::hex_chars_from_string(msg.content.map.md5, hash);
         if (!console.empty()) {
             bmmo::map_names_msg name_msg{};
-            name_msg.maps.emplace(msg.content.map.get_hash_bytes_string(), console.get_rest_of_line());
+            map_name = console.get_rest_of_line();
+            name_msg.maps.emplace(msg.content.map.get_hash_bytes_string(), map_name);
             name_msg.serialize();
             client.send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
         }
+        client.set_own_map(msg.content.map, map_name);
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("setsector", [&] {
         bmmo::current_sector_msg msg{};
         msg.content.sector = atoi(console.get_next_word().c_str());
+        client.set_own_sector(msg.content.sector);
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
 

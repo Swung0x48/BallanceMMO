@@ -182,9 +182,9 @@ public:
 			CK3dObject* ball;
 			std::string ball_name;
 			ball_name.resize(physicalized_ball->GetElementStringValue(i, 0, nullptr), '\0');
-			physicalized_ball->GetElementStringValue(i, 0, &ball_name[0]);
+			physicalized_ball->GetElementStringValue(i, 0, ball_name.data());
 			ball_name.pop_back();
-			ball = bml_->Get3dObjectByName(ball_name.c_str());
+			ball = bml_->Get3dObjectByName(ball_name.data());
 
 			CKDependencies dep;
 			dep.Resize(40); dep.Fill(0);
@@ -194,8 +194,7 @@ public:
 			dep[CKCID_3DENTITY] = CK_DEPENDENCIES_COPY_3DENTITY_MESH;
 			ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(ball, &dep, "_Peer_"));
 			if (!ball) {
-				auto msg = std::format("Failed to init template ball: {} {}", i);
-				bml_->SendIngameMessage(msg.c_str());
+				bml_->SendIngameMessage(std::format("Failed to init template ball: {}", i).c_str());
 				continue;
 			}
 			for (int j = 0; j < ball->GetMeshCount(); j++) {
@@ -231,7 +230,7 @@ public:
 			return nullptr;
 		}
 
-		CK3dObject* ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(template_ball, &dep, std::to_string(id).c_str()));
+		CK3dObject* ball = static_cast<CK3dObject*>(bml_->GetCKContext()->CopyObject(template_ball, &dep, std::to_string(id).data()));
 		
 		if (!ball) {
 			auto msg = std::format("Failed to copy template ball when initializing: {} {}", id, ball_index);

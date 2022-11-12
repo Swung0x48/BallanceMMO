@@ -1439,7 +1439,7 @@ int main(int argc, char** argv) {
             msg.chat_content = text;
             msg.serialize();
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("([Server]) -> #%u: %s.", client, msg.chat_content);
+            server.Printf("([Server]) -> #%u: %s", client, msg.chat_content);
         } else if (console.get_command_name() == "ban") {
             server.set_ban(client, text);
         } else {

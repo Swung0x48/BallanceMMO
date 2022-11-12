@@ -76,9 +76,7 @@ public:
 			return false;
 
 		std::unique_lock lk(mutex_);
-		states_[id] = {};
-		states_[id].name = name;
-		states_[id].cheated = cheated;
+		states_.insert({id, {.name = name, .cheated = cheated}});
 		return true;
 	}
 
@@ -189,7 +187,7 @@ public:
 		auto& state = states_[id];
 		state.current_map_name = map_name;
 		state.current_sector = sector;
-		state.current_sector_timestamp = (int32_t)((SteamNetworkingUtils()->GetLocalTimestamp() - (int32_t)3e12) / 1024);
+		state.current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
 		return true;
 	}
 
@@ -198,7 +196,7 @@ public:
 			return false;
 		std::unique_lock lk(mutex_);
 		states_[id].current_sector = sector;
-		states_[id].current_sector_timestamp = (int32_t)((SteamNetworkingUtils()->GetLocalTimestamp() - (int32_t)3e12) / 1024);
+		states_[id].current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
 		return true;
 	}
 

@@ -117,7 +117,7 @@ bool BallanceMMOClient::show_console() {
             DWORD mode;
             GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
             SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-            _setmode(_fileno(stdin), _O_U16TEXT);
+            std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
             for (const auto& i : previous_msg_) {
                 Printf(i.c_str());
             }
@@ -1523,7 +1523,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
         SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content);
         std::thread([msg = std::move(msg)] {
-            int popup = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
+            std::ignore = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
         }).detach();
         break;
     }

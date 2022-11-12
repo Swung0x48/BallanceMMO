@@ -658,6 +658,7 @@ private:
 			spectator_label_->set_visible(false);
 			spectator_label_.reset();
 		}
+		db_.set_client_id(k_HSteamNetConnection_Invalid + rand()); // invalid id indicates server
 	}
 
 	void restart_current_level() {
@@ -746,7 +747,7 @@ private:
 		return std::format("{:.1f}{}", bytes, suffixes[s]);
 	}
 
-	static inline const std::string mu = bmmo::message_utils::ConvertWideToANSI(bmmo::message_utils::ConvertUtf8ToWide("μ"));
+	static inline const std::string MICRO_SIGN = bmmo::message_utils::ConvertWideToANSI(bmmo::message_utils::ConvertUtf8ToWide("µ"));
 	static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
 		std::string s;
 		s.reserve(512);
@@ -756,7 +757,7 @@ private:
 		s += std::format("Tx: {:.3g}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
 		s += std::format("Rx: {:.3g}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
 		s += "Est. MaxBandwidth: " + pretty_bytes((float)status.m_nSendRateBytesPerSecond) + "/s\n";
-		s += std::format("Queue time: {}" + mu + "s\n", status.m_usecQueueTime);
+		s += std::format("Queue time: {}{}s\n", status.m_usecQueueTime, MICRO_SIGN);
 		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
 		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
 		return s;
