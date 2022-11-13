@@ -181,10 +181,12 @@ void BallanceMMOClient::show_player_list() {
         if (player_list_thread_.joinable())
             player_list_thread_.join();
         player_list_thread_ = std::thread([&] {
+            int last_player_count = 0, last_font_size = get_display_font_size(9.78f);
             text_sprite player_list("PlayerList", "", RIGHT_MOST, 0.412f);
-            player_list.sprite_->SetSize({RIGHT_MOST, 0.588f});
+            player_list.sprite_->SetPosition({0.596f, 0.412f});
+            player_list.sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
             player_list.sprite_->SetZOrder(128);
-            player_list.sprite_->SetFont(system_font_, get_display_font_size(9.65f), 400, false, false);
+            player_list.sprite_->SetFont(system_font_, last_font_size, 400, false, false);
             player_list.paint(player_list_color_);
             player_list.set_visible(true);
             player_list_visible_ = true;
@@ -203,18 +205,24 @@ void BallanceMMOClient::show_player_list() {
                 std::sort(status_list.begin(), status_list.end(), [](const auto& i1, const auto& i2) {
                     const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
                     if (map_cmp > 0) return true;
-                    if (map_cmp == 0) {
-                      const int sector_cmp = i1.sector - i2.sector;
-                      if (sector_cmp != 0) return sector_cmp > 0;
-                      if (i1.sector != 1) {
-                        const int32_t time_cmp = i1.timestamp - i2.timestamp;
-                        if (time_cmp != 0) return time_cmp < 0;
-                      }
-                      return boost::ilexicographical_compare(i1.name, i2.name);
+                    if (map_cmp < 0) return false;
+                    const int sector_cmp = i1.sector - i2.sector;
+                    if (sector_cmp != 0) return sector_cmp > 0;
+                    if (i1.sector != 1) {
+                      const int32_t time_cmp = i1.timestamp - i2.timestamp;
+                      if (time_cmp != 0) return time_cmp < 0;
                     }
-                    return false;
-                }); // two comparisons don't work for some unknown reason
-                auto size = status_list.size();
+                    return boost::ilexicographical_compare(i1.name, i2.name);
+                });
+                auto size = int(status_list.size());
+                if (size != last_player_count) {
+                    last_player_count = size;
+                    auto font_size = get_display_font_size(10.48f - 0.1f * std::clamp(size, 7, 25));
+                    if (last_font_size != font_size) {
+                        last_font_size = font_size;
+                        player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
+                    }
+                }
                 std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
                 text.reserve(1024);
                 for (const auto& i: status_list /* | std::views::reverse */)
@@ -235,17 +243,6 @@ void BallanceMMOClient::OnLoad()
 
 void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
 {
-    if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
-        objects_.destroy_all_objects();
-        objects_.init_template_balls();
-        //objects_.init_players();
-    }
-
-    if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
-        current_level_array_ = CKOBJID(m_bml->GetArrayByName("CurrentLevel"));
-        ingame_parameter_array_ = CKOBJID(m_bml->GetArrayByName("IngameParameter"));
-    }
-
     if (isMap) {
         GetLogger()->Info("Initializing peer objects...");
         objects_.init_players();
@@ -286,7 +283,6 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         reset_timer_ = true;
         GetLogger()->Info("Initialization completed.");
     }
-
     /*if (isMap) {
         std::string filename_string(filename);
         std::filesystem::path path = std::filesystem::current_path().parent_path().append(filename_string[0] == '.' ? filename_string.substr(3, filename_string.length()) : filename_string);
@@ -297,6 +293,16 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
         msg.header.id = MsgType::EnterMap;
         client_.send(msg);
     }*/
+
+    else if (strcmp(filename, "3D Entities\\Balls.nmo") == 0) {
+        objects_.destroy_all_objects();
+        objects_.init_template_balls();
+        //objects_.init_players();
+    }
+    else if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
+        current_level_array_ = CKOBJID(m_bml->GetArrayByName("CurrentLevel"));
+        ingame_parameter_array_ = CKOBJID(m_bml->GetArrayByName("IngameParameter"));
+    }
 }
 
 void BallanceMMOClient::OnPostCheckpointReached() {
@@ -334,10 +340,10 @@ void BallanceMMOClient::OnPostStartMenu()
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
         md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
 
+        validate_nickname(props_["playername"]);
+
         init_ = true;
     }
-
-    validate_nickname(props_["playername"]);
 }
 
 void BallanceMMOClient::OnProcess() {
@@ -1035,7 +1041,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         msg.nickname = nickname;
         msg.version = version;
         msg.cheated = m_bml->IsCheatEnabled() && !spectator_mode_; // always false in spectator mode
-        memcpy(msg.uuid, &uuid_, 16);
+        memcpy(msg.uuid, &uuid_, sizeof(uuid_));
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         if (ping_thread_.joinable())
@@ -1193,7 +1199,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         bmmo::hash_data_msg hash_msg{};
         hash_msg.data_name = "Balls.nmo";
-        memcpy(hash_msg.md5, balls_nmo_md5_, 16);
+        memcpy(hash_msg.md5, balls_nmo_md5_, sizeof(balls_nmo_md5_));
         hash_msg.serialize();
         send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
         break;

@@ -9,6 +9,8 @@ namespace bmmo {
         // <md5_bytes, map_name>
         std::unordered_map<std::string, std::string> maps;
 
+        constexpr static auto HASH_SIZE = sizeof(bmmo::map::md5);
+
         map_names_msg(): serializable_message(bmmo::MapNames) {};
 
         bool serialize() {
@@ -18,7 +20,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&size), sizeof(size));
 
             for (auto& i: maps) {
-                raw.write(i.first.c_str(), 16);
+                raw.write(i.first.c_str(), HASH_SIZE);
                 message_utils::write_string(i.second, raw);
             };
 
@@ -36,11 +38,10 @@ namespace bmmo {
                 if (!raw.good())
                     return false;
 
-                std::string md5_bytes;
+                std::string md5_bytes(HASH_SIZE, '\0');
                 std::string name;
-                md5_bytes.resize(16);
-                raw.read(md5_bytes.data(), 16);
-                if (!raw.good() || raw.gcount() != 16)
+                raw.read(md5_bytes.data(), HASH_SIZE);
+                if (!raw.good() || raw.gcount() != HASH_SIZE)
                     return false;
                 if (!message_utils::read_string(raw, name)) // check if read string successfully
                     return false;

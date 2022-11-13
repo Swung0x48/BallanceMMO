@@ -697,7 +697,7 @@ private:
                 }
                 
                 clients_[networking_msg->m_conn] = {msg.nickname, {}};  // add the client here
-                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(uint8_t) * 16);
+                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
                 username_[msg.nickname] = networking_msg->m_conn;
                 Printf("%s (v%s) logged in!\n",
                         msg.nickname,

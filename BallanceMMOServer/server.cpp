@@ -246,7 +246,7 @@ public:
     void print_maps() {
         for (const auto& [hash, name]: map_names_) {
             std::string hash_string;
-            bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), 16);
+            bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), sizeof(bmmo::map::md5));
             Printf("%s: %s", hash_string, name);
         }
     }
@@ -1170,7 +1170,7 @@ protected:
                 if (msg.data_name == "Balls.nmo" && !msg.is_same_data("fb29d77e63aad08499ce38d36266ec33")) {
                     bmmo::plain_text_msg new_msg{};
                     std::string md5_string;
-                    bmmo::string_from_hex_chars(md5_string, msg.md5, 16);
+                    bmmo::string_from_hex_chars(md5_string, msg.md5, sizeof(msg.md5));
                     new_msg.text_content = "Warning: " + client_it->second.name + " has a modified Balls.nmo (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
                     Printf("%s", new_msg.text_content);
                     new_msg.serialize();
@@ -1481,9 +1481,10 @@ int main(int argc, char** argv) {
     console.register_command("countdown", [&] {
         auto print_hint = [] {
             role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
-            role::Printf("Usage: \"countdown level <level number> [type]\" or \"countdown <hash> <level number> [type]\".");
+            role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
         };
+        auto client = (HSteamNetConnection) atoll(console.get_next_word().c_str());
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word();
         if (console.empty()) { print_hint(); return; }
@@ -1496,12 +1497,12 @@ int main(int argc, char** argv) {
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
                 msg.content.type = static_cast<bmmo::countdown_type>(i);
-                server.receive(&msg, sizeof(msg));
+                server.receive(&msg, sizeof(msg), client);
                 if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } else {
             msg.content.type = static_cast<bmmo::countdown_type>(atoi(console.get_next_word().c_str()));
-            server.receive(&msg, sizeof(msg));
+            server.receive(&msg, sizeof(msg), client);
         }
     });
     console.register_command("countdown-forced", [&] {

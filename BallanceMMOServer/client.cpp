@@ -174,7 +174,7 @@ public:
     void print_maps() {
         for (const auto& [hash, name]: map_names_) {
             std::string hash_string;
-            bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), 16);
+            bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), sizeof(bmmo::map::md5));
             Printf("%s: %s", hash_string, name);
         }
     }

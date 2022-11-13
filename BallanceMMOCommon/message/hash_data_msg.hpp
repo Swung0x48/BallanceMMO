@@ -12,22 +12,22 @@ namespace bmmo {
         hash_data_msg(): serializable_message(bmmo::HashData) {};
 
         bool is_same_data(std::string hash_string) {
-            uint8_t md5[16];
-            if (hash_string.size() != 32)
+            decltype(this->md5) md5;
+            if (hash_string.size() != 2 * sizeof(md5))
                 return false;
             hex_chars_from_string(md5, hash_string);
             // for (int i = 0; i < 16; i++) {
             //     md5[i] = (uint8_t)hash_string[i * 2];
             //     md5[i] += (uint8_t)hash_string[i * 2 + 1] << 4;
             // }
-            return memcmp(md5, this->md5, 16) == 0;
+            return memcmp(md5, this->md5, sizeof(md5)) == 0;
         };
 
         bool serialize() {
             serializable_message::serialize();
 
             message_utils::write_string(data_name, raw);
-            raw.write(reinterpret_cast<const char*>(md5), 16);
+            raw.write(reinterpret_cast<const char*>(md5), sizeof(md5));
 
             return raw.good();
         };
@@ -37,8 +37,8 @@ namespace bmmo {
 
             if (!message_utils::read_string(raw, data_name))
                 return false;
-            raw.read(reinterpret_cast<char*>(md5), sizeof(uint8_t) * 16);
-            if (!raw.good() || raw.gcount() != sizeof(uint8_t) * 16)
+            raw.read(reinterpret_cast<char*>(md5), sizeof(md5));
+            if (!raw.good() || raw.gcount() != sizeof(md5))
                 return false;
 
             return raw.good();
