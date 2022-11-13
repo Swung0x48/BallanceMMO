@@ -56,7 +56,7 @@ public:
 
     }
 
-    template<typename T>
+    template<bmmo::trivially_copyable_msg T>
     EResult send(HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
@@ -66,16 +66,16 @@ public:
                     out_message_number);
     }
 
-    void broadcast_message(void* buffer, size_t size, int send_flags, const HSteamNetConnection* ignored_client = nullptr) {
+    void broadcast_message(void* buffer, size_t size, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
         for (auto& i: clients_)
-            if (ignored_client == nullptr || *ignored_client != i.first)
+            if (ignored_client != i.first)
                 send(i.first, buffer, size,
                                                     send_flags,
                                                     nullptr);
     }
 
-    template<typename T>
-    void broadcast_message(T msg, int send_flags, HSteamNetConnection* ignored_client = nullptr) {
+    template<bmmo::trivially_copyable_msg T>
+    void broadcast_message(T msg, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
         static_assert(std::is_trivially_copyable<T>());
 
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
@@ -576,7 +576,7 @@ private:
                             pInfo->m_info.m_szEndDebug
                     );
 
-                    cleanup_disconnected_client(&pInfo->m_hConn);
+                    cleanup_disconnected_client(pInfo->m_hConn);
                 } else {
                     assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting);
                 }
@@ -644,24 +644,24 @@ private:
         }
     }
 
-    void cleanup_disconnected_client(HSteamNetConnection* client) {
+    void cleanup_disconnected_client(HSteamNetConnection client) {
         // Locate the client.  Note that it should have been found, because this
         // is the only codepath where we remove clients (except on shutdown),
         // and connection change callbacks are dispatched in queue order.
-        auto itClient = clients_.find(*client);
+        auto itClient = clients_.find(client);
         //assert(itClient != clients_.end()); // It might in limbo state...So may not yet to be found
         if (itClient == clients_.end())
             return;
 
         bmmo::player_disconnected_msg msg;
-        msg.content.connection_id = *client;
+        msg.content.connection_id = client;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
         std::string name = itClient->second.name;
         if (auto itName = username_.find(name); itName != username_.end())
             username_.erase(itName);
         if (itClient != clients_.end())
             clients_.erase(itClient);
-        Printf("%s (#%u) disconnected.", name, *client);
+        Printf("%s (#%u) disconnected.", name, client);
         
         bmmo::plain_text_msg text_msg;
         text_msg.text_content.resize(128);

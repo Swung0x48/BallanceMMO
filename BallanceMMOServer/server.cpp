@@ -76,7 +76,7 @@ public:
 
     }
 
-    template<typename T>
+    template<bmmo::trivially_copyable_msg T>
     EResult send(HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
@@ -86,16 +86,16 @@ public:
                     out_message_number);
     }
 
-    void broadcast_message(void* buffer, size_t size, int send_flags, const HSteamNetConnection* ignored_client = nullptr) {
+    void broadcast_message(void* buffer, size_t size, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
         for (auto& i: clients_)
-            if (ignored_client == nullptr || *ignored_client != i.first)
+            if (ignored_client != i.first)
                 send(i.first, buffer, size,
                                                     send_flags,
                                                     nullptr);
     }
 
-    template<typename T>
-    void broadcast_message(T msg, int send_flags, HSteamNetConnection* ignored_client = nullptr) {
+    template<bmmo::trivially_copyable_msg T>
+    void broadcast_message(T msg, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
         static_assert(std::is_trivially_copyable<T>());
 
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
@@ -471,22 +471,22 @@ protected:
         config_file.close();
     }
 
-    void cleanup_disconnected_client(HSteamNetConnection* client) {
+    void cleanup_disconnected_client(HSteamNetConnection client) {
         // Locate the client.  Note that it should have been found, because this
         // is the only codepath where we remove clients (except on shutdown),
         // and connection change callbacks are dispatched in queue order.
-        auto itClient = clients_.find(*client);
+        auto itClient = clients_.find(client);
         //assert(itClient != clients_.end()); // It might in limbo state...So may not yet to be found
         if (itClient == clients_.end())
             return;
 
         bmmo::player_disconnected_msg msg;
-        msg.content.connection_id = *client;
+        msg.content.connection_id = client;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
         std::string name = itClient->second.name;
         username_.erase(name);
         clients_.erase(itClient);
-        Printf("%s (#%u) disconnected.", name, *client);
+        Printf("%s (#%u) disconnected.", name, client);
     }
 
     bool client_exists(HSteamNetConnection client, bool suppress_error = false) {
@@ -634,7 +634,7 @@ protected:
                             pInfo->m_info.m_szEndDebug
                     );
 
-                    cleanup_disconnected_client(&pInfo->m_hConn);
+                    cleanup_disconnected_client(pInfo->m_hConn);
                 } else {
                     assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting
                            || pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_None);
@@ -793,7 +793,7 @@ protected:
                 connected_msg.name = msg.nickname;
                 connected_msg.cheated = msg.cheated;
                 connected_msg.serialize();
-                broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+                broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
 
                 bmmo::owned_timed_ball_state_msg state_msg{};
                 pull_ball_states(state_msg.balls);
@@ -1054,7 +1054,7 @@ protected:
 
                 msg.clear();
                 msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, &networking_msg->m_conn);
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
                 break;
             }
             case bmmo::CheatState: {
@@ -1123,7 +1123,7 @@ protected:
                     case bmmo::current_map_state::EnteringMap: {
                         client_it->second.current_map = msg->content.map;
                         client_it->second.current_sector = msg->content.sector;
-                        broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, &(networking_msg->m_conn));
+                        broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
                         break;
                     }
                     default: break;
@@ -1134,7 +1134,7 @@ protected:
                 auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(networking_msg->m_pData);
                 msg->content.player_id = networking_msg->m_conn;
                 client_it->second.current_sector = msg->content.sector;
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, &(networking_msg->m_conn));
+                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
                 break;
             }
             case bmmo::SimpleAction: {

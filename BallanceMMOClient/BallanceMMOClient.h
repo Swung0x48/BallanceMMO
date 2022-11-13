@@ -212,7 +212,7 @@ private:
 			if (sector == current_sector_) return false;
 		} else if (current_sector_ == 0) return false;
 		current_sector_ = sector;
-		current_sector_timestamp_ = (int32_t)((SteamNetworkingUtils()->GetLocalTimestamp() - (int32_t)3e12) / 1024);
+		current_sector_timestamp_ = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
 		return true;
 	}
 

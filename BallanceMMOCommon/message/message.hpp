@@ -108,6 +108,15 @@ namespace bmmo {
             return c == code;
         }
     };
+
+    template<typename>
+    struct is_trivially_copyable_msg: std::false_type{};
+
+    template<typename T, opcode C>
+    struct is_trivially_copyable_msg<message<T, C>>: std::true_type{};
+
+    template<typename T>
+    concept trivially_copyable_msg = is_trivially_copyable_msg<T>::value && !std::is_base_of<serializable_message, T>::value;
 }
 
 #endif //BALLANCEMMOSERVER_PACKET_HPP
