@@ -43,9 +43,8 @@ public:
         asio::io_context io_context;
         tcp::resolver resolver(io_context);
         tcp::resolver::query query(hp.get_address(), hp.get_port());
-        tcp::resolver::iterator iter = resolver.resolve(query), end;
-        while (iter != end) {
-            tcp::endpoint ep = *iter++;
+        for (tcp::resolver::iterator iter = resolver.resolve(query); iter != tcp::resolver::iterator{}; iter++) {
+            tcp::endpoint ep = *iter;
             std::string resolved_addr = ep.address().to_string() + ":" + std::to_string(ep.port());
             Printf("Trying %s...", resolved_addr);
             SteamNetworkingIPAddr server_address{};

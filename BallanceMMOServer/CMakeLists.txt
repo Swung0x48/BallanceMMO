@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 # sets RPATH for *install*ed files
 set(CMAKE_INSTALL_RPATH "\$ORIGIN/bin") # Note CMake escaping around '$' sign.
-# *built* files will also used RPATH which has been set before
+# *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -51,15 +51,17 @@ get_target_property(_inc yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warnings
 
 if (MSVC)
-    target_compile_options(BallanceMMOServer PRIVATE /Wall)
-    target_compile_options(BallanceMMOMockClient PRIVATE /Wall)
-    target_compile_options(BallanceMMORecordParser PRIVATE /Wall)
+    set(compile_options /Wall)
 else()
-    target_compile_options(BallanceMMOServer PRIVATE -Wall -Wextra)
-    target_compile_options(BallanceMMOMockClient PRIVATE -Wall -Wextra)
-    target_compile_options(BallanceMMORecordParser PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
+    set(compile_options -Wall -Wextra -Wno-unknown-pragmas)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
+        list(APPEND compile_options -fconcepts)
+    endif()
 endif()
 
+target_compile_options(BallanceMMOServer PRIVATE ${compile_options})
+target_compile_options(BallanceMMOMockClient PRIVATE ${compile_options})
+target_compile_options(BallanceMMORecordParser PRIVATE ${compile_options})
 
 # os specific scripts
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")

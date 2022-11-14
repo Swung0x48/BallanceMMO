@@ -188,7 +188,6 @@ public:
 		state.current_map_name = map_name;
 		state.current_sector = sector;
 		state.current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
-		role::Printf("%lld %d", SteamNetworkingUtils()->GetLocalTimestamp(), state.current_sector_timestamp);
 		return true;
 	}
 
@@ -198,7 +197,6 @@ public:
 		std::unique_lock lk(mutex_);
 		states_[id].current_sector = sector;
 		states_[id].current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
-		role::Printf("%lld %d", SteamNetworkingUtils()->GetLocalTimestamp(), states_[id].current_sector_timestamp);
 		return true;
 	}
 

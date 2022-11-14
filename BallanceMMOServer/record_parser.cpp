@@ -47,7 +47,7 @@ public:
         set_logging_level(k_ESteamNetworkingSocketsDebugOutputType_Important);
     }
 
-    EResult send(HSteamNetConnection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
         return interface_->SendMessageToConnection(destination,
                                                    buffer,
                                                    size,
@@ -57,7 +57,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
                     &msg,
@@ -156,7 +156,6 @@ public:
                         auto& time_period = timeline_[it->second.name].back(); // it should exist ahead of time
                         time_period.end = current_record_time_; // end this period
                         record_clients_.erase(msg.content.connection_id);
-                        // don't use iterator here
                     }
                     break;
                 }
@@ -752,10 +751,7 @@ private:
             }
             case bmmo::PlayerDisconnected: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::player_disconnected_msg>(entry.data, entry.size);
-                if (record_clients_.contains(msg.content.connection_id)) {
-                    record_clients_.erase(msg.content.connection_id);
-                    // don't use iterator here
-                }
+                record_clients_.erase(msg.content.connection_id);
                 break;
             }
             case bmmo::PlayerConnectedV2: {

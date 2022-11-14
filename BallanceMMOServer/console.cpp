@@ -50,10 +50,8 @@ bool console::register_aliases(const std::string &name, const std::vector<std::s
 };
 
 bool console::unregister_command(const std::string &name) {
-    if (auto it = commands_.find(name); it != commands_.end()) {
-        commands_.erase(name);
+    if (commands_.erase(name))
         return true;
-    };
     return false;
 };
 

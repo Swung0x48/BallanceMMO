@@ -67,7 +67,7 @@ public:
         }
     }
 
-    EResult send(HSteamNetConnection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
         return interface_->SendMessageToConnection(destination,
                                                    buffer,
                                                    size,
@@ -77,7 +77,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
                     &msg,
@@ -148,9 +148,7 @@ public:
             // Send a message without serialization; this effectively kills the client
             // at deserialization. A dirty hack, but it works and we don't need to
             // worry about the outcome; the client will just terminate immediately.
-            bmmo::plain_text_msg ptm{};
-            ptm.text_content = "BallanceMMO has encountered a fatal error. Game will be terminated.";
-            send(client, ptm.raw.str().data(), ptm.size(), k_nSteamNetworkingSend_Reliable);
+            send(client, nullptr, 0, k_nSteamNetworkingSend_Reliable);
             reason = "fatal error";
         }
 
@@ -343,10 +341,8 @@ public:
             op_players_[name] = get_uuid_string(clients_[client].uuid);
             Printf("%s is now an operator.", name);
         } else {
-            auto it = op_players_.find(name);
-            if (it == op_players_.end())
+            if (op_players_.erase(name))
                 return;
-            op_players_.erase(it);
             Printf("%s is no longer an operator.", name);
         }
         save_config_to_file();
@@ -1255,7 +1251,7 @@ protected:
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_;
     std::mutex client_data_mutex_;
-    constexpr static inline std::chrono::nanoseconds TICK_DELAY{(int)1e9 / 200},
+    constexpr static inline std::chrono::nanoseconds TICK_DELAY{(int)1e9 / 198},
                                                      UPDATE_INTERVAL{(int)1e9 / 66};
 
     std::mutex startup_mutex_;
