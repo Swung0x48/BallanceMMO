@@ -217,7 +217,7 @@ void BallanceMMOClient::show_player_list() {
                 auto size = int(status_list.size());
                 if (size != last_player_count) {
                     last_player_count = size;
-                    auto font_size = get_display_font_size(10.48f - 0.1f * std::clamp(size, 7, 25));
+                    auto font_size = get_display_font_size(10.76f - 0.14f * std::clamp(size, 7, 25));
                     if (last_font_size != font_size) {
                         last_font_size = font_size;
                         player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
@@ -512,6 +512,60 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     std::string lower1;
     if (length > 1) lower1 = boost::algorithm::to_lower_copy(args[1]);
 
+    
+    if (length >= 2 && length < 512 && connected()) {
+        if (lower1 == "s" || lower1 == "say") {
+            bmmo::chat_msg msg{};
+            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
+            msg.serialize();
+
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            return;
+        }
+        else if (lower1 == "announce") {
+            bmmo::important_notification_msg msg{};
+            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
+            msg.serialize();
+
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            return;
+        }
+        else if (lower1 == "bulletin") {
+            bmmo::permanent_notification_msg msg{};
+            msg.text_content = bmmo::message_utils::join_strings(args, 2);
+            msg.serialize();
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            return;
+        }
+        else if (length >= 3 && lower1 == "kick") {
+            bmmo::kick_request_msg msg{};
+            if (args[2][0] == '#')
+                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
+            else
+                msg.player_name = args[2];
+            if (length > 3) {
+                msg.reason = bmmo::message_utils::join_strings(args, 3);
+            }
+
+            msg.serialize();
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            return;
+        }
+        else if (length >= 4 && (lower1 == "whisper" || lower1 == "w")) {
+            bmmo::private_chat_msg msg{};
+            if (args[2][0] == '#')
+                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
+            else
+                msg.player_id = (args[2] == db_.get_nickname()) ? db_.get_client_id() : db_.get_client_id(args[2]);
+            msg.chat_content = bmmo::message_utils::join_strings(args, 3);
+            msg.serialize();
+            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            SendIngameMessage(std::format("Whispered to {}: {}",
+                get_username(msg.player_id), msg.chat_content));
+            return;
+        }
+    }
+
     switch (length) {
         case 1: {
             help(bml);
@@ -683,7 +737,6 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         case 3: {
             if (lower1 == "connect" || lower1 == "c") {
                 connect_to_server(args[2]);
-                return;
             }
             else if (lower1 == "cheat") {
                 bool cheat_state = false;
@@ -692,11 +745,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 bmmo::cheat_toggle_msg msg{};
                 msg.content.cheated = cheat_state;
                 send(msg, k_nSteamNetworkingSend_Reliable);
-                return;
             }
             else if (lower1 == "rank" && boost::iequals(args[2], "reset")) {
                 reset_rank_ = true;
-                return;
             }
             else if (lower1 == "teleport" || lower1 == "tp") {
                 if (!(connected() && m_bml->IsIngame() && m_bml->IsCheatEnabled()))
@@ -734,7 +785,6 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     SendIngameMessage(std::format("Teleported to \"{}\" at ({:.3f}, {:.3f}, {:.3f}).",
                                       name, position.x, position.y, position.z));
                 });
-                return;
             }
             else if (lower1 == "custommap") {
                 if (args[2] == "reset") { send_current_map(); return; }
@@ -746,54 +796,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
                 send(bmmo::current_map_msg{.content = {.map = map, .type = bmmo::current_map_state::EnteringMap}}, k_nSteamNetworkingSend_Reliable);
                 SendIngameMessage(std::format("Set current map name to \"{}\".", args[2]));
-                return;
             }
-        }
-    }
-
-    if (length >= 3 && length < 512) {
-        if (!connected())
             return;
-        if (lower1 == "s" || lower1 == "say") {
-            bmmo::chat_msg msg{};
-            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
-            msg.serialize();
-
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-        else if (lower1 == "announce") {
-            bmmo::important_notification_msg msg{};
-            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
-            msg.serialize();
-
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        }
-        else if (lower1 == "kick") {
-            bmmo::kick_request_msg msg{};
-            if (args[2][0] == '#')
-                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
-            else
-                msg.player_name = args[2];
-            if (length > 3) {
-                msg.reason = bmmo::message_utils::join_strings(args, 3);
-            }
-
-            msg.serialize();
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        }
-        else if (length >= 4 && (lower1 == "whisper" || lower1 == "w")) {
-            bmmo::private_chat_msg msg{};
-            if (args[2][0] == '#')
-                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
-            else
-                msg.player_id = (args[2] == db_.get_nickname()) ? db_.get_client_id() : db_.get_client_id(args[2]);
-            msg.chat_content = bmmo::message_utils::join_strings(args, 3);
-            msg.serialize();
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            SendIngameMessage(std::format("Whispered to {}: {}",
-                get_username(msg.player_id), msg.chat_content));
-        }
-        return;
     }
 
     help(bml);
@@ -806,7 +811,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 
     switch (length) {
         case 2: {
-            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce" };
+            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin"};
             break;
         }
         case 3: {
@@ -965,7 +970,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         cleanup();
         int nReason = pInfo->m_info.m_eEndReason - k_ESteamNetConnectionEnd_App_Min;
         // 102 - crash; 103 - fatal error
-        if (nReason == 102 || nReason == 103)
+        if (nReason >= std::to_underlying(bmmo::crash_type::Crash) && nReason <= std::to_underlying(bmmo::crash_type::End))
             terminate(5);
         else if (nReason >= 150 && nReason < 200) {
             asio::post(thread_pool_, [this, nReason]() {
@@ -1516,6 +1521,28 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
         SendIngameMessage(std::format("You have been {} Operator permission.",
                 msg->content.op ? "granted" : "removed from").c_str());
+        break;
+    }
+    case bmmo::PermanentNotification: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(network_msg);
+        if (msg.text_content.empty()) {
+            permanent_notification_.reset();
+            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title));
+            break;
+        }
+        if (!permanent_notification_) {
+            permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", msg.text_content.c_str(), 0.192f, 0.04f);
+            permanent_notification_->sprite_->SetSize({0.616f, 0.05f});
+            permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
+            permanent_notification_->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
+            permanent_notification_->sprite_->SetFont(system_font_, get_display_font_size(11.72f), 400, false, false);
+            permanent_notification_->sprite_->SetZOrder(65536);
+            permanent_notification_->paint(player_list_color_);
+            permanent_notification_->set_visible(true);
+        }
+        else
+            permanent_notification_->update(msg.text_content.c_str());
+        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content));
         break;
     }
     case bmmo::PlainText: {

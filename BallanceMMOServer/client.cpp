@@ -43,7 +43,7 @@ public:
         asio::io_context io_context;
         tcp::resolver resolver(io_context);
         tcp::resolver::query query(hp.get_address(), hp.get_port());
-        for (tcp::resolver::iterator iter = resolver.resolve(query); iter != tcp::resolver::iterator{}; iter++) {
+        for (tcp::resolver::iterator iter = resolver.resolve(query), end; iter != end; iter++) {
             tcp::endpoint ep = *iter;
             std::string resolved_addr = ep.address().to_string() + ":" + std::to_string(ep.port());
             Printf("Trying %s...", resolved_addr);
@@ -140,6 +140,8 @@ public:
             return "#" + std::to_string(player_id);
     }
 
+    void print_bulletin() { Printf("[Bulletin] %s", permanent_notification_text_); }
+
     void print_clients() {
         decltype(clients_) spectators;
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
@@ -171,7 +173,9 @@ public:
     }
 
     void print_maps() {
-        for (const auto& [hash, name]: map_names_) {
+        std::multimap<decltype(map_names_)::mapped_type, decltype(map_names_)::key_type> map_names_inverted;
+        for (const auto& [hash, name]: map_names_) map_names_inverted.emplace(name, hash);
+        for (const auto& [name, hash]: map_names_inverted) {
             std::string hash_string;
             bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), sizeof(bmmo::map::md5));
             Printf("%s: %s", hash_string, name);
@@ -306,6 +310,7 @@ private:
                 // so we just pass 0's.
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
                 connection_ = k_HSteamNetConnection_Invalid;
+                permanent_notification_text_.clear();
                 break;
             }
 
@@ -453,6 +458,12 @@ private:
                 Printf("[Announcement] (%u, %s): %s", msg.player_id, get_player_name(msg.player_id), msg.chat_content);
                 break;
             }
+            case bmmo::PermanentNotification: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
+                Printf("[Bulletin] %s: %s", msg.title, msg.text_content);
+                permanent_notification_text_ = msg.text_content;
+                break;
+            }
             case bmmo::PopupBox: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(networking_msg);
                 Printf("[Popup] {%s}: %s", msg.title, msg.text_content);
@@ -476,8 +487,10 @@ private:
             }
             case bmmo::CheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
+                Printf("Server toggled cheat %s globally!", msg->content.cheated ? "on" : "off");
+                if (cheat == msg->content.cheated)
+                    return;
                 cheat = msg->content.cheated;
-                Printf("Server toggled cheat %s globally!", cheat ? "on" : "off");
                 bmmo::cheat_state_msg state_msg{};
                 state_msg.content.cheated = cheat;
                 state_msg.content.notify = false;
@@ -657,6 +670,7 @@ private:
     uint8_t uuid_[16]{};
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, std::string> map_names_;
+    std::string permanent_notification_text_;
     bmmo::timed_ball_state_msg local_state_msg_{};
     std::atomic_bool print_states_ = false, recorder_mode_ = false;
 };
@@ -729,9 +743,8 @@ int main(int argc, char** argv) {
     if (parse_args(argc, argv) != 0)
         return 0;
 
-    FILE* log_file = nullptr;
     if (!options.log_path.empty()) {
-        log_file = fopen(options.log_path.c_str(), "a");
+        FILE* log_file = fopen(options.log_path.c_str(), "a");
         if (log_file == nullptr) {
             std::cerr << "Fatal: failed to open log file." << std::endl;
             return 1;
@@ -864,21 +877,31 @@ int main(int argc, char** argv) {
     });
     console.register_command("getmap", [&] { client.print_player_maps(); });
     console.register_command("listmap", [&] { client.print_maps(); });
+    auto get_map_from_input = [&](bool with_name = false) {
+        std::string hash = console.get_next_word();
+        bmmo::named_map input_map = {{.type = bmmo::map_type::OriginalLevel,
+                                    .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)}, {}};
+        if (hash == "level")
+            bmmo::hex_chars_from_string(input_map.md5, bmmo::map::original_map_hashes[input_map.level]);
+        else
+            bmmo::hex_chars_from_string(input_map.md5, hash);
+        if (with_name && !console.empty()) {
+            bmmo::map_names_msg name_msg{};
+            input_map.name = console.get_rest_of_line();
+            name_msg.maps.emplace(input_map.get_hash_bytes_string(), input_map.name);
+            name_msg.serialize();
+            client.send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        return input_map;
+    };
     console.register_command("countdown", [&] {
-        auto print_hint = [] {
+        if (console.empty()) {
             role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
             role::Printf("Usage: \"countdown level <level number> [type]\" or \"countdown <hash> <level number> [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
-        };
-        if (console.empty()) { print_hint(); return; }
-        std::string hash = console.get_next_word();
-        if (console.empty()) { print_hint(); return; }
-        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)};
-        if (hash == "level")
-            bmmo::hex_chars_from_string(map.md5, bmmo::map::original_map_hashes[map.level]);
-        else
-            bmmo::hex_chars_from_string(map.md5, hash);
-        bmmo::countdown_msg msg{.content = {.map = map}};
+            return;
+        }
+        bmmo::countdown_msg msg{.content = {.map = get_map_from_input()}};
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
                 msg.content.type = static_cast<bmmo::countdown_type>(i);
@@ -919,22 +942,9 @@ int main(int argc, char** argv) {
             role::Printf("Usage: \"setmap level <level number>\", \"setmap <hash> [<level number> <name>]\".");
             return;
         }
-        std::string hash = console.get_next_word(), map_name;
-        bmmo::current_map_msg msg{.content = {.map = {
-            .type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)
-        }, .type = bmmo::current_map_state::EnteringMap}};
-        if (hash == "level")
-            bmmo::hex_chars_from_string(msg.content.map.md5, bmmo::map::original_map_hashes[msg.content.map.level]);
-        else
-            bmmo::hex_chars_from_string(msg.content.map.md5, hash);
-        if (!console.empty()) {
-            bmmo::map_names_msg name_msg{};
-            map_name = console.get_rest_of_line();
-            name_msg.maps.emplace(msg.content.map.get_hash_bytes_string(), map_name);
-            name_msg.serialize();
-            client.send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
-        }
-        client.set_own_map(msg.content.map, map_name);
+        auto input_map = get_map_from_input(true);
+        bmmo::current_map_msg msg{.content = {.map = input_map, .type = bmmo::current_map_state::EnteringMap}};
+        client.set_own_map(msg.content.map, input_map.name);
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("setsector", [&] {
@@ -942,6 +952,24 @@ int main(int argc, char** argv) {
         msg.content.sector = atoi(console.get_next_word().c_str());
         client.set_own_sector(msg.content.sector);
         client.send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("dnf", [&] {
+        client.send(bmmo::did_not_finish_msg{.content = {.cheated = cheat, .map = get_map_from_input(),
+            .sector = atoi(console.get_next_word().c_str())}}, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("win", [&] {
+        auto map = get_map_from_input();
+        client.send(bmmo::level_finish_v2_msg{.content = {
+            .points = atoi(console.get_next_word().c_str()), .lives = atoi(console.get_next_word().c_str()),
+            .lifeBonus = 200, .levelBonus = map.level * 100, .timeElapsed = (float) atof(console.get_next_word().c_str()),
+            .startPoints = 1000, .cheated = cheat, .map = map
+        }}, k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_command("bulletin", [&] {
+        bmmo::permanent_notification_msg msg{};
+        msg.text_content = console.get_rest_of_line();
+        msg.serialize();
+        client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
 
     client.wait_till_started();

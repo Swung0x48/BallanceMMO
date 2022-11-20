@@ -126,7 +126,7 @@ public:
         while (record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
             current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
             bool print_status = false;
-            if (current_record_time_ - last_segmented_timestamp > (int)1e7) {
+            if (get_segment_index(current_record_time_) > get_segment_index(last_segmented_timestamp)) {
                 last_segmented_timestamp = current_record_time_;
                 segments_.emplace_back(segment_info_t{ (int64_t)record_stream_.tellg() - (int64_t)sizeof(SteamNetworkingMicroseconds), current_record_time_ });
                 print_status = true;
@@ -207,6 +207,11 @@ public:
                     record_map_names_.insert(msg.maps.begin(), msg.maps.end());
                     break;
                 }
+                case bmmo::PermanentNotification: {
+                    auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(entry.data, entry.size);
+                    permanent_notification_timeline_.try_emplace(current_record_time_, msg.title, msg.text_content);
+                    break;
+                }
                 default: {
                     break;
                 }
@@ -230,6 +235,10 @@ public:
 
         return true;
     }
+
+    // begin_time, <username (title), text>
+    std::map<SteamNetworkingMicroseconds, std::pair<std::string, std::string>> permanent_notification_timeline_{{0, {}}};
+    std::pair<std::string, std::string> record_permanent_notification_;
 
     // username - time_period
     std::unordered_map<std::string, std::vector<time_period_t>> timeline_;
@@ -388,6 +397,15 @@ public:
         msg.online_players = record_clients_;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+
+        if (!permanent_notification_timeline_.empty()) {
+            record_permanent_notification_ =
+                std::prev(permanent_notification_timeline_.upper_bound(current_record_time_))->second;
+            bmmo::permanent_notification_msg bulletin_msg{};
+            std::tie(bulletin_msg.title, bulletin_msg.text_content) = record_permanent_notification_;
+            bulletin_msg.serialize();
+            broadcast_message(bulletin_msg.raw.str().data(), bulletin_msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
 
         seeking_ = false;
         Printf("Sought to %.3lfs successfully.", current_record_time_ / 1e6);
@@ -712,6 +730,13 @@ private:
                 accepted_msg.serialize();
                 send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
 
+                if (!record_permanent_notification_.second.empty()) {
+                    bmmo::permanent_notification_msg bulletin_msg{};
+                    std::tie(bulletin_msg.title, bulletin_msg.text_content) = record_permanent_notification_;
+                    bulletin_msg.serialize();
+                    send(networking_msg->m_conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), k_nSteamNetworkingSend_Reliable);
+                }
+
                 bmmo::plain_text_msg text_msg;
                 text_msg.text_content.resize(128);
                 Sprintf(text_msg.text_content, "[Reality] %s joined the game.", msg.nickname);
@@ -779,6 +804,11 @@ private:
             case bmmo::CurrentSector: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::current_sector_msg>(entry.data, entry.size);
                 record_clients_[msg.content.player_id].sector = msg.content.sector;
+                break;
+            }
+            case bmmo::PermanentNotification: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(entry.data, entry.size);
+                record_permanent_notification_ = {msg.title, msg.text_content};
                 break;
             }
             case bmmo::OwnedTimedBallState: {

@@ -63,6 +63,7 @@ namespace bmmo {
         PopupBox,
         CurrentSector,
         LoginAcceptedV3,
+        PermanentNotification,
     };
 
     template<typename T, opcode C = None>

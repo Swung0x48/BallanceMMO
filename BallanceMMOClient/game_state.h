@@ -219,12 +219,8 @@ public:
 	}
 
 	bool remove(HSteamNetConnection id) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		states_.erase(id);
-		return true;
+		return bool(states_.erase(id));
 	}
 
 	size_t player_count() {

@@ -108,14 +108,6 @@ namespace bmmo {
     struct named_map : map {
         std::string name;
 
-        map& operator=(const named_map& that) {
-            type = that.type;
-            name = that.name;
-            memcpy(md5, that.md5, sizeof(md5));
-            level = that.level;
-            return *this;
-        }
-
         std::string get_display_name() const {
             return map::get_display_name(name);
         }

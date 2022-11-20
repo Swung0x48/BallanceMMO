@@ -37,7 +37,7 @@ struct map_data {
     SteamNetworkingMicroseconds start_time = 0;
 };
 
-class server : public role {
+class server: public role {
 public:
     explicit server(uint16_t port) {
         port_ = port;
@@ -113,11 +113,10 @@ public:
         networking_msg->Release();
     }
 
+    auto& get_bulletin() { return permanent_notification_; }
+
     HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) {
-        std::string lower_username = bmmo::message_utils::to_lower(username);
-        auto username_it = std::find_if(username_.begin(), username_.end(), [&lower_username](const auto& i) {
-            return bmmo::message_utils::to_lower(i.first) == lower_username;
-        });
+        auto username_it = username_.find(bmmo::message_utils::to_lower(username));
         if (username_it == username_.end()) {
             if (!suppress_error)
                 Printf("Error: client \"%s\" not found.", username);
@@ -126,7 +125,7 @@ public:
         return username_it->second;
     };
 
-    int get_client_count() { return clients_.size(); }
+    inline int get_client_count() const noexcept { return clients_.size(); }
 
     bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid, bmmo::crash_type crash = bmmo::crash_type::None) {
         if (!client_exists(client))
@@ -160,7 +159,7 @@ public:
 
         msg.crashed = (bool) crash;
 
-        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + 101 + static_cast<int>(crash), kick_notice.c_str(), true);
+        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + static_cast<int>(crash), kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -221,28 +220,29 @@ public:
     }
 
     void print_clients(bool print_uuid = false) {
-        decltype(clients_) spectators;
-        auto print_client = [&](auto i) {
+        std::map<decltype(username_)::key_type, decltype(username_)::mapped_type> spectators;
+        static const auto print_client = [&](auto id, auto data) {
             Printf("%u: %s%s%s%s",
-                    i.first, i.second.name,
-                    print_uuid ? (" (" + get_uuid_string(i.second.uuid) + ")") : "",
-                    i.second.cheated ? " [CHEAT]" : "", is_op(i.first) ? " [OP]" : "");
+                    id, data.name,
+                    print_uuid ? (" (" + get_uuid_string(data.uuid) + ")") : "",
+                    data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "");
         };
-        for (const auto& i: clients_) {
-            if (bmmo::name_validator::is_spectator(i.second.name)) {
+        for (const auto& i: std::map(username_.begin(), username_.end())) {
+            if (bmmo::name_validator::is_spectator(i.first))
                 spectators.insert(i);
-                continue;
-            }
-            print_client(i);
+            else
+                print_client(i.second, clients_[i.second]);
         }
         for (const auto& i: spectators)
-            print_client(i);
+            print_client(i.second, clients_[i.second]);
         Printf("%d client(s) online: %d player(s), %d spectator(s).",
             clients_.size(), clients_.size() - spectators.size(), spectators.size());
     }
 
     void print_maps() {
-        for (const auto& [hash, name]: map_names_) {
+        std::multimap<decltype(map_names_)::mapped_type, decltype(map_names_)::key_type> map_names_inverted;
+        for (const auto& [hash, name]: map_names_) map_names_inverted.emplace(name, hash);
+        for (const auto& [name, hash]: map_names_inverted) {
             std::string hash_string;
             bmmo::string_from_hex_chars(hash_string, reinterpret_cast<const uint8_t*>(hash.c_str()), sizeof(bmmo::map::md5));
             Printf("%s: %s", hash_string, name);
@@ -341,7 +341,7 @@ public:
             op_players_[name] = get_uuid_string(clients_[client].uuid);
             Printf("%s is now an operator.", name);
         } else {
-            if (op_players_.erase(name))
+            if (!op_players_.erase(name))
                 return;
             Printf("%s is no longer an operator.", name);
         }
@@ -454,7 +454,9 @@ protected:
             Printf("Error: failed to open config file for writing.");
             return;
         }
-        config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t{}.to_string() << "\n"
+        auto current_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t{}.to_string() << " - "
+                        << std::put_time(std::localtime(&current_time), "%F %T") << "\n"
                     << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
                     << "# - Ban list style: \"uuid: reason\".\n"
@@ -480,7 +482,7 @@ protected:
         msg.content.connection_id = client;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
         std::string name = itClient->second.name;
-        username_.erase(name);
+        username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, client);
     }
@@ -649,9 +651,8 @@ protected:
                     case 0:
                         maps_.clear();
                         map_names_.clear();
-                        std::for_each(clients_.begin(), clients_.end(),
-                            [](auto& i) { i.second.ready = false; });
-                        // fallthrough
+                        permanent_notification_ = {};
+                        [[fallthrough]];
                     case 1:
                         if (ticking_)
                             stop_ticking();
@@ -757,7 +758,7 @@ protected:
                 // accepting client
                 clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}});  // add the client here
                 memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
-                username_[msg.nickname] = networking_msg->m_conn;
+                username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;
                 Printf("%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
                         get_uuid_string(msg.uuid).substr(0, 8),
@@ -795,6 +796,13 @@ protected:
                 pull_ball_states(state_msg.balls);
                 state_msg.serialize();
                 send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_Reliable);
+
+                if (!permanent_notification_.second.empty()) {
+                    bmmo::permanent_notification_msg bulletin_msg{};
+                    std::tie(bulletin_msg.title, bulletin_msg.text_content) = permanent_notification_;
+                    bulletin_msg.serialize();
+                    send(networking_msg->m_conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), k_nSteamNetworkingSend_Reliable);
+                }
 
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
@@ -1143,12 +1151,22 @@ protected:
                         Printf("(#%u, %s) has encountered a fatal error!",
                             networking_msg->m_conn, client_it->second.name);
                         // they already got their own fatal error, so we don't need to induce one here.
-                        kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::crash_type::Crash);
+                        kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::crash_type::SelfTriggeredFatalError);
                         break;
                     }
                     default:
                         break;
                 }
+                break;
+            }
+            case bmmo::PermanentNotification: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
+                msg.title = client_it->second.name;
+                Printf("[Bulletin] %s: %s", msg.title, msg.text_content);
+                permanent_notification_ = {msg.title, msg.text_content};
+                msg.clear();
+                msg.serialize();
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             case bmmo::PlainText: {
@@ -1249,8 +1267,9 @@ protected:
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 //    std::thread server_thread_;
     std::unordered_map<HSteamNetConnection, client_data> clients_;
-    std::unordered_map<std::string, HSteamNetConnection> username_;
+    std::unordered_map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
     std::mutex client_data_mutex_;
+    std::pair<std::string, std::string> permanent_notification_; // <username (title), text>
     constexpr static inline std::chrono::nanoseconds TICK_DELAY{(int)1e9 / 198},
                                                      UPDATE_INTERVAL{(int)1e9 / 66};
 
@@ -1269,13 +1288,13 @@ protected:
 
 // parse arguments (optional port and help/version/log) with getopt
 int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, bool* dry_run) {
-    constexpr static const int DRYRUN_VALUE = UINT8_MAX + 1;
+    enum option_values: int { DryRun = UINT8_MAX + 1 };
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"log", required_argument, 0, 'l'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
-        {"dry-run", no_argument, 0, DRYRUN_VALUE},
+        {"dry-run", no_argument, 0, DryRun},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
@@ -1303,7 +1322,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
                 printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;
-            case DRYRUN_VALUE:
+            case DryRun:
                 *dry_run = true;
                 break;
         }
@@ -1323,9 +1342,8 @@ int main(int argc, char** argv) {
         return 1;
     };
 
-    FILE* log_file = nullptr;
     if (!log_path.empty()) {
-        log_file = fopen(log_path.c_str(), "a");
+        FILE* log_file = fopen(log_path.c_str(), "a");
         if (log_file == nullptr) {
             std::cerr << "Fatal: failed to open the log file." << std::endl;
             return 1;
@@ -1513,6 +1531,18 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     });
+    console.register_command("bulletin", [&] {
+        auto& bulletin = server.get_bulletin();
+        if (console.get_command_name() == "bulletin") {
+            bulletin = {"[Server]", console.get_rest_of_line()};
+            bmmo::permanent_notification_msg msg{};
+            std::tie(msg.title, msg.text_content) = bulletin;
+            msg.serialize();
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        server.Printf("[Bulletin] %s: %s", bulletin.first, bulletin.second);
+    });
+    console.register_aliases("bulletin", {"getbulletin"});
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();

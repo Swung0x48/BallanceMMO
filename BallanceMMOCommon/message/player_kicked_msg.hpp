@@ -3,10 +3,12 @@
 #include "message.hpp"
 
 namespace bmmo {
-    enum class crash_type : uint8_t {
-        None = 0, // not crashed
-        Crash = 1,
-        FatalError = 2
+    enum class crash_type {
+        None = 101, // not crashed
+        Crash = 102,
+        FatalError = 103,
+        SelfTriggeredFatalError = 104,
+        End = 110,
     };
 
     // This message is only intended to be a notification about kicking itself.

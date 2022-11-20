@@ -157,7 +157,7 @@ private:
 	//uint64_t id_ = 0;
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
-	std::shared_ptr<text_sprite> spectator_label_;
+	std::shared_ptr<text_sprite> spectator_label_, permanent_notification_;
 
 	game_state db_;
 	game_objects objects_;
@@ -231,6 +231,7 @@ private:
 			player_list_visible_ = false;
 			show_player_list();
 		}
+		if (permanent_notification_) permanent_notification_->paint(player_list_color_);
 	}
 
 	void init_config() {
@@ -654,11 +655,9 @@ private:
 			status_->paint(0xffff0000);
 		}
 
-		if (spectator_label_) {
-			spectator_label_->set_visible(false);
-			spectator_label_.reset();
-		}
-		db_.set_client_id(k_HSteamNetConnection_Invalid + rand()); // invalid id indicates server
+		spectator_label_.reset();
+		permanent_notification_.reset();
+		db_.set_client_id(k_HSteamNetConnection_Invalid + ((rand() << 16) | rand())); // invalid id indicates server
 	}
 
 	void restart_current_level() {
@@ -814,7 +813,7 @@ private:
 		MD5_Final(result, &md5Context);
 	}
 
-	boost::circular_buffer<std::string> previous_msg_ = boost::circular_buffer<std::string>(8);
+	boost::circular_buffer<std::string> previous_msg_ = decltype(previous_msg_)(8);
 	
 	// Windows 7 does not have GetDpiForSystem
 	typedef UINT (WINAPI* GetDpiForSystemPtr) (void);

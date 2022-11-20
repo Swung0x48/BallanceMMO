@@ -51,7 +51,8 @@ namespace bmmo {
         }
 
         static std::string join_strings(const std::vector<std::string>& strings, size_t start = 0, const char* delim = " ") {
-            constexpr const size_t MAX_LENGTH = UINT16_MAX;
+            if (strings.size() == start) return "";
+            static constexpr const size_t MAX_LENGTH = UINT16_MAX;
             std::string str = strings[start];
             start++;
             size_t length = strings.size();
