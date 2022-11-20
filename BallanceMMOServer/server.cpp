@@ -1160,9 +1160,12 @@ protected:
                 break;
             }
             case bmmo::PermanentNotification: {
+                if (deny_action(networking_msg->m_conn))
+                    break;
                 auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
                 msg.title = client_it->second.name;
-                Printf("[Bulletin] %s: %s", msg.title, msg.text_content);
+                Printf("[Bulletin] %s%s", msg.title,
+                        msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
                 permanent_notification_ = {msg.title, msg.text_content};
                 msg.clear();
                 msg.serialize();
@@ -1540,7 +1543,8 @@ int main(int argc, char** argv) {
             msg.serialize();
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-        server.Printf("[Bulletin] %s: %s", bulletin.first, bulletin.second);
+        server.Printf("[Bulletin] %s%s", bulletin.first,
+            bulletin.second.empty() ? " - Empty" : ": " + bulletin.second);
     });
     console.register_aliases("bulletin", {"getbulletin"});
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });

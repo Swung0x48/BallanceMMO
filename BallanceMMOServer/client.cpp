@@ -460,7 +460,8 @@ private:
             }
             case bmmo::PermanentNotification: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
-                Printf("[Bulletin] %s: %s", msg.title, msg.text_content);
+                Printf("[Bulletin] %s%s", msg.title,
+                        msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
                 permanent_notification_text_ = msg.text_content;
                 break;
             }
@@ -971,6 +972,7 @@ int main(int argc, char** argv) {
         msg.serialize();
         client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
+    console.register_command("getbulletin", [&] { client.print_bulletin(); });
 
     client.wait_till_started();
     std::thread record_thread;
