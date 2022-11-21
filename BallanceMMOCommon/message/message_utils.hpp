@@ -11,7 +11,7 @@ namespace bmmo {
         using bmmo::string_utils::to_lower;
         using bmmo::string_utils::join_strings;
 
-        void write_string(std::string str, std::stringstream& stream) {
+        inline void write_string(std::string str, std::stringstream& stream) {
 #ifdef _WIN32
             str = string_utils::ConvertWideToUtf8(string_utils::ConvertAnsiToWide(str));
 #endif
@@ -20,7 +20,7 @@ namespace bmmo {
             stream.write(str.c_str(), str.length());
         }
 
-        bool read_string(std::stringstream& stream, std::string& str) {
+        inline bool read_string(std::stringstream& stream, std::string& str) {
             uint32_t length = 0;
             stream.read(reinterpret_cast<char*>(&length), sizeof(length));
             if (length > stream.tellp())
