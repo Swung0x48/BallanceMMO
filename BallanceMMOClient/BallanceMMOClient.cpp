@@ -141,7 +141,7 @@ bool BallanceMMOClient::show_console() {
                 // std::wcout << wline << std::endl;
                 if (!console_running_)
                     break;
-                std::string line = bmmo::message_utils::ConvertWideToANSI(wline),
+                std::string line = bmmo::string_utils::ConvertWideToANSI(wline),
                   cmd = "ballancemmo";
                 if (auto pos = line.rfind('\r'); pos != std::string::npos)
                     line.erase(pos);
@@ -1281,15 +1281,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         std::string name = get_username(msg.player_id);
         SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content));
-        asio::post(thread_pool_, [this, name, wtext = bmmo::message_utils::ConvertAnsiToWide(msg.chat_content)]() mutable {
+        asio::post(thread_pool_, [this, name, wtext = bmmo::string_utils::ConvertAnsiToWide(msg.chat_content)]() mutable {
             std::string text;
             constexpr static size_t MAX_LINE_LENGTH = 22;
             int line_count;
             for (line_count = 0; wtext.length() > MAX_LINE_LENGTH; ++line_count) {
-                text += bmmo::message_utils::ConvertWideToANSI(wtext.substr(0, MAX_LINE_LENGTH)) + '\n';
+                text += bmmo::string_utils::ConvertWideToANSI(wtext.substr(0, MAX_LINE_LENGTH)) + '\n';
                 wtext.erase(0, MAX_LINE_LENGTH);
             };
-            text += bmmo::message_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
+            text += bmmo::string_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
             auto current_second = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
             text_sprite notification(std::format("Notification{}_{}",
                                      current_second, rand() % 1000), text, 0.0f, 0.4f - 0.02f * line_count);

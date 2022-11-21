@@ -26,7 +26,7 @@ bool console::read_input(std::string& buf) {
 #ifdef _WIN32
         std::wstring wbuf;
         bool success = bool(std::getline(std::wcin, wbuf));
-        buf = bmmo::message_utils::ConvertWideToANSI(wbuf);
+        buf = bmmo::string_utils::ConvertWideToANSI(wbuf);
         if (auto pos = buf.rfind('\r'); pos != std::string::npos)
             buf.erase(pos);
         return success;

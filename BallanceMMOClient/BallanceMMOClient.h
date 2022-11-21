@@ -746,7 +746,7 @@ private:
 		return std::format("{:.1f}{}", bytes, suffixes[s]);
 	}
 
-	static inline const std::string MICRO_SIGN = bmmo::message_utils::ConvertWideToANSI(bmmo::message_utils::ConvertUtf8ToWide("µ"));
+	static inline const std::string MICRO_SIGN = bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide("µ"));
 	static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
 		std::string s;
 		s.reserve(512);

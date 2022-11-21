@@ -1,6 +1,7 @@
 #ifndef BALLANCEMMOSERVER_CONSOLE_HPP
 #define BALLANCEMMOSERVER_CONSOLE_HPP
 #include "../BallanceMMOCommon/utility/command_parser.hpp"
+#include "../BallanceMMOCommon/utility/string_utils.hpp"
 #include <string>
 #include <functional>
 #include <map>

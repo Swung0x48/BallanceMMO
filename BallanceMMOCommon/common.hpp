@@ -15,5 +15,6 @@
 #include "utility/name_validator.hpp"
 #include "utility/command_parser.hpp"
 #include "utility/hostname_parser.hpp"
+#include "utility/string_utils.hpp"
 
 #endif //BALLANCEMMOSERVER_COMMON_HPP
