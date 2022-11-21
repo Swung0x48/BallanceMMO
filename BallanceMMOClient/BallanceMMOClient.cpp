@@ -133,7 +133,11 @@ bool BallanceMMOClient::show_console() {
                 }
                 while (wc != L'\n');
                 std::cout << '\n';*/
-                std::getline(std::wcin, wline);
+                if (!std::getline(std::wcin, wline)) {
+                    puts("stop");
+                    hide_console();
+                    break;
+                };
                 // std::wcout << wline << std::endl;
                 if (!console_running_)
                     break;

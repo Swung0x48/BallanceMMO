@@ -985,15 +985,12 @@ int main(int argc, char** argv) {
     while (client.running()) {
         std::cout << "\r> " << std::flush;
         std::string input;
-#ifdef _WIN32
-        std::wstring wline;
-        std::getline(std::wcin, wline);
-        input = bmmo::message_utils::ConvertWideToANSI(wline);
-        if (auto pos = input.rfind('\r'); pos != std::string::npos)
-            input.erase(pos);
-#else
-        std::getline(std::cin, input);
-#endif
+        if (!console.read_input(input)) {
+            puts("stop");
+            client.shutdown();
+        };
+        role::LogFileOutput(("> " + input).c_str());
+
         // std::cin >> input;
         if (!console.execute(input) && !console.get_command_name().empty()) {
             std::string extra_text;

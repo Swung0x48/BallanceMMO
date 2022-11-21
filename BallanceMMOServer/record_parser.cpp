@@ -959,16 +959,12 @@ int main(int argc, char** argv) {
 
     while (replayer.running()) {
         std::cout << "\r> " << std::flush;
-        std::string line, cmd;
-#ifdef _WIN32
-        std::wstring wline;
-        std::getline(std::wcin, wline);
-        line = bmmo::message_utils::ConvertWideToANSI(wline);
-        if (auto pos = line.rfind('\r'); pos != std::string::npos)
-            line.erase(pos);
-#else
-        std::getline(std::cin, line);
-#endif
+        std::string line;
+        if (!console.read_input(line)) {
+            puts("stop");
+            replayer.shutdown();
+        };
+
         // bmmo::command_parser parser(line);
         if (!console.execute(line)) {
             role::Printf("Error: unknown command \"%s\".", console.get_command_name());

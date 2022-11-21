@@ -4,6 +4,7 @@
 #include <string>
 #include <functional>
 #include <map>
+#include <iostream>
 #include <algorithm>
 
 class console {
@@ -15,6 +16,8 @@ public:
     const std::string get_help_string() const;
     const std::vector<std::string> get_command_hints(bool fuzzy_matching = false) const;
 
+    // returns whether the stream has no errors.
+    bool read_input(std::string& buf);
     bool execute(const std::string &cmd);
 
     bool register_command(const std::string &name, const std::function<void()> &handler);

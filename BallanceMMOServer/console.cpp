@@ -22,6 +22,19 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
     return hints;
 };
 
+bool console::read_input(std::string& buf) {
+#ifdef _WIN32
+        std::wstring wbuf;
+        bool success = bool(std::getline(std::wcin, wbuf));
+        buf = bmmo::message_utils::ConvertWideToANSI(wbuf);
+        if (auto pos = buf.rfind('\r'); pos != std::string::npos)
+            buf.erase(pos);
+        return success;
+#else
+        return bool(std::getline(std::cin, buf));
+#endif
+}
+
 bool console::execute(const std::string &cmd) {
     parser_ = bmmo::command_parser(cmd);
     command_name_ = parser_.get_next_word();

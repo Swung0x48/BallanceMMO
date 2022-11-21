@@ -1557,15 +1557,10 @@ int main(int argc, char** argv) {
     while (server.running()) {
         std::cout << "\r> " << std::flush;
         std::string line;
-#ifdef _WIN32
-        std::wstring wline;
-        std::getline(std::wcin, wline);
-        line = bmmo::message_utils::ConvertWideToANSI(wline);
-        if (auto pos = line.rfind('\r'); pos != std::string::npos)
-            line.erase(pos);
-#else
-        std::getline(std::cin, line);
-#endif
+        if (!console.read_input(line)) {
+            puts("stop");
+            server.shutdown();
+        };
         server.LogFileOutput(("> " + line).c_str());
 
         if (!console.execute(line) && !console.get_command_name().empty()) {
