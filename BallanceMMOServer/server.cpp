@@ -157,7 +157,7 @@ public:
         }
         kick_notice.append(".");
 
-        msg.crashed = (bool) crash;
+        msg.crashed = (crash >= bmmo::crash_type::Crash);
 
         interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + static_cast<int>(crash), kick_notice.c_str(), true);
         msg.serialize();

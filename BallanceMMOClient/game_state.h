@@ -59,10 +59,12 @@ struct PlayerState {
 		if (t32 == 0 || t31 == 0) return {state3.position, state3.rotation};
 		if (t21 == 0) return get_linear_extrapolated_state(tc, state2, state3);
 
+		const auto t1 = tc - state1.timestamp, t2 = tc - state2.timestamp, t3 = tc - state3.timestamp;
+
 		return {
-			state1.position * (((tc - state2.timestamp) * (tc - state3.timestamp)) / static_cast<double>(t21 * t31))
-			+ state2.position * (((tc - state1.timestamp) * (tc - state3.timestamp)) / -static_cast<double>(t21 * t32))
-			+ state3.position * (((tc - state1.timestamp) * (tc - state2.timestamp)) / static_cast<double>(t31 * t32)),
+			state1.position * static_cast<float>((t2 * t3) / static_cast<double>(t21 * t31))
+			+ state2.position * static_cast<float>((t1 * t3) / -static_cast<double>(t21 * t32))
+			+ state3.position * static_cast<float>((t1 * t2) / static_cast<double>(t31 * t32)),
 			Slerp(static_cast<float>(tc - state2.timestamp) / t32, state2.rotation, state3.rotation)
 		};
 	}
