@@ -955,10 +955,12 @@ int main(int argc, char** argv) {
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("dnf", [&] {
+        if (console.empty()) { role::Printf("Usage: \"dnf <map> <sector>\"."); return; }
         client.send(bmmo::did_not_finish_msg{.content = {.cheated = cheat, .map = get_map_from_input(),
             .sector = atoi(console.get_next_word().c_str())}}, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("win", [&] {
+        if (console.empty()) { role::Printf("Usage: \"win <map> <points> <lives> <time>\"."); return; }
         auto map = get_map_from_input();
         client.send(bmmo::level_finish_v2_msg{.content = {
             .points = atoi(console.get_next_word().c_str()), .lives = atoi(console.get_next_word().c_str()),

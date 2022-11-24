@@ -118,9 +118,8 @@ bool BallanceMMOClient::show_console() {
             GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
             SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
             std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
-            for (const auto& i : previous_msg_) {
+            for (const auto& i : previous_msg_)
                 Printf(i.c_str());
-            }
             while (true) {
                 std::cout << "\r> " << std::flush;
                 std::wstring wline;
@@ -172,9 +171,8 @@ bool BallanceMMOClient::hide_console() {
     fclose(stderr);*/
     //std::this_thread::sleep_for(std::chrono::milliseconds(100));
     //TerminateThread(console_thread_.native_handle(), 0);
-    if (FreeConsole()) {
+    if (FreeConsole())
         return true;
-    }
     return false;
 }
 
@@ -221,7 +219,7 @@ void BallanceMMOClient::show_player_list() {
                 auto size = int(status_list.size());
                 if (size != last_player_count) {
                     last_player_count = size;
-                    auto font_size = get_display_font_size(10.76f - 0.14f * std::clamp(size, 7, 25));
+                    auto font_size = get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 25));
                     if (last_font_size != font_size) {
                         last_font_size = font_size;
                         player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
@@ -1181,9 +1179,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         // post-connection actions
         player_ball_ = get_current_ball();
-        if (m_bml->IsIngame() && player_ball_ != nullptr) {
+        if (m_bml->IsIngame() && player_ball_ != nullptr)
             local_state_handler_->poll_and_send_state_forced(player_ball_);
-        }
         if (!current_map_.name.empty()) {
             if (const auto name_it = map_names_.find(current_map_.get_hash_bytes_string()); name_it == map_names_.end()) {
                 send_current_map_name();
@@ -1199,7 +1196,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         const auto count = m_bml->GetModCount();
         bmmo::mod_list_msg mod_msg{};
         mod_msg.mods.reserve(count);
-        for (auto i = 1; i < count; i++) {
+        for (auto i = 1; i < count; ++i) {
             auto* mod = m_bml->GetMod(i);
             mod_msg.mods.try_emplace(mod->GetID(), mod->GetVersion());
         }

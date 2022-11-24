@@ -469,6 +469,7 @@ protected:
         config_file.close();
     }
 
+    // Fail silently if the client doesn't exist.
     void cleanup_disconnected_client(HSteamNetConnection client) {
         // Locate the client.  Note that it should have been found, because this
         // is the only codepath where we remove clients (except on shutdown),
@@ -485,6 +486,20 @@ protected:
         username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, client);
+        
+        switch (get_client_count()) {
+            case 0:
+                maps_.clear();
+                map_names_.clear();
+                permanent_notification_ = {};
+                [[fallthrough]];
+            case 1:
+                if (ticking_)
+                    stop_ticking();
+                break;
+            default:
+                break;
+        }
     }
 
     bool client_exists(HSteamNetConnection client, bool suppress_error = false) {
@@ -570,7 +585,7 @@ protected:
             nReason = k_ESteamNetConnectionEnd_App_Min + 1;
         }
         // check if name exists
-        else if (get_client_id(msg.nickname, true) != k_HSteamNetConnection_Invalid) {
+        else if (username_.contains(bmmo::string_utils::to_lower(msg.nickname))) {
             reason << "A player with the same username \"" << msg.nickname << "\" already exists on this serer.";
             nReason = k_ESteamNetConnectionEnd_App_Min + 2;
         }
@@ -608,29 +623,30 @@ protected:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
                 // Ignore if they were not previously connected.  (If they disconnected
                 // before we accepted the connection.)
-                if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected
-                        && logging_level_ != k_ESteamNetworkingSocketsDebugOutputType_Msg) {
+                if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
                     // Select appropriate log messages
-                    const char* pszDebugLogAction;
-                    if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-                        pszDebugLogAction = "problem detected locally";
-                    } else if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer) {
-                        // Note that here we could check the reason code to see if
-                        // it was a "usual" connection or an "unusual" one.
-                        pszDebugLogAction = "closed by peer";
-                    } else {
-                        pszDebugLogAction = "closed by app";
-                    }
+                    if (logging_level_ < k_ESteamNetworkingSocketsDebugOutputType_Msg) {
+                        const char* pszDebugLogAction;
+                        if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
+                            pszDebugLogAction = "problem detected locally";
+                        } else if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer) {
+                            // Note that here we could check the reason code to see if
+                            // it was a "usual" connection or an "unusual" one.
+                            pszDebugLogAction = "closed by peer";
+                        } else {
+                            pszDebugLogAction = "closed by app";
+                        }
 
-                    // Spew something to our own log.  Note that because we put their nick
-                    // as the connection description, it will show up, along with their
-                    // transport-specific data (e.g. their IP address)
-                    Printf( "[%s] %s (%d): %s\n",
-                            pInfo->m_info.m_szConnectionDescription,
-                            pszDebugLogAction,
-                            pInfo->m_info.m_eEndReason,
-                            pInfo->m_info.m_szEndDebug
-                    );
+                        // Spew something to our own log.  Note that because we put their nick
+                        // as the connection description, it will show up, along with their
+                        // transport-specific data (e.g. their IP address)
+                        Printf( "[%s] %s (%d): %s\n",
+                                pInfo->m_info.m_szConnectionDescription,
+                                pszDebugLogAction,
+                                pInfo->m_info.m_eEndReason,
+                                pInfo->m_info.m_szEndDebug
+                        );
+                    }
 
                     cleanup_disconnected_client(pInfo->m_hConn);
                 } else {
@@ -646,20 +662,6 @@ protected:
                 // so we just pass 0's.
 
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
-
-                switch (get_client_count()) {
-                    case 0:
-                        maps_.clear();
-                        map_names_.clear();
-                        permanent_notification_ = {};
-                        [[fallthrough]];
-                    case 1:
-                        if (ticking_)
-                            stop_ticking();
-                        break;
-                    default:
-                        break;
-                }
 
                 break;
             }
@@ -1291,7 +1293,7 @@ protected:
 
 // parse arguments (optional port and help/version/log) with getopt
 int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, bool* dry_run) {
-    enum option_values: int { DryRun = UINT8_MAX + 1 };
+    enum option_values { DryRun = UINT8_MAX + 1 };
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"log", required_argument, 0, 'l'},
@@ -1434,9 +1436,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("version", [&] { server.print_version_info(); });
     console.register_aliases("version", {"ver"});
-    console.register_command("getmap", [&] {
-        server.print_player_maps();
-    });
+    console.register_command("getmap", [&] { server.print_player_maps(); });
     console.register_command("getpos", [&] { server.print_positions(); });
     console.register_command("kick", [&] {
         HSteamNetConnection client = k_HSteamNetConnection_Invalid;
@@ -1566,7 +1566,7 @@ int main(int argc, char** argv) {
         if (!console.execute(line) && !console.get_command_name().empty()) {
             std::string extra_text;
             if (auto hints = console.get_command_hints(true); !hints.empty())
-                extra_text = " Did you mean: " + bmmo::message_utils::join_strings(hints, 0, ", ") + "?";
+                extra_text = " Did you mean: " + bmmo::string_utils::join_strings(hints, 0, ", ") + "?";
             server.Printf("Error: unknown command \"%s\".%s", console.get_command_name(), extra_text);
         }
     }
