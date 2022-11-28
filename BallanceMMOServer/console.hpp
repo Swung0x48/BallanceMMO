@@ -28,6 +28,9 @@ public:
     bool empty() const noexcept;
     const std::string get_next_word();
     const std::string get_rest_of_line();
+    inline int32_t get_next_int() { return std::atoi(get_next_word().c_str()); };
+    inline int64_t get_next_long() { return std::atoll(get_next_word().c_str()); };
+    inline double get_next_double() { return std::atof(get_next_word().c_str()); };
     const std::string get_command_name() const { return command_name_; };
 };
 

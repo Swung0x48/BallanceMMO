@@ -917,7 +917,7 @@ int main(int argc, char** argv) {
         replayer.play();
     });
     console.register_command("stop", [&]() {
-        replayer.shutdown(atoi(console.get_next_word().c_str()));
+        replayer.shutdown(console.get_next_int());
     });
     console.register_command("list", std::bind(&record_replayer::print_clients, &replayer));
     console.register_command("time", std::bind(&record_replayer::print_current_record_time, &replayer));

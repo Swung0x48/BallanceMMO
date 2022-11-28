@@ -780,14 +780,14 @@ int main(int argc, char** argv) {
         float* pos = msg.content.position.v;
         for (int i = 0; i < 3; ++i) {
             if (!console.empty())
-                pos[i] = atof(console.get_next_word().c_str()) + ((translate) ? pos[i] : 0.0f);
+                pos[i] = console.get_next_double() + ((translate) ? pos[i] : 0.0f);
             else
                 pos[i] = (rand() % 2000 - 1000) / 100.0f + ((translate) ? pos[i] : 0.0f);
         }
         float* rot = msg.content.rotation.v;
         for (int i = 0; i < 4; ++i) {
             if (!console.empty())
-                rot[i] = atof(console.get_next_word().c_str()) + ((translate) ? rot[i] : 0.0f);
+                rot[i] = console.get_next_double() + ((translate) ? rot[i] : 0.0f);
             else
                 rot[i] = (rand() % 3600 - 1800) / 10.0f + ((translate) ? rot[i] : 0.0f);
         }
@@ -866,14 +866,14 @@ int main(int argc, char** argv) {
         options.print_states = !options.print_states;
         client.set_print_states(options.print_states);
     });
-    console.register_command("teleport", [&] { client.teleport_to(atoll(console.get_next_word().c_str())); });
+    console.register_command("teleport", [&] { client.teleport_to(console.get_next_long()); });
     console.register_command("balltype", [&] {
         auto& msg = client.get_local_state_msg();
-        msg.content.type = atoi(console.get_next_word().c_str());
+        msg.content.type = console.get_next_int();
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("whisper", [&] {
-        HSteamNetConnection dest = atoll(console.get_next_word().c_str());
+        HSteamNetConnection dest = console.get_next_long();
         client.whisper_to(dest, console.get_rest_of_line());
     });
     console.register_command("getmap", [&] { client.print_player_maps(); });
@@ -881,7 +881,7 @@ int main(int argc, char** argv) {
     auto get_map_from_input = [&](bool with_name = false) {
         std::string hash = console.get_next_word();
         bmmo::named_map input_map = {{.type = bmmo::map_type::OriginalLevel,
-                                    .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)}, {}};
+                                    .level = std::clamp(console.get_next_int(), 0, 13)}, {}};
         if (hash == "level")
             bmmo::hex_chars_from_string(input_map.md5, bmmo::map::original_map_hashes[input_map.level]);
         else
@@ -910,7 +910,7 @@ int main(int argc, char** argv) {
                 if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } else {
-            msg.content.type = static_cast<bmmo::countdown_type>(atoi(console.get_next_word().c_str()));
+            msg.content.type = static_cast<bmmo::countdown_type>(console.get_next_int());
             client.send(msg, k_nSteamNetworkingSend_Reliable);
         }
     });
@@ -924,7 +924,7 @@ int main(int argc, char** argv) {
     console.register_command("kick", [&] {
         auto name = console.get_next_word();
         bmmo::kick_request_msg msg{};
-        if (name[0] == '#') msg.player_id = static_cast<HSteamNetConnection>(atoll(console.get_next_word().c_str()));
+        if (name[0] == '#') msg.player_id = static_cast<HSteamNetConnection>(console.get_next_long());
         else msg.player_name = name;
         msg.reason = console.get_rest_of_line();
         msg.serialize();
@@ -950,21 +950,21 @@ int main(int argc, char** argv) {
     });
     console.register_command("setsector", [&] {
         bmmo::current_sector_msg msg{};
-        msg.content.sector = atoi(console.get_next_word().c_str());
+        msg.content.sector = console.get_next_int();
         client.set_own_sector(msg.content.sector);
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("dnf", [&] {
         if (console.empty()) { role::Printf("Usage: \"dnf <map> <sector>\"."); return; }
         client.send(bmmo::did_not_finish_msg{.content = {.cheated = cheat, .map = get_map_from_input(),
-            .sector = atoi(console.get_next_word().c_str())}}, k_nSteamNetworkingSend_Reliable);
+            .sector = console.get_next_int()}}, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("win", [&] {
         if (console.empty()) { role::Printf("Usage: \"win <map> <points> <lives> <time>\"."); return; }
         auto map = get_map_from_input();
         client.send(bmmo::level_finish_v2_msg{.content = {
-            .points = atoi(console.get_next_word().c_str()), .lives = atoi(console.get_next_word().c_str()),
-            .lifeBonus = 200, .levelBonus = map.level * 100, .timeElapsed = (float) atof(console.get_next_word().c_str()),
+            .points = console.get_next_int(), .lives = console.get_next_int(),
+            .lifeBonus = 200, .levelBonus = map.level * 100, .timeElapsed = (float) console.get_next_double(),
             .startPoints = 1000, .cheated = cheat, .map = map
         }}, k_nSteamNetworkingSend_Reliable);
     });

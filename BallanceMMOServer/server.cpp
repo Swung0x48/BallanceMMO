@@ -1369,7 +1369,7 @@ int main(int argc, char** argv) {
     std::thread server_thread([&server]() { server.run(); });
 
     console console;
-    console.register_command("stop", [&] { server.shutdown(atoi(console.get_next_word().c_str())); });
+    console.register_command("stop", [&] { server.shutdown(console.get_next_int()); });
     console.register_command("list", [&] { server.print_clients(); });
     console.register_command("list-uuid", [&] { server.print_clients(true); });
     console.register_command("say", [&] {
@@ -1407,11 +1407,27 @@ int main(int argc, char** argv) {
             if (client == k_HSteamNetConnection_Invalid)
                 return;
         }
-        std::string line = console.get_rest_of_line();
         bmmo::popup_box_msg msg{};
-        auto pos = line.find("||");
-        msg.title = pos == std::string::npos ? "BallanceMMO - Message" : line.substr(0, pos);
-        msg.text_content = pos == std::string::npos ? line : line.substr(pos + 2);
+        msg.title = "BallanceMMO - Message";
+        msg.text_content = console.get_rest_of_line();
+        try {
+            YAML::Node idata = YAML::Load(msg.text_content);
+            switch (idata.Type()) {
+                case YAML::NodeType::Map:
+                    std::tie(msg.title, msg.text_content) = 
+                        *idata.as<std::unordered_map<std::string, std::string>>().begin();
+                    break;
+                case YAML::NodeType::Scalar:
+                    msg.text_content = idata.as<std::string>();
+                    break;
+                default:
+                    std::stringstream ss; ss << idata;
+                    msg.text_content = ss.str();
+            }
+        } catch (const std::exception& e) {
+            server.Printf(e.what());
+            return;
+        }
         msg.serialize();
         if (!broadcast)
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1501,11 +1517,11 @@ int main(int argc, char** argv) {
             role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
         };
-        auto client = (HSteamNetConnection) atoll(console.get_next_word().c_str());
+        auto client = (HSteamNetConnection) console.get_next_long();
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word();
         if (console.empty()) { print_hint(); return; }
-        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = std::clamp(atoi(console.get_next_word().c_str()), 0, 13)};
+        bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = std::clamp(console.get_next_int(), 0, 13)};
         if (hash == "level")
             bmmo::hex_chars_from_string(map.md5, bmmo::map::original_map_hashes[map.level]);
         else
@@ -1518,7 +1534,7 @@ int main(int argc, char** argv) {
                 if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } else {
-            msg.content.type = static_cast<bmmo::countdown_type>(atoi(console.get_next_word().c_str()));
+            msg.content.type = static_cast<bmmo::countdown_type>(console.get_next_int());
             server.receive(&msg, sizeof(msg), client);
         }
     });
