@@ -9,6 +9,7 @@
 #include "game_objects.h"
 #include "local_state_handler_impl.h"
 #include "dumpfile.h"
+#include <map>
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -830,6 +831,8 @@ private:
 	int get_display_font_size(float size) {
 		return (int)std::round(m_bml->GetRenderContext()->GetHeight() / (768.0f / 119) * size / ((get_system_dpi == nullptr) ? 96 : get_system_dpi()));
 	}
+
+	inline void flash_window() { FlashWindow((HWND)m_bml->GetCKContext()->GetMainWindow(), false); }
 
 	void SendIngameMessage(const std::string& msg) {
 		SendIngameMessage(msg.c_str());

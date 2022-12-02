@@ -1,5 +1,8 @@
 #ifndef BALLANCEMMOSERVER_RECORD_ENTRY_HPP
 #define BALLANCEMMOSERVER_RECORD_ENTRY_HPP
+#include <cstdint>
+#include <cstring>
+#include <cstddef>
 
 namespace bmmo {
     struct record_entry {

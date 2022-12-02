@@ -42,5 +42,6 @@
 #include "current_sector_msg.hpp"
 #include "login_accepted_v3_msg.hpp"
 #include "permanent_notification_msg.hpp"
+#include "sound_data_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

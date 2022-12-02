@@ -64,6 +64,7 @@ namespace bmmo {
         CurrentSector,
         LoginAcceptedV3,
         PermanentNotification,
+        SoundData,
     };
 
     template<typename T, opcode C = None>

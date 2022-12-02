@@ -259,7 +259,7 @@ public:
 
     void print_positions() {
         for (const auto& [id, data]: clients_) {
-            std::string type = std::unordered_map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
+            std::string type = std::map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
             if (type.empty()) type = "unknown (id #" + std::to_string(data.state.type) + ")";
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
@@ -1200,6 +1200,7 @@ protected:
             case bmmo::ModList: {
                 break;
             }
+            case bmmo::SoundData:
             case bmmo::OwnedBallState:
             case bmmo::OwnedBallStateV2:
             case bmmo::OwnedTimedBallState:
@@ -1563,6 +1564,25 @@ int main(int argc, char** argv) {
             bulletin.second.empty() ? " - Empty" : ": " + bulletin.second);
     });
     console.register_aliases("bulletin", {"getbulletin"});
+    console.register_command("playsound", [&] {
+        try {
+            auto sounds = YAML::Load(console.get_rest_of_line());
+            bmmo::sound_data_msg msg{};
+            if (sounds.IsSequence() && sounds.begin() != sounds.end() && sounds.begin()->IsSequence()) {
+                msg.sounds = sounds.as<decltype(msg.sounds)>();
+            } else if (sounds.IsMap() && sounds.begin() != sounds.end() && sounds.begin()->second.IsSequence() && sounds.begin()->second.begin() != sounds.begin()->second.end() && sounds.begin()->second.begin()->IsSequence()) {
+                msg.caption = sounds.begin()->first.as<decltype(msg.caption)>();
+                msg.sounds = sounds.begin()->second.as<decltype(msg.sounds)>();
+            } else {
+                server.Printf("Usage: playsound <caption>: [[frequency, duration], [freq2, dur2]] (comments can be omitted).");
+                return;
+            }
+            std::stringstream temp; temp << sounds;
+            server.Printf("Playing sound - %s", temp.str());
+            msg.serialize();
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        } catch (const std::exception& e) { server.Printf(e.what()); return; }
+    });
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();

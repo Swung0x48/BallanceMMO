@@ -184,7 +184,7 @@ public:
 
     void print_positions() {
         for (const auto& [id, data]: clients_) {
-            std::string type = std::unordered_map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
+            std::string type = std::map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
             if (type.empty()) type = "unknown (id #" + std::to_string(data.state.type) + ")";
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
@@ -474,7 +474,7 @@ private:
                 auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(networking_msg->m_pData);
 
                 using dr = bmmo::deny_reason;
-                std::string reason = std::unordered_map<dr, const char*>{
+                std::string reason = std::map<dr, const char*>{
                     {dr::NoPermission, "you don't have the permission to run this action."},
                     {dr::InvalidAction, "invalid action."},
                     {dr::InvalidTarget, "invalid target."},
