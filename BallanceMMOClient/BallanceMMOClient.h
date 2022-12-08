@@ -176,7 +176,7 @@ private:
 
 	std::unique_ptr<local_state_handler_base> local_state_handler_;
 	bool spectator_mode_ = false;
-	std::string server_addr;
+	std::string server_addr_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;

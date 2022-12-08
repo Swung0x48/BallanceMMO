@@ -483,7 +483,7 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
     if (connected() || connecting()) {
         disconnect_from_server();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        connect_to_server(server_addr);
+        connect_to_server();
     }
 }
 
@@ -885,7 +885,7 @@ void BallanceMMOClient::connect_to_server(std::string address) {
         // Resolve address
         if (address.empty())
             address = props_["remote_addr"]->GetString();
-        server_addr = address;
+        server_addr_ = address;
         const auto& [host, port] = bmmo::hostname_parser(address).get_host_components();
         resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
         resolver_->async_resolve(host, port, [this](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
@@ -980,7 +980,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
                 SendIngameMessage(std::format("Attempting to reconnect in {}s ...", nReason - 150));
                 std::this_thread::sleep_for(std::chrono::seconds(nReason - 150));
                 if (!connecting() && !connected())
-                    connect_to_server(server_addr);
+                    connect_to_server(server_addr_);
             });
         }
         break;
