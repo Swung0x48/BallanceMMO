@@ -470,19 +470,20 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
     else if (prop == props_["uuid"]) {
         prop->SetString(boost::uuids::to_string(uuid_).c_str());
         GetLogger()->Warn("Warning: Unable to modify UUID.");
+        return;
     }
     else if (prop == props_["extrapolation"]) {
         objects_.toggle_extrapolation(prop->GetBoolean());
-    }
-    else if (prop == props_["spectator"]) {
-        if (connected() || connecting()) {
-            disconnect_from_server();
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            connect_to_server(server_addr);
-        }
+        return;
     }
     else if (prop == props_["player_list_color"]) {
         parse_and_set_player_list_color(prop);
+        return;
+    }
+    if (connected() || connecting()) {
+        disconnect_from_server();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        connect_to_server(server_addr);
     }
 }
 

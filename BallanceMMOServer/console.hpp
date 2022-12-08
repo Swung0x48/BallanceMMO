@@ -7,11 +7,13 @@
 #include <map>
 #include <iostream>
 #include <algorithm>
+#include <mutex>
 
 class console {
     bmmo::command_parser parser_;
     std::map<std::string, std::function<void()>> commands_;
     std::string command_name_;
+    std::mutex console_mutex_;
 
 public:
     const std::string get_help_string() const;

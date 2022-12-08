@@ -26,10 +26,10 @@ struct client_data {
     bool state_updated = true;
     bool timestamp_updated = true;
     bool ready = false;
-    uint8_t uuid[16]{};
     bmmo::timed_ball_state state{};
     bmmo::map current_map{};
     int32_t current_sector = 0;
+    uint8_t uuid[16]{};
 };
 
 struct map_data {

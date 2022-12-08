@@ -88,27 +88,27 @@ public:
 				init_player(item.first, item.second.name, item.second.cheated);
 			}
 
+			auto& player = objects_[item.first];
 			const auto& state_it = item.second.ball_state.begin();
 
 			uint32_t current_ball_type = state_it->type;
-			auto* ctx = bml_->GetCKContext();
 
-			if (current_ball_type != objects_[item.first].visible_ball_type) {
-				on_trafo(item.first, objects_[item.first].visible_ball_type, current_ball_type);
-				objects_[item.first].visible_ball_type = current_ball_type;
+			if (current_ball_type != player.visible_ball_type) {
+				on_trafo(item.first, player.visible_ball_type, current_ball_type);
+				player.visible_ball_type = current_ball_type;
 			}
 
 			/*bml_->SendIngameMessage(std::to_string(item.first).c_str());
 			bml_->SendIngameMessage(std::to_string(current_ball_type).c_str());*/
 
-			auto* current_ball = static_cast<CK3dObject*>(ctx->GetObject(objects_[item.first].balls[current_ball_type]));
-			auto& username_label = objects_[item.first].username_label;
+			auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(player.balls[current_ball_type]));
+			auto& username_label = player.username_label;
 
 			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
 				return true;
 
 			// Update ball states with togglable quadratic extrapolation
-			if (!objects_[item.first].physicalized) {
+			if (!player.physicalized) {
 				if (extrapolation_ && [&] {
 					if (SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE)
 						return true;

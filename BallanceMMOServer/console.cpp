@@ -23,19 +23,21 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
 };
 
 bool console::read_input(std::string& buf) {
+    std::unique_lock lk(console_mutex_);
 #ifdef _WIN32
-        std::wstring wbuf;
-        bool success = bool(std::getline(std::wcin, wbuf));
-        buf = bmmo::string_utils::ConvertWideToANSI(wbuf);
-        if (auto pos = buf.rfind('\r'); pos != std::string::npos)
-            buf.erase(pos);
-        return success;
+    std::wstring wbuf;
+    bool success = bool(std::getline(std::wcin, wbuf));
+    buf = bmmo::string_utils::ConvertWideToANSI(wbuf);
+    if (auto pos = buf.rfind('\r'); pos != std::string::npos)
+        buf.erase(pos);
+    return success;
 #else
-        return bool(std::getline(std::cin, buf));
+    return bool(std::getline(std::cin, buf));
 #endif
 }
 
 bool console::execute(const std::string &cmd) {
+    std::unique_lock lk(console_mutex_);
     parser_ = bmmo::command_parser(cmd);
     command_name_ = parser_.get_next_word();
     if (auto it = commands_.find(command_name_); it != commands_.end()) {
@@ -48,11 +50,13 @@ bool console::execute(const std::string &cmd) {
 bool console::register_command(const std::string &name, const std::function<void()> &handler) {
     if (commands_.contains(name))
         return false;
+    std::unique_lock lk(console_mutex_);
     commands_[name] = handler;
     return true;
 };
 
 bool console::register_aliases(const std::string &name, const std::vector<std::string> &aliases) {
+    std::unique_lock lk(console_mutex_);
     auto it = commands_.find(name);
     if (it == commands_.end())
         return false;
@@ -63,6 +67,7 @@ bool console::register_aliases(const std::string &name, const std::vector<std::s
 };
 
 bool console::unregister_command(const std::string &name) {
+    std::unique_lock lk(console_mutex_);
     if (commands_.erase(name))
         return true;
     return false;
