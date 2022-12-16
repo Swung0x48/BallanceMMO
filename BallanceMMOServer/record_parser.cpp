@@ -259,7 +259,7 @@ public:
         record_stream_.seekg(0);
         std::string read_data;
         std::getline(record_stream_, read_data, '\0');
-        if (read_data != HEADER) {
+        if (read_data != bmmo::RECORD_HEADER) {
             FatalError("Error: invalid record file.");
             return false;
         }
@@ -309,7 +309,7 @@ public:
 
     void run() override {
         while (running_) {
-            auto next_update = std::chrono::steady_clock::now() + UPDATE_INTERVAL;
+            auto next_update = std::chrono::steady_clock::now() + bmmo::SERVER_RECEIVE_INTERVAL;
             update();
             std::this_thread::sleep_until(next_update);
         }
@@ -550,7 +550,7 @@ private:
     void backward_seek(SteamNetworkingMicroseconds dest_time) {
         {
             std::unique_lock<std::mutex> lk(record_data_mutex_);
-            record_stream_.seekg(strlen(HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(time_t) + sizeof(SteamNetworkingMicroseconds));
+            record_stream_.seekg(strlen(bmmo::RECORD_HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(time_t) + sizeof(SteamNetworkingMicroseconds));
             started_ = false;
             record_clients_.clear();
             record_map_names_.clear();
@@ -844,13 +844,10 @@ private:
 
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_;
-
-    constexpr static inline std::chrono::nanoseconds UPDATE_INTERVAL{(int)1e9 / 66};
-    constexpr static inline const char* HEADER = "BallanceMMO FlightRecorder";
 };
 
 // parse arguments (optional port and help/version) with getopt
-int parse_args(int argc, char** argv, uint16_t* port, std::string& filename) {
+int parse_args(int argc, char** argv, uint16_t& port, std::string& filename) {
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},
@@ -861,7 +858,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& filename) {
     while ((opt = getopt_long(argc, argv, "p:hv", long_options, &opt_index)) != -1) {
         switch (opt) {
             case 'p':
-                *port = atoi(optarg);
+                port = atoi(optarg);
                 break;
             case 'h':
                 printf("Usage: %s [RECORD_FILE] [OPTION]...\n", argv[0]);
@@ -890,7 +887,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& filename) {
 int main(int argc, char** argv) {
     uint16_t port = 26677;
     std::string filename;
-    if (int v = parse_args(argc, argv, &port, filename); v != 0)
+    if (int v = parse_args(argc, argv, port, filename); v != 0)
         return std::max(v, 0);
 
     printf("Initializing sockets...\n");

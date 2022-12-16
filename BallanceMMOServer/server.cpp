@@ -48,10 +48,10 @@ public:
             auto update_begin = std::chrono::steady_clock::now();
             update();
             if (ticking_) {
-                std::this_thread::sleep_until(update_begin + TICK_DELAY);
+                std::this_thread::sleep_until(update_begin + bmmo::SERVER_TICK_DELAY);
                 tick();
             }
-            std::this_thread::sleep_until(update_begin + UPDATE_INTERVAL);
+            std::this_thread::sleep_until(update_begin + bmmo::SERVER_RECEIVE_INTERVAL);
         }
 
 //        while (running_) {
@@ -127,8 +127,11 @@ public:
 
     inline int get_client_count() const noexcept { return clients_.size(); }
 
-    bool kick_client(HSteamNetConnection client, std::string reason = "", HSteamNetConnection executor = k_HSteamNetConnection_Invalid, bmmo::crash_type crash = bmmo::crash_type::None) {
-        if (!client_exists(client))
+    bool kick_client(HSteamNetConnection client, std::string reason = "",
+            HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
+            bmmo::connection_end::code type = bmmo::connection_end::Kicked) {
+        if (!client_exists(client) ||
+                type < bmmo::connection_end::PlayerKicked_Min || type >= bmmo::connection_end::PlayerKicked_Max)
             return false;
         bmmo::player_kicked_msg msg{};
         msg.kicked_player_name = clients_[client].name;
@@ -143,7 +146,7 @@ public:
             kick_notice += "the server";
         }
 
-        if (crash == bmmo::crash_type::FatalError) {
+        if (type == bmmo::connection_end::FatalError) {
             // Send a message without serialization; this effectively kills the client
             // at deserialization. A dirty hack, but it works and we don't need to
             // worry about the outcome; the client will just terminate immediately.
@@ -157,9 +160,9 @@ public:
         }
         kick_notice.append(".");
 
-        msg.crashed = (crash >= bmmo::crash_type::Crash);
+        msg.crashed = (type >= bmmo::connection_end::Crash);
 
-        interface_->CloseConnection(client, k_ESteamNetConnectionEnd_App_Min + static_cast<int>(crash), kick_notice.c_str(), true);
+        interface_->CloseConnection(client, type, kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
 
@@ -359,7 +362,7 @@ public:
 
     void shutdown(int reconnection_delay = 0) {
         Printf("Shutting down...");
-        int nReason = reconnection_delay == 0 ? 0 : k_ESteamNetConnectionEnd_App_Min + 150 + reconnection_delay;
+        int nReason = reconnection_delay == 0 ? 0 : bmmo::connection_end::AutoReconnection_Min + reconnection_delay;
         for (auto& i: clients_) {
             interface_->CloseConnection(i.first, nReason, "Server closed", true);
         }
@@ -486,7 +489,7 @@ protected:
         username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, client);
-        
+
         switch (get_client_count()) {
             case 0:
                 maps_.clear();
@@ -559,12 +562,6 @@ protected:
         return false;
     }
 
-    // nReason:
-    // - 0~99: denied at joining
-    // -- 0~49: denied from incorrect configuration
-    // -- 50~99: banned
-    // - 100~199: kicked when online
-    // -- 150+n: auto reconnect in n seconds
     bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
@@ -576,32 +573,32 @@ protected:
             if (!it->second.empty())
                 reason << ": " << it->second;
             reason << ".";
-            nReason = k_ESteamNetConnectionEnd_App_Min + 50;
+            nReason = bmmo::connection_end::Banned;
         }
         // verify client version
         else if (msg.version < bmmo::minimum_client_version) {
             reason << "Outdated client (client: " << msg.version.to_string()
                     << "; minimum: " << bmmo::minimum_client_version.to_string() << ").";
-            nReason = k_ESteamNetConnectionEnd_App_Min + 1;
+            nReason = bmmo::connection_end::OutdatedClient;
         }
         // check if name exists
         else if (username_.contains(bmmo::string_utils::to_lower(msg.nickname))) {
             reason << "A player with the same username \"" << msg.nickname << "\" already exists on this serer.";
-            nReason = k_ESteamNetConnectionEnd_App_Min + 2;
+            nReason = bmmo::connection_end::ExistingName;
         }
         // validate nickname length
         else if (!bmmo::name_validator::is_of_valid_length(real_nickname)) {
             reason << "Nickname must be between "
                     << bmmo::name_validator::min_length << " and "
                     << bmmo::name_validator::max_length << " characters in length.";
-            nReason = k_ESteamNetConnectionEnd_App_Min + 3;
+            nReason = bmmo::connection_end::InvalidNameLength;
         }
         // validate nickname characters
         else if (size_t invalid_pos = bmmo::name_validator::get_invalid_char_pos(real_nickname);
                 invalid_pos != std::string::npos) {
             reason << "Invalid character '" << real_nickname[invalid_pos] << "' at position "
                     << invalid_pos << "; nicknames can only contain alphanumeric characters and underscores.";
-            nReason = k_ESteamNetConnectionEnd_App_Min + 4;
+            nReason = bmmo::connection_end::InvalidNameCharacter;
         }
 
         if (nReason != k_ESteamNetConnectionEnd_Invalid) {
@@ -730,7 +727,7 @@ protected:
             case bmmo::LoginRequest: {
                 bmmo::simple_action_msg msg{.content = {bmmo::action_type::LoginDenied}};
                 send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
-                interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, "Outdated client", true);
+                interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::OutdatedClient, "Outdated client", true);
                 break;
             }
             case bmmo::LoginRequestV2: {
@@ -744,7 +741,7 @@ protected:
                         + "; minimum: " + bmmo::minimum_client_version.to_string() + ")";
                 bmmo::simple_action_msg new_msg{.content = {bmmo::action_type::LoginDenied}};
                 send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
-                interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1, reason.c_str(), true);
+                interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::OutdatedClient, reason.c_str(), true);
                 break;
             }
             case bmmo::LoginRequestV3: {
@@ -766,7 +763,7 @@ protected:
                         get_uuid_string(msg.uuid).substr(0, 8),
                         msg.version.to_string(),
                         msg.cheated ? "on" : "off");
-                
+
                 if (!map_names_.empty()) { // do this before login_accepted_msg since the latter contains map info
                     bmmo::map_names_msg name_msg;
                     name_msg.maps = map_names_;
@@ -1153,7 +1150,7 @@ protected:
                         Printf("(#%u, %s) has encountered a fatal error!",
                             networking_msg->m_conn, client_it->second.name);
                         // they already got their own fatal error, so we don't need to induce one here.
-                        kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::crash_type::SelfTriggeredFatalError);
+                        kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::connection_end::SelfTriggeredFatalError);
                         break;
                     }
                     default:
@@ -1276,8 +1273,6 @@ protected:
     std::unordered_map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
     std::mutex client_data_mutex_;
     std::pair<std::string, std::string> permanent_notification_; // <username (title), text>
-    constexpr static inline std::chrono::nanoseconds TICK_DELAY{(int)1e9 / 198},
-                                                     UPDATE_INTERVAL{(int)1e9 / 66};
 
     std::mutex startup_mutex_;
     std::condition_variable startup_cv_;
@@ -1293,7 +1288,7 @@ protected:
 };
 
 // parse arguments (optional port and help/version/log) with getopt
-int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, bool* dry_run) {
+int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run) {
     enum option_values { DryRun = UINT8_MAX + 1 };
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
@@ -1307,7 +1302,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
     while ((opt = getopt_long(argc, argv, "p:l:hv", long_options, &opt_index)) != -1) {
         switch (opt) {
             case 'p':
-                *port = atoi(optarg);
+                port = atoi(optarg);
                 break;
             case 'l':
                 log_path = optarg;
@@ -1329,7 +1324,7 @@ int parse_args(int argc, char** argv, uint16_t* port, std::string& log_path, boo
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;
             case DryRun:
-                *dry_run = true;
+                dry_run = true;
                 break;
         }
     }
@@ -1340,7 +1335,7 @@ int main(int argc, char** argv) {
     uint16_t port = 26676;
     bool dry_run = false;
     std::string log_path;
-    if (parse_args(argc, argv, &port, log_path, &dry_run) < 0)
+    if (parse_args(argc, argv, port, log_path, dry_run) < 0)
         return 0;
 
     if (port == 0) {
@@ -1415,7 +1410,7 @@ int main(int argc, char** argv) {
             YAML::Node idata = YAML::Load(msg.text_content);
             switch (idata.Type()) {
                 case YAML::NodeType::Map:
-                    std::tie(msg.title, msg.text_content) = 
+                    std::tie(msg.title, msg.text_content) =
                         *idata.as<std::unordered_map<std::string, std::string>>().begin();
                     break;
                 case YAML::NodeType::Scalar:
@@ -1477,11 +1472,11 @@ int main(int argc, char** argv) {
         } else if (console.get_command_name() == "ban") {
             server.set_ban(client, text);
         } else {
-            bmmo::crash_type crash = bmmo::crash_type::None;
+            bmmo::connection_end::code crash = bmmo::connection_end::Kicked;
             if (console.get_command_name() == "crash")
-                crash = bmmo::crash_type::Crash;
+                crash = bmmo::connection_end::Crash;
             else if (console.get_command_name() == "fatalerror")
-                crash = bmmo::crash_type::FatalError;
+                crash = bmmo::connection_end::FatalError;
             server.kick_client(client, text, k_HSteamNetConnection_Invalid, crash);
         }
     });

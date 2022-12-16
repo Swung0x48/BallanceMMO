@@ -368,7 +368,7 @@ void BallanceMMOClient::OnProcess() {
         if (current_timestamp >= next_update_timestamp_) {
             if (current_timestamp - next_update_timestamp_ > 1048576)
                 next_update_timestamp_ = current_timestamp;
-            next_update_timestamp_ += MINIMUM_UPDATE_INTERVAL;
+            next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
 
             auto ball = get_current_ball();
             if (player_ball_ == nullptr)
@@ -971,14 +971,14 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         }
         SendIngameMessage(s.c_str());
         cleanup();
-        int nReason = pInfo->m_info.m_eEndReason - k_ESteamNetConnectionEnd_App_Min;
+        const int nReason = pInfo->m_info.m_eEndReason;
         // 102 - crash; 103 - fatal error
-        if (nReason >= std::to_underlying(bmmo::crash_type::Crash) && nReason <= std::to_underlying(bmmo::crash_type::End))
+        if (nReason >= bmmo::connection_end::Crash && nReason <= bmmo::connection_end::PlayerKicked_Max)
             terminate(5);
-        else if (nReason >= 150 && nReason < 200) {
+        else if (nReason >= bmmo::connection_end::AutoReconnection_Min && nReason < bmmo::connection_end::AutoReconnection_Max) {
             asio::post(thread_pool_, [this, nReason]() {
-                SendIngameMessage(std::format("Attempting to reconnect in {}s ...", nReason - 150));
-                std::this_thread::sleep_for(std::chrono::seconds(nReason - 150));
+                SendIngameMessage(std::format("Attempting to reconnect in {}s ...", nReason - bmmo::connection_end::AutoReconnection_Min));
+                std::this_thread::sleep_for(std::chrono::seconds(nReason - bmmo::connection_end::AutoReconnection_Min));
                 if (!connecting() && !connected())
                     connect_to_server(server_addr_);
             });

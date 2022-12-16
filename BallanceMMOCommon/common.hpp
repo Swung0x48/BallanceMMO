@@ -8,6 +8,7 @@
 #endif
 
 #include "message/message_all.hpp"
+#include "entity/constants.hpp"
 #include "entity/entity.hpp"
 #include "entity/version.hpp"
 #include "entity/map.hpp"

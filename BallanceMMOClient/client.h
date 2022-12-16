@@ -29,7 +29,7 @@ public:
     void run() override {
         running_ = true;
         while (running_) {
-            auto next_update = std::chrono::steady_clock::now() + UPDATE_INTERVAL;
+            auto next_update = std::chrono::steady_clock::now() + bmmo::CLIENT_RECEIVE_INTERVAL;
             if (!update())
                 std::this_thread::sleep_until(next_update);
         }
@@ -130,6 +130,4 @@ protected:
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     ESteamNetworkingConnectionState estate_;
-    static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
-    constexpr static inline auto UPDATE_INTERVAL = std::chrono::nanoseconds((int)1e9 / 66);
 };

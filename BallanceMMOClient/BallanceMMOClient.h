@@ -181,7 +181,6 @@ private:
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
 	SteamNetworkingMicroseconds next_update_timestamp_ = 0, last_dnf_hotkey_timestamp_ = 0;
-	static constexpr inline SteamNetworkingMicroseconds MINIMUM_UPDATE_INTERVAL = (int)1e6 / 66;
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;

@@ -70,7 +70,7 @@ public:
         record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
         if (!record_stream_.is_open())
             return false;
-        record_stream_ << "BallanceMMO FlightRecorder";
+        record_stream_ << bmmo::RECORD_HEADER;
         record_stream_.put('\0');
         bmmo::version_t version;
         record_stream_.write(reinterpret_cast<const char*>(&version), sizeof(version));
@@ -84,7 +84,7 @@ public:
         startup_cv_.notify_all();
         while (running_) {
             if (!update())
-                std::this_thread::sleep_for(std::chrono::nanoseconds((int)1e9 / 66));
+                std::this_thread::sleep_for(bmmo::CLIENT_RECEIVE_INTERVAL);
         }
 
 //        while (running_) {
@@ -633,7 +633,7 @@ private:
 
     void enqueue_log_message(const ISteamNetworkingMessage* msg) {
         bmmo::record_entry entry(SteamNetworkingUtils()->GetLocalTimestamp(), msg->m_cbSize, reinterpret_cast<std::byte*>(msg->m_pData));
-        
+
         std::unique_lock<std::mutex> lk(message_queue_mutex_);
         message_queue_.emplace_back(std::move(entry));
         message_available_cv_.notify_one();
