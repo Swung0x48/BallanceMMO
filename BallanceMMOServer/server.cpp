@@ -1178,23 +1178,29 @@ protected:
                 Printf("[Plain] (%u, %s): %s", networking_msg->m_conn, client_it->second.name, msg.text_content);
                 break;
             }
+            case bmmo::PublicWarning: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::public_warning_msg>(networking_msg);
+                Printf("[Warning] (%u, %s): %s", networking_msg->m_conn, client_it->second.name, msg.text_content);
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                break;
+            }
             case bmmo::HashData: {
                 bmmo::hash_data_msg msg{};
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
                 if (msg.data_name == "Balls.nmo" && !msg.is_same_data("fb29d77e63aad08499ce38d36266ec33")) {
-                    bmmo::plain_text_msg new_msg{};
+                    bmmo::public_warning_msg new_msg{};
                     std::string md5_string;
                     bmmo::string_from_hex_chars(md5_string, msg.md5, sizeof(msg.md5));
-                    new_msg.text_content = "Warning: " + client_it->second.name + " has a modified Balls.nmo (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
-                    Printf("%s", new_msg.text_content);
+                    new_msg.text_content = client_it->second.name + " has a modified Balls.nmo (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
+                    Printf("[Warning] %s", new_msg.text_content);
                     new_msg.serialize();
                     broadcast_message(new_msg.raw.str().data(), new_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
                 break;
             }
-            case bmmo::ModList: {
+            case bmmo::ModList: { // TODO: configurable mod blacklist/whitelist handling
                 break;
             }
             case bmmo::SoundData:

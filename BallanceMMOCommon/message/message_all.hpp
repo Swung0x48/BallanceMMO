@@ -43,5 +43,6 @@
 #include "login_accepted_v3_msg.hpp"
 #include "permanent_notification_msg.hpp"
 #include "sound_data_msg.hpp"
+#include "public_warning_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

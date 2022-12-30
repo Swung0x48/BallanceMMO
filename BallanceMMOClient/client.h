@@ -80,6 +80,10 @@ public:
         return status;
     }
 
+    virtual std::string get_own_name() {
+        return "Unidentified";
+    }
+
     int get_ping() {
         return get_status().m_nPing;
     }

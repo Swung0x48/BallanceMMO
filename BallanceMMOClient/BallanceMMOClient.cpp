@@ -1569,6 +1569,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         flash_window();
         break;
     }
+    case bmmo::PublicWarning: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::public_warning_msg>(network_msg);
+        SendIngameMessage("[Warning] " + msg.text_content);
+        flash_window();
+        break;
+    }
     case bmmo::SoundData: {
         auto msg = bmmo::message_utils::deserialize<bmmo::sound_data_msg>(network_msg);
         if (!msg.caption.empty())

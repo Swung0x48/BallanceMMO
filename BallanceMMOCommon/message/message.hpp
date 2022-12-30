@@ -65,6 +65,7 @@ namespace bmmo {
         LoginAcceptedV3,
         PermanentNotification,
         SoundData,
+        PublicWarning,
     };
 
     template<typename T, opcode C = None>
@@ -119,6 +120,9 @@ namespace bmmo {
 
     template<typename T>
     concept trivially_copyable_msg = is_trivially_copyable_msg<T>::value && !std::is_base_of<serializable_message, T>::value;
+
+    template<typename T>
+    concept non_trivially_copyable_msg = std::is_base_of<serializable_message, T>::value;
 }
 
 #endif //BALLANCEMMOSERVER_PACKET_HPP

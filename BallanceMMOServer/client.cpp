@@ -356,6 +356,10 @@ private:
                     Printf("%s (#%u)%s", data.name, id, (data.cheated ? " [CHEAT]" : ""));
                     clients_.insert({ id, { data.name, (bool) data.cheated, {}, data.map, data.sector } });
                 }
+                bmmo::plain_text_msg text_msg{};
+                text_msg.text_content = "Using Mock Client.";
+                text_msg.serialize();
+                send(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
             case bmmo::PlayerConnectedV2: {
@@ -448,6 +452,11 @@ private:
             case bmmo::PlainText: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::plain_text_msg>(networking_msg);
                 Printf(msg.text_content.c_str());
+                break;
+            }
+            case bmmo::PublicWarning: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::public_warning_msg>(networking_msg);
+                Printf("[Warning] %s", msg.text_content);
                 break;
             }
             case bmmo::ImportantNotification: {

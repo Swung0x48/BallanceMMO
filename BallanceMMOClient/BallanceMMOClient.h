@@ -78,6 +78,8 @@ public:
 		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingOutput);
 	}
 
+	virtual std::string get_own_name() override { return db_.get_nickname(); }
+
 private:
 	void OnLoad() override;
 	void OnPostStartMenu() override;

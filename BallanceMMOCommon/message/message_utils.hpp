@@ -33,25 +33,24 @@ namespace bmmo {
             return true;
         }
 
-        template<typename T>
-        constexpr inline T deserialize(void* data, [[maybe_unused]] int size) {
-            if constexpr (std::is_base_of<bmmo::serializable_message, T>::value) {
-                T msg{};
-                msg.raw.write(reinterpret_cast<char*>(data), size);
-                msg.deserialize();
-                return msg;
-            }
-            else {
-                return *reinterpret_cast<T*>(data);
-            }
+        template<trivially_copyable_msg T>
+        constexpr inline T deserialize(void* data, int) {
+            return *reinterpret_cast<T*>(data);
         }
-        
+
+        template<non_trivially_copyable_msg T>
+        constexpr inline T deserialize(void* data, int size) {
+            T msg{};
+            msg.raw.write(reinterpret_cast<char*>(data), size);
+            msg.deserialize();
+            return msg;
+        }
+
         template<typename T>
         constexpr inline T deserialize(ISteamNetworkingMessage* networking_msg) {
             return deserialize<T>(networking_msg->m_pData, networking_msg->m_cbSize);
         }
     };
 }
-
 
 #endif //BALLANCEMMOSERVER_MESSAGE_UTILS_HPP

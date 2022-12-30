@@ -29,6 +29,8 @@ namespace bmmo {
                 raw.write(reinterpret_cast<const char*>(&i), sizeof(i));
             }
             size = unchanged_balls.size();
+            if (size == 0)
+                return raw.good();
             raw.write(reinterpret_cast<const char*>(&size), sizeof(size));
             for (const auto& i: unchanged_balls) {
                 raw.write(reinterpret_cast<const char*>(&i), sizeof(i));
@@ -49,6 +51,8 @@ namespace bmmo {
                 if (!raw.good() || raw.gcount() != sizeof(owned_timed_ball_state))
                     return false;
             }
+            if (raw.tellg() == -1)
+                return raw.good();
             raw.read(reinterpret_cast<char*>(&size), sizeof(size));
             unchanged_balls.resize(size);
             for (uint32_t i = 0; i < size; ++i) {
