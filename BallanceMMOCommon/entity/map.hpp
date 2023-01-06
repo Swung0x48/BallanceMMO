@@ -3,11 +3,10 @@
 #include <cstdint>
 #include <vector>
 #include <string>
-#include <sstream>
-#include <iomanip>
 #include <cstring>
 #include <unordered_map>
 #include "../message/message_utils.hpp"
+#include "../utility/string_utils.hpp"
 
 namespace bmmo {
     enum class map_type : uint8_t {
@@ -16,28 +15,16 @@ namespace bmmo {
         CustomMap
     };
 
-    inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
-        for (unsigned int i = 0; i < src.length(); i += 2) {
-            std::string byte_string = src.substr(i, 2);
-            uint8_t byte = (uint8_t) strtol(byte_string.c_str(), NULL, 16);
-            dest[i / 2] = byte;
-        }
-    };
-
-    inline void string_from_hex_chars(std::string& dest, const uint8_t* src, const int length) {
-        std::stringstream ss;
-        ss << std::hex << std::setfill('0');
-        for (int i = 0; i < length; i++)
-            ss << std::setw(2) << (int)src[i];
-        dest = ss.str();
-    }
+    // compatibilty
+    using string_utils::hex_chars_from_string;
+    using string_utils::string_from_hex_chars;
 
     struct map {
         map_type type = map_type::Unknown;
         uint8_t md5[16] = {};
         int32_t level = 0;
 
-        static inline const char* const original_map_hashes[] = {
+        static constexpr const char* const original_map_hashes[] = {
             "00000000000000000000000000000000", // 0
             "a364b408fffaab4344806b427e37f1a7",
             "e90b2f535c8bf881e9cb83129fba241d",

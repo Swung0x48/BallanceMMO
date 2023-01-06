@@ -3,6 +3,7 @@
 #include <steam/steamnetworkingtypes.h>
 #include <string>
 #include <sstream>
+#include "message.hpp"
 #include "../utility/string_utils.hpp"
 
 namespace bmmo {
@@ -31,6 +32,26 @@ namespace bmmo {
             str = string_utils::ConvertWideToANSI(string_utils::ConvertUtf8ToWide(str));
 #endif
             return true;
+        }
+
+        template<std::semiregular T>
+        constexpr inline bool read_variable(std::istream& stream, T* t) {
+            stream.read(reinterpret_cast<char*>(t), sizeof(T));
+            if (stream.good() && stream.gcount() == sizeof(T))
+                return true;
+            return false;
+        }
+
+        template<std::semiregular T>
+        constexpr inline T read_variable(std::istream& stream) {
+            T t;
+            stream.read(reinterpret_cast<char*>(&t), sizeof(T));
+            return t;
+        }
+
+        template<std::semiregular T>
+        constexpr inline void write_variable(T* t, std::ostream& stream) {
+            stream.write(reinterpret_cast<const char*>(t), sizeof(T));
         }
 
         template<trivially_copyable_msg T>

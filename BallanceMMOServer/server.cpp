@@ -176,12 +176,11 @@ public:
             try {
                 config_ = YAML::Load(ifile);
                 if (config_["op_list"])
-                    op_players_ = config_["op_list"].as<std::unordered_map<std::string, std::string>>();
+                    op_players_ = config_["op_list"].as<decltype(op_players_)>();
                 if (config_["enable_op_privileges"])
                     op_mode_ = config_["enable_op_privileges"].as<bool>();
-                if (config_["ban_list"]) {
-                    banned_players_ = config_["ban_list"].as<std::unordered_map<std::string, std::string>>();
-                }
+                if (config_["ban_list"])
+                    banned_players_ = config_["ban_list"].as<decltype(banned_players_)>();
                 if (config_["mute_list"]) {
                     auto muted_vector = config_["mute_list"].as<std::vector<std::string>>();
                     muted_players_ = std::unordered_set(muted_vector.begin(), muted_vector.end());
@@ -215,6 +214,17 @@ public:
             config_["logging_level"] = "important";
         }
         set_logging_level(logging_level_);
+        if (config_["map_name_list"]) {
+            default_map_names_.clear();
+            for (const auto& element: config_["map_name_list"]) {
+                decltype(bmmo::map::md5) hash;
+                bmmo::string_utils::hex_chars_from_string(hash, element.first.as<std::string>());
+                default_map_names_.try_emplace(reinterpret_cast<const char*>(hash), element.second.as<std::string>());
+            }
+            if (get_client_count() < 1) map_names_.clear();
+            map_names_.insert(default_map_names_.begin(), default_map_names_.end());
+        } else
+            config_["map_name_list"] = YAML::Node(YAML::NodeType::Map);
 
         ifile.close();
         save_config_to_file();
@@ -464,6 +474,7 @@ protected:
                     << "# - Op list player data style: \"playername: uuid\".\n"
                     << "# - Ban list style: \"uuid: reason\".\n"
                     << "# - Mute list style: \"- uuid\".\n"
+                    << "# - Map name list style: \"md5_hash: name\".\n"
                     << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
                     << "# - Options for log levels: important, warning, msg.\n"
                     << std::endl;
@@ -493,7 +504,7 @@ protected:
         switch (get_client_count()) {
             case 0:
                 maps_.clear();
-                map_names_.clear();
+                map_names_ = default_map_names_;
                 permanent_notification_ = {};
                 [[fallthrough]];
             case 1:
@@ -1063,7 +1074,7 @@ protected:
             case bmmo::CheatState: {
                 auto* state_msg = reinterpret_cast<bmmo::cheat_state_msg*>(networking_msg->m_pData);
                 client_it->second.cheated = state_msg->content.cheated;
-                Printf("%s turned [%s] cheat!", client_it->second.name, state_msg->content.cheated ? "on" : "off");
+                Printf("%s turned cheat [%s]!", client_it->second.name, state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
@@ -1178,9 +1189,9 @@ protected:
                 Printf("[Plain] (%u, %s): %s", networking_msg->m_conn, client_it->second.name, msg.text_content);
                 break;
             }
-            case bmmo::PublicWarning: {
-                auto msg = bmmo::message_utils::deserialize<bmmo::public_warning_msg>(networking_msg);
-                Printf("[Warning] (%u, %s): %s", networking_msg->m_conn, client_it->second.name, msg.text_content);
+            case bmmo::PublicNotification: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(networking_msg);
+                Printf("[%s] (%u, %s): %s", msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.text_content);
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
@@ -1190,11 +1201,12 @@ protected:
                 msg.deserialize();
 
                 if (msg.data_name == "Balls.nmo" && !msg.is_same_data("fb29d77e63aad08499ce38d36266ec33")) {
-                    bmmo::public_warning_msg new_msg{};
+                    bmmo::public_notification_msg new_msg{};
+                    new_msg.type = bmmo::public_notification_type::Warning;
                     std::string md5_string;
                     bmmo::string_from_hex_chars(md5_string, msg.md5, sizeof(msg.md5));
                     new_msg.text_content = client_it->second.name + " has a modified Balls.nmo (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
-                    Printf("[Warning] %s", new_msg.text_content);
+                    Printf("[%s] %s", new_msg.get_type_name(), new_msg.text_content);
                     new_msg.serialize();
                     broadcast_message(new_msg.raw.str().data(), new_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
@@ -1286,7 +1298,7 @@ protected:
     // std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
     YAML::Node config_;
-    std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_;
+    std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_, default_map_names_;
     std::unordered_set<std::string> muted_players_;
     std::unordered_map<std::string, map_data> maps_;
     bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false;

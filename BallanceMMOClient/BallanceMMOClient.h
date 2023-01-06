@@ -4,7 +4,7 @@
 #include "CommandMMO.h"
 #include "text_sprite.h"
 #include "label_sprite.h"
-#include "client.h"
+#include "exported_client.h"
 #include "game_state.h"
 #include "game_objects.h"
 #include "local_state_handler_impl.h"
@@ -34,7 +34,7 @@ extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
 }
 
-class BallanceMMOClient : public IMod, public client {
+class BallanceMMOClient : public IMod, public bmmo::exported::client {
 public:
 	BallanceMMOClient(IBML* bml): 
 		IMod(bml),
@@ -78,7 +78,10 @@ public:
 		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingOutput);
 	}
 
-	virtual std::string get_own_name() override { return db_.get_nickname(); }
+	// virtual functions from bmmo::exported::client
+	std::string get_client_name() override { return db_.get_nickname(); }
+	bool is_spectator() override { return spectator_mode_; }
+	bmmo::named_map get_current_map() override { return current_map_; }
 
 private:
 	void OnLoad() override;
@@ -207,7 +210,7 @@ private:
 		return nullptr;
 	}
 
-	bool get_current_sector() {
+	bool update_current_sector() {
 		int sector = 0;
 		if (ingame_parameter_array_ != 0) {
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);

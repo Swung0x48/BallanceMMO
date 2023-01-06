@@ -21,17 +21,19 @@
 
 #include "console.hpp"
 
-template<typename T>
-inline void read_variable(std::istream& stream, T* t) {
-    stream.read(reinterpret_cast<char*>(t), sizeof(T));
-}
+// template<typename T>
+// inline void read_variable(std::istream& stream, T* t) {
+//     stream.read(reinterpret_cast<char*>(t), sizeof(T));
+// }
 
-template<typename T>
-inline T read_variable(std::istream& stream) {
-    T t;
-    stream.read(reinterpret_cast<char*>(&t), sizeof(T));
-    return t;
-}
+// template<typename T>
+// inline T read_variable(std::istream& stream) {
+//     T t;
+//     stream.read(reinterpret_cast<char*>(&t), sizeof(T));
+//     return t;
+// }
+
+using bmmo::message_utils::read_variable;
 
 enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
 

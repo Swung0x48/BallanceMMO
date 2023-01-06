@@ -65,7 +65,7 @@ namespace bmmo {
         LoginAcceptedV3,
         PermanentNotification,
         SoundData,
-        PublicWarning,
+        PublicNotification,
     };
 
     template<typename T, opcode C = None>

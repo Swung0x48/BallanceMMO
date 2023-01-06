@@ -308,7 +308,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
 }
 
 void BallanceMMOClient::OnPostCheckpointReached() {
-    if (get_current_sector() && connected()) send_current_sector();
+    if (update_current_sector() && connected()) send_current_sector();
 }
 
 void BallanceMMOClient::OnPostExitLevel() {
@@ -1498,18 +1498,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::ActionDenied: {
         auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
-
-        using dr = bmmo::deny_reason;
-        std::string reason = std::map<dr, const char*>{
-            {dr::NoPermission, "you don't have the permission to run this action."},
-            {dr::InvalidAction, "invalid action."},
-            {dr::InvalidTarget, "invalid target."},
-            {dr::TargetNotFound, "target not found."},
-            {dr::PlayerMuted, "you are not allowed to post public messages on this server."},
-        }[msg->content.reason];
-        if (reason.empty()) reason = "unknown reason.";
-
-        SendIngameMessage(("Action failed: " + reason).c_str());
+        SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str());
         break;
     }
     case bmmo::CurrentMap: {
@@ -1569,9 +1558,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         flash_window();
         break;
     }
-    case bmmo::PublicWarning: {
-        auto msg = bmmo::message_utils::deserialize<bmmo::public_warning_msg>(network_msg);
-        SendIngameMessage("[Warning] " + msg.text_content);
+    case bmmo::PublicNotification: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(network_msg);
+        SendIngameMessage("[" + msg.get_type_name() + "] " + msg.text_content);
         flash_window();
         break;
     }

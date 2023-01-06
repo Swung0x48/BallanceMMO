@@ -3,6 +3,8 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
 #ifdef _WIN32
 # ifndef WIN32_LEAN_AND_MEAN
 # define WIN32_LEAN_AND_MEAN
@@ -59,6 +61,22 @@ namespace bmmo {
                     str.append(delim + strings[i]);
             }
             return str.substr(0, MAX_LENGTH);
+        }
+
+        inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
+            for (unsigned int i = 0; i < src.length(); i += 2) {
+                std::string byte_string = src.substr(i, 2);
+                uint8_t byte = (uint8_t) strtol(byte_string.c_str(), NULL, 16);
+                dest[i / 2] = byte;
+            }
+        }
+
+        inline void string_from_hex_chars(std::string& dest, const uint8_t* src, const int length) {
+            std::stringstream ss;
+            ss << std::hex << std::setfill('0');
+            for (int i = 0; i < length; i++)
+                ss << std::setw(2) << (int)src[i];
+            dest = ss.str();
         }
     }
 }

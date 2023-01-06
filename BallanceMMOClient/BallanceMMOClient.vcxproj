@@ -28,6 +28,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="BallanceMMOClient.h" />
+    <ClInclude Include="exported_client.h" />
     <ClInclude Include="client.h" />
     <ClInclude Include="CommandMMO.h" />
     <ClInclude Include="dumpfile.h" />
