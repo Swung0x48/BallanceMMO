@@ -51,7 +51,7 @@ namespace bmmo {
                 if (!raw.good() || raw.gcount() != sizeof(owned_timed_ball_state))
                     return false;
             }
-            if (raw.tellg() == -1)
+            if (raw.peek() == std::stringstream::traits_type::eof())
                 return raw.good();
             raw.read(reinterpret_cast<char*>(&size), sizeof(size));
             unchanged_balls.resize(size);

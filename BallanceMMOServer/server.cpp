@@ -217,9 +217,9 @@ public:
         if (config_["map_name_list"]) {
             default_map_names_.clear();
             for (const auto& element: config_["map_name_list"]) {
-                decltype(bmmo::map::md5) hash;
-                bmmo::string_utils::hex_chars_from_string(hash, element.first.as<std::string>());
-                default_map_names_.try_emplace(reinterpret_cast<const char*>(hash), element.second.as<std::string>());
+                std::string hash(sizeof(bmmo::map::md5), 0);
+                bmmo::string_utils::hex_chars_from_string(reinterpret_cast<uint8_t*>(hash.data()), element.first.as<std::string>());
+                default_map_names_.try_emplace(hash, element.second.as<std::string>());
             }
             if (get_client_count() < 1) map_names_.clear();
             map_names_.insert(default_map_names_.begin(), default_map_names_.end());
