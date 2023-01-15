@@ -184,12 +184,10 @@ public:
 
     void print_positions() {
         for (const auto& [id, data]: clients_) {
-            std::string type = std::map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
-            if (type.empty()) type = "unknown (id #" + std::to_string(data.state.type) + ")";
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
                     data.state.position.x, data.state.position.y, data.state.position.z,
-                    type
+                    data.state.get_type_name()
             );
         }
     }

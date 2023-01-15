@@ -11,7 +11,7 @@ namespace bmmo {
         Countdown_3 = 3,
         Ready = 4,
         ConfirmReady = 5,
-        Unknown = UINT8_MAX
+        Unknown = std::numeric_limits<std::underlying_type_t<countdown_type>>::max(),
     };
 
     struct countdown {

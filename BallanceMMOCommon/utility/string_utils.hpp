@@ -78,6 +78,12 @@ namespace bmmo {
                 ss << std::setw(2) << (int)src[i];
             dest = ss.str();
         }
+
+        // sanitize chat message (remove control characters)
+        inline void sanitize_string(std::string& str) {
+            std::replace_if(str.begin(), str.end(),
+                [](char c) { return std::iscntrl(c); }, ' ');
+        }
     }
 }
 

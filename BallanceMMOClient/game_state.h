@@ -16,6 +16,15 @@ struct BallState {
 	uint32_t type = 0;
 	VxVector position{};
 	VxQuaternion rotation{};
+
+	const std::string get_type_name() const {
+		switch (type) {
+			case 0: return "paper";
+			case 1: return "stone";
+			case 2: return "wood";
+			default: return "unknown (id #" + std::to_string(type) + ")";
+		}
+	}
 };
 
 struct TimedBallState : BallState {

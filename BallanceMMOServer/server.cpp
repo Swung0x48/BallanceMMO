@@ -235,10 +235,11 @@ public:
     void print_clients(bool print_uuid = false) {
         std::map<decltype(username_)::key_type, decltype(username_)::mapped_type> spectators;
         static const auto print_client = [&](auto id, auto data) {
-            Printf("%u: %s%s%s%s",
+            Printf("%u: %s%s%s%s%s",
                     id, data.name,
                     print_uuid ? (" (" + get_uuid_string(data.uuid) + ")") : "",
-                    data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "");
+                    data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "",
+                    is_muted(data.uuid) ? " [Muted]" : "");
         };
         for (const auto& i: std::map(username_.begin(), username_.end())) {
             if (bmmo::name_validator::is_spectator(i.first))
@@ -272,12 +273,10 @@ public:
 
     void print_positions() {
         for (const auto& [id, data]: clients_) {
-            std::string type = std::map<int, std::string>{{0, "paper"}, {1, "stone"}, {2, "wood"}}[data.state.type];
-            if (type.empty()) type = "unknown (id #" + std::to_string(data.state.type) + ")";
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
                     data.state.position.x, data.state.position.y, data.state.position.z,
-                    type
+                    data.state.get_type_name()
             );
         }
     }
@@ -551,6 +550,11 @@ protected:
             uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
         );
         return {str};
+    }
+
+    inline bool is_muted(HSteamNetConnection client) { return is_muted(clients_[client].uuid); }
+    inline bool is_muted(uint8_t* uuid) {
+        return muted_players_.contains(get_uuid_string(uuid));
     }
 
     bool is_op(HSteamNetConnection client) {
@@ -884,11 +888,8 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                // sanitize chat message (remove control characters)
-                std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
-                    [](char c) { return std::iscntrl(c); }, ' ');
-
-                bool muted = muted_players_.contains(get_uuid_string(client_it->second.uuid));
+                bmmo::string_utils::sanitize_string(msg.chat_content);
+                const bool muted = is_muted(client_it->second.uuid);
 
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
@@ -916,8 +917,7 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
-                    [](char c) { return std::iscntrl(c); }, ' ');
+                bmmo::string_utils::sanitize_string(msg.chat_content);
                 const HSteamNetConnection receiver = msg.player_id;
                 msg.player_id = networking_msg->m_conn;
 
@@ -944,11 +944,13 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                std::replace_if(msg.chat_content.begin(), msg.chat_content.end(),
-                    [](char c) { return std::iscntrl(c); }, ' ');
+                bmmo::string_utils::sanitize_string(msg.chat_content);
                 msg.player_id = networking_msg->m_conn;
+                const bool muted = is_muted(client_it->second.uuid);
 
-                Printf("[Announcement] (%u, %s): %s", msg.player_id, client_it->second.name, msg.chat_content);
+                Printf("%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
+                    msg.player_id, client_it->second.name, msg.chat_content);
+                if (muted) return;
                 msg.clear();
                 msg.serialize();
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1110,8 +1112,7 @@ protected:
                 if (deny_action(networking_msg->m_conn))
                     break;
 
-                std::replace_if(msg.reason.begin(), msg.reason.end(),
-                    [](char c) { return std::iscntrl(c); }, ' ');
+                bmmo::string_utils::sanitize_string(msg.reason);
 
                 if (!kick_client(player_id, msg.reason, client_it->first)) {
                     bmmo::action_denied_msg new_msg{};
@@ -1172,10 +1173,13 @@ protected:
             case bmmo::PermanentNotification: {
                 if (deny_action(networking_msg->m_conn))
                     break;
-                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
-                msg.title = client_it->second.name;
-                Printf("[Bulletin] %s%s", msg.title,
+                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);bmmo::string_utils::sanitize_string(msg.text_content);
+                const bool muted = is_muted(client_it->second.uuid);
+
+                Printf("%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
                         msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
+                if (muted) return;
+                msg.title = client_it->second.name;
                 permanent_notification_ = {msg.title, msg.text_content};
                 msg.clear();
                 msg.serialize();

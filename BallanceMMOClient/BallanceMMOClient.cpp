@@ -664,12 +664,10 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 });
                 states[db_.get_nickname()] = local_state_handler_->get_local_state();
                 for (const auto& i: states) {
-                    std::string type = std::map<int, std::string>{ {0, "paper"}, {1, "stone"}, {2, "wood"} }[i.second.type];
-                    if (type.empty()) type = "unknown (id #" + std::to_string(i.second.type) + ")";
                     SendIngameMessage(std::format("{} is at {:.2f}, {:.2f}, {:.2f} with {} ball.",
                                       i.first,
                                       i.second.position.x, i.second.position.y, i.second.position.z,
-                                      type
+                                      i.second.get_type_name()
                     ));
                 }
             }
