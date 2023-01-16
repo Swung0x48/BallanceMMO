@@ -9,29 +9,37 @@
 #include <cassert>
 
 namespace bmmo {
-    struct compressed_flag {
-        enum flag_t : uint8_t {
-            BallSwitched = 1 << 0,
-            Quat_XOmit = 0 << 1,
-            Quat_YOmit = 1 << 1,
-            Quat_ZOmit = 2 << 1,
-            Quat_WOmit = 3 << 1,
-        };
-    };
-
     struct owned_compressed_ball_state_msg: public serializable_message {
         std::vector<owned_timed_ball_state> balls;
         std::vector<owned_timestamp> unchanged_balls;
 
+        owned_compressed_ball_state_msg(): serializable_message(OwnedCompressedBallState) {}
+
+        struct compressed_flag {
+            enum flag_t : uint8_t {
+                BallSwitched = 1 << 0,
+                Quat_XOmit = 0 << 1,
+                Quat_YOmit = 1 << 1,
+                Quat_ZOmit = 2 << 1,
+                Quat_WOmit = 3 << 1,
+            };
+            static constexpr int used_bits = 3;
+        };
+
         // [-0.7, 0.7]
         // 256 8bit, 0.7 * 2 / 256 = 0.0027 * 2, 1 * 2 / 256 = 0.0039 * 2
 
-        static constexpr const int ROTATION_SIZE = sizeof(quaternion::v) / sizeof(std::remove_all_extents_t<decltype(quaternion::v)>);
-        static constexpr const float SQRT_2_DIVIDED_BY_2 = 0.7071067811865475f;
-        static constexpr const float ROTATION_STEP = SQRT_2_DIVIDED_BY_2 * 2 / (std::numeric_limits<uint8_t>::max() + 1);
-        static constexpr const int TIMESTAMP_SIZE = 6;
+        static constexpr int ROTATION_LENGTH = sizeof(quaternion::v) / sizeof(std::remove_all_extents_t<decltype(quaternion::v)>);
+        static constexpr float SQRT_2_DIVIDED_BY_2 = 0.7071067811865475f;
+        static constexpr int ROTATION_BIT_LENGTH = 9;
+        static constexpr int ROTATION_COUNT = 512;
+        static constexpr float ROTATION_STEP = SQRT_2_DIVIDED_BY_2 * 2 / ROTATION_COUNT;
+        static constexpr int TIMESTAMP_SIZE = 6;
 
-        owned_compressed_ball_state_msg(): serializable_message(OwnedCompressedBallState) {}
+        struct compressed_bitfield {
+            signed int flag: compressed_flag::used_bits,
+                rotation0: ROTATION_BIT_LENGTH, rotation1: ROTATION_BIT_LENGTH, rotation2: ROTATION_BIT_LENGTH;
+        };
 
         bool serialize() override {
             serializable_message::serialize();
@@ -44,29 +52,37 @@ namespace bmmo {
                 raw.write(reinterpret_cast<const char*>(&ball.state.position), sizeof(ball.state.position));
 
                 // Compress rotation
-                int index = 0;
+                int max_value_index = 0;
                 float max_value = std::abs(ball.state.rotation.v[0]);
-                for (int i = 1; i < ROTATION_SIZE; ++i) {
+                for (int i = 1; i < ROTATION_LENGTH; ++i) {
                     float f = std::abs(ball.state.rotation.v[i]);
                     if (f > max_value) {
-                        index = i;
+                        max_value_index = i;
                         max_value = f;
                     }
                 }
-                assert(index >= 0 && index < ROTATION_SIZE);
-                const bool sign_inverted = (ball.state.rotation.v[index] < 0);
-                auto flag = static_cast<std::underlying_type_t<compressed_flag::flag_t>>(index << 1);
+                assert(max_value_index >= 0 && max_value_index < ROTATION_LENGTH);
+                const bool sign_inverted = (ball.state.rotation.v[max_value_index] < 0);
+
+                compressed_bitfield bits;
+                static_assert(sizeof(bits) == 4);
+
+                bits.flag = static_cast<std::underlying_type_t<compressed_flag::flag_t>>(max_value_index << 1);
 
                 // TODO: Implement ball trafo compression
                 // flag |= compressed_flag::BallSwitched; // Short circuit for now 
 
-                raw.write(reinterpret_cast<const char*>(&flag), sizeof(flag));
-
-                for (int i = 0; i < ROTATION_SIZE; ++i) {
-                    if (i == index) continue;
-                    auto v = int8_t(((sign_inverted) ? -1 : 1) * std::round(ball.state.rotation.v[i] / ROTATION_STEP));
-                    raw.write(reinterpret_cast<const char*>(&v), sizeof(v));
+                int compressed_rotation[ROTATION_LENGTH - 1], i = 0;
+                for (auto& v: compressed_rotation) {
+                    if (i == max_value_index) ++i;
+                    v = int(((sign_inverted) ? -1 : 1) * std::round(ball.state.rotation.v[i] / ROTATION_STEP));
+                    ++i;
                 }
+                bits.rotation0 = compressed_rotation[0];
+                bits.rotation1 = compressed_rotation[1];
+                bits.rotation2 = compressed_rotation[2];
+
+                raw.write(reinterpret_cast<const char*>(&bits), sizeof(bits));
 
                 // Compress timestamp
                 const auto timestamp = int64_t(ball.state.timestamp);
@@ -106,23 +122,21 @@ namespace bmmo {
                 if (!raw.good() || raw.gcount() != sizeof(ball.state.position))
                     return false;
                 
-                std::underlying_type_t<compressed_flag::flag_t> flag;
-                raw.read(reinterpret_cast<char*>(&flag), sizeof(flag));
-                if (!raw.good() || raw.gcount() != sizeof(flag))
+                compressed_bitfield bits;
+                raw.read(reinterpret_cast<char*>(&bits), sizeof(bits));
+                if (!raw.good() || raw.gcount() != sizeof(bits))
                     return false;
-                int index = (flag >> 1) & 0x3;
-                float omitted_squared = 1;
-                for (int i = 0; i < ROTATION_SIZE; ++i) {
-                    if (i == index) continue;
-                    int8_t v;
-                    raw.read(reinterpret_cast<char*>(&v), sizeof(v));
-                    if (!raw.good() || raw.gcount() != sizeof(v))
-                        return false;
-                    const float v_uncompressed = v * ROTATION_STEP;
-                    omitted_squared -= v_uncompressed * v_uncompressed;
-                    ball.state.rotation.v[i] = v_uncompressed;
+                int max_value_index = (bits.flag >> 1) & 0x3;
+                float max_value_squared = 1;
+
+                int compressed_rotation[] = {bits.rotation0, bits.rotation1, bits.rotation2}, i = 0;
+                for (const int v: compressed_rotation) {
+                    if (i == max_value_index) ++i;
+                    ball.state.rotation.v[i] = v * ROTATION_STEP;
+                    max_value_squared -= ball.state.rotation.v[i] * ball.state.rotation.v[i];
+                    ++i;
                 }
-                ball.state.rotation.v[index] = std::sqrt(omitted_squared);
+                ball.state.rotation.v[max_value_index] = std::sqrt(max_value_squared);
 
                 int64_t timestamp{};
                 raw.read(reinterpret_cast<char*>(&timestamp), TIMESTAMP_SIZE);
