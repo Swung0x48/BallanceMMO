@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include <sstream>
+#include <concepts>
 
 namespace bmmo {
     enum opcode : uint32_t {
@@ -66,6 +67,8 @@ namespace bmmo {
         PermanentNotification,
         SoundData,
         PublicNotification,
+
+        OwnedCompressedBallState,
     };
 
     template<typename T, opcode C = None>

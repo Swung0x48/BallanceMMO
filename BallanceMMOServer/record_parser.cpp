@@ -813,7 +813,8 @@ private:
                 record_permanent_notification_ = {msg.title, msg.text_content};
                 break;
             }
-            case bmmo::OwnedTimedBallState: {
+            case bmmo::OwnedTimedBallState:
+            case bmmo::OwnedCompressedBallState: {
                 return message_action_t::BroadcastNoDelay;
             }
             default: {

@@ -406,18 +406,21 @@ private:
 
                 break;
             }
-            case bmmo::OwnedTimedBallState: {
-                bmmo::owned_timed_ball_state_msg msg;
+            case bmmo::OwnedTimedBallState: 
+                break;
+            case bmmo::OwnedCompressedBallState: {
+                bmmo::owned_compressed_ball_state_msg msg;
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
                 for (auto& ball : msg.balls) {
                     if (print_states_)
-                        Printf("%u: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
+                        Printf("%u: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f), %ld",
                             ball.player_id,
                             ball.state.type,
                             ball.state.position.x, ball.state.position.y, ball.state.position.z,
-                            ball.state.rotation.x, ball.state.rotation.y, ball.state.rotation.z, ball.state.rotation.w);
+                            ball.state.rotation.x, ball.state.rotation.y, ball.state.rotation.z, ball.state.rotation.w,
+                            int64_t(ball.state.timestamp));
                     clients_[ball.player_id].state = ball.state;
                 }
 

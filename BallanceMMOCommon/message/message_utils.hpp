@@ -3,6 +3,7 @@
 #include <steam/steamnetworkingtypes.h>
 #include <string>
 #include <sstream>
+#include <concepts>
 #include "message.hpp"
 #include "../utility/string_utils.hpp"
 
@@ -50,7 +51,7 @@ namespace bmmo {
         }
 
         template<std::semiregular T>
-        constexpr inline void write_variable(T* t, std::ostream& stream) {
+        constexpr inline void write_variable(const T* t, std::ostream& stream) {
             stream.write(reinterpret_cast<const char*>(t), sizeof(T));
         }
 

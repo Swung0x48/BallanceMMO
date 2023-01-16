@@ -2,6 +2,7 @@
 #define BALLANCEMMOSERVER_COUNTDOWN_HPP
 #include "message.hpp"
 #include <cstdint>
+#include <limits>
 
 namespace bmmo {
     enum class countdown_type: uint8_t {

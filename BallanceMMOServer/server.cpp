@@ -1223,6 +1223,7 @@ protected:
             case bmmo::OwnedBallState:
             case bmmo::OwnedBallStateV2:
             case bmmo::OwnedTimedBallState:
+            case bmmo::OwnedCompressedBallState:
             case bmmo::LoginAcceptedV2:
             case bmmo::LoginAcceptedV3:
             case bmmo::PlayerConnectedV2:
@@ -1264,7 +1265,7 @@ protected:
     }
 
     inline void tick() {
-        bmmo::owned_timed_ball_state_msg msg{};
+        bmmo::owned_compressed_ball_state_msg msg{};
         pull_unupdated_ball_states(msg.balls, msg.unchanged_balls);
         if (msg.balls.empty() && msg.unchanged_balls.empty())
             return;
