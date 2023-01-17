@@ -17,6 +17,7 @@
 #include <list>
 #include <fstream>
 #include <condition_variable>
+#include <random>
 
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
@@ -775,23 +776,28 @@ int main(int argc, char** argv) {
     console.register_command("help", [&] { role::Printf(console.get_help_string().c_str()); });
     console.register_command("stop", [&] { client.shutdown(); });
     auto pos_function = [&](bool translate = false) {
+        std::mt19937 random_gen(std::random_device{}()); 
+        std::uniform_real_distribution<float> pos_dist(-10, 10), rot_dist(-1, 1);
         auto& msg = client.get_local_state_msg();
-        float* pos = msg.content.position.v;
+        float* const pos = msg.content.position.v;
         for (int i = 0; i < 3; ++i) {
             if (!console.empty())
                 pos[i] = console.get_next_double() + ((translate) ? pos[i] : 0.0f);
             else
-                pos[i] = (rand() % 2000 - 1000) / 100.0f + ((translate) ? pos[i] : 0.0f);
+                pos[i] = pos_dist(random_gen) + ((translate) ? pos[i] : 0.0f);
         }
-        float* rot = msg.content.rotation.v;
+        float* const rot = msg.content.rotation.v;
+        float last_squared = 1;
         for (int i = 0; i < 4; ++i) {
             if (!console.empty())
                 rot[i] = console.get_next_double() + ((translate) ? rot[i] : 0.0f);
             else
-                rot[i] = (rand() % 3600 - 1800) / 10.0f + ((translate) ? rot[i] : 0.0f);
+                rot[i] = rot_dist(random_gen) + ((translate) ? rot[i] : 0.0f);
+            if (i != 3) last_squared -= rot[i] * rot[i];
         }
+        rot[3] = std::sqrt(last_squared);
         msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-        client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.1f, %.1f, %.1f, %.1f)",
+        client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.3f, %.3f, %.3f, %.3f)",
             pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
 //        for (int i = 0; i < 50; ++i)
         client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);

@@ -264,15 +264,18 @@ public:
     }
 
     void print_player_maps() {
-        for (const auto& [id, data]: clients_)
+        for (const auto& [_, id]: username_) {
+            auto& data = clients_[id];
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
                 data.current_sector, bmmo::get_ordinal_rank(data.current_sector),
                 data.current_map.get_display_name(map_names_));
+        }
     }
 
     void print_positions() {
-        for (const auto& [id, data]: clients_) {
+        for (const auto& [_, id]: username_) {
+            auto& data = clients_[id];
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
                     data.state.position.x, data.state.position.y, data.state.position.z,
@@ -298,7 +301,7 @@ public:
             std::unique_lock<std::mutex> lock(client_data_mutex_);
             if (i.second.state.timestamp.is_zero())
                 continue;
-            balls.push_back({i.second.state, i.first});
+            balls.emplace_back(i.second.state, i.first);
         }
     }
 
@@ -306,11 +309,11 @@ public:
         for (auto& i: clients_) {
             std::unique_lock<std::mutex> lock(client_data_mutex_);
             if (!i.second.state_updated) {
-                balls.push_back({i.second.state, i.first});
+                balls.emplace_back(i.second.state, i.first);
                 i.second.state_updated = true;
             }
             if (!i.second.timestamp_updated) {
-                unchanged_balls.push_back({i.second.state.timestamp, i.first});
+                unchanged_balls.emplace_back(i.second.state.timestamp, i.first);
                 i.second.timestamp_updated = true;
             }
         }
@@ -788,9 +791,9 @@ protected:
 
                 // notify this client of other online players
                 bmmo::login_accepted_v3_msg accepted_msg;
+                accepted_msg.online_players.reserve(clients_.size());
                 for (const auto& [id, data]: clients_) {
                     //if (client_it != it)
-                    accepted_msg.online_players.reserve(clients_.size());
                     accepted_msg.online_players.insert({id, {data.name, data.cheated, data.current_map, data.current_sector}});
                 }
                 accepted_msg.serialize();
