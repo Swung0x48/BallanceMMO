@@ -264,7 +264,7 @@ public:
     }
 
     void print_player_maps() {
-        for (const auto& [_, id]: username_) {
+        for (const auto& [_, id]: std::map(username_.begin(), username_.end())) {
             auto& data = clients_[id];
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
@@ -274,7 +274,7 @@ public:
     }
 
     void print_positions() {
-        for (const auto& [_, id]: username_) {
+        for (const auto& [_, id]: std::map(username_.begin(), username_.end())) {
             auto& data = clients_[id];
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,

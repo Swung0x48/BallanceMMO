@@ -166,7 +166,13 @@ public:
     }
 
     void print_player_maps() {
-        for (const auto& [id, data]: clients_)
+        std::vector<std::pair<HSteamNetConnection, client_data>> players;
+        players.reserve(clients_.size());
+        for (const auto& i: clients_)
+            players.push_back(i);
+        std::sort(players.begin(), players.end(), [](const auto& i1, const auto& i2)
+            { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
+        for (const auto& [id, data]: players)
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
                 data.current_sector, bmmo::get_ordinal_rank(data.current_sector),
@@ -184,7 +190,13 @@ public:
     }
 
     void print_positions() {
-        for (const auto& [id, data]: clients_) {
+        std::vector<std::pair<HSteamNetConnection, client_data>> players;
+        players.reserve(clients_.size());
+        for (const auto& i: clients_)
+            players.push_back(i);
+        std::sort(players.begin(), players.end(), [](const auto& i1, const auto& i2)
+            { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
+        for (const auto& [id, data]: players) {
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
                     data.state.position.x, data.state.position.y, data.state.position.z,
