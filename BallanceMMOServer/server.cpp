@@ -772,8 +772,8 @@ protected:
                 if (!validate_client(networking_msg->m_conn, msg))
                     break;
 
-                // accepting client
-                clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}});  // add the client here
+                // accepting client and adding it to the client list
+                client_it = clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}}).first;
                 memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
                 username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;
                 Printf("%s (%s; v%s) logged in with cheat mode %s!\n",
@@ -838,7 +838,7 @@ protected:
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
                 std::unique_lock<std::mutex> lock(client_data_mutex_);
-                clients_[networking_msg->m_conn].state = {state_msg->content, SteamNetworkingUtils()->GetLocalTimestamp()};
+                client_it->second.state = {state_msg->content, SteamNetworkingUtils()->GetLocalTimestamp()};
                 client_it->second.state_updated = false;
 
                 // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
@@ -1176,7 +1176,8 @@ protected:
             case bmmo::PermanentNotification: {
                 if (deny_action(networking_msg->m_conn))
                     break;
-                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);bmmo::string_utils::sanitize_string(msg.text_content);
+                auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
+                bmmo::string_utils::sanitize_string(msg.text_content);
                 const bool muted = is_muted(client_it->second.uuid);
 
                 Printf("%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
@@ -1467,9 +1468,7 @@ int main(int argc, char** argv) {
         server.Printf("[Announcement] ([Server]): %s", msg.chat_content);
     });
     console.register_command("cheat", [&] {
-        bool cheat_state = false;
-        if (console.get_next_word() == "on")
-            cheat_state = true;
+        bool cheat_state = (console.get_next_word() == "on");
         server.toggle_cheat(cheat_state);
     });
     console.register_command("version", [&] { server.print_version_info(); });
@@ -1519,9 +1518,7 @@ int main(int argc, char** argv) {
         } else {
             client = server.get_client_id(client_input);
         }
-        bool action = false;
-        if (cmd == "op" || cmd == "mute")
-            action = true;
+        bool action = (cmd == "op" || cmd == "mute");
         if (cmd == "op" || cmd == "deop")
             server.set_op(client, action);
         else
@@ -1617,6 +1614,7 @@ int main(int argc, char** argv) {
         if (!console.read_input(line)) {
             puts("stop");
             server.shutdown();
+            break;
         };
         server.LogFileOutput(("> " + line).c_str());
 

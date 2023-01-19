@@ -21,18 +21,6 @@
 
 #include "console.hpp"
 
-// template<typename T>
-// inline void read_variable(std::istream& stream, T* t) {
-//     stream.read(reinterpret_cast<char*>(t), sizeof(T));
-// }
-
-// template<typename T>
-// inline T read_variable(std::istream& stream) {
-//     T t;
-//     stream.read(reinterpret_cast<char*>(&t), sizeof(T));
-//     return t;
-// }
-
 using bmmo::message_utils::read_variable;
 
 enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
@@ -115,6 +103,9 @@ public:
         HSteamNetConnection id = k_HSteamNetConnection_Invalid;
         player_state_t state{};
     };
+
+    SteamNetworkingMicroseconds get_current_record_time() { return current_record_time_; }
+    time_t get_record_start_world_time() { return record_start_world_time_; }
 
     int get_segment_index(SteamNetworkingMicroseconds time) {
         return time / (int)1e7;
@@ -269,10 +260,10 @@ public:
         record_version_ = read_variable<decltype(record_version_)>(record_stream_);
         // record_stream_.read(reinterpret_cast<char*>(&version), sizeof(version));
         Printf("Version: \t\t%s\n", record_version_.to_string());
-        auto start_time = read_variable<time_t>(record_stream_);
+        record_start_world_time_ = read_variable<int64_t>(record_stream_);
         // record_stream_.read(reinterpret_cast<char *>(&start_time), sizeof(start_time));
         char time_str[32];
-        strftime(time_str, 32, "%F %T", localtime(&start_time));
+        strftime(time_str, sizeof(time_str), "%F %T", localtime(&record_start_world_time_));
         Printf("Record start time: \t%s\n", time_str);
         record_start_time_ = read_variable<decltype(record_start_time_)>(record_stream_);
 
@@ -471,6 +462,10 @@ public:
 
     void print_current_record_time() {
         Printf("Current record is played to %.3lfs.", current_record_time_ / 1e6);
+        auto current_world_time = time_t(current_record_time_ / 1e6 + record_start_world_time_);
+        char time_str[32];
+        std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&current_world_time));
+        Printf("Real world time: %s.", time_str);
     }
 
     void poll_local_state_changes() override {}
@@ -552,7 +547,7 @@ private:
     void backward_seek(SteamNetworkingMicroseconds dest_time) {
         {
             std::unique_lock<std::mutex> lk(record_data_mutex_);
-            record_stream_.seekg(strlen(bmmo::RECORD_HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(time_t) + sizeof(SteamNetworkingMicroseconds));
+            record_stream_.seekg(strlen(bmmo::RECORD_HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(int64_t) + sizeof(SteamNetworkingMicroseconds));
             started_ = false;
             record_clients_.clear();
             record_map_names_.clear();
@@ -829,6 +824,7 @@ private:
     bmmo::version_t record_version_;
     std::ifstream record_stream_;
     SteamNetworkingMicroseconds record_start_time_;
+    time_t record_start_world_time_;
     std::chrono::steady_clock::time_point time_zero_, time_pause_;
 
     uint16_t port_ = 0;
@@ -929,7 +925,36 @@ int main(int argc, char** argv) {
         replayer.pause();
     });
     console.register_command("seek", [&]() {
-        replayer.seek(atof(console.get_next_word().c_str()));
+        constexpr auto print_hint = [] {
+            role::Printf("Usage: \"seek <time>\".");
+            role::Printf("Examples:\t seek 11.4 || seek -51.4 || seek +19:19.810");
+            role::Printf("\t\t seek 2019-08-10 11:45:14");
+        };
+        if (console.empty()) { print_hint(); return; }
+        auto time_string = console.get_rest_of_line();
+        double time_value = 0;
+        switch (std::count(time_string.begin(), time_string.end(), ':')) {
+            default:
+            case 0: // precise time point measured in seconds
+                time_value = atof(time_string.c_str());
+                break;
+            case 1:
+                double minutes, seconds;
+                if (sscanf(time_string.c_str(), "%lf:%lf", &minutes, &seconds) != 2) {
+                    print_hint(); return;
+                };
+                time_value = minutes * 60 + seconds * (minutes < 0 ? -1 : 1);
+                break;
+            case 2:
+                std::stringstream time_stream(time_string); std::tm time_struct;
+                time_stream >> std::get_time(&time_struct, "%Y-%m-%d %H:%M:%S");
+                if (time_stream.fail()) { print_hint(); return; };
+                time_value = std::mktime(&time_struct) - replayer.get_record_start_world_time();
+                break;
+        }
+        if (time_string.starts_with('+') || time_string.starts_with('-'))
+            time_value += replayer.get_current_record_time() / 1e6;
+        replayer.seek(time_value);
     });
     console.register_command("seek_legacy", [&]() {
         replayer.seek_legacy(atof(console.get_next_word().c_str()));
@@ -963,6 +988,7 @@ int main(int argc, char** argv) {
         if (!console.read_input(line)) {
             puts("stop");
             replayer.shutdown();
+            break;
         };
 
         // bmmo::command_parser parser(line);
