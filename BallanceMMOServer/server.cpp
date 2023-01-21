@@ -235,11 +235,14 @@ public:
     void print_clients(bool print_uuid = false) {
         std::map<decltype(username_)::key_type, decltype(username_)::mapped_type> spectators;
         static const auto print_client = [&](auto id, auto data) {
-            Printf("%u: %s%s%s%s%s",
+            SteamNetConnectionRealTimeStatus_t status{};
+            interface_->GetConnectionRealTimeStatus(id, &status, 0, nullptr);
+            Printf("%u: %s%s%s%s%s - %dms, %.2f%% quality",
                     id, data.name,
                     print_uuid ? (" (" + get_uuid_string(data.uuid) + ")") : "",
                     data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "",
-                    is_muted(data.uuid) ? " [Muted]" : "");
+                    is_muted(data.uuid) ? " [Muted]" : "",
+                    status.m_nPing, status.m_flConnectionQualityLocal * 100);
         };
         for (const auto& i: std::map(username_.begin(), username_.end())) {
             if (bmmo::name_validator::is_spectator(i.first))
@@ -1418,7 +1421,7 @@ int main(int argc, char** argv) {
             server.Printf("[Plain]: %s", msg.text_content);
         } else {
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("[Plain -> #%u]: %s", msg.text_content, client);
+            server.Printf("[Plain -> #%u]: %s", client, msg.text_content);
         }
     };
     console.register_command("plaintext", send_plain_text_msg);

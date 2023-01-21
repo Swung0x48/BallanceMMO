@@ -938,14 +938,14 @@ int main(int argc, char** argv) {
             case 0: // precise time point measured in seconds
                 time_value = atof(time_string.c_str());
                 break;
-            case 1:
+            case 1: // [sign]<minute>:<second>
                 double minutes, seconds;
                 if (sscanf(time_string.c_str(), "%lf:%lf", &minutes, &seconds) != 2) {
                     print_hint(); return;
                 };
                 time_value = minutes * 60 + seconds * (minutes < 0 ? -1 : 1);
                 break;
-            case 2:
+            case 2: // real-world time format
                 std::stringstream time_stream(time_string); std::tm time_struct;
                 time_stream >> std::get_time(&time_struct, "%Y-%m-%d %H:%M:%S");
                 if (time_stream.fail()) { print_hint(); return; };
