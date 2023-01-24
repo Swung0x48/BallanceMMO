@@ -237,12 +237,15 @@ public:
         static const auto print_client = [&](auto id, auto data) {
             SteamNetConnectionRealTimeStatus_t status{};
             interface_->GetConnectionRealTimeStatus(id, &status, 0, nullptr);
-            Printf("%u: %s%s%s%s%s - %dms, %.2f%% quality",
+            char quality_str[32]{};
+            if (std::abs(status.m_flConnectionQualityLocal) != 1)
+                std::snprintf(quality_str, sizeof(quality_str), "  %5.2f quality", 100 * status.m_flConnectionQualityLocal);
+            Printf("%10u  %-16s%s  %4dms%s %s%s%s",
                     id, data.name,
-                    print_uuid ? (" (" + get_uuid_string(data.uuid) + ")") : "",
+                    print_uuid ? ("  " + get_uuid_string(data.uuid)) : "",
+                    status.m_nPing, quality_str,
                     data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "",
-                    is_muted(data.uuid) ? " [Muted]" : "",
-                    status.m_nPing, status.m_flConnectionQualityLocal * 100);
+                    is_muted(data.uuid) ? " [Muted]" : "");
         };
         for (const auto& i: std::map(username_.begin(), username_.end())) {
             if (bmmo::name_validator::is_spectator(i.first))
@@ -271,7 +274,7 @@ public:
             auto& data = clients_[id];
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
-                data.current_sector, bmmo::get_ordinal_rank(data.current_sector),
+                data.current_sector, bmmo::get_ordinal_suffix(data.current_sector),
                 data.current_map.get_display_name(map_names_));
         }
     }
@@ -435,7 +438,7 @@ protected:
         char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
         std::string uuid_str = get_uuid_string(clients_[client].uuid),
                     name = clients_[client].name;
-        ip.ToString(ip_str, SteamNetworkingIPAddr::k_cchMaxString, false);
+        ip.ToString(ip_str, sizeof(ip_str), false);
         YAML::Node login_data;
         std::ifstream ifile("login_data.yml");
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
@@ -956,7 +959,7 @@ protected:
 
                 Printf("%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
                     msg.player_id, client_it->second.name, msg.chat_content);
-                if (muted) return;
+                if (muted) break;
                 msg.clear();
                 msg.serialize();
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1060,7 +1063,7 @@ protected:
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, clients_[msg->content.player_id].name,
-                    msg->content.map.get_display_name(map_names_), maps_[md5_str].rank, bmmo::get_ordinal_rank(msg->content.rank),
+                    msg->content.map.get_display_name(map_names_), maps_[md5_str].rank, bmmo::get_ordinal_suffix(msg->content.rank),
                     score, hours, minutes, seconds, ms);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
@@ -1137,7 +1140,7 @@ protected:
                         Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                             client_it->second.cheated ? "[CHEAT] " : "",
                             networking_msg->m_conn, client_it->second.name,
-                            msg->content.sector, bmmo::get_ordinal_rank(msg->content.sector),
+                            msg->content.sector, bmmo::get_ordinal_suffix(msg->content.sector),
                             msg->content.map.get_display_name(map_names_));
                         break;
                     }
@@ -1185,7 +1188,7 @@ protected:
 
                 Printf("%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
                         msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
-                if (muted) return;
+                if (muted) break;
                 msg.title = client_it->second.name;
                 permanent_notification_ = {msg.title, msg.text_content};
                 msg.clear();

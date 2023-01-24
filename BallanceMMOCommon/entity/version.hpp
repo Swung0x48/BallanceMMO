@@ -2,6 +2,8 @@
 #define BALLANCEMMOSERVER_VERSION_HPP
 #include <cstdint>
 #include <sstream>
+#include <cstring>
+#include <map>
 
 namespace bmmo {
     enum stage_t: uint8_t {
@@ -15,12 +17,14 @@ namespace bmmo {
         uint8_t major = 3;
         uint8_t minor = 4;
         uint8_t subminor = 5;
-        stage_t stage = Alpha;
-        uint8_t build = 6;
+        stage_t stage = Beta;
+        uint8_t build = 10;
 
         const std::string to_string() const;
+        static version_t from_string(const std::string& input);
         bool operator<(const version_t& that) const;
         bool operator>(const version_t& that) const;
+        bool operator==(const version_t& that) const { return std::memcmp(this, &that, sizeof(version_t)) == 0; }
     };
 
     constexpr version_t minimum_client_version = {3, 4, 5, Alpha, 6};
@@ -36,6 +40,16 @@ namespace bmmo {
             default: break;
         };
         return ss.str();
+    }
+
+    version_t version_t::from_string(const std::string& input) {
+        version_t v{};
+        char stage_str[16]{};
+        sscanf(input.c_str(), "%hhu.%hhu.%hhu-%15[^0123456789]%hhu",
+            &v.major, &v.minor, &v.subminor, stage_str, &v.build);
+        v.stage = std::map<std::string, stage_t>
+            {{"alpha", Alpha}, {"beta", Beta}, {"rc", RC}, {"", Release}} [stage_str];
+        return v;
     }
 
     bool version_t::operator<(const version_t& that) const {

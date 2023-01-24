@@ -4,9 +4,9 @@
 #include "../entity/map.hpp"
 
 namespace bmmo {
-    std::string get_ordinal_rank(uint32_t rank) {
-        if ((rank / 10) % 10 != 1) {
-            switch (rank % 10) {
+    std::string get_ordinal_suffix(uint32_t n) {
+        if ((n / 10) % 10 != 1) {
+            switch (n % 10) {
                 case 1: return "st";
                 case 2: return "nd";
                 case 3: return "rd";

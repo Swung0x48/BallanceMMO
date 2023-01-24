@@ -27,6 +27,7 @@
 #include <fstream>
 #include <io.h>
 #include <fcntl.h>
+#include <ShlObj.h>
 
 // #include <filesystem>
 
@@ -194,6 +195,15 @@ private:
 	boost::uuids::uuid uuid_{};
 
 	char system_font_[32]{};
+	const std::wstring UUID_FILE_PATH = [] { // local appdata
+		std::wstring path_str = L".";
+		wchar_t* path_pchar{};
+		if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path_pchar))) {
+			path_str = path_pchar;
+			CoTaskMemFree(path_pchar);
+		}
+		return path_str;
+	}() + L"\\BallanceMMOClient_UUID.cfg";
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
@@ -240,6 +250,7 @@ private:
 	}
 
 	void init_config() {
+		migrate_uuid();
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 		IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
 		tmp_prop->SetComment("Remote server address with port (optional; default 26676). It could be an IPv4 address or a domain name.");
@@ -261,22 +272,11 @@ private:
 		props_["playername"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
 		// so we had to put it at the time of post startmenu events.
-		GetConfig()->SetCategoryComment("Identity", "Identifiers of yourself. Cannot be modified.");
-		tmp_prop = GetConfig()->GetProperty("Identity", "UUID");
-		tmp_prop->SetComment("Universally unique identifier of yourself (please keep it secret). Cannot be modified.");
-		tmp_prop->SetDefaultString(boost::uuids::to_string(boost::uuids::random_generator()()).c_str());
-		try {
-			uuid_ = boost::lexical_cast<boost::uuids::uuid>(tmp_prop->GetString());
-		} catch (...) {
-			GetLogger()->Warn("Error: Invalid UUID. A new UUID has been generated.");
-			uuid_ = boost::uuids::random_generator()();
-			tmp_prop->SetString(boost::uuids::to_string(uuid_).c_str());
-		}
-		props_["uuid"] = tmp_prop;
+		load_uuid();
 		GetConfig()->SetCategoryComment("Gameplay", "Settings for your actual gameplay experience in multiplayer.");
 		tmp_prop = GetConfig()->GetProperty("Gameplay", "Extrapolation");
 		tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother at a slight cost of accuracy.");
-		tmp_prop->SetDefaultBoolean(true);
+		tmp_prop->SetBoolean(true); // force extrapolation for now
 		objects_.toggle_extrapolation(tmp_prop->GetBoolean());
 		props_["extrapolation"] = tmp_prop;
 		tmp_prop = GetConfig()->GetProperty("Gameplay", "PlayerListColor");
@@ -284,6 +284,47 @@ private:
 		tmp_prop->SetDefaultString("FFE3A1");
 		parse_and_set_player_list_color(tmp_prop);
 		props_["player_list_color"] = tmp_prop;
+	}
+
+	void migrate_uuid() {
+		constexpr const char* const config_path = "..\\ModLoader\\Config\\BallanceMMOClient.cfg";
+		std::ifstream config(config_path);
+		if (!config.is_open())
+			return;
+		std::string temp_str;
+		while (config >> temp_str) {
+			if (temp_str == GetID())
+				break;
+		}
+		config >> temp_str >> temp_str;
+		if (bmmo::version_t::from_string(temp_str) > bmmo::version_t{3, 4, 5, bmmo::Alpha, 6})
+			return;
+
+		GetLogger()->Info("Migrating UUID data ...");
+		while (config >> temp_str) {
+			if (temp_str == "UUID")
+				break;
+		}
+		if (config.eof())
+			temp_str = boost::uuids::to_string(boost::uuids::random_generator()());
+		else
+			config >> temp_str;
+		std::ofstream uuid_file(UUID_FILE_PATH);
+		uuid_file << temp_str;
+	}
+
+	void load_uuid() {
+		try {
+			std::ifstream uuid_ifile(UUID_FILE_PATH);
+			std::string uuid_str; uuid_ifile >> uuid_str;
+			uuid_ = boost::lexical_cast<boost::uuids::uuid>(uuid_str);
+		}
+		catch (...) {
+			GetLogger()->Warn("Invalid UUID. A new UUID has been generated.");
+			uuid_ = boost::uuids::random_generator()();
+			std::ofstream uuid_ofile(UUID_FILE_PATH);
+			uuid_ofile << boost::uuids::to_string(uuid_);
+		}
 	}
 
 	struct KeyVector {

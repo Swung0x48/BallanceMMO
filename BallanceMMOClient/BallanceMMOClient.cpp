@@ -680,7 +680,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
                                       pair.second.cheated ? "[CHEAT] " : "",
                                       pair.second.name, pair.second.current_sector,
-                                      bmmo::get_ordinal_rank(pair.second.current_sector),
+                                      bmmo::get_ordinal_suffix(pair.second.current_sector),
                                       pair.second.current_map_name));
                     return true;
                 });
@@ -1408,7 +1408,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             "{}{} finished {} in {}{} place (score: {}; real time: {:02d}:{:02d}:{:02d}.{:03d}).",
             msg->content.cheated ? "[CHEAT] " : "",
             get_username(msg->content.player_id),
-            map_name, msg->content.rank, bmmo::get_ordinal_rank(msg->content.rank),
+            map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
             score, hours, minutes, seconds, ms).c_str());
         // TODO: Stop displaying objects on finish
         flash_window();
@@ -1515,7 +1515,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               (db_.get_client_id() == msg->content.player_id ? m_bml->IsCheatEnabled()
                               : db_.get(msg->content.player_id).value().cheated) ? "[CHEAT] " : "",
                               get_username(msg->content.player_id), msg->content.sector,
-                              bmmo::get_ordinal_rank(msg->content.sector),
+                              bmmo::get_ordinal_suffix(msg->content.sector),
                               msg->content.map.get_display_name(map_names_)));
         }
         else {
