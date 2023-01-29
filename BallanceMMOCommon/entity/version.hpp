@@ -22,9 +22,7 @@ namespace bmmo {
 
         const std::string to_string() const;
         static version_t from_string(const std::string& input);
-        bool operator<(const version_t& that) const;
-        bool operator>(const version_t& that) const;
-        bool operator==(const version_t& that) const { return std::memcmp(this, &that, sizeof(version_t)) == 0; }
+        auto operator<=>(const version_t& that) const = default;
     };
 
     constexpr version_t minimum_client_version = {3, 4, 5, Alpha, 6};
@@ -52,23 +50,23 @@ namespace bmmo {
         return v;
     }
 
-    bool version_t::operator<(const version_t& that) const {
-        if (major < that.major) return true;
-        if (major > that.major) return false;
-        if (minor < that.minor) return true;
-        if (minor > that.minor) return false;
-        if (subminor < that.subminor) return true;
-        if (subminor > that.subminor) return false;
-        if (stage < that.stage) return true;
-        if (stage > that.stage) return false;
-        if (build < that.build) return true;
-        if (build > that.build) return false;
-        return false;
-    }
+    // bool version_t::operator<(const version_t& that) const {
+    //     if (major < that.major) return true;
+    //     if (major > that.major) return false;
+    //     if (minor < that.minor) return true;
+    //     if (minor > that.minor) return false;
+    //     if (subminor < that.subminor) return true;
+    //     if (subminor > that.subminor) return false;
+    //     if (stage < that.stage) return true;
+    //     if (stage > that.stage) return false;
+    //     if (build < that.build) return true;
+    //     if (build > that.build) return false;
+    //     return false;
+    // }
 
-    bool version_t::operator>(const version_t& that) const {
-        return that < *this;
-    }
+    // bool version_t::operator>(const version_t& that) const {
+    //     return that < *this;
+    // }
 }
 
 #endif //BALLANCEMMOSERVER_VERSION_HPP

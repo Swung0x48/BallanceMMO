@@ -115,7 +115,7 @@ public:
 
     auto& get_bulletin() { return permanent_notification_; }
 
-    HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) {
+    HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) const {
         auto username_it = username_.find(bmmo::message_utils::to_lower(username));
         if (username_it == username_.end()) {
             if (!suppress_error)
@@ -239,7 +239,7 @@ public:
             interface_->GetConnectionRealTimeStatus(id, &status, 0, nullptr);
             char quality_str[32]{};
             if (std::abs(status.m_flConnectionQualityLocal) != 1)
-                std::snprintf(quality_str, sizeof(quality_str), "  %5.2f quality", 100 * status.m_flConnectionQualityLocal);
+                Sprintf(quality_str, "  %5.2f%% quality", 100 * status.m_flConnectionQualityLocal);
             Printf("%10u  %-16s%s  %4dms%s %s%s%s",
                     id, data.name,
                     print_uuid ? ("  " + get_uuid_string(data.uuid)) : "",
@@ -259,7 +259,7 @@ public:
             clients_.size(), clients_.size() - spectators.size(), spectators.size());
     }
 
-    void print_maps() {
+    void print_maps() const {
         std::multimap<decltype(map_names_)::mapped_type, decltype(map_names_)::key_type> map_names_inverted;
         for (const auto& [hash, name]: map_names_) map_names_inverted.emplace(name, hash);
         for (const auto& [name, hash]: map_names_inverted) {
@@ -271,7 +271,7 @@ public:
 
     void print_player_maps() {
         for (const auto& [_, id]: std::map(username_.begin(), username_.end())) {
-            auto& data = clients_[id];
+            const auto& data = clients_[id];
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
                 data.current_sector, bmmo::get_ordinal_suffix(data.current_sector),
@@ -281,7 +281,7 @@ public:
 
     void print_positions() {
         for (const auto& [_, id]: std::map(username_.begin(), username_.end())) {
-            auto& data = clients_[id];
+            const auto& data = clients_[id];
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
                     data.state.position.x, data.state.position.y, data.state.position.z,
@@ -290,7 +290,7 @@ public:
         }
     }
 
-    void print_version_info() {
+    void print_version_info() const {
         Printf("Server version: %s; minimum accepted client version: %s.",
                         bmmo::version_t{}.to_string(),
                         bmmo::minimum_client_version.to_string());
@@ -330,6 +330,7 @@ public:
             return;
         banned_players_[get_uuid_string(clients_[client].uuid)] = reason;
         Printf("Banned %s%s.", clients_[client].name, reason.empty() ? "" : ": " + reason);
+        kick_client(client, "Banned" + (reason.empty() ? "" : ": " + reason));
         save_config_to_file();
     }
 
@@ -524,7 +525,7 @@ protected:
         }
     }
 
-    bool client_exists(HSteamNetConnection client, bool suppress_error = false) {
+    bool client_exists(HSteamNetConnection client, bool suppress_error = false) const {
         if (client == k_HSteamNetConnection_Invalid)
             return false;
         if (!clients_.contains(client)) {
@@ -544,7 +545,7 @@ protected:
         return false;
     }
 
-    std::string get_uuid_string(uint8_t* uuid) {
+    std::string get_uuid_string(uint8_t* uuid) const {
         // std::stringstream ss;
         // for (int i = 0; i < 16; i++) {
         //     ss << std::hex << std::setfill('0') << std::setw(2) << (int)uuid[i];
@@ -562,7 +563,7 @@ protected:
     }
 
     inline bool is_muted(HSteamNetConnection client) { return is_muted(clients_[client].uuid); }
-    inline bool is_muted(uint8_t* uuid) {
+    inline bool is_muted(uint8_t* uuid) const {
         return muted_players_.contains(get_uuid_string(uuid));
     }
 
@@ -1598,7 +1599,7 @@ int main(int argc, char** argv) {
                 msg.caption = sounds.begin()->first.as<decltype(msg.caption)>();
                 msg.sounds = sounds.begin()->second.as<decltype(msg.sounds)>();
             } else {
-                server.Printf("Usage: playsound <caption>: [[frequency, duration], [freq2, dur2]] (comments can be omitted).");
+                server.Printf("Usage: playsound <caption>: [[frequency, duration], [freq2, dur2]] (caption can be omitted).");
                 return;
             }
             std::stringstream temp; temp << sounds;

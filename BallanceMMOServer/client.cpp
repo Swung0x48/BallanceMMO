@@ -134,7 +134,7 @@ public:
         return local_state_msg_;
     }
 
-    std::string get_player_name(HSteamNetConnection player_id) {
+    std::string get_player_name(HSteamNetConnection player_id) const {
         if (player_id == k_HSteamNetConnection_Invalid) return "[Server]";
         if (auto it = clients_.find(player_id); it != clients_.end())
             return it->second.name;
