@@ -578,9 +578,11 @@ private:
             }
             case bmmo::OwnedCheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(networking_msg->m_pData);
-                cheat = msg->content.state.cheated;
                 Printf("(#%u, %s) toggled cheat %s globally!",
-                    msg->content.player_id, clients_[msg->content.player_id].name, cheat ? "on" : "off");
+                    msg->content.player_id, clients_[msg->content.player_id].name, msg->content.state.cheated ? "on" : "off");
+                if (cheat == msg->content.state.cheated)
+                    return;
+                cheat = msg->content.state.cheated;
                 bmmo::cheat_state_msg state_msg{};
                 state_msg.content.cheated = cheat;
                 state_msg.content.notify = false;

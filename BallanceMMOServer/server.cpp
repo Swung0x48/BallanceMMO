@@ -597,7 +597,6 @@ protected:
             reason << "You are banned from this server";
             if (!it->second.empty())
                 reason << ": " << it->second;
-            reason << ".";
             nReason = bmmo::connection_end::Banned;
         }
         // verify client version
