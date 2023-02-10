@@ -118,6 +118,8 @@ private:
 		send(msg, k_nSteamNetworkingSend_Reliable);
 	};
 
+	inline void on_sector_changed();
+
 	bool show_console();
 	bool hide_console();
 	void show_player_list();
@@ -284,6 +286,11 @@ private:
 		tmp_prop->SetDefaultString("FFE3A1");
 		parse_and_set_player_list_color(tmp_prop);
 		props_["player_list_color"] = tmp_prop;
+		tmp_prop = GetConfig()->GetProperty("Gameplay", "DynamicOpacity");
+		tmp_prop->SetComment("Whether to dynamically adjust opacities of other spirit balls based on their distances to the current camera.");
+		tmp_prop->SetDefaultBoolean(true);
+		objects_.toggle_dynamic_opacity(tmp_prop->GetBoolean());
+		props_["dynamic_opacity"] = tmp_prop;
 	}
 
 	void migrate_uuid() {

@@ -93,7 +93,7 @@ void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr
         std::wcerr.clear();
         std::cerr.clear();
     }
-  }
+}
 
 bool BallanceMMOClient::show_console() {
     if (AllocConsole()) {
@@ -219,7 +219,7 @@ void BallanceMMOClient::show_player_list() {
                 auto size = int(status_list.size());
                 if (size != last_player_count) {
                     last_player_count = size;
-                    auto font_size = get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 25));
+                    auto font_size = get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 29));
                     if (last_font_size != font_size) {
                         last_font_size = font_size;
                         player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
@@ -307,17 +307,14 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
     }
 }
 
-void BallanceMMOClient::OnPostCheckpointReached() {
+
+void BallanceMMOClient::on_sector_changed() {
     if (update_current_sector() && connected()) send_current_sector();
 }
 
-void BallanceMMOClient::OnPostExitLevel() {
-    OnPostCheckpointReached();
-}
-
-void BallanceMMOClient::OnCounterActive() {
-    OnPostCheckpointReached();
-}
+void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
+void BallanceMMOClient::OnPostExitLevel() { on_sector_changed(); }
+void BallanceMMOClient::OnCounterActive() { on_sector_changed(); }
 
 void BallanceMMOClient::OnPostStartMenu()
 {
@@ -474,6 +471,10 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
     }
     else if (prop == props_["extrapolation"]) {
         objects_.toggle_extrapolation(prop->GetBoolean());
+        return;
+    }
+    else if (prop == props_["dynamic_opacity"]) {
+        objects_.toggle_dynamic_opacity(prop->GetBoolean());
         return;
     }
     else if (prop == props_["player_list_color"]) {

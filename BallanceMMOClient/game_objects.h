@@ -7,6 +7,7 @@
 struct PlayerObjects {
 	static inline IBML* bml;
 	std::vector<CK_ID> balls;
+	std::vector<CK_ID> materials;
 	std::unique_ptr<label_sprite> username_label;
 	uint32_t visible_ball_type = std::numeric_limits<decltype(visible_ball_type)>::max();
 	bool physicalized = false;
@@ -32,8 +33,11 @@ public:
 		auto& obj = objects_[id];
 		for (size_t i = 0; i < template_balls_.size(); ++i) {
 			auto* ball = init_spirit_ball(i, id);
-			if (ball)
+			if (ball) {
 				obj.balls.emplace_back(CKOBJID(ball));
+				if (ball->GetMeshCount() > 0 && ball->GetMesh(0)->GetMaterialCount() > 0)
+					obj.materials.emplace_back(CKOBJID(ball->GetMesh(0)->GetMaterial(0)));
+			}
 			else {
 				auto msg = std::format("Failed to init player: {} {}", id, i);
 				bml_->SendIngameMessage(msg.c_str());
@@ -79,7 +83,17 @@ public:
 		if (!rc)
 			return;
 		VxRect viewport; rc->GetViewRect(viewport);
-		db_.for_each([this, &viewport, &rc, update_cheat, timestamp](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+
+		VxVector camera_target_pos{};
+		auto* camera = rc->GetAttachedCamera();
+		if (camera) {
+			camera->GetPosition(&camera_target_pos);
+			VxVector orientation;
+			camera->GetOrientation(&orientation, nullptr);
+			camera_target_pos += orientation * CAMERA_TARGET_DISTANCE;
+		}
+
+		db_.for_each([=, this, &viewport, &rc](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -107,10 +121,12 @@ public:
 			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
 				return true;
 
+			float square_camera_distance = 0;
+
 			// Update ball states with togglable quadratic extrapolation
 			if (!player.physicalized) {
-				if (extrapolation_ && [&] {
-					if (SquareMagnitude(state_it[0].position - state_it[1].position) < MAX_EXTRAPOLATION_SQUARE_DISTANCE)
+				if (extrapolation_ && [=, this] {
+					if ((state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE)
 						return true;
 					db_.remove_earlier_states(item.first);
 					return false;
@@ -121,11 +137,20 @@ public:
 					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(tc, state_it[2], state_it[1], state_it[0]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
+					square_camera_distance = (position - camera_target_pos).SquareMagnitude();
 				}
 				else {
 					current_ball->SetPosition(state_it->position);
 					current_ball->SetQuaternion(state_it->rotation);
+					square_camera_distance = (state_it->position - camera_target_pos).SquareMagnitude();
 				}
+			}
+
+			if (dynamic_opacity_) {
+				auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
+				VxColor color = current_material->GetDiffuse();
+				color.a = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
+				current_material->SetDiffuse(color);
 			}
 
 			// Update username label
@@ -197,15 +222,17 @@ public:
 				bml_->SendIngameMessage(std::format("Failed to init template ball: {}", i).c_str());
 				continue;
 			}
+			assert(ball->GetMeshCount() == 1);
 			for (int j = 0; j < ball->GetMeshCount(); j++) {
 				CKMesh* mesh = ball->GetMesh(j);
+				assert(mesh->GetMaterialCount() >= 1);
 				for (int k = 0; k < mesh->GetMaterialCount(); k++) {
 					CKMaterial* mat = mesh->GetMaterial(k);
 					mat->EnableAlphaBlend();
 					mat->SetSourceBlend(VXBLEND_SRCALPHA);
 					mat->SetDestBlend(VXBLEND_INVSRCALPHA);
 					VxColor color = mat->GetDiffuse();
-					color.a = 0.5f;
+					color.a = ALPHA_DEFAULT;
 					mat->SetDiffuse(color);
 					bml_->SetIC(mat);
 				}
@@ -249,8 +276,22 @@ public:
 		return ball;
 	}
 
-	void toggle_extrapolation(bool enabled) {
-		extrapolation_ = enabled;
+	void toggle_extrapolation(bool enabled) { extrapolation_ = enabled; }
+
+	void toggle_dynamic_opacity(bool enabled) {
+		dynamic_opacity_ = enabled;
+		if (enabled) return;
+		db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+			auto player_it = objects_.find(item.first);
+			if (player_it == objects_.end()) return true;
+			for (const CK_ID mat_id : player_it->second.materials) {
+				auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
+				VxColor color = mat->GetDiffuse();
+				color.a = ALPHA_DEFAULT;
+				mat->SetDiffuse(color);
+			}
+			return true;
+		});
 	}
 
 	void destroy_all_objects() {
@@ -280,7 +321,10 @@ private:
 	IBML* bml_ = nullptr;
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
-	bool extrapolation_ = false;
+	bool extrapolation_ = false, dynamic_opacity_ = true;
 	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
+	static constexpr float CAMERA_TARGET_DISTANCE = 40.0f,
+		ALPHA_DEFAULT = 0.5f, ALPHA_DISTANCE_RATE = 0.0144f,
+		ALPHA_BEGIN = 0.2f, ALPHA_MIN = 0.28f, ALPHA_MAX = 0.7f;
 };
