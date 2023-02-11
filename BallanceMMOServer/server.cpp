@@ -815,10 +815,10 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
 
-                bmmo::owned_timed_ball_state_msg state_msg{};
+                bmmo::owned_compressed_ball_state_msg state_msg{};
                 pull_ball_states(state_msg.balls);
                 state_msg.serialize();
-                send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
 
                 if (!permanent_notification_.second.empty()) {
                     bmmo::permanent_notification_msg bulletin_msg{};

@@ -65,8 +65,8 @@ struct PlayerState {
 		const auto t21 = state2.timestamp - state1.timestamp,
 			t32 = state3.timestamp - state2.timestamp,
 			t31 = state3.timestamp - state1.timestamp;
-		if (t32 == 0 || t31 == 0) return {state3.position, state3.rotation};
-		if (t21 == 0) return get_linear_extrapolated_state(tc, state2, state3);
+		if (t32 == 0 || t31 == 0) [[unlikely]] return {state3.position, state3.rotation};
+		if (t21 == 0) [[unlikely]] return get_linear_extrapolated_state(tc, state2, state3);
 
 		const auto t1 = tc - state1.timestamp, t2 = tc - state2.timestamp, t3 = tc - state3.timestamp;
 
