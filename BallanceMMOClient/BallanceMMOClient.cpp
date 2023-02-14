@@ -882,10 +882,12 @@ void BallanceMMOClient::connect_to_server(std::string address) {
         });
 
         // Resolve address
-        if (address.empty())
-            address = props_["remote_addr"]->GetString();
-        server_addr_ = address;
-        const auto& [host, port] = bmmo::hostname_parser(address).get_host_components();
+        if (address.empty()) {
+            if (server_addr_.empty())
+                server_addr_ = props_["remote_addr"]->GetString();
+        } else
+            server_addr_ = address;
+        const auto& [host, port] = bmmo::hostname_parser(server_addr_).get_host_components();
         resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
         resolver_->async_resolve(host, port, [this](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
             resolving_endpoint_ = false;
@@ -976,7 +978,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             terminate(5);
         else if (nReason >= bmmo::connection_end::AutoReconnection_Min && nReason < bmmo::connection_end::AutoReconnection_Max) {
             asio::post(thread_pool_, [this, nReason]() {
-                SendIngameMessage(std::format("Attempting to reconnect in {}s ...", nReason - bmmo::connection_end::AutoReconnection_Min));
+                SendIngameMessage(std::format("Attempting to reconnect to [{}] in {}s ...",
+                    server_addr_, nReason - bmmo::connection_end::AutoReconnection_Min));
                 std::this_thread::sleep_for(std::chrono::seconds(nReason - bmmo::connection_end::AutoReconnection_Min));
                 if (!connecting() && !connected())
                     connect_to_server(server_addr_);
