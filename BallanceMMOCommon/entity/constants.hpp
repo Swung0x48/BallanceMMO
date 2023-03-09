@@ -12,6 +12,8 @@ namespace bmmo {
 
     constexpr const char* RECORD_HEADER = "BallanceMMO FlightRecorder";
 
+    constexpr const uint16_t DEFAULT_PORT = 26676;
+
     // - 0~99: denied at joining
     // -- 0~49: denied from incorrect configuration
     // -- 50~99: banned

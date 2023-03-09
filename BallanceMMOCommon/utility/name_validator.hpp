@@ -14,6 +14,8 @@ namespace bmmo {
             return name.find_first_not_of(valid_chars);
         };
 
+        // spectator status is only indicated by the prefix as in spectator_prefix;
+        // their different behaviors from normal players are entirely client-side
         bool is_spectator(const std::string& name) {
             return name.starts_with(spectator_prefix);
         }
@@ -60,7 +62,7 @@ namespace bmmo {
         // Then names with only underscores are discarded and regenerated randomly.
         std::string get_valid_nickname(std::string name) {
             if (!is_of_valid_length(name))
-                name = (name + "___").substr(0, 20);
+                name = (name + "___").substr(0, max_length);
             size_t invalid_pos = std::string::npos;
             while ((invalid_pos = get_invalid_char_pos(name)) != std::string::npos) {
                 name[invalid_pos] = '_';

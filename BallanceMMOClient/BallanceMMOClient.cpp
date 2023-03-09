@@ -277,7 +277,7 @@ void BallanceMMOClient::OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING mas
             if (player_ball_ != nullptr) {
                 local_state_handler_->poll_and_send_state_forced(player_ball_);
             }
-            OnPostCheckpointReached();
+            on_sector_changed();
             send_current_map();
         };
         GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
@@ -1367,7 +1367,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 SendIngameMessage(std::format("[{}]: {} - Get ready", sender_name, map_name).c_str());
                 asio::post(thread_pool_, [] {
                     for (const auto i: std::vector<double>{220, 220 * std::powf(2.0f, 3.0f / 12), 220 * std::powf(2.0f, 7.0f / 12), 440}) Beep(int(i), 220);
-                 });
+                });
                 break;
             case bmmo::countdown_type::ConfirmReady:
                 SendIngameMessage(std::format("[{}]: {} - Please use \"/mmo ready\" to confirm if you are ready", sender_name, map_name).c_str());

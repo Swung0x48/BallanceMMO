@@ -2,6 +2,7 @@
 #define BALLANCEMMOSERVER_HOSTNAME_PARSER_HPP
 #include <utility>
 #include <string>
+#include "../entity/constants.hpp"
 
 namespace bmmo {
     class hostname_parser {
@@ -10,7 +11,9 @@ namespace bmmo {
         hostname_parser(const std::string& str) {
             size_t pos = str.rfind(":");
             address = (pos == str.rfind("::") + 1) ? str : str.substr(0, pos);
-            port = (pos == str.npos || (pos + 1) == str.length() || pos == str.rfind("::") + 1) ? "26676" : str.substr(pos + 1);
+            port = (pos == str.npos || (pos + 1) == str.length() || pos == str.rfind("::") + 1)
+                ? std::to_string(DEFAULT_PORT)
+                : str.substr(pos + 1);
         };
 
         std::pair<std::string, std::string> get_host_components() const {

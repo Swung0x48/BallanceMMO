@@ -23,7 +23,7 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
 };
 
 bool console::read_input(std::string& buf) {
-    std::unique_lock lk(console_mutex_);
+    // std::unique_lock lk(console_mutex_);
 #ifdef _WIN32
     std::wstring wbuf;
     bool success = bool(std::getline(std::wcin, wbuf));
