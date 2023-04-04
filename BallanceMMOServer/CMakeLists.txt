@@ -31,6 +31,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets 
 
 include_directories(../submodule/asio/asio/include)
 include_directories(../submodule/ya_getopt)
+include_directories(../submodule/GameNetworkingSockets/src/external)
 
 include(FetchContent)
 FetchContent_Declare(

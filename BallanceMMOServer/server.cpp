@@ -20,6 +20,9 @@
 #include <ya_getopt.h>
 #include <yaml-cpp/yaml.h>
 
+#define PICOJSON_USE_INT64
+#include <picojson/picojson.h>
+
 struct client_data {
     std::string name;
     bool cheated = false;
@@ -30,6 +33,7 @@ struct client_data {
     bmmo::map current_map{};
     int32_t current_sector = 0;
     uint8_t uuid[16]{};
+    int64_t login_time{};
 };
 
 struct map_data {
@@ -191,6 +195,8 @@ public:
                     force_restart_level_ = config_["force_restart_after_countdown"].as<bool>();
                 if (config_["logging_level"])
                     logging_level_string = config_["logging_level"].as<std::string>();
+                if (config_["save_player_status_to_file"])
+                    save_player_status_to_file_ = config_["save_player_status_to_file"].as<bool>();
             } catch (const std::exception& e) {
                 Printf("Error: failed to parse config: %s", e.what());
                 return false;
@@ -205,6 +211,7 @@ public:
         config_["enable_op_privileges"] = op_mode_;
         config_["restart_level_after_countdown"] = restart_level_;
         config_["force_restart_after_countdown"] = force_restart_level_;
+        config_["save_player_status_to_file"] = save_player_status_to_file_;
         if (logging_level_string == "msg")
             logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Msg;
         else if (logging_level_string == "warning")
@@ -467,6 +474,21 @@ protected:
         }
     }
 
+    void save_player_status() {
+        picojson::array player_list{};
+        using picojson::value;
+        for (const auto& [_, data]: clients_) {
+            player_list.emplace_back(picojson::object{
+                {"name", value{data.name}},
+                {"login_time", value{data.login_time}},
+            });
+        }
+        std::ofstream player_status_file("player_status.json");
+        if (player_status_file.is_open()) {
+            player_status_file << value{player_list};
+        }
+    }
+
     void save_config_to_file() {
         config_["op_list"] = op_players_;
         config_["ban_list"] = banned_players_;
@@ -523,6 +545,8 @@ protected:
             default:
                 break;
         }
+        if (save_player_status_to_file_)
+            save_player_status();
     }
 
     bool client_exists(HSteamNetConnection client, bool suppress_error = false) const {
@@ -780,7 +804,8 @@ protected:
 
                 // accepting client and adding it to the client list
                 client_it = clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}}).first;
-                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
+                memcpy(client_it->second.uuid, msg.uuid, sizeof(msg.uuid));
+                client_it->second.login_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                 username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;
                 Printf("%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
@@ -829,6 +854,8 @@ protected:
 
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
+                if (save_player_status_to_file_)
+                    save_player_status();
 
                 break;
             }
@@ -1316,7 +1343,8 @@ protected:
     std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_, default_map_names_;
     std::unordered_set<std::string> muted_players_;
     std::unordered_map<std::string, map_data> maps_;
-    bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false;
+    bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false,
+        save_player_status_to_file_ = false;
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
 };
 
