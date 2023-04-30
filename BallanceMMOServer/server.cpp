@@ -1112,7 +1112,8 @@ protected:
             case bmmo::CheatState: {
                 auto* state_msg = reinterpret_cast<bmmo::cheat_state_msg*>(networking_msg->m_pData);
                 client_it->second.cheated = state_msg->content.cheated;
-                Printf("%s turned cheat [%s]!", client_it->second.name, state_msg->content.cheated ? "on" : "off");
+                Printf("(#%u, %s) turned cheat [%s]!",
+                    networking_msg->m_conn, client_it->second.name, state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
@@ -1125,7 +1126,8 @@ protected:
                 if (deny_action(networking_msg->m_conn))
                     break;
                 auto* state_msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
-                Printf("%s toggled cheat [%s] globally!", client_it->second.name, state_msg->content.cheated ? "on" : "off");
+                Printf("(#%u, %s) toggled cheat [%s] globally!",
+                    networking_msg->m_conn, client_it->second.name, state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_toggle_msg new_msg{};
                 new_msg.content.player_id = client_it->first;
                 new_msg.content.state.cheated = state_msg->content.cheated;
