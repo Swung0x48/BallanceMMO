@@ -3,7 +3,15 @@
 #include <mutex>
 #include <BML/BMLAll.h>
 struct text_sprite {
-	std::unique_ptr<BGui::Text> sprite_;
+	class sprite : public BGui::Text {
+	public:
+		using BGui::Text::Text;
+		void SetBackgroundColor(CKDWORD col) {
+			m_sprite->SetBackgroundColor(col);
+		}
+	};
+
+	std::unique_ptr<sprite> sprite_;
 	std::mutex mtx_;
 	bool visible_ = false;
 
@@ -16,7 +24,7 @@ struct text_sprite {
 		float y_pos = 0.0f) {
 		std::unique_lock lk(mtx_);
 
-		sprite_ = std::make_unique<BGui::Text>(("T_Sprite_" + name).c_str());
+		sprite_ = std::make_unique<sprite>(("T_Sprite_" + name).c_str());
 		sprite_->SetAlignment(CKSPRITETEXT_RIGHT);
 		sprite_->SetSize(Vx2DVector(x_pos, 0.1f));
 		sprite_->SetPosition(Vx2DVector(0.0f, y_pos)); // Yeah that's right
@@ -44,6 +52,10 @@ struct text_sprite {
 	void paint(CKDWORD color) {
 		std::unique_lock lk(mtx_);
 		sprite_->SetTextColor(color);
+	}
+	void paint_background(CKDWORD color) {
+		std::unique_lock lk(mtx_);
+		sprite_->SetBackgroundColor(color);
 	}
 	void set_visible(bool visible) {
 		std::unique_lock lk(mtx_);

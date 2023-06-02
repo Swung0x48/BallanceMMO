@@ -190,6 +190,7 @@ void BallanceMMOClient::show_player_list() {
             player_list.sprite_->SetZOrder(128);
             player_list.sprite_->SetFont(system_font_, last_font_size, 400, false, false);
             player_list.paint(player_list_color_);
+            // player_list.paint_background(0x44444444);
             player_list.set_visible(true);
             player_list_visible_ = true;
             struct list_entry { std::string map_name, name; int sector; int32_t timestamp; bool cheated; };
