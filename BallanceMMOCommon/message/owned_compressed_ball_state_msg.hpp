@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <cmath>
 #include <cassert>
+#include <numbers>
 
 namespace bmmo {
     struct owned_compressed_ball_state_msg: public serializable_message {
@@ -30,10 +31,9 @@ namespace bmmo {
         // 256 8bit, 0.7 * 2 / 256 = 0.0027 * 2, 1 * 2 / 256 = 0.0039 * 2
 
         static constexpr int ROTATION_LENGTH = sizeof(quaternion::v) / sizeof(std::remove_all_extents_t<decltype(quaternion::v)>);
-        static constexpr float SQRT_2_DIVIDED_BY_2 = 0.7071067811865475f;
         static constexpr int ROTATION_BIT_LENGTH = 9;
         static constexpr int ROTATION_COUNT = 512;
-        static constexpr float ROTATION_STEP = SQRT_2_DIVIDED_BY_2 * 2 / ROTATION_COUNT;
+        static constexpr float ROTATION_STEP = std::numbers::sqrt2_v<float> / ROTATION_COUNT;
         static constexpr int TIMESTAMP_SIZE = 6;
 
         struct compressed_bitfield {
