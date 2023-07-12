@@ -59,6 +59,9 @@ jobs:
       - name: Fetch git submodules
         run: git submodule update --init --recursive --remote
 
+      # Setup MSVC command prompt environment vars
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - name: Restore artifacts, setup vcpkg
         uses: lukka/run-vcpkg@v10
         with:
@@ -66,12 +69,9 @@ jobs:
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
 
-      # Setup MSVC command prompt environment vars
-      - uses: ilammy/msvc-dev-cmd@v1
-
       - name: vcpkg check / install dependencies
         working-directory: ${{env.VCPKG_ROOT}}
-        run: vcpkg install --feature-flags=manifests
+        run: vcpkg install --triplet x64-windows
 
       - name: Configure CMake
         run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE=${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR=${{github.workspace}} -DYAML_BUILD_SHARED_LIBS=ON
