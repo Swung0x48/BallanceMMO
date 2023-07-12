@@ -948,6 +948,22 @@ void BallanceMMOClient::disconnect_from_server() {
     }
 }
 
+void BallanceMMOClient::reconnect(int delay) {
+  asio::post(thread_pool_, [this, delay]() {
+    if (reconnection_count_ >= 3) {
+      SendIngameMessage("Failed to connect to the server after 3 attempts. Server will not be reconnected.");
+      reconnection_count_ = 0;
+      return;
+    }
+    ++reconnection_count_;
+    SendIngameMessage(std::format("Attempting to reconnect to [{}] in {} second{} ...",
+        server_addr_, delay, delay == 1 ? "" : "s"));
+    std::this_thread::sleep_for(std::chrono::seconds(delay));
+    if (!connecting() && !connected())
+      connect_to_server(server_addr_);
+  });
+}
+
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
 {
     GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
@@ -978,13 +994,10 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         if (nReason >= bmmo::connection_end::Crash && nReason <= bmmo::connection_end::PlayerKicked_Max)
             terminate(5);
         else if (nReason >= bmmo::connection_end::AutoReconnection_Min && nReason < bmmo::connection_end::AutoReconnection_Max) {
-            asio::post(thread_pool_, [this, nReason]() {
-                SendIngameMessage(std::format("Attempting to reconnect to [{}] in {}s ...",
-                    server_addr_, nReason - bmmo::connection_end::AutoReconnection_Min));
-                std::this_thread::sleep_for(std::chrono::seconds(nReason - bmmo::connection_end::AutoReconnection_Min));
-                if (!connecting() && !connected())
-                    connect_to_server(server_addr_);
-            });
+          reconnect(nReason - bmmo::connection_end::AutoReconnection_Min);
+        }
+        else if (nReason > k_ESteamNetConnectionEnd_App_Max) {
+          reconnect(10);
         }
         break;
     }
@@ -1016,6 +1029,10 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 
         //interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
         cleanup();
+
+        if (pInfo->m_info.m_eEndReason > k_ESteamNetConnectionEnd_App_Max) {
+          reconnect(10);
+        }
         break;
     }
 
@@ -1186,6 +1203,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             break;
         }
         logged_in_ = true;
+        reconnection_count_ = 0;
         status_->update("Connected");
         status_->paint(0xff00ff00);
         SendIngameMessage("Logged in.");

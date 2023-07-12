@@ -126,6 +126,9 @@ private:
 
 	void connect_to_server(std::string address = "");
 	void disconnect_from_server();
+	void reconnect(int delay);
+
+	int reconnection_count_ = 0;
 
 	static void terminate(long delay);
 

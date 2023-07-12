@@ -16,9 +16,9 @@ namespace bmmo {
     struct version_t {
         uint8_t major = 3;
         uint8_t minor = 4;
-        uint8_t subminor = 6;
-        stage_t stage = Beta;
-        uint8_t build = 12;
+        uint8_t subminor = 7;
+        stage_t stage = Alpha;
+        uint8_t build = 8;
 
         const std::string to_string() const;
         static version_t from_string(const std::string& input);
@@ -43,7 +43,7 @@ namespace bmmo {
     version_t version_t::from_string(const std::string& input) {
         version_t v{};
         char stage_str[16]{};
-        sscanf(input.c_str(), "%hhu.%hhu.%hhu-%15[^0123456789]%hhu",
+        std::ignore = sscanf(input.c_str(), "%hhu.%hhu.%hhu-%15[^0123456789]%hhu",
             &v.major, &v.minor, &v.subminor, stage_str, &v.build);
         v.stage = std::map<std::string, stage_t>
             {{"alpha", Alpha}, {"beta", Beta}, {"rc", RC}, {"", Release}} [stage_str];
