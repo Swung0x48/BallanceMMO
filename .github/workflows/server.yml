@@ -70,6 +70,10 @@ jobs:
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
 
+      - name: vcpkg add baseline
+        working-directory: ${{env.VCPKG_ROOT}}
+        run: vcpkg x-update-baseline --add-initial-baseline
+
 #      - name: vcpkg check / install dependencies
 #        working-directory: ${{env.VCPKG_ROOT}}
 #        run: vcpkg install --triplet x64-windows
