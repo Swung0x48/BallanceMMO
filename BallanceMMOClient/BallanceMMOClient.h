@@ -278,9 +278,9 @@ private:
 		tmp_prop->SetDefaultBoolean(false);
 		props_["spectator"] = tmp_prop;
 
-		GetConfig()->SetCategoryComment("Player", "Player name. Can only be changed once every 24 hours (counting down after joining a server).");
+		GetConfig()->SetCategoryComment("Player", "Who are you?");
 		tmp_prop = GetConfig()->GetProperty("Player", "Playername");
-		tmp_prop->SetComment("Your name please?");
+		tmp_prop->SetComment("Player name. Can only be changed once every 24 hours (countdown starting after joining a server).");
 		tmp_prop->SetDefaultString(bmmo::name_validator::get_random_nickname().c_str());
 		props_["playername"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
