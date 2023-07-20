@@ -29,6 +29,9 @@
 #include <fcntl.h>
 #include <ShlObj.h>
 
+#define PICOJSON_USE_INT64
+#include <picojson/picojson.h>
+
 // #include <filesystem>
 
 extern "C" {
@@ -191,16 +194,19 @@ private:
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
-	SteamNetworkingMicroseconds next_update_timestamp_ = 0, last_dnf_hotkey_timestamp_ = 0;
+	SteamNetworkingMicroseconds next_update_timestamp_ = 0, last_dnf_hotkey_timestamp_ = 0,
+		dnf_cooldown_end_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;
 	bool countdown_restart_ = false;
 
 	boost::uuids::uuid uuid_{};
+	int64_t last_name_change_time_{};
+	bool name_changed_ = false, bypass_name_check_ = false;
 
 	char system_font_[32]{};
-	const std::wstring UUID_FILE_PATH = [] { // local appdata
+	const std::wstring LOCAL_APPDATA_PATH = [] { // local appdata
 		std::wstring path_str = L".";
 		wchar_t* path_pchar{};
 		if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path_pchar))) {
@@ -208,7 +214,9 @@ private:
 			CoTaskMemFree(path_pchar);
 		}
 		return path_str;
-	}() + L"\\BallanceMMOClient_UUID.cfg";
+	}();
+	const std::wstring LEGACY_UUID_FILE_PATH = LOCAL_APPDATA_PATH + L"\\BallanceMMOClient_UUID.cfg";
+	const std::wstring EXTERNAL_CONFIG_PATH = LOCAL_APPDATA_PATH + L"\\BallanceMMOClient_external.json";
 
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
@@ -232,7 +240,7 @@ private:
 			if (sector == current_sector_) return false;
 		} else if (current_sector_ == 0) return false;
 		current_sector_ = sector;
-		current_sector_timestamp_ = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
+		current_sector_timestamp_ = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - db_.get_init_timestamp()) / 1024);
 		return true;
 	}
 
@@ -255,7 +263,7 @@ private:
 	}
 
 	void init_config() {
-		migrate_uuid();
+		migrate_config();
 		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 		IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
 		tmp_prop->SetComment("Remote server address with port (optional; default 26676). It could be an IPv4 address or a domain name.");
@@ -270,14 +278,14 @@ private:
 		tmp_prop->SetDefaultBoolean(false);
 		props_["spectator"] = tmp_prop;
 
-		GetConfig()->SetCategoryComment("Player", "Who are you?");
+		GetConfig()->SetCategoryComment("Player", "Player name. Can only be changed once every 24 hours (counting down after joining a server).");
 		tmp_prop = GetConfig()->GetProperty("Player", "Playername");
 		tmp_prop->SetComment("Your name please?");
 		tmp_prop->SetDefaultString(bmmo::name_validator::get_random_nickname().c_str());
 		props_["playername"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
 		// so we had to put it at the time of post startmenu events.
-		load_uuid();
+		load_external_config();
 		GetConfig()->SetCategoryComment("Gameplay", "Settings for your actual gameplay experience in multiplayer.");
 		tmp_prop = GetConfig()->GetProperty("Gameplay", "Extrapolation");
 		tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother at a slight cost of accuracy.");
@@ -296,7 +304,10 @@ private:
 		props_["dynamic_opacity"] = tmp_prop;
 	}
 
-	void migrate_uuid() {
+	// ver <= 3.4.5-alpha6: no external config
+	// 3.4.5-alpha6 < ver < 3.4.8-beta12: external plain text uuid config
+	// ver >= 3.4.8-alpha12: external json config
+	void migrate_config() {
 		constexpr const char* const config_path = "..\\ModLoader\\Config\\BallanceMMOClient.cfg";
 		std::ifstream config(config_path);
 		if (!config.is_open())
@@ -307,34 +318,59 @@ private:
 				break;
 		}
 		config >> temp_str >> temp_str;
-		if (bmmo::version_t::from_string(temp_str) > bmmo::version_t{3, 4, 5, bmmo::Alpha, 6})
+		auto version = bmmo::version_t::from_string(temp_str);
+		if (version >= bmmo::version_t{3, 4, 8, bmmo::Beta, 12})
 			return;
 
-		GetLogger()->Info("Migrating UUID data ...");
-		while (config >> temp_str) {
-			if (temp_str == "UUID")
-				break;
+		GetLogger()->Info("Migrating config data ...");
+		if (version <= bmmo::version_t{3, 4, 5, bmmo::Alpha, 6}) {
+			while (config >> temp_str) {
+				if (temp_str == "UUID")
+					break;
+			}
+			if (config.eof())
+				temp_str = boost::uuids::to_string(boost::uuids::random_generator()());
+			else
+				config >> temp_str;
 		}
-		if (config.eof())
-			temp_str = boost::uuids::to_string(boost::uuids::random_generator()());
-		else
-			config >> temp_str;
-		std::ofstream uuid_file(UUID_FILE_PATH);
-		uuid_file << temp_str;
+		else {
+		  {
+				std::ifstream uuid_config(LEGACY_UUID_FILE_PATH);
+				if (!uuid_config.is_open())
+					return;
+				uuid_config >> temp_str;
+			}
+			DeleteFileW(LEGACY_UUID_FILE_PATH.c_str());
+		}
+
+		save_external_config(temp_str);
 	}
 
-	void load_uuid() {
+	void load_external_config() {
 		try {
-			std::ifstream uuid_ifile(UUID_FILE_PATH);
-			std::string uuid_str; uuid_ifile >> uuid_str;
-			uuid_ = boost::lexical_cast<boost::uuids::uuid>(uuid_str);
+			std::ifstream ifile(EXTERNAL_CONFIG_PATH);
+			picojson::value external_config_v;
+			ifile >> external_config_v;
+			auto& external_config = external_config_v.get<picojson::object>();
+			uuid_ = boost::lexical_cast<boost::uuids::uuid>(external_config["uuid"].get<std::string>());
+			last_name_change_time_ = external_config["last_name_change"].get<int64_t>();
 		}
 		catch (...) {
 			GetLogger()->Warn("Invalid UUID. A new UUID has been generated.");
 			uuid_ = boost::uuids::random_generator()();
-			std::ofstream uuid_ofile(UUID_FILE_PATH);
-			uuid_ofile << boost::uuids::to_string(uuid_);
+			save_external_config();
 		}
+	}
+
+	void save_external_config(std::string uuid = {}) {
+		if (uuid.empty())
+			uuid = boost::uuids::to_string(uuid_);
+		picojson::object external_config{
+			{"uuid", picojson::value{uuid}},
+			{"last_name_change", picojson::value{last_name_change_time_}},
+		};
+		std::ofstream ofile(EXTERNAL_CONFIG_PATH);
+		ofile << picojson::value{external_config}.serialize(true);
 	}
 
 	struct KeyVector {
@@ -512,6 +548,8 @@ private:
 				if (current_map_.level == 0 || spectator_mode_)
 					return;
 				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+				if (timestamp < dnf_cooldown_end_timestamp_)
+					return;
 				if (timestamp - last_dnf_hotkey_timestamp_ <= 3000000) {
 					bmmo::did_not_finish_msg msg{};
 					m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
@@ -519,6 +557,7 @@ private:
 					msg.content.cheated = m_bml->IsCheatEnabled();
 					send(msg, k_nSteamNetworkingSend_Reliable);
 					last_dnf_hotkey_timestamp_ = 0;
+					dnf_cooldown_end_timestamp_ = timestamp + 6000000;
 				}
 				else {
 					last_dnf_hotkey_timestamp_ = timestamp;
@@ -778,6 +817,7 @@ private:
 			SendIngameMessage(std::format(
 				"Invalid player name \"{}\", replaced with \"{}\".",
 				name, valid_name).c_str());
+			bypass_name_check_ = true;
 			name_prop->SetString(valid_name.c_str());
 		}
 	}

@@ -341,6 +341,7 @@ void BallanceMMOClient::OnPostStartMenu()
         md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
 
         validate_nickname(props_["playername"]);
+        db_.set_nickname(props_["playername"]->GetString());
 
         init_ = true;
     }
@@ -463,12 +464,29 @@ void BallanceMMOClient::OnCheatEnabled(bool enable) {
 
 void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) {
     if (prop == props_["playername"]) {
+        if (bypass_name_check_) {
+            bypass_name_check_ = false;
+            return;
+        }
+        using namespace std::chrono;
+        auto last_name_change = sys_time(seconds(last_name_change_time_));
+        if (std::chrono::system_clock::now() - last_name_change < 24h) {
+            bypass_name_check_ = true;
+            prop->SetString(db_.get_nickname().c_str());
+            auto next_name_change = system_clock::to_time_t(last_name_change + 24h);
+            std::string error_msg(128, '\0');
+            std::strftime(error_msg.data(), error_msg.size(),
+                "Error: You can only change your name every 24 hours (after %F %T).",
+                std::localtime(&next_name_change));
+            SendIngameMessage(error_msg.c_str());
+            return;
+        }
+        std::string new_name = prop->GetString();
+        if (new_name == db_.get_nickname())
+          return;
+        name_changed_ = true;
         validate_nickname(prop);
-    }
-    else if (prop == props_["uuid"]) {
-        prop->SetString(boost::uuids::to_string(uuid_).c_str());
-        GetLogger()->Warn("Warning: Unable to modify UUID.");
-        return;
+        db_.set_nickname(prop->GetString());
     }
     else if (prop == props_["extrapolation"]) {
         objects_.toggle_extrapolation(prop->GetBoolean());
@@ -990,10 +1008,10 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         SendIngameMessage(s.c_str());
         cleanup();
         const int nReason = pInfo->m_info.m_eEndReason;
-        // 102 - crash; 103 - fatal error
         if (nReason >= bmmo::connection_end::Crash && nReason <= bmmo::connection_end::PlayerKicked_Max)
             terminate(5);
         else if (nReason >= bmmo::connection_end::AutoReconnection_Min && nReason < bmmo::connection_end::AutoReconnection_Max) {
+          // auto reconnect
           reconnect(nReason - bmmo::connection_end::AutoReconnection_Min);
         }
         else if (nReason > k_ESteamNetConnectionEnd_App_Max) {
@@ -1046,7 +1064,13 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         status_->update("Connected (Login requested)");
         //status_->paint(0xff00ff00);
         SendIngameMessage("Connected to server.");
-        std::string nickname = props_["playername"]->GetString();
+        std::string nickname = db_.get_nickname();
+        if (name_changed_) {
+          using namespace std::chrono;
+          last_name_change_time_ = duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+          save_external_config();
+          name_changed_ = false;
+        }
         spectator_mode_ = props_["spectator"]->GetBoolean();
         if (spectator_mode_) {
             nickname = bmmo::name_validator::get_spectator_nickname(nickname);
@@ -1065,7 +1089,6 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 
         SendIngameMessage(("Logging in as \"" + nickname + "\"...").c_str());
         bmmo::login_request_v3_msg msg{};
-        db_.set_nickname(nickname);
         msg.nickname = nickname;
         msg.version = version;
         msg.cheated = m_bml->IsCheatEnabled() && !spectator_mode_; // always false in spectator mode

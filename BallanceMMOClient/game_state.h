@@ -198,7 +198,7 @@ public:
 		auto& state = states_[id];
 		state.current_map_name = map_name;
 		state.current_sector = sector;
-		state.current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
+		state.current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1024);
 		return true;
 	}
 
@@ -207,7 +207,7 @@ public:
 			return false;
 		std::unique_lock lk(mutex_);
 		states_[id].current_sector = sector;
-		states_[id].current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - 3e12) / 1024);
+		states_[id].current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1024);
 		return true;
 	}
 
@@ -307,6 +307,10 @@ public:
 		return ball_name_to_id_[name];
 	}
 
+	static constexpr inline auto get_init_timestamp() {
+		return INIT_TIMESTAMP;
+	}
+
 	bool is_nametag_visible() {
 		return nametag_visible_;
 	}
@@ -341,4 +345,5 @@ private:
 	std::atomic_bool nametag_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
 	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15;
+	static const inline auto INIT_TIMESTAMP = SteamNetworkingUtils()->GetLocalTimestamp();
 };

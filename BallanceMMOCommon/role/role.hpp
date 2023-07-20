@@ -74,7 +74,7 @@ public:
 
     static SteamNetworkingConfigValue_t generate_opt() {
         SteamNetworkingConfigValue_t opt{};
-        SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected, 4400);
+        SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected, 7200);
         opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
                    (void*)SteamNetConnectionStatusChangedCallbackWrapper);
         return opt;
