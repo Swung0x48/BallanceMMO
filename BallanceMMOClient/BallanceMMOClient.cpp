@@ -509,6 +509,7 @@ void BallanceMMOClient::OnModifyConfig(CKSTRING category, CKSTRING key, IPropert
 
 void BallanceMMOClient::OnExitGame()
 {
+    check_and_save_name_change_time();
     cleanup(true);
     client::destroy();
 }
@@ -1065,12 +1066,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         //status_->paint(0xff00ff00);
         SendIngameMessage("Connected to server.");
         std::string nickname = db_.get_nickname();
-        if (name_changed_) {
-          using namespace std::chrono;
-          last_name_change_time_ = duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
-          save_external_config();
-          name_changed_ = false;
-        }
+        check_and_save_name_change_time();
         spectator_mode_ = props_["spectator"]->GetBoolean();
         if (spectator_mode_) {
             nickname = bmmo::name_validator::get_spectator_nickname(nickname);

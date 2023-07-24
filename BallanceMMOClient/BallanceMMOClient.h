@@ -373,6 +373,14 @@ private:
 		ofile << picojson::value{external_config}.serialize(true);
 	}
 
+	void check_and_save_name_change_time() {
+		if (!name_changed_) return;
+		using namespace std::chrono;
+		last_name_change_time_ = duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+		save_external_config();
+		name_changed_ = false;
+	}
+
 	struct KeyVector {
 		char x = 0;
 		char y = 0;
