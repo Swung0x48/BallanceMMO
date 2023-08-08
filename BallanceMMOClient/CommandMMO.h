@@ -1,5 +1,5 @@
 #pragma once
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 
 class CommandMMO: public ICommand
 {

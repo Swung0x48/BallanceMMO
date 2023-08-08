@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
 #include <mutex>
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 struct label_sprite {
 	std::unique_ptr<BGui::Label> sprite_;
 	std::mutex mtx_;

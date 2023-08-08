@@ -1,5 +1,5 @@
 #pragma once
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 #include "label_sprite.h"
 #include "game_state.h"
 #include <unordered_map>

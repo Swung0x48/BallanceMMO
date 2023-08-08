@@ -1,6 +1,6 @@
 #pragma once
 
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 #include "CommandMMO.h"
 #include "text_sprite.h"
 #include "label_sprite.h"
@@ -56,11 +56,11 @@ public:
 
 	bmmo::version_t version;
 	const std::string version_string = version.to_string();
-	virtual CKSTRING GetID() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetVersion() override { return version_string.c_str(); }
-	virtual CKSTRING GetName() override { return "BallanceMMOClient"; }
-	virtual CKSTRING GetAuthor() override { return "Swung0x48 & BallanceBug"; }
-	virtual CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
+	virtual BMMO_CKSTRING GetID() override { return "BallanceMMOClient"; }
+	virtual BMMO_CKSTRING GetVersion() override { return version_string.c_str(); }
+	virtual BMMO_CKSTRING GetName() override { return "BallanceMMOClient"; }
+	virtual BMMO_CKSTRING GetAuthor() override { return "Swung0x48 & BallanceBug"; }
+	virtual BMMO_CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
 	DECLARE_BML_VERSION;
 
 	static void init_socket() {
@@ -94,14 +94,14 @@ private:
 	//void OnUnload() override;
 	void OnProcess() override;
 	void OnStartLevel() override;
-	void OnLoadObject(CKSTRING filename, BOOL isMap, CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
+	void OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	void OnPostCheckpointReached() override;
 	void OnPostExitLevel() override;
 	void OnCounterActive() override;
 	void OnLevelFinish() override;
-	void OnLoadScript(CKSTRING filename, CKBehavior* script) override;
+	void OnLoadScript(BMMO_CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
-	void OnModifyConfig(CKSTRING category, CKSTRING key, IProperty* prop) override;
+	void OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key, IProperty* prop) override;
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	const std::vector<std::string> OnTabComplete(IBML* bml, const std::vector<std::string>& args);
@@ -205,6 +205,12 @@ private:
 	int64_t last_name_change_time_{};
 	bool name_changed_ = false, bypass_name_check_ = false;
 
+	std::atomic_bool beep_enabled_ = true;
+	void play_beep(uint32_t frequency, uint32_t duration) {
+		if (beep_enabled_)
+			Beep(frequency, duration);
+	};
+
 	char system_font_[32]{};
 	const std::wstring LOCAL_APPDATA_PATH = [] { // local appdata
 		std::wstring path_str = L".";
@@ -302,6 +308,11 @@ private:
 		tmp_prop->SetDefaultBoolean(true);
 		objects_.toggle_dynamic_opacity(tmp_prop->GetBoolean());
 		props_["dynamic_opacity"] = tmp_prop;
+		tmp_prop = GetConfig()->GetProperty("Gameplay", "SoundNotification");
+		tmp_prop->SetComment("Whether to play beep sounds in addition to chat notifications on important server events.");
+		tmp_prop->SetDefaultBoolean(true);
+		beep_enabled_ = tmp_prop->GetBoolean();
+		props_["sound_notification"] = tmp_prop;
 	}
 
 	// ver <= 3.4.5-alpha6: no external config
@@ -797,7 +808,7 @@ private:
 		auto* esc = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(esc_event_));
 		esc->Activate();
 
-		m_bml->AddTimer(3u, [this]() {
+		m_bml->AddTimer(CKDWORD(3), [this]() {
 			CKMessageManager* mm = m_bml->GetMessageManager();
 
 			CKMessageType reset_level_msg = mm->AddMessageType("Reset Level");

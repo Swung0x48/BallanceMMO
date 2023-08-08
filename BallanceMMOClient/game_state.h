@@ -4,7 +4,7 @@
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
 #include <steam/steam_api.h>
 #endif
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 
 #include <unordered_map>
 #include <shared_mutex>

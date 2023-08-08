@@ -1,5 +1,5 @@
 #pragma once
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 class game_repository
 {
 	CKDataArray* current_level_array_ = nullptr;

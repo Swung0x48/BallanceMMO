@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
 #include <mutex>
-#include <BML/BMLAll.h>
+#include "bml_includes.h"
 struct text_sprite {
 	class sprite : public BGui::Text {
 	public:

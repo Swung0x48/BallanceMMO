@@ -51,6 +51,9 @@
     <ClInclude Include="exported_client.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="bml_includes.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BallanceMMOClient.cpp">
