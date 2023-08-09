@@ -14,7 +14,9 @@
 /Debug
 /BallanceMMOClient/x64/Debug
 /BallanceMMOClient/Release
+/BallanceMMOClient/Release-BMLPlus
 /Release
+/Release-BMLPlus
 /BallanceMMOServer/cmake-build-debug_
 /BallanceMMOServer/.idea
 /.idea

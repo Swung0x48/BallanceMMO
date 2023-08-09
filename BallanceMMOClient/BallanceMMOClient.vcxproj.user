@@ -10,6 +10,11 @@
     <LocalDebuggerWorkingDirectory>C:\Users\Swung0x48\Desktop\Ballance-Debug\Bin\</LocalDebuggerWorkingDirectory>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release-BMLPlus|Win32'">
+    <LocalDebuggerCommand>C:\Users\Swung0x48\Desktop\Ballance-Debug\Bin\Player.exe</LocalDebuggerCommand>
+    <LocalDebuggerWorkingDirectory>C:\Users\Swung0x48\Desktop\Ballance-Debug\Bin\</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='RelDebug|Win32'">
     <LocalDebuggerCommand>C:\Users\Swung0x48\Desktop\Ballance-Debug\Bin\Player.exe</LocalDebuggerCommand>
     <LocalDebuggerWorkingDirectory>C:\Users\Swung0x48\Desktop\Ballance-Debug\Bin\</LocalDebuggerWorkingDirectory>
