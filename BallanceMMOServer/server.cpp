@@ -871,7 +871,7 @@ protected:
                 auto* state_msg = reinterpret_cast<bmmo::ball_state_msg*>(networking_msg->m_pData);
 
                 std::unique_lock<std::mutex> lock(client_data_mutex_);
-                client_it->second.state = {state_msg->content, SteamNetworkingUtils()->GetLocalTimestamp()};
+                client_it->second.state = {state_msg->content, networking_msg->m_usecTimeReceived};
                 client_it->second.state_updated = false;
 
                 // Printf("%u: %d, (%f, %f, %f), (%f, %f, %f, %f)",
@@ -1017,9 +1017,9 @@ protected:
                         if (force_restart_level_ || msg->content.force_restart) {
                             maps_.clear();
                             for (const auto& map: map_names_)
-                                maps_[map.first] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
+                                maps_[map.first] = {0, networking_msg->m_usecTimeReceived};
                         } else {
-                            maps_[msg->content.map.get_hash_bytes_string()] = {0, SteamNetworkingUtils()->GetLocalTimestamp()};
+                            maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived};
                         }
                         msg->content.restart_level = restart_level_;
                         msg->content.force_restart = force_restart_level_;
@@ -1077,7 +1077,7 @@ protected:
                 auto& current_map = maps_[md5_str];
 
                 if (current_map.start_time != 0 && msg->content.timeElapsed - current_map.start_time / 1e6f < 9000)
-                    msg->content.timeElapsed = (SteamNetworkingUtils()->GetLocalTimestamp() - current_map.start_time) / 1e6f;
+                    msg->content.timeElapsed = (networking_msg->m_usecTimeReceived - current_map.start_time) / 1e6f;
                 int total = int(msg->content.timeElapsed);
                 int minutes = total / 60;
                 int seconds = total % 60;

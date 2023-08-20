@@ -16,16 +16,16 @@ namespace bmmo {
     struct version_t {
         uint8_t major = 3;
         uint8_t minor = 4;
-        uint8_t subminor = 8;
+        uint8_t subminor = 9;
         stage_t stage = Beta;
-        uint8_t build = 13;
+        uint8_t build = 14;
 
         const std::string to_string() const;
         static version_t from_string(const std::string& input);
         auto operator<=>(const version_t& that) const = default;
     };
 
-    constexpr version_t minimum_client_version = {3, 4, 8, Beta, 12};
+    constexpr version_t minimum_client_version = {3, 4, 9, Beta, 14};
 
     const std::string version_t::to_string() const {
         std::stringstream ss;

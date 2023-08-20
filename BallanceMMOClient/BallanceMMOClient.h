@@ -194,8 +194,8 @@ private:
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
-	SteamNetworkingMicroseconds next_update_timestamp_ = 0, last_dnf_hotkey_timestamp_ = 0,
-		dnf_cooldown_end_timestamp_ = 0;
+	SteamNetworkingMicroseconds next_update_timestamp_ = 0, 
+		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;
@@ -507,7 +507,7 @@ private:
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
-			db_.update(db_.get_client_id(), TimedBallState(local_state_handler_->get_local_state()));
+			db_.update(db_.get_client_id(), TimedBallState(local_state_handler_->get_local_state()), next_update_timestamp_);
 		}
 		else {
 			db_.remove(db_.get_client_id());

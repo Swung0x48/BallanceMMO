@@ -1120,7 +1120,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OwnedBallState: {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
         auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
-        bool success = db_.update(obs->content.player_id, TimedBallState(obs->content.state));
+        bool success = db_.update(obs->content.player_id, TimedBallState(obs->content.state), network_msg->m_usecTimeReceived);
         //assert(success);
         if (!success) {
             GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", obs->content.player_id);
@@ -1144,7 +1144,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
 
         for (auto& i : msg.balls) {
-            if (!db_.update(i.player_id, TimedBallState(i.state)) && i.player_id != db_.get_client_id()) {
+            if (!db_.update(i.player_id, TimedBallState(i.state), network_msg->m_usecTimeReceived) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
@@ -1165,12 +1165,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               i.state.position.x, i.state.position.y, i.state.position.z,
                               i.state.rotation.x, i.state.rotation.y, i.state.rotation.z, i.state.rotation.w,
                               int64_t(i.state.timestamp));*/
-            if (!db_.update(i.player_id, TimedBallState(i.state)) && i.player_id != db_.get_client_id()) {
+            if (!db_.update(i.player_id, TimedBallState(i.state), network_msg->m_usecTimeReceived) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
         for (const auto& i : msg.unchanged_balls) {
-            if (!db_.update(i.player_id, i.timestamp) && i.player_id != db_.get_client_id()) {
+            if (!db_.update(i.player_id, i.timestamp, network_msg->m_usecTimeReceived) && i.player_id != db_.get_client_id()) {
                 GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
