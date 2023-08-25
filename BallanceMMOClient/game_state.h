@@ -118,8 +118,7 @@ public:
 
 	inline SteamNetworkingMicroseconds get_updated_timestamp(
 			const HSteamNetConnection id,
-			const SteamNetworkingMicroseconds timestamp,
-			const SteamNetworkingMicroseconds local_timestamp) {
+			const SteamNetworkingMicroseconds timestamp) {
 		// We have to assign a recalibrated timestamp here to reduce
 		// errors caused by lags for our extrapolation to work.
 		// Not setting new timestamps can get us almost accurate
@@ -128,8 +127,9 @@ public:
 		// and record everyone's average timestamp differences.
 		states_[id].time_diff =
 			(states_[id].time_diff == std::numeric_limits<decltype(states_[id].time_diff)>::min())
-			? (local_timestamp - timestamp)
-			: (PREV_DIFF_WEIGHT * states_[id].time_diff - timestamp + local_timestamp) / (PREV_DIFF_WEIGHT + 1);
+			? (SteamNetworkingUtils()->GetLocalTimestamp() - timestamp)
+			: (PREV_DIFF_WEIGHT * states_[id].time_diff - timestamp + SteamNetworkingUtils()->GetLocalTimestamp())
+			/ (PREV_DIFF_WEIGHT + 1);
 		// Weighted average - more weight on the previous value means more resistance
 		// to random lag spikes, which in turn results in overall smoother movement;
 		// however this also makes initial values converge into actual timestamp
@@ -157,25 +157,25 @@ public:
 		return true;
 	}
 
-	bool update(HSteamNetConnection id, TimedBallState&& state, const SteamNetworkingMicroseconds local_timestamp) {
+	bool update(HSteamNetConnection id, TimedBallState&& state) {
 		if (!exists(id))
 			return false;
 
 		std::unique_lock lk(mutex_);
-		state.timestamp = get_updated_timestamp(id, state.timestamp, local_timestamp);
+		state.timestamp = get_updated_timestamp(id, state.timestamp);
 		if (state.timestamp <= states_[id].ball_state.front().timestamp)
 			return true;
 		states_[id].ball_state.push_front(state);
 		return true;
 	}
 
-	bool update(HSteamNetConnection id, SteamNetworkingMicroseconds timestamp, const SteamNetworkingMicroseconds local_timestamp) {
+	bool update(HSteamNetConnection id, SteamNetworkingMicroseconds timestamp) {
 		if (!exists(id))
 			return false;
 
 		std::unique_lock lk(mutex_);
 		TimedBallState last_state_copy(states_[id].ball_state.front());
-		timestamp = get_updated_timestamp(id, timestamp, local_timestamp);
+		timestamp = get_updated_timestamp(id, timestamp);
 		if (timestamp <= last_state_copy.timestamp)
 			return true;
 		last_state_copy.timestamp = timestamp;

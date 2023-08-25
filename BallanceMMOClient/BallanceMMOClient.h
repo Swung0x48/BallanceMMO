@@ -507,7 +507,7 @@ private:
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
-			db_.update(db_.get_client_id(), TimedBallState(local_state_handler_->get_local_state()), next_update_timestamp_);
+			db_.update(db_.get_client_id(), TimedBallState(local_state_handler_->get_local_state()));
 		}
 		else {
 			db_.remove(db_.get_client_id());
