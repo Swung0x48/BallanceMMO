@@ -1076,8 +1076,10 @@ protected:
                 std::string md5_str = msg->content.map.get_hash_bytes_string();
                 auto& current_map = maps_[md5_str];
 
-                if (current_map.start_time != 0 && msg->content.timeElapsed - current_map.start_time / 1e6f < 9000)
-                    msg->content.timeElapsed = (networking_msg->m_usecTimeReceived - current_map.start_time) / 1e6f;
+                // Use server-side timing if available and under 2.5 hours
+                auto local_time_elapsed = networking_msg->m_usecTimeReceived - current_map.start_time;
+                if (current_map.start_time != 0 && local_time_elapsed < int64_t(2.5 * 3600 * 1e6))
+                    msg->content.timeElapsed = local_time_elapsed / 1e6f;
                 int total = int(msg->content.timeElapsed);
                 int minutes = total / 60;
                 int seconds = total % 60;
