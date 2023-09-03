@@ -18,7 +18,7 @@ jobs:
     - uses: actions/checkout@v2
 
     - name: Fetch git submodules
-      run: git submodule update --init --recursive --remote
+      run: git -c submodule."submodule/GameNetworkingSockets/modules/*".update=none submodule update --init --recursive --remote
 
     - name: Install OpenSSL
       run: sudo apt install libssl-dev
@@ -57,7 +57,7 @@ jobs:
       - uses: lukka/get-cmake@latest
 
       - name: Fetch git submodules
-        run: git submodule update --init --recursive --remote
+        run: git -c submodule."submodule/GameNetworkingSockets/modules/*".update=none submodule update --init --recursive --remote
 
       # Setup MSVC command prompt environment vars
       - uses: ilammy/msvc-dev-cmd@v1
