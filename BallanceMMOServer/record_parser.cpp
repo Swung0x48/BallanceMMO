@@ -119,9 +119,12 @@ public:
         while (record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
             current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
             bool print_status = false;
-            if (get_segment_index(current_record_time_) > get_segment_index(last_segmented_timestamp)) {
+            if (auto last_segment_index = get_segment_index(last_segmented_timestamp),
+                    current_segment_index = get_segment_index(current_record_time_);
+                    current_segment_index > last_segment_index) {
+                for (; last_segment_index <= current_segment_index; ++last_segment_index)
+                    segments_.emplace_back(segment_info_t{ (int64_t)record_stream_.tellg() - (int64_t)sizeof(SteamNetworkingMicroseconds), current_record_time_ });
                 last_segmented_timestamp = current_record_time_;
-                segments_.emplace_back(segment_info_t{ (int64_t)record_stream_.tellg() - (int64_t)sizeof(SteamNetworkingMicroseconds), current_record_time_ });
                 print_status = true;
             }
             auto size = read_variable<int32_t>(record_stream_);
