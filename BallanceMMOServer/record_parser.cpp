@@ -500,17 +500,17 @@ private:
                 bmmo::record_entry entry;
                 int size = 0;
                 {
-                    std::unique_lock<std::mutex> lk(record_data_mutex_);
+                    std::unique_lock lk(record_data_mutex_);
                     current_record_time_ =
                             read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
                     size = read_variable<int32_t>(record_stream_);
                     bmmo::record_entry e(size);
                     record_stream_.read(reinterpret_cast<char*>(e.data), size);
                     entry = std::move(e);
+                    if (!running_ || !playing_)
+                        break;
+                    std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
                 }
-                if (!running_ || !playing_)
-                    break;
-                std::this_thread::sleep_until(time_zero_ + std::chrono::microseconds(current_record_time_));
 
                 // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
                 // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
@@ -532,7 +532,7 @@ private:
     }
 
     void forward_seek(SteamNetworkingMicroseconds dest_time, bool parse = true) {
-        std::unique_lock<std::mutex> lk(record_data_mutex_);
+        std::unique_lock lk(record_data_mutex_);
         time_zero_ -= std::chrono::microseconds(dest_time - current_record_time_);
         while (running_ && current_record_time_ < dest_time
                 && record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
@@ -549,7 +549,7 @@ private:
 
     void backward_seek(SteamNetworkingMicroseconds dest_time) {
         {
-            std::unique_lock<std::mutex> lk(record_data_mutex_);
+            std::unique_lock lk(record_data_mutex_);
             record_stream_.seekg(strlen(bmmo::RECORD_HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(int64_t) + sizeof(SteamNetworkingMicroseconds));
             started_ = false;
             record_clients_.clear();
