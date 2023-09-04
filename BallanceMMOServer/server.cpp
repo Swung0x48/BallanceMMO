@@ -1072,7 +1072,6 @@ protected:
                 }
 
                 // Prepare data...
-                int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
                 std::string md5_str = msg->content.map.get_hash_bytes_string();
                 auto& current_map = maps_[md5_str];
 
@@ -1080,20 +1079,14 @@ protected:
                 auto local_time_elapsed = networking_msg->m_usecTimeReceived - current_map.start_time;
                 if (current_map.start_time != 0 && local_time_elapsed < int64_t(2.5 * 3600 * 1e6))
                     msg->content.timeElapsed = local_time_elapsed / 1e6f;
-                int total = int(msg->content.timeElapsed);
-                int minutes = total / 60;
-                int seconds = total % 60;
-                int hours = minutes / 60;
-                minutes = minutes % 60;
-                int ms = int((msg->content.timeElapsed - total) * 1000);
 
                 // Prepare message
                 msg->content.rank = ++maps_[md5_str].rank;
-                Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
+                Printf("%s(#%u, %s) finished %s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, clients_[msg->content.player_id].name,
                     msg->content.map.get_display_name(map_names_), maps_[md5_str].rank, bmmo::get_ordinal_suffix(msg->content.rank),
-                    score, hours, minutes, seconds, ms);
+                    msg->content.get_formatted_score(), msg->content.get_formatted_time());
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
 

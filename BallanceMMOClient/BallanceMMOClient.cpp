@@ -242,6 +242,10 @@ void BallanceMMOClient::OnLoad()
     init_config();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
     input_manager_ = m_bml->GetInputManager();
+    load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sound\\Menu_dong.wav");
+    sound_countdown_->SetPitch(0.625f);
+    load_wave_sound(&sound_level_finish_, "MMO_Sound_Level_Finish", "..\\Sound\\Music_Highscore.wav");
+    load_wave_sound(&sound_dnf_, "MMO_Sound_DNF", "..\\Sound\\Misc_RopeTears.wav");
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -501,7 +505,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
         return;
     }
     else if (prop == props_["sound_notification"]) {
-        beep_enabled_ = prop->GetBoolean();
+        sound_enabled_ = prop->GetBoolean();
         return;
     }
     if (connected() || connecting()) {
@@ -1404,6 +1408,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             case bmmo::countdown_type::Countdown_3:
                 SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
                 asio::post(thread_pool_, [this] { play_beep(440, 500); });
+
                 break;
             case bmmo::countdown_type::Ready:
                 SendIngameMessage(std::format("[{}]: {} - Get ready", sender_name, map_name).c_str());
@@ -1436,26 +1441,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::LevelFinishV2: {
         auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(network_msg->m_pData);
 
-        // Prepare data...
-        int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
-
-        int total = int(msg->content.timeElapsed);
-        int minutes = total / 60;
-        int seconds = total % 60;
-        int hours = minutes / 60;
-        minutes = minutes % 60;
-        int ms = int((msg->content.timeElapsed - total) * 1000);
-
         // Prepare message
         std::string map_name = msg->content.map.get_display_name(map_names_);
         //auto state = db_.get(msg->content.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         SendIngameMessage(std::format(
-            "{}{} finished {} in {}{} place (score: {}; real time: {:02d}:{:02d}:{:02d}.{:03d}).",
+            "{}{} finished {} in {}{} place (score: {}; real time: {}).",
             msg->content.cheated ? "[CHEAT] " : "",
             get_username(msg->content.player_id),
             map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
-            score, hours, minutes, seconds, ms).c_str());
+            msg->content.get_formatted_score(), msg->content.get_formatted_time()).c_str());
         // TODO: Stop displaying objects on finish
         flash_window();
         break;

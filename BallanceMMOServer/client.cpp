@@ -548,19 +548,12 @@ private:
             }
             case bmmo::LevelFinishV2: {
                 auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(networking_msg->m_pData);
-                int score = msg->content.levelBonus + msg->content.points + msg->content.lives * msg->content.lifeBonus;
-                int total = int(msg->content.timeElapsed);
-                int minutes = total / 60;
-                int seconds = total % 60;
-                int hours = minutes / 60;
-                minutes = minutes % 60;
-                int ms = int((msg->content.timeElapsed - total) * 1000);
 
-                Printf("%s(#%u, %s) finished %s in %d%s place (score: %d; real time: %02d:%02d:%02d.%03d).",
+                Printf("%s(#%u, %s) finished %s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, clients_[msg->content.player_id].name,
                     msg->content.map.get_display_name(map_names_), msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
-                    score, hours, minutes, seconds, ms);
+                    msg->content.get_formatted_score(), msg->content.get_formatted_time());
                 break;
             }
             case bmmo::MapNames: {

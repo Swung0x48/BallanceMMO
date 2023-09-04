@@ -205,11 +205,24 @@ private:
 	int64_t last_name_change_time_{};
 	bool name_changed_ = false, bypass_name_check_ = false;
 
-	std::atomic_bool beep_enabled_ = true;
+	std::atomic_bool sound_enabled_ = true;
+	CKWaveSound* sound_countdown_{}, * sound_level_finish_{}, * sound_dnf_{};
 	void play_beep(uint32_t frequency, uint32_t duration) {
-		if (beep_enabled_)
-			Beep(frequency, duration);
+		if (!sound_enabled_)
+			return;
+		Beep(frequency, duration);
 	};
+	void play_wave_sound(CKWaveSound* sound, float gain = 1.0f) {
+		if (!sound_enabled_)
+			return;
+		if (sound->IsPlaying())
+			sound->Stop();
+		sound->Play(0, gain);
+	}
+	void load_wave_sound(CKWaveSound** sound, CKSTRING name, CKSTRING path) {
+		*sound = static_cast<CKWaveSound*>(m_bml->GetCKContext()->CreateObject(CKCID_WAVESOUND, name));
+		(**sound).Create(true, path);
+	}
 
 	char system_font_[32]{};
 	const std::wstring LOCAL_APPDATA_PATH = [] { // local appdata
@@ -311,7 +324,7 @@ private:
 		tmp_prop = GetConfig()->GetProperty("Gameplay", "SoundNotification");
 		tmp_prop->SetComment("Whether to play beep sounds in addition to chat notifications on important server events.");
 		tmp_prop->SetDefaultBoolean(true);
-		beep_enabled_ = tmp_prop->GetBoolean();
+		sound_enabled_ = tmp_prop->GetBoolean();
 		props_["sound_notification"] = tmp_prop;
 	}
 
