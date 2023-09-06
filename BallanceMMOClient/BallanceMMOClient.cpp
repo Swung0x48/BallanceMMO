@@ -1658,15 +1658,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 SendIngameMessage("Now playing: " + msg.caption);
             flash_window();
             static constexpr auto prefix = "BMMO_";
-            std::string sound_name = "MMO_Sound_" + msg.path.substr(msg.path.find_last_of(prefix) + strlen(prefix));
+            std::string path = msg.path;
+            std::string sound_name = "MMO_Sound_" + path.substr(path.find_last_of(prefix) + strlen(prefix));
             /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
             CKWaveSound* sound;
-            load_wave_sound(&sound, sound_name.data(), msg.path.data(), msg.gain, msg.pitch, true);
+            load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, true);
             received_wave_sounds_.push_back(sound);
             GetLogger()->Info("Playing sound <%s> from server%s",
                               sound_name.c_str(),
                               msg.caption.empty() ? "" : (": " + msg.caption).c_str());
-            GetLogger()->Info("Sound length: %d milliseconds", msg.duration_ms == 0 ? sound->GetSoundLength() : msg.duration_ms);
+            GetLogger()->Info("Sound length: %d milliseconds; Gain: %.2f; Pitch: %.2f",
+                              msg.duration_ms == 0 ? sound->GetSoundLength() : msg.duration_ms,
+                              msg.gain, msg.pitch);
             m_bml->AddTimer(CKDWORD(0), [=] { sound->Play(); });
 
             if (msg.duration_ms == 0)
