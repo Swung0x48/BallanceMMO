@@ -1642,9 +1642,9 @@ int main(int argc, char** argv) {
                 case YAML::NodeType::Map:
                     if (idata["caption"]) msg.caption = idata["caption"].as<std::string>();
                     if (idata["path"]) msg.path = idata["path"].as<std::string>();
-                    if (idata["duration"]) msg.duration_ms = idata["duration"].as<typeof(msg.duration_ms)>();
-                    if (idata["gain"]) msg.gain = idata["gain"].as<typeof(msg.gain)>();
-                    if (idata["pitch"]) msg.pitch = idata["pitch"].as<typeof(msg.pitch)>();
+                    if (idata["duration"]) msg.duration_ms = idata["duration"].as<decltype(msg.duration_ms)>();
+                    if (idata["gain"]) msg.gain = idata["gain"].as<decltype(msg.gain)>();
+                    if (idata["pitch"]) msg.pitch = idata["pitch"].as<decltype(msg.pitch)>();
                     break;
                 case YAML::NodeType::Scalar:
                     msg.path = idata.as<std::string>();

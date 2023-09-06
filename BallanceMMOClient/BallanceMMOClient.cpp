@@ -1657,9 +1657,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             if (!msg.caption.empty())
                 SendIngameMessage("Now playing: " + msg.caption);
             flash_window();
-            static constexpr auto prefix = "BMMO_";
             std::string path = msg.path;
-            std::string sound_name = "MMO_Sound_" + path.substr(path.find_last_of(prefix) + strlen(prefix));
+            std::string sound_name = "MMO_Sound_" + path.substr(path.find_last_of("BMMO_"));
             /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
             CKWaveSound* sound;
             load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, true);
