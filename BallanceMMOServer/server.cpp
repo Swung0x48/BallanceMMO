@@ -16,6 +16,7 @@
 #include <mutex>
 // #include <shared_mutex>
 #include <fstream>
+#include <filesystem>
 
 #include <ya_getopt.h>
 #include <yaml-cpp/yaml.h>
@@ -1254,6 +1255,7 @@ protected:
                 break;
             }
             case bmmo::SoundData:
+            case bmmo::SoundStream:
             case bmmo::OwnedBallState:
             case bmmo::OwnedBallStateV2:
             case bmmo::OwnedTimedBallState:
@@ -1629,6 +1631,36 @@ int main(int argc, char** argv) {
             std::stringstream temp; temp << sounds;
             server.Printf("Playing sound - %s", temp.str());
             msg.serialize();
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        } catch (const std::exception& e) { server.Printf(e.what()); return; }
+    });
+    console.register_command("playstream", [&] {
+        try {
+            auto idata = YAML::Load(console.get_rest_of_line());
+            bmmo::sound_stream_msg msg{};
+            switch (idata.Type()) {
+                case YAML::NodeType::Map:
+                    if (idata["path"]) msg.path = idata["path"].as<std::string>();
+                    if (idata["duration"]) msg.duration_ms = idata["duration"].as<typeof(msg.duration_ms)>();
+                    if (idata["gain"]) msg.gain = idata["gain"].as<typeof(msg.gain)>();
+                    if (idata["pitch"]) msg.pitch = idata["pitch"].as<typeof(msg.pitch)>();
+                    break;
+                case YAML::NodeType::Scalar:
+                    msg.path = idata.as<std::string>();
+                    break;
+                default:
+                    server.Printf("Usage: playstream {path: <path>, duration: <duration_ms = 0>, gain: <1.0 ∈ [0, 1]>, pitch: <1.0 ∈ [0.5, 2]>}");
+                    server.Printf("Usage: playstream <path>");
+                    server.Printf("Current working directory: %s", std::filesystem::current_path().string());
+                    server.Printf("Maximum file size: %lld bytes", msg.get_max_stream_size());
+                    return;
+            }
+            msg.type = bmmo::sound_stream_msg::sound_type::Wave;
+            if (!msg.serialize()) {
+                server.Printf("Error serializing message.");
+                return;
+            }
+            server.Printf("Sending sound <%s>, size: %d", msg.path, (uint32_t) msg.size());
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         } catch (const std::exception& e) { server.Printf(e.what()); return; }
     });

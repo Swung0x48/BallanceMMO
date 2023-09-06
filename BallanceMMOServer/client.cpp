@@ -420,7 +420,7 @@ private:
 
                 break;
             }
-            case bmmo::OwnedTimedBallState: 
+            case bmmo::OwnedTimedBallState:
                 break;
             case bmmo::OwnedCompressedBallState: {
                 bmmo::owned_compressed_ball_state_msg msg;
@@ -492,6 +492,28 @@ private:
             case bmmo::PopupBox: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(networking_msg);
                 Printf("[Popup] {%s}: %s", msg.title, msg.text_content);
+                break;
+            }
+            case bmmo::SoundData: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::sound_data_msg>(networking_msg);
+                Printf("Sound data received%s!", msg.caption.empty() ? "" : ": " + msg.caption);
+                std::stringstream data_text;
+                for (const auto& [frequency, duration]: msg.sounds)
+                    data_text << ", (" << frequency << ", " << duration << ")";
+                Printf("%s", data_text.str().erase(0, 2));
+                break;
+            }
+            case bmmo::SoundStream: {
+                bmmo::sound_stream_msg msg{};
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.save_to_pwd = true;
+                if (!msg.deserialize()) {
+                    Printf("Error receiving sound!");
+                    break;
+                }
+                Printf("Sound stream received%s!", msg.caption.empty() ? "" : ": " + msg.caption);
+                Printf("Path: %s; Length: %d ms; Gain: %.2f; Pitch: %.2f.",
+                    msg.path, msg.duration_ms, msg.gain, msg.pitch);
                 break;
             }
             case bmmo::ActionDenied: {
@@ -784,7 +806,7 @@ int main(int argc, char** argv) {
     console.register_command("help", [&] { role::Printf(console.get_help_string().c_str()); });
     console.register_command("stop", [&] { client.shutdown(); });
     auto pos_function = [&](bool translate = false) {
-        std::mt19937 random_gen(std::random_device{}()); 
+        std::mt19937 random_gen(std::random_device{}());
         std::uniform_real_distribution<float> pos_dist(-10, 10), rot_dist(-1, 1);
         auto& msg = client.get_local_state_msg();
         float* const pos = msg.content.position.v;

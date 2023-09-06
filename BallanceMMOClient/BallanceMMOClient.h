@@ -206,22 +206,48 @@ private:
 	bool name_changed_ = false, bypass_name_check_ = false;
 
 	std::atomic_bool sound_enabled_ = true;
-	CKWaveSound* sound_countdown_{}, * sound_level_finish_{}, * sound_dnf_{};
+	CKWaveSound* sound_countdown_{}, * sound_go_{},
+		* sound_level_finish_{}, * sound_level_finish_cheat_{}, * sound_dnf_{},
+		* sound_notification_{}, * sound_bubble_{}, * sound_knock_{};
 	void play_beep(uint32_t frequency, uint32_t duration) {
 		if (!sound_enabled_)
 			return;
 		Beep(frequency, duration);
 	};
-	void play_wave_sound(CKWaveSound* sound, float gain = 1.0f) {
+	void play_wave_sound(CKWaveSound* sound) {
 		if (!sound_enabled_)
 			return;
 		if (sound->IsPlaying())
 			sound->Stop();
-		sound->Play(0, gain);
+		sound->Play();
 	}
-	void load_wave_sound(CKWaveSound** sound, CKSTRING name, CKSTRING path) {
+	void load_wave_sound(CKWaveSound** sound, CKSTRING name, CKSTRING path, float gain = 1.0f, float pitch = 1.0f, bool streaming = false) {
 		*sound = static_cast<CKWaveSound*>(m_bml->GetCKContext()->CreateObject(CKCID_WAVESOUND, name));
-		(**sound).Create(true, path);
+		(**sound).Create(streaming, path);
+		(**sound).SetGain(gain);
+		(**sound).SetPitch(pitch);
+	}
+
+	std::vector<CKWaveSound*> received_wave_sounds_;
+	void cleanup_received_sounds() {
+		if (received_wave_sounds_.empty())
+			return;
+		for (const auto sound : received_wave_sounds_) {
+			if (sound == nullptr) return;
+			if (sound->IsPlaying())
+				sound->Stop();
+			m_bml->GetCKContext()->DestroyObject(sound, CK_DESTROY_TEMPOBJECT);
+		}
+		received_wave_sounds_.clear();
+		// Delete every sound matching the pattern as we may fail to do so the last time
+		WIN32_FIND_DATA fd;
+		HANDLE hFind = FindFirstFile("..\\ModLoader\\Cache\\BMMO_*.wav", &fd);
+		if (hFind != INVALID_HANDLE_VALUE) {
+			do {
+				DeleteFile((std::string("..\\ModLoader\\Cache\\") + fd.cFileName).c_str());
+			} while (FindNextFile(hFind, &fd));
+			FindClose(hFind);
+		}
 	}
 
 	char system_font_[32]{};
@@ -764,6 +790,7 @@ private:
 		db_.clear();
 		objects_.destroy_all_objects();
 		local_state_handler_.reset();
+		cleanup_received_sounds();
 
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();

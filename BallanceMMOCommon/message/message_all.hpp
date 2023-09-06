@@ -45,5 +45,6 @@
 #include "sound_data_msg.hpp"
 #include "public_notification_msg.hpp"
 #include "owned_compressed_ball_state_msg.hpp"
+#include "sound_stream_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

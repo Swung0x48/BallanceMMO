@@ -242,10 +242,14 @@ void BallanceMMOClient::OnLoad()
     init_config();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
     input_manager_ = m_bml->GetInputManager();
-    load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sound\\Menu_dong.wav");
-    sound_countdown_->SetPitch(0.625f);
-    load_wave_sound(&sound_level_finish_, "MMO_Sound_Level_Finish", "..\\Sound\\Music_Highscore.wav");
-    load_wave_sound(&sound_dnf_, "MMO_Sound_DNF", "..\\Sound\\Misc_RopeTears.wav");
+    load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sounds\\Menu_dong.wav", 0.82f, 0.625f);
+    load_wave_sound(&sound_go_, "MMO_Sound_Go", "..\\Sounds\\Menu_dong.wav", 1.0f, 0.625f * 2);
+    load_wave_sound(&sound_level_finish_, "MMO_Sound_Level_Finish", "..\\Sounds\\Music_Highscore.wav", 0.28f);
+    load_wave_sound(&sound_level_finish_cheat_, "MMO_Sound_Level_Finish_Cheat", "..\\Sounds\\Hit_Stone_Wood.wav", 0.32f, 0.5f * std::powf(2.0f, 9.0f / 12));
+    load_wave_sound(&sound_dnf_, "MMO_Sound_DNF", "..\\Sounds\\Misc_RopeTears.wav", 0.9f);
+    load_wave_sound(&sound_notification_, "MMO_Sound_Notification", "..\\Sounds\\Hit_Stone_Kuppel.wav", 0.92f);
+    load_wave_sound(&sound_bubble_, "MMO_Sound_Bubble", "..\\Sounds\\Extra_Life_Blob.wav", 0.88f);
+    load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -1299,6 +1303,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
         db_.create(msg.connection_id, msg.name, msg.cheated);
 
+        play_wave_sound(sound_bubble_);
         flash_window();
         // TODO: call this when the player enters a map
 
@@ -1312,6 +1317,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             SendIngameMessage((state->name + " left the game.").c_str());
             db_.remove(msg->content.connection_id);
             objects_.remove(msg->content.connection_id);
+            play_wave_sound(sound_knock_);
             flash_window();
         }
         break;
@@ -1342,6 +1348,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content));
         asio::post(thread_pool_, [this, name, wtext = bmmo::string_utils::ConvertAnsiToWide(msg.chat_content)]() mutable {
             flash_window();
+            play_wave_sound(sound_notification_);
             std::string text;
             constexpr static size_t MAX_LINE_LENGTH = 22;
             int line_count;
@@ -1386,7 +1393,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         switch (msg->content.type) {
             case bmmo::countdown_type::Go: {
                 SendIngameMessage(std::format("[{}]: {} - Go!", sender_name, map_name).c_str());
-                asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
+                // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
+                play_wave_sound(sound_go_);
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
                 if (msg->content.restart_level) {
@@ -1407,7 +1415,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             case bmmo::countdown_type::Countdown_2:
             case bmmo::countdown_type::Countdown_3:
                 SendIngameMessage(std::format("[{}]: {} - {}", sender_name, map_name, (int)msg->content.type).c_str());
-                asio::post(thread_pool_, [this] { play_beep(440, 500); });
+                // asio::post(thread_pool_, [this] { play_beep(440, 500); });
+                play_wave_sound(sound_countdown_);
 
                 break;
             case bmmo::countdown_type::Ready:
@@ -1435,6 +1444,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg->content.map.get_display_name(map_names_),
             msg->content.sector
         ).c_str());
+        play_wave_sound(sound_dnf_);
         flash_window();
         break;
     }
@@ -1452,6 +1462,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
             msg->content.get_formatted_score(), msg->content.get_formatted_time()).c_str());
         // TODO: Stop displaying objects on finish
+        if (msg->content.player_id != db_.get_client_id())
+            play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);
         flash_window();
         break;
     }
@@ -1487,6 +1499,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             notify_cheat_toggle_ = false;
             m_bml->EnableCheat(cheat);
             notify_cheat_toggle_ = true;
+            play_wave_sound(sound_knock_);
+            flash_window();
         }
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
         SendIngameMessage(str.c_str());
@@ -1510,6 +1524,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 notify_cheat_toggle_ = false;
                 m_bml->EnableCheat(cheat);
                 notify_cheat_toggle_ = true;
+                play_wave_sound(sound_knock_);
+                flash_window();
             }
             SendIngameMessage(str.c_str());
         }
@@ -1596,6 +1612,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             permanent_notification_->update(msg.text_content.c_str());
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content));
         flash_window();
+        play_wave_sound(sound_notification_);
         break;
     }
     case bmmo::PlainText: {
@@ -1610,6 +1627,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(network_msg);
         SendIngameMessage("[" + msg.get_type_name() + "] " + msg.text_content);
         flash_window();
+        play_wave_sound(sound_knock_);
         break;
     }
     case bmmo::SoundData: {
@@ -1618,7 +1636,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             SendIngameMessage("Now playing: " + msg.caption);
         asio::post(thread_pool_, [this, msg = std::move(msg)] {
             flash_window();
-            GetLogger()->Info((std::string{"Playing sound from server"}.append(msg.caption.empty() ? "" : ": " + msg.caption)).c_str());
+            GetLogger()->Info("Playing sound from server%s", msg.caption.empty() ? "" : (": " + msg.caption).c_str());
             std::stringstream data_text;
             for (const auto& [frequency, duration]: msg.sounds) {
                 data_text << ", (" << frequency << ", " << duration << ")";
@@ -1626,6 +1644,38 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             }
             GetLogger()->Info("Finished playing sound: [%s]", data_text.str().erase(0, 2).c_str());
         });
+        break;
+    }
+    case bmmo::SoundStream: {
+        bmmo::sound_stream_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (!msg.deserialize()) {
+            SendIngameMessage("Error receiving sound!");
+            break;
+        }
+        std::thread([this, msg = std::move(msg)] {
+            if (!msg.caption.empty())
+                SendIngameMessage("Now playing: " + msg.caption);
+            flash_window();
+            static constexpr auto prefix = "BMMO_";
+            std::string sound_name = "MMO_Sound_" + msg.path.substr(msg.path.find_last_of(prefix) + strlen(prefix));
+            /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
+            CKWaveSound* sound;
+            load_wave_sound(&sound, sound_name.data(), msg.path.data(), msg.gain, msg.pitch, true);
+            received_wave_sounds_.push_back(sound);
+            GetLogger()->Info("Playing sound <%s> from server%s",
+                              sound_name.c_str(),
+                              msg.caption.empty() ? "" : (": " + msg.caption).c_str());
+            GetLogger()->Info("Sound length: %d milliseconds", msg.duration_ms == 0 ? sound->GetSoundLength() : msg.duration_ms);
+            m_bml->AddTimer(CKDWORD(0), [=] { sound->Play(); });
+
+            if (msg.duration_ms == 0)
+                return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(msg.duration_ms));
+            if (!sound) return;
+            if (sound->IsPlaying())
+                sound->Stop();
+        }).detach();
         break;
     }
     case bmmo::PopupBox: {

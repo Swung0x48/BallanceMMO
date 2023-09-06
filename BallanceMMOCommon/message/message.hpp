@@ -69,6 +69,8 @@ namespace bmmo {
         PublicNotification,
 
         OwnedCompressedBallState,
+
+        SoundStream,
     };
 
     template<typename T, opcode C = None>
