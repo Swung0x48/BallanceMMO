@@ -69,7 +69,6 @@ namespace bmmo {
         PublicNotification,
 
         OwnedCompressedBallState,
-
         SoundStream,
     };
 

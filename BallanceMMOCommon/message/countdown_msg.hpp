@@ -15,12 +15,32 @@ namespace bmmo {
         Unknown = std::numeric_limits<std::underlying_type_t<countdown_type>>::max(),
     };
 
+    enum class level_mode: uint8_t {
+        Speedrun = 0,
+        Highscore = 1,
+    };
+
+    constexpr inline std::string get_level_mode_label(level_mode mode) {
+        switch (mode) {
+            case level_mode::Highscore:
+                return " <HS>";
+            case level_mode::Speedrun:
+            default:
+                return "";
+        }
+    }
+
     struct countdown {
         countdown_type type = countdown_type::Unknown;
+        level_mode mode = level_mode::Speedrun;
         HSteamNetConnection sender = k_HSteamNetConnection_Invalid;
         struct map map{};
         uint8_t restart_level = 0;
         uint8_t force_restart = 0;
+
+        constexpr inline auto get_level_mode_label() {
+            return bmmo::get_level_mode_label(mode);
+        }
     };
 
     typedef struct message<countdown, Countdown> countdown_msg;

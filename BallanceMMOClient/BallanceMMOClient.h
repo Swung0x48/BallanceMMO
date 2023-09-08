@@ -98,6 +98,10 @@ private:
 	void OnPostCheckpointReached() override;
 	void OnPostExitLevel() override;
 	void OnCounterActive() override;
+	void OnPauseLevel() override;
+	void OnBallOff() override;
+	void OnCamNavActive() override;
+	void OnPreLifeUp() override;
 	void OnLevelFinish() override;
 	void OnLoadScript(BMMO_CKSTRING filename, CKBehavior* script) override;
 	void OnCheatEnabled(bool enable) override;
@@ -182,11 +186,23 @@ private:
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
 	CK_ID current_level_array_ = 0;
 	CK_ID ingame_parameter_array_ = 0;
+	CK_ID energy_array_ = 0;
+	CK_ID all_gameplay_beh_ = 0;
 	bmmo::named_map current_map_{};
+	bmmo::level_mode current_level_mode_ = bmmo::level_mode::Speedrun, countdown_mode_{};
+	float counter_start_timestamp_ = 0;
 	int32_t current_sector_ = 0;
 	int32_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
+
+	int32_t initial_points_{}, initial_lives_{};
+	float point_decrease_interval_{};
+
+	bool ball_off_ = false, extra_life_received_ = false, level_finished_ = false;
+	int compensation_lives_ = 0;
+	std::unique_ptr<label_sprite> compensation_lives_label_;
+	void update_compensation_lives_label();
 
 	std::unique_ptr<local_state_handler_base> local_state_handler_;
 	bool spectator_mode_ = false;
@@ -287,6 +303,12 @@ private:
 		current_sector_ = sector;
 		current_sector_timestamp_ = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - db_.get_init_timestamp()) / 1024);
 		return true;
+	}
+
+	void resume_counter() {
+		auto* mm = m_bml->GetMessageManager();
+		CKMessageType unpause_level_msg = mm->AddMessageType("Unpause Level");
+		mm->SendMessageSingle(unpause_level_msg, static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObject(all_gameplay_beh_)));
 	}
 
 	void parse_and_set_player_list_color(IProperty* prop) {
@@ -583,7 +605,7 @@ private:
 					if (input_manager_->IsKeyPressed(KEYS_TO_CHECK[i])) {
 						// std::vector<std::string> args(init_args);
 						// OnCommand(m_bml, args);
-						send_countdown_message(static_cast<bmmo::countdown_type>(i));
+						send_countdown_message(static_cast<bmmo::countdown_type>(i), countdown_mode_);
 					}
 				}
 				if (input_manager_->IsKeyPressed(CKKEY_GRAVE)) {
@@ -609,11 +631,7 @@ private:
 				if (timestamp < dnf_cooldown_end_timestamp_)
 					return;
 				if (timestamp - last_dnf_hotkey_timestamp_ <= 3000000) {
-					bmmo::did_not_finish_msg msg{};
-					m_bml->GetArrayByName("IngameParameter")->GetElementValue(0, 1, &msg.content.sector);
-					msg.content.map = current_map_;
-					msg.content.cheated = m_bml->IsCheatEnabled();
-					send(msg, k_nSteamNetworkingSend_Reliable);
+					send_dnf_message();
 					last_dnf_hotkey_timestamp_ = 0;
 					dnf_cooldown_end_timestamp_ = timestamp + 6000000;
 				}
@@ -917,12 +935,21 @@ private:
 		return s;
 	}
 
-	void send_countdown_message(bmmo::countdown_type type) {
+	void send_countdown_message(bmmo::countdown_type type, bmmo::level_mode mode) {
 		bmmo::countdown_msg msg{};
 		msg.content.type = type;
+		msg.content.mode = mode;
 		msg.content.map = current_map_;
 		msg.content.force_restart = reset_rank_;
 		reset_rank_ = false;
+		send(msg, k_nSteamNetworkingSend_Reliable);
+	}
+
+	void send_dnf_message() {
+		bmmo::did_not_finish_msg msg{};
+		msg.content.sector = current_sector_;
+		msg.content.map = current_map_;
+		msg.content.cheated = m_bml->IsCheatEnabled();
 		send(msg, k_nSteamNetworkingSend_Reliable);
 	}
 

@@ -1013,8 +1013,12 @@ protected:
 
                 std::string map_name = msg->content.map.get_display_name(map_names_);
                 switch (msg->content.type) {
-                    case bmmo::countdown_type::Go: {
-                        Printf("[%u, %s]: %s - Go!%s", networking_msg->m_conn, client_it->second.name, map_name, msg->content.force_restart ? " (rank reset)" : "");
+                    using ct = bmmo::countdown_type;
+                    case ct::Go: {
+                        Printf("[%u, %s]: %s%s - Go!%s",
+                            networking_msg->m_conn, client_it->second.name, map_name,
+                            msg->content.get_level_mode_label(),
+                            msg->content.force_restart ? " (rank reset)" : "");
                         if (force_restart_level_ || msg->content.force_restart) {
                             maps_.clear();
                             for (const auto& map: map_names_)
@@ -1028,18 +1032,21 @@ protected:
                             i.second.ready = false;
                         break;
                     }
-                    case bmmo::countdown_type::Countdown_1:
-                    case bmmo::countdown_type::Countdown_2:
-                    case bmmo::countdown_type::Countdown_3:
-                        Printf("[%u, %s]: %s - %u", networking_msg->m_conn, client_it->second.name, map_name, msg->content.type);
+                    case ct::Countdown_1:
+                    case ct::Countdown_2:
+                    case ct::Countdown_3:
+                    case ct::Ready:
+                    case ct::ConfirmReady:
+                        Printf("[%u, %s]: %s%s - %s",
+                            networking_msg->m_conn, client_it->second.name, map_name,
+                            msg->content.get_level_mode_label(),
+                            std::map<ct, std::string>{
+                                {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"},
+                                {ct::Ready, "Get ready"},
+                                {ct::ConfirmReady, "Please use \"/mmo ready\" to confirm if you are ready"},
+                            }[msg->content.type]);
                         break;
-                    case bmmo::countdown_type::Ready:
-                        Printf("[%u, %s]: %s - Get ready", networking_msg->m_conn, client_it->second.name, map_name);
-                        break;
-                    case bmmo::countdown_type::ConfirmReady:
-                        Printf("[%u, %s]: %s - Please use \"/mmo ready\" to confirm if you are ready", networking_msg->m_conn, client_it->second.name, map_name);
-                        break;
-                    case bmmo::countdown_type::Unknown:
+                    case ct::Unknown:
                     default:
                         return;
                 }
@@ -1566,7 +1573,7 @@ int main(int argc, char** argv) {
     console.register_command("countdown", [&] {
         auto print_hint = [] {
             role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
-            role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [type]\".");
+            role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [mode] [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
         };
         auto client = (HSteamNetConnection) console.get_next_long();
@@ -1579,6 +1586,8 @@ int main(int argc, char** argv) {
         else
             bmmo::hex_chars_from_string(map.md5, hash);
         bmmo::countdown_msg msg{.content = {.map = map}};
+        if (!console.empty() && console.get_next_word() == "hs")
+            msg.content.mode = bmmo::level_mode::Highscore;
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
                 msg.content.type = static_cast<bmmo::countdown_type>(i);
@@ -1593,11 +1602,15 @@ int main(int argc, char** argv) {
     console.register_command("countdown-forced", [&] {
         bmmo::countdown_msg msg{};
         msg.content.restart_level = msg.content.force_restart = true;
+        if (!console.empty() && console.get_next_word() == "hs")
+            msg.content.mode = bmmo::level_mode::Highscore;
         msg.content.map.type = bmmo::map_type::OriginalLevel;
         for (int i = 3; i >= 0; --i) {
             msg.content.type = static_cast<bmmo::countdown_type>(i);
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
-            server.Printf("[[Server]]: Countdown - %s", i == 0 ? "Go!" : std::to_string(i));
+            server.Printf("[[Server]]: Countdown%s - %s",
+                msg.content.mode == bmmo::level_mode::Highscore ? " <HS>" : "",
+                i == 0 ? "Go!" : std::to_string(i));
             if (i != 0)
                 std::this_thread::sleep_for(std::chrono::seconds(1));
         }

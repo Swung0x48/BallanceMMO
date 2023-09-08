@@ -536,10 +536,11 @@ private:
             case bmmo::Countdown: {
                 auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
                 using ct = bmmo::countdown_type;
-                Printf("[%u, %s]: %s - %s",
+                Printf("[%u, %s]: %s%s - %s",
                     msg->content.sender,
                     clients_[msg->content.sender].name,
                     msg->content.map.get_display_name(map_names_),
+                    msg->content.get_level_mode_label(),
                     std::map<ct, const char*>{
                         {ct::Ready, "Get Ready"}, {ct::ConfirmReady, "Confirm if you're ready"},
                         {ct::Go, "Go!"}, {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"}
@@ -933,11 +934,13 @@ int main(int argc, char** argv) {
     console.register_command("countdown", [&] {
         if (console.empty()) {
             role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
-            role::Printf("Usage: \"countdown level <level number> [type]\" or \"countdown <hash> <level number> [type]\".");
+            role::Printf("Usage: \"countdown level|<hash> <level number> [mode] [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
             return;
         }
         bmmo::countdown_msg msg{.content = {.map = get_map_from_input()}};
+        if (!console.empty() && console.get_next_word() == "hs")
+            msg.content.mode = bmmo::level_mode::Highscore;
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
                 msg.content.type = static_cast<bmmo::countdown_type>(i);
