@@ -20,7 +20,7 @@ namespace bmmo {
         Highscore = 1,
     };
 
-    inline std::string get_level_mode_label(level_mode mode) {
+    inline const char* get_level_mode_label(level_mode mode) {
         switch (mode) {
             case level_mode::Highscore:
                 return " <HS>";

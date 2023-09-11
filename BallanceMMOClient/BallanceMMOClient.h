@@ -230,8 +230,8 @@ private:
 			return;
 		Beep(frequency, duration);
 	};
-	void play_wave_sound(CKWaveSound* sound) {
-		if (!sound_enabled_)
+	void play_wave_sound(CKWaveSound* sound, bool forced = false) {
+		if (!sound_enabled_ && !forced)
 			return;
 		if (sound->IsPlaying())
 			sound->Stop();
@@ -303,6 +303,10 @@ private:
 		current_sector_ = sector;
 		current_sector_timestamp_ = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - db_.get_init_timestamp()) / 1024);
 		return true;
+	}
+
+	bool is_foreground_window() {
+		return GetForegroundWindow() == static_cast<HWND>(m_bml->GetCKContext()->GetMainWindow());
 	}
 
 	void resume_counter() {

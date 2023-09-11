@@ -242,12 +242,12 @@ void BallanceMMOClient::OnLoad()
     init_config();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
     input_manager_ = m_bml->GetInputManager();
-    load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sounds\\Menu_dong.wav", 0.82f, 0.625f);
-    load_wave_sound(&sound_go_, "MMO_Sound_Go", "..\\Sounds\\Menu_dong.wav", 1.0f, 0.625f * 2);
-    load_wave_sound(&sound_level_finish_, "MMO_Sound_Level_Finish", "..\\Sounds\\Music_Highscore.wav", 0.28f);
-    load_wave_sound(&sound_level_finish_cheat_, "MMO_Sound_Level_Finish_Cheat", "..\\Sounds\\Hit_Stone_Wood.wav", 0.32f, 0.5f * std::powf(2.0f, 9.0f / 12));
+    load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sounds\\Menu_dong.wav", 0.88f);
+    load_wave_sound(&sound_go_, "MMO_Sound_Go", "..\\Sounds\\Menu_dong.wav", 1.0f, 1.75f);
+    load_wave_sound(&sound_level_finish_, "MMO_Sound_Level_Finish", "..\\Sounds\\Music_Highscore.wav", 0.16f);
+    load_wave_sound(&sound_level_finish_cheat_, "MMO_Sound_Level_Finish_Cheat", "..\\Sounds\\Hit_Stone_Wood.wav", 0.24f, 0.5f * std::powf(2.0f, 9.0f / 12));
     load_wave_sound(&sound_dnf_, "MMO_Sound_DNF", "..\\Sounds\\Misc_RopeTears.wav", 0.9f);
-    load_wave_sound(&sound_notification_, "MMO_Sound_Notification", "..\\Sounds\\Hit_Stone_Kuppel.wav", 0.92f);
+    load_wave_sound(&sound_notification_, "MMO_Sound_Notification", "..\\Sounds\\Hit_Stone_Kuppel.wav", 0.76f);
     load_wave_sound(&sound_bubble_, "MMO_Sound_Bubble", "..\\Sounds\\Extra_Life_Blob.wav", 0.88f);
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 }
@@ -489,13 +489,11 @@ void BallanceMMOClient::update_compensation_lives_label() {
         compensation_lives_label_ = std::make_unique<label_sprite>("Compensation_Lives", "", 0.8f, 0.834f);
         auto sprite = compensation_lives_label_->sprite_.get();
         sprite->SetAlignment(ALIGN_BOTTOMRIGHT);
-        sprite->SetFont(ExecuteBB::GAMEFONT_04);
+        sprite->SetFont(ExecuteBB::GAMEFONT_02);
         sprite->SetSize({ 0.114f, 0.05f });
         compensation_lives_label_->set_visible(true);
     }
-    std::string text(16, 0);
-    role::Sprintf(text, "+%d", compensation_lives_);
-    compensation_lives_label_->update(text);
+    compensation_lives_label_->update(std::format("+{}", compensation_lives_));
 }
 
 // may give wrong values of extra points
@@ -842,6 +840,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return;
                 bmmo::player_ready_msg msg{.content = {.ready = false}};
                 send(msg, k_nSteamNetworkingSend_Reliable);
+            }
+            else if (lower1 == "hs" || lower1 == "sr") {
+                OnCommand(m_bml, { "mmo", "mode", args[1] });
             }
             /*else if (lower1 == "p") {
                 objects_.physicalize_all();
@@ -1446,7 +1447,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content));
         asio::post(thread_pool_, [this, name, wtext = bmmo::string_utils::ConvertAnsiToWide(msg.chat_content)]() mutable {
             flash_window();
-            play_wave_sound(sound_notification_);
+            play_wave_sound(sound_notification_, !is_foreground_window());
             std::string text;
             constexpr static size_t MAX_LINE_LENGTH = 22;
             int line_count;
@@ -1496,7 +1497,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 SendIngameMessage(std::format("[{}]: {}{} - Go!",
                                   sender_name, map_name, msg->content.get_level_mode_label()).c_str());
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
-                play_wave_sound(sound_go_);
+                play_wave_sound(sound_go_, true);
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
                 if (msg->content.restart_level) {
@@ -1520,7 +1521,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   sender_name, map_name, msg->content.get_level_mode_label(),
                                   (int)msg->content.type).c_str());
                 // asio::post(thread_pool_, [this] { play_beep(440, 500); });
-                play_wave_sound(sound_countdown_);
+                sound_countdown_->SetPitch(0.875f);
+                play_wave_sound(sound_countdown_, true);
 
                 break;
             case ct::Ready:
@@ -1533,7 +1535,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   }[msg->content.type]
                 ).c_str());
                 asio::post(thread_pool_, [this] {
-                    for (const auto i: std::vector<double>{220, 220 * std::powf(2.0f, 3.0f / 12), 220 * std::powf(2.0f, 7.0f / 12), 440}) play_beep(int(i), 220);
+                    static constexpr float base = 0.4375f;// 1.29f;
+                    for (const auto pitch: {base, base * std::powf(2.0f, 3.0f / 12), base * std::powf(2.0f, 7.0f / 12), base * 2.0f}) {
+                        sound_countdown_->SetPitch(pitch);
+                        play_wave_sound(sound_countdown_, true);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+                    // for (const auto i: std::vector<double>{220, 220 * std::powf(2.0f, 3.0f / 12), 220 * std::powf(2.0f, 7.0f / 12), 440}) play_beep(int(i), 220);
                 });
                 break;
             case ct::Unknown:
@@ -1720,7 +1728,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             permanent_notification_->update(msg.text_content.c_str());
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content));
         flash_window();
-        play_wave_sound(sound_notification_);
+        play_wave_sound(sound_notification_, !is_foreground_window());
         break;
     }
     case bmmo::PlainText: {
