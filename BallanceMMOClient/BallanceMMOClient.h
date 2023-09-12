@@ -82,6 +82,14 @@ public:
 		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingOutput);
 	}
 
+	using role::this_instance_; // public
+
+	typedef LRESULT(CALLBACK* LPFNWNDPROC)(HWND, UINT, WPARAM, LPARAM);
+	inline static LPFNWNDPROC old_wndproc;
+
+	void enter_size_move();
+	void exit_size_move();
+
 	// virtual functions from bmmo::exported::client
 	std::string get_client_name() override { return db_.get_nickname(); }
 	bool is_spectator() override { return spectator_mode_; }
@@ -151,6 +159,8 @@ private:
 		LoggingOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
 	}
 
+	inline HWND get_main_window() { return static_cast<HWND>(m_bml->GetCKContext()->GetMainWindow()); }
+
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
@@ -198,6 +208,8 @@ private:
 
 	int32_t initial_points_{}, initial_lives_{};
 	float point_decrease_interval_{};
+
+	float last_move_size_time_{}, move_size_time_length_{};
 
 	bool ball_off_ = false, extra_life_received_ = false, level_finished_ = false;
 	int compensation_lives_ = 0;
@@ -305,8 +317,8 @@ private:
 		return true;
 	}
 
-	bool is_foreground_window() {
-		return GetForegroundWindow() == static_cast<HWND>(m_bml->GetCKContext()->GetMainWindow());
+	inline bool is_foreground_window() {
+		return GetForegroundWindow() == get_main_window();
 	}
 
 	void resume_counter() {
@@ -1017,7 +1029,7 @@ private:
 		return (int)std::round(m_bml->GetRenderContext()->GetHeight() / (768.0f / 119) * size / ((get_system_dpi == nullptr) ? 96 : get_system_dpi()));
 	}
 
-	inline void flash_window() { FlashWindow((HWND)m_bml->GetCKContext()->GetMainWindow(), false); }
+	inline void flash_window() { FlashWindow(get_main_window(), false); }
 
 	void SendIngameMessage(const std::string& msg) {
 		SendIngameMessage(msg.c_str());

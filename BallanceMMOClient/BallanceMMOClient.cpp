@@ -5,6 +5,13 @@ IMod* BMLEntry(IBML* bml) {
     return new BallanceMMOClient(bml);
 }
 
+LRESULT WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto instance = static_cast<BallanceMMOClient*>(BallanceMMOClient::this_instance_);
+    if (msg == WM_ENTERSIZEMOVE) instance->enter_size_move();
+    else if (msg == WM_EXITSIZEMOVE) instance->exit_size_move();
+    return BallanceMMOClient::old_wndproc(hWnd, msg, wParam, lParam);
+}
+
 void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {
     // Re-initialize the C runtime "FILE" handles with clean handles bound to "nul". We do this because it has been
     // observed that the file number of our standard handle file objects can be assigned internally to a value of -2
@@ -237,6 +244,21 @@ void BallanceMMOClient::show_player_list() {
     });
 }
 
+inline void BallanceMMOClient::enter_size_move() {
+    if (current_level_mode_ != bmmo::level_mode::Highscore || !m_bml->IsIngame()) return;
+    last_move_size_time_ = m_bml->GetTimeManager()->GetTime();
+}
+
+inline void BallanceMMOClient::exit_size_move() {
+    if (current_level_mode_ != bmmo::level_mode::Highscore || !m_bml->IsIngame()) return;
+    auto last_length = move_size_time_length_;
+    move_size_time_length_ += m_bml->GetTimeManager()->GetTime() - last_move_size_time_;
+    auto array = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
+    int points; array->GetElementValue(0, 0, &points);
+    points -= int(std::ceilf(move_size_time_length_ / point_decrease_interval_) - std::ceilf(last_length / point_decrease_interval_));
+    array->SetElementValue(0, 0, &points);
+}
+
 void BallanceMMOClient::OnLoad()
 {
     init_config();
@@ -339,6 +361,7 @@ void BallanceMMOClient::OnPostExitLevel() {
 void BallanceMMOClient::OnCounterActive() {
     on_sector_changed();
     if (countdown_restart_) {
+        move_size_time_length_ = 0;
         counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
         countdown_restart_ = false;
     }
@@ -378,6 +401,9 @@ void BallanceMMOClient::OnPostStartMenu()
         // SendIngameMessage(std::to_string(m_bml->GetParameterManager()->GetParameterSize(m_bml->GetParameterManager()->ParameterGuidToType(energy_array_ptr->GetColumnParameterGuid(4)))));
 
         all_gameplay_beh_ = CKOBJID(static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("All_Gameplay", CKCID_BEOBJECT, nullptr)));
+
+        old_wndproc = reinterpret_cast<LPFNWNDPROC>(GetWindowLongPtr(get_main_window(), GWLP_WNDPROC));
+        SetWindowLongPtr(get_main_window(), GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc));
 
         init_ = true;
     }
@@ -1777,7 +1803,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             std::string sound_name = "MMO_Sound_" + path.substr(path.find_last_of("BMMO_"));
             /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
             CKWaveSound* sound;
-            load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, true);
+            load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, false);
             received_wave_sounds_.push_back(sound);
             GetLogger()->Info("Playing sound <%s> from server%s",
                               sound_name.c_str(),
