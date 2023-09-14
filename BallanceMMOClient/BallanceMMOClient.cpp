@@ -350,7 +350,7 @@ void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
 
 void BallanceMMOClient::OnPostExitLevel() {
     if (current_level_mode_ == bmmo::level_mode::Highscore && !spectator_mode_) {
-        if (!level_finished_)
+        if (!level_finished_ && !did_not_finish_)
             send_dnf_message();
         level_finished_ = false;
         compensation_lives_label_.reset();
@@ -457,6 +457,9 @@ void BallanceMMOClient::OnStartLevel()
         reset_timer_ = false;
     }
 
+    if (!connected()) countdown_restart_ = true;
+
+    did_not_finish_ = false;
     level_finished_ = false;
     ball_off_ = false;
     extra_life_received_ = false;
@@ -948,7 +951,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 else
                     countdown_mode_ = bmmo::level_mode::Speedrun;
                 std::string mode_name = (countdown_mode_ == bmmo::level_mode::Highscore) ? "Highscore" : "Speedrun";
-                SendIngameMessage(std::format("Level mode set to {} for the next countdown.", mode_name));
+                SendIngameMessage(std::format("Level mode set to {} for future countdowns.", mode_name));
                 if (!connected()) {
                     current_level_mode_ = countdown_mode_;
                     SendIngameMessage(std::format("Local level mode set to {}.", mode_name));
@@ -1808,17 +1811,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             GetLogger()->Info("Playing sound <%s> from server%s",
                               sound_name.c_str(),
                               msg.caption.empty() ? "" : (": " + msg.caption).c_str());
+            int duration = int(msg.duration_ms);
+            if (duration <= 0 || duration >= sound->GetSoundLength())
+                duration = sound->GetSoundLength();
             GetLogger()->Info("Sound length: %d milliseconds; Gain: %.2f; Pitch: %.2f",
-                              msg.duration_ms == 0 ? sound->GetSoundLength() : msg.duration_ms,
-                              msg.gain, msg.pitch);
+                              duration, msg.gain, msg.pitch);
             m_bml->AddTimer(CKDWORD(0), [=] { sound->Play(); });
 
-            if (msg.duration_ms == 0)
-                return;
-            std::this_thread::sleep_for(std::chrono::milliseconds(msg.duration_ms));
+            if (duration >= sound->GetSoundLength())
+                duration = sound->GetSoundLength() + 1000;
+            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             if (!sound) return;
-            if (sound->IsPlaying())
-                sound->Stop();
+            destroy_wave_sound(sound, true);
         }).detach();
         break;
     }

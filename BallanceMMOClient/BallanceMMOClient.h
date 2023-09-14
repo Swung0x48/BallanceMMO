@@ -227,7 +227,7 @@ private:
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;
-	bool countdown_restart_ = false;
+	bool countdown_restart_ = false, did_not_finish_ = false;
 
 	boost::uuids::uuid uuid_{};
 	int64_t last_name_change_time_{};
@@ -257,25 +257,20 @@ private:
 	}
 
 	std::vector<CKWaveSound*> received_wave_sounds_;
+	void destroy_wave_sound(CKWaveSound* sound, bool delete_file = false) {
+		if (sound == nullptr) return;
+		if (sound->IsPlaying())
+			sound->Stop();
+		std::string path = sound->GetSoundFileName();
+		m_bml->GetCKContext()->DestroyObject(sound, CK_DESTROY_TEMPOBJECT);
+		if (delete_file) DeleteFile(path.c_str());
+	}
 	void cleanup_received_sounds() {
 		if (received_wave_sounds_.empty())
 			return;
-		for (const auto sound : received_wave_sounds_) {
-			if (sound == nullptr) return;
-			if (sound->IsPlaying())
-				sound->Stop();
-			m_bml->GetCKContext()->DestroyObject(sound, CK_DESTROY_TEMPOBJECT);
-		}
+		for (const auto sound : received_wave_sounds_)
+			destroy_wave_sound(sound, true);
 		received_wave_sounds_.clear();
-		// Delete every sound matching the pattern as we may fail to do so the last time
-		WIN32_FIND_DATA fd;
-		HANDLE hFind = FindFirstFile("..\\ModLoader\\Cache\\BMMO_*.wav", &fd);
-		if (hFind != INVALID_HANDLE_VALUE) {
-			do {
-				DeleteFile((std::string("..\\ModLoader\\Cache\\") + fd.cFileName).c_str());
-			} while (FindNextFile(hFind, &fd));
-			FindClose(hFind);
-		}
 	}
 
 	char system_font_[32]{};
@@ -967,6 +962,7 @@ private:
 		msg.content.map = current_map_;
 		msg.content.cheated = m_bml->IsCheatEnabled();
 		send(msg, k_nSteamNetworkingSend_Reliable);
+		did_not_finish_ = true;
 	}
 
 	void send_current_map_name() {
