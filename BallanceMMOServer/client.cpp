@@ -764,6 +764,7 @@ int parse_args(int argc, char** argv) {
                 return -1;
             case 'v':
                 puts("Ballance MMO mock client by Swung0x48 and BallanceBug.");
+                printf("Build time: \t%s.\n", bmmo::string_utils::get_build_time_string().c_str());
                 printf("Version: %s.\n", bmmo::version_t{}.to_string().c_str());
                 return -1;
         }

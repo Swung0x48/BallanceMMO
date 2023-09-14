@@ -871,7 +871,7 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& filename) {
                 return -1;
             case 'v':
                 puts("Ballance MMO record replayer by Swung0x48 and BallanceBug.");
-                printf("Build time: \t%s %s.\n", __DATE__, __TIME__);
+                printf("Build time: \t%s.\n", bmmo::string_utils::get_build_time_string().c_str());
                 printf("Version: \t%s.\n", bmmo::version_t().to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;

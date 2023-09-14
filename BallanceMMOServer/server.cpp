@@ -1385,7 +1385,7 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, boo
                 return -1;
             case 'v':
                 puts("Ballance MMO server by Swung0x48 and BallanceBug.");
-                printf("Build time: \t%s %s.\n", __DATE__, __TIME__);
+                printf("Build time: \t%s.\n", bmmo::string_utils::get_build_time_string().c_str());
                 printf("Version: \t%s.\n", bmmo::version_t{}.to_string().c_str());
                 printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");

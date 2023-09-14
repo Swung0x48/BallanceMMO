@@ -85,6 +85,14 @@ namespace bmmo {
             std::replace_if(str.begin(), str.end(),
                 [](char c) { return std::iscntrl(c); }, ' ');
         }
+
+        inline static std::string get_build_time_string() {
+            std::stringstream input_ss { __DATE__ }, output_ss {};
+            std::tm date_struct;
+            input_ss >> std::get_time(&date_struct, "%b %e %Y");
+            output_ss << std::put_time(&date_struct, "%F ") << __TIME__;
+            return output_ss.str();
+        }
     }
 }
 

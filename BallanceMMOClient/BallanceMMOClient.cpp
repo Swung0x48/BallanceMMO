@@ -651,8 +651,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
         SendIngameMessage("BallanceMMO Help");
-        SendIngameMessage(std::format("Version: {}; build time: {} {}.",
-                                      version_string, __DATE__, __TIME__));
+        SendIngameMessage(std::format("Version: {}; build time: {}.",
+                                      version_string, bmmo::string_utils::get_build_time_string()));
         SendIngameMessage("/mmo connect - Connect to server.");
         SendIngameMessage("/mmo disconnect - Disconnect from server.");
         SendIngameMessage("/mmo list - List online players.");
