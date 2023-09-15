@@ -5,11 +5,11 @@ IMod* BMLEntry(IBML* bml) {
     return new BallanceMMOClient(bml);
 }
 
-LRESULT WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+VOID CALLBACK WinEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
+    if (!BallanceMMOClient::this_instance_) return;
     auto instance = static_cast<BallanceMMOClient*>(BallanceMMOClient::this_instance_);
-    if (msg == WM_ENTERSIZEMOVE) instance->enter_size_move();
-    else if (msg == WM_EXITSIZEMOVE) instance->exit_size_move();
-    return BallanceMMOClient::old_wndproc(hWnd, msg, wParam, lParam);
+    if (dwEvent == EVENT_SYSTEM_MOVESIZESTART) instance->enter_size_move();
+    else if (dwEvent == EVENT_SYSTEM_MOVESIZEEND) instance->exit_size_move();
 }
 
 void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {
@@ -402,8 +402,8 @@ void BallanceMMOClient::OnPostStartMenu()
 
         all_gameplay_beh_ = CKOBJID(static_cast<CKBeObject*>(m_bml->GetCKContext()->GetObjectByNameAndParentClass("All_Gameplay", CKCID_BEOBJECT, nullptr)));
 
-        old_wndproc = reinterpret_cast<LPFNWNDPROC>(GetWindowLongPtr(get_main_window(), GWLP_WNDPROC));
-        SetWindowLongPtr(get_main_window(), GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc));
+        move_size_hook_ = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, NULL,
+                                          WinEventProcCallback, 0, 0, WINEVENT_OUTOFCONTEXT);
 
         init_ = true;
     }
@@ -636,6 +636,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
 
 void BallanceMMOClient::OnExitGame()
 {
+    UnhookWinEvent(move_size_hook_);
     check_and_save_name_change_time();
     cleanup(true);
     client::destroy();

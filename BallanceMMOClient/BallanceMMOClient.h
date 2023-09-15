@@ -84,8 +84,7 @@ public:
 
 	using role::this_instance_; // public
 
-	typedef LRESULT(CALLBACK* LPFNWNDPROC)(HWND, UINT, WPARAM, LPARAM);
-	inline static LPFNWNDPROC old_wndproc;
+	HWINEVENTHOOK move_size_hook_{};
 
 	void enter_size_move();
 	void exit_size_move();
