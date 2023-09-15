@@ -46,7 +46,7 @@ public:
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
-		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this));
+		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this, std::placeholders::_1));
 		this_instance_ = this;
 
 		LOGFONT font_struct{};
@@ -125,13 +125,7 @@ private:
 	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
 	void on_message(ISteamNetworkingMessage* network_msg) override;
 
-	void on_fatal_error() {
-		if (!connected())
-			return;
-		bmmo::simple_action_msg msg{};
-		msg.content.action = bmmo::action_type::FatalError;
-		send(msg, k_nSteamNetworkingSend_Reliable);
-	};
+	void on_fatal_error(std::string& extra_text);
 
 	inline void on_sector_changed();
 

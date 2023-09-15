@@ -85,7 +85,7 @@ namespace NSDumpFile
         return bRet;
     }
 
-    std::function<void()> CrashCallback{};
+    std::function<void(std::string&)> CrashCallback{};
     LONG WINAPI UnhandledExceptionFilterEx(struct _EXCEPTION_POINTERS* pException)
     {
         TCHAR szMbsFile[MAX_PATH] = { 0 };
@@ -100,13 +100,17 @@ namespace NSDumpFile
 
 
         // TODO: MiniDumpWriteDump
-        CrashCallback();
-        FatalAppExit(-1, _T("Fatal Error"));
+        std::string extraText;
+        CrashCallback(extraText);
+        if (!extraText.empty())
+          extraText = "\n\n" + extraText;
+        extraText = "Fatal Error" + extraText;
+        FatalAppExit(-1, extraText.c_str());
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
 
-    void RunCrashHandler(std::function<void()> Callback)
+    void RunCrashHandler(std::function<void(std::string&)> Callback)
     {
         CrashCallback = Callback;
         SetUnhandledExceptionFilter(UnhandledExceptionFilterEx);

@@ -641,6 +641,21 @@ void BallanceMMOClient::OnExitGame()
     client::destroy();
 }
 
+inline void BallanceMMOClient::on_fatal_error(std::string& extra_text) {
+    if (!connected())
+        return;
+
+    if (current_level_mode_ == bmmo::level_mode::Highscore
+            && !spectator_mode_ && !level_finished_ && !did_not_finish_) {
+        send_dnf_message();
+        extra_text = std::format("You did not finish {}.\nAborted at sector {}.",
+                                 current_map_.get_display_name(), current_sector_);
+    }
+    bmmo::simple_action_msg msg{};
+    msg.content.action = bmmo::action_type::FatalError;
+    send(msg, k_nSteamNetworkingSend_Reliable);
+}
+
 //void BallanceMMOClient::OnUnload() {
 //    cleanup(true);
 //    client::destroy();
