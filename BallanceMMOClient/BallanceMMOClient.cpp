@@ -1814,13 +1814,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             int duration = int(msg.duration_ms);
             if (duration <= 0 || duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength();
-            GetLogger()->Info("Sound length: %d milliseconds; Gain: %.2f; Pitch: %.2f",
-                              duration, msg.gain, msg.pitch);
+            GetLogger()->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
+                              duration, msg.pitch, duration / msg.pitch, msg.gain, msg.pitch);
             m_bml->AddTimer(CKDWORD(0), [=] { sound->Play(); });
 
             if (duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength() + 1000;
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+            std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
             if (!sound) return;
             destroy_wave_sound(sound, true);
         }).detach();

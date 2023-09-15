@@ -43,7 +43,7 @@ namespace bmmo {
             message_utils::write_variable(&type, raw);
             message_utils::write_variable(&duration_ms, raw);
             gain = std::clamp(0.0f, gain, 1.0f);
-            pitch = std::clamp(0.5f, pitch, 2.0f);
+            pitch = std::clamp(0.2f, pitch, 4.5f);
             message_utils::write_variable(&gain, raw);
             message_utils::write_variable(&pitch, raw);
 
