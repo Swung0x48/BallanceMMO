@@ -340,7 +340,13 @@ public:
         }
         bool was_playing = false;
         if (playing_) {
-            pause();
+            std::mutex pause_cv_mutex;
+            std::unique_lock cv_lk(pause_cv_mutex);
+            {
+                std::unique_lock lk(pause_mutex_);
+                pause();
+            }
+            pause_cv_.wait(cv_lk);
             was_playing = true;
         }
         SteamNetworkingMicroseconds dest_time = seconds * 1e6;
@@ -523,6 +529,10 @@ private:
                     default:
                         break;
                 }
+            }
+            if (running_ && !playing_) {
+                std::unique_lock lk(pause_mutex_);
+                pause_cv_.notify_all();
             }
             if (!(record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof())) {
                 Printf("Playing finished at %.3lfs.", current_record_time_ / 1e6);
@@ -831,8 +841,8 @@ private:
     std::chrono::steady_clock::time_point time_zero_, time_pause_;
 
     uint16_t port_ = 0;
-    std::mutex startup_mutex_, record_data_mutex_;
-    std::condition_variable startup_cv_;
+    std::mutex startup_mutex_, record_data_mutex_, pause_mutex_;
+    std::condition_variable startup_cv_, pause_cv_;
     // bool print_states = true;
     std::atomic_bool playing_ = false, started_ = false, seeking_ = false, init_ = false;
     std::thread player_thread_;
