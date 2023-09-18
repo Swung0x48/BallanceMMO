@@ -40,7 +40,7 @@ extern "C" {
 
 class BallanceMMOClient : public IMod, public bmmo::exported::client {
 public:
-	BallanceMMOClient(IBML* bml): 
+	BallanceMMOClient(IBML* bml):
 		IMod(bml),
 		objects_(bml, db_)
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
@@ -157,7 +157,7 @@ private:
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
-	
+
 	asio::io_context io_ctx_;
 	std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work_guard_;
 	//std::thread io_ctx_thread_;
@@ -192,12 +192,20 @@ private:
 	CK_ID energy_array_ = 0;
 	CK_ID all_gameplay_beh_ = 0;
 	bmmo::named_map current_map_{};
+	bmmo::map last_countdown_map_{};
 	bmmo::level_mode current_level_mode_ = bmmo::level_mode::Speedrun, countdown_mode_{};
 	float counter_start_timestamp_ = 0;
 	int32_t current_sector_ = 0;
 	int32_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
+
+	struct player_rank_info {
+		bool cheated{};
+		int sr_rank{};
+		std::string player_name, formatted_hs_score, formatted_sr_score;
+	};
+	std::unordered_map<std::string, std::vector<player_rank_info>> player_ranks_;
 
 	int32_t initial_points_{}, initial_lives_{};
 	float point_decrease_interval_{};
@@ -215,7 +223,7 @@ private:
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
-	SteamNetworkingMicroseconds next_update_timestamp_ = 0, 
+	SteamNetworkingMicroseconds next_update_timestamp_ = 0,
 		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true;
@@ -337,6 +345,27 @@ private:
 			show_player_list();
 		}
 		if (permanent_notification_) permanent_notification_->paint(player_list_color_);
+	}
+
+	// blocks as it uses this_thread::sleep
+	void display_important_notification(const std::string& text, float font_size, int line_count) {
+		auto current_ms = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
+		text_sprite notification(std::format("Notification{}", current_ms),
+														 text, 0.0f, 0.4f - 0.001053f * font_size * line_count);
+		notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);
+		notification.sprite_->SetZOrder(65536 + static_cast<int>(current_ms));
+		notification.sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });
+		notification.sprite_->SetFont(system_font_, get_display_font_size(font_size), 700, false, false);
+		notification.set_visible(true);
+		for (int i = 1; i < 15; ++i) {
+			notification.paint(0x11FF1190 + i * 0x11001001);
+			std::this_thread::sleep_for(std::chrono::milliseconds(44));
+		}
+		std::this_thread::sleep_for(std::chrono::seconds(9));
+		for (int i = 1; i < 15; ++i) {
+			notification.paint(0xFFFFF19E - i * 0x11100000);
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+		}
 	}
 
 	void init_config() {
@@ -487,7 +516,7 @@ private:
 	KeyVector last_input_;
 
 	void poll_status_toggle() {
-		
+
 	}
 
 	/*char ckkey_to_num(CKKEYBOARD key) {
@@ -805,13 +834,13 @@ private:
 		// Weird bug if join thread here. Will join at the place before next use
 		// Actually since we're using std::jthread, we don't have to join threads manually
 		// Welp, std::jthread does not work on some of the clients. Switching back to std::thread. QwQ
-		// 
+		//
 		//if (ping_thread_.joinable())
 		//	ping_thread_.join();
-		// 
+		//
 		//if (network_thread_.joinable())
 			//network_thread_.join();
-		
+
 		//thread_pool_.stop();
 		toggle_own_spirit_ball(false);
 		map_names_.clear();
@@ -859,7 +888,7 @@ private:
 		pause->Activate();*/
 		//m_bml->OnPauseLevel();
 		//m_bml->OnBallNavInactive();
-		
+
 		//INPUT ip;
 		//ip.type = INPUT_KEYBOARD;
 		//ip.ki.wScan = 0; // hardware scan code for key
@@ -872,7 +901,7 @@ private:
 
 		//ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
 		//SendInput(1, &ip, sizeof(INPUT));
-		
+
 		auto* esc = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(esc_event_));
 		esc->Activate();
 
@@ -887,11 +916,11 @@ private:
 			auto* output = beh->GetOutput(0);
 			output->Activate();
 		});
-		
-		
+
+
 		//auto* beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(menu_pause_));
 		//beh->Activate(FALSE);
-		
+
 		//beh = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(exit_));
 		//beh->ActivateInput(0);
 		//beh->Activate();
@@ -1007,7 +1036,7 @@ private:
 	}
 
 	boost::circular_buffer<std::string> previous_msg_ = decltype(previous_msg_)(8);
-	
+
 	// Windows 7 does not have GetDpiForSystem
 	typedef UINT (WINAPI* GetDpiForSystemPtr) (void);
 	GetDpiForSystemPtr const get_system_dpi = [] {

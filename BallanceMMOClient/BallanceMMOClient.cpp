@@ -267,7 +267,7 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sounds\\Menu_dong.wav", 0.88f);
     load_wave_sound(&sound_go_, "MMO_Sound_Go", "..\\Sounds\\Menu_dong.wav", 1.0f, 1.75f);
     load_wave_sound(&sound_level_finish_, "MMO_Sound_Level_Finish", "..\\Sounds\\Music_Highscore.wav", 0.16f);
-    load_wave_sound(&sound_level_finish_cheat_, "MMO_Sound_Level_Finish_Cheat", "..\\Sounds\\Hit_Stone_Wood.wav", 0.24f, 0.5f * std::powf(2.0f, 9.0f / 12));
+    load_wave_sound(&sound_level_finish_cheat_, "MMO_Sound_Level_Finish_Cheat", "..\\Sounds\\Hit_Stone_Wood.wav", 0.27f, 0.5f * std::powf(2.0f, 9.0f / 12));
     load_wave_sound(&sound_dnf_, "MMO_Sound_DNF", "..\\Sounds\\Misc_RopeTears.wav", 0.9f);
     load_wave_sound(&sound_notification_, "MMO_Sound_Notification", "..\\Sounds\\Hit_Stone_Kuppel.wav", 0.76f);
     load_wave_sound(&sound_bubble_, "MMO_Sound_Bubble", "..\\Sounds\\Extra_Life_Blob.wav", 0.88f);
@@ -383,7 +383,7 @@ void BallanceMMOClient::OnPostStartMenu()
         status_->paint(0xffff0000);
 
         using namespace std::placeholders;
-        
+
         m_bml->RegisterCommand(new CommandMMO(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
         m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
 
@@ -679,7 +679,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
     std::string lower1;
     if (length > 1) lower1 = boost::algorithm::to_lower_copy(args[1]);
 
-    
+
     if (length >= 2 && length < 512 && connected()) {
         if (lower1 == "s" || lower1 == "say") {
             bmmo::chat_msg msg{};
@@ -704,18 +704,55 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             return;
         }
-        else if (length >= 3 && lower1 == "kick") {
-            bmmo::kick_request_msg msg{};
-            if (args[2][0] == '#')
-                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
-            else
-                msg.player_name = args[2];
-            if (length > 3) {
-                msg.reason = bmmo::message_utils::join_strings(args, 3);
-            }
+        else if (length >= 3) {
+            if (lower1 == "kick") {
+                bmmo::kick_request_msg msg{};
+                if (args[2][0] == '#')
+                    msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
+                else
+                    msg.player_name = args[2];
+                if (length > 3) {
+                    msg.reason = bmmo::message_utils::join_strings(args, 3);
+                }
 
-            msg.serialize();
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                msg.serialize();
+                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            }
+            else if (lower1 == "scores") {
+                bmmo::map rank_map;
+                if (length > 3) {
+                    int level = std::clamp(atoi(args[3].c_str()), 1, 13);
+                    bmmo::hex_chars_from_string(rank_map.md5, bmmo::map::original_map_hashes[level]);
+                    rank_map.level = level;
+                    rank_map.type = bmmo::map_type::OriginalLevel;
+                } else
+                    rank_map = last_countdown_map_;
+
+                constexpr auto hs_sorter = [](const player_rank_info& r1, const player_rank_info& r2) {
+                    return atoi(r1.formatted_hs_score.c_str()) > atoi(r2.formatted_hs_score.c_str());
+                };
+                constexpr auto sr_sorter = [](const player_rank_info& r1, const player_rank_info& r2) {
+                    return r1.sr_rank < r2.sr_rank;
+                };
+                auto sorter = (args[2] == "hs") ? hs_sorter : sr_sorter;
+                asio::post(thread_pool_, [this, rank_map = std::move(rank_map), sorter] {
+                    auto ranks_it = player_ranks_.find(rank_map.get_hash_bytes_string());
+                    if (ranks_it == player_ranks_.end() || ranks_it->second.empty()) {
+                        SendIngameMessage("Error: ranking info not found for the specified map.");
+                        return;
+                    }
+                    auto& ranks = ranks_it->second;
+                    std::sort(ranks.begin(), ranks.end(), sorter);
+                    std::string text = std::format("Ranking info for {} [{}]:\n",
+                                                   rank_map.get_display_name(map_names_),
+                                                   sorter == hs_sorter ? "HS" : "SR");
+                    for (size_t i = 0; i < ranks.size(); ++i)
+                        text += std::format("<{}> {}{}: {} | {}\n",
+                                            i + 1, ranks[i].player_name, ranks[i].cheated ? " [C]" : "",
+                                            ranks[i].formatted_hs_score, ranks[i].formatted_sr_score);
+                    display_important_notification(text, ranks.size() > 10 ? 12.0f : 15.0f, ranks.size() + 1);
+                });
+            }
             return;
         }
         else if (length >= 4 && (lower1 == "whisper" || lower1 == "w")) {
@@ -750,7 +787,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return;
 
                 bool show_id = (lower1 == "list-id" || lower1 == "li");
-                
+
                 typedef std::tuple<HSteamNetConnection, std::string, bool> player_data;
                 std::vector<player_data> players, spectators;
                 players.reserve(db_.player_count() + 1);
@@ -988,7 +1025,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 
     switch (length) {
         case 2: {
-            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode" };
+            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode", "scores" };
             break;
         }
         case 3: {
@@ -1005,7 +1042,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
                 options.push_back(get_display_nickname());
                 return options;
             }
-            else if (lower1 == "mode")
+            else if (lower1 == "mode" || lower1 == "scores")
                 return std::vector<std::string>{"hs", "sr"};
             break;
         }
@@ -1433,7 +1470,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         //// TODO: call this when the player enters a map
         GetLogger()->Warn("Outdated PlayerConnected msg received!");
-        
+
         break;
     }
     case bmmo::PlayerConnectedV2: {
@@ -1503,23 +1540,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 wtext.erase(0, MAX_LINE_LENGTH);
             };
             text += bmmo::string_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
-            auto current_second = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
-            text_sprite notification(std::format("Notification{}_{}",
-                                     current_second, rand() % 1000), text, 0.0f, 0.4f - 0.02f * line_count);
-            notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-            notification.sprite_->SetZOrder(65536 + static_cast<int>(current_second));
-            notification.sprite_->SetSize({1.0f, 0.2f + 0.08f * line_count});
-            notification.sprite_->SetFont(system_font_, get_display_font_size(19), 700, false, false);
-            notification.set_visible(true);
-            for (int i = 1; i < 15; ++i) {
-              notification.paint(0x11FF1190 + i * 0x11001001);
-              std::this_thread::sleep_for(std::chrono::milliseconds(44));
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(9));
-            for (int i = 1; i < 15; ++i) {
-                notification.paint(0xFFFFF19E - i * 0x11100000);
-                std::this_thread::sleep_for(std::chrono::milliseconds(80));
-            }
+            display_important_notification(text, 19, line_count);
         });
         break;
     }
@@ -1537,6 +1558,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     map_name = msg->content.map.get_display_name(map_names_);
         if (msg->content.map == current_map_ || msg->content.force_restart)
             current_level_mode_ = msg->content.mode;
+        last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
 
         switch (msg->content.type) {
             using ct = bmmo::countdown_type;
@@ -1545,6 +1567,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   sender_name, map_name, msg->content.get_level_mode_label()).c_str());
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
+                player_ranks_[last_countdown_map_.get_hash_bytes_string()] = {};
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
                 if (msg->content.restart_level) {
@@ -1615,15 +1638,20 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(network_msg->m_pData);
 
         // Prepare message
-        std::string map_name = msg->content.map.get_display_name(map_names_);
+        std::string map_name = msg->content.map.get_display_name(map_names_),
+            player_name = get_username(msg->content.player_id),
+            formatted_score = msg->content.get_formatted_score(),
+            formatted_time = msg->content.get_formatted_time();
         //auto state = db_.get(msg->content.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         SendIngameMessage(std::format(
             "{}{} finished {} in {}{} place (score: {}; real time: {}).",
-            msg->content.cheated ? "[CHEAT] " : "",
-            get_username(msg->content.player_id),
+            msg->content.cheated ? "[CHEAT] " : "", player_name,
             map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
-            msg->content.get_formatted_score(), msg->content.get_formatted_time()).c_str());
+            formatted_score, formatted_time).c_str());
+
+        player_ranks_[msg->content.map.get_hash_bytes_string()].emplace_back(
+            msg->content.cheated, msg->content.rank, player_name, formatted_score, formatted_time);
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);
