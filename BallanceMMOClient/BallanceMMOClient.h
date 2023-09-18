@@ -266,6 +266,12 @@ private:
 		received_wave_sounds_.clear();
 	}
 
+	std::string get_display_nickname() {
+		if (spectator_mode_)
+			return bmmo::name_validator::get_spectator_nickname(db_.get_nickname());
+		return db_.get_nickname();
+	}
+
 	char system_font_[32]{};
 	const std::wstring LOCAL_APPDATA_PATH = [] { // local appdata
 		std::wstring path_str = L".";

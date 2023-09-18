@@ -723,7 +723,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             if (args[2][0] == '#')
                 msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
             else
-                msg.player_id = (args[2] == db_.get_nickname()) ? db_.get_client_id() : db_.get_client_id(args[2]);
+                msg.player_id = (args[2] == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(args[2]);
             msg.chat_content = bmmo::message_utils::join_strings(args, 3);
             msg.serialize();
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -755,6 +755,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 std::vector<player_data> players, spectators;
                 players.reserve(db_.player_count() + 1);
                 db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    SendIngameMessage(std::format("{} {} {}", db_.get_client_id(), pair.first, pair.second.name));
                     if (pair.first == db_.get_client_id())
                         return true;
                     if (bmmo::name_validator::is_spectator(pair.second.name))
@@ -764,9 +765,9 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return true;
                 });
                 if (spectator_mode_)
-                    spectators.emplace_back(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
+                    spectators.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
                 else
-                    players.emplace_back(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
+                    players.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
                 int player_count = players.size();
                 std::ranges::sort(players, [](const player_data& i1, const player_data& i2)
                     { return boost::algorithm::ilexicographical_compare(std::get<1>(i1), std::get<1>(i2)); });
@@ -1001,7 +1002,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
                     return true;
                 });
                 options.push_back('#' + std::to_string(db_.get_client_id()));
-                options.push_back(db_.get_nickname());
+                options.push_back(get_display_nickname());
                 return options;
             }
             else if (lower1 == "mode")
@@ -1360,8 +1361,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             objects_.destroy_all_objects();
         }
         GetLogger()->Info("%d player(s) online: ", msg.online_players.size());
+        auto nickname = get_display_nickname();
         for (const auto& [id, data] : msg.online_players) {
-            if (data.name == db_.get_nickname()) {
+            if (data.name == nickname) {
                 db_.set_client_id(id);
             } else {
                 db_.create(id, data.name, data.cheated);
