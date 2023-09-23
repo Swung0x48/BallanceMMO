@@ -385,6 +385,7 @@ public:
         bmmo::cheat_toggle_msg msg;
         msg.content.cheated = (uint8_t)cheat;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+        Printf("Toggled cheat [%s] globally.", cheat ? "on" : "off");
     }
 
     void shutdown(int reconnection_delay = 0) {

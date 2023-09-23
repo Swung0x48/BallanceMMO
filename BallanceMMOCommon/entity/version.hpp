@@ -18,7 +18,7 @@ namespace bmmo {
         uint8_t minor = 5;
         uint8_t subminor = 0;
         stage_t stage = Beta;
-        uint8_t build = 1;
+        uint8_t build = 2;
 
         const std::string to_string() const;
         static version_t from_string(const std::string& input);

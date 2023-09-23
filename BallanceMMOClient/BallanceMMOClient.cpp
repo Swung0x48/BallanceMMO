@@ -219,8 +219,8 @@ void BallanceMMOClient::show_player_list() {
                     const int sector_cmp = i1.sector - i2.sector;
                     if (sector_cmp != 0) return sector_cmp > 0;
                     if (i1.sector != 1) {
-                      const int32_t time_cmp = i1.timestamp - i2.timestamp;
-                      if (time_cmp != 0) return time_cmp < 0;
+                        const int32_t time_cmp = i1.timestamp - i2.timestamp;
+                        if (time_cmp != 0) return time_cmp < 0;
                     }
                     return boost::ilexicographical_compare(i1.name, i2.name);
                 });
@@ -717,6 +717,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
                 msg.serialize();
                 send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                return;
             }
             else if (lower1 == "scores") {
                 bmmo::map rank_map;
@@ -729,7 +730,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     rank_map = last_countdown_map_;
 
                 constexpr auto hs_sorter = [](const player_rank_info& r1, const player_rank_info& r2) {
-                    return atoi(r1.formatted_hs_score.c_str()) > atoi(r2.formatted_hs_score.c_str());
+                    return atoi(r1.formatted_hs_score.c_str()) >= atoi(r2.formatted_hs_score.c_str());
                 };
                 constexpr auto sr_sorter = [](const player_rank_info& r1, const player_rank_info& r2) {
                     return r1.sr_rank < r2.sr_rank;
@@ -752,8 +753,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                             ranks[i].formatted_hs_score, ranks[i].formatted_sr_score);
                     display_important_notification(text, ranks.size() > 10 ? 12.0f : 15.0f, ranks.size() + 1);
                 });
+                return;
             }
-            return;
         }
         else if (length >= 4 && (lower1 == "whisper" || lower1 == "w")) {
             bmmo::private_chat_msg msg{};
