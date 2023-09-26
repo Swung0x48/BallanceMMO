@@ -134,7 +134,8 @@ private:
 
 	void connect_to_server(std::string address = "");
 	void disconnect_from_server();
-	void reconnect(int delay);
+	// 3 attempts: delay, delay * scale, delay * scale ^ 2
+	void reconnect(int delay, float scale = 1.0f);
 
 	int reconnection_count_ = 0;
 
@@ -601,7 +602,7 @@ private:
 	std::mutex ball_toggle_mutex_;
 	void toggle_own_spirit_ball(bool visible, bool notify = false) {
 		std::lock_guard lk(ball_toggle_mutex_);
-		if (own_ball_visible_ == visible)
+		if (own_ball_visible_ == visible || spectator_mode_)
 			return;
 		GetLogger()->Info("Toggling visibility of own ball to %s", visible ? "on" : "off");
 		if (visible) {
@@ -1017,7 +1018,7 @@ private:
 			return {"[Server]"};
 		auto state = db_.get(client_id);
 		assert(state.has_value() || (db_.get_client_id() == msg.player_id));
-		return state.has_value() ? state->name : db_.get_nickname();
+		return state.has_value() ? state->name : get_display_nickname();
 	}
 
 	void md5_from_file(const std::string& path, uint8_t* result) {

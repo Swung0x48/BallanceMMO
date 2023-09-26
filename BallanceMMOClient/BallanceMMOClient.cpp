@@ -721,7 +721,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             }
             else if (lower1 == "scores") {
                 bmmo::map rank_map;
-                if (length > 3) {
+                if (length > 3 && !args[3].empty()) {
                     int level = std::clamp(atoi(args[3].c_str()), 1, 13);
                     bmmo::hex_chars_from_string(rank_map.md5, bmmo::map::original_map_hashes[level]);
                     rank_map.level = level;
@@ -729,10 +729,10 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 } else
                     rank_map = last_countdown_map_;
 
-                constexpr auto hs_sorter = [](const player_rank_info& r1, const player_rank_info& r2) {
+                constexpr auto hs_sorter = [](const player_rank_info& r1, decltype(r1) r2) {
                     return atoi(r1.formatted_hs_score.c_str()) >= atoi(r2.formatted_hs_score.c_str());
                 };
-                constexpr auto sr_sorter = [](const player_rank_info& r1, const player_rank_info& r2) {
+                constexpr auto sr_sorter = [](const player_rank_info& r1, decltype(r1) r2) {
                     return r1.sr_rank < r2.sr_rank;
                 };
                 auto sorter = (args[2] == "hs") ? hs_sorter : sr_sorter;
@@ -1162,20 +1162,21 @@ void BallanceMMOClient::disconnect_from_server() {
     }
 }
 
-void BallanceMMOClient::reconnect(int delay) {
-  asio::post(thread_pool_, [this, delay]() {
-    if (reconnection_count_ >= 3) {
-      SendIngameMessage("Failed to connect to the server after 3 attempts. Server will not be reconnected.");
-      reconnection_count_ = 0;
-      return;
-    }
-    ++reconnection_count_;
-    SendIngameMessage(std::format("Attempting to reconnect to [{}] in {} second{} ...",
-        server_addr_, delay, delay == 1 ? "" : "s"));
-    std::this_thread::sleep_for(std::chrono::seconds(delay));
-    if (!connecting() && !connected())
-      connect_to_server(server_addr_);
-  });
+void BallanceMMOClient::reconnect(int delay, float scale) {
+    asio::post(thread_pool_, [this, delay, scale]() mutable {
+        if (reconnection_count_ >= 3) {
+            SendIngameMessage("Failed to connect to the server after 3 attempts. Server will not be reconnected.");
+            reconnection_count_ = 0;
+            return;
+        }
+        delay = int(delay * std::powf(scale, reconnection_count_));
+        ++reconnection_count_;
+        SendIngameMessage(std::format("Attempting to reconnect to [{}] in {} second{} ...",
+                                      server_addr_, delay, delay == 1 ? "" : "s"));
+        std::this_thread::sleep_for(std::chrono::seconds(delay));
+        if (!connecting() && !connected())
+            connect_to_server(server_addr_);
+    });
 }
 
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
@@ -1207,11 +1208,11 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         if (nReason >= bmmo::connection_end::Crash && nReason <= bmmo::connection_end::PlayerKicked_Max)
             terminate(5);
         else if (nReason >= bmmo::connection_end::AutoReconnection_Min && nReason < bmmo::connection_end::AutoReconnection_Max) {
-          // auto reconnect
-          reconnect(nReason - bmmo::connection_end::AutoReconnection_Min);
+            // auto reconnect
+            reconnect(nReason - bmmo::connection_end::AutoReconnection_Min);
         }
         else if (nReason > k_ESteamNetConnectionEnd_App_Max) {
-          reconnect(10);
+            reconnect(5, 2.0f);
         }
         break;
     }
@@ -1245,7 +1246,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         cleanup();
 
         if (pInfo->m_info.m_eEndReason > k_ESteamNetConnectionEnd_App_Max) {
-          reconnect(10);
+            reconnect(5, 2.0f);
         }
         break;
     }
