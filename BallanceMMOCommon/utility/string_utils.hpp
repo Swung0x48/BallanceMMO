@@ -94,7 +94,7 @@ namespace bmmo::string_utils {
     }
 
     // parse line breaks
-    std::string get_parsed_string(const std::string& text) {
+    inline std::string get_parsed_string(const std::string& text) {
         std::string parsed_text;
         const auto text_length = text.length();
         for (size_t i = 0; i < text_length; ++i) {
