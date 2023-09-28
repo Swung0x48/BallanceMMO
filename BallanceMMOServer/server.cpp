@@ -152,10 +152,12 @@ public:
         }
 
         if (type == bmmo::connection_end::FatalError) {
-            // Send a message without serialization; this effectively kills the client
-            // at deserialization. A dirty hack, but it works and we don't need to
-            // worry about the outcome; the client will just terminate immediately.
-            send(client, nullptr, 0, k_nSteamNetworkingSend_Reliable);
+            // Triggers a segment fault explicitly on client's side.
+            // A dirty hack, but it works and we don't need to
+            // worry about the outcome; client will just terminate immediately.
+            bmmo::simple_action_msg fatal_error_msg{};
+            fatal_error_msg.content.action = bmmo::action_type::TriggerFatalError;
+            send(client, fatal_error_msg, k_nSteamNetworkingSend_Reliable);
             reason = "fatal error";
         }
 
@@ -772,6 +774,11 @@ protected:
             interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
             return;
         }
+        if (networking_msg->m_cbSize < static_cast<decltype(networking_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
+            Printf("Error: invalid message with size %d received from #%u.",
+                    networking_msg->m_cbSize, networking_msg->m_conn);
+            return;
+        }
 
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
@@ -1279,7 +1286,8 @@ protected:
             case bmmo::KeyboardInput:
                 break;
             default:
-                Printf("Error: invalid message with opcode %d received.", raw_msg->code);
+                Printf("Error: invalid message with opcode %d received from #%u.",
+                        raw_msg->code, networking_msg->m_conn);
         }
 
         // TODO: replace with actual message data structure handling

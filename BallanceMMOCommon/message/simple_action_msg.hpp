@@ -9,6 +9,7 @@ namespace bmmo {
         LoginDenied,
         CurrentMapQuery,
         FatalError, // client encountered a fatal error; end connection from server
+        TriggerFatalError, // produce a fatal error just for fun
     };
 
     struct simple_action {

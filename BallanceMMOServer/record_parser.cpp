@@ -705,6 +705,11 @@ private:
             interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
             return;
         }
+        if (networking_msg->m_cbSize < static_cast<decltype(networking_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
+            Printf("Error: invalid message with size %d received from #%u.",
+                    networking_msg->m_cbSize, networking_msg->m_conn);
+            return;
+        }
 
         switch (raw_msg->code) {
             case bmmo::LoginRequestV3: {

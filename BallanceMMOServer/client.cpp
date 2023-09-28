@@ -357,6 +357,11 @@ private:
 //        printf("\b> ");
 //        Printf(reinterpret_cast<const char*>(msg->m_pData));
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
+        if (networking_msg->m_cbSize < static_cast<decltype(networking_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
+            Printf("Error: invalid message with size %d received.", networking_msg->m_cbSize);
+            return;
+        }
+
         switch (raw_msg->code) {
             case bmmo::LoginAcceptedV3: {
                 bmmo::login_accepted_v3_msg msg{};
@@ -628,6 +633,10 @@ private:
                     case bmmo::action_type::CurrentMapQuery: {
                         bmmo::current_map_msg new_msg{};
                         send(new_msg, k_nSteamNetworkingSend_Reliable);
+                        break;
+                    }
+                    case bmmo::action_type::TriggerFatalError: {
+                        trigger_fatal_error();
                         break;
                     }
                     case bmmo::action_type::Unknown: {

@@ -1169,7 +1169,7 @@ void BallanceMMOClient::reconnect(int delay, float scale) {
             reconnection_count_ = 0;
             return;
         }
-        delay = int(delay * std::powf(scale, reconnection_count_));
+        delay = int(delay * std::powf(scale, static_cast<float>(reconnection_count_)));
         ++reconnection_count_;
         SendIngameMessage(std::format("Attempting to reconnect to [{}] in {} second{} ...",
                                       server_addr_, delay, delay == 1 ? "" : "s"));
@@ -1307,6 +1307,11 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 
 void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
+
+    if (network_msg->m_cbSize < static_cast<decltype(network_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
+        GetLogger()->Error("Invalid message with size %d received.", network_msg->m_cbSize);
+        return;
+    }
 
     switch (raw_msg->code) {
     case bmmo::OwnedBallState: {
@@ -1743,6 +1748,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         switch (msg->content.action) {
             case bmmo::action_type::LoginDenied:
                 SendIngameMessage("Login denied.");
+                break;
+            case bmmo::action_type::TriggerFatalError:
+                trigger_fatal_error();
                 break;
             case bmmo::action_type::CurrentMapQuery: {
                 break;

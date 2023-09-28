@@ -144,6 +144,11 @@ protected:
         SteamNetworkingUtils()->SetDebugOutputFunction(eType, DebugOutput);
     }
 
+    // triggers an actual segmentation fault; I was too lazy to fake one
+    static void trigger_fatal_error() {
+        *(int*)0 = 0;
+    }
+
 public:
     static void LogFileOutput(const char* pMsg) {
         if (log_file_) {
