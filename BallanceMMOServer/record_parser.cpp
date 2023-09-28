@@ -777,7 +777,7 @@ private:
     message_action_t parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
         if (entry.size < static_cast<decltype(entry.size)>(sizeof(bmmo::opcode)))
-            return;
+            return message_action_t::None;
         // std::unique_lock<std::mutex> lk(record_data_mutex_);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
