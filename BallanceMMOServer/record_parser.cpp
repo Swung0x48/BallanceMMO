@@ -281,7 +281,7 @@ public:
             local_address.Clear();
             local_address.m_port = port_;
             SteamNetworkingConfigValue_t opt = generate_opt();
-            
+
             listen_socket_ = interface_->CreateListenSocketIP(local_address, 1, &opt);
             if (listen_socket_ == k_HSteamListenSocket_Invalid) {
                 return false;
@@ -689,7 +689,7 @@ private:
         if (itClient != clients_.end())
             clients_.erase(itClient);
         Printf("%s (#%u) disconnected.", name, client);
-        
+
         bmmo::plain_text_msg text_msg;
         text_msg.text_content.resize(128);
         Sprintf(text_msg.text_content, "[Reality] %s disconnected.", name);
@@ -701,13 +701,13 @@ private:
         auto client_it = clients_.find(networking_msg->m_conn);
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
 
-        if (!(client_it != clients_.end() || raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || raw_msg->code == bmmo::LoginRequestV3)) { // ignore limbo clients message
-            interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
-            return;
-        }
         if (networking_msg->m_cbSize < static_cast<decltype(networking_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
             Printf("Error: invalid message with size %d received from #%u.",
                     networking_msg->m_cbSize, networking_msg->m_conn);
+            return;
+        }
+        if (!(client_it != clients_.end() || raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || raw_msg->code == bmmo::LoginRequestV3)) { // ignore limbo clients message
+            interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
             return;
         }
 
@@ -727,7 +727,7 @@ private:
                         "Seeking data, please wait", true);
                     break;
                 }
-                
+
                 clients_[networking_msg->m_conn] = {msg.nickname, {}};  // add the client here
                 memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
                 username_[msg.nickname] = networking_msg->m_conn;
@@ -739,7 +739,7 @@ private:
                 names_msg.maps = record_map_names_;
                 names_msg.serialize();
                 send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), k_nSteamNetworkingSend_Reliable);
-                
+
                 bmmo::login_accepted_v3_msg accepted_msg{};
                 accepted_msg.online_players = record_clients_;
                 accepted_msg.serialize();
@@ -776,6 +776,8 @@ private:
 
     message_action_t parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
+        if (entry.size < static_cast<decltype(entry.size)>(sizeof(bmmo::opcode)))
+            return;
         // std::unique_lock<std::mutex> lk(record_data_mutex_);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
