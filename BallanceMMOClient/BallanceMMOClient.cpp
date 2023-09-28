@@ -1799,9 +1799,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title));
             break;
         }
+        std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
         if (!permanent_notification_) {
-            permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", msg.text_content.c_str(), 0.192f, 0.04f);
-            permanent_notification_->sprite_->SetSize({0.616f, 0.05f});
+            permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", parsed_text.c_str(), 0.2f, 0.036f);
+            permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
             permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
             permanent_notification_->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
             permanent_notification_->sprite_->SetFont(system_font_, get_display_font_size(11.72f), 400, false, false);
@@ -1810,7 +1811,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             permanent_notification_->set_visible(true);
         }
         else
-            permanent_notification_->update(msg.text_content.c_str());
+            permanent_notification_->update(parsed_text.c_str());
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content));
         flash_window();
         play_wave_sound(sound_notification_, !is_foreground_window());
