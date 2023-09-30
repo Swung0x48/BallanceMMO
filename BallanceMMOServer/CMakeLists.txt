@@ -64,6 +64,12 @@ endif()
 target_compile_options(BallanceMMOServer PRIVATE ${compile_options})
 target_compile_options(BallanceMMOMockClient PRIVATE ${compile_options})
 target_compile_options(BallanceMMORecordParser PRIVATE ${compile_options})
+if (WIN32)
+# Prevents Windows.h from adding unnecessary includes, and defining min/max as macros 
+    target_compile_definitions(BallanceMMOServer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(BallanceMMOMockClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(BallanceMMORecordParser PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif() 
 
 # os specific scripts
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
