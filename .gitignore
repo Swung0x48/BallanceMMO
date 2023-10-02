@@ -24,3 +24,4 @@
 /BallanceMMOClient/RelDebug
 /RelDebug
 .DS_Store
+/vcpkg_installed

@@ -627,10 +627,13 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
         sound_enabled_ = prop->GetBoolean();
         return;
     }
+    else if (prop == props_["remote_addr"]) {
+        server_addr_ = prop->GetString()
+    }
     if (connected() || connecting()) {
         disconnect_from_server();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        connect_to_server();
+        connect_to_server(server_addr_);
     }
 }
 
