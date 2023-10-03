@@ -1,0 +1,1 @@
+cmake .. -DCMAKE_TOOLCHAIN_FILE=../submodule/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x86-windows -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR=../ -A Win32 -DVIRTOOLS_SDK_FETCH_FROM_GIT
