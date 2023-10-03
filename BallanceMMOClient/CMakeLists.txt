@@ -9,7 +9,14 @@ set(CMAKE_INSTALL_RPATH "\$ORIGIN/bin") # Note CMake escaping around '$' sign.
 # *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 
-message(STATUS ${CMAKE_TOOLCHAIN_FILE})
+set(BMMO_VER_DEFINED 1)
+set(BMMO_MAJOR_VER 3)
+set(BMMO_MINOR_VER 5)
+set(BMMO_SUBMINOR_VER 2)
+set(BMMO_STAGE_VER beta)
+set(BMMO_BUILD_VER 5)
+
+configure_file(${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config/version_config.h.in ${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config/version_config.h @ONLY)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # setting vcpkg toolchain file
@@ -80,6 +87,7 @@ set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClien
 set_target_properties(BallanceMMOClient PROPERTIES SUFFIX ".bmod")
 target_include_directories(BallanceMMOClient PRIVATE
                             "include/"
+                            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE
@@ -95,6 +103,7 @@ set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES OUTPUT_NAME "Ballance
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES SUFFIX ".bmodp")
 target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             "include/"
+                            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE

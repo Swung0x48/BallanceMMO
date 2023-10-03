@@ -4,21 +4,22 @@
 #include <sstream>
 #include <cstring>
 #include <map>
+#include "version_config.h"
 
 #define STRINGIFY(x) #x
 #define STR(x) STRINGIFY(x)
-#ifdef BMMO_VER_DEFINED
-# define BMMO_VER_STRING STR(BMMO_VER)
-# define BMMO_MIN_CLIENT_VER_STRING STR(BMMO_MIN_CLIENT_VER)
+#if BMMO_VER_DEFINED
+// Nothing needed here
 #else
 # define BMMO_MAJOR_VER 3
 # define BMMO_MINOR_VER 1
 # define BMMO_SUBMINOR_VER 4
 # define BMMO_STAGE_VER alpha
 # define BMMO_BUILD_VER 159
-# define BMMO_VER_STRING STR(BMMO_MAJOR_VER) "." STR(BMMO_MINOR_VER) "." STR(BMMO_SUBMINOR_VER) "-" STR(BMMO_STAGE_VER) STR(BMMO_BUILD_VER)
-# define BMMO_MIN_CLIENT_VER_STRING BMMO_VER_STRING
 #endif
+
+#define BMMO_VER_STRING STR(BMMO_MAJOR_VER) "." STR(BMMO_MINOR_VER) "." STR(BMMO_SUBMINOR_VER) "-" STR(BMMO_STAGE_VER) STR(BMMO_BUILD_VER)
+#define BMMO_MIN_CLIENT_VER_STRING BMMO_VER_STRING
 
 
 namespace bmmo {
