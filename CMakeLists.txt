@@ -15,6 +15,12 @@ set(BMMO_SUBMINOR_VER 2)
 set(BMMO_STAGE_VER beta)
 set(BMMO_BUILD_VER 5)
 
+set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/submodule/vcpkg/scripts/buildsystems/vcpkg.cmake
+           CACHE STRING "Vcpkg toolchain file")
+set(VCPKG_MANIFEST_DIR ${CMAKE_CURRENT_LIST_DIR} CACHE STRING "Vcpkg manifest dir")
+set(VCPKG_MANIFEST_MODE TRUE CACHE BOOL "Vcpkg manifest mode")
+set(VCPKG_TARGET_TRIPLET "x86-windows" CACHE STRING "Vcpkg manifest dir")
+
 option(BUILD_SERVER "Build BallanceMMO Server" ON)
 option(BUILD_CLIENT "Build BallanceMMO Client" ON)
 
