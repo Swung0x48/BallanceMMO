@@ -4,6 +4,7 @@
 #include <iostream>
 #include <vector>
 #include <tchar.h>
+#include <psapi.h>
 
 
 #pragma comment(lib, "Dbghelp.lib")
@@ -86,7 +87,7 @@ namespace NSDumpFile
     }
 
     std::function<void(std::string&)> CrashCallback{};
-    LONG WINAPI UnhandledExceptionFilterEx(struct _EXCEPTION_POINTERS* pException)
+    LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
     {
         TCHAR szMbsFile[MAX_PATH] = { 0 };
         ::GetModuleFileName(NULL, szMbsFile, MAX_PATH);
@@ -103,9 +104,32 @@ namespace NSDumpFile
         std::string extraText;
         CrashCallback(extraText);
         if (!extraText.empty())
-          extraText = "\n\n" + extraText;
-        extraText = "Fatal Error" + extraText;
-        FatalAppExit(-1, extraText.c_str());
+            extraText = "--------\r\n" + extraText;
+        extraText = "Fatal Error" + extraText + "\r\n========";
+        EXCEPTION_RECORD* record{};
+        do {
+            if (record) {
+                record = record->ExceptionRecord;
+                extraText.append("\r\n--------");
+            } else
+                record = pException->ExceptionRecord;
+            if (!record) break;
+            char desc[128];
+            snprintf(desc, sizeof(desc), "\r\nCode: 0x%08X | Flags: 0x%08X | Address: %p", record->ExceptionCode, record->ExceptionFlags, record->ExceptionAddress);
+            extraText.append(desc);
+            if (record->NumberParameters == 0) continue;
+            extraText.append("\r\nExtraInfo");
+            for (DWORD i = 0; i < record->NumberParameters; ++i) {
+                snprintf(desc, sizeof(desc), " | 0x%08X", record->ExceptionInformation[i]);
+                extraText.append(desc);
+            }
+        } while (record->ExceptionRecord);
+        //FatalAppExit(-1, extraText.c_str());
+        char basename[128];
+        GetModuleBaseName(GetCurrentProcess(), NULL, basename, sizeof(basename));
+        std::ignore = MessageBox(NULL, extraText.c_str(),
+                        (basename + std::string{" - Fatal Application Exit"}).c_str(), MB_OK | MB_ICONERROR);
+        FatalExit(-1);
         return EXCEPTION_CONTINUE_SEARCH;
     }
 

@@ -202,7 +202,7 @@ private:
 	struct player_rank_info {
 		bool cheated{};
 		int sr_rank{};
-		std::string player_name, formatted_hs_score, formatted_sr_score;
+		std::string name, formatted_hs_score, formatted_sr_score;
 	};
 	std::unordered_map<std::string, std::vector<player_rank_info>> player_ranks_;
 

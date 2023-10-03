@@ -750,11 +750,19 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     std::string text = std::format("Ranking info for {} [{}]:\n",
                                                    rank_map.get_display_name(map_names_),
                                                    sorter == hs_sorter ? "HS" : "SR");
-                    for (size_t i = 0; i < ranks.size(); ++i)
+                    for (size_t i = 0; i < ranks.size(); ++i) {
+                        const auto& player = ranks[i];
+                        int rank = i;
+                        if (sorter == hs_sorter) {
+                            while (rank > 0 && atoi(player.formatted_hs_score.c_str())
+                                    == atoi(ranks[rank - 1].formatted_hs_score.c_str()))
+                                --rank;
+                        }
                         text += std::format("<{}> {}{}: {} | {}\n",
-                                            i + 1, ranks[i].player_name, ranks[i].cheated ? " [C]" : "",
-                                            ranks[i].formatted_hs_score, ranks[i].formatted_sr_score);
-                    display_important_notification(text, ranks.size() > 10 ? 12.0f : 15.0f, ranks.size() + 1);
+                                            rank + 1, player.name, player.cheated ? " [C]" : "",
+                                            player.formatted_hs_score, player.formatted_sr_score);
+                    }
+                    display_important_notification(text, ranks.size() > 10 ? 11.0f : 15.0f, ranks.size() + 1, 400);
                 });
                 return;
             }
@@ -931,6 +939,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             else if (lower1 == "hs" || lower1 == "sr") {
                 OnCommand(m_bml, { "mmo", "mode", args[1] });
             }
+            else if (lower1 == "fatalerror")
+                std::thread([] { trigger_fatal_error(); }).detach();
             /*else if (lower1 == "p") {
                 objects_.physicalize_all();
             } else if (lower1 == "f") {
@@ -1029,7 +1039,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 
     switch (length) {
         case 2: {
-            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode", "scores" };
+            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode", "scores", "fatalerror" };
             break;
         }
         case 3: {
