@@ -49,9 +49,7 @@ public:
 		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this, std::placeholders::_1));
 		this_instance_ = this;
 
-		LOGFONT font_struct{};
-		SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(font_struct), &font_struct, 0);
-		strcpy(system_font_, font_struct.lfFaceName);
+		SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(system_font_struct_), &system_font_struct_, 0);
 	}
 
 	bmmo::version_t version;
@@ -281,7 +279,8 @@ private:
 		return db_.get_nickname();
 	}
 
-	char system_font_[32]{};
+	LOGFONT system_font_struct_{};
+	const char* system_font_ = system_font_struct_.lfFaceName;
 	const std::wstring LOCAL_APPDATA_PATH = [] { // local appdata
 		std::wstring path_str = L".";
 		wchar_t* path_pchar{};
@@ -349,14 +348,14 @@ private:
 	}
 
 	// blocks as it uses this_thread::sleep
-	void display_important_notification(const std::string& text, float font_size, int line_count) {
+	void display_important_notification(const std::string& text, float font_size, int line_count, int weight = 700) {
 		auto current_ms = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
 		text_sprite notification(std::format("Notification{}", current_ms),
 														 text, 0.0f, 0.4f - 0.001053f * font_size * line_count);
 		notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);
 		notification.sprite_->SetZOrder(65536 + static_cast<int>(current_ms));
 		notification.sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });
-		notification.sprite_->SetFont(system_font_, get_display_font_size(font_size), 700, false, false);
+		notification.sprite_->SetFont(system_font_, get_display_font_size(font_size), weight, false, false);
 		notification.set_visible(true);
 		for (int i = 1; i < 15; ++i) {
 			notification.paint(0x11FF1190 + i * 0x11001001);

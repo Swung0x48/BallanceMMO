@@ -628,7 +628,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
         return;
     }
     else if (prop == props_["remote_addr"]) {
-        server_addr_ = prop->GetString()
+        server_addr_ = prop->GetString();
     }
     if (connected() || connecting()) {
         disconnect_from_server();
@@ -1100,10 +1100,9 @@ void BallanceMMOClient::connect_to_server(std::string address) {
         });
 
         // Resolve address
-        if (address.empty()) {
-            if (server_addr_.empty())
-                server_addr_ = props_["remote_addr"]->GetString();
-        } else
+        if (address.empty())
+            server_addr_ = props_["remote_addr"]->GetString();
+        else
             server_addr_ = address;
         const auto& [host, port] = bmmo::hostname_parser(server_addr_).get_host_components();
         resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
@@ -1539,17 +1538,31 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         std::string name = get_username(msg.player_id);
         SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content));
-        asio::post(thread_pool_, [this, name, wtext = bmmo::string_utils::ConvertAnsiToWide(msg.chat_content)]() mutable {
+        asio::post(thread_pool_, [this, name, msg = std::move(msg)]() {
             flash_window();
             play_wave_sound(sound_notification_, !is_foreground_window());
+            std::wstringstream ws {bmmo::string_utils::ConvertAnsiToWide(bmmo::string_utils::get_parsed_string(msg.chat_content))};
+            auto hdc = GetDC(get_main_window());
+            LOGFONT font_struct_bold = system_font_struct_;
+            font_struct_bold.lfWeight = 700;
+            HFONT font = CreateFontIndirect(&font_struct_bold);
+            SelectObject(hdc, font);
+            SIZE sz;
+            int max_length{}, line_length, line_count = 1;
             std::string text;
-            constexpr static size_t MAX_LINE_LENGTH = 22;
-            int line_count;
-            for (line_count = 0; wtext.length() > MAX_LINE_LENGTH; ++line_count) {
-                text += bmmo::string_utils::ConvertWideToANSI(wtext.substr(0, MAX_LINE_LENGTH)) + '\n';
-                wtext.erase(0, MAX_LINE_LENGTH);
-            };
-            text += bmmo::string_utils::ConvertWideToANSI(wtext) + "\n\n[" + name + "]";
+            while (!ws.eof()) {
+                std::wstring wline; std::getline(ws, wline);
+                do {
+                    line_length = wline.length();
+                    GetTextExtentExPointW(hdc, wline.c_str(), line_length, int(680 / 1.44f / 19.0f * 12), &max_length, NULL, &sz);
+                    text += bmmo::string_utils::ConvertWideToANSI(wline.substr(0, max_length)) + '\n';
+                    wline.erase(0, max_length);
+                    ++line_count;
+                } while (max_length < line_length);
+            }
+            // GetTextExtentPoint32W(hdc, wtext.c_str(), wtext.length(), &sz);
+            DeleteObject(font);
+            text += "\n[" + name + "]";
             display_important_notification(text, 19, line_count);
         });
         break;
