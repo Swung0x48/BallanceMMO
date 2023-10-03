@@ -25,3 +25,6 @@
 /RelDebug
 .DS_Store
 /vcpkg_installed
+/BallanceMMOClient/build
+/include/BMLPlus/BMLPlus
+/include
