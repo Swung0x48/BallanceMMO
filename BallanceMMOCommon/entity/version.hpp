@@ -5,6 +5,16 @@
 #include <cstring>
 #include <map>
 
+#define BMMO_MAJOR_VER 3
+#define BMMO_MINOR_VER 5
+#define BMMO_SUBMINOR_VER 1
+#define BMMO_STAGE_VER beta
+#define BMMO_BUILD_VER 4
+#define STRINGIFY(x) #x
+#define STR(x) STRINGIFY(x)
+#define BMMO_VERSION_STRING STR(BMMO_MAJOR_VER) "." STR(BMMO_MINOR_VER) "." STR(BMMO_SUBMINOR_VER) "-" STR(BMMO_STAGE_VER) STR(BMMO_BUILD_VER)
+
+
 namespace bmmo {
     enum stage_t: uint8_t {
         Alpha,
@@ -14,11 +24,11 @@ namespace bmmo {
     };
 
     struct version_t {
-        uint8_t major = 3;
-        uint8_t minor = 5;
-        uint8_t subminor = 1;
+        uint8_t major = BMMO_MAJOR_VER;
+        uint8_t minor = BMMO_MINOR_VER;
+        uint8_t subminor = BMMO_SUBMINOR_VER;
         stage_t stage = Beta;
-        uint8_t build = 4;
+        uint8_t build = BMMO_BUILD_VER;
 
         const std::string to_string() const;
         static version_t from_string(const std::string& input);

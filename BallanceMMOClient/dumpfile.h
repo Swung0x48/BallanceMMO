@@ -5,7 +5,8 @@
 #include <vector>
 #include <tchar.h>
 #include <psapi.h>
-
+#include <direct.h>
+#include "../BallanceMMOCommon/entity/version.hpp"
 
 #pragma comment(lib, "Dbghelp.lib")
 
@@ -34,7 +35,7 @@ namespace NSDumpFile
 
         // write in dump file
         //
-        if (pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, MiniDumpNormal, &dumpInfo, NULL, NULL)) {
+        if (pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, MiniDumpWithFullMemory, &dumpInfo, NULL, NULL)) {
         //    //DWORD bytesWritten;
         //    //WriteFile(
         //    //    hTest,            // Handle to the file
@@ -89,7 +90,7 @@ namespace NSDumpFile
     std::function<void(std::string&)> CrashCallback{};
     LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
     {
-        TCHAR szMbsFile[MAX_PATH] = { 0 };
+        /*TCHAR szMbsFile[MAX_PATH] = { 0 };
         ::GetModuleFileName(NULL, szMbsFile, MAX_PATH);
         TCHAR* pFind = _tcsrchr(szMbsFile, '\\');
         if (pFind)
@@ -97,8 +98,18 @@ namespace NSDumpFile
             *(pFind + 1) = 0;
             _tcscat(szMbsFile, _T("CrashDumpFile.dmp"));
             CreateDumpFile(szMbsFile, pException);
-        }
+        }*/
+        const char* _Path = "crashdumps";
+        int retval = _mkdir(_Path);
+        TCHAR szFileName[MAX_PATH] = { 0 };
+        const TCHAR* szVersion = BMMO_VERSION_STRING;
 
+        SYSTEMTIME stLocalTime;
+        GetLocalTime(&stLocalTime);
+        sprintf(szFileName, "crashdumps/%s_%04d%02d%02d-%02d%02d%02d.dmp",
+            szVersion, stLocalTime.wYear, stLocalTime.wMonth, stLocalTime.wDay,
+            stLocalTime.wHour, stLocalTime.wMinute, stLocalTime.wSecond);
+        CreateDumpFile(szFileName, pException);
 
         // TODO: MiniDumpWriteDump
         std::string extraText;
