@@ -73,9 +73,8 @@ public:
             return false;
         record_stream_ << bmmo::RECORD_HEADER;
         record_stream_.put('\0');
-        bmmo::version_t version;
         int64_t init_time = init_time_t_; // be specific about time_t type
-        record_stream_.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        record_stream_.write(reinterpret_cast<const char*>(&bmmo::current_version), sizeof(bmmo::current_version));
         record_stream_.write(reinterpret_cast<const char*>(&init_time), sizeof(init_time));
         record_stream_.write(reinterpret_cast<const char*>(&init_timestamp_), sizeof(init_timestamp_));
         return true;
@@ -774,7 +773,7 @@ int parse_args(int argc, char** argv) {
             case 'v':
                 puts("Ballance MMO mock client by Swung0x48 and BallanceBug.");
                 printf("Build time: \t%s.\n", bmmo::string_utils::get_build_time_string().c_str());
-                printf("Version: %s.\n", bmmo::version_t{}.to_string().c_str());
+                printf("Version: %s.\n", bmmo::current_version.to_string().c_str());
                 return -1;
         }
     }

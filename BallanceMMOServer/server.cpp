@@ -302,7 +302,7 @@ public:
 
     void print_version_info() const {
         Printf("Server version: %s; minimum accepted client version: %s.",
-                        bmmo::version_t{}.to_string(),
+                        bmmo::current_version.to_string(),
                         bmmo::minimum_client_version.to_string());
         auto uptime = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         std::string time_str(20, 0);
@@ -436,7 +436,7 @@ public:
         startup_cv_.notify_all();
 
         Printf("Server (v%s; client min. v%s) started at port %u.\n",
-                bmmo::version_t{}.to_string(),
+                bmmo::current_version.to_string(),
                 bmmo::minimum_client_version.to_string(), port_);
 
         return true;
@@ -503,7 +503,7 @@ protected:
             return;
         }
         auto current_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        config_file << "# Config file for Ballance MMO Server v" << bmmo::version_t{}.to_string() << " - "
+        config_file << "# Config file for Ballance MMO Server v" << bmmo::current_version.to_string() << " - "
                         << std::put_time(std::localtime(&current_time), "%F %T") << "\n"
                     << "# Notes:\n"
                     << "# - Op list player data style: \"playername: uuid\".\n"
@@ -1395,7 +1395,7 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, boo
             case 'v':
                 puts("Ballance MMO server by Swung0x48 and BallanceBug.");
                 printf("Build time: \t%s.\n", bmmo::string_utils::get_build_time_string().c_str());
-                printf("Version: \t%s.\n", bmmo::version_t{}.to_string().c_str());
+                printf("Version: \t%s.\n", bmmo::current_version.to_string().c_str());
                 printf("Minimum accepted client version: %s.\n", bmmo::minimum_client_version.to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;

@@ -5,14 +5,20 @@
 #include <cstring>
 #include <map>
 
-#define BMMO_MAJOR_VER 3
-#define BMMO_MINOR_VER 5
-#define BMMO_SUBMINOR_VER 1
-#define BMMO_STAGE_VER beta
-#define BMMO_BUILD_VER 4
 #define STRINGIFY(x) #x
 #define STR(x) STRINGIFY(x)
-#define BMMO_VERSION_STRING STR(BMMO_MAJOR_VER) "." STR(BMMO_MINOR_VER) "." STR(BMMO_SUBMINOR_VER) "-" STR(BMMO_STAGE_VER) STR(BMMO_BUILD_VER)
+#ifdef BMMO_VER_DEFINED
+# define BMMO_VER_STRING STR(BMMO_VER)
+# define BMMO_MIN_CLIENT_VER_STRING STR(BMMO_MIN_CLIENT_VER)
+#else
+# define BMMO_MAJOR_VER 3
+# define BMMO_MINOR_VER 1
+# define BMMO_SUBMINOR_VER 4
+# define BMMO_STAGE_VER alpha
+# define BMMO_BUILD_VER 159
+# define BMMO_VER_STRING STR(BMMO_MAJOR_VER) "." STR(BMMO_MINOR_VER) "." STR(BMMO_SUBMINOR_VER) "-" STR(BMMO_STAGE_VER) STR(BMMO_BUILD_VER)
+# define BMMO_MIN_CLIENT_VER_STRING BMMO_VER_STRING
+#endif
 
 
 namespace bmmo {
@@ -24,18 +30,20 @@ namespace bmmo {
     };
 
     struct version_t {
-        uint8_t major = BMMO_MAJOR_VER;
-        uint8_t minor = BMMO_MINOR_VER;
-        uint8_t subminor = BMMO_SUBMINOR_VER;
-        stage_t stage = Beta;
-        uint8_t build = BMMO_BUILD_VER;
+        uint8_t major{};
+        uint8_t minor{};
+        uint8_t subminor{};
+        stage_t stage{};
+        uint8_t build{};
 
         const std::string to_string() const;
         static version_t from_string(const std::string& input);
         auto operator<=>(const version_t& that) const = default;
     };
 
-    constexpr version_t minimum_client_version = {3, 5, 1, Beta, 4};
+    const static version_t
+        current_version        = version_t::from_string(BMMO_VER_STRING),
+        minimum_client_version = version_t::from_string(BMMO_MIN_CLIENT_VER_STRING);
 
     const std::string version_t::to_string() const {
         std::stringstream ss;

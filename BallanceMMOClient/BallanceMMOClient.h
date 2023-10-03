@@ -52,8 +52,7 @@ public:
 		SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(system_font_struct_), &system_font_struct_, 0);
 	}
 
-	bmmo::version_t version;
-	const std::string version_string = version.to_string();
+	const std::string version_string = bmmo::current_version.to_string();
 	virtual BMMO_CKSTRING GetID() override { return "BallanceMMOClient"; }
 	virtual BMMO_CKSTRING GetVersion() override { return version_string.c_str(); }
 	virtual BMMO_CKSTRING GetName() override { return "BallanceMMOClient"; }

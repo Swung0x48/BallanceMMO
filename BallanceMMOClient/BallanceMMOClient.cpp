@@ -1294,7 +1294,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         SendIngameMessage(("Logging in as \"" + nickname + "\"...").c_str());
         bmmo::login_request_v3_msg msg{};
         msg.nickname = nickname;
-        msg.version = version;
+        msg.version = bmmo::current_version;
         msg.cheated = m_bml->IsCheatEnabled() && !spectator_mode_; // always false in spectator mode
         memcpy(msg.uuid, &uuid_, sizeof(uuid_));
         msg.serialize();
