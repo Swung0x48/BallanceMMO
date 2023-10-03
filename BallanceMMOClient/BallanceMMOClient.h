@@ -1015,7 +1015,7 @@ private:
 		if (client_id == k_HSteamNetConnection_Invalid)
 			return {"[Server]"};
 		auto state = db_.get(client_id);
-		assert(state.has_value() || (db_.get_client_id() == msg.player_id));
+		assert(state.has_value() || (db_.get_client_id() == client_id));
 		return state.has_value() ? state->name : get_display_nickname();
 	}
 
