@@ -272,6 +272,20 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_notification_, "MMO_Sound_Notification", "..\\Sounds\\Hit_Stone_Kuppel.wav", 0.76f);
     load_wave_sound(&sound_bubble_, "MMO_Sound_Bubble", "..\\Sounds\\Extra_Life_Blob.wav", 0.88f);
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
+
+    if (!std::filesystem::is_directory(NSDumpFile::DumpPath)) return;
+    for (const auto& entry : std::filesystem::directory_iterator(NSDumpFile::DumpPath)) {
+        if (entry.is_directory()) continue;
+        char dump_ver[32], dump_time_str[32];
+        std::ignore = std::sscanf(entry.path().filename().string().c_str(), "BMMO_%31[^_]_%31[^.].dmp",
+                                  dump_ver, dump_time_str);
+        std::stringstream time_stream(dump_time_str); std::tm time_struct;
+        time_stream >> std::get_time(&time_struct, "%Y%m%d-%H%M%S");
+        if (time_stream.fail()) continue;
+        auto time_diff = std::time(nullptr) - std::mktime(&time_struct);
+        if (time_diff > 86400ll * 7)
+            std::filesystem::remove(entry);
+    }
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)

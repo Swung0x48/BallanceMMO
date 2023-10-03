@@ -35,7 +35,7 @@ namespace NSDumpFile
 
         // write in dump file
         //
-        if (pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, MiniDumpWithFullMemory, &dumpInfo, NULL, NULL)) {
+        if (pDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, MiniDumpWithDataSegs, &dumpInfo, NULL, NULL)) {
         //    //DWORD bytesWritten;
         //    //WriteFile(
         //    //    hTest,            // Handle to the file
@@ -87,6 +87,7 @@ namespace NSDumpFile
         return bRet;
     }
 
+    constexpr const char* DumpPath = "..\\CrashDumps";
     std::function<void(std::string&)> CrashCallback{};
     LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
     {
@@ -99,15 +100,14 @@ namespace NSDumpFile
             _tcscat(szMbsFile, _T("CrashDumpFile.dmp"));
             CreateDumpFile(szMbsFile, pException);
         }*/
-        const char* _Path = "crashdumps";
-        int retval = _mkdir(_Path);
+        int retval = _mkdir(DumpPath);
         TCHAR szFileName[MAX_PATH] = { 0 };
-        const TCHAR* szVersion = BMMO_VERSION_STRING;
+        const TCHAR* szVersion = BMMO_VER_STRING;
 
         SYSTEMTIME stLocalTime;
         GetLocalTime(&stLocalTime);
-        sprintf(szFileName, "crashdumps/%s_%04d%02d%02d-%02d%02d%02d.dmp",
-            szVersion, stLocalTime.wYear, stLocalTime.wMonth, stLocalTime.wDay,
+        snprintf(szFileName, sizeof(szFileName), "%s\\BMMO_%s_%04d%02d%02d-%02d%02d%02d.dmp",
+            DumpPath, szVersion, stLocalTime.wYear, stLocalTime.wMonth, stLocalTime.wDay,
             stLocalTime.wHour, stLocalTime.wMinute, stLocalTime.wSecond);
         CreateDumpFile(szFileName, pException);
 

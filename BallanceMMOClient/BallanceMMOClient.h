@@ -15,6 +15,7 @@
 #include <memory>
 #include <format>
 #include <ranges>
+#include <filesystem>
 #include <asio.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
