@@ -4,7 +4,7 @@
 #include <sstream>
 #include <cstring>
 #include <map>
-#include "version_config.h"
+#include "config/version_config.h"
 
 #define STRINGIFY(x) #x
 #define STR(x) STRINGIFY(x)
