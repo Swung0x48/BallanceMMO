@@ -7,7 +7,7 @@
 /BallanceMMOServer/out/build/x64-Debug/CMakeFiles
 /BallanceMMOServer/out/build/x64-Debug
 /BallanceMMOServer/out/build/x64-Debug/CMakeFiles
-/build
+/build*/
 /BallanceMMOClient/include
 /BallanceMMOClient/lib
 /BallanceMMOClient/Debug
@@ -28,3 +28,4 @@
 /BallanceMMOClient/build
 /include/BMLPlus/BMLPlus
 /include
+/BallanceMMOCommon/config/version_config.h

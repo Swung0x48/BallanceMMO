@@ -1,0 +1,2 @@
+#! /bin/bash
+cmake . -Bbuild -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -G Ninja
