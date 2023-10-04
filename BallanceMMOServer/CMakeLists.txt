@@ -9,7 +9,7 @@ set(CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD 20)
 
 # sets RPATH for *install*ed files
-set(CMAKE_INSTALL_RPATH "\$ORIGIN/bin") # Note CMake escaping around '$' sign.
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:\$ORIGIN:${PROJECT_BINARY_DIR}/lib") # Note CMake escaping around '$' sign.
 # *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 
@@ -58,6 +58,10 @@ target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared)
 
 get_target_property(_inc yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warnings
+set_target_properties(yaml-cpp PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
+set_target_properties(GameNetworkingSockets PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 
 if (MSVC)
     set(compile_options /Wall)

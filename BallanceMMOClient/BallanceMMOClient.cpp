@@ -818,7 +818,6 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 std::vector<player_data> players, spectators;
                 players.reserve(db_.player_count() + 1);
                 db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    SendIngameMessage(std::format("{} {} {}", db_.get_client_id(), pair.first, pair.second.name));
                     if (pair.first == db_.get_client_id())
                         return true;
                     if (bmmo::name_validator::is_spectator(pair.second.name))
