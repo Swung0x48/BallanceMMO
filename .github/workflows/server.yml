@@ -29,14 +29,14 @@ jobs:
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+      run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON
 
     - name: Build
       # Build your program with the given configuration
-      run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
+      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
     - name: Test
-      working-directory: ${{github.workspace}}/BallanceMMOServer
+      working-directory: ${{github.workspace}}
       # Execute tests defined by the CMake configuration.  
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
       run: ctest -C ${{env.BUILD_TYPE}}
@@ -45,7 +45,7 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: server-linux
-        path: BallanceMMOServer/build/
+        path: build/
 
   build-server-windows:
     runs-on: windows-latest
@@ -75,30 +75,30 @@ jobs:
 #        run: vcpkg install --triplet x64-windows
 
       - name: Configure CMake
-        run: cmake -B ${{github.workspace}}/BallanceMMOServer/build -S ${{github.workspace}}/BallanceMMOServer -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON
+        run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON
 
       - name: Build
-        working-directory: ${{github.workspace}}/BallanceMMOServer/build
-        run: cmake --build ${{github.workspace}}/BallanceMMOServer/build --config ${{env.BUILD_TYPE}}
+        working-directory: ${{github.workspace}}/build
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
 #      - name: List build dir
-#        working-directory: ${{github.workspace}}/BallanceMMOServer/build
+#        working-directory: ${{github.workspace}}/build
 #        run: dir
 
       - name: Run post-build script
-        working-directory: ${{github.workspace}}/BallanceMMOServer/build
-        run: ${{github.workspace}}/BallanceMMOServer/build/postbuild.bat ${{env.BUILD_TYPE}}
+        working-directory: ${{github.workspace}}/build/BallanceMMOServer
+        run: ${{github.workspace}}/build/BallanceMMOServer/postbuild.bat ${{env.BUILD_TYPE}}
 
       - name: Test
-        working-directory: ${{github.workspace}}/BallanceMMOServer
+        working-directory: ${{github.workspace}}
         run: ctest -C ${{env.BUILD_TYPE}}
 
       - name: Dry run
-        working-directory: ${{github.workspace}}/BallanceMMOServer/build/${{env.BUILD_TYPE}}
-        run: ${{github.workspace}}/BallanceMMOServer/build/${{env.BUILD_TYPE}}/BallanceMMOServer.exe --dry-run
+        working-directory: ${{github.workspace}}/build/BallanceMMOServer/${{env.BUILD_TYPE}}
+        run: ${{github.workspace}}/build/BallanceMMOServer/${{env.BUILD_TYPE}}/BallanceMMOServer.exe --dry-run
 
       - name: Release Artifact
         uses: actions/upload-artifact@v3
         with:
           name: server-windows
-          path: BallanceMMOServer/build/${{env.BUILD_TYPE}}
+          path: build/BallanceMMOServer/${{env.BUILD_TYPE}}
