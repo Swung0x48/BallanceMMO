@@ -1,0 +1,64 @@
+name: Client
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+
+jobs:
+  build-client:
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: lukka/get-cmake@latest
+
+      - name: Fetch git submodules
+        run: git submodule update --init --recursive
+
+      # Setup MSVC command prompt environment vars
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Restore artifacts, setup vcpkg
+        uses: lukka/run-vcpkg@v10
+        with:
+          vcpkgGitCommitId: 861c33057553ee836e7061ffbdabc25ea343145d
+          vcpkgDirectory: '${{env.VCPKG_ROOT}}'
+          vcpkgJsonGlob: vcpkg.json
+          runVcpkgInstall: false
+
+#      - name: vcpkg check / install dependencies
+#        working-directory: ${{env.VCPKG_ROOT}}
+#        run: vcpkg install --triplet x64-windows
+
+      - name: Configure CMake
+        run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON
+
+      - name: Build
+        working-directory: ${{github.workspace}}/build
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+
+#      - name: List build dir
+#        working-directory: ${{github.workspace}}/build
+#        run: dir
+
+      # - name: Run post-build script
+      #   working-directory: ${{github.workspace}}/build/BallanceMMOClient
+      #   run: ${{github.workspace}}/build/BallanceMMOClient/postbuild.bat ${{env.BUILD_TYPE}}
+
+      - name: Test
+        working-directory: ${{github.workspace}}
+        run: ctest -C ${{env.BUILD_TYPE}}
+
+      - name: Release Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: client-windows
+          path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
