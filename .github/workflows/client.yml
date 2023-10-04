@@ -39,7 +39,7 @@ jobs:
 #        run: vcpkg install --triplet x64-windows
 
       - name: Configure CMake
-        run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON
+        run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON -A Win32
 
       - name: Build
         working-directory: ${{github.workspace}}/build
