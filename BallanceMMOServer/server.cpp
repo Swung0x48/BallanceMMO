@@ -242,6 +242,13 @@ public:
         return true;
     }
 
+    void print_bans() {
+        for (const auto& [uuid, reason]: banned_players_)
+            Printf("%s: %s", uuid, reason);
+        Printf("%d UUID%s banned in total.", banned_players_.size(),
+                banned_players_.size() == 1 ? "" : "s");
+    }
+
     void print_clients(bool print_uuid = false) {
         std::map<decltype(username_)::key_type, decltype(username_)::mapped_type> spectators;
         static const auto print_client = [&](auto id, auto data) {
@@ -338,8 +345,9 @@ public:
     void set_ban(HSteamNetConnection client, const std::string& reason) {
         if (!client_exists(client))
             return;
-        banned_players_[get_uuid_string(clients_[client].uuid)] = reason;
-        Printf("Banned %s%s.", clients_[client].name, reason.empty() ? "" : ": " + reason);
+        const std::string uuid_string = get_uuid_string(clients_[client].uuid);
+        banned_players_[uuid_string] = reason;
+        Printf("Banned %s (%s)%s.", clients_[client].name, uuid_string, reason.empty() ? "" : ": " + reason);
         kick_client(client, "Banned" + (reason.empty() ? "" : ": " + reason));
         save_config_to_file();
     }
@@ -347,14 +355,15 @@ public:
     void set_mute(HSteamNetConnection client, bool action) {
         if (!client_exists(client))
             return;
+        const std::string uuid_string = get_uuid_string(clients_[client].uuid);
         if (action) {
-            Printf("Muted %s%s.", clients_[client].name,
-                muted_players_.insert(get_uuid_string(clients_[client].uuid)).second
+            Printf("Muted %s (%s)%s.", clients_[client].name, uuid_string,
+                muted_players_.insert(uuid_string).second
                 ? "" : " (client was already muted previously)");
         } else {
-            Printf("Unmuted %s%s.", clients_[client].name,
-                muted_players_.erase(get_uuid_string(clients_[client].uuid)) != 0
-                ? "" : " (client was already unmuted previously)");
+            Printf("Unmuted %s (%s)%s.", clients_[client].name, uuid_string,
+                muted_players_.erase(uuid_string) != 0
+                ? "" : " (client is already not muted)");
         }
         save_config_to_file();
     }
@@ -381,6 +390,17 @@ public:
         bmmo::op_state_msg msg{};
         msg.content.op = action;
         send(client, msg, k_nSteamNetworkingSend_Reliable);
+    }
+
+    void set_unban(std::string uuid_string) {
+        auto it = banned_players_.find(uuid_string);
+        if (it == banned_players_.end()) {
+            Printf("Error: %s is not banned.", uuid_string);
+            return;
+        }
+        banned_players_.erase(it);
+        Printf("Unbanned %s.", uuid_string);
+        save_config_to_file();
     }
 
     void toggle_cheat(bool cheat) {
@@ -1574,6 +1594,8 @@ int main(int argc, char** argv) {
             server.set_mute(client, action);
     });
     console.register_aliases("op", {"deop", "mute", "unmute"});
+    console.register_command("listban", [&] { server.print_bans(); });
+    console.register_command("unban", [&] { server.set_unban(console.get_next_word()); });
     console.register_command("reload", [&] {
         if (!server.load_config())
             server.Printf("Error: failed to reload config.");
