@@ -13,20 +13,20 @@ set(CMAKE_INSTALL_RPATH "\$ORIGIN/bin") # Note CMake escaping around '$' sign.
 # *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 
-if (CMAKE_SYSTEM_NAME MATCHES "Windows")
-    # setting vcpkg toolchain file
-#    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake
-#            CACHE STRING "Vcpkg toolchain file")
+# if (CMAKE_SYSTEM_NAME MATCHES "Windows")
+#     # setting vcpkg toolchain file
+# #    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake
+# #            CACHE STRING "Vcpkg toolchain file")
 
-    if (MINGW)  # if mingw
-        # setting vcpkg
-        if (DEFINED ENV{VCPKG_DEFAULT_TRIPLET} AND NOT DEFINED VCPKG_TARGET_TRIPLET)
-            set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
-        endif ()
-    endif ()
-    find_package(Protobuf REQUIRED)
-    find_package(GameNetworkingSockets REQUIRED)
-endif ()
+#     if (MINGW)  # if mingw
+#         # setting vcpkg
+#         if (DEFINED ENV{VCPKG_DEFAULT_TRIPLET} AND NOT DEFINED VCPKG_TARGET_TRIPLET)
+#             set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
+#         endif ()
+#     endif ()
+#     find_package(Protobuf REQUIRED)
+#     find_package(GameNetworkingSockets REQUIRED)
+# endif ()
 
 #add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets ${CMAKE_CURRENT_BINARY_DIR}/BallanceMMO)
