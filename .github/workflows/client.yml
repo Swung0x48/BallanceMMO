@@ -3,8 +3,14 @@ name: Client
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'BallanceMMOServer/**'
+      - '.git*'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'BallanceMMOServer/**'
+      - '.git*'
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
