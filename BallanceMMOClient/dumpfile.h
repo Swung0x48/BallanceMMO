@@ -87,6 +87,26 @@ namespace NSDumpFile
         return bRet;
     }
 
+    constexpr const char* Quotes[] = {
+         "Look mom I'm on this quote!",
+         "Uh-oh.",
+         "Ouch!",
+         "Something went wrong...",
+         "To run or not to run, that is the question.",
+         "Task failed successfully.",
+         "It's all my fault.",
+         "You know the rules and so do I.",
+         "The game is a lie!",
+         "ALL YOUR GAME ARE BELONG TO ERRORS",
+         "Wow I can has faytle errerz?",
+         "Error displaying error quotes.",
+         "F",
+         "Meow :3",
+         "FATAW EWWA",
+         "Error details:\n Error displaying the previous error.",
+         "Error messages\ncannot completely convey.\nWe now know shared loss.",
+         "Fun fact: MMO stands for Massive Massacre On-going",
+    };
     constexpr const char* DumpPath = "..\\CrashDumps";
     std::function<void(std::string&)> CrashCallback{};
     LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
@@ -115,26 +135,30 @@ namespace NSDumpFile
         std::string extraText;
         CrashCallback(extraText);
         if (!extraText.empty())
-            extraText = "--------\r\n" + extraText;
-        extraText = "Fatal Error" + extraText + "\r\n========";
+            extraText = "--------\n" + extraText + "\n";
+        extraText = "Fatal Error\n" + extraText + "========";
         EXCEPTION_RECORD* record{};
         do {
             if (record) {
                 record = record->ExceptionRecord;
-                extraText.append("\r\n--------");
+                extraText.append("\n--------");
             } else
                 record = pException->ExceptionRecord;
             if (!record) break;
             char desc[128];
-            snprintf(desc, sizeof(desc), "\r\nCode: 0x%08X | Flags: 0x%08X | Address: %p", record->ExceptionCode, record->ExceptionFlags, record->ExceptionAddress);
+            snprintf(desc, sizeof(desc), "\nCode: 0x%08X | Flags: 0x%08X\nAddress: %p", record->ExceptionCode, record->ExceptionFlags, record->ExceptionAddress);
             extraText.append(desc);
             if (record->NumberParameters == 0) continue;
-            extraText.append("\r\nExtraInfo");
+            extraText.append("\nExtraInfo");
             for (DWORD i = 0; i < record->NumberParameters; ++i) {
                 snprintf(desc, sizeof(desc), " | 0x%08X", record->ExceptionInformation[i]);
                 extraText.append(desc);
             }
         } while (record->ExceptionRecord);
+        extraText.append("\n--------\n" + std::string{szFileName}.erase(0, strlen(DumpPath) + 1));
+        extraText.append("\n========\n");
+        srand(time(nullptr));
+        extraText.append(Quotes[rand() % (sizeof(Quotes) / sizeof(char*))]);
         //FatalAppExit(-1, extraText.c_str());
         char basename[128];
         GetModuleBaseName(GetCurrentProcess(), NULL, basename, sizeof(basename));
