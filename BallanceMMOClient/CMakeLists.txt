@@ -79,7 +79,7 @@ add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC})
 set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClient")
 set_target_properties(BallanceMMOClient PROPERTIES SUFFIX ".bmod")
 target_include_directories(BallanceMMOClient PRIVATE
-                            "include/"
+                            "${CMAKE_CURRENT_LIST_DIR}/include/"
                             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
@@ -95,7 +95,7 @@ add_library(BallanceMMOClient-BMLPlus SHARED
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES OUTPUT_NAME "BallanceMMOClient")
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES SUFFIX ".bmodp")
 target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
-                            "include/"
+                            "${CMAKE_CURRENT_LIST_DIR}/include/"
                             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
