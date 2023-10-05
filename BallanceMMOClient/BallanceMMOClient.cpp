@@ -438,8 +438,11 @@ void BallanceMMOClient::OnProcess() {
     bool show = true;
     ImGui::ShowDemoWindow(&show);
 
+    static char buf[50];
+
     ImGui::Begin("中文测试");
     ImGui::Text("我能吞下玻璃而不伤身体");
+    ImGui::InputText(buf, buf, 50);
     ImGui::End();
 
     if (!connected())

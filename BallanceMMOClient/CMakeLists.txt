@@ -120,8 +120,7 @@ target_link_libraries(testmod PRIVATE
 
 if (MSVC)
     # set(compile_options /Wall)
-    add_compile_options("$<$<C_COMPILER_ID:MSVC>:/utf-8>")
-    add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+    set(compile_options /utf-8)
 else()
     set(compile_options -Wall -Wextra -Wno-unknown-pragmas)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
