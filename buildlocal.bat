@@ -1,0 +1,1 @@
+cmake . -Bbuild -A Win32 -DVIRTOOLS_SDK_PATH="D:\Source\Repos\Virtools-SDK-2.1" -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON

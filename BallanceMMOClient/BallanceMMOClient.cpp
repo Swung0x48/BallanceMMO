@@ -430,6 +430,9 @@ void BallanceMMOClient::OnProcess() {
     //poll_status_toggle();
     poll_local_input();
 
+    bool show = true;
+    ImGui::ShowDemoWindow(&show);
+
     if (!connected())
         return;
 

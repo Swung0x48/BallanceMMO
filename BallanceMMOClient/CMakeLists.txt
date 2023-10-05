@@ -99,13 +99,14 @@ target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
-target_link_directories(BallanceMMOClient PRIVATE
-                            ${BMLPLUS_LIB_DIR})
 target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE 
                         GameNetworkingSockets::shared
                         CK2
                         VxMath
-                        ${BMLPLUS_LIB_DIR}/BMLPlus.lib)
+                        ${BMLPLUS_LIB_DIR}/BMLPlus.lib
+                        ${BMLPLUS_LIB_DIR}/ImGui.lib)
+
+
 if (MSVC)
     # set(compile_options /Wall)
 else()
