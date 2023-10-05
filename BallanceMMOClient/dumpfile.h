@@ -91,10 +91,13 @@ namespace NSDumpFile
          "Look mom I'm on this quote!",
          "Uh-oh.",
          "Ouch!",
+         "Noooooooooooooooo",
+         "Help! HELP!",
          "Something went wrong...",
          "To run or not to run, that is the question.",
          "Task failed successfully.",
          "It's all my fault.",
+         "Gonna give you up and let you down",
          "You know the rules and so do I.",
          "The game is a lie!",
          "ALL YOUR GAME ARE BELONG TO ERRORS",
@@ -136,7 +139,8 @@ namespace NSDumpFile
         CrashCallback(extraText);
         if (!extraText.empty())
             extraText = "--------\n" + extraText + "\n";
-        extraText = "Fatal Error\n" + extraText + "========";
+        extraText = "Fatal Error\n" + std::string{szFileName}.erase(0, strlen(DumpPath) + 1)
+                + "\n" + extraText + "========";
         EXCEPTION_RECORD* record{};
         do {
             if (record) {
@@ -146,7 +150,7 @@ namespace NSDumpFile
                 record = pException->ExceptionRecord;
             if (!record) break;
             char desc[128];
-            snprintf(desc, sizeof(desc), "\nCode: 0x%08X | Flags: 0x%08X\nAddress: %p", record->ExceptionCode, record->ExceptionFlags, record->ExceptionAddress);
+            snprintf(desc, sizeof(desc), "\nCode: %08X | Flags: %08X\nAddress: %p", record->ExceptionCode, record->ExceptionFlags, record->ExceptionAddress);
             extraText.append(desc);
             if (record->NumberParameters == 0) continue;
             extraText.append("\nExtraInfo");
@@ -155,7 +159,6 @@ namespace NSDumpFile
                 extraText.append(desc);
             }
         } while (record->ExceptionRecord);
-        extraText.append("\n--------\n" + std::string{szFileName}.erase(0, strlen(DumpPath) + 1));
         extraText.append("\n========\n");
         srand(time(nullptr));
         extraText.append(Quotes[rand() % (sizeof(Quotes) / sizeof(char*))]);

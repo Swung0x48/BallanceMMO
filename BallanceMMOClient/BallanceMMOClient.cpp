@@ -1283,6 +1283,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         break;
 
     case k_ESteamNetworkingConnectionState_Connected: {
+        std::lock_guard<std::mutex> lk(bml_mtx_);
         status_->update("Connected (Login requested)");
         //status_->paint(0xff00ff00);
         SendIngameMessage("Connected to server.");
@@ -1423,6 +1424,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::LoginAcceptedV3: {
         auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(network_msg);
+        std::lock_guard<std::mutex> lk(bml_mtx_);
 
         if (logged_in_) {
             GetLogger()->Info("New LoginAccepted message received. Resetting current data.");
@@ -1506,6 +1508,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerConnectedV2: {
+        std::lock_guard<std::mutex> lk(bml_mtx_);
         bmmo::player_connected_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
@@ -1525,6 +1528,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerDisconnected: {
+        std::lock_guard<std::mutex> lk(bml_mtx_);
         auto* msg = reinterpret_cast<bmmo::player_disconnected_msg *>(network_msg->m_pData);
         auto state = db_.get(msg->content.connection_id);
         //assert(state.has_value());

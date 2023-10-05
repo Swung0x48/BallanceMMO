@@ -334,6 +334,7 @@ private:
                 Printf("Connected to server OK\n");
                 //bmmo::login_request_msg msg;
                 bmmo::login_request_v3_msg msg;
+                msg.version = bmmo::current_version;
                 msg.nickname = nickname_;
                 msg.cheated = 0;
                 memcpy(msg.uuid, uuid_, sizeof(uuid_));
