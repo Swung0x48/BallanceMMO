@@ -106,6 +106,17 @@ target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE
                         ${BMLPLUS_LIB_DIR}/BMLPlus.lib
                         ${BMLPLUS_LIB_DIR}/ImGui.lib)
 
+add_library(testmod SHARED bml_includes.h testmod.cpp testmod.h)
+set_target_properties(testmod PROPERTIES OUTPUT_NAME "testmod")
+set_target_properties(testmod PROPERTIES SUFFIX ".bmodp")
+target_include_directories(testmod PRIVATE
+                            "${CMAKE_CURRENT_LIST_DIR}/include/"
+                            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config")
+target_link_libraries(testmod PRIVATE
+                        CK2
+                        VxMath
+                        ${BMLPLUS_LIB_DIR}/BMLPlus.lib
+                        ${BMLPLUS_LIB_DIR}/ImGui.lib)
 
 if (MSVC)
     # set(compile_options /Wall)
