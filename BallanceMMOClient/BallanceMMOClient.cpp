@@ -286,6 +286,11 @@ void BallanceMMOClient::OnLoad()
         if (time_diff > 86400ll * 7)
             std::filesystem::remove(entry);
     }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/simhei.ttf", 13.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
+    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/arial.ttf", 13.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
+    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/Batang.ttf", 13.0f, NULL, io.Fonts->GetGlyphRangesKorean());
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -432,6 +437,10 @@ void BallanceMMOClient::OnProcess() {
 
     bool show = true;
     ImGui::ShowDemoWindow(&show);
+
+    ImGui::Begin("中文测试");
+    ImGui::Text("我能吞下玻璃而不伤身体");
+    ImGui::End();
 
     if (!connected())
         return;

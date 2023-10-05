@@ -624,6 +624,18 @@ private:
 	static constexpr CKKEYBOARD KEYS_TO_CHECK[] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5 };
 	// const std::vector<std::string> init_args{ "mmo", "s" };
 	void poll_local_input() {
+		ImGuiIO& io = ImGui::GetIO();
+		
+		// Mouse click
+		for (int i = 0; i < 5; i++) io.MouseDown[i] = false;
+		CKBYTE oStates[4];
+		input_manager_->GetMouseButtonsState(oStates);
+		for (int i = CK_MOUSEBUTTON_LEFT; i <= CK_MOUSEBUTTON_4; ++i) {
+			if (oStates[i] & KS_PRESSED)
+				io.MouseDown[i] = true;
+		}
+
+
 		// Toggle status
 		if (input_manager_->IsKeyDown(CKKEY_F3)) {
 			if (input_manager_->IsKeyPressed(CKKEY_A)) {
