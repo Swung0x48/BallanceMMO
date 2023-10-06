@@ -33,11 +33,12 @@ jobs:
       - name: Fetch git submodules
         run: git submodule update --init --recursive
 
-      - name: Download and extract BML 0.3.42
+      - name: Download and extract BML 0.3.42 & BMLPlus 0.2.2
         working-directory: ${{github.workspace}}/BallanceMMOClient
         run: |
           curl -o BML-dev.zip -L https://github.com/yyc12345/BallanceModLoader/releases/download/0.3.42/BML-0.3.42-dev.zip
           tar -xf BML-dev.zip include lib
+          mv lib/* lib/BML -ErrorAction Ignore
     
       - name: Download and extract BMLPlus 0.2.2
         working-directory: ${{github.workspace}}/BallanceMMOClient
@@ -48,11 +49,13 @@ jobs:
           mkdir lib/BMLPlus
           mv ModLoader/Lib/BMLPlus.lib lib/BMLPlus
 
-      - name: Setup Boost headers
+      - name: Download and setup Boost 1.80.0 headers
         working-directory: ${{github.workspace}}/BallanceMMOClient
+        # yes we know this is for linux, but we only need its headers so it's fine
         run: |
-          git clone https://github.com/scipy/boost-headers-only
-          New-Item -ItemType Junction -Path include/boost -Target boost-headers-only/boost
+          curl -o boost.tar.gz -L https://boostorg.jfrog.io/artifactory/main/release/1.80.0/source/boost_1_80_0.tar.gz
+          tar -xzf boost.tar.gz boost_1_80_0/boost
+          New-Item -ItemType Junction -Path include/boost -Target boost_1_80_0/boost
 
       # Setup MSVC command prompt environment vars
       - uses: ilammy/msvc-dev-cmd@v1
