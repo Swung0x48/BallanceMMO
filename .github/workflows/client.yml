@@ -7,12 +7,14 @@ on:
       - 'BallanceMMOServer/**'
       - '.git*'
       - 'README.md'
+      - '.github/workflows/server.yml'
   pull_request:
     branches: [ main ]
     paths-ignore:
       - 'BallanceMMOServer/**'
       - '.git*'
       - 'README.md'
+      - '.github/workflows/server.yml'
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
@@ -34,13 +36,13 @@ jobs:
       - name: Download and extract BML 0.3.42
         working-directory: ${{github.workspace}}/BallanceMMOClient
         run: |
-          curl -o BML-dev.zip https://github.com/yyc12345/BallanceModLoader/releases/download/0.3.42/BML-0.3.42-dev.zip
+          curl -o BML-dev.zip -L https://github.com/yyc12345/BallanceModLoader/releases/download/0.3.42/BML-0.3.42-dev.zip
           tar -xf BML-dev.zip include lib
     
       - name: Download and extract BMLPlus 0.2.2
         working-directory: ${{github.workspace}}/BallanceMMOClient
         run: |
-          curl -o BMLP-dev.zip https://github.com/yyc12345/BallanceModLoaderPlus/releases/download/v0.2.2/BMLP-0.2.2-dev.zip
+          curl -o BMLP-dev.zip -L https://github.com/yyc12345/BallanceModLoaderPlus/releases/download/v0.2.2/BMLP-0.2.2-dev.zip
           tar -xf BMLP-dev.zip ModLoader/Include ModLoader/Lib
           mv ModLoader/Include/BMLPlus include
           mkdir lib/BMLPlus

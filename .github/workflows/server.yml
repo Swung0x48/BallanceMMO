@@ -7,12 +7,14 @@ on:
       - 'BallanceMMOClient/**'
       - '.git*'
       - 'README.md'
+      - '.github/workflows/client.yml'
   pull_request:
     branches: [ main ]
     paths-ignore:
       - 'BallanceMMOClient/**'
       - '.git*'
       - 'README.md'
+      - '.github/workflows/client.yml'
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
