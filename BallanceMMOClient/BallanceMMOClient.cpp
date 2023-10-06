@@ -288,9 +288,10 @@ void BallanceMMOClient::OnLoad()
     }
 
     ImGuiIO& io = ImGui::GetIO();
-    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/simhei.ttf", 13.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
-    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/arial.ttf", 13.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
-    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/Batang.ttf", 13.0f, NULL, io.Fonts->GetGlyphRangesKorean());
+    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/simsun.ttc", 26.0f, NULL, io.Fonts->GetGlyphRangesChineseFull());
+    //io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/msgothic.ttc", 26.0f, NULL, io.Fonts->GetGlyphRangesJapanese());
+    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/arial.ttf", 26.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
+    io.Fonts->AddFontFromFileTTF("C:/Windows/fonts/Batang.ttf", 26.0f, NULL, io.Fonts->GetGlyphRangesKorean());
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -438,11 +439,18 @@ void BallanceMMOClient::OnProcess() {
     bool show = true;
     ImGui::ShowDemoWindow(&show);
 
-    static char buf[50];
+    static char buf[50] = {0};
 
     ImGui::Begin("中文测试");
     ImGui::Text("我能吞下玻璃而不伤身体");
-    ImGui::InputText(buf, buf, 50);
+    ImGui::InputText("测试输入", buf, 50);
+    ImGui::Text(buf);
+    for (auto i = 0; i < strlen(buf); ++i)
+    {
+        if (i % 4 != 0)
+            ImGui::SameLine();
+        ImGui::Text("0x%x ", buf[i]);
+    }
     ImGui::End();
 
     if (!connected())
