@@ -56,7 +56,7 @@ jobs:
         working-directory: ${{github.workspace}}/BallanceMMOClient
         # yes we know this is for linux, but we only need its headers so it's fine
         run: |
-          $BOOST_VER_UNDERSCORES = "${{env.BOOST_VER}}" -replace '.', '_'
+          $BOOST_VER_UNDERSCORES = "${{env.BOOST_VER}}".Replace('.', '_')
           curl -o boost.tar.gz -L "https://boostorg.jfrog.io/artifactory/main/release/${{env.BOOST_VER}}/source/boost_$BOOST_VER_UNDERSCORES.tar.gz"
           tar -xzf boost.tar.gz boost_$BOOST_VER_UNDERSCORES/boost
           New-Item -ItemType Junction -Path include/boost -Target boost_$BOOST_VER_UNDERSCORES/boost
@@ -81,6 +81,7 @@ jobs:
           echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
           cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON -A Win32
           echo "BMMO_VER=$(cat version.txt)" >> "$GITHUB_ENV"
+          echo "SHA_SHORT=$(git rev-parse --short "$GITHUB_SHA")" >> "$GITHUB_ENV"
 
       - name: Build
         working-directory: ${{github.workspace}}/build
@@ -101,5 +102,5 @@ jobs:
       - name: Release Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: client-windows-${{env.BMMO_VER}}-$(git rev-parse --short "$GITHUB_SHA")
+          name: client-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
           path: build/BallanceMMOClient/${{env.BUILD_TYPE}}

@@ -43,6 +43,7 @@ jobs:
         echo -e "\nfile(WRITE version.txt \${BMMO_VER})" >> CMakeLists.txt
         cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
         echo "BMMO_VER=$(cat version.txt)" >> "$GITHUB_ENV"
+        echo "SHA_SHORT=$(git rev-parse --short "$GITHUB_SHA")" >> "$GITHUB_ENV"
 
     - name: Build
       # Build your program with the given configuration
@@ -57,7 +58,7 @@ jobs:
     - name: Release Artifact
       uses: actions/upload-artifact@v3
       with:
-        name: server-linux-${{env.BMMO_VER}}-$(git rev-parse --short "$GITHUB_SHA")
+        name: server-linux-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
         path: build/BallanceMMOServer
 
   build-server-windows:
@@ -92,6 +93,7 @@ jobs:
           echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
           cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON  -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
           echo "BMMO_VER=$(cat version.txt)" >> "$GITHUB_ENV"
+          echo "SHA_SHORT=$(git rev-parse --short "$GITHUB_SHA")" >> "$GITHUB_ENV"
 
       - name: Build
         working-directory: ${{github.workspace}}/build
@@ -116,5 +118,5 @@ jobs:
       - name: Release Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: server-windows-${{env.BMMO_VER}}-$(git rev-parse --short "$GITHUB_SHA")
+          name: server-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
           path: build/BallanceMMOServer/${{env.BUILD_TYPE}}
