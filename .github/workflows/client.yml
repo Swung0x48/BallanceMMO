@@ -19,6 +19,9 @@ on:
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
+  BML_VER: '0.3.42'
+  BMLP_VER: '0.2.2'
+  BOOST_VER: '1.80.0'
 
 jobs:
   build-client:
@@ -33,29 +36,30 @@ jobs:
       - name: Fetch git submodules
         run: git submodule update --init --recursive
 
-      - name: Download and extract BML 0.3.42 & BMLPlus 0.2.2
+      - name: Download and extract BML ${{env.BML_VER}}
         working-directory: ${{github.workspace}}/BallanceMMOClient
         run: |
-          curl -o BML-dev.zip -L https://github.com/yyc12345/BallanceModLoader/releases/download/0.3.42/BML-0.3.42-dev.zip
-          tar -xf BML-dev.zip include lib
+          curl -o BML-dev.zip -L https://github.com/yyc12345/BallanceModLoader/releases/download/${{env.BML_VER}}/BML-${{env.BML_VER}}-dev.zip
+          tar -xvf BML-dev.zip include lib
           mv lib/* lib/BML -ErrorAction Ignore
     
-      - name: Download and extract BMLPlus 0.2.2
+      - name: Download and extract BMLPlus ${{env.BMLP_VER}}
         working-directory: ${{github.workspace}}/BallanceMMOClient
         run: |
-          curl -o BMLP-dev.zip -L https://github.com/yyc12345/BallanceModLoaderPlus/releases/download/v0.2.2/BMLP-0.2.2-dev.zip
-          tar -xf BMLP-dev.zip ModLoader/Include ModLoader/Lib
+          curl -o BMLP-dev.zip -L https://github.com/yyc12345/BallanceModLoaderPlus/releases/download/v${{env.BMLP_VER}}/BMLP-${{env.BMLP_VER}}-dev.zip
+          tar -xvf BMLP-dev.zip ModLoader/Include ModLoader/Lib
           mv ModLoader/Include/BMLPlus include
           mkdir lib/BMLPlus
           mv ModLoader/Lib/BMLPlus.lib lib/BMLPlus
 
-      - name: Download and setup Boost 1.80.0 headers
+      - name: Download and setup Boost ${{env.BOOST_VER}} headers
         working-directory: ${{github.workspace}}/BallanceMMOClient
         # yes we know this is for linux, but we only need its headers so it's fine
         run: |
-          curl -o boost.tar.gz -L https://boostorg.jfrog.io/artifactory/main/release/1.80.0/source/boost_1_80_0.tar.gz
-          tar -xzf boost.tar.gz boost_1_80_0/boost
-          New-Item -ItemType Junction -Path include/boost -Target boost_1_80_0/boost
+          $BOOST_VER_UNDERSCORES = "${{env.BOOST_VER}}" -replace '.', '_'
+          curl -o boost.tar.gz -L "https://boostorg.jfrog.io/artifactory/main/release/${{env.BOOST_VER}}/source/boost_$BOOST_VER_UNDERSCORES.tar.gz"
+          tar -xzf boost.tar.gz boost_$BOOST_VER_UNDERSCORES/boost
+          New-Item -ItemType Junction -Path include/boost -Target boost_$BOOST_VER_UNDERSCORES/boost
 
       # Setup MSVC command prompt environment vars
       - uses: ilammy/msvc-dev-cmd@v1
@@ -73,7 +77,10 @@ jobs:
 #        run: vcpkg install --triplet x64-windows
 
       - name: Configure CMake
-        run: cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON -A Win32
+        run: |
+          echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
+          cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON -A Win32
+          echo "BMMO_VER=$(cat version.txt)" >> "$GITHUB_ENV"
 
       - name: Build
         working-directory: ${{github.workspace}}/build
@@ -83,9 +90,9 @@ jobs:
 #        working-directory: ${{github.workspace}}/build
 #        run: dir
 
-      # - name: Run post-build script
-      #   working-directory: ${{github.workspace}}/build/BallanceMMOClient
-      #   run: ${{github.workspace}}/build/BallanceMMOClient/postbuild.bat ${{env.BUILD_TYPE}}
+      - name: Run post-build actions
+        working-directory: ${{github.workspace}}/build/BallanceMMOClient/${{env.BUILD_TYPE}}
+        run: rm BallanceMMOClient.exp, BallanceMMOClient.lib
 
       - name: Test
         working-directory: ${{github.workspace}}
@@ -94,5 +101,5 @@ jobs:
       - name: Release Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: client-windows
+          name: client-windows-${{env.BMMO_VER}}-$(git rev-parse --short "$GITHUB_SHA")
           path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
