@@ -276,7 +276,7 @@ void BallanceMMOClient::OnLoad()
     if (!std::filesystem::is_directory(NSDumpFile::DumpPath)) return;
     for (const auto& entry : std::filesystem::directory_iterator(NSDumpFile::DumpPath)) {
         if (entry.is_directory()) continue;
-        char dump_ver[32], dump_time_str[32];
+        char dump_ver[32]{}, dump_time_str[32]{};
         std::ignore = std::sscanf(entry.path().filename().string().c_str(), "BMMO_%31[^_]_%31[^.].dmp",
                                   dump_ver, dump_time_str);
         std::stringstream time_stream(dump_time_str); std::tm time_struct;
@@ -1178,7 +1178,6 @@ void BallanceMMOClient::disconnect_from_server() {
         //status_->update("Disconnected");
         //status_->paint(0xffff0000);
         cleanup();
-        std::lock_guard<std::mutex> lk(bml_mtx_);
         SendIngameMessage("Disconnected.");
 
         ping_->update("");
@@ -1380,6 +1379,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
+        std::lock_guard<std::mutex> lk(bml_mtx_);
         for (const auto& i : msg.balls) {
             //static char t[128];
             /*snprintf(t, 128, "%u: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f), %lld",

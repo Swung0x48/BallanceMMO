@@ -633,6 +633,7 @@ private:
 				if (!connected())
 					return;
 			} else if (input_manager_->IsKeyPressed(CKKEY_F3)) {
+				std::lock_guard<std::mutex> lk(bml_mtx_);
 				ping_->toggle();
 				status_->toggle();
 			}
@@ -648,6 +649,7 @@ private:
 					}
 				}
 				if (input_manager_->IsKeyPressed(CKKEY_GRAVE)) {
+					std::lock_guard<std::mutex> lk(bml_mtx_);
 					// toggle own ball
 					toggle_own_spirit_ball(!own_ball_visible_, true);
 				}
@@ -690,6 +692,7 @@ private:
 
 		// Toggle nametag
 		if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
+			std::lock_guard<std::mutex> lk(bml_mtx_);
 			db_.toggle_nametag_visible();
 		}
 
@@ -814,6 +817,7 @@ private:
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
+		std::lock_guard<std::mutex> lk(bml_mtx_);
 		if (player_list_visible_) {
 			player_list_visible_ = false;
 			asio::post(thread_pool_, [this] {

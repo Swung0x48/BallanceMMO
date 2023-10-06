@@ -139,8 +139,8 @@ namespace NSDumpFile
         CrashCallback(extraText);
         if (!extraText.empty())
             extraText = "--------\n" + extraText + "\n";
-        extraText = "Fatal Error\n" + std::string{szFileName}.erase(0, strlen(DumpPath) + 1)
-                + "\n" + extraText + "========";
+        extraText = "Fatal Error\n" + extraText + "========\n"
+                + std::string{ szFileName }.erase(0, strlen(DumpPath) + 1);
         EXCEPTION_RECORD* record{};
         do {
             if (record) {
