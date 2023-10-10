@@ -9,6 +9,7 @@
 #include "game_objects.h"
 #include "local_state_handler_impl.h"
 #include "dumpfile.h"
+#include "server_list.h"
 #include <map>
 #include <unordered_map>
 #include <mutex>
@@ -43,7 +44,8 @@ class BallanceMMOClient : public IMod, public bmmo::exported::client {
 public:
 	BallanceMMOClient(IBML* bml):
 		IMod(bml),
-		objects_(bml, db_)
+		objects_(bml, db_),
+		server_list_(bml, GetLogger(), [this](std::string addr, std::string name) { connect_to_server(addr, name); })
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
@@ -130,7 +132,7 @@ private:
 	bool hide_console();
 	void show_player_list();
 
-	void connect_to_server(std::string address = "");
+	void connect_to_server(std::string address, std::string name = "");
 	void disconnect_from_server();
 	// 3 attempts: delay, delay * scale, delay * scale ^ 2
 	void reconnect(int delay, float scale = 1.0f);
@@ -183,6 +185,8 @@ private:
 	game_state db_;
 	game_objects objects_;
 
+	server_list server_list_;
+
 	CK3dObject* player_ball_ = nullptr;
 	//std::vector<CK3dObject*> template_balls_;
 	//std::unordered_map<std::string, uint32_t> ball_name_to_idx_;
@@ -218,7 +222,7 @@ private:
 
 	std::unique_ptr<local_state_handler_base> local_state_handler_;
 	bool spectator_mode_ = false;
-	std::string server_addr_;
+	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
 	std::unordered_map<std::string, float> level_start_timestamp_;
@@ -370,25 +374,24 @@ private:
 
 	void init_config() {
 		migrate_config();
-		GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
+		/*GetConfig()->SetCategoryComment("Remote", "Which server to connect to?");
 		IProperty* tmp_prop = GetConfig()->GetProperty("Remote", "ServerAddress");
 		tmp_prop->SetComment("Remote server address with port (optional; default 26676). It could be an IPv4 address or a domain name.");
 		tmp_prop->SetDefaultString("127.0.0.1");
 		props_["remote_addr"] = tmp_prop;
-		/*tmp_prop = GetConfig()->GetProperty("Remote", "Port");
+		tmp_prop = GetConfig()->GetProperty("Remote", "Port");
 		tmp_prop->SetComment("The port that server is running on.");
 		tmp_prop->SetDefaultInteger(50000);
 		props_["remote_port"] = tmp_prop;*/
-		tmp_prop = GetConfig()->GetProperty("Remote", "SpectatorMode");
-		tmp_prop->SetComment("Whether to connect to the server as a spectator. Spectators are invisible to other players.");
-		tmp_prop->SetDefaultBoolean(false);
-		props_["spectator"] = tmp_prop;
-
 		GetConfig()->SetCategoryComment("Player", "Who are you?");
-		tmp_prop = GetConfig()->GetProperty("Player", "Playername");
+		auto* tmp_prop = GetConfig()->GetProperty("Player", "Playername");
 		tmp_prop->SetComment("Player name. Can only be changed once every 24 hours (countdown starting after joining a server).");
 		tmp_prop->SetDefaultString(bmmo::name_validator::get_random_nickname().c_str());
 		props_["playername"] = tmp_prop;
+		tmp_prop = GetConfig()->GetProperty("Player", "SpectatorMode");
+		tmp_prop->SetComment("Whether to connect to the server as a spectator. Spectators are invisible to other players.");
+		tmp_prop->SetDefaultBoolean(false);
+		props_["spectator"] = tmp_prop;
 		// Validation of player names fails at this stage of initialization
 		// so we had to put it at the time of post startmenu events.
 		load_external_config();

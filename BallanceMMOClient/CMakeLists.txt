@@ -72,6 +72,7 @@ set(BMMO_CLIENT_HDR
         label_sprite.h
         local_state_handler_base.h
         local_state_handler_impl.h
+        server_list.h
         text_sprite.h)
 set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp)
 
