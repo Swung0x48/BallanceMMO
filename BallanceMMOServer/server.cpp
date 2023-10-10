@@ -554,7 +554,7 @@ protected:
         std::string name = itClient->second.name;
         username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
-        Printf("%s (#%u) disconnected.", name, client);
+        Printf(93, "%s (#%u) disconnected.", name, client);
 
         switch (get_client_count()) {
             case 0:
@@ -836,7 +836,7 @@ protected:
                 memcpy(client_it->second.uuid, msg.uuid, sizeof(msg.uuid));
                 client_it->second.login_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                 username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;
-                Printf("%s (%s; v%s) logged in with cheat mode %s!\n",
+                Printf(93, "%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
                         get_uuid_string(msg.uuid).substr(0, 8),
                         msg.version.to_string(),
@@ -987,13 +987,13 @@ protected:
                 msg.player_id = networking_msg->m_conn;
 
                 if (client_exists(receiver, true)) {
-                    Printf("(%u, %s) -> (%u, %s): %s",
+                    Printf(37, "(%u, %s) -> (%u, %s): %s",
                         msg.player_id, client_it->second.name, receiver, clients_[receiver].name, msg.chat_content);
                     msg.clear();
                     msg.serialize();
                     send(receiver, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 } else {
-                    Printf("(%u, %s) -> (%u, %s): %s",
+                    Printf(37, "(%u, %s) -> (%u, %s): %s",
                         msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
                     if (receiver != k_HSteamNetConnection_Invalid) {
                         bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::TargetNotFound}};
@@ -1013,7 +1013,7 @@ protected:
                 msg.player_id = networking_msg->m_conn;
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf("%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
+                Printf(94, "%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
                     msg.player_id, client_it->second.name, msg.chat_content);
                 if (muted) break;
                 msg.clear();
@@ -1043,7 +1043,7 @@ protected:
                 switch (msg->content.type) {
                     using ct = bmmo::countdown_type;
                     case ct::Go: {
-                        Printf("[%u, %s]: %s%s - Go!%s",
+                        Printf(92, "[%u, %s]: %s%s - Go!%s",
                             networking_msg->m_conn, client_it->second.name, map_name,
                             msg->content.get_level_mode_label(),
                             msg->content.force_restart ? " (rank reset)" : "");
@@ -1157,7 +1157,7 @@ protected:
                 if (deny_action(networking_msg->m_conn))
                     break;
                 auto* state_msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
-                Printf("(#%u, %s) toggled cheat [%s] globally!",
+                Printf(36, "(#%u, %s) toggled cheat [%s] globally!",
                     networking_msg->m_conn, client_it->second.name, state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_toggle_msg new_msg{};
                 new_msg.content.player_id = client_it->first;
@@ -1246,7 +1246,7 @@ protected:
                 bmmo::string_utils::sanitize_string(msg.text_content);
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf("%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
+                Printf(94, "%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
                         msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
                 if (muted) break;
                 msg.title = client_it->second.name;
@@ -1265,7 +1265,7 @@ protected:
             }
             case bmmo::PublicNotification: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(networking_msg);
-                Printf("[%s] (%u, %s): %s", msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.text_content);
+                Printf(91, "[%s] (%u, %s): %s", msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.text_content);
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
@@ -1639,7 +1639,7 @@ int main(int argc, char** argv) {
         for (int i = 3; i >= 0; --i) {
             msg.content.type = static_cast<bmmo::countdown_type>(i);
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
-            server.Printf("[[Server]]: Countdown%s - %s",
+            server.Printf(94, "[[Server]]: Countdown%s - %s",
                 msg.content.mode == bmmo::level_mode::Highscore ? " <HS>" : "",
                 i == 0 ? "Go!" : std::to_string(i));
             if (i != 0)

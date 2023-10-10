@@ -1062,14 +1062,14 @@ private:
 
 	inline void flash_window() { FlashWindow(get_main_window(), false); }
 
-	void SendIngameMessage(const std::string& msg) {
-		SendIngameMessage(msg.c_str());
+	void SendIngameMessage(const std::string& msg, int ansi_color = -1) {
+		SendIngameMessage(msg.c_str(), ansi_color);
 	}
 
-	void SendIngameMessage(const char* msg) {
+	void SendIngameMessage(const char* msg, int ansi_color = -1) {
 		previous_msg_.push_back(msg);
 		if (console_running_) {
-			Printf(msg);
+			Printf(ansi_color, "%s", msg);
 		}
 		m_bml->SendIngameMessage(msg);
 	}

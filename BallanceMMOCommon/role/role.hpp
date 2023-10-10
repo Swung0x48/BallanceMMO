@@ -153,29 +153,26 @@ public:
     static void LogFileOutput(const char* pMsg) {
         if (log_file_) {
             auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            char time_str[15];
-            std::strftime(time_str, sizeof(time_str), "%m-%d %T", std::localtime(&time));
-            fprintf(log_file_, "[%s] %s\n", time_str, pMsg);
+            char timeStr[15];
+            std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
+            fprintf(log_file_, "[%s] %s\n", timeStr, pMsg);
             fflush(log_file_);
         }
     }
 
-    static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
+    static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor) {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        /*std::string time_str(15, 0);
-        time_str.resize(std::strftime(&time_str[0], time_str.size(), 
-            "%m-%d %T", std::localtime(&time)));*/
-        char time_str[15];
-        std::strftime(time_str, sizeof(time_str), "%m-%d %T", std::localtime(&time));
+        char timeStr[15];
+        std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
 
         if (log_file_) {
-            fprintf(log_file_, "[%s] %s\n", time_str, pszMsg);
+            fprintf(log_file_, "[%s] %s\n", timeStr, pszMsg);
             fflush(log_file_);
         }
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-            fprintf(stderr, "\r[%s] %s\n> ", time_str, pszMsg);
+            fprintf(stderr, "\r[%s] %s\n> ", timeStr, pszMsg);
             fflush(stdout);
             fflush(stderr);
             exit(2);
@@ -186,7 +183,7 @@ public:
                 || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
 #endif
             ) {
-                printf("\r[%s] %s\n> ", time_str, pszMsg);
+                printf("\r[%s] %s\n> ", timeStr, pszMsg);
                 fflush(stdout);
                 return;
             }
@@ -202,9 +199,23 @@ public:
                 width = 80;
 #endif
             unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
-            printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, time_str, pszMsg, lines);
+            if (ansiColor == -1)
+                printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, timeStr, pszMsg, lines);
+            else
+                printf("\033[s\033[%uL\033[G[%s] \033[0;%dm%s\033[0m\n> \033[u\033[%uB",
+                        lines, timeStr, ansiColor, pszMsg, lines);
             fflush(stdout);
         }
+    }
+
+    static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
+        DebugOutput(eType, pszMsg, -1);
+    }
+
+    static void RightTrim(char* text) {
+        char* nl = strchr(text, '\0') - 1;
+        if (nl >= text && *nl == '\n')
+            *nl = '\0';
     }
 
     template <typename T>
@@ -232,24 +243,28 @@ public:
     static void Printf(const char* fmt) {
         char text[2048];
         strcpy(text, fmt);
-        char* nl = strchr(text, '\0') - 1;
-        if (nl >= text && *nl == '\n')
-            *nl = '\0';
+        RightTrim(text);
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
     }
 
     template <typename ... Args>
     static void Printf(const char* fmt, Args&& ... args) {
-        char text[2048];
-        snprintf(text, 2048, fmt, ConvertArgument(args)...);
+        char text[2048]{};
+        snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
         // va_list ap;
         // va_start(ap, fmt);
         // vsprintf(text, fmt, ap);
         // va_end(ap);
-        char* nl = strchr(text, '\0') - 1;
-        if (nl >= text && *nl == '\n')
-            *nl = '\0';
+        RightTrim(text);
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
+    }
+
+    template<typename ... Args>
+    static void Printf(int ansiColor, const char* fmt, Args&& ... args) {
+        char text[2048]{};
+        snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
+        RightTrim(text);
+        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text, ansiColor);
     }
 
     static void FatalError(const char* fmt, ...) {
@@ -258,9 +273,7 @@ public:
         va_start(ap, fmt);
         vsprintf(text, fmt, ap);
         va_end(ap);
-        char* nl = strchr(text, '\0') - 1;
-        if (nl >= text && *nl == '\n')
-            *nl = '\0';
+        RightTrim(text);
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
     }
 };
