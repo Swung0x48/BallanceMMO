@@ -1,5 +1,10 @@
 # BallanceMMO
 
+Build status:
+[![Server](https://github.com/Swung0x48/BallanceMMO/actions/workflows/server.yml/badge.svg)](https://github.com/Swung0x48/BallanceMMO/actions/workflows/server.yml)
+·
+[![Client](https://github.com/Swung0x48/BallanceMMO/actions/workflows/client.yml/badge.svg)](https://github.com/Swung0x48/BallanceMMO/actions/workflows/client.yml)
+
 ## What is BallanceMMO?
 
 BallanceMMO is a project which brings online experiences to Ballance.
@@ -11,11 +16,21 @@ BallanceMMO is a project which brings online experiences to Ballance.
 1. Install Ballance Mod Loader (aka. BML).
     - Download the latest version of BML [here](https://github.com/Gamepiaynmo/BallanceModLoader/releases).
     - Extract and put `BML.dll` under `$(game_directory)\BuildingBlocks`, where `$(game_directory)` is where you installed your game to.
-2. Download the latest mod from ~~the [release page](https://github.com/Swung0x48/BallanceMMO/releases)~~ the [BMMO download site](https://dl.bmmo.bcrc.site).
+2. Download the latest mod release from the [BMMO download site](https://dl.bmmo.bcrc.site). Alternatively, try out [builds from GitHub Actions](https://github.com/Swung0x48/BallanceMMO/actions/workflows/client.yml) which also support [BallanceModLoaderPlus](https://github.com/doyaGu/BallanceModLoaderPlus).
 
-3. Put `BallanceMMO_x.y.z-[stage]b.bmod` under `$(game_directory)\ModLoader\Mods`. (If the directory is not present, you may launch the game and BML will generate that for you)
+3. Put `BallanceMMO_x.y.z-[stage]b.bmod` and required `.dll` dependencies under `$(game_directory)\ModLoader\Mods`. (If the directory is not present, you may launch the game and BML will generate that for you)
 
 4. Launch the game and enjoy!
+
+### Server
+
+1. Download your desired [server builds from GitHub Actions](https://github.com/Swung0x48/BallanceMMO/actions/workflows/server.yml), as currently we don't have a release page for it (maybe we'll make one in the future?).
+
+2. Extract the archive and run `start_ballancemmo_loop.bat` (Windows) or `start_ballancemmo_loop.sh` (Linux/macOS), which is our helper script to take care of logging and server crashes.
+
+3. Modify the generated `config.yml` according to your needs; you may also run `./BallanceMMOServer --help` to see if there are any configurable command line arguments (you can also supply them through our helper script!).
+
+4. Type `reload` in the server console and apply your config changes. Now you're ready to share your address and invite others!
 
 ## Dependencies or build tools
 
@@ -31,7 +46,7 @@ BallanceMMO is a project which brings online experiences to Ballance.
   - OpenSSL 1.1.x, plus ed25519-donna and curve25519-donna. (Valve GNS has made some minor changes, so the source is included in this project.)
   - libsodium
 - Google protobuf 2.6.1+ (included in submodule)
-- Dev pack of BallanceModLoader (client-side, [*release page*](https://github.com/Gamepiaynmo/BallanceModLoader/releases))
+- Dev pack of BallanceModLoader (client-side, [*release page*](https://github.com/Gamepiaynmo/BallanceModLoader/releases)) and (optionally) [BallanceModLoaderPlus](https://github.com/doyaGu/BallanceModLoaderPlus)
 
 ## Building server
 
@@ -74,32 +89,34 @@ BallanceMMO is a project which brings online experiences to Ballance.
     - Ninja
 
         ```commandline
-        cd BallanceMMOServer
-        mkdir build
+        chmod +x build.sh
+        ./build.sh
         cd build
-        cmake -G Ninja ..
         ninja
         ```
 
     - GNU Make
 
         ```commandline
-        cd BallanceMMOServer
-        mkdir build
+        chmod +x build.sh
+        ./build.sh -G
         cd build
-        cmake -G ..
         make
         ```
+
+    You may also want to supply command line arguments such as `-DCMAKE_BUILD_TYPE=Release` when running `build.sh`, to specify the build type.
 
     If CMake failed to find openssl for some reason, you may need to specify path to openssl yourself.
 
     For example:
 
     ```commandline
-    $ cmake -G Ninja .. -DOPENSSL_ROOT_DIR="/usr/local/opt/openssl@1.1/"
+    $ ./build.sh -DOPENSSL_ROOT_DIR="/usr/local/opt/openssl@1.1/"
     ```
 
 4. Run your server!
+
+    (Don't forget to navigate to the build directory first: `cd BallanceMMOServer`)
 
     ```commandline
     $ ./BallanceMMOServer
