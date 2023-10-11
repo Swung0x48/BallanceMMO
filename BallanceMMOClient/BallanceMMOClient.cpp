@@ -790,7 +790,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             msg.serialize();
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             SendIngameMessage(std::format("Whispered to {}: {}",
-                get_username(msg.player_id), msg.chat_content), 37);
+                get_username(msg.player_id), msg.chat_content), 90);
             return;
         }
     }
@@ -1562,7 +1562,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         SendIngameMessage(std::format("{} whispers to you: {}",
-                                      get_username(msg.player_id), msg.chat_content), 37);
+                                      get_username(msg.player_id), msg.chat_content), 90);
         flash_window();
         break;
     }
@@ -1571,7 +1571,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         std::string name = get_username(msg.player_id);
-        SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content), 94);
+        SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content), 96);
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() {
             flash_window();
             play_wave_sound(sound_notification_, !is_foreground_window());
@@ -1751,7 +1751,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             flash_window();
         }
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
-        SendIngameMessage(str.c_str(), 36);
+        SendIngameMessage(str.c_str(), 94);
         break;
     }
     case bmmo::OwnedCheatToggle: {
@@ -1775,7 +1775,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 play_wave_sound(sound_knock_);
                 flash_window();
             }
-            SendIngameMessage(str.c_str(), 36);
+            SendIngameMessage(str.c_str(), 94);
         }
         break;
     }
@@ -1846,7 +1846,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(network_msg);
         if (msg.text_content.empty()) {
             permanent_notification_.reset();
-            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title), 94);
+            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title), 96);
             break;
         }
         std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
@@ -1862,7 +1862,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         else
             permanent_notification_->update(parsed_text.c_str());
-        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content), 94);
+        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content), 96);
         flash_window();
         play_wave_sound(sound_notification_, !is_foreground_window());
         break;
@@ -1935,7 +1935,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::PopupBox: {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
-        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, 94);
+        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, 96);
         std::thread([msg = std::move(msg)] {
             std::ignore = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
         }).detach();

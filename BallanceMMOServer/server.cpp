@@ -987,13 +987,13 @@ protected:
                 msg.player_id = networking_msg->m_conn;
 
                 if (client_exists(receiver, true)) {
-                    Printf(37, "(%u, %s) -> (%u, %s): %s",
+                    Printf(90, "(%u, %s) -> (%u, %s): %s",
                         msg.player_id, client_it->second.name, receiver, clients_[receiver].name, msg.chat_content);
                     msg.clear();
                     msg.serialize();
                     send(receiver, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 } else {
-                    Printf(37, "(%u, %s) -> (%u, %s): %s",
+                    Printf(90, "(%u, %s) -> (%u, %s): %s",
                         msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
                     if (receiver != k_HSteamNetConnection_Invalid) {
                         bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::TargetNotFound}};
@@ -1013,7 +1013,7 @@ protected:
                 msg.player_id = networking_msg->m_conn;
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf(94, "%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
+                Printf(96, "%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
                     msg.player_id, client_it->second.name, msg.chat_content);
                 if (muted) break;
                 msg.clear();
@@ -1157,7 +1157,7 @@ protected:
                 if (deny_action(networking_msg->m_conn))
                     break;
                 auto* state_msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
-                Printf(36, "(#%u, %s) toggled cheat [%s] globally!",
+                Printf(94, "(#%u, %s) toggled cheat [%s] globally!",
                     networking_msg->m_conn, client_it->second.name, state_msg->content.cheated ? "on" : "off");
                 bmmo::owned_cheat_toggle_msg new_msg{};
                 new_msg.content.player_id = client_it->first;
@@ -1246,7 +1246,7 @@ protected:
                 bmmo::string_utils::sanitize_string(msg.text_content);
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf(94, "%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
+                Printf(96, "%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
                         msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
                 if (muted) break;
                 msg.title = client_it->second.name;
@@ -1562,7 +1562,7 @@ int main(int argc, char** argv) {
             msg.chat_content = text;
             msg.serialize();
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("([Server]) -> #%u: %s", client, msg.chat_content);
+            server.Printf(90, "([Server]) -> #%u: %s", client, msg.chat_content);
         } else if (console.get_command_name() == "ban") {
             server.set_ban(client, text);
         } else {
@@ -1639,7 +1639,7 @@ int main(int argc, char** argv) {
         for (int i = 3; i >= 0; --i) {
             msg.content.type = static_cast<bmmo::countdown_type>(i);
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
-            server.Printf(94, "[[Server]]: Countdown%s - %s",
+            server.Printf(92, "[[Server]]: Countdown%s - %s",
                 msg.content.mode == bmmo::level_mode::Highscore ? " <HS>" : "",
                 i == 0 ? "Go!" : std::to_string(i));
             if (i != 0)
