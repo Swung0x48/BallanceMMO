@@ -32,7 +32,7 @@ private:
     BGui::Label* server_labels_[MAX_SERVERS_COUNT]{};
     picojson::array servers_{};
     BGui::Input* server_address_{}, * server_name_{};
-    BGui::Button* edit_cancel_{}, * edit_ok_{};
+    BGui::Button* edit_cancel_{}, * edit_save_{};
     size_t server_index_{};
     std::function<void()> process_ = [this] {};
     std::function<void(std::string, std::string)> connect_callback_{};
@@ -51,15 +51,17 @@ private:
     }
 
     void save_server_data() {
-        std::string address = server_address_->GetText();
+        std::string address = server_address_->GetText(),
+                name = server_name_->GetText();
         if (address.empty()) {
-            enter_server_list();
+            if (name.empty())
+                enter_server_list();
             return;
         };
         if (server_index_ >= servers_.size()) servers_.push_back({});
         auto& entry = servers_[(std::min)(server_index_, servers_.size())];
         entry = picojson::value{picojson::object{ {"address", picojson::value{address}},
-                  {"name", picojson::value{server_name_->GetText()}} }};
+                  {"name", picojson::value{name}} }};
         enter_server_list();
     }
 
@@ -78,7 +80,7 @@ private:
         server_name_label_->SetVisible(false);
         server_name_background_->SetVisible(false);
         edit_cancel_->SetVisible(false);
-        edit_ok_->SetVisible(false);
+        edit_save_->SetVisible(false);
     }
 
     void hide_connection_status() {
@@ -125,14 +127,14 @@ private:
         server_name_background_->SetVisible(true);
         gui_->SetFocus(nullptr);
         bool create_new = (server_index_ >= servers_.size());
-        hints_->SetText("Default port: 26676 \xB7 <Enter> Save data\n<Up|Down> Move input focus \xB7 <Esc>");
+        hints_->SetText("Default port: 26676 \xB7 <Enter> Save data\n<Up|Down|Tab> Move input focus \xB7 <Esc>");
         hints_->SetVisible(true);
         picojson::object* entry{};
         if (!create_new) entry = &(servers_[server_index_].get<picojson::object>());
         server_address_->SetText(create_new ? "" : (*entry)["address"].get<std::string>().c_str());
         server_name_->SetText(create_new ? "" : (*entry)["name"].get<std::string>().c_str());
         edit_cancel_->SetVisible(true);
-        edit_ok_->SetVisible(true);
+        edit_save_->SetVisible(true);
         bml_->AddTimerLoop(CKDWORD(1), [this] {
             if (input_manager_->oIsKeyDown(CKKEY_E))
                 return true;
@@ -145,6 +147,9 @@ private:
     void save_config() {
         std::ofstream extra_config(EXTRA_CONFIG_PATH);
         if (!extra_config.is_open()) return;
+        // we can use (picojson::) value::set<array> but using value::set(array)
+        // gives value::set<array&> and linker error somehow
+        // also there doesn't seem to be value::set<int64_t> for some reason
         picojson::object o(DEFAULT_CONFIG);
         o["servers"].set<decltype(servers_)>(servers_);
         o["selected_server"] = picojson::value{int64_t(server_index_)};
@@ -176,12 +181,18 @@ private:
                 save_server_data();
             else if (input_manager_->oIsKeyPressed(CKKEY_ESCAPE))
                 enter_server_list();
+            else if (input_manager_->oIsKeyPressed(CKKEY_TAB)) {
+                if (server_address_->GetTextFlags() & TEXT_SHOWCARET) // on focus
+                    gui_->SetFocus(server_name_);
+                else
+                    gui_->SetFocus(server_address_);
+            }
         }
         else {
             if (input_manager_->oIsKeyPressed(CKKEY_DOWN))
-                select_server(size_t(int(server_index_ + 1) % (servers_.size() + 1)));
+                select_server((server_index_ + 1) % (servers_.size() + 1));
             else if (input_manager_->oIsKeyPressed(CKKEY_UP))
-                select_server(size_t(int(server_index_ - 1) % (servers_.size() + 1)));
+                select_server((server_index_ + servers_.size()) % (servers_.size() + 1));
             else if (input_manager_->oIsKeyPressed(CKKEY_E))
                 enter_server_edit();
             else if (input_manager_->oIsKeyPressed(CKKEY_DELETE))
@@ -285,9 +296,10 @@ public:
         edit_cancel_ = gui_->AddSmallButton("MMO_Server_Edit_Cancel", "Cancel", 0.59f, 0.3912f,
                                             [this] { enter_server_list(); });
         edit_cancel_->SetZOrder(1032);
-        edit_ok_ = gui_->AddSmallButton("MMO_Server_Edit_OK", "OK", 0.59f, 0.54f,
+        edit_cancel_->SetActive(false);
+        edit_save_ = gui_->AddSmallButton("MMO_Server_Edit_Save", "Save", 0.59f, 0.54f,
                                         [this] { save_server_data(); });
-        edit_ok_->SetZOrder(1032);
+        edit_save_->SetZOrder(1032);
 
         connection_status_ = gui_->AddTextLabel("MMO_Server_List_Connection_Status", "",
                                                 ExecuteBB::GAMEFONT_01, 0.3f, 0.39f, 0.4f, 0.22f);
