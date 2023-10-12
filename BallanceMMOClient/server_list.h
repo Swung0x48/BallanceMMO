@@ -23,7 +23,7 @@ private:
         SERVER_NAME_Y_BEGIN = SERVER_LIST_Y_BEGIN + (SERVER_ENTRY_HEIGHT + 0.01f) * 3;
     static constexpr size_t MAX_SERVERS_COUNT = 10;
     static constexpr const char* EXTRA_CONFIG_PATH = "..\\ModLoader\\Config\\BallanceMMOClient_extra.json";
-    bool gui_visible_ = false, is_editing_ = false;
+    bool gui_visible_ = false, is_editing_ = false, config_modified_ = false;
     BGui::Panel* selected_server_background_{},
         * server_address_background_{}, * server_name_background_{};
     BGui::Label* header_{}, * new_server_{}, * hints_{},
@@ -37,19 +37,24 @@ private:
     std::function<void()> process_ = [this] {};
     std::function<void(std::string, std::string)> connect_callback_{};
 
-    void select_server(size_t index) {
+    void select_server(size_t index, bool save_to_config = true) {
         server_index_ = std::clamp(index, 0u, (std::min)(servers_.size(), MAX_SERVERS_COUNT - 1));
         selected_server_background_->SetPosition({ 0.3f,
                 SERVER_LIST_Y_BEGIN + 0.001f + server_index_ * SERVER_ENTRY_HEIGHT });
+        if (save_to_config) config_modified_ = true;
     }
 
     void delete_selected_server() {
         if (server_index_ >= servers_.size()) return;
         servers_.erase(servers_.begin() + server_index_);
+        config_modified_ = true;
         enter_server_list();
-        select_server(server_index_);
     }
 
+    // save to memory but not config.
+    // we're not saving every single time we make a change;
+    // instead it is deferred to (with `save_config()`)
+    // when we're exiting the server list gui itself.
     void save_server_data() {
         std::string address = server_address_->GetText(),
                 name = server_name_->GetText();
@@ -62,6 +67,7 @@ private:
         auto& entry = servers_[(std::min)(server_index_, servers_.size())];
         entry = picojson::value{picojson::object{ {"address", picojson::value{address}},
                   {"name", picojson::value{name}} }};
+        config_modified_ = true;
         enter_server_list();
     }
 
@@ -110,7 +116,7 @@ private:
         selected_server_background_->SetVisible(true);
         hints_->SetVisible(true);
         hints_->SetText("<Enter> Join selected server\n<E> Edit entry \xB7 <Delete> \xB7 <Esc>");
-        select_server(server_index_);
+        select_server(server_index_, false);
         is_editing_ = false;
     }
 
@@ -155,18 +161,27 @@ private:
         o["selected_server"] = picojson::value{int64_t(server_index_)};
         extra_config << picojson::value{o}.serialize(true);
         extra_config.close();
+        config_modified_ = false;
     }
 
     void exit_gui(CKDWORD key) {
         gui_visible_ = false;
-        save_config();
-        bml_->AddTimerLoop(CKDWORD(1), [this, key] {
-            if (gui_visible_) return false;
-            if (input_manager_->oIsKeyDown(key))
-                return true;
+        if (config_modified_) save_config();
+        set_input_block(false, key, [this] { return gui_visible_; }, [this] {
             gui_->SetVisible(false);
-            input_manager_->SetBlock(false);
             process_ = [] {};
+        });
+    }
+
+    void set_input_block(bool block, CKDWORD defer_key, std::function<bool()> cancel_condition,
+                         std::function<void()> callback = [] {}) {
+        bml_->AddTimerLoop(CKDWORD(1), [=, this] {
+            if (cancel_condition())
+                return false;
+            if (input_manager_->oIsKeyDown(defer_key))
+                return true;
+            input_manager_->SetBlock(block);
+            callback();
             return false;
         });
     }
@@ -200,20 +215,22 @@ private:
             else if (input_manager_->oIsKeyPressed(CKKEY_ESCAPE))
                 exit_gui(CKKEY_ESCAPE);
             else if (input_manager_->oIsKeyPressed(CKKEY_RETURN)) {
-              if (server_index_ == servers_.size())
-                  enter_server_edit();
-              else {
-                  auto& entry = servers_[server_index_ % servers_.size()].get<picojson::object>();
-                  hide_server_edit();
-                  hide_server_list();
-                  header_->SetVisible(false);
-                  hints_->SetVisible(false);
-                  connection_status_->SetText(("Connecting to\n["
-                                               + entry["name"].get<std::string>() + "]\n...").c_str());
-                  connection_status_->SetVisible(true);
-                  bml_->AddTimer(1000.0f, [this] { exit_gui(CKKEY_RETURN); });
-                  connect_callback_(entry["address"].get<std::string>(), entry["name"].get<std::string>());
-              }
+                if (server_index_ == servers_.size())
+                    enter_server_edit();
+                else {
+                    auto& entry = servers_[server_index_ % servers_.size()].get<picojson::object>();
+                    const auto& address = entry["address"].get<std::string>(),
+                        & name = entry["name"].get<std::string>();
+                    hide_server_edit();
+                    hide_server_list();
+                    header_->SetVisible(false);
+                    hints_->SetVisible(false);
+                    connection_status_->SetText(("Connecting to\n[" + (name.empty() ?
+                                                 address : name) + "]\n...").c_str());
+                    connection_status_->SetVisible(true);
+                    bml_->AddTimer(800.0f, [this] { exit_gui(CKKEY_RETURN); });
+                    connect_callback_(address, name);
+                }
             }
         }
     }
@@ -318,7 +335,7 @@ public:
         if (gui_visible_) return;
         gui_visible_ = true;
         gui_->SetVisible(true);
-        input_manager_->SetBlock(true);
+        set_input_block(true, CKKEY_RETURN, [this] { return !gui_visible_; });
         process_ = [this] {
             poll_local_input();
             gui_->Process();
