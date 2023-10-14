@@ -244,7 +244,8 @@ public:
             // local_state_msg_.content.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count(); // wtf is this from github copilot
             local_state_msg_.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
             send(local_state_msg_, k_nSteamNetworkingSend_Reliable);
-            Printf("Teleported to %s at (%.3f, %.3f, %.3f).", client.name, client.state.position.x, client.state.position.y, client.state.position.z);
+            Printf(bmmo::ansi::WhiteInverse, "Teleported to %s at (%.3f, %.3f, %.3f).",
+                    client.name, client.state.position.x, client.state.position.y, client.state.position.z);
         }
         else {
             Printf("Player not found.");
@@ -260,7 +261,8 @@ public:
 
     void whisper_to(const HSteamNetConnection player_id, const std::string& message) {
         if (auto it = clients_.find(player_id); it != clients_.end() || player_id == k_HSteamNetConnection_Invalid) {
-            Printf(90, "Whispering to (%u, %s): %s", player_id, get_player_name(player_id), message);
+            Printf(bmmo::ansi::Xterm256 | 248, "Whispering to (%u, %s): %s",
+                    player_id, get_player_name(player_id), message);
             bmmo::private_chat_msg msg{};
             msg.player_id = player_id;
             msg.chat_content = message;
@@ -383,14 +385,15 @@ private:
                 bmmo::player_connected_v2_msg msg{};
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
-                Printf(93, "%s (#%u) logged in with cheat mode %s.", msg.name.c_str(), msg.connection_id, (msg.cheated ? "on" : "off"));
+                Printf(bmmo::ansi::BrightYellow, "%s (#%u) logged in with cheat mode %s.",
+                        msg.name.c_str(), msg.connection_id, (msg.cheated ? "on" : "off"));
                 clients_[msg.connection_id] = { msg.name, (bool) msg.cheated };
                 break;
             }
             case bmmo::PlayerDisconnected: {
                 auto* msg = reinterpret_cast<bmmo::player_disconnected_msg*>(networking_msg->m_pData);
                 if (auto it = clients_.find(msg->content.connection_id); it != clients_.end()) {
-                    Printf(93, "%s (#%u) disconnected.", it->second.name, it->first);
+                    Printf(bmmo::ansi::BrightYellow, "%s (#%u) disconnected.", it->second.name, it->first);
                     clients_.erase(it);
                 }
                 break;
@@ -466,7 +469,8 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                Printf(90, "(%u, %s) whispers to you: %s", msg.player_id, get_player_name(msg.player_id), msg.chat_content.c_str());
+                Printf(bmmo::ansi::Xterm256 | 248, "(%u, %s) whispers to you: %s",
+                        msg.player_id, get_player_name(msg.player_id), msg.chat_content.c_str());
                 break;
             }
             case bmmo::PlainText: {
@@ -476,7 +480,7 @@ private:
             }
             case bmmo::PublicNotification: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(networking_msg);
-                Printf(91, "[%s] %s", msg.get_type_name(), msg.text_content);
+                Printf(msg.get_ansi_color_code(), "[%s] %s", msg.get_type_name(), msg.text_content);
                 break;
             }
             case bmmo::ImportantNotification: {
@@ -484,24 +488,25 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                Printf(96, "[Announcement] (%u, %s): %s", msg.player_id, get_player_name(msg.player_id), msg.chat_content);
+                Printf(bmmo::ansi::BrightCyan | bmmo::ansi::Bold, "[Announcement] (%u, %s): %s",
+                        msg.player_id, get_player_name(msg.player_id), msg.chat_content);
                 break;
             }
             case bmmo::PermanentNotification: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(networking_msg);
-                Printf(96, "[Bulletin] %s%s", msg.title,
+                Printf(bmmo::ansi::BrightCyan, "[Bulletin] %s%s", msg.title,
                         msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
                 permanent_notification_text_ = msg.text_content;
                 break;
             }
             case bmmo::PopupBox: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(networking_msg);
-                Printf(96, "[Popup] {%s}: %s", msg.title, msg.text_content);
+                Printf(bmmo::ansi::BrightCyan, "[Popup] {%s}: %s", msg.title, msg.text_content);
                 break;
             }
             case bmmo::SoundData: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::sound_data_msg>(networking_msg);
-                Printf("Sound data received%s!", msg.caption.empty() ? "" : ": " + msg.caption);
+                Printf(bmmo::ansi::Italic, "Sound data received%s!", msg.caption.empty() ? "" : ": " + msg.caption);
                 std::stringstream data_text;
                 for (const auto& [frequency, duration]: msg.sounds)
                     data_text << ", (" << frequency << ", " << duration << ")";
@@ -516,19 +521,19 @@ private:
                     Printf("Error receiving sound!");
                     break;
                 }
-                Printf("Sound stream received%s!", msg.caption.empty() ? "" : ": " + msg.caption);
+                Printf(bmmo::ansi::Italic, "Sound stream received%s!", msg.caption.empty() ? "" : ": " + msg.caption);
                 Printf("Path: %s; Length: %d ms; Gain: %.2f; Pitch: %.2f.",
                     msg.path, msg.duration_ms, msg.gain, msg.pitch);
                 break;
             }
             case bmmo::ActionDenied: {
                 auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(networking_msg->m_pData);
-                Printf(31, "Action failed: %s", msg->content.to_string());
+                Printf(bmmo::ansi::Red, "Action failed: %s", msg->content.to_string());
                 break;
             }
             case bmmo::CheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
-                Printf(94, "Server toggled cheat %s globally!", msg->content.cheated ? "on" : "off");
+                Printf(bmmo::ansi::BrightBlue, "Server toggled cheat %s globally!", msg->content.cheated ? "on" : "off");
                 if (cheat == msg->content.cheated)
                     return;
                 cheat = msg->content.cheated;
@@ -540,8 +545,9 @@ private:
             }
             case bmmo::Countdown: {
                 auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
-                using ct = bmmo::countdown_type;
-                Printf(msg->content.type == ct::Go ? 92 : -1, "[%u, %s]: %s%s - %s",
+                using ct = bmmo::countdown_type; using a = bmmo::ansi;
+                Printf(msg->content.type == ct::Go ? a::BrightGreen | a::Bold : a::Default,
+                    "[%u, %s]: %s%s - %s",
                     msg->content.sender,
                     clients_[msg->content.sender].name,
                     msg->content.map.get_display_name(map_names_),
@@ -594,12 +600,13 @@ private:
             }
             case bmmo::OpState: {
                 auto* msg = reinterpret_cast<bmmo::op_state_msg*>(networking_msg->m_pData);
-                Printf("You have been %s Operator permission.", msg->content.op ? "granted" : "removed from");
+                Printf("You have been %s Operator permission.", msg->content.op ? "granted" : "removed from",
+                        bmmo::ansi::WhiteInverse);
                 break;
             }
             case bmmo::OwnedCheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(networking_msg->m_pData);
-                Printf(94, "(#%u, %s) toggled cheat %s globally!",
+                Printf(bmmo::ansi::BrightBlue, "(#%u, %s) toggled cheat %s globally!",
                     msg->content.player_id, clients_[msg->content.player_id].name, msg->content.state.cheated ? "on" : "off");
                 if (cheat == msg->content.state.cheated)
                     return;
@@ -615,7 +622,7 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                Printf("%s was kicked by %s%s%s.",
+                Printf(bmmo::ansi::WhiteInverse, "%s was kicked by %s%s%s.",
                     msg.kicked_player_name.c_str(),
                     (msg.executor_name == "")? "the server" : msg.executor_name.c_str(),
                     (msg.reason == "")? "" : (" (" + msg.reason + ")").c_str(),

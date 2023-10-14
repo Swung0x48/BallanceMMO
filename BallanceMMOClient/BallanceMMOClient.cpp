@@ -617,7 +617,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
             std::strftime(error_msg.data(), error_msg.size(),
                 "Error: You can only change your name every 24 hours (after %F %T).",
                 std::localtime(&next_name_change));
-            SendIngameMessage(error_msg.c_str());
+            SendIngameMessage(error_msg.c_str(), bmmo::ansi::BrightRed);
             return;
         }
         std::string new_name = prop->GetString();
@@ -776,6 +776,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                                             player.formatted_hs_score, player.formatted_sr_score);
                     }
                     display_important_notification(text, ranks.size() > 10 ? 11.0f : 15.0f, ranks.size() + 1, 400);
+                    if (console_running_)
+                        Printf(text.c_str());
                 });
                 return;
             }
@@ -790,7 +792,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             msg.serialize();
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             SendIngameMessage(std::format("Whispered to {}: {}",
-                get_username(msg.player_id), msg.chat_content), 90);
+                get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
             return;
         }
     }
@@ -986,7 +988,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 else
                     state = db_.get_from_nickname(args[2]);
                 if (!state.has_value()) {
-                    SendIngameMessage("Error: requested player \"" + args[2] + "\" does not exist.");
+                    SendIngameMessage("Error: requested player \"" + args[2] + "\" does not exist.",
+                            bmmo::ansi::BrightRed);
                     return;
                 }
                 const std::string name = state.value().name;
@@ -1011,7 +1014,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     m_phyNewBall->Activate();
                     m_phyNewBall->GetParent()->Activate();
                     SendIngameMessage(std::format("Teleported to \"{}\" at ({:.3f}, {:.3f}, {:.3f}).",
-                                      name, position.x, position.y, position.z));
+                                      name, position.x, position.y, position.z), bmmo::ansi::WhiteInverse);
                 });
             }
             else if (lower1 == "custommap") {
@@ -1023,7 +1026,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 name_msg.serialize();
                 send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
                 send(bmmo::current_map_msg{.content = {.map = map, .type = bmmo::current_map_state::EnteringMap}}, k_nSteamNetworkingSend_Reliable);
-                SendIngameMessage(std::format("Current map name set to \"{}\".", args[2]));
+                SendIngameMessage(std::format("Current map name set to \"{}\".", args[2]), bmmo::ansi::WhiteInverse);
             }
             else if (lower1 == "mode") {
                 if (boost::iequals(args[2], "hs"))
@@ -1031,7 +1034,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 else
                     countdown_mode_ = bmmo::level_mode::Speedrun;
                 std::string mode_name = (countdown_mode_ == bmmo::level_mode::Highscore) ? "Highscore" : "Speedrun";
-                SendIngameMessage(std::format("Level mode set to {} for future countdowns.", mode_name));
+                SendIngameMessage(std::format("Level mode set to {} for future countdowns.", mode_name),
+                                  bmmo::ansi::WhiteInverse);
                 if (!connected()) {
                     current_level_mode_ = countdown_mode_;
                     SendIngameMessage(std::format("Local level mode set to {}.", mode_name));
@@ -1519,7 +1523,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::player_connected_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off").c_str(), 93);
+        SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off"),
+                          bmmo::ansi::BrightYellow);
         if (m_bml->IsIngame()) {
             GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
             objects_.init_player(msg.connection_id, msg.name, msg.cheated);
@@ -1540,7 +1545,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto state = db_.get(msg->content.connection_id);
         //assert(state.has_value());
         if (state.has_value()) {
-            SendIngameMessage((state->name + " left the game.").c_str(), 93);
+            SendIngameMessage(state->name + " left the game.", bmmo::ansi::BrightYellow);
             db_.remove(msg->content.connection_id);
             objects_.remove(msg->content.connection_id);
             play_wave_sound(sound_knock_);
@@ -1562,7 +1567,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         SendIngameMessage(std::format("{} whispers to you: {}",
-                                      get_username(msg.player_id), msg.chat_content), 90);
+                                      get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
         flash_window();
         break;
     }
@@ -1571,7 +1576,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         std::string name = get_username(msg.player_id);
-        SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content), 96);
+        SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content),
+                          bmmo::ansi::BrightCyan | bmmo::ansi::Bold);
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() {
             flash_window();
             play_wave_sound(sound_notification_, !is_foreground_window());
@@ -1621,7 +1627,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             using ct = bmmo::countdown_type;
             case ct::Go: {
                 SendIngameMessage(std::format("[{}]: {}{} - Go!",
-                                  sender_name, map_name, msg->content.get_level_mode_label()).c_str(), 92);
+                                  sender_name, map_name, msg->content.get_level_mode_label()),
+                                  bmmo::ansi::BrightGreen | bmmo::ansi::Bold);
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
                 player_ranks_[last_countdown_map_.get_hash_bytes_string()] = {};
@@ -1751,7 +1758,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             flash_window();
         }
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
-        SendIngameMessage(str.c_str(), 94);
+        SendIngameMessage(str.c_str(), bmmo::ansi::BrightBlue);
         break;
     }
     case bmmo::OwnedCheatToggle: {
@@ -1775,7 +1782,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 play_wave_sound(sound_knock_);
                 flash_window();
             }
-            SendIngameMessage(str.c_str(), 94);
+            SendIngameMessage(str.c_str(), bmmo::ansi::BrightBlue);
         }
         break;
     }
@@ -1813,7 +1820,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::ActionDenied: {
         auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
-        SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str(), 31);
+        SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str(), bmmo::ansi::Red);
         break;
     }
     case bmmo::CurrentMap: {
@@ -1824,7 +1831,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               : db_.get(msg->content.player_id).value().cheated) ? "[CHEAT] " : "",
                               get_username(msg->content.player_id), msg->content.sector,
                               bmmo::get_ordinal_suffix(msg->content.sector),
-                              msg->content.map.get_display_name(map_names_)));
+                              msg->content.map.get_display_name(map_names_)),
+                              bmmo::ansi::Italic);
         }
         else {
             db_.update_map(msg->content.player_id, msg->content.map.get_display_name(map_names_), msg->content.sector);
@@ -1839,14 +1847,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OpState: {
         auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
         SendIngameMessage(std::format("You have been {} Operator permission.",
-                msg->content.op ? "granted" : "removed from").c_str());
+                msg->content.op ? "granted" : "removed from"), bmmo::ansi::WhiteInverse);
         break;
     }
     case bmmo::PermanentNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(network_msg);
         if (msg.text_content.empty()) {
             permanent_notification_.reset();
-            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title), 96);
+            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title), bmmo::ansi::BrightCyan);
             break;
         }
         std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
@@ -1862,7 +1870,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         else
             permanent_notification_->update(parsed_text.c_str());
-        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content), 96);
+        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content), bmmo::ansi::BrightCyan);
         flash_window();
         play_wave_sound(sound_notification_, !is_foreground_window());
         break;
@@ -1877,7 +1885,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::PublicNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(network_msg);
-        SendIngameMessage("[" + msg.get_type_name() + "] " + msg.text_content, 91);
+        SendIngameMessage("[" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
         flash_window();
         play_wave_sound(sound_knock_);
         break;
@@ -1935,7 +1943,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::PopupBox: {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
-        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, 96);
+        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, bmmo::ansi::BrightCyan);
         std::thread([msg = std::move(msg)] {
             std::ignore = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
         }).detach();

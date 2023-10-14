@@ -20,6 +20,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #endif
+#include "../utility/ansi_colors.hpp"
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
@@ -199,17 +200,17 @@ public:
                 width = 80;
 #endif
             unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
-            if (ansiColor == -1)
+            if (ansiColor == bmmo::ansi::Reset)
                 printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, timeStr, pszMsg, lines);
             else
-                printf("\033[s\033[%uL\033[G[%s] \033[0;%dm%s\033[0m\n> \033[u\033[%uB",
-                        lines, timeStr, ansiColor, pszMsg, lines);
+                printf("\033[s\033[%uL\033[G[%s] %s%s\033[0m\n> \033[u\033[%uB",
+                        lines, timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg, lines);
             fflush(stdout);
         }
     }
 
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
-        DebugOutput(eType, pszMsg, -1);
+        DebugOutput(eType, pszMsg, bmmo::ansi::Reset);
     }
 
     static void RightTrim(char* text) {

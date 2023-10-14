@@ -1,6 +1,7 @@
 #ifndef BALLANCEMMOSERVER_PUBLIC_NOTIFICATION_MSG_HPP
 #define BALLANCEMMOSERVER_PUBLIC_NOTIFICATION_MSG_HPP
 #include "message.hpp"
+#include "../utility/ansi_colors.hpp"
 
 namespace bmmo {
     enum class public_notification_type: uint8_t { Info, Warning, Error };
@@ -11,13 +12,23 @@ namespace bmmo {
         public_notification_type type = public_notification_type::Info;
         std::string text_content;
 
-        std::string get_type_name() {
+        std::string get_type_name() const {
             using pn = public_notification_type;
             switch (type) {
                 case pn::Info: return "Info";
                 case pn::Warning: return "Warning";
                 case pn::Error: return "Error";
                 default: return "Unknown";
+            }
+        }
+
+        int get_ansi_color_code() const {
+            using pn = public_notification_type;
+            switch (type) {
+                case pn::Info: return ansi::Default;
+                case pn::Warning: return ansi::Xterm256 | 221;
+                case pn::Error: return ansi::Xterm256 | 202;
+                default: return ansi::Reset;
             }
         }
 

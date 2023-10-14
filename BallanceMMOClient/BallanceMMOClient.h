@@ -939,7 +939,7 @@ private:
 			std::string valid_name = bmmo::name_validator::get_valid_nickname(name);
 			SendIngameMessage(std::format(
 				"Invalid player name \"{}\", replaced with \"{}\".",
-				name, valid_name).c_str());
+				name, valid_name).c_str(), bmmo::ansi::BrightRed);
 			bypass_name_check_ = true;
 			name_prop->SetString(valid_name.c_str());
 		}
@@ -1062,11 +1062,11 @@ private:
 
 	inline void flash_window() { FlashWindow(get_main_window(), false); }
 
-	void SendIngameMessage(const std::string& msg, int ansi_color = -1) {
+	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		SendIngameMessage(msg.c_str(), ansi_color);
 	}
 
-	void SendIngameMessage(const char* msg, int ansi_color = -1) {
+	void SendIngameMessage(const char* msg, int ansi_color = bmmo::ansi::Reset) {
 		previous_msg_.push_back(msg);
 		if (console_running_) {
 			Printf(ansi_color, "%s", msg);
