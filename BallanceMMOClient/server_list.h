@@ -1,6 +1,7 @@
 #include <memory>
 #include <map>
 #include <fstream>
+#include <mutex>
 
 #ifndef PICOJSON_USE_INT64
 # define PICOJSON_USE_INT64
@@ -14,6 +15,7 @@ private:
     IBML* bml_;
     ILogger* logger_;
     InputHook* input_manager_{};
+    std::mutex mtx_{};
     std::unique_ptr<BGui::Gui> gui_;
     inline static const picojson::object DEFAULT_CONFIG {
             {"servers", picojson::value{picojson::array{}}},
@@ -38,6 +40,7 @@ private:
     std::function<void(std::string, std::string)> connect_callback_{};
 
     void select_server(size_t index, bool save_to_config = true) {
+        std::lock_guard lk(mtx_);
         server_index_ = std::clamp(index, 0u, (std::min)(servers_.size(), MAX_SERVERS_COUNT - 1));
         selected_server_background_->SetPosition({ 0.3f,
                 SERVER_LIST_Y_BEGIN + 0.001f + server_index_ * SERVER_ENTRY_HEIGHT });
@@ -45,9 +48,11 @@ private:
     }
 
     void delete_selected_server() {
+        std::unique_lock lk(mtx_);
         if (server_index_ >= servers_.size()) return;
         servers_.erase(servers_.begin() + server_index_);
         config_modified_ = true;
+        lk.unlock();
         enter_server_list();
     }
 
@@ -56,6 +61,7 @@ private:
     // instead it is deferred to (with `save_config()`)
     // when we're exiting the server list gui itself.
     void save_server_data() {
+        std::unique_lock lk(mtx_);
         std::string address = server_address_->GetText(),
                 name = server_name_->GetText();
         if (address.empty()) {
@@ -68,6 +74,7 @@ private:
         entry = picojson::value{picojson::object{ {"address", picojson::value{address}},
                   {"name", picojson::value{name}} }};
         config_modified_ = true;
+        lk.unlock();
         enter_server_list();
     }
 
@@ -173,6 +180,21 @@ private:
         });
     }
 
+    void connect_to_server() {
+        auto& entry = servers_[server_index_ % (servers_.size() + 1)].get<picojson::object>();
+        const auto& address = entry["address"].get<std::string>(),
+                & name = entry["name"].get<std::string>();
+        hide_server_edit();
+        hide_server_list();
+        header_->SetVisible(false);
+        hints_->SetVisible(false);
+        connection_status_->SetText(("Connecting to\n[" + (name.empty() ?
+                                                           address : name) + "]\n...").c_str());
+        connection_status_->SetVisible(true);
+        bml_->AddTimer(500.0f, [this] { exit_gui(CKKEY_RETURN); });
+        connect_callback_(address, name);
+    }
+
     void set_input_block(bool block, CKDWORD defer_key, std::function<bool()> cancel_condition,
                          std::function<void()> callback = [] {}) {
         bml_->AddTimerLoop(CKDWORD(1), [=, this] {
@@ -215,22 +237,10 @@ private:
             else if (input_manager_->oIsKeyPressed(CKKEY_ESCAPE))
                 exit_gui(CKKEY_ESCAPE);
             else if (input_manager_->oIsKeyPressed(CKKEY_RETURN)) {
-                if (server_index_ == servers_.size())
+                if (server_index_ >= servers_.size())
                     enter_server_edit();
-                else {
-                    auto& entry = servers_[server_index_ % servers_.size()].get<picojson::object>();
-                    const auto& address = entry["address"].get<std::string>(),
-                        & name = entry["name"].get<std::string>();
-                    hide_server_edit();
-                    hide_server_list();
-                    header_->SetVisible(false);
-                    hints_->SetVisible(false);
-                    connection_status_->SetText(("Connecting to\n[" + (name.empty() ?
-                                                 address : name) + "]\n...").c_str());
-                    connection_status_->SetVisible(true);
-                    bml_->AddTimer(800.0f, [this] { exit_gui(CKKEY_RETURN); });
-                    connect_callback_(address, name);
-                }
+                else
+                    connect_to_server();
             }
         }
     }

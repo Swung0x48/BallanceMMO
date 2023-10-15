@@ -966,10 +966,10 @@ int main(int argc, char** argv) {
                 time_value = minutes * 60 + seconds * (minutes < 0 ? -1 : 1);
                 break;
             case 2: // real-world time format
-                std::stringstream time_stream(time_string); std::tm time_struct;
+                std::stringstream time_stream(time_string); std::tm time_struct{};
                 time_stream >> std::get_time(&time_struct, "%Y-%m-%d %H:%M:%S");
                 if (time_stream.fail()) { print_hint(); return; };
-                time_value = std::mktime(&time_struct) - replayer.get_record_start_world_time();
+                time_value = double(std::mktime(&time_struct) - replayer.get_record_start_world_time());
                 break;
         }
         if (time_string.starts_with('+') || time_string.starts_with('-'))

@@ -83,4 +83,17 @@ const std::string console::get_next_word() {
 
 const std::string console::get_rest_of_line() {
     return parser_.get_rest_of_line();
-};
+}
+
+const bmmo::named_map console::get_next_map(bool with_name) {
+    std::string hash = get_next_word();
+    bmmo::named_map input_map = {{.type = bmmo::map_type::OriginalLevel,
+                                .level = std::clamp(get_next_int(), 0, 13)}, {}};
+    if (hash == "level")
+        bmmo::hex_chars_from_string(input_map.md5, bmmo::map::original_map_hashes[input_map.level]);
+    else
+        bmmo::hex_chars_from_string(input_map.md5, hash);
+    if (with_name && !empty())
+        input_map.name = get_rest_of_line();
+    return input_map;
+}

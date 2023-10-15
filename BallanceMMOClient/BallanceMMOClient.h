@@ -203,12 +203,7 @@ private:
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
 
-	struct player_rank_info {
-		bool cheated{};
-		int sr_rank{};
-		std::string name, formatted_hs_score, formatted_sr_score;
-	};
-	std::unordered_map<std::string, std::vector<player_rank_info>> player_ranks_;
+	bmmo::ranking_entry::map_rankings local_rankings_;
 
 	int32_t initial_points_{}, initial_lives_{};
 	float point_decrease_interval_{};
@@ -1063,16 +1058,12 @@ private:
 	inline void flash_window() { FlashWindow(get_main_window(), false); }
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
-		SendIngameMessage(msg.c_str(), ansi_color);
+		previous_msg_.push_back(msg);
+		if (console_running_)
+			Printf(ansi_color, "%s", msg);
+		m_bml->AddTimer(CKDWORD(0), [this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
 	}
 
-	void SendIngameMessage(const char* msg, int ansi_color = bmmo::ansi::Reset) {
-		previous_msg_.push_back(msg);
-		if (console_running_) {
-			Printf(ansi_color, "%s", msg);
-		}
-		m_bml->SendIngameMessage(msg);
-	}
 	/*CKBehavior* bbSetForce = nullptr;
 	static void SetForce(CKBehavior* bbSetForce, CK3dEntity* target, VxVector position, CK3dEntity* posRef, VxVector direction, CK3dEntity* directionRef, float force) {
 		using namespace ExecuteBB;

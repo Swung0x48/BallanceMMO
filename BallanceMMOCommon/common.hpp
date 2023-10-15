@@ -14,6 +14,7 @@
 #include "message/message_all.hpp"
 #include "entity/constants.hpp"
 #include "entity/entity.hpp"
+#include "entity/ranking_entry.hpp"
 #include "entity/version.hpp"
 #include "entity/map.hpp"
 #include "role/role.hpp"

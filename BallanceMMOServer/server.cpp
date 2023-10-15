@@ -307,6 +307,21 @@ public:
         }
     }
 
+    void print_scores(bool hs_mode, bmmo::map map) {
+        if (map == bmmo::map{}) map = last_countdown_map_;
+        auto ranks_it = local_rankings_.find(map.get_hash_bytes_string());
+        if (ranks_it == local_rankings_.end() || ranks_it->second.empty()) {
+            Printf(bmmo::ansi::Red, "Error: ranking info not found for the specified map.");
+            return;
+        }
+        auto& ranks = ranks_it->second;
+        bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
+        auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
+                ranks, map.get_display_name(map_names_), hs_mode);
+        for (const auto& line: formatted_texts)
+            Printf(line.c_str());
+    }
+
     void print_version_info() const {
         Printf("Server version: %s; minimum accepted client version: %s.",
                         bmmo::current_version.to_string(),
@@ -1044,6 +1059,7 @@ protected:
                 auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
 
                 std::string map_name = msg->content.map.get_display_name(map_names_);
+                last_countdown_map_ = msg->content.map;
                 switch (msg->content.type) {
                     using ct = bmmo::countdown_type;
                     case ct::Go: {
@@ -1062,6 +1078,7 @@ protected:
                         msg->content.force_restart = force_restart_level_;
                         for (auto& i: clients_)
                             i.second.ready = false;
+                        local_rankings_[last_countdown_map_.get_hash_bytes_string()] = {};
                         break;
                     }
                     case ct::Countdown_1:
@@ -1112,7 +1129,10 @@ protected:
                 }
 
                 // Prepare data...
-                std::string md5_str = msg->content.map.get_hash_bytes_string();
+                std::string md5_str = msg->content.map.get_hash_bytes_string(),
+                    player_name = client_it->second.name,
+                    formatted_score = msg->content.get_formatted_score(),
+                    formatted_time = msg->content.get_formatted_time();
                 auto& current_map = maps_[md5_str];
 
                 // Use server-side timing if available and under 2.5 hours
@@ -1121,14 +1141,17 @@ protected:
                     msg->content.timeElapsed = local_time_elapsed / 1e6f;
 
                 // Prepare message
-                msg->content.rank = ++maps_[md5_str].rank;
+                msg->content.rank = ++current_map.rank;
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
-                    msg->content.player_id, clients_[msg->content.player_id].name,
-                    msg->content.map.get_display_name(map_names_), maps_[md5_str].rank, bmmo::get_ordinal_suffix(msg->content.rank),
-                    msg->content.get_formatted_score(), msg->content.get_formatted_time());
+                    msg->content.player_id, player_name,
+                    msg->content.map.get_display_name(map_names_), current_map.rank, bmmo::get_ordinal_suffix(current_map.rank),
+                    formatted_score, formatted_time);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+
+                local_rankings_[md5_str].emplace_back(
+                    msg->content.cheated, current_map.rank, player_name, formatted_score, formatted_time);
 
                 break;
             }
@@ -1385,6 +1408,9 @@ protected:
     std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_, default_map_names_;
     std::unordered_set<std::string> muted_players_;
     std::unordered_map<std::string, map_data> maps_;
+    bmmo::map last_countdown_map_{};
+    bmmo::ranking_entry::map_rankings local_rankings_{};
+
     bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false,
         save_player_status_to_file_ = false;
     ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
@@ -1718,6 +1744,11 @@ int main(int argc, char** argv) {
             server.Printf(bmmo::ansi::WhiteInverse, "Sending sound <%s>, size: %d", msg.path, (uint32_t) msg.size());
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         } catch (const std::exception& e) { server.Printf(e.what()); return; }
+    });
+    console.register_command("scores", [&] {
+        if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
+        bool hs_mode = (console.get_next_word() == "hs");
+        server.print_scores(hs_mode, console.empty() ? bmmo::map{} : static_cast<bmmo::map>(console.get_next_map()));
     });
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
 

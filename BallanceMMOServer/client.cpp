@@ -141,7 +141,7 @@ public:
             return "#" + std::to_string(player_id);
     }
 
-    void print_bulletin() { Printf("[Bulletin] %s", permanent_notification_text_); }
+    void print_bulletin() { Printf(bmmo::ansi::BrightCyan, "[Bulletin] %s", permanent_notification_text_); }
 
     void print_clients() {
         decltype(clients_) spectators;
@@ -203,6 +203,21 @@ public:
                     data.state.get_type_name()
             );
         }
+    }
+
+    void print_scores(bool hs_mode, bmmo::map map) {
+        if (map == bmmo::map{}) map = last_countdown_map_;
+        auto ranks_it = local_rankings_.find(map.get_hash_bytes_string());
+        if (ranks_it == local_rankings_.end() || ranks_it->second.empty()) {
+            Printf(bmmo::ansi::Red, "Error: ranking info not found for the specified map.");
+            return;
+        }
+        auto& ranks = ranks_it->second;
+        bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
+        auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
+                ranks, map.get_display_name(map_names_), hs_mode);
+        for (const auto& line: formatted_texts)
+            Printf(line.c_str());
     }
 
     using role::set_logging_level;
@@ -369,6 +384,7 @@ private:
                 bmmo::login_accepted_v3_msg msg{};
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
+                clients_.clear();
                 Printf("%d player(s) online:", msg.online_players.size());
                 for (const auto& [id, data]: msg.online_players) {
                     if (data.name == nickname_) own_id_ = id;
@@ -545,6 +561,7 @@ private:
             }
             case bmmo::Countdown: {
                 auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
+                last_countdown_map_ = msg->content.map;
                 using ct = bmmo::countdown_type; using a = bmmo::ansi;
                 Printf(msg->content.type == ct::Go ? a::BrightGreen | a::Bold : a::Default,
                     "[%u, %s]: %s%s - %s",
@@ -556,6 +573,8 @@ private:
                         {ct::Ready, "Get Ready"}, {ct::ConfirmReady, "Confirm if you're ready"},
                         {ct::Go, "Go!"}, {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"}
                     }[msg->content.type]);
+                if (msg->content.type == ct::Go)
+                    local_rankings_[last_countdown_map_.get_hash_bytes_string()] = {};
                 break;
             }
             case bmmo::CurrentMap: {
@@ -583,11 +602,16 @@ private:
             case bmmo::LevelFinishV2: {
                 auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(networking_msg->m_pData);
 
+                std::string player_name = get_player_name(msg->content.player_id),
+                    formatted_score = msg->content.get_formatted_score(),
+                    formatted_time = msg->content.get_formatted_time();
                 Printf("%s(#%u, %s) finished %s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
-                    msg->content.player_id, clients_[msg->content.player_id].name,
+                    msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_), msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
-                    msg->content.get_formatted_score(), msg->content.get_formatted_time());
+                    formatted_score, formatted_time);
+                local_rankings_[msg->content.map.get_hash_bytes_string()].emplace_back(
+                    msg->content.cheated, msg->content.rank, player_name, formatted_score, formatted_time);
                 break;
             }
             case bmmo::MapNames: {
@@ -719,6 +743,8 @@ private:
     std::unordered_map<HSteamNetConnection, client_data> clients_;
     std::unordered_map<std::string, std::string> map_names_;
     std::string permanent_notification_text_;
+    bmmo::map last_countdown_map_{};
+    bmmo::ranking_entry::map_rankings local_rankings_{};
     bmmo::timed_ball_state_msg local_state_msg_{};
     std::atomic_bool print_states_ = false, recorder_mode_ = false;
 };
@@ -932,16 +958,9 @@ int main(int argc, char** argv) {
     console.register_command("getmap", [&] { client.print_player_maps(); });
     console.register_command("listmap", [&] { client.print_maps(); });
     auto get_map_from_input = [&](bool with_name = false) {
-        std::string hash = console.get_next_word();
-        bmmo::named_map input_map = {{.type = bmmo::map_type::OriginalLevel,
-                                    .level = std::clamp(console.get_next_int(), 0, 13)}, {}};
-        if (hash == "level")
-            bmmo::hex_chars_from_string(input_map.md5, bmmo::map::original_map_hashes[input_map.level]);
-        else
-            bmmo::hex_chars_from_string(input_map.md5, hash);
-        if (with_name && !console.empty()) {
+        auto input_map = console.get_next_map(with_name);
+        if (with_name && !input_map.name.empty()) {
             bmmo::map_names_msg name_msg{};
-            input_map.name = console.get_rest_of_line();
             name_msg.maps.emplace(input_map.get_hash_bytes_string(), input_map.name);
             name_msg.serialize();
             client.send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1030,6 +1049,11 @@ int main(int argc, char** argv) {
         client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("getbulletin", [&] { client.print_bulletin(); });
+    console.register_command("scores", [&] {
+        if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
+        bool hs_mode = (console.get_next_word() == "hs");
+        client.print_scores(hs_mode, console.empty() ? bmmo::map{} : get_map_from_input());
+    });
 
     client.wait_till_started();
     std::thread record_thread;

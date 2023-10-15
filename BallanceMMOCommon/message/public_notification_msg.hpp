@@ -26,7 +26,7 @@ namespace bmmo {
             using pn = public_notification_type;
             switch (type) {
                 case pn::Info: return ansi::Default;
-                case pn::Warning: return ansi::Xterm256 | 221;
+                case pn::Warning: return ansi::Xterm256 | 216;
                 case pn::Error: return ansi::Xterm256 | 202;
                 default: return ansi::Reset;
             }

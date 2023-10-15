@@ -745,39 +745,25 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                 } else
                     rank_map = last_countdown_map_;
 
-                constexpr auto hs_sorter = [](const player_rank_info& r1, decltype(r1) r2) {
-                    return atoi(r1.formatted_hs_score.c_str()) >= atoi(r2.formatted_hs_score.c_str());
-                };
-                constexpr auto sr_sorter = [](const player_rank_info& r1, decltype(r1) r2) {
-                    return r1.sr_rank < r2.sr_rank;
-                };
-                auto sorter = (args[2] == "hs") ? hs_sorter : sr_sorter;
-                asio::post(thread_pool_, [this, rank_map = std::move(rank_map), sorter] {
-                    auto ranks_it = player_ranks_.find(rank_map.get_hash_bytes_string());
-                    if (ranks_it == player_ranks_.end() || ranks_it->second.empty()) {
+                asio::post(thread_pool_, [this, rank_map = std::move(rank_map), hs_mode = (args[2] == "hs")] {
+                    auto ranks_it = local_rankings_.find(rank_map.get_hash_bytes_string());
+                    if (ranks_it == local_rankings_.end() || ranks_it->second.empty()) {
                         SendIngameMessage("Error: ranking info not found for the specified map.");
                         return;
                     }
                     auto& ranks = ranks_it->second;
-                    std::sort(ranks.begin(), ranks.end(), sorter);
-                    std::string text = std::format("Ranking info for {} [{}]:\n",
-                                                   rank_map.get_display_name(map_names_),
-                                                   sorter == hs_sorter ? "HS" : "SR");
-                    for (size_t i = 0; i < ranks.size(); ++i) {
-                        const auto& player = ranks[i];
-                        int rank = i;
-                        if (sorter == hs_sorter) {
-                            while (rank > 0 && atoi(player.formatted_hs_score.c_str())
-                                    == atoi(ranks[rank - 1].formatted_hs_score.c_str()))
-                                --rank;
-                        }
-                        text += std::format("<{}> {}{}: {} | {}\n",
-                                            rank + 1, player.name, player.cheated ? " [C]" : "",
-                                            player.formatted_hs_score, player.formatted_sr_score);
+                    bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
+                    auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
+                            ranks, rank_map.get_display_name(map_names_), hs_mode);
+                    std::string text; text.reserve((ranks.size() + 1) * 64);
+                    for (const auto& line : formatted_texts) {
+                        text += line + '\n';
+                        if (console_running_)
+                            Printf(line.c_str());
+                        else
+                            GetLogger()->Info("%s", line.c_str());
                     }
                     display_important_notification(text, ranks.size() > 10 ? 11.0f : 15.0f, ranks.size() + 1, 400);
-                    if (console_running_)
-                        Printf(text.c_str());
                 });
                 return;
             }
@@ -1631,7 +1617,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   bmmo::ansi::BrightGreen | bmmo::ansi::Bold);
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
-                player_ranks_[last_countdown_map_.get_hash_bytes_string()] = {};
+                local_rankings_[last_countdown_map_.get_hash_bytes_string()] = {};
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
                 if (msg->content.restart_level) {
@@ -1714,7 +1700,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
             formatted_score, formatted_time).c_str());
 
-        player_ranks_[msg->content.map.get_hash_bytes_string()].emplace_back(
+        local_rankings_[msg->content.map.get_hash_bytes_string()].emplace_back(
             msg->content.cheated, msg->content.rank, player_name, formatted_score, formatted_time);
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
