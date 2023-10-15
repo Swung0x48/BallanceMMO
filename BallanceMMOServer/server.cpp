@@ -310,7 +310,7 @@ public:
     void print_scores(bool hs_mode, bmmo::map map) {
         if (map == bmmo::map{}) map = last_countdown_map_;
         auto ranks_it = local_rankings_.find(map.get_hash_bytes_string());
-        if (ranks_it == local_rankings_.end() || ranks_it->second.empty()) {
+        if (ranks_it == local_rankings_.end() || (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
             Printf(bmmo::ansi::Red, "Error: ranking info not found for the specified map.");
             return;
         }
@@ -1107,14 +1107,17 @@ protected:
             case bmmo::DidNotFinish: {
                 auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
                 msg->content.player_id = networking_msg->m_conn;
+                std::string& player_name = client_it->second.name;
                 Printf(
                     "%s(#%u, %s) did not finish %s (aborted at sector %d).",
                     msg->content.cheated ? "[CHEAT] " : "",
-                    msg->content.player_id, clients_[msg->content.player_id].name,
+                    msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_),
                     msg->content.sector
                 );
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                local_rankings_[msg->content.map.get_hash_bytes_string()].second.emplace_back(
+                    msg->content.cheated, player_name, msg->content.sector);
                 break;
             }
             case bmmo::LevelFinish:
@@ -1130,7 +1133,7 @@ protected:
 
                 // Prepare data...
                 std::string md5_str = msg->content.map.get_hash_bytes_string(),
-                    player_name = client_it->second.name,
+                    & player_name = client_it->second.name,
                     formatted_score = msg->content.get_formatted_score(),
                     formatted_time = msg->content.get_formatted_time();
                 auto& current_map = maps_[md5_str];
@@ -1150,8 +1153,8 @@ protected:
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
 
-                local_rankings_[md5_str].emplace_back(
-                    msg->content.cheated, current_map.rank, player_name, formatted_score, formatted_time);
+                local_rankings_[md5_str].first.emplace_back(
+                    msg->content.cheated, player_name, current_map.rank, formatted_score, formatted_time);
 
                 break;
             }

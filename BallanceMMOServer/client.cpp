@@ -208,7 +208,7 @@ public:
     void print_scores(bool hs_mode, bmmo::map map) {
         if (map == bmmo::map{}) map = last_countdown_map_;
         auto ranks_it = local_rankings_.find(map.get_hash_bytes_string());
-        if (ranks_it == local_rankings_.end() || ranks_it->second.empty()) {
+        if (ranks_it == local_rankings_.end() || (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
             Printf(bmmo::ansi::Red, "Error: ranking info not found for the specified map.");
             return;
         }
@@ -590,13 +590,16 @@ private:
             }
             case bmmo::DidNotFinish: {
                 auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
+                std::string player_name = get_player_name(msg->content.player_id);
                 Printf(
                     "%s(#%u, %s) did not finish %s (aborted at sector %d).",
                     msg->content.cheated ? "[CHEAT] " : "",
-                    msg->content.player_id, clients_[msg->content.player_id].name,
+                    msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_),
                     msg->content.sector
                 );
+                local_rankings_[msg->content.map.get_hash_bytes_string()].second.emplace_back(
+                    msg->content.cheated, player_name, msg->content.sector);
                 break;
             }
             case bmmo::LevelFinishV2: {
@@ -610,8 +613,8 @@ private:
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_), msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
                     formatted_score, formatted_time);
-                local_rankings_[msg->content.map.get_hash_bytes_string()].emplace_back(
-                    msg->content.cheated, msg->content.rank, player_name, formatted_score, formatted_time);
+                local_rankings_[msg->content.map.get_hash_bytes_string()].first.emplace_back(
+                    msg->content.cheated, player_name, msg->content.rank, formatted_score, formatted_time);
                 break;
             }
             case bmmo::MapNames: {

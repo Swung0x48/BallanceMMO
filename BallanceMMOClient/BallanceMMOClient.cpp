@@ -747,7 +747,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
                 asio::post(thread_pool_, [this, rank_map = std::move(rank_map), hs_mode = (args[2] == "hs")] {
                     auto ranks_it = local_rankings_.find(rank_map.get_hash_bytes_string());
-                    if (ranks_it == local_rankings_.end() || ranks_it->second.empty()) {
+                    if (ranks_it == local_rankings_.end() ||
+                            (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
                         SendIngameMessage("Error: ranking info not found for the specified map.");
                         return;
                     }
@@ -755,7 +756,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
                     auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
                             ranks, rank_map.get_display_name(map_names_), hs_mode);
-                    std::string text; text.reserve((ranks.size() + 1) * 64);
+                    size_t size = ranks.first.size() + ranks.second.size() + 1;
+                    std::string text; text.reserve(size * 64);
                     for (const auto& line : formatted_texts) {
                         text += line + '\n';
                         if (console_running_)
@@ -763,7 +765,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         else
                             GetLogger()->Info("%s", line.c_str());
                     }
-                    display_important_notification(text, ranks.size() > 10 ? 11.0f : 15.0f, ranks.size() + 1, 400);
+                    display_important_notification(text, size > 12 ? 11.0f : 15.0f, size + 1, 400);
                 });
                 return;
             }
@@ -1673,13 +1675,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::DidNotFinish: {
         auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
+        auto player_name = get_username(msg->content.player_id);
         SendIngameMessage(std::format(
             "{}{} did not finish {} (aborted at sector {}).",
             msg->content.cheated ? "[CHEAT] " : "",
-            get_username(msg->content.player_id),
+            player_name,
             msg->content.map.get_display_name(map_names_),
             msg->content.sector
         ).c_str());
+        local_rankings_[msg->content.map.get_hash_bytes_string()].second.emplace_back(
+            msg->content.cheated, player_name, msg->content.sector);
         play_wave_sound(sound_dnf_);
         flash_window();
         break;
@@ -1700,8 +1705,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
             formatted_score, formatted_time).c_str());
 
-        local_rankings_[msg->content.map.get_hash_bytes_string()].emplace_back(
-            msg->content.cheated, msg->content.rank, player_name, formatted_score, formatted_time);
+        local_rankings_[msg->content.map.get_hash_bytes_string()].first.emplace_back(
+            msg->content.cheated, player_name, msg->content.rank, formatted_score, formatted_time);
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);
