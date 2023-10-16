@@ -39,7 +39,7 @@ bool console::read_input(std::string& buf) {
 bool console::execute(const std::string &cmd) {
     std::unique_lock lk(console_mutex_);
     parser_ = bmmo::command_parser(cmd);
-    command_name_ = parser_.get_next_word();
+    command_name_ = bmmo::string_utils::to_lower(parser_.get_next_word());
     if (auto it = commands_.find(command_name_); it != commands_.end()) {
         (it->second)();
         return true;
@@ -48,16 +48,17 @@ bool console::execute(const std::string &cmd) {
 };
 
 bool console::register_command(const std::string &name, const std::function<void()> &handler) {
-    if (commands_.contains(name))
+    auto name_lower = bmmo::string_utils::to_lower(name);
+    if (commands_.contains(name_lower))
         return false;
     std::unique_lock lk(console_mutex_);
-    commands_[name] = handler;
+    commands_[name_lower] = handler;
     return true;
 };
 
 bool console::register_aliases(const std::string &name, const std::vector<std::string> &aliases) {
     std::unique_lock lk(console_mutex_);
-    auto it = commands_.find(name);
+    auto it = commands_.find(bmmo::string_utils::to_lower(name));
     if (it == commands_.end())
         return false;
     for (const auto& i: aliases) {
@@ -68,7 +69,7 @@ bool console::register_aliases(const std::string &name, const std::vector<std::s
 
 bool console::unregister_command(const std::string &name) {
     std::unique_lock lk(console_mutex_);
-    if (commands_.erase(name))
+    if (commands_.erase(bmmo::string_utils::to_lower(name)))
         return true;
     return false;
 };
