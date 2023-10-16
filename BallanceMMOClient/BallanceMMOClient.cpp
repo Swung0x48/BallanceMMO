@@ -746,6 +746,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     rank_map = last_countdown_map_;
 
                 asio::post(thread_pool_, [this, rank_map = std::move(rank_map), hs_mode = (args[2] == "hs")] {
+                    std::unique_lock lk(client_mtx_);
                     auto ranks_it = local_rankings_.find(rank_map.get_hash_bytes_string());
                     if (ranks_it == local_rankings_.end() ||
                             (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
@@ -756,6 +757,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
                     auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
                             ranks, rank_map.get_display_name(map_names_), hs_mode);
+                    lk.unlock();
                     size_t size = ranks.first.size() + ranks.second.size() + 1;
                     std::string text; text.reserve(size * 64);
                     for (const auto& line : formatted_texts) {
@@ -1468,6 +1470,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         send_current_map();
 
+        {
+            std::lock_guard client_lk(client_mtx_);
+            for (const auto& i : login_callbacks_)
+                (i.second)();
+        }
+
         if (spectator_mode_)
             break;
 
@@ -1683,6 +1691,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg->content.map.get_display_name(map_names_),
             msg->content.sector
         ).c_str());
+
+        std::lock_guard lk(client_mtx_);
         local_rankings_[msg->content.map.get_hash_bytes_string()].second.emplace_back(
             msg->content.cheated, player_name, msg->content.sector);
         play_wave_sound(sound_dnf_);
@@ -1705,6 +1715,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
             formatted_score, formatted_time).c_str());
 
+        std::lock_guard lk(client_mtx_);
         local_rankings_[msg->content.map.get_hash_bytes_string()].first.emplace_back(
             msg->content.cheated, player_name, msg->content.rank, formatted_score, formatted_time);
         // TODO: Stop displaying objects on finish
@@ -1733,7 +1744,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
 
         if (ocs->content.state.notify) {
-            std::string s = std::format("{} turned cheat [{}].", state.has_value() ? state->name : db_.get_nickname(), ocs->content.state.cheated ? "on" : "off");
+            std::string s = std::format("{} turned cheat [{}].", get_username(ocs->content.player_id), ocs->content.state.cheated ? "on" : "off");
             SendIngameMessage(s.c_str());
         }
         break;
@@ -1754,15 +1765,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::OwnedCheatToggle: {
         auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(network_msg->m_pData);
-        std::string player_name = "";
-        if (msg->content.player_id == db_.get_client_id())
-            player_name = db_.get_nickname();
-        else {
-            auto player_state = db_.get(msg->content.player_id);
-            if (player_state.has_value()) {
-                player_name = player_state->name;
-            }
-        }
+        std::string player_name = get_username(msg->content.player_id);
         if (player_name != "") {
             bool cheat = msg->content.state.cheated;
             std::string str = std::format("{} toggled cheat [{}] globally!", player_name, cheat ? "on" : "off");

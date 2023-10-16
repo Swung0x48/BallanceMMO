@@ -81,6 +81,9 @@ namespace bmmo::ranking_entry {
                 --rank;
             texts.emplace_back(entry.to_string(rank + 1 + rankings.first.size()));
         }
+        char footer[32];
+        std::snprintf(footer, sizeof(footer), "%u Completions, %u DNFs.", rankings.first.size(), rankings.second.size());
+        texts.emplace_back(footer);
         return texts;
     }
 }

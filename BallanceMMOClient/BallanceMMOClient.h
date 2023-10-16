@@ -90,9 +90,29 @@ public:
 	void exit_size_move();
 
 	// virtual functions from bmmo::exported::client
-	std::string get_client_name() override { return db_.get_nickname(); }
+	std::pair<HSteamNetConnection, std::string> get_own_id() override {
+		return { db_.get_client_id(), get_display_nickname() };
+	}
 	bool is_spectator() override { return spectator_mode_; }
 	bmmo::named_map get_current_map() override { return current_map_; }
+	std::unordered_map<HSteamNetConnection, std::string> get_client_list() override {
+		decltype(get_client_list()) list;
+		db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+			if (pair.first == db_.get_client_id() || bmmo::name_validator::is_spectator(pair.second.name))
+				return true;
+			list.emplace(pair.first, pair.second.name);
+			return true;
+		});
+		return list;
+	}
+	void register_login_callback(IMod* mod, std::function<void()> callback) override {
+		std::lock_guard lk(client_mtx_);
+		login_callbacks_.emplace(mod, callback);
+	};
+	void register_logout_callback(IMod* mod, std::function<void()> callback) override {
+		std::lock_guard lk(client_mtx_);
+		logout_callbacks_.emplace(mod, callback);
+	};
 
 private:
 	void OnLoad() override;
@@ -231,6 +251,8 @@ private:
 	boost::uuids::uuid uuid_{};
 	int64_t last_name_change_time_{};
 	bool name_changed_ = false, bypass_name_check_ = false;
+
+	std::unordered_map<IMod*, std::function<void()>> login_callbacks_, logout_callbacks_;
 
 	std::atomic_bool sound_enabled_ = true;
 	CKWaveSound* sound_countdown_{}, * sound_go_{},
@@ -850,6 +872,12 @@ private:
 		objects_.destroy_all_objects();
 		local_state_handler_.reset();
 		cleanup_received_sounds();
+
+		{
+			std::lock_guard client_lk(client_mtx_);
+			for (const auto& i : logout_callbacks_)
+				(i.second)();
+		}
 
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();
