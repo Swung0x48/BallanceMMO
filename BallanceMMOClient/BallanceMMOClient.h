@@ -12,6 +12,7 @@
 #include "server_list.h"
 #include <map>
 #include <unordered_map>
+#include <condition_variable>
 #include <mutex>
 #include <memory>
 #include <format>
@@ -178,6 +179,7 @@ private:
 	std::unordered_map<std::string, IProperty*> props_;
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
+	std::condition_variable client_cv_;
 
 	asio::io_context io_ctx_;
 	std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work_guard_;
@@ -219,11 +221,17 @@ private:
 	bmmo::level_mode current_level_mode_ = bmmo::level_mode::Speedrun, countdown_mode_{};
 	float counter_start_timestamp_ = 0;
 	int32_t current_sector_ = 0;
-	int32_t current_sector_timestamp_ = 0;
+	int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
 
-	bmmo::ranking_entry::map_rankings local_rankings_;
+	struct map_data {
+		float level_start_timestamp{};
+		// pair <earliest timestamp of reaching the sector, whether to display time diffs>
+		std::map<int, int64_t> sector_timestamps{};
+		bmmo::ranking_entry::player_rankings rankings{};
+	};
+	std::unordered_map<std::string, map_data> maps_;
 
 	int32_t initial_points_{}, initial_lives_{};
 	float point_decrease_interval_{};
@@ -240,7 +248,6 @@ private:
 	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
-	std::unordered_map<std::string, float> level_start_timestamp_;
 	SteamNetworkingMicroseconds next_update_timestamp_ = 0,
 		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
 
@@ -329,15 +336,23 @@ private:
 		return nullptr;
 	}
 
-	bool update_current_sector() {
+	bool update_current_sector() { // true if changed
 		int sector = 0;
 		if (ingame_parameter_array_ != 0) {
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
 			if (sector == current_sector_) return false;
 		} else if (current_sector_ == 0) return false;
 		current_sector_ = sector;
-		current_sector_timestamp_ = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - db_.get_init_timestamp()) / 1024);
+		current_sector_timestamp_ = db_.get_timestamp_ms();
+		if (connected()) current_sector_timestamp_ += get_status().m_nPing;
 		return true;
+	}
+
+	void update_sector_timestamp(const bmmo::map& map, int sector, int64_t timestamp) {
+		if (sector == 0) return;
+		auto map_it = maps_.find(map.get_hash_bytes_string());
+		if (map_it == maps_.end() || map_it->second.sector_timestamps.contains(sector)) return;
+		map_it->second.sector_timestamps.emplace(sector, timestamp);
 	}
 
 	inline bool is_foreground_window() {
@@ -1040,6 +1055,8 @@ private:
 
 	void send_current_sector() {
 		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_Reliable);
+		std::lock_guard<std::mutex> lk(client_mtx_);
+		update_sector_timestamp(current_map_, current_sector_, db_.get_timestamp_ms());
 	}
 
 	std::string get_username(HSteamNetConnection client_id) {

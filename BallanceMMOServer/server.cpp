@@ -40,6 +40,7 @@ struct client_data {
 struct map_data {
     int rank = 0;
     SteamNetworkingMicroseconds start_time = 0;
+    bmmo::ranking_entry::player_rankings rankings{};
 };
 
 class server: public role {
@@ -309,12 +310,12 @@ public:
 
     void print_scores(bool hs_mode, bmmo::map map) {
         if (map == bmmo::map{}) map = last_countdown_map_;
-        auto ranks_it = local_rankings_.find(map.get_hash_bytes_string());
-        if (ranks_it == local_rankings_.end() || (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
+        auto map_it = maps_.find(map.get_hash_bytes_string());
+        if (map_it == maps_.end() || (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
             Printf(bmmo::ansi::Red, "Error: ranking info not found for the specified map.");
             return;
         }
-        auto& ranks = ranks_it->second;
+        auto& ranks = map_it->second.rankings;
         bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
         auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
                 ranks, map.get_display_name(map_names_), hs_mode);
@@ -1070,15 +1071,14 @@ protected:
                         if (force_restart_level_ || msg->content.force_restart) {
                             maps_.clear();
                             for (const auto& map: map_names_)
-                                maps_[map.first] = {0, networking_msg->m_usecTimeReceived};
+                                maps_[map.first] = {0, networking_msg->m_usecTimeReceived, {}};
                         } else {
-                            maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived};
+                            maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived, {}};
                         }
                         msg->content.restart_level = restart_level_;
                         msg->content.force_restart = force_restart_level_;
                         for (auto& i: clients_)
                             i.second.ready = false;
-                        local_rankings_[last_countdown_map_.get_hash_bytes_string()] = {};
                         break;
                     }
                     case ct::Countdown_1:
@@ -1116,7 +1116,7 @@ protected:
                     msg->content.sector
                 );
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
-                local_rankings_[msg->content.map.get_hash_bytes_string()].second.emplace_back(
+                maps_[msg->content.map.get_hash_bytes_string()].rankings.second.emplace_back(
                     msg->content.cheated, player_name, msg->content.sector);
                 break;
             }
@@ -1153,7 +1153,7 @@ protected:
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
 
-                local_rankings_[md5_str].first.emplace_back(
+                current_map.rankings.first.emplace_back(
                     msg->content.cheated, player_name, current_map.rank, formatted_score, formatted_time);
 
                 break;
@@ -1412,7 +1412,6 @@ protected:
     std::unordered_set<std::string> muted_players_;
     std::unordered_map<std::string, map_data> maps_;
     bmmo::map last_countdown_map_{};
-    bmmo::ranking_entry::map_rankings local_rankings_{};
 
     bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false,
         save_player_status_to_file_ = false;

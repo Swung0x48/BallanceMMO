@@ -58,13 +58,22 @@ public:
 
     }
 
-    template<typename T>
+    template<bmmo::trivially_copyable_msg T>
     EResult send(T msg, int send_flags, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(&msg,
             sizeof(msg),
             send_flags,
             out_message_number);
+    }
+
+    void receive(void* data, size_t size) {
+        auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
+        networking_msg->m_conn = connection_;
+        networking_msg->m_pData = data;
+        networking_msg->m_cbSize = size;
+        on_message(networking_msg);
+        networking_msg->Release();
     }
 
     std::string get_detailed_status() {

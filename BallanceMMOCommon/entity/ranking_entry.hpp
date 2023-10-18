@@ -29,7 +29,7 @@ namespace bmmo::ranking_entry {
 
         std::string to_string(int ranking) const {
             char text[128];
-            std::snprintf(text, sizeof(text), "<*%d> %s%s: DNF | Sector %d",
+            std::snprintf(text, sizeof(text), "<%d*> %s%s: DNF | Sector %d",
                           ranking, cheated ? "[C] " : "", name.c_str(), dnf_sector);
             return {text};
         }
@@ -82,7 +82,7 @@ namespace bmmo::ranking_entry {
             texts.emplace_back(entry.to_string(rank + 1 + rankings.first.size()));
         }
         char footer[32];
-        std::snprintf(footer, sizeof(footer), "%u Completions, %u DNFs.", rankings.first.size(), rankings.second.size());
+        std::snprintf(footer, sizeof(footer), "%zu Completion(s), %zu DNF(s).", rankings.first.size(), rankings.second.size());
         texts.emplace_back(footer);
         return texts;
     }

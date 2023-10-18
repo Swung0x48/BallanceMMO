@@ -5,6 +5,7 @@
 #include <steam/steam_api.h>
 #endif
 #include "bml_includes.h"
+#include "../BallanceMMOCommon/entity/map.hpp"
 
 #include <unordered_map>
 #include <shared_mutex>
@@ -44,9 +45,9 @@ struct PlayerState {
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state = decltype(ball_state)(3, TimedBallState());
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
-	std::string current_map_name;
+	bmmo::map current_map;
 	int32_t current_sector = 0;
-	int32_t current_sector_timestamp = 0;
+	int64_t current_sector_timestamp = 0;
 	// BallState ball_state;
 
 	// use linear extrapolation to get current position and rotation
@@ -102,6 +103,12 @@ public:
 		if (id == k_HSteamNetConnection_Invalid)
 			return {};
 		return states_[id];
+	}
+
+	std::optional<const bmmo::map> get_client_map(HSteamNetConnection id) {
+		if (!exists(id))
+			return {};
+		return states_[id].current_map;
 	}
 
 	bool exists(HSteamNetConnection id) const {
@@ -193,23 +200,23 @@ public:
 		return true;
 	}
 
-	bool update_map(HSteamNetConnection id, const std::string& map_name, const int32_t sector) {
+	bool update_map(HSteamNetConnection id, const bmmo::map& map, const int32_t sector, int64_t timestamp) {
 		if (!exists(id))
 			return false;
 		std::unique_lock lk(mutex_);
 		auto& state = states_[id];
-		state.current_map_name = map_name;
+		state.current_map = map;
 		state.current_sector = sector;
-		state.current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1024);
+		state.current_sector_timestamp = timestamp;
 		return true;
 	}
 
-	bool update_sector(HSteamNetConnection id, const int32_t sector) {
+	bool update_sector(HSteamNetConnection id, const int32_t sector, int64_t timestamp) {
 		if (!exists(id))
 			return false;
 		std::unique_lock lk(mutex_);
 		states_[id].current_sector = sector;
-		states_[id].current_sector_timestamp = int32_t((SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1024);
+		states_[id].current_sector_timestamp = timestamp;
 		return true;
 	}
 
@@ -311,6 +318,10 @@ public:
 
 	static constexpr inline auto get_init_timestamp() {
 		return INIT_TIMESTAMP;
+	}
+
+	static inline auto get_timestamp_ms() {
+		return (SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1000;
 	}
 
 	bool is_nametag_visible() {
