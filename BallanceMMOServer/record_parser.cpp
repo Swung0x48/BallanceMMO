@@ -267,14 +267,17 @@ public:
         // record_stream_.read(reinterpret_cast<char *>(&start_time), sizeof(start_time));
         char time_str[32];
         strftime(time_str, sizeof(time_str), "%F %T", localtime(&record_start_world_time_));
-        Printf("Record start time: \t%s\n", time_str);
+        Printf("Record begin time: \t%s\n", time_str);
         record_start_time_ = read_variable<decltype(record_start_time_)>(record_stream_);
 
         if (!build_index(record_stream_.tellg())) {
             Printf("Seek index build failed.");
             return false;
         }
+        auto record_end_world_time = record_start_world_time_ + time_t(duration_ / 1e6);
+        strftime(time_str, sizeof(time_str), "%F %T", localtime(&record_end_world_time));
         Printf("Record length: \t%.3lfs", duration_ / 1e6);
+        Printf("Record end time: \t%s", time_str);
 
         if (!init_) {
             SteamNetworkingIPAddr local_address{};
@@ -331,6 +334,7 @@ public:
         playing_ = false;
         time_pause_ = std::chrono::steady_clock::now();
         Printf("Playing paused at %.3lfs.", current_record_time_ / 1e6);
+        print_current_world_time();
     }
 
     void seek(double seconds) {
@@ -411,6 +415,7 @@ public:
 
         seeking_ = false;
         Printf("Sought to %.3lfs successfully.", current_record_time_ / 1e6);
+        print_current_world_time();
         if (was_playing)
             play();
     }
@@ -437,6 +442,7 @@ public:
         }
         seeking_ = false;
         Printf("Sought to %.3lfs successfully.", current_record_time_ / 1e6);
+        print_current_world_time();
         if (was_playing)
             play();
     }
@@ -471,10 +477,25 @@ public:
 
     void print_current_record_time() {
         Printf("Current record is played to %.3lfs.", current_record_time_ / 1e6);
+        print_current_world_time();
+    }
+
+    void print_current_world_time() {
         auto current_world_time = time_t(current_record_time_ / 1e6 + record_start_world_time_);
         char time_str[32];
         std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&current_world_time));
         Printf("Real world time: %s.", time_str);
+    }
+
+    void print_permanent_notifications() {
+        for (const auto& [timestamp, notification]: permanent_notification_timeline_) {
+            if (timestamp == 0) continue;
+            auto world_time = record_start_world_time_ + time_t(timestamp / 1e6);
+            char time_str[32];
+            std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&world_time));
+            Printf("%s (%.3lfs) %s%s", time_str, timestamp / 1e6, notification.first,
+                    notification.second.empty() ? " - Content cleared" : ": " + notification.second);
+        }
     }
 
     void poll_local_state_changes() override {}
@@ -536,6 +557,7 @@ private:
             }
             if (!(record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof())) {
                 Printf("Playing finished at %.3lfs.", current_record_time_ / 1e6);
+                print_current_world_time();
                 playing_ = false;
             }
         });
@@ -937,6 +959,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("list", std::bind(&record_replayer::print_clients, &replayer));
     console.register_command("time", std::bind(&record_replayer::print_current_record_time, &replayer));
+    console.register_command("bulletins", std::bind(&record_replayer::print_permanent_notifications, &replayer));
     console.register_command("pause", [&]() {
         if (!replayer.playing()) {
             replayer.Printf("Already not playing.");
@@ -976,7 +999,7 @@ int main(int argc, char** argv) {
             time_value += replayer.get_current_record_time() / 1e6;
         replayer.seek(time_value);
     });
-    console.register_command("seek_legacy", [&]() {
+    console.register_command("seek-legacy", [&]() {
         replayer.seek_legacy(atof(console.get_next_word().c_str()));
     });
     console.register_command("say", [&]() {

@@ -248,6 +248,10 @@ public:
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
     }
 
+    static void Printf(int ansiColor, const char* fmt) {
+        Printf(ansiColor, "%s", fmt);
+    }
+
     template <typename ... Args>
     static void Printf(const char* fmt, Args&& ... args) {
         char text[2048]{};

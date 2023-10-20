@@ -351,8 +351,8 @@ private:
 	void update_sector_timestamp(const bmmo::map& map, int sector, int64_t timestamp) {
 		if (sector == 0) return;
 		auto map_it = maps_.find(map.get_hash_bytes_string());
-		if (map_it == maps_.end() || map_it->second.sector_timestamps.contains(sector)) return;
-		map_it->second.sector_timestamps.emplace(sector, timestamp);
+		if (map_it == maps_.end()) return;
+		map_it->second.sector_timestamps.try_emplace(sector, timestamp);
 	}
 
 	inline bool is_foreground_window() {
@@ -1056,7 +1056,7 @@ private:
 	void send_current_sector() {
 		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_Reliable);
 		std::lock_guard<std::mutex> lk(client_mtx_);
-		update_sector_timestamp(current_map_, current_sector_, db_.get_timestamp_ms());
+		if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
 	}
 
 	std::string get_username(HSteamNetConnection client_id) {
