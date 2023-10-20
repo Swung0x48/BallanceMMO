@@ -19,8 +19,8 @@ on:
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
-  BML_VER: '0.3.42'
-  BMLP_VER: '0.2.2'
+  BML_VER: '0.3.43'
+  BMLP_VER: '0.2.3'
   BOOST_VER: '1.80.0'
 
 jobs:
@@ -47,10 +47,9 @@ jobs:
         working-directory: ${{github.workspace}}/BallanceMMOClient
         run: |
           curl -o BMLP-dev.zip -L https://github.com/yyc12345/BallanceModLoaderPlus/releases/download/v${{env.BMLP_VER}}/BMLP-${{env.BMLP_VER}}-dev.zip
-          tar -xvf BMLP-dev.zip ModLoader/Include ModLoader/Lib
-          mv ModLoader/Include/BMLPlus include
+          tar -xvf BMLP-dev.zip Include Lib/BMLPlus.lib Lib/ImGui.lib
           mkdir lib/BMLPlus
-          mv ModLoader/Lib/BMLPlus.lib lib/BMLPlus
+          mv lib/*.lib lib/BMLPlus
 
       - name: Download and setup Boost ${{env.BOOST_VER}} headers
         working-directory: ${{github.workspace}}/BallanceMMOClient
