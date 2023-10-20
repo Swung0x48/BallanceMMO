@@ -25,7 +25,8 @@ private:
         SERVER_NAME_Y_BEGIN = SERVER_LIST_Y_BEGIN + (SERVER_ENTRY_HEIGHT + 0.01f) * 3;
     static constexpr size_t MAX_SERVERS_COUNT = 10;
     static constexpr const char* EXTRA_CONFIG_PATH = "..\\ModLoader\\Config\\BallanceMMOClient_extra.json";
-    bool gui_visible_ = false, is_editing_ = false, config_modified_ = false;
+    bool gui_visible_ = false, is_editing_ = false, config_modified_ = false,
+        previous_mouse_visibility_ = true;
     BGui::Panel* selected_server_background_{},
         * server_address_background_{}, * server_name_background_{};
     BGui::Label* header_{}, * new_server_{}, * hints_{},
@@ -173,6 +174,7 @@ private:
 
     void exit_gui(CKDWORD key) {
         gui_visible_ = false;
+        input_manager_->ShowCursor(previous_mouse_visibility_);
         if (config_modified_) save_config();
         set_input_block(false, key, [this] { return gui_visible_; }, [this] {
             gui_->SetVisible(false);
@@ -181,15 +183,20 @@ private:
     }
 
     void connect_to_server() {
-        auto& entry = servers_[server_index_ % (servers_.size() + 1)].get<picojson::object>();
+        auto index = server_index_ % (servers_.size() + 1);
+        if (index >= servers_.size()) {
+            enter_server_edit();
+            return;
+        }
+        auto& entry = servers_[index].get<picojson::object>();
         const auto& address = entry["address"].get<std::string>(),
                 & name = entry["name"].get<std::string>();
         hide_server_edit();
         hide_server_list();
         header_->SetVisible(false);
         hints_->SetVisible(false);
-        connection_status_->SetText(("Connecting to\n[" + (name.empty() ?
-                                                           address : name) + "]\n...").c_str());
+        connection_status_->SetText(("Connecting to\n[" + (name.empty() ? address : name)
+                                     + "]\n...").c_str());
         connection_status_->SetVisible(true);
         bml_->AddTimer(500.0f, [this] { exit_gui(CKKEY_RETURN); });
         connect_callback_(address, name);
@@ -236,11 +243,33 @@ private:
                 delete_selected_server();
             else if (input_manager_->oIsKeyPressed(CKKEY_ESCAPE))
                 exit_gui(CKKEY_ESCAPE);
-            else if (input_manager_->oIsKeyPressed(CKKEY_RETURN)) {
-                if (server_index_ >= servers_.size())
-                    enter_server_edit();
-                else
-                    connect_to_server();
+            else if (input_manager_->oIsKeyPressed(CKKEY_RETURN))
+                connect_to_server();
+            else if (std::pair<bool, bool> mouse_down = {
+                         input_manager_->oIsMouseClicked(CK_MOUSEBUTTON_LEFT),
+                         input_manager_->oIsMouseClicked(CK_MOUSEBUTTON_RIGHT)
+                     }; mouse_down.first || mouse_down.second) {
+                 Vx2DVector mouse_pos; VxRect screen_size;
+                 input_manager_->GetMousePosition(mouse_pos, false);
+                 bml_->GetRenderContext()->GetWindowRect(screen_size);
+                 mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();
+                 if (gui_->Intersect(mouse_pos.x, mouse_pos.y, selected_server_background_)) {
+                     if (mouse_down.first) {
+                         connect_to_server();
+                         return;
+                     }
+                     else {
+                         enter_server_edit();
+                         return;
+                     }
+                 }
+                 for (size_t i = 0; i < servers_.size(); ++i) {
+                     if (!gui_->Intersect(mouse_pos.x, mouse_pos.y, server_labels_[i])) continue;
+                     select_server(i);
+                     break;
+                 }
+                 if (gui_->Intersect(mouse_pos.x, mouse_pos.y, new_server_))
+                     select_server(servers_.size());
             }
         }
     }
@@ -325,7 +354,7 @@ public:
         edit_cancel_->SetZOrder(1032);
         edit_cancel_->SetActive(false);
         edit_save_ = gui_->AddSmallButton("MMO_Server_Edit_Save", "Save", 0.59f, 0.54f,
-                                        [this] { save_server_data(); });
+                                          [this] { save_server_data(); });
         edit_save_->SetZOrder(1032);
 
         connection_status_ = gui_->AddTextLabel("MMO_Server_List_Connection_Status", "",
@@ -345,6 +374,8 @@ public:
         if (gui_visible_) return;
         gui_visible_ = true;
         gui_->SetVisible(true);
+        previous_mouse_visibility_ = input_manager_->GetCursorVisibility() || !bml_->IsIngame();
+        input_manager_->ShowCursor(true);
         set_input_block(true, CKKEY_RETURN, [this] { return !gui_visible_; });
         process_ = [this] {
             poll_local_input();

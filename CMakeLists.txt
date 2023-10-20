@@ -31,8 +31,8 @@ project(${PROJECT_NAME})
 # endif()
 
 set(BMMO_VER_DEFINED 1)
-set(BMMO_VER            3.5.4-beta8)
-set(BMMO_MIN_CLIENT_VER 3.5.4-beta8)
+set(BMMO_VER            3.5.4-beta9)
+set(BMMO_MIN_CLIENT_VER 3.5.4-beta9)
 set(CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/BallanceMMOCommon/config)
 configure_file(${CONFIG_DIR}/version_config.h.in ${CONFIG_DIR}/version_config.h @ONLY)
 

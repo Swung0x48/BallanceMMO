@@ -1889,9 +1889,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::CurrentSector: {
         auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(network_msg->m_pData);
         int64_t timestamp = db_.get_timestamp_ms();
+        std::unique_lock<std::mutex> lk(client_mtx_);
         db_.update_sector(msg->content.player_id, msg->content.sector, timestamp);
         auto client_map = db_.get_client_map(msg->content.player_id);
-        std::lock_guard<std::mutex> lk(client_mtx_);
         if (client_map.has_value() && !bmmo::name_validator::is_spectator(get_username(msg->content.player_id)))
             update_sector_timestamp(client_map.value(), msg->content.sector, timestamp);
         break;
