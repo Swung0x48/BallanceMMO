@@ -236,6 +236,13 @@ public:
             map_names_.insert(default_map_names_.begin(), default_map_names_.end());
         } else
             config_["map_name_list"] = YAML::Node(YAML::NodeType::Map);
+ 
+        if (get_client_count() > 0 && !map_names_.empty()) {
+            bmmo::map_names_msg name_msg;
+            name_msg.maps = map_names_;
+            name_msg.serialize();
+            broadcast_message(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
 
         ifile.close();
         save_config_to_file();

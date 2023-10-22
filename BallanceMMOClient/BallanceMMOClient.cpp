@@ -1152,7 +1152,8 @@ void BallanceMMOClient::connect_to_server(std::string address, std::string name)
         disconnect_from_server();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    SendIngameMessage("Resolving server address...");
+    SendIngameMessage(std::format("Resolving server address {}...",
+                                  name.empty() ? address : std::format("[{}] {}", name, address)));
     resolving_endpoint_ = true;
     // Bootstrap io_context
     work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());

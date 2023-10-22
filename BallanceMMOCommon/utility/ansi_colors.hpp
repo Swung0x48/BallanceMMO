@@ -33,7 +33,7 @@ namespace bmmo {
             Overline = 1 << (MODIFIER_BEGIN_BIT + 11), // 53
             Xterm256 = 1 << (MODIFIER_BEGIN_BIT + 12), // 38;2;<color>; supported by conhost
 
-            WhiteInverse = Xterm256 | 251 | Inverse, // default inverse is unintelligible on some terminals
+            WhiteInverse = White | Inverse, // default inverse is unintelligible on some terminals
         };
 
         inline static constexpr const char* RESET = "\033[0m";
