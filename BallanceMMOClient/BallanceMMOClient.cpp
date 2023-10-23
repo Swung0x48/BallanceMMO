@@ -190,94 +190,99 @@ void BallanceMMOClient::show_player_list() {
         if (player_list_thread_.joinable())
             player_list_thread_.join();
         player_list_thread_ = std::thread([&] {
-            int last_player_count = 0, last_font_size = get_display_font_size(9.78f);
             text_sprite player_list("PlayerList", "", RIGHT_MOST, 0.412f);
             player_list.sprite_->SetPosition({0.596f, 0.412f});
             player_list.sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
             player_list.sprite_->SetZOrder(128);
-            player_list.sprite_->SetFont(system_font_, last_font_size, 400, false, false);
+            player_list.sprite_->SetFont(system_font_, 10, 400, false, false);
             player_list.paint(player_list_color_);
             // player_list.paint_background(0x44444444);
             player_list.set_visible(true);
             player_list_visible_ = true;
-            struct list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
-            // only display the time diff if there's at least 2 players
-            // (including the player that reaches it first) in the sector
-            enum timestamp_diff_status {
-                TdsNone = 0, TdsZero = 0b01, TdsNonZero = 0b10, TdsDisplay = 0b11
-            };
             while (player_list_visible_) {
-                std::vector<list_entry> status_list;
-                std::unordered_map<std::string, std::map<int, int>> timestamp_display; // std::map<int, tds>
-                status_list.reserve(db_.player_count() + !spectator_mode_);
-                auto push_entry = [&](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
-                    std::lock_guard lk(client_mtx_);
-                    const auto& times = maps_[map.get_hash_bytes_string()].sector_timestamps;
-                    auto time_it = times.find(sector);
-                    auto map_name = map.get_display_name(map_names_);
-                    if (time_it != times.end()) {
-                        timestamp -= time_it->second;
-                        timestamp_display[map_name][sector] |= (timestamp == 0 ? TdsZero : TdsNonZero);
-                    }
-                    status_list.push_back({ map_name, name, sector, timestamp, cheated });
-                };
-                db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    if (pair.first == db_.get_client_id() || bmmo::name_validator::is_spectator(pair.second.name))
-                        return true;
-                    push_entry(pair.second.current_map, pair.second.name, pair.second.current_sector,
-                               pair.second.current_sector_timestamp, pair.second.cheated);
-                    return true;
-                });
-                if (!spectator_mode_)
-                    push_entry(current_map_, get_display_nickname(), current_sector_,
-                               current_sector_timestamp_, m_bml->IsCheatEnabled());
-                std::sort(status_list.begin(), status_list.end(), [](const auto& i1, const auto& i2) {
-                    const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
-                    if (map_cmp > 0) return true;
-                    if (map_cmp < 0) return false;
-                    const int sector_cmp = i1.sector - i2.sector;
-                    if (sector_cmp != 0) return sector_cmp > 0;
-                    if (i1.sector != 1) {
-                        const int64_t time_cmp = i1.time_diff - i2.time_diff;
-                        if (time_cmp != 0) return time_cmp < 0;
-                    }
-                    return boost::ilexicographical_compare(i1.name, i2.name);
-                });
-                auto size = int(status_list.size());
-                if (size != last_player_count) {
-                    last_player_count = size;
-                    auto font_size = get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 29));
-                    if (last_font_size != font_size) {
-                        last_font_size = font_size;
-                        player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
-                    }
-                }
-                std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
-                text.reserve(1024);
-                std::string last_map_name;
-                for (const auto& i: status_list /* | std::views::reverse */) {
-                    std::string map_display_name;
-                    if (last_map_name != i.map_name)
-                        last_map_name = map_display_name = i.map_name;
-                    else
-                        map_display_name = "~";
-                    std::string time_diff_str;
-                    const auto& time_diff_map = timestamp_display[i.map_name];
-                    auto time_it = time_diff_map.find(i.sector);
-                    if (;
-                            time_it != time_diff_map.end() && i.sector > 1
-                            && time_it->second == TdsDisplay)
-                        time_diff_str = std::abs(i.time_diff) < 100000
-                                ? std::format(" {:+06.2f}s", float(i.time_diff) / 1000)
-                                : std::format(" {:+#06.4g}s", float(i.time_diff) / 1000);
-                    text.append(std::format("{}{}: {}, S{:02d}{}\n",
-                            i.cheated ? "[C] " : "", i.name, map_display_name, i.sector, time_diff_str));
-                }
-                player_list.update(text);
+                update_player_list(player_list);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         });
     });
+}
+
+inline void BallanceMMOClient::update_player_list(text_sprite& player_list) {
+    static int last_player_count = -1, last_font_size = get_display_font_size(9.78f);
+    struct list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
+    auto list_sorter = [](const list_entry& i1, const list_entry& i2) {
+        const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
+        if (map_cmp > 0) return true;
+        if (map_cmp < 0) return false;
+        const int sector_cmp = i1.sector - i2.sector;
+        if (sector_cmp != 0) return sector_cmp > 0;
+        if (i1.sector != 1) {
+            const int64_t time_cmp = i1.time_diff - i2.time_diff;
+            if (time_cmp != 0) return time_cmp < 0;
+        }
+        return boost::ilexicographical_compare(i1.name, i2.name);
+    };
+    // only display the time diff if there's at least 2 players
+    // (including the player that reaches it first) in the sector
+    enum timestamp_diff_status { TdsNone = 0, TdsZero = 0b01, TdsNonZero = 0b10, TdsDisplay = 0b11 };
+
+    std::vector<list_entry> status_list;
+    std::unordered_map<std::string, std::map<int, int>> timestamp_display; // std::map<int, tds>
+    status_list.reserve(db_.player_count() + !spectator_mode_);
+    auto push_entry = [&](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
+        std::lock_guard lk(client_mtx_);
+        const auto& times = maps_[map.get_hash_bytes_string()].sector_timestamps;
+        auto time_it = times.find(sector);
+        auto map_name = map.get_display_name(map_names_);
+        if (time_it != times.end()) {
+            timestamp -= time_it->second;
+            timestamp_display[map_name][sector] |= (timestamp == 0 ? TdsZero : TdsNonZero);
+        }
+        status_list.push_back({ map_name, name, sector, timestamp, cheated });
+    };
+
+    db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+        if (pair.first == db_.get_client_id() || bmmo::name_validator::is_spectator(pair.second.name))
+            return true;
+        push_entry(pair.second.current_map, pair.second.name, pair.second.current_sector,
+                    pair.second.current_sector_timestamp, pair.second.cheated);
+        return true;
+    });
+    if (!spectator_mode_)
+        push_entry(current_map_, get_display_nickname(), current_sector_,
+                    current_sector_timestamp_, m_bml->IsCheatEnabled());
+    std::sort(status_list.begin(), status_list.end(), list_sorter);
+    auto size = int(status_list.size());
+    if (size != last_player_count) {
+        last_player_count = size;
+        auto font_size = get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 29));
+        if (last_font_size != font_size) {
+            last_font_size = font_size;
+            player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
+        }
+    }
+
+    std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
+    text.reserve(1024);
+    std::string last_map_name;
+    for (const auto& i: status_list /* | std::views::reverse */) {
+        std::string map_display_name;
+        if (last_map_name != i.map_name)
+            last_map_name = map_display_name = i.map_name;
+        else
+            map_display_name = "~";
+        std::string time_diff_str;
+        const auto& time_diff_map = timestamp_display[i.map_name];
+        if (auto time_it = time_diff_map.find(i.sector);
+                time_it != time_diff_map.end() && i.sector > 1
+                && time_it->second == TdsDisplay)
+            time_diff_str = std::abs(i.time_diff) < 100000
+                    ? std::format(" {:+06.2f}s", float(i.time_diff) / 1000)
+                    : std::format(" {:+#06.4g}s", float(i.time_diff) / 1000);
+        text.append(std::format("{}{}: {}, S{:02d}{}\n",
+                i.cheated ? "[C] " : "", i.name, map_display_name, i.sector, time_diff_str));
+    }
+    player_list.update(text);
 }
 
 inline void BallanceMMOClient::enter_size_move() {
@@ -786,7 +791,8 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     auto map_it = maps_.find(rank_map.get_hash_bytes_string());
                     if (map_it == maps_.end() ||
                             (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
-                        SendIngameMessage("Error: ranking info not found for the specified map.");
+                        SendIngameMessage("Error: ranking info not found for the specified map.",
+                                          bmmo::ansi::BrightRed);
                         return;
                     }
                     auto& ranks = map_it->second.rankings;
@@ -800,8 +806,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                         text += line + '\n';
                         if (console_running_)
                             Printf(line.c_str());
-                        else
-                            GetLogger()->Info("%s", line.c_str());
+                        GetLogger()->Info("%s", line.c_str());
                     }
                     display_important_notification(text, size > 12 ? 11.0f : 15.0f, size + 1, 400);
                 });

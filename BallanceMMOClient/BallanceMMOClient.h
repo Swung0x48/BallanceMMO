@@ -152,6 +152,7 @@ private:
 	bool show_console();
 	bool hide_console();
 	void show_player_list();
+	inline void update_player_list(text_sprite& player_list);
 
 	void connect_to_server(std::string address, std::string name = "");
 	void disconnect_from_server();

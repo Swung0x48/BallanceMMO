@@ -214,9 +214,9 @@ public:
     }
 
     static void RightTrim(char* text) {
-        char* nl = strchr(text, '\0') - 1;
-        if (nl >= text && *nl == '\n')
-            *nl = '\0';
+        char* el = strchr(text, '\0');
+        if (el > text && el[-1] == '\n')
+            text[el - text - 1] = '\0';
     }
 
     template <typename T>
