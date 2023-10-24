@@ -1157,8 +1157,7 @@ void BallanceMMOClient::connect_to_server(std::string address, std::string name)
         disconnect_from_server();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    SendIngameMessage(std::format("Resolving server address {}...",
-                                  name.empty() ? address : std::format("[{}] {}", name, address)));
+    SendIngameMessage("Resolving server address...");
     resolving_endpoint_ = true;
     // Bootstrap io_context
     work_guard_ = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_ctx_.get_executor());
@@ -1172,6 +1171,8 @@ void BallanceMMOClient::connect_to_server(std::string address, std::string name)
     server_addr_ = address;
     server_name_ = (name.empty()) ? address : name;
     const auto& [host, port] = bmmo::hostname_parser(server_addr_).get_host_components();
+    GetLogger()->Info("Server name: %s; address: %s (%s:%s).",
+                      server_name_.c_str(), server_addr_.c_str(), host.c_str(), port.c_str());
     resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
     resolver_->async_resolve(host, port, [this](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
         resolving_endpoint_ = false;
