@@ -169,7 +169,6 @@ public:
 
         if (log_file_) {
             fprintf(log_file_, "[%s] %s\n", timeStr, pszMsg);
-            fflush(log_file_);
         }
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {

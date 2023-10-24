@@ -45,6 +45,10 @@ struct PlayerState {
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state = decltype(ball_state)(3, TimedBallState());
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
+	SteamNetworkingMicroseconds time_variance = 0;
+#ifdef DEBUG
+	int counter = 0;
+#endif
 	bmmo::map current_map;
 	int32_t current_sector = 0;
 	int64_t current_sector_timestamp = 0;
@@ -132,17 +136,19 @@ public:
 		// real-time position of our own spirit balls, but everyone
 		// has a different timestamp, so we have to account for this
 		// and record everyone's average timestamp differences.
-		states_[id].time_diff =
-			(states_[id].time_diff == std::numeric_limits<decltype(states_[id].time_diff)>::min())
-			? (SteamNetworkingUtils()->GetLocalTimestamp() - timestamp)
-			: (PREV_DIFF_WEIGHT * states_[id].time_diff - timestamp + SteamNetworkingUtils()->GetLocalTimestamp())
-			/ (PREV_DIFF_WEIGHT + 1);
+		auto& state = states_[id];
+		const auto new_diff = SteamNetworkingUtils()->GetLocalTimestamp() - timestamp;
+		const bool no_recalibration = (state.time_diff == std::numeric_limits<decltype(state.time_diff)>::min());
+		state.time_diff = no_recalibration ? new_diff
+			: state.time_diff + (new_diff - state.time_diff) / (PREV_DIFF_WEIGHT + 1);
+		const auto delta_time = timestamp + state.time_diff - state.ball_state.front().timestamp - bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+		state.time_variance += no_recalibration ? 0 : (delta_time * delta_time - state.time_variance) / (PREV_VARIANCE_WEIGHT + 1);
 		// Weighted average - more weight on the previous value means more resistance
 		// to random lag spikes, which in turn results in overall smoother movement;
 		// however this also makes initial values converge into actual timestamp
 		// differences slower and cause prolonged random flickering when average
 		// lag values changed. We have to pick a value comfortable to both aspects.
-		return (timestamp + states_[id].time_diff);
+		return (timestamp + state.time_diff);
 	};
 
 	bool update(HSteamNetConnection id, const std::string& name) {
@@ -357,6 +363,6 @@ private:
 	HSteamNetConnection assigned_id_ = k_HSteamNetConnection_Invalid;
 	std::atomic_bool nametag_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
-	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15;
+	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15, PREV_VARIANCE_WEIGHT = 63;
 	static const inline auto INIT_TIMESTAMP = SteamNetworkingUtils()->GetLocalTimestamp();
 };

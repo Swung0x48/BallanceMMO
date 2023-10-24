@@ -93,7 +93,7 @@ public:
 			camera_target_pos += orientation * CAMERA_TARGET_DISTANCE;
 		}
 
-		db_.for_each([=, this, &viewport, &rc](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		db_.for_each([=, this, &viewport, &rc](std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -125,10 +125,18 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!player.physicalized) {
-				if (extrapolation_ && [=, this] {
-					if ((state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE)
+#ifdef DEBUG
+				item.second.counter++;
+				if (item.second.counter % 33 == 0) {
+					username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + " " + std::to_string(item.second.time_variance / 1000000));
+				}
+#endif
+				if (extrapolation_ && [=, this]() mutable {
+					if ((state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
+							&& item.second.time_variance < 134217728)
 						return true;
-					db_.remove_earlier_states(item.first);
+					item.second.ball_state.push_front(state_it[0]);
+					item.second.ball_state.push_front(state_it[0]);
 					return false;
 				}()) {
 					SteamNetworkingMicroseconds tc = timestamp;
