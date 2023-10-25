@@ -15,6 +15,28 @@ namespace bmmo {
         CustomMap
     };
 
+    enum class level_mode : uint8_t {
+        Speedrun = 0,
+        Highscore = 1,
+    };
+
+    inline constexpr const char* get_level_mode_suffix(level_mode mode) {
+        switch (mode) {
+            case level_mode::Highscore: return " [HS]";
+            case level_mode::Speedrun: return " [SR]";
+            default: return "";
+        }
+    }
+    
+    inline constexpr const char* get_level_mode_label(level_mode mode) {
+        switch (mode) {
+            case level_mode::Highscore: return " <HS>";
+            case level_mode::Speedrun:
+            default:
+                return "";
+        }
+    }
+
     // compatibilty
     using string_utils::hex_chars_from_string;
     using string_utils::string_from_hex_chars;

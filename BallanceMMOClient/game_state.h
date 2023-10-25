@@ -45,7 +45,7 @@ struct PlayerState {
 	bool cheated = false;
 	boost::circular_buffer<TimedBallState> ball_state = decltype(ball_state)(3, TimedBallState());
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
-	SteamNetworkingMicroseconds time_variance = 0;
+	int64_t time_variance = 0;
 #ifdef DEBUG
 	int counter = 0;
 #endif
@@ -363,6 +363,6 @@ private:
 	HSteamNetConnection assigned_id_ = k_HSteamNetConnection_Invalid;
 	std::atomic_bool nametag_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
-	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15, PREV_VARIANCE_WEIGHT = 63;
+	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15, PREV_VARIANCE_WEIGHT = 31;
 	static const inline auto INIT_TIMESTAMP = SteamNetworkingUtils()->GetLocalTimestamp();
 };

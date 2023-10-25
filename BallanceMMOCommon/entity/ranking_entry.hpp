@@ -5,26 +5,31 @@
 #include <unordered_map>
 #include <algorithm>
 #include <utility>
+#include "map.hpp"
 
 namespace bmmo::ranking_entry {
-    struct finish_entry {
+    struct base_entry {
         bool cheated{};
         std::string name;
+    };
+
+    struct finish_entry: base_entry {
+        level_mode mode = level_mode::Speedrun;
         int sr_ranking{};
         std::string formatted_hs_score, formatted_sr_score;
 
-        std::string to_string(int ranking) const {
+        std::string to_string(int ranking, level_mode default_mode) const {
             char text[128];
-            std::snprintf(text, sizeof(text), "<%d> %s%s: %s | %s",
-                          ranking, cheated ? "[C] " : "", name.c_str(),
+            std::snprintf(text, sizeof(text), "<%d%s> %s%s: %s | %s",
+                          ranking,
+                          default_mode == mode ? "" : get_level_mode_suffix(mode),
+                          cheated ? "[C] " : "", name.c_str(),
                           formatted_hs_score.c_str(), formatted_sr_score.c_str());
             return {text};
         }
     };
     
-    struct dnf_entry {
-        bool cheated{};
-        std::string name;
+    struct dnf_entry: base_entry {
         int dnf_sector{};
 
         std::string to_string(int ranking) const {
@@ -64,6 +69,7 @@ namespace bmmo::ranking_entry {
         std::snprintf(header, sizeof(header), "Ranking info for %s [%s]:",
                 map_name.c_str(), hs_mode ? "HS" : "SR");
         texts.emplace_back(header);
+        using lm = level_mode;
         for (size_t i = 0; i < rankings.first.size(); ++i) {
             const auto& entry = rankings.first[i];
             int rank = i;
@@ -72,7 +78,7 @@ namespace bmmo::ranking_entry {
                         == atoi(rankings.first[rank - 1].formatted_hs_score.c_str()))
                     --rank;
             }
-            texts.emplace_back(entry.to_string(rank + 1));
+            texts.emplace_back(entry.to_string(rank + 1, hs_mode ? lm::Highscore : lm::Speedrun));
         }
         for (size_t i = 0; i < rankings.second.size(); ++i) {
             const auto& entry = rankings.second[i];

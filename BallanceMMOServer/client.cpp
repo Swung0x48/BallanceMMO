@@ -598,8 +598,8 @@ private:
                     msg->content.map.get_display_name(map_names_),
                     msg->content.sector
                 );
-                local_rankings_[msg->content.map.get_hash_bytes_string()].second.emplace_back(
-                    msg->content.cheated, player_name, msg->content.sector);
+                local_rankings_[msg->content.map.get_hash_bytes_string()].second.push_back({
+                    (bool)msg->content.cheated, player_name, msg->content.sector});
                 break;
             }
             case bmmo::LevelFinishV2: {
@@ -608,13 +608,15 @@ private:
                 std::string player_name = get_player_name(msg->content.player_id),
                     formatted_score = msg->content.get_formatted_score(),
                     formatted_time = msg->content.get_formatted_time();
-                Printf("%s(#%u, %s) finished %s in %d%s place (score: %s; real time: %s).",
+                Printf("%s(#%u, %s) finished %s%s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
-                    msg->content.map.get_display_name(map_names_), msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
+                    msg->content.map.get_display_name(map_names_), get_level_mode_label(msg->content.mode),
+                    msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
                     formatted_score, formatted_time);
-                local_rankings_[msg->content.map.get_hash_bytes_string()].first.emplace_back(
-                    msg->content.cheated, player_name, msg->content.rank, formatted_score, formatted_time);
+                local_rankings_[msg->content.map.get_hash_bytes_string()].first.push_back({
+                    (bool)msg->content.cheated, player_name, msg->content.mode,
+                    msg->content.rank, formatted_score, formatted_time});
                 break;
             }
             case bmmo::MapNames: {

@@ -608,6 +608,7 @@ void BallanceMMOClient::OnLevelFinish() {
         msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - maps_[current_map_.get_hash_bytes_string()].level_start_timestamp) / 1e3f;
         reset_timer_ = true;
         msg.content.cheated = m_bml->IsCheatEnabled();
+        msg.content.mode = current_level_mode_;
         msg.content.map = current_map_;
         GetLogger()->Info("Sending level finish message...");
 
@@ -1747,8 +1748,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         ).c_str());
 
         std::lock_guard lk(client_mtx_);
-        maps_[msg->content.map.get_hash_bytes_string()].rankings.second.emplace_back(
-            msg->content.cheated, player_name, msg->content.sector);
+        maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
+            (bool)msg->content.cheated, player_name, msg->content.sector});
         play_wave_sound(sound_dnf_);
         flash_window();
         break;
@@ -1764,14 +1765,16 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         //auto state = db_.get(msg->content.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         SendIngameMessage(std::format(
-            "{}{} finished {} in {}{} place (score: {}; real time: {}).",
+            "{}{} finished {}{} in {}{} place (score: {}; real time: {}).",
             msg->content.cheated ? "[CHEAT] " : "", player_name,
-            map_name, msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
+            map_name, get_level_mode_label(msg->content.mode),
+            msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
             formatted_score, formatted_time).c_str());
 
         std::lock_guard lk(client_mtx_);
-        maps_[msg->content.map.get_hash_bytes_string()].rankings.first.emplace_back(
-            msg->content.cheated, player_name, msg->content.rank, formatted_score, formatted_time);
+        maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
+            (bool)msg->content.cheated, player_name, msg->content.mode,
+            msg->content.rank, formatted_score, formatted_time});
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);

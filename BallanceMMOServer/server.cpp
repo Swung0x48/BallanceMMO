@@ -1123,8 +1123,8 @@ protected:
                     msg->content.sector
                 );
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
-                maps_[msg->content.map.get_hash_bytes_string()].rankings.second.emplace_back(
-                    msg->content.cheated, player_name, msg->content.sector);
+                maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
+                    (bool)msg->content.cheated, player_name, msg->content.sector});
                 break;
             }
             case bmmo::LevelFinish:
@@ -1152,16 +1152,18 @@ protected:
 
                 // Prepare message
                 msg->content.rank = ++current_map.rank;
-                Printf("%s(#%u, %s) finished %s in %d%s place (score: %s; real time: %s).",
+                Printf("%s(#%u, %s) finished %s%s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
-                    msg->content.map.get_display_name(map_names_), current_map.rank, bmmo::get_ordinal_suffix(current_map.rank),
+                    msg->content.map.get_display_name(map_names_), get_level_mode_label(msg->content.mode),
+                    current_map.rank, bmmo::get_ordinal_suffix(current_map.rank),
                     formatted_score, formatted_time);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
 
-                current_map.rankings.first.emplace_back(
-                    msg->content.cheated, player_name, current_map.rank, formatted_score, formatted_time);
+                current_map.rankings.first.push_back({
+                    (bool)msg->content.cheated, player_name, msg->content.mode,
+                    current_map.rank, formatted_score, formatted_time});
 
                 break;
             }

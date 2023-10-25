@@ -1103,11 +1103,15 @@ private:
 
 	inline void flash_window() { FlashWindow(get_main_window(), false); }
 
+	inline void call_sync_method(std::function<void()>&& func) {
+		m_bml->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });
+	}
+
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		previous_msg_.push_back(msg);
 		if (console_running_)
 			Printf(ansi_color, "%s", msg);
-		m_bml->AddTimer(CKDWORD(0), [this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
+		call_sync_method([this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;

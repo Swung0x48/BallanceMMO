@@ -1,6 +1,7 @@
 #ifndef BALLANCEMMOSERVER_COUNTDOWN_HPP
 #define BALLANCEMMOSERVER_COUNTDOWN_HPP
 #include "message.hpp"
+#include "../entity/map.hpp"
 #include <cstdint>
 #include <limits>
 
@@ -14,21 +15,6 @@ namespace bmmo {
         ConfirmReady = 5,
         Unknown = std::numeric_limits<std::underlying_type_t<countdown_type>>::max(),
     };
-
-    enum class level_mode: uint8_t {
-        Speedrun = 0,
-        Highscore = 1,
-    };
-
-    inline const char* get_level_mode_label(level_mode mode) {
-        switch (mode) {
-            case level_mode::Highscore:
-                return " <HS>";
-            case level_mode::Speedrun:
-            default:
-                return "";
-        }
-    }
 
     struct countdown {
         countdown_type type = countdown_type::Unknown;

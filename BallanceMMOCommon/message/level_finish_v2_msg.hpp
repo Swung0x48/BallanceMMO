@@ -25,6 +25,7 @@ namespace bmmo {
 
         int32_t startPoints = 0;
         bool cheated = false;
+        level_mode mode = level_mode::Speedrun;
 
         struct map map;
         int32_t rank = 0;

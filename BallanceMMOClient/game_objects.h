@@ -128,12 +128,12 @@ public:
 #ifdef DEBUG
 				item.second.counter++;
 				if (item.second.counter % 33 == 0) {
-					username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + " " + std::to_string(item.second.time_variance / 1000000));
+					username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + " " + std::to_string(item.second.time_variance / 100000));
 				}
 #endif
 				if (extrapolation_ && [=, this]() mutable {
 					if ((state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
-							&& item.second.time_variance < 134217728)
+							&& item.second.time_variance < 268435456ll)
 						return true;
 					item.second.ball_state.push_front(state_it[0]);
 					item.second.ball_state.push_front(state_it[0]);
