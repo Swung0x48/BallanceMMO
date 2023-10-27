@@ -105,9 +105,10 @@ public:
 			auto& player = objects_[item.first];
 			const auto& state_it = item.second.ball_state.begin();
 
-			uint32_t current_ball_type = state_it->type;
+			const uint32_t current_ball_type = state_it->type;
+			const bool ball_type_changed = (current_ball_type != player.visible_ball_type);
 
-			if (current_ball_type != player.visible_ball_type) {
+			if (ball_type_changed) {
 				on_trafo(item.first, player.visible_ball_type, current_ball_type);
 				player.visible_ball_type = current_ball_type;
 			}
@@ -133,7 +134,7 @@ public:
 #endif
 				if (extrapolation_ && [=, this]() mutable {
 					if ((state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
-							&& item.second.time_variance < 268435456ll)
+							&& item.second.time_variance < MAX_EXTRAPOLATION_TIME_VARIANCE)
 						return true;
 					item.second.ball_state.push_front(state_it[0]);
 					item.second.ball_state.push_front(state_it[0]);
@@ -142,7 +143,9 @@ public:
 					SteamNetworkingMicroseconds tc = timestamp;
 					if (state_it->timestamp + MAX_EXTRAPOLATION_TIME < timestamp)
 						tc = state_it->timestamp + MAX_EXTRAPOLATION_TIME;
-					const auto& [position, rotation] = PlayerState::get_quadratic_extrapolated_state(tc, state_it[2], state_it[1], state_it[0]);
+					const auto& [position, rotation] = (item.second.time_variance > MAX_EXTRAPOLATION_TIME_VARIANCE / 2)
+						? PlayerState::get_quadratic_extrapolated_state(tc, state_it[2], state_it[1], state_it[0])
+						: PlayerState::get_linear_extrapolated_state(tc, state_it[1], state_it[0]);
 					current_ball->SetPosition(position);
 					current_ball->SetQuaternion(rotation);
 					square_camera_distance = (position - camera_target_pos).SquareMagnitude();
@@ -155,10 +158,14 @@ public:
 			}
 
 			if (dynamic_opacity_) {
-				auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
-				VxColor color = current_material->GetDiffuse();
-				color.a = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
-				current_material->SetDiffuse(color);
+				const auto new_opacity = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
+				if (std::fabsf(new_opacity - item.second.last_opacity) < 0.02f) {
+					item.second.last_opacity = new_opacity;
+					auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
+					VxColor color = current_material->GetDiffuse();
+					color.a = new_opacity;
+					current_material->SetDiffuse(color);
+				}
 			}
 
 			// Update username label
@@ -171,8 +178,10 @@ public:
 				return true;
 			}
 			// Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
-			username_label->set_position({ extent.GetCenter() / viewport.GetBottomRight() });
-			username_label->set_visible(db_.is_nametag_visible());
+			if (!ball_type_changed)
+				username_label->set_position({ extent.GetCenter() / viewport.GetBottomRight() });
+			if (username_label->visible_ != db_.is_nametag_visible())
+				username_label->set_visible(db_.is_nametag_visible());
 			username_label->process();
 			return true;
 		});
@@ -332,6 +341,7 @@ private:
 	bool extrapolation_ = false, dynamic_opacity_ = true;
 	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
+	static constexpr int64_t MAX_EXTRAPOLATION_TIME_VARIANCE = 268435456ll;
 	static constexpr float CAMERA_TARGET_DISTANCE = 40.0f,
 		ALPHA_DEFAULT = 0.5f, ALPHA_DISTANCE_RATE = 0.0144f,
 		ALPHA_BEGIN = 0.2f, ALPHA_MIN = 0.28f, ALPHA_MAX = 0.7f;

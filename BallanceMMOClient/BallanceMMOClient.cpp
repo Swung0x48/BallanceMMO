@@ -1025,14 +1025,14 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
                     return;
                 }
                 const std::string name = state.value().name;
-                const VxVector& position = state.value().ball_state.front().position;
+                const VxVector position = state.value().ball_state.front().position;
 
                 CKMessageManager* mm = m_bml->GetMessageManager();
                 CKMessageType ballDeact = mm->AddMessageType("BallNav deactivate");
                 mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Gameplay"));
                 mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Sound"));
 
-                m_bml->AddTimer(CKDWORD(2), [this, &position, name]() {
+                m_bml->AddTimer(CKDWORD(2), [this, position, name]() {
                     ExecuteBB::Unphysicalize(get_current_ball());
                     get_current_ball()->SetPosition(position);
                     CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
@@ -1993,13 +1993,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 duration = sound->GetSoundLength();
             GetLogger()->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
                               duration, msg.pitch, duration / msg.pitch, msg.gain, msg.pitch);
-            m_bml->AddTimer(CKDWORD(0), [=] { sound->Play(); });
+            call_sync_method([=] { sound->Play(); });
 
             if (duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength() + 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
-            if (!sound) return;
-            destroy_wave_sound(sound, true);
+            call_sync_method([=] { if (sound) destroy_wave_sound(sound, true); });
         }).detach();
         break;
     }
