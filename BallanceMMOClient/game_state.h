@@ -50,7 +50,6 @@ struct PlayerState {
 	int counter = 0;
 #endif
 	bmmo::map current_map;
-	float last_opacity = 0.5;
 	int32_t current_sector = 0;
 	int64_t current_sector_timestamp = 0;
 	// BallState ball_state;

@@ -251,17 +251,14 @@ private:
                      }; mouse_down.first || mouse_down.second) {
                  Vx2DVector mouse_pos; VxRect screen_size;
                  input_manager_->GetMousePosition(mouse_pos, false);
-                 bml_->GetRenderContext()->GetWindowRect(screen_size);
+                 bml_->GetRenderContext()->GetViewRect(screen_size);
                  mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();
                  if (gui_->Intersect(mouse_pos.x, mouse_pos.y, selected_server_background_)) {
-                     if (mouse_down.first) {
+                     if (mouse_down.first)
                          connect_to_server();
-                         return;
-                     }
-                     else {
+                     else
                          enter_server_edit();
-                         return;
-                     }
+                     return;
                  }
                  for (size_t i = 0; i < servers_.size(); ++i) {
                      if (!gui_->Intersect(mouse_pos.x, mouse_pos.y, server_labels_[i])) continue;
