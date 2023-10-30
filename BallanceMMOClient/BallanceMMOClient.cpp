@@ -1980,11 +1980,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 SendIngameMessage("Now playing: " + msg.caption);
             flash_window();
             std::string path = msg.path;
-            std::string sound_name = "MMO_Sound_" + path.substr(path.find_last_of("BMMO_"));
+            std::string sound_name = "MMO_Sound" + path.substr(path.find_last_of("BMMO_"));
             /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
             CKWaveSound* sound;
             load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, false);
-            received_wave_sounds_.push_back(sound);
+            received_wave_sounds_.insert(sound);
             GetLogger()->Info("Playing sound <%s> from server%s",
                               sound_name.c_str(),
                               msg.caption.empty() ? "" : (": " + msg.caption).c_str());
@@ -1998,7 +1998,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             if (duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength() + 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
-            call_sync_method([=] { if (sound) destroy_wave_sound(sound, true); });
+            call_sync_method([=] {
+                std::lock_guard<std::mutex> lk(bml_mtx_);
+                if (!received_wave_sounds_.contains(sound))
+                    return;
+                destroy_wave_sound(sound, true);
+                received_wave_sounds_.erase(sound);
+            });
         }).detach();
         break;
     }

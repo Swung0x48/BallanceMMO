@@ -1741,7 +1741,7 @@ int main(int argc, char** argv) {
                     msg.path = idata.as<std::string>();
                     break;
                 default:
-                    server.Printf("Usage: playstream {caption: <name>, path: <path>, duration: <duration_ms = 0>, gain: <1.0 ∈ [0, 1]>, pitch: <1.0 ∈ [0.2, 4.5]>}");
+                    server.Printf("Usage: playstream {caption: <name>, path: <path>, duration: <duration_ms = 0>, gain: <1.0 ∈ [0, 1]>, pitch: <1.0 ∈ [0.1, 4.1]>}");
                     server.Printf("Usage: playstream <path>");
                     server.Printf("Current working directory: %s", std::filesystem::current_path().string());
                     server.Printf("Maximum file size: %lld bytes", msg.get_max_stream_size());

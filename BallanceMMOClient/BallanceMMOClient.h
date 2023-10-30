@@ -285,7 +285,7 @@ private:
 		(**sound).SetPitch(pitch);
 	}
 
-	std::vector<CKWaveSound*> received_wave_sounds_;
+	std::set<CKWaveSound*> received_wave_sounds_;
 	void destroy_wave_sound(CKWaveSound* sound, bool delete_file = false) {
 		if (sound == nullptr) return;
 		if (sound->IsPlaying())
