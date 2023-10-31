@@ -84,8 +84,9 @@ public:
         running_ = true;
         startup_cv_.notify_all();
         while (running_) {
-            if (!update())
-                std::this_thread::sleep_for(bmmo::CLIENT_RECEIVE_INTERVAL);
+            auto update_begin = std::chrono::steady_clock::now();
+            update();
+            std::this_thread::sleep_until(update_begin + bmmo::CLIENT_RECEIVE_INTERVAL);
         }
 
 //        while (running_) {
@@ -1041,10 +1042,11 @@ int main(int argc, char** argv) {
     console.register_command("win", [&] {
         if (console.empty()) { role::Printf("Usage: \"win <map> <points> <lives> <time>\"."); return; }
         auto map = get_map_from_input();
+        auto mode = console.get_next_word() == "hs" ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
         client.send(bmmo::level_finish_v2_msg{.content = {
             .points = console.get_next_int(), .lives = console.get_next_int(),
             .lifeBonus = 200, .levelBonus = map.level * 100, .timeElapsed = (float) console.get_next_double(),
-            .startPoints = 1000, .cheated = cheat, .map = map
+            .startPoints = 1000, .cheated = cheat, .mode = mode, .map = map
         }}, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("bulletin", [&] {

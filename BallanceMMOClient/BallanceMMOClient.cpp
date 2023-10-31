@@ -199,16 +199,17 @@ void BallanceMMOClient::show_player_list() {
             // player_list.paint_background(0x44444444);
             player_list.set_visible(true);
             player_list_visible_ = true;
+            int last_player_count = -1, last_font_size = get_display_font_size(9.78f);
             while (player_list_visible_) {
-                update_player_list(player_list);
+                update_player_list(player_list, last_player_count, last_font_size);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         });
     });
 }
 
-inline void BallanceMMOClient::update_player_list(text_sprite& player_list) {
-    static int last_player_count = -1, last_font_size = get_display_font_size(9.78f);
+inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
+                                                  int& last_player_count, int& last_font_size) {
     struct list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
     auto list_sorter = [](const list_entry& i1, const list_entry& i2) {
         const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
