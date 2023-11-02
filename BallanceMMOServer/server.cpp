@@ -5,7 +5,6 @@
 #include <steam/steam_api.h>
 #endif
 
-#include "../BallanceMMOCommon/role/role.hpp"
 #include <vector>
 #include <unordered_set>
 #include <condition_variable>

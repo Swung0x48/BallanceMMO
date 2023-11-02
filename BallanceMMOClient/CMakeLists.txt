@@ -9,7 +9,11 @@ set(CMAKE_INSTALL_RPATH "\$ORIGIN/bin") # Note CMake escaping around '$' sign.
 # *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 
-configure_file(${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config/version_config.h.in ${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config/version_config.h @ONLY)
+include_directories("${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include"
+                    "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config")
+
+set(CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config)
+configure_file(${CONFIG_DIR}/version_config.h.in ${CONFIG_DIR}/version_config.h @ONLY)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # setting vcpkg toolchain file
@@ -75,14 +79,14 @@ set(BMMO_CLIENT_HDR
         server_list.h
         text_sprite.h)
 set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp)
-file(GLOB BMMO_COMMON_SRC "../BallanceMMOCommon/src/*.cpp")
+set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
+file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/utility/console.cpp)
 
 add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC})
 set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClient")
 set_target_properties(BallanceMMOClient PROPERTIES SUFFIX ".bmod")
 target_include_directories(BallanceMMOClient PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
-                            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE
@@ -99,7 +103,6 @@ set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES OUTPUT_NAME "Ballance
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES SUFFIX ".bmodp")
 target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
-                            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config"
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE

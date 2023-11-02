@@ -6,7 +6,7 @@
 #include <tchar.h>
 #include <psapi.h>
 #include <direct.h>
-#include "../BallanceMMOCommon/entity/version.hpp"
+#include "entity/version.hpp"
 
 #pragma comment(lib, "Dbghelp.lib")
 

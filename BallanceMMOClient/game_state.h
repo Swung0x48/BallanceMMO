@@ -5,7 +5,7 @@
 #include <steam/steam_api.h>
 #endif
 #include "bml_includes.h"
-#include "../BallanceMMOCommon/entity/map.hpp"
+#include "entity/map.hpp"
 
 #include <unordered_map>
 #include <shared_mutex>

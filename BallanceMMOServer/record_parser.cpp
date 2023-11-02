@@ -5,8 +5,8 @@
 #include <steam/steam_api.h>
 #endif
 
-#include "../BallanceMMOCommon/common.hpp"
-#include "../BallanceMMOCommon/entity/record_entry.hpp"
+#include "common.hpp"
+#include "entity/record_entry.hpp"
 #include <fstream>
 #include <condition_variable>
 #include <cinttypes>

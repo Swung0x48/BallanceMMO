@@ -23,8 +23,8 @@
 #include <asio/ip/tcp.hpp>
 #include <ya_getopt.h>
 
-#include "../BallanceMMOCommon/common.hpp"
-#include "../BallanceMMOCommon/entity/record_entry.hpp"
+#include "common.hpp"
+#include "entity/record_entry.hpp"
 
 bool cheat = false;
 struct client_data {

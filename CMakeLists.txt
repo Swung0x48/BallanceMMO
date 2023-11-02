@@ -33,7 +33,7 @@ project(${PROJECT_NAME})
 set(BMMO_VER_DEFINED 1)
 set(BMMO_VER            3.5.5-beta11)
 set(BMMO_MIN_CLIENT_VER 3.5.5-beta10)
-set(CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/BallanceMMOCommon/config)
+set(CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/BallanceMMOCommon/include/config)
 configure_file(${CONFIG_DIR}/version_config.h.in ${CONFIG_DIR}/version_config.h @ONLY)
 
 option(BUILD_SERVER "Build BallanceMMO Server" ON)

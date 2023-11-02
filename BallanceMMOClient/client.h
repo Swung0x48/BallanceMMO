@@ -9,7 +9,7 @@
 #include <cassert>
 
 #include <memory>
-#include "../BallanceMMOCommon/common.hpp"
+#include "common.hpp"
 
 class client : public role {
 public:

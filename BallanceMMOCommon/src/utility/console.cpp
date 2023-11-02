@@ -1,4 +1,4 @@
-#include "../utility/console.hpp"
+#include "utility/console.hpp"
 
 namespace bmmo {
 
