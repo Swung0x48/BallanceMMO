@@ -1,4 +1,6 @@
-#include "console.hpp"
+#include "../utility/console.hpp"
+
+namespace bmmo {
 
 const std::string console::get_help_string() const {
     std::string help_string;
@@ -78,8 +80,8 @@ bool console::empty() const noexcept {
     return parser_.empty();
 };
 
-const std::string console::get_next_word() {
-    return parser_.get_next_word();
+const std::string console::get_next_word(bool lowercase) {
+    return parser_.get_next_word(lowercase);
 };
 
 const std::string console::get_rest_of_line() {
@@ -97,4 +99,6 @@ const bmmo::named_map console::get_next_map(bool with_name) {
     if (with_name && !empty())
         input_map.name = get_rest_of_line();
     return input_map;
+}
+
 }

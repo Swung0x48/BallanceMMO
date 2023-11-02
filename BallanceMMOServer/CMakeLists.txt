@@ -45,15 +45,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(yaml-cpp)
 
-add_executable(BallanceMMOServer server.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
+file(GLOB BMMO_COMMON_SRC "../BallanceMMOCommon/src/*.cpp")
+
+add_executable(BallanceMMOServer server.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
 target_include_directories(BallanceMMOServer PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config")
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
-add_executable(BallanceMMOMockClient client.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
+add_executable(BallanceMMOMockClient client.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
 target_include_directories(BallanceMMOMockClient PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config")
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
-add_executable(BallanceMMORecordParser record_parser.cpp console.cpp ../submodule/ya_getopt/ya_getopt.c)
+add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
 target_include_directories(BallanceMMORecordParser PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/config")
 target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared)

@@ -10,7 +10,6 @@
 #include <unordered_set>
 #include <condition_variable>
 #include "../BallanceMMOCommon/common.hpp"
-#include "console.hpp"
 
 // #include <iomanip>
 #include <mutex>
@@ -255,6 +254,13 @@ public:
             Printf("%s: %s", uuid, reason);
         Printf("%d UUID%s banned in total.", banned_players_.size(),
                 banned_players_.size() == 1 ? "" : "s");
+    }
+
+    void print_mutes() {
+        for (const auto& uuid: muted_players_)
+            Printf("%s", uuid);
+        Printf("%d UUID%s muted in total.", muted_players_.size(),
+                muted_players_.size() == 1 ? "" : "s");
     }
 
     void print_clients(bool print_uuid = false) {
@@ -1504,7 +1510,7 @@ int main(int argc, char** argv) {
         server::FatalError("Server failed on setup.");
     std::thread server_thread([&server]() { server.run(); });
 
-    console console;
+    bmmo::console console;
     console.register_command("stop", [&] { server.shutdown(console.get_next_int()); });
     console.register_command("list", [&] { server.print_clients(); });
     console.register_command("list-uuid", [&] { server.print_clients(true); });
@@ -1516,13 +1522,16 @@ int main(int argc, char** argv) {
         server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         server.Printf("([Server]): %s", msg.chat_content);
     });
-    auto send_plain_text_msg = [&](bool broadcast = false) {
-        HSteamNetConnection client{};
-        if (!broadcast) {
-            client = server.get_client_id(console.get_next_word());
-            if (client == k_HSteamNetConnection_Invalid)
-                return;
-        }
+    auto get_client_id_from_console = [&]() -> HSteamNetConnection {
+        std::string client_input = console.get_next_word();
+        HSteamNetConnection client = (client_input.length() > 0 && client_input[0] == '#')
+                ? atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
+        if (client == 0)
+            server.Printf("Error: invalid connection id.");
+        return client;
+    };
+    auto send_plain_text_msg = [&](bool broadcast = true) {
+        HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
         bmmo::plain_text_msg msg{};
         msg.text_content = console.get_rest_of_line();
         msg.serialize();
@@ -1535,14 +1544,9 @@ int main(int argc, char** argv) {
         }
     };
     console.register_command("plaintext", send_plain_text_msg);
-    console.register_command("plaintext-broadcast", std::bind(send_plain_text_msg, true));
-    auto send_popup_msg = [&](bool broadcast = false) {
-        HSteamNetConnection client = k_HSteamNetConnection_Invalid;
-        if (!broadcast) {
-            client = server.get_client_id(console.get_next_word());
-            if (client == k_HSteamNetConnection_Invalid)
-                return;
-        }
+    console.register_command("plaintext#", std::bind(send_plain_text_msg, false));
+    auto send_popup_msg = [&](bool broadcast = true) {
+        HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
         bmmo::popup_box_msg msg{};
         msg.title = "BallanceMMO - Message";
         msg.text_content = console.get_rest_of_line();
@@ -1565,26 +1569,32 @@ int main(int argc, char** argv) {
             return;
         }
         msg.serialize();
-        if (!broadcast)
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        else
+        if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        else
+            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         server.Printf(bmmo::ansi::BrightCyan, "[Popup -> %s] {%s}: %s",
                 client == k_HSteamNetConnection_Invalid ? "[all]" : std::to_string(client),
                 msg.title, msg.text_content);
     };
     console.register_command("popup", send_popup_msg);
-    console.register_command("popup-broadcast", std::bind(send_popup_msg, true));
-    console.register_command("announce", [&] {
+    console.register_command("popup#", std::bind(send_popup_msg, false));
+    auto send_important_notification = [&](bool broadcast = true) {
         bmmo::important_notification_msg msg{};
+        HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
         msg.chat_content = console.get_rest_of_line();
         msg.serialize();
-        server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        if (broadcast)
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        else
+            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         server.Printf(bmmo::ansi::BrightCyan | bmmo::ansi::Bold,
                 "[Announcement] ([Server]): %s", msg.chat_content);
-    });
+    };
+    console.register_command("announce", send_important_notification);
+    console.register_command("announce#", std::bind(send_important_notification, false));
     console.register_command("cheat", [&] {
-        bool cheat_state = (console.get_next_word() == "on");
+        bool cheat_state = (console.get_next_word(true) == "on");
         server.toggle_cheat(cheat_state);
     });
     console.register_command("version", [&] { server.print_version_info(); });
@@ -1592,48 +1602,36 @@ int main(int argc, char** argv) {
     console.register_command("getmap", [&] { server.print_player_maps(); });
     console.register_command("getpos", [&] { server.print_positions(); });
     console.register_command("kick", [&] {
-        HSteamNetConnection client = k_HSteamNetConnection_Invalid;
-        std::string client_input = console.get_next_word();
-        if (client_input.length() > 0 && client_input[0] == '#') {
-            client = atoll(client_input.substr(1).c_str());
-            if (client == 0) {
-                server.Printf("Error: invalid connection id.");
-                return;
-            }
-        } else {
-            client = server.get_client_id(client_input);
-        }
+        auto client = get_client_id_from_console();
+        if (client == k_HSteamNetConnection_Invalid) return;
         std::string text = console.get_rest_of_line();
-        if (console.get_command_name() == "whisper") {
-            bmmo::private_chat_msg msg{};
-            msg.chat_content = text;
-            msg.serialize();
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf(bmmo::ansi::Xterm256 | 248, "([Server]) -> #%u: %s", client, msg.chat_content);
-        } else if (console.get_command_name() == "ban") {
-            server.set_ban(client, text);
-        } else {
-            bmmo::connection_end::code crash = bmmo::connection_end::Kicked;
-            if (console.get_command_name() == "crash")
-                crash = bmmo::connection_end::Crash;
-            else if (console.get_command_name() == "fatalerror")
-                crash = bmmo::connection_end::FatalError;
-            server.kick_client(client, text, k_HSteamNetConnection_Invalid, crash);
-        }
+        bmmo::connection_end::code crash = bmmo::connection_end::Kicked;
+        if (console.get_command_name() == "crash")
+            crash = bmmo::connection_end::Crash;
+        else if (console.get_command_name() == "fatalerror")
+            crash = bmmo::connection_end::FatalError;
+        server.kick_client(client, text, k_HSteamNetConnection_Invalid, crash);
     });
-    console.register_aliases("kick", {"crash", "fatalerror", "whisper", "ban"});
+    console.register_aliases("kick", {"crash", "fatalerror"});
+    console.register_command("whisper", [&] {
+        auto client = get_client_id_from_console();
+        if (client == k_HSteamNetConnection_Invalid) return;
+        std::string text = console.get_rest_of_line();
+        bmmo::private_chat_msg msg{};
+        msg.chat_content = text;
+        msg.serialize();
+        server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        server.Printf(bmmo::ansi::Xterm256 | 248, "([Server]) -> #%u: %s", client, msg.chat_content);
+    });
+    console.register_command("ban", [&] {
+        auto client = get_client_id_from_console();
+        std::string text = console.get_rest_of_line();
+        server.set_ban(client, text);
+    });
     console.register_command("op", [&] {
-        HSteamNetConnection client = k_HSteamNetConnection_Invalid;
-        std::string client_input = console.get_next_word(), cmd = console.get_command_name();
-        if (client_input.length() > 0 && client_input[0] == '#') {
-            client = atoll(client_input.substr(1).c_str());
-            if (client == 0) {
-                server.Printf("Error: invalid connection id.");
-                return;
-            }
-        } else {
-            client = server.get_client_id(client_input);
-        }
+        auto client = get_client_id_from_console();
+        if (client == k_HSteamNetConnection_Invalid) return;
+        auto cmd = console.get_command_name();
         bool action = (cmd == "op" || cmd == "mute");
         if (cmd == "op" || cmd == "deop")
             server.set_op(client, action);
@@ -1642,6 +1640,7 @@ int main(int argc, char** argv) {
     });
     console.register_aliases("op", {"deop", "mute", "unmute"});
     console.register_command("listban", [&] { server.print_bans(); });
+    console.register_command("listmute", [&] { server.print_mutes(); });
     console.register_command("unban", [&] { server.set_unban(console.get_next_word()); });
     console.register_command("reload", [&] {
         if (!server.load_config())
@@ -1656,7 +1655,7 @@ int main(int argc, char** argv) {
         };
         auto client = (HSteamNetConnection) console.get_next_long();
         if (console.empty()) { print_hint(); return; }
-        std::string hash = console.get_next_word();
+        std::string hash = console.get_next_word(true);
         if (console.empty()) { print_hint(); return; }
         bmmo::map map{.type = bmmo::map_type::OriginalLevel, .level = std::clamp(console.get_next_int(), 0, 13)};
         if (hash == "level")
@@ -1664,7 +1663,7 @@ int main(int argc, char** argv) {
         else
             bmmo::hex_chars_from_string(map.md5, hash);
         bmmo::countdown_msg msg{.content = {.map = map}};
-        if (!console.empty() && console.get_next_word() == "hs")
+        if (!console.empty() && console.get_next_word(true) == "hs")
             msg.content.mode = bmmo::level_mode::Highscore;
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
@@ -1680,7 +1679,7 @@ int main(int argc, char** argv) {
     console.register_command("countdown-forced", [&] {
         bmmo::countdown_msg msg{};
         msg.content.restart_level = msg.content.force_restart = true;
-        if (!console.empty() && console.get_next_word() == "hs")
+        if (!console.empty() && console.get_next_word(true) == "hs")
             msg.content.mode = bmmo::level_mode::Highscore;
         msg.content.map.type = bmmo::map_type::OriginalLevel;
         for (int i = 3; i >= 0; --i) {
@@ -1758,7 +1757,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("scores", [&] {
         if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
-        bool hs_mode = (console.get_next_word() == "hs");
+        bool hs_mode = (console.get_next_word(true) == "hs");
         server.print_scores(hs_mode, console.empty() ? bmmo::map{} : static_cast<bmmo::map>(console.get_next_map()));
     });
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });

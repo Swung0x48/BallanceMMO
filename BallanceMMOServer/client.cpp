@@ -25,7 +25,6 @@
 
 #include "../BallanceMMOCommon/common.hpp"
 #include "../BallanceMMOCommon/entity/record_entry.hpp"
-#include "console.hpp"
 
 bool cheat = false;
 struct client_data {
@@ -852,7 +851,7 @@ int main(int argc, char** argv) {
 
     std::thread client_thread([&client]() { client.run(); });
 
-    console console;
+    bmmo::console console;
     console.register_command("help", [&] { role::Printf(console.get_help_string().c_str()); });
     console.register_command("stop", [&] { client.shutdown(); });
     auto pos_function = [&](bool translate = false) {
@@ -933,12 +932,12 @@ int main(int argc, char** argv) {
     });
     console.register_command("cheat", [&] {
         bmmo::cheat_toggle_msg msg{};
-        msg.content.cheated = (console.get_next_word() == "on") ? true : false;
+        msg.content.cheated = (console.get_next_word(true) == "on") ? true : false;
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("cheat-self", [&] {
         if (!console.empty())
-            cheat = (console.get_next_word() == "on") ? true : false;
+            cheat = (console.get_next_word(true) == "on") ? true : false;
         else
             cheat = !cheat;
         bmmo::cheat_state_msg msg;
@@ -981,7 +980,7 @@ int main(int argc, char** argv) {
             return;
         }
         bmmo::countdown_msg msg{.content = {.map = get_map_from_input()}};
-        if (!console.empty() && console.get_next_word() == "hs")
+        if (!console.empty() && console.get_next_word(true) == "hs")
             msg.content.mode = bmmo::level_mode::Highscore;
         if (console.empty()) {
             for (int i = 3; i >= 0; --i) {
@@ -1042,7 +1041,7 @@ int main(int argc, char** argv) {
     console.register_command("win", [&] {
         if (console.empty()) { role::Printf("Usage: \"win <map> <points> <lives> <time>\"."); return; }
         auto map = get_map_from_input();
-        auto mode = console.get_next_word() == "hs" ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
+        auto mode = console.get_next_word(true) == "hs" ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
         client.send(bmmo::level_finish_v2_msg{.content = {
             .points = console.get_next_int(), .lives = console.get_next_int(),
             .lifeBonus = 200, .levelBonus = map.level * 100, .timeElapsed = (float) console.get_next_double(),
@@ -1058,7 +1057,7 @@ int main(int argc, char** argv) {
     console.register_command("getbulletin", [&] { client.print_bulletin(); });
     console.register_command("scores", [&] {
         if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
-        bool hs_mode = (console.get_next_word() == "hs");
+        bool hs_mode = (console.get_next_word(true) == "hs");
         client.print_scores(hs_mode, console.empty() ? bmmo::map{} : get_map_from_input());
     });
 

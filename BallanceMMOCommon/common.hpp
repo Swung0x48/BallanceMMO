@@ -20,6 +20,7 @@
 #include "role/role.hpp"
 #include "utility/name_validator.hpp"
 #include "utility/command_parser.hpp"
+#include "utility/console.hpp"
 #include "utility/hostname_parser.hpp"
 #include "utility/string_utils.hpp"
 

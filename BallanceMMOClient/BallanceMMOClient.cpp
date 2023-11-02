@@ -986,6 +986,11 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
             else if (lower1 == "hs" || lower1 == "sr") {
                 OnCommand(m_bml, { "mmo", "mode", args[1] });
             }
+            else if (lower1 == "uuid") {
+                SendIngameMessage(std::format("Your UUID: {} (open ModLoader\\ModLoader.log to copy).",
+                                              boost::uuids::to_string(uuid_)));
+                SendIngameMessage("Keep this secret as it is possible to impersonate you with your UUID!");
+            }
             else if (lower1 == "fatalerror")
                 std::thread([] { trigger_fatal_error(); }).detach();
             /*else if (lower1 == "p") {
@@ -1088,7 +1093,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 
     switch (length) {
         case 2: {
-            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode", "scores", "fatalerror" };
+            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode", "scores", "fatalerror", "uuid" };
             break;
         }
         case 3: {

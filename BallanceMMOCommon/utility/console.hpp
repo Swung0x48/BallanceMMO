@@ -1,8 +1,8 @@
 #ifndef BALLANCEMMOSERVER_CONSOLE_HPP
 #define BALLANCEMMOSERVER_CONSOLE_HPP
-#include "../BallanceMMOCommon/entity/map.hpp"
-#include "../BallanceMMOCommon/utility/command_parser.hpp"
-#include "../BallanceMMOCommon/utility/string_utils.hpp"
+#include "../entity/map.hpp"
+#include "../utility/command_parser.hpp"
+#include "../utility/string_utils.hpp"
 #include <string>
 #include <functional>
 #include <map>
@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <mutex>
 
+namespace bmmo {
 class console {
     bmmo::command_parser parser_;
     std::map<std::string, std::function<void()>> commands_;
@@ -31,12 +32,14 @@ public:
     bool empty() const noexcept;
     inline const std::string get_command_name() const { return command_name_; };
 
-    const std::string get_next_word();
+    const std::string get_next_word(bool lowercase = false);
     const std::string get_rest_of_line();
     const bmmo::named_map get_next_map(bool with_name = false);
     inline int32_t get_next_int() { return std::atoi(get_next_word().c_str()); };
     inline int64_t get_next_long() { return std::atoll(get_next_word().c_str()); };
     inline double get_next_double() { return std::atof(get_next_word().c_str()); };
 };
+
+}
 
 #endif // BALLANCEMMOSERVER_CONSOLE_HPP

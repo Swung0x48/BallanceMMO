@@ -75,8 +75,9 @@ set(BMMO_CLIENT_HDR
         server_list.h
         text_sprite.h)
 set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp)
+file(GLOB BMMO_COMMON_SRC "../BallanceMMOCommon/src/*.cpp")
 
-add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC})
+add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC})
 set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClient")
 set_target_properties(BallanceMMOClient PROPERTIES SUFFIX ".bmod")
 target_include_directories(BallanceMMOClient PRIVATE
@@ -92,7 +93,8 @@ target_link_libraries(BallanceMMOClient PRIVATE
 
 add_library(BallanceMMOClient-BMLPlus SHARED
             ${BMMO_CLIENT_HDR}
-            ${BMMO_CLIENT_SRC})
+            ${BMMO_CLIENT_SRC}
+            ${BMMO_COMMON_SRC})
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES OUTPUT_NAME "BallanceMMOClient")
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES SUFFIX ".bmodp")
 target_include_directories(BallanceMMOClient-BMLPlus PRIVATE

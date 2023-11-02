@@ -19,8 +19,6 @@
 
 #include <ya_getopt.h>
 
-#include "console.hpp"
-
 using bmmo::message_utils::read_variable;
 
 enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
@@ -945,7 +943,7 @@ int main(int argc, char** argv) {
         role::FatalError("Fake server failed on setup.");
     std::thread server_thread([&replayer]() { replayer.run(); });
 
-    console console;
+    bmmo::console console;
     console.register_command("help", [&]() { role::Printf(console.get_help_string().c_str()); });
     console.register_command("play", [&]() {
         if (replayer.playing()) {

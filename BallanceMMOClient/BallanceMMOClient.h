@@ -209,6 +209,7 @@ private:
 	game_objects objects_;
 
 	server_list server_list_;
+	bmmo::console console_;
 
 	CK3dObject* player_ball_ = nullptr;
 	//std::vector<CK3dObject*> template_balls_;

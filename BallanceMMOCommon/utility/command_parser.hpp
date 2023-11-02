@@ -14,12 +14,12 @@ namespace bmmo {
             return cmd.find_first_not_of(" \t\n\v\f\r") == std::string::npos;
         }
 
-        std::string get_next_word() {
+        std::string get_next_word(bool lowercase = false) {
             std::string word;
             while (cmd.length() > 0 && cmd[0] == ' ')
                 cmd.erase(0, 1);
             while (cmd.length() > 0 && cmd[0] != ' ') {
-                word += cmd[0];
+                word += lowercase ? std::tolower(cmd[0]) : cmd[0];
                 cmd.erase(0, 1);
             }
             return word;
