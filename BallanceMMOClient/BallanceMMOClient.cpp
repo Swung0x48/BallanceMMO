@@ -129,7 +129,7 @@ bool BallanceMMOClient::show_console() {
                 Printf(i.c_str());
             while (true) {
                 std::cout << "\r> " << std::flush;
-                std::wstring wline;
+                std::string line;
                 /*wchar_t wc;
                 do {
                     wc = _getwch();
@@ -139,18 +139,14 @@ bool BallanceMMOClient::show_console() {
                 }
                 while (wc != L'\n');
                 std::cout << '\n';*/
-                if (!std::getline(std::wcin, wline)) {
+                if (!bmmo::console::read_input(line)) {
                     puts("stop");
                     hide_console();
                     break;
                 };
-                // std::wcout << wline << std::endl;
                 if (!console_running_)
                     break;
-                std::string line = bmmo::string_utils::ConvertWideToANSI(wline),
-                  cmd = "ballancemmo";
-                if (auto pos = line.rfind('\r'); pos != std::string::npos)
-                    line.erase(pos);
+                std::string cmd = "ballancemmo";
                 std::vector<std::string> args;
                 bmmo::command_parser parser(line);
                 while (!cmd.empty()) {
@@ -304,6 +300,7 @@ inline void BallanceMMOClient::exit_size_move() {
 void BallanceMMOClient::OnLoad()
 {
     init_config();
+    init_commands();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
     input_manager_ = m_bml->GetInputManager();
     load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sounds\\Menu_dong.wav", 0.88f);
@@ -725,365 +722,363 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 {
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
-        SendIngameMessage("BallanceMMO Help");
+        SendIngameMessage("BallanceMMO Help", bmmo::ansi::Bold);
         SendIngameMessage(std::format("Version: {}; build time: {}.",
                                       version_string, bmmo::string_utils::get_build_time_string()));
         SendIngameMessage("/mmo connect - Connect to server.");
         SendIngameMessage("/mmo disconnect - Disconnect from server.");
         SendIngameMessage("/mmo list - List online players.");
         SendIngameMessage("/mmo say - Send message to each other.");
+        SendIngameMessage("Full subcommand list:");
+        auto cmd_str = console_.get_help_string();
+        while (!cmd_str.empty()) {
+            auto pos = cmd_str.find(',', 80);
+            pos += (pos == std::string::npos) ? 0 : 2;
+            SendIngameMessage(cmd_str.substr(0, pos));
+            cmd_str.erase(0, pos);
+        }
     };
 
-    const size_t length = args.size();
-    std::string lower1;
-    if (length > 1) lower1 = boost::algorithm::to_lower_copy(args[1]);
+    const std::string full_command = bmmo::string_utils::join_strings(args, 1);
+    if (console_.execute(full_command))
+        return;
+    if (console_.get_command_name().empty())
+        help(bml);
+    else {
+        std::string extra_text;
+        if (auto hints = console_.get_command_hints(true); !hints.empty())
+            extra_text = " Did you mean: " + bmmo::string_utils::join_strings(hints, 0, ", ") + "?";
+        SendIngameMessage(std::format("Error: unknown subcommand \"{}\".{}",
+                                      console_.get_command_name(), extra_text));
+    }
+}
 
+void BallanceMMOClient::OnAsyncCommand(IBML* bml, const std::vector<std::string>& args) {
+    asio::post(thread_pool_, [=, this] { OnCommand(bml, args); });
+}
 
-    if (length >= 2 && length < 512 && connected()) {
-        if (lower1 == "s" || lower1 == "say") {
-            bmmo::chat_msg msg{};
-            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
-            msg.serialize();
+void BallanceMMOClient::init_commands() {
+    /*console_.register_command("p", [&] { objects_.physicalize_all(); });
+    console_.register_command("f", [&] { ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f); });
+    console_.register_command("u", [&] { ExecuteBB::UnsetPhysicsForce(player_ball_); });*/
 
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            return;
-        }
-        else if (lower1 == "announce") {
-            bmmo::important_notification_msg msg{};
-            msg.chat_content = bmmo::message_utils::join_strings(args, 2);
-            msg.serialize();
+    console_.register_command("say", [&] {
+        bmmo::chat_msg msg{};
+        msg.chat_content = console_.get_rest_of_line();
+        msg.serialize();
 
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            return;
-        }
-        else if (lower1 == "bulletin") {
-            bmmo::permanent_notification_msg msg{};
-            msg.text_content = bmmo::message_utils::join_strings(args, 2);
-            msg.serialize();
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            return;
-        }
-        else if (length >= 3) {
-            if (lower1 == "kick") {
-                bmmo::kick_request_msg msg{};
-                if (args[2][0] == '#')
-                    msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
-                else
-                    msg.player_name = args[2];
-                if (length > 3) {
-                    msg.reason = bmmo::message_utils::join_strings(args, 3);
-                }
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        return;
+    });
+    console_.register_aliases("say", {"s"});
+    console_.register_command("announce", [&] {
+        bmmo::important_notification_msg msg{};
+        msg.chat_content = console_.get_rest_of_line();
+        msg.serialize();
 
-                msg.serialize();
-                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        return;
+    });
+    console_.register_aliases("announce", {"a"});
+    console_.register_command("bulletin", [&] {
+        bmmo::permanent_notification_msg msg{};
+        msg.text_content = console_.get_rest_of_line();
+        msg.serialize();
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console_.register_aliases("bulletin", {"b"});
+    console_.register_command("kick", [&] {
+        bmmo::kick_request_msg msg{};
+        auto next_word = console_.get_next_word();
+        if (next_word.empty()) return;
+        if (next_word[0] == '#')
+            msg.player_id = (HSteamNetConnection) atoll(next_word.substr(1).c_str());
+        else
+            msg.player_name = next_word;
+        msg.reason = console_.get_rest_of_line();
+
+        msg.serialize();
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console_.register_command("scores", [&] {
+        bmmo::map rank_map;
+        auto mode = console_.get_next_word(true);
+        if (!console_.empty()) {
+            int level = std::clamp(atoi(console_.get_next_word().c_str()), 1, 13);
+            bmmo::hex_chars_from_string(rank_map.md5, bmmo::map::original_map_hashes[level]);
+            rank_map.level = level;
+            rank_map.type = bmmo::map_type::OriginalLevel;
+        } else
+            rank_map = last_countdown_map_;
+
+        asio::post(thread_pool_, [this, rank_map = std::move(rank_map), hs_mode = (mode == "hs")] {
+            std::unique_lock lk(client_mtx_);
+            auto map_it = maps_.find(rank_map.get_hash_bytes_string());
+            if (map_it == maps_.end() ||
+                    (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
+                SendIngameMessage("Error: ranking info not found for the specified map.",
+                                  bmmo::ansi::BrightRed);
                 return;
             }
-            else if (lower1 == "scores") {
-                bmmo::map rank_map;
-                if (length > 3 && !args[3].empty()) {
-                    int level = std::clamp(atoi(args[3].c_str()), 1, 13);
-                    bmmo::hex_chars_from_string(rank_map.md5, bmmo::map::original_map_hashes[level]);
-                    rank_map.level = level;
-                    rank_map.type = bmmo::map_type::OriginalLevel;
-                } else
-                    rank_map = last_countdown_map_;
-
-                asio::post(thread_pool_, [this, rank_map = std::move(rank_map), hs_mode = (args[2] == "hs")] {
-                    std::unique_lock lk(client_mtx_);
-                    auto map_it = maps_.find(rank_map.get_hash_bytes_string());
-                    if (map_it == maps_.end() ||
-                            (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
-                        SendIngameMessage("Error: ranking info not found for the specified map.",
-                                          bmmo::ansi::BrightRed);
-                        return;
-                    }
-                    auto& ranks = map_it->second.rankings;
-                    bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
-                    auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
-                            ranks, rank_map.get_display_name(map_names_), hs_mode);
-                    lk.unlock();
-                    size_t size = ranks.first.size() + ranks.second.size() + 1;
-                    std::string text; text.reserve(size * 64);
-                    for (const auto& line : formatted_texts) {
-                        text += line + '\n';
-                        if (console_running_)
-                            Printf(line.c_str());
-                        GetLogger()->Info("%s", line.c_str());
-                    }
-                    display_important_notification(text, size > 12 ? 11.0f : 15.0f, size + 1, 400);
-                });
-                return;
+            auto& ranks = map_it->second.rankings;
+            bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
+            auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
+                    ranks, rank_map.get_display_name(map_names_), hs_mode);
+            lk.unlock();
+            size_t size = ranks.first.size() + ranks.second.size() + 1;
+            std::string text; text.reserve(size * 64);
+            for (const auto& line : formatted_texts) {
+                text += line + '\n';
+                if (console_running_)
+                    Printf(line.c_str());
+                GetLogger()->Info("%s", line.c_str());
             }
-        }
-        if (length >= 4 && (lower1 == "whisper" || lower1 == "w")) {
-            bmmo::private_chat_msg msg{};
-            if (args[2][0] == '#')
-                msg.player_id = (HSteamNetConnection) atoll(args[2].substr(1).c_str());
+            display_important_notification(text, size > 12 ? 11.0f : 15.0f, size + 1, 400);
+        });
+    });
+    console_.register_command("whisper", [&] {
+        bmmo::private_chat_msg msg{};
+        auto next_word = console_.get_next_word();
+        if (next_word.empty()) return;
+        if (next_word[0] == '#')
+            msg.player_id = (HSteamNetConnection) atoll(next_word.substr(1).c_str());
+        else
+            msg.player_id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+        msg.chat_content = console_.get_rest_of_line();
+        msg.serialize();
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        SendIngameMessage(std::format("Whispered to {}: {}",
+            get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
+    });
+    console_.register_aliases("whisper", {"w"});
+    console_.register_command("help", [&] { OnAsyncCommand(m_bml, {"mmo"}); });
+    console_.register_command("connect", [&] { connect_to_server(console_.get_next_word()); });
+    console_.register_aliases("connect", {"c"});
+    console_.register_command("disconnect", [&] { disconnect_from_server(); });
+    console_.register_aliases("disconnect", {"d"});
+    console_.register_command("list", [&] {
+        if (!connected())
+            return;
+
+        auto cmd_name = console_.get_command_name();
+        bool show_id = (cmd_name == "list-id" || cmd_name == "li");
+
+        typedef std::tuple<HSteamNetConnection, std::string, bool> player_data;
+        std::vector<player_data> players, spectators;
+        players.reserve(db_.player_count() + 1);
+        db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+            if (pair.first == db_.get_client_id())
+                return true;
+            if (bmmo::name_validator::is_spectator(pair.second.name))
+                spectators.emplace_back(pair.first, pair.second.name, pair.second.cheated);
             else
-                msg.player_id = (args[2] == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(args[2]);
-            msg.chat_content = bmmo::message_utils::join_strings(args, 3);
-            msg.serialize();
-            send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            SendIngameMessage(std::format("Whispered to {}: {}",
-                get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
+                players.emplace_back(pair.first, pair.second.name, pair.second.cheated);
+            return true;
+        });
+        if (spectator_mode_)
+            spectators.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
+        else
+            players.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
+        int player_count = players.size();
+        std::ranges::sort(players, [](const player_data& i1, const player_data& i2)
+            { return boost::algorithm::ilexicographical_compare(std::get<1>(i1), std::get<1>(i2)); });
+        players.insert(players.begin(), spectators.begin(), spectators.end());
+
+        SendIngameMessage(std::format("{} player{} and {} spectator{} ({} total) online:",
+                                      player_count, player_count == 1 ? "" : "s",
+                                      spectators.size(), spectators.size() == 1 ? "" : "s",
+                                      players.size()));
+        std::string line; player_count = players.size();
+        for (int i = 0; i < player_count; ++i) {
+            const auto& [id, name, cheated] = players[i];
+            line.append(name + (cheated ? " [CHEAT]" : "")
+                        + (show_id ? (": " + std::to_string(id)) : ""));
+            if (i != player_count - 1) line.append(", ");
+            if (line.length() > 80) {
+                SendIngameMessage(line);
+                line.clear();
+            }
+        }
+
+        if (!line.empty()) SendIngameMessage(line);
+    });
+    console_.register_aliases("list", {"l", "list-id", "li"});
+    console_.register_command("dnf", [&] {
+        if (current_map_.level == 0 || spectator_mode_)
+            return;
+        send_dnf_message();
+    });
+    console_.register_command("show", [&] {
+        if (console_running_) {
+            SendIngameMessage("Error: console is already visible.");
             return;
         }
-    }
-
-    switch (length) {
-        case 1: {
-            help(bml);
+        /*_dup2(old_stdin, _fileno(stdin));
+        _dup2(old_stdout, _fileno(stdout));
+        _dup2(old_stderr, _fileno(stderr));*/
+        show_console();
+    });
+    console_.register_command("hide", [&] {
+        if (!console_running_) {
+            SendIngameMessage("Error: console is already hidden.");
             return;
         }
-        case 2: {
-            if (lower1 == "connect" || lower1 == "c") {
-                connect_to_server("");
+        hide_console();
+    });
+    console_.register_command("getpos", [&] {
+        if (!connected())
+            return;
+        std::map<std::string, TimedBallState> states;
+        db_.for_each([this, &states](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+            if (pair.first != db_.get_client_id())
+                states[pair.second.name] = pair.second.ball_state.front();
+            return true;
+        });
+        states[db_.get_nickname()] = local_state_handler_->get_local_state();
+        for (const auto& i: states) {
+            SendIngameMessage(std::format("{} is at {:.2f}, {:.2f}, {:.2f} with {} ball.",
+                              i.first,
+                              i.second.position.x, i.second.position.y, i.second.position.z,
+                              i.second.get_type_name()
+            ));
+        }
+    });
+    console_.register_aliases("getpos", {"gp"});
+    console_.register_command("getmap", [&] {
+        if (!connected())
+            return;
+        db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+            if (pair.first == db_.get_client_id())
+                return true;
+            SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
+                              pair.second.cheated ? "[CHEAT] " : "",
+                              pair.second.name, pair.second.current_sector,
+                              bmmo::get_ordinal_suffix(pair.second.current_sector),
+                              pair.second.current_map.get_display_name(map_names_)));
+            return true;
+        });
+    });
+    console_.register_aliases("getmap", {"gm"});
+    console_.register_command("announcemap", [&] {
+        if (!connected())
+            return;
+        send_current_map(bmmo::current_map_state::Announcement);
+    });
+    console_.register_aliases("announcemap", {"am"});
+    console_.register_command("reload", [&] {
+        if (!connected() || !m_bml->IsIngame())
+            return;
+        objects_.reload();
+        SendIngameMessage("Reload completed.");
+    });
+    console_.register_aliases("reload", {"rl"});
+    console_.register_command("gettimestamp", [&] {
+        db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+            SendIngameMessage(std::format("{}: last recalibrated timestamp: {}; mean time diff: {:.4f} s.",
+                              pair.second.name,
+                              pair.second.ball_state.front().timestamp, pair.second.time_diff / 1e6l));
+            return true;
+        });
+    });
+    console_.register_command("countdown", [&] {
+        if (!connected() || !m_bml->IsIngame())
+            return;
+        asio::post(thread_pool_, [this]() {
+            for (int i = 3; i >= 0; --i) {
+                send_countdown_message(static_cast<bmmo::countdown_type>(i), countdown_mode_);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
-            else if (lower1 == "disconnect" || lower1 == "d") {
-                disconnect_from_server();
-            }
-            else if (lower1 == "list" || lower1 == "l" || lower1 == "list-id" || lower1 == "li") {
-                if (!connected())
-                    return;
-
-                bool show_id = (lower1 == "list-id" || lower1 == "li");
-
-                typedef std::tuple<HSteamNetConnection, std::string, bool> player_data;
-                std::vector<player_data> players, spectators;
-                players.reserve(db_.player_count() + 1);
-                db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    if (pair.first == db_.get_client_id())
-                        return true;
-                    if (bmmo::name_validator::is_spectator(pair.second.name))
-                        spectators.emplace_back(pair.first, pair.second.name, pair.second.cheated);
-                    else
-                        players.emplace_back(pair.first, pair.second.name, pair.second.cheated);
-                    return true;
-                });
-                if (spectator_mode_)
-                    spectators.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
-                else
-                    players.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
-                int player_count = players.size();
-                std::ranges::sort(players, [](const player_data& i1, const player_data& i2)
-                    { return boost::algorithm::ilexicographical_compare(std::get<1>(i1), std::get<1>(i2)); });
-                players.insert(players.begin(), spectators.begin(), spectators.end());
-
-                SendIngameMessage(std::format("{} player{} and {} spectator{} ({} total) online:",
-                                              player_count, player_count == 1 ? "" : "s",
-                                              spectators.size(), spectators.size() == 1 ? "" : "s",
-                                              players.size()));
-                std::string line; player_count = players.size();
-                for (int i = 0; i < player_count; ++i) {
-                    const auto& [id, name, cheated] = players[i];
-                    line.append(name + (cheated ? " [CHEAT]" : "")
-                                + (show_id ? (": " + std::to_string(id)) : ""));
-                    if (i != player_count - 1) line.append(", ");
-                    if (line.length() > 80) {
-                        SendIngameMessage(line);
-                        line.clear();
-                    }
-                }
-
-                if (!line.empty())
-                    SendIngameMessage(line);
-            }
-            else if (lower1 == "dnf") {
-                if (current_map_.level == 0 || spectator_mode_)
-                    return;
-                send_dnf_message();
-            }
-            else if (lower1 == "show") {
-                if (console_running_) {
-                    SendIngameMessage("Error: console is already visible.");
-                    return;
-                }
-                /*_dup2(old_stdin, _fileno(stdin));
-                _dup2(old_stdout, _fileno(stdout));
-                _dup2(old_stderr, _fileno(stderr));*/
-                show_console();
-            }
-            else if (lower1 == "hide") {
-                if (!console_running_) {
-                    SendIngameMessage("Error: console is already hidden.");
-                    return;
-                }
-                hide_console();
-            }
-            else if (lower1 == "getpos" || lower1 == "gp") {
-                if (!connected())
-                    return;
-                std::map<std::string, TimedBallState> states;
-                db_.for_each([this, &states](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    if (pair.first != db_.get_client_id())
-                        states[pair.second.name] = pair.second.ball_state.front();
-                    return true;
-                });
-                states[db_.get_nickname()] = local_state_handler_->get_local_state();
-                for (const auto& i: states) {
-                    SendIngameMessage(std::format("{} is at {:.2f}, {:.2f}, {:.2f} with {} ball.",
-                                      i.first,
-                                      i.second.position.x, i.second.position.y, i.second.position.z,
-                                      i.second.get_type_name()
-                    ));
-                }
-            }
-            else if (lower1 == "getmap" || lower1 == "gm") {
-                if (!connected())
-                    return;
-                db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    if (pair.first == db_.get_client_id())
-                        return true;
-                    SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
-                                      pair.second.cheated ? "[CHEAT] " : "",
-                                      pair.second.name, pair.second.current_sector,
-                                      bmmo::get_ordinal_suffix(pair.second.current_sector),
-                                      pair.second.current_map.get_display_name(map_names_)));
-                    return true;
-                });
-            }
-            else if (lower1 == "announcemap" || lower1 == "am") {
-                if (!connected())
-                    return;
-                send_current_map(bmmo::current_map_state::Announcement);
-            }
-            else if (lower1 == "reload" || lower1 == "rl") {
-                if (!connected() || !m_bml->IsIngame())
-                    return;
-                objects_.reload();
-                SendIngameMessage("Reload completed.");
-            }
-            else if (lower1 == "gettimestamp") {
-                db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
-                    SendIngameMessage(std::format("{}: last recalibrated timestamp: {}; mean time diff: {:.4f} s.",
-                                      pair.second.name,
-                                      pair.second.ball_state.front().timestamp, pair.second.time_diff / 1e6l));
-                    return true;
-                });
-            }
-            else if (lower1 == "countdown") {
-                if (!connected() || !m_bml->IsIngame())
-                    return;
-                asio::post(thread_pool_, [this]() {
-                    for (int i = 3; i >= 0; --i) {
-                        send_countdown_message(static_cast<bmmo::countdown_type>(i), countdown_mode_);
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                    }
-                });
-            }
-            else if (lower1 == "ready") {
-                if (!connected() || !m_bml->IsIngame() || spectator_mode_)
-                    return;
-                bmmo::player_ready_msg msg{.content = {.ready = true}};
-                send(msg, k_nSteamNetworkingSend_Reliable);
-            }
-            else if (lower1 == "ready-cancel") {
-                if (!connected() || !m_bml->IsIngame() || spectator_mode_)
-                    return;
-                bmmo::player_ready_msg msg{.content = {.ready = false}};
-                send(msg, k_nSteamNetworkingSend_Reliable);
-            }
-            else if (lower1 == "hs" || lower1 == "sr") {
-                OnCommand(m_bml, { "mmo", "mode", args[1] });
-            }
-            else if (lower1 == "uuid") {
-                SendIngameMessage(std::format("Your UUID: {} (open ModLoader\\ModLoader.log to copy).",
-                                              boost::uuids::to_string(uuid_)));
-                SendIngameMessage("Keep this secret as it is possible to impersonate you with your UUID!");
-            }
-            else if (lower1 == "fatalerror")
-                std::thread([] { trigger_fatal_error(); }).detach();
-            /*else if (lower1 == "p") {
-                objects_.physicalize_all();
-            } else if (lower1 == "f") {
-                ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f);
-            } else if (lower1 == "u") {
-                ExecuteBB::UnsetPhysicsForce(player_ball_);
-            }*/
+        });
+    });
+    console_.register_command("ready", [&] {
+        if (!connected() || !m_bml->IsIngame() || spectator_mode_)
+            return;
+        bmmo::player_ready_msg msg{.content = {.ready = (console_.get_command_name() == "ready")}};
+        send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console_.register_aliases("ready", {"ready-cancel"});
+    console_.register_command("hs", [&] {
+        OnAsyncCommand(m_bml, { "mmo", "mode", console_.get_command_name()});
+    });
+    console_.register_aliases("hs", {"sr"});
+    console_.register_command("uuid", [&] {
+        SendIngameMessage(std::format("Your UUID: {} (open ModLoader\\ModLoader.log to copy).",
+                                      boost::uuids::to_string(uuid_)));
+        SendIngameMessage("Keep this secret as it is possible to impersonate you with your UUID!");
+    });
+    console_.register_command("fatalerror", [] { std::thread([] { trigger_fatal_error(); }).detach(); });
+    console_.register_command("cheat", [&] {
+        bmmo::cheat_toggle_msg msg{};
+        msg.content.cheated = (console_.get_next_word(true) == "on");
+        send(msg, k_nSteamNetworkingSend_Reliable);
+    });
+    console_.register_command("rankreset", [&] { reset_rank_ = true; });
+    console_.register_command("teleport", [&] {
+        if (!(connected() && m_bml->IsIngame() && m_bml->IsCheatEnabled()))
+            return;
+        auto next_word = console_.get_next_word();
+        if (next_word.empty()) return;
+        std::optional<PlayerState> state;
+        if (next_word[0] == '#')
+            state = db_.get((HSteamNetConnection) atoll(next_word.substr(1).c_str()));
+        else
+            state = db_.get_from_nickname(next_word);
+        if (!state.has_value()) {
+            SendIngameMessage("Error: requested player \"" + next_word + "\" does not exist.",
+                    bmmo::ansi::BrightRed);
             return;
         }
-        case 3: {
-            if (lower1 == "connect" || lower1 == "c") {
-                connect_to_server(args[2]);
-            }
-            else if (lower1 == "cheat") {
-                bool cheat_state = false;
-                if (boost::iequals(args[2], "on"))
-                    cheat_state = true;
-                bmmo::cheat_toggle_msg msg{};
-                msg.content.cheated = cheat_state;
-                send(msg, k_nSteamNetworkingSend_Reliable);
-            }
-            else if (lower1 == "rank" && boost::iequals(args[2], "reset")) {
-                reset_rank_ = true;
-            }
-            else if (lower1 == "teleport" || lower1 == "tp") {
-                if (!(connected() && m_bml->IsIngame() && m_bml->IsCheatEnabled()))
-                    return;
-                std::optional<PlayerState> state;
-                if (args[2][0] == '#')
-                    state = db_.get((HSteamNetConnection) atoll(args[2].substr(1).c_str()));
-                else
-                    state = db_.get_from_nickname(args[2]);
-                if (!state.has_value()) {
-                    SendIngameMessage("Error: requested player \"" + args[2] + "\" does not exist.",
-                            bmmo::ansi::BrightRed);
-                    return;
-                }
-                const std::string name = state.value().name;
-                const VxVector position = state.value().ball_state.front().position;
+        const std::string name = state.value().name;
+        const VxVector position = state.value().ball_state.front().position;
 
-                CKMessageManager* mm = m_bml->GetMessageManager();
-                CKMessageType ballDeact = mm->AddMessageType("BallNav deactivate");
-                mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Gameplay"));
-                mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Sound"));
+        CKMessageManager* mm = m_bml->GetMessageManager();
+        CKMessageType ballDeact = mm->AddMessageType("BallNav deactivate");
+        mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Gameplay"));
+        mm->SendMessageSingle(ballDeact, m_bml->GetGroupByName("All_Sound"));
 
-                m_bml->AddTimer(CKDWORD(2), [this, position, name]() {
-                    ExecuteBB::Unphysicalize(get_current_ball());
-                    get_current_ball()->SetPosition(position);
-                    CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
-                    VxMatrix matrix = camMF->GetWorldMatrix();
-                    m_bml->RestoreIC(camMF, true);
-                    camMF->SetPosition(position);
-                    camMF->SetWorldMatrix(matrix);
-                    m_dynamicPos->ActivateInput(0);
-                    m_dynamicPos->Activate();
-                    m_phyNewBall->ActivateInput(0);
-                    m_phyNewBall->Activate();
-                    m_phyNewBall->GetParent()->Activate();
-                    SendIngameMessage(std::format("Teleported to \"{}\" at ({:.3f}, {:.3f}, {:.3f}).",
-                                      name, position.x, position.y, position.z), bmmo::ansi::WhiteInverse);
-                });
-            }
-            else if (lower1 == "custommap") {
-                if (args[2] == "reset") { send_current_map(); return; }
-                bmmo::map map; srand((uint32_t)time(nullptr));
-                for (auto& i: map.md5) i = rand() % std::numeric_limits<uint8_t>::max();
-                bmmo::map_names_msg name_msg{};
-                name_msg.maps.emplace(map.get_hash_bytes_string(), args[2]);
-                name_msg.serialize();
-                send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
-                send(bmmo::current_map_msg{.content = {.map = map, .type = bmmo::current_map_state::EnteringMap}}, k_nSteamNetworkingSend_Reliable);
-                SendIngameMessage(std::format("Current map name set to \"{}\".", args[2]), bmmo::ansi::WhiteInverse);
-            }
-            else if (lower1 == "mode") {
-                if (boost::iequals(args[2], "hs"))
-                    countdown_mode_ = bmmo::level_mode::Highscore;
-                else
-                    countdown_mode_ = bmmo::level_mode::Speedrun;
-                std::string mode_name = (countdown_mode_ == bmmo::level_mode::Highscore) ? "Highscore" : "Speedrun";
-                SendIngameMessage(std::format("Level mode set to {} for future countdowns.", mode_name),
-                                  bmmo::ansi::WhiteInverse);
-                if (!connected()) {
-                    current_level_mode_ = countdown_mode_;
-                    SendIngameMessage(std::format("Local level mode set to {}.", mode_name));
-                }
-            }
-            return;
+        m_bml->AddTimer(CKDWORD(2), [this, position, name]() {
+            ExecuteBB::Unphysicalize(get_current_ball());
+            get_current_ball()->SetPosition(position);
+            CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
+            VxMatrix matrix = camMF->GetWorldMatrix();
+            m_bml->RestoreIC(camMF, true);
+            camMF->SetPosition(position);
+            camMF->SetWorldMatrix(matrix);
+            m_dynamicPos->ActivateInput(0);
+            m_dynamicPos->Activate();
+            m_phyNewBall->ActivateInput(0);
+            m_phyNewBall->Activate();
+            m_phyNewBall->GetParent()->Activate();
+            SendIngameMessage(std::format("Teleported to \"{}\" at ({:.3f}, {:.3f}, {:.3f}).",
+                              name, position.x, position.y, position.z), bmmo::ansi::WhiteInverse);
+        });
+    });
+    console_.register_aliases("teleport", {"tp"});
+    console_.register_command("custommap", [&] {
+        auto next_word = console_.get_rest_of_line();
+        if (boost::iequals(next_word, "reset")) { send_current_map(); return; }
+        bmmo::map map; srand((uint32_t)time(nullptr));
+        for (auto& i : map.md5) i = rand() % std::numeric_limits<uint8_t>::max();
+        bmmo::map_names_msg name_msg{};
+        name_msg.maps.emplace(map.get_hash_bytes_string(), next_word);
+        name_msg.serialize();
+        send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(bmmo::current_map_msg{ .content = {.map = map, .type = bmmo::current_map_state::EnteringMap} }, k_nSteamNetworkingSend_Reliable);
+        SendIngameMessage(std::format("Current map name set to \"{}\".", next_word), bmmo::ansi::WhiteInverse);
+    });
+    console_.register_command("mode", [&] {
+        if (console_.get_next_word(true) == "hs")
+            countdown_mode_ = bmmo::level_mode::Highscore;
+        else
+            countdown_mode_ = bmmo::level_mode::Speedrun;
+        std::string mode_name = (countdown_mode_ == bmmo::level_mode::Highscore) ? "Highscore" : "Speedrun";
+        SendIngameMessage(std::format("Level mode set to {} for future countdowns.", mode_name),
+                          bmmo::ansi::WhiteInverse);
+        if (!connected()) {
+            current_level_mode_ = countdown_mode_;
+            SendIngameMessage(std::format("Local level mode set to {}.", mode_name));
         }
-    }
-
-    help(bml);
+    });
 }
 
 const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::vector<std::string>& args) {
@@ -1093,8 +1088,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 
     switch (length) {
         case 2: {
-            return { "connect", "disconnect", "help", "say", "list", "list-id", "cheat", "dnf", "show", "hide", "rank reset", "getmap", "getpos", "announcemap", "teleport", "whisper", "reload", "countdown", "ready", "ready-cancel", "announce", "bulletin", "mode", "scores", "fatalerror", "uuid" };
-            break;
+            return console_.get_command_list();
         }
         case 3: {
             if (lower1 == "teleport" || lower1 == "kick" || lower1 == "tp" || lower1 == "whisper" || lower1 == "w") {

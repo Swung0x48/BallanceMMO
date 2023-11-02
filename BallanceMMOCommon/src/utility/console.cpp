@@ -10,6 +10,13 @@ const std::string console::get_help_string() const {
     return help_string;
 };
 
+const std::vector<std::string> console::get_command_list() const {
+    std::remove_const_t<decltype(get_command_list())> command_list;
+    for (const auto& i: commands_)
+        command_list.emplace_back(i.first);
+    return command_list;
+};
+
 const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) const {
     std::string start_name(command_name_);
     if (fuzzy_matching && start_name.length() > 1)
@@ -25,7 +32,6 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
 };
 
 bool console::read_input(std::string& buf) {
-    // std::unique_lock lk(console_mutex_);
 #ifdef _WIN32
     std::wstring wbuf;
     bool success = bool(std::getline(std::wcin, wbuf));

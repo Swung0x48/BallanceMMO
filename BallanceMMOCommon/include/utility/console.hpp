@@ -19,10 +19,11 @@ class console {
 
 public:
     const std::string get_help_string() const;
+    const std::vector<std::string> get_command_list() const;
     const std::vector<std::string> get_command_hints(bool fuzzy_matching = false) const;
 
-    // returns whether the stream has no errors.
-    bool read_input(std::string& buf);
+    // returns true if the stream doesn't have any errors.
+    static bool read_input(std::string& buf);
     bool execute(const std::string &cmd);
 
     bool register_command(const std::string &name, const std::function<void()> &handler);

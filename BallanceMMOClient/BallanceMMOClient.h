@@ -136,6 +136,7 @@ private:
 	void OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key, IProperty* prop) override;
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
+	void OnAsyncCommand(IBML* bml, const std::vector<std::string>& args);
 	const std::vector<std::string> OnTabComplete(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
@@ -210,6 +211,7 @@ private:
 
 	server_list server_list_;
 	bmmo::console console_;
+	void init_commands();
 
 	CK3dObject* player_ball_ = nullptr;
 	//std::vector<CK3dObject*> template_balls_;
