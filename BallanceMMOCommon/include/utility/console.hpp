@@ -2,12 +2,9 @@
 #define BALLANCEMMOSERVER_CONSOLE_HPP
 #include "../entity/map.hpp"
 #include "../utility/command_parser.hpp"
-#include "../utility/string_utils.hpp"
 #include <string>
 #include <functional>
 #include <map>
-#include <iostream>
-#include <algorithm>
 #include <mutex>
 
 namespace bmmo {
@@ -23,7 +20,7 @@ public:
     const std::vector<std::string> get_command_hints(bool fuzzy_matching = false) const;
 
     // returns true if the stream doesn't have any errors.
-    static bool read_input(std::string& buf);
+    static bool read_input(std::string &buf);
     bool execute(const std::string &cmd);
 
     bool register_command(const std::string &name, const std::function<void()> &handler);
@@ -31,9 +28,9 @@ public:
     bool unregister_command(const std::string &name);
 
     bool empty() const noexcept;
-    inline const std::string get_command_name() const { return command_name_; };
+    inline const std::string get_command_name() const noexcept { return command_name_; };
 
-    const std::string get_next_word(bool lowercase = false);
+    const std::string get_next_word(bool to_lowercase = false);
     const std::string get_rest_of_line();
     const bmmo::named_map get_next_map(bool with_name = false);
     inline int32_t get_next_int() { return std::atoi(get_next_word().c_str()); };

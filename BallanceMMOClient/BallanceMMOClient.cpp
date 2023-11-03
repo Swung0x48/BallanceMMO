@@ -833,7 +833,7 @@ void BallanceMMOClient::init_commands() {
                     Printf(line.c_str());
                 GetLogger()->Info("%s", line.c_str());
             }
-            display_important_notification(text, size > 12 ? 11.0f : 15.0f, size + 1, 400);
+            display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);
         });
     });
     console_.register_command("whisper", [&] {

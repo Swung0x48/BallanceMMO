@@ -28,4 +28,4 @@
 /BallanceMMOClient/build
 /include/BMLPlus/BMLPlus
 /include
-/BallanceMMOCommon/config/version_config.h
+/BallanceMMOCommon/include/config/version_config.h

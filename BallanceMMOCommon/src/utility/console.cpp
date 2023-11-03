@@ -1,4 +1,7 @@
+#include <iostream>
+#include <algorithm>
 #include "utility/console.hpp"
+#include "utility/string_utils.hpp"
 
 namespace bmmo {
 
@@ -31,7 +34,7 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
     return hints;
 };
 
-bool console::read_input(std::string& buf) {
+bool console::read_input(std::string &buf) {
 #ifdef _WIN32
     std::wstring wbuf;
     bool success = bool(std::getline(std::wcin, wbuf));
@@ -86,8 +89,8 @@ bool console::empty() const noexcept {
     return parser_.empty();
 };
 
-const std::string console::get_next_word(bool lowercase) {
-    return parser_.get_next_word(lowercase);
+const std::string console::get_next_word(bool to_lowercase) {
+    return parser_.get_next_word(to_lowercase);
 };
 
 const std::string console::get_rest_of_line() {

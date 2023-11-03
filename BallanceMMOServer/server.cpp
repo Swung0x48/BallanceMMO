@@ -990,7 +990,8 @@ protected:
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
                 const HSteamNetConnection current_player_id  = networking_msg->m_conn;
-                Printf("%s(%u, %s): %s", muted ? "[Muted] " : "", current_player_id, current_player_name, msg.chat_content);
+                Printf(muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset, "%s(%u, %s): %s",
+                        muted ? "[Muted] " : "", current_player_id, current_player_name, msg.chat_content);
 
                 if (muted) {
                     bmmo::action_denied_msg msg{.content = {bmmo::deny_reason::PlayerMuted}};
@@ -1044,7 +1045,7 @@ protected:
                 msg.player_id = networking_msg->m_conn;
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf(bmmo::ansi::BrightCyan | bmmo::ansi::Bold,
+                Printf(bmmo::ansi::BrightCyan | (muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Bold),
                     "%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
                     msg.player_id, client_it->second.name, msg.chat_content);
                 if (muted) break;
@@ -1292,7 +1293,8 @@ protected:
                 bmmo::string_utils::sanitize_string(msg.text_content);
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf(bmmo::ansi::BrightCyan, "%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
+                Printf(bmmo::ansi::BrightCyan | (muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset),
+                        "%s[Bulletin] %s%s", muted ? "[Muted] " : "", client_it->second.name,
                         msg.text_content.empty() ? " - Content cleared" : ": " + msg.text_content);
                 if (muted) break;
                 msg.title = client_it->second.name;
