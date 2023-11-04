@@ -103,65 +103,66 @@ void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr
 }
 
 bool BallanceMMOClient::show_console() {
-    if (AllocConsole()) {
-        SetConsoleTitle("BallanceMMO Console");
-        if (HWND hwnd = GetConsoleWindow()) {
-            if (HMENU hMenu = GetSystemMenu(hwnd, FALSE)) {
-                EnableMenuItem(hMenu, SC_CLOSE, MF_BYCOMMAND | MF_DISABLED | MF_GRAYED);
+    bool console_allocated = AllocConsole();
+    HWND hwnd = GetConsoleWindow();
+    if (!hwnd)
+        return false;
+    owned_console_ = console_allocated;
+    SetConsoleTitle("BallanceMMO Console");
+    if (HMENU hMenu = GetSystemMenu(hwnd, FALSE)) {
+        EnableMenuItem(hMenu, SC_CLOSE, MF_BYCOMMAND | MF_DISABLED | MF_GRAYED);
+    }
+    /*old_stdin = _dup(_fileno(stdin));
+    old_stdout = _dup(_fileno(stdout));
+    old_stderr = _dup(_fileno(stderr));*/
+    BindCrtHandlesToStdHandles(true, true, true);
+    /*        freopen("CONIN$", "r", stdin);
+            freopen("CONOUT$", "w", stdout);
+            freopen("CONOUT$", "w", stderr);*/
+    if (console_thread_.joinable())
+        console_thread_.join();
+    console_thread_ = std::thread([&]() {
+        console_running_ = true;
+        DWORD mode;
+        GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
+        SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
+        if (owned_console_)
+            for (const auto& i : previous_msg_) Printf(i.c_str());
+        while (true) {
+            std::cout << "\r> " << std::flush;
+            std::string line;
+            /*wchar_t wc;
+            do {
+                wc = _getwch();
+                wline += wc;
+                ungetwc(wc, stdin);
+                std::wcout << wc;
             }
+            while (wc != L'\n');
+            std::cout << '\n';*/
+            if (!bmmo::console::read_input(line)) {
+                puts("stop");
+                hide_console();
+                break;
+            };
+            if (!console_running_)
+                break;
+            std::string cmd = "ballancemmo";
+            std::vector<std::string> args;
+            bmmo::command_parser parser(line);
+            while (!cmd.empty()) {
+                args.push_back(cmd);
+                cmd = parser.get_next_word();
+            }
+            if (args.size() <= 1) continue;
+            else if (args[1] == "mmo" || args[1] == "ballancemmo")
+                args.erase(args.begin());
+            GetLogger()->Info("Execute command from console: %s", line.c_str());
+            OnCommand(m_bml, args);
         }
-        /*old_stdin = _dup(_fileno(stdin));
-        old_stdout = _dup(_fileno(stdout));
-        old_stderr = _dup(_fileno(stderr));*/
-        BindCrtHandlesToStdHandles(true, true, true);
-        /*        freopen("CONIN$", "r", stdin);
-                freopen("CONOUT$", "w", stdout);
-                freopen("CONOUT$", "w", stderr);*/
-        if (console_thread_.joinable())
-            console_thread_.join();
-        console_thread_ = std::thread([&]() {
-            console_running_ = true;
-            DWORD mode;
-            GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
-            SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-            std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
-            for (const auto& i : previous_msg_)
-                Printf(i.c_str());
-            while (true) {
-                std::cout << "\r> " << std::flush;
-                std::string line;
-                /*wchar_t wc;
-                do {
-                    wc = _getwch();
-                    wline += wc;
-                    ungetwc(wc, stdin);
-                    std::wcout << wc;
-                }
-                while (wc != L'\n');
-                std::cout << '\n';*/
-                if (!bmmo::console::read_input(line)) {
-                    puts("stop");
-                    hide_console();
-                    break;
-                };
-                if (!console_running_)
-                    break;
-                std::string cmd = "ballancemmo";
-                std::vector<std::string> args;
-                bmmo::command_parser parser(line);
-                while (!cmd.empty()) {
-                    args.push_back(cmd);
-                    cmd = parser.get_next_word();
-                }
-                if (args[1] == "mmo" || args[1] == "ballancemmo")
-                    args.erase(args.begin());
-                GetLogger()->Info("Execute command from console: %s", line.c_str());
-                OnCommand(m_bml, args);
-            }
-        });
-        return true;
-    };
-    return false;
+    });
+    return true;
 }
 
 bool BallanceMMOClient::hide_console() {
@@ -174,6 +175,9 @@ bool BallanceMMOClient::hide_console() {
     fclose(stderr);*/
     //std::this_thread::sleep_for(std::chrono::milliseconds(100));
     //TerminateThread(console_thread_.native_handle(), 0);
+    if (!owned_console_)
+        return false;
+    owned_console_ = false;
     if (FreeConsole())
         return true;
     return false;

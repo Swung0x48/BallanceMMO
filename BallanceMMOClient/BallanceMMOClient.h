@@ -194,6 +194,7 @@ private:
 	std::thread console_thread_;
 	std::thread player_list_thread_;
 
+	bool owned_console_ = false;
 	std::atomic_bool console_running_ = false;
 	std::atomic_bool player_list_visible_ = false;
 
@@ -1113,7 +1114,7 @@ private:
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		previous_msg_.push_back(msg);
-		if (console_running_)
+		if (console_running_ && owned_console_)
 			Printf(ansi_color, "%s", msg);
 		call_sync_method([this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
 	}
