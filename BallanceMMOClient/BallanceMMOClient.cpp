@@ -1091,7 +1091,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
             return console_.get_command_list();
         }
         case 3: {
-            if (lower1 == "teleport" || lower1 == "kick" || lower1 == "tp" || lower1 == "whisper" || lower1 == "w") {
+            if (std::set<std::string>{"teleport", "tp", "kick", "whisper", "w"}.contains(lower1)) {
                 std::vector<std::string> options;
                 options.reserve(2 * db_.player_count() + 2);
                 db_.for_each([this, &options, &args](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
@@ -1362,7 +1362,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         ping_thread_ = std::thread([this]() {
             { // race condition mitigation
                 std::unique_lock client_lk(client_mtx_);
-                client_cv_.wait(client_lk, [this] { return connected(); });
+                client_cv_.wait(client_lk);
             }
             while (connected()) {
                 auto status = get_status();

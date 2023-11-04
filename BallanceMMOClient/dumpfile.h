@@ -106,9 +106,10 @@ namespace NSDumpFile
          "F",
          "Meow :3",
          "FATAW EWWA",
-         "Error details:\n Error displaying the previous error.",
+         "Error details:\n- Error displaying the previous error.",
          "Error messages\ncannot completely convey.\nWe now know shared loss.",
          "Fun fact: MMO stands for Massive Massacre On-going",
+         "A wild exception appeared!\nException used Fatal Error!\nIt's super effective!",
     };
     constexpr const char* DumpPath = "..\\CrashDumps";
     std::function<void(std::string&)> CrashCallback{};
@@ -165,8 +166,9 @@ namespace NSDumpFile
         //FatalAppExit(-1, extraText.c_str());
         char basename[128];
         GetModuleBaseName(GetCurrentProcess(), NULL, basename, sizeof(basename));
-        std::ignore = MessageBox(NULL, extraText.c_str(),
-                        (basename + std::string{" - Fatal Application Exit"}).c_str(), MB_OK | MB_ICONERROR);
+        MessageBox(NULL, extraText.c_str(),
+                        (basename + std::string{" - Fatal Application Exit"}).c_str(),
+                        MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
         FatalExit(-1);
         return EXCEPTION_CONTINUE_SEARCH;
     }

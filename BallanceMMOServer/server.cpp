@@ -686,7 +686,7 @@ protected:
         }
         // check if name exists
         else if (username_.contains(bmmo::string_utils::to_lower(msg.nickname))) {
-            reason << "A player with the same username \"" << msg.nickname << "\" already exists on this serer.";
+            reason << "A player with the same username \"" << msg.nickname << "\" already exists on this server.";
             nReason = bmmo::connection_end::ExistingName;
         }
         // validate nickname length

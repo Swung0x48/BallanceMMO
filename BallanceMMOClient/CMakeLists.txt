@@ -80,7 +80,7 @@ set(BMMO_CLIENT_HDR
         text_sprite.h)
 set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp)
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
-file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/utility/console.cpp)
+file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
 add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC})
 set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClient")

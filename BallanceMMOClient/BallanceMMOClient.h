@@ -857,6 +857,7 @@ private:
 
 	void cleanup(bool down = false, bool linger = true) {
 		std::lock_guard<std::mutex> lk(bml_mtx_);
+		client_cv_.notify_all();
 		if (player_list_visible_) {
 			player_list_visible_ = false;
 			asio::post(thread_pool_, [this] {

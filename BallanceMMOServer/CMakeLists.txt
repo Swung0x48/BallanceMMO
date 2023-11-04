@@ -49,7 +49,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(yaml-cpp)
 
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
-file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/utility/console.cpp)
+file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
 add_executable(BallanceMMOServer server.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
 target_include_directories(BallanceMMOServer PRIVATE)
