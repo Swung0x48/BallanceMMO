@@ -1726,6 +1726,12 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) { server.Printf(e.what()); return; }
     });
     console.register_command("playstream", [&] {
+        auto client = k_HSteamNetConnection_Invalid;
+        if (console.get_command_name() == "playstream#") {
+            client = get_client_id_from_console();
+            if (client == k_HSteamNetConnection_Invalid) return;
+        }
+        const bool broadcast = (client == k_HSteamNetConnection_Invalid);
         try {
             auto idata = YAML::Load(console.get_rest_of_line());
             bmmo::sound_stream_msg msg{};
@@ -1752,10 +1758,13 @@ int main(int argc, char** argv) {
                 server.Printf("Error serializing message.");
                 return;
             }
-            server.Printf(bmmo::ansi::WhiteInverse, "Sending sound <%s>, size: %d", msg.path, (uint32_t) msg.size());
-            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.Printf(bmmo::ansi::WhiteInverse, "Sending sound <%s>, size: %d to %s",
+                    msg.path, (uint32_t) msg.size(), broadcast ? "[all]" : std::to_string(client));
+            if (broadcast) server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            else server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         } catch (const std::exception& e) { server.Printf(e.what()); return; }
     });
+    console.register_aliases("playstream", {"playstream#"});
     console.register_command("scores", [&] {
         if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
         bool hs_mode = (console.get_next_word(true) == "hs");
