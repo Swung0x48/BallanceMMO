@@ -10,6 +10,7 @@
 #include "local_state_handler_impl.h"
 #include "dumpfile.h"
 #include "server_list.h"
+#include "console_window.h"
 #include <map>
 #include <unordered_map>
 #include <condition_variable>
@@ -24,12 +25,9 @@
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/regex.hpp>
-#include <boost/circular_buffer.hpp>
 #include <openssl/md5.h>
 // #include <openssl/sha.h>
 #include <fstream>
-#include <io.h>
-#include <fcntl.h>
 #include <ShlObj.h>
 
 #define PICOJSON_USE_INT64
@@ -46,7 +44,8 @@ public:
 	BallanceMMOClient(IBML* bml):
 		IMod(bml),
 		objects_(bml, db_),
-		server_list_(bml, GetLogger(), [this](std::string addr, std::string name) { connect_to_server(addr, name); })
+		server_list_(bml, GetLogger(), [this](std::string addr, std::string name) { connect_to_server(addr, name); }),
+		console_window_(bml, GetLogger(), [this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); })
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
@@ -150,8 +149,6 @@ private:
 
 	inline void on_sector_changed();
 
-	bool show_console();
-	bool hide_console();
 	void show_player_list();
 	inline void update_player_list(text_sprite& player_list, int& last_player_count, int& last_font_size);
 
@@ -191,11 +188,8 @@ private:
 	asio::thread_pool thread_pool_;
 	std::thread network_thread_;
 	std::thread ping_thread_;
-	std::thread console_thread_;
 	std::thread player_list_thread_;
 
-	bool owned_console_ = false;
-	std::atomic_bool console_running_ = false;
 	std::atomic_bool player_list_visible_ = false;
 
 	const float RIGHT_MOST = 0.98f;
@@ -211,6 +205,7 @@ private:
 	game_objects objects_;
 
 	server_list server_list_;
+	console_window console_window_;
 	bmmo::console console_;
 	void init_commands();
 
@@ -866,11 +861,9 @@ private:
 			});
 		}
 		if (down) {
-			console_running_ = false;
+			console_window_.hide();
 			asio::post(thread_pool_, [this] {
-				FreeConsole();
-				if (console_thread_.joinable())
-					console_thread_.join();
+				console_window_.free_thread();
 			});
 		}
 
@@ -1088,8 +1081,6 @@ private:
 		MD5_Final(result, &md5Context);
 	}
 
-	boost::circular_buffer<std::string> previous_msg_ = decltype(previous_msg_)(8);
-
 	// Windows 7 does not have GetDpiForSystem
 	typedef UINT (WINAPI* GetDpiForSystemPtr) (void);
 	GetDpiForSystemPtr const get_system_dpi = [] {
@@ -1113,9 +1104,7 @@ private:
 	}
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
-		previous_msg_.push_back(msg);
-		if (console_running_ && owned_console_)
-			Printf(ansi_color, "%s", msg);
+		console_window_.print_text(msg.c_str(), ansi_color);
 		call_sync_method([this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
 	}
 

@@ -68,6 +68,7 @@ set(BMMO_CLIENT_HDR
         bml_includes.h
         client.h
         CommandMMO.h
+        console_window.h
         dumpfile.h
         exported_client.h
         game_objects.h
