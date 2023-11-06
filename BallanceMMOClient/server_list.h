@@ -9,11 +9,12 @@
 #include <picojson/picojson.h>
 
 #include "bml_includes.h"
+#include "log_manager.h"
 
 class server_list {
 private:
     IBML* bml_;
-    ILogger* logger_;
+    log_manager* log_manager_;
     InputHook* input_manager_{};
     std::mutex mtx_{};
     std::unique_ptr<BGui::Gui> gui_;
@@ -272,8 +273,8 @@ private:
     }
 
 public:
-    server_list(IBML* bml, ILogger* logger, std::function<void(std::string, std::string)> connect_callback):
-            bml_(bml), logger_(logger), connect_callback_(connect_callback) {
+    server_list(IBML* bml, log_manager* log_manager, decltype(connect_callback_) connect_callback):
+            bml_(bml), log_manager_(log_manager), connect_callback_(connect_callback) {
         picojson::value v;
         std::ifstream extra_config(EXTRA_CONFIG_PATH);
         if (extra_config.is_open()) extra_config >> v;
@@ -284,7 +285,7 @@ public:
             server_index_ = (size_t)v.get<picojson::object>()["selected_server"].get<int64_t>();
         }
         catch (const std::exception& e) {
-            logger_->Info("Error parsing %s: %s", EXTRA_CONFIG_PATH, e.what());
+            log_manager_->get_logger()->Info("Error parsing %s: %s", EXTRA_CONFIG_PATH, e.what());
         }
     }
 

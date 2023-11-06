@@ -132,7 +132,12 @@ inline void BallanceMMOClient::exit_size_move() {
 
 void BallanceMMOClient::OnLoad()
 {
-    init_config();
+    config_manager_.init_config();
+    objects_.toggle_extrapolation(config_manager_["extrapolation"]->GetBoolean());
+    parse_and_set_player_list_color(config_manager_["player_list_color"]);
+    objects_.toggle_dynamic_opacity(config_manager_["dynamic_opacity"]->GetBoolean());
+    sound_enabled_ = config_manager_["sound_notification"]->GetBoolean();
+
     init_commands();
     //client_ = std::make_unique<client>(GetLogger(), m_bml);
     input_manager_ = m_bml->GetInputManager();
@@ -145,19 +150,7 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_bubble_, "MMO_Sound_Bubble", "..\\Sounds\\Extra_Life_Blob.wav", 0.88f);
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 
-    if (!std::filesystem::is_directory(NSDumpFile::DumpPath)) return;
-    for (const auto& entry : std::filesystem::directory_iterator(NSDumpFile::DumpPath)) {
-        if (entry.is_directory()) continue;
-        char dump_ver[32]{}, dump_time_str[32]{};
-        std::ignore = std::sscanf(entry.path().filename().string().c_str(), "BMMO_%31[^_]_%31[^.].dmp",
-                                  dump_ver, dump_time_str);
-        std::stringstream time_stream(dump_time_str); std::tm time_struct;
-        time_stream >> std::get_time(&time_struct, "%Y%m%d-%H%M%S");
-        if (time_stream.fail()) continue;
-        auto time_diff = std::time(nullptr) - std::mktime(&time_struct);
-        if (time_diff > 86400ll * 7)
-            std::filesystem::remove(entry);
-    }
+    cleanup_old_crash_dumps();
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -276,8 +269,8 @@ void BallanceMMOClient::OnPostStartMenu()
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
         md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
 
-        validate_nickname(props_["playername"]);
-        db_.set_nickname(props_["playername"]->GetString());
+        config_manager_.validate_nickname();
+        db_.set_nickname(config_manager_["playername"]->GetString());
 
         auto* energy_array_ptr = m_bml->GetArrayByName("Energy");
         energy_array_ = CKOBJID(energy_array_ptr);
@@ -475,44 +468,23 @@ void BallanceMMOClient::OnCheatEnabled(bool enable) {
 }
 
 void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key, IProperty* prop) {
-    if (prop == props_["playername"]) {
-        if (bypass_name_check_) {
-            bypass_name_check_ = false;
+    if (prop == config_manager_["playername"]) {
+        if (!config_manager_.check_and_set_nickname(prop, db_))
             return;
-        }
-        using namespace std::chrono;
-        auto last_name_change = sys_time(seconds(last_name_change_time_));
-        if (std::chrono::system_clock::now() - last_name_change < 24h) {
-            bypass_name_check_ = true;
-            prop->SetString(db_.get_nickname().c_str());
-            auto next_name_change = system_clock::to_time_t(last_name_change + 24h);
-            std::string error_msg(128, '\0');
-            std::strftime(error_msg.data(), error_msg.size(),
-                "Error: You can only change your name every 24 hours (after %F %T).",
-                std::localtime(&next_name_change));
-            SendIngameMessage(error_msg.c_str(), bmmo::ansi::BrightRed);
-            return;
-        }
-        std::string new_name = prop->GetString();
-        if (new_name == db_.get_nickname())
-          return;
-        name_changed_ = true;
-        validate_nickname(prop);
-        db_.set_nickname(prop->GetString());
     }
-    else if (prop == props_["extrapolation"]) {
+    else if (prop == config_manager_["extrapolation"]) {
         objects_.toggle_extrapolation(prop->GetBoolean());
         return;
     }
-    else if (prop == props_["dynamic_opacity"]) {
+    else if (prop == config_manager_["dynamic_opacity"]) {
         objects_.toggle_dynamic_opacity(prop->GetBoolean());
         return;
     }
-    else if (prop == props_["player_list_color"]) {
+    else if (prop == config_manager_["player_list_color"]) {
         parse_and_set_player_list_color(prop);
         return;
     }
-    else if (prop == props_["sound_notification"]) {
+    else if (prop == config_manager_["sound_notification"]) {
         sound_enabled_ = prop->GetBoolean();
         return;
     }
@@ -526,7 +498,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
 void BallanceMMOClient::OnExitGame()
 {
     UnhookWinEvent(move_size_hook_);
-    check_and_save_name_change_time();
+    config_manager_.check_and_save_name_change_time();
     cleanup(true);
     client::destroy();
 }
@@ -835,7 +807,7 @@ void BallanceMMOClient::init_commands() {
     console_.register_aliases("hs", {"sr"});
     console_.register_command("uuid", [&] {
         SendIngameMessage(std::format("Your UUID: {} (open ModLoader\\ModLoader.log to copy).",
-                                      boost::uuids::to_string(uuid_)));
+                                      boost::uuids::to_string(config_manager_.get_uuid())));
         SendIngameMessage("Keep this secret as it is possible to impersonate you with your UUID!");
     });
     console_.register_command("fatalerror", [] { std::thread([] { trigger_fatal_error(); }).detach(); });
@@ -1164,8 +1136,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         //status_->paint(0xff00ff00);
         SendIngameMessage("Connected to server.");
         std::string nickname = db_.get_nickname();
-        check_and_save_name_change_time();
-        spectator_mode_ = props_["spectator"]->GetBoolean();
+        config_manager_.check_and_save_name_change_time();
+        spectator_mode_ = config_manager_["spectator"]->GetBoolean();
         if (spectator_mode_) {
             nickname = bmmo::name_validator::get_spectator_nickname(nickname);
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
@@ -1186,7 +1158,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         msg.nickname = nickname;
         msg.version = bmmo::current_version;
         msg.cheated = m_bml->IsCheatEnabled() && !spectator_mode_; // always false in spectator mode
-        memcpy(msg.uuid, &uuid_, sizeof(uuid_));
+        memcpy(msg.uuid, &(config_manager_.get_uuid()), sizeof(config_manager_.get_uuid()));
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         if (ping_thread_.joinable())

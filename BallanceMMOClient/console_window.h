@@ -8,6 +8,7 @@
 #include <boost/circular_buffer.hpp>
 #include "bml_includes.h"
 #include "common.hpp"
+#include "log_manager.h"
 
 void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {
     // Re-initialize the C runtime "FILE" handles with clean handles bound to "nul". We do this because it has been
@@ -102,7 +103,7 @@ void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr
 class console_window {
 private:
     IBML* bml_;
-    ILogger* logger_;
+    log_manager* log_manager_;
     std::function<void(IBML*, const std::vector<std::string>&)> command_callback_;
     std::thread console_thread_;
     bool owned_console_ = false;
@@ -110,8 +111,8 @@ private:
     boost::circular_buffer<std::string> previous_msg_ = decltype(previous_msg_)(8);
 
 public:
-    console_window(IBML* bml, ILogger* logger, decltype(command_callback_) command_callback):
-      bml_(bml), logger_(logger), command_callback_(command_callback) {}
+    console_window(IBML* bml, log_manager* log_manager, decltype(command_callback_) command_callback):
+        bml_(bml), log_manager_(log_manager), command_callback_(command_callback) {}
 
     void print_text(const char* text, int ansi_color = bmmo::ansi::Reset) {
         previous_msg_.push_back(text);
@@ -158,7 +159,7 @@ public:
             if (args.size() <= 1) continue;
             else if (args[1] == "mmo" || args[1] == "ballancemmo")
                 args.erase(args.begin());
-            logger_->Info("Execute command from console: %s", line.c_str());
+            log_manager_->get_logger()->Info("Execute command from console: %s", line.c_str());
             command_callback_(bml_, args);
         }
     }

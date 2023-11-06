@@ -68,6 +68,7 @@ set(BMMO_CLIENT_HDR
         bml_includes.h
         client.h
         CommandMMO.h
+        config_manager.h
         console_window.h
         dumpfile.h
         exported_client.h
@@ -77,6 +78,7 @@ set(BMMO_CLIENT_HDR
         label_sprite.h
         local_state_handler_base.h
         local_state_handler_impl.h
+        log_manager.h
         server_list.h
         text_sprite.h)
 set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp)
