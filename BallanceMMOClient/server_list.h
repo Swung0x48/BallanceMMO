@@ -20,7 +20,7 @@ private:
         SERVER_NAME_Y_BEGIN = SERVER_LIST_Y_BEGIN + (SERVER_ENTRY_HEIGHT + 0.01f) * 3;
     static constexpr size_t MAX_SERVERS_COUNT = 10;
     static constexpr const char* EXTRA_CONFIG_PATH = "..\\ModLoader\\Config\\BallanceMMOClient_extra.json";
-    bool gui_visible_ = false, is_editing_ = false, config_modified_ = false,
+    bool gui_visible_ = false, config_modified_ = false,
         previous_mouse_visibility_ = true;
     BGui::Panel* selected_server_background_{},
         * server_address_background_{}, * server_name_background_{};
@@ -34,6 +34,9 @@ private:
     size_t server_index_{};
     std::function<void()> process_ = [this] {};
     std::function<void(std::string, std::string)> connect_callback_{};
+
+    enum screen_state { None, ServerList, ServerEditor, ConnectionScreen };
+    screen_state screen_;
 
     void select_server(size_t index, bool save_to_config = true);
     void delete_selected_server();

@@ -87,7 +87,7 @@ void server_list::enter_server_list() {
     hints_->SetVisible(true);
     hints_->SetText("<Enter> Join selected server\n<E> Edit entry \xB7 <Delete> \xB7 <Esc>");
     select_server(server_index_, false);
-    is_editing_ = false;
+    screen_ = ServerList;
 }
 
 void server_list::enter_server_edit() {
@@ -117,7 +117,7 @@ void server_list::enter_server_edit() {
         gui_->SetFocus(server_address_);
         return false;
     });
-    is_editing_ = true;
+    screen_ = ServerEditor;
 }
 
 void server_list::save_config() {
@@ -138,6 +138,7 @@ void server_list::exit_gui(CKDWORD key) {
     gui_visible_ = false;
     input_manager_->ShowCursor(previous_mouse_visibility_);
     if (config_modified_) save_config();
+    screen_ = None;
     set_input_block(false, key, [this] { return gui_visible_; }, [this] {
         gui_->SetVisible(false);
         process_ = [] {};
@@ -162,6 +163,7 @@ void server_list::connect_to_server() {
     connection_status_->SetVisible(true);
     bml_->AddTimer(500.0f, [this] { exit_gui(CKKEY_RETURN); });
     connect_callback_(address, name);
+    screen_ = ConnectionScreen;
 }
 
 void server_list::set_input_block(bool block, CKDWORD defer_key, std::function<bool()> cancel_condition, std::function<void()> callback) {
@@ -177,7 +179,8 @@ void server_list::set_input_block(bool block, CKDWORD defer_key, std::function<b
 }
 
 void server_list::poll_local_input() {
-    if (is_editing_) {
+    switch (screen_) {
+    case ServerEditor:
         if (input_manager_->oIsKeyPressed(CKKEY_UP))
             gui_->SetFocus(server_address_);
         else if (input_manager_->oIsKeyPressed(CKKEY_DOWN))
@@ -192,8 +195,8 @@ void server_list::poll_local_input() {
             else
                 gui_->SetFocus(server_address_);
         }
-    }
-    else {
+        break;
+    case ServerList:
         if (input_manager_->oIsKeyPressed(CKKEY_DOWN))
             select_server((server_index_ + 1) % (servers_.size() + 1));
         else if (input_manager_->oIsKeyPressed(CKKEY_UP))
@@ -209,26 +212,29 @@ void server_list::poll_local_input() {
         else if (std::pair<bool, bool> mouse_down = {
                       input_manager_->oIsMouseClicked(CK_MOUSEBUTTON_LEFT),
                       input_manager_->oIsMouseClicked(CK_MOUSEBUTTON_RIGHT)
-                  }; mouse_down.first || mouse_down.second) {
-              Vx2DVector mouse_pos; VxRect screen_size;
-              input_manager_->GetMousePosition(mouse_pos, false);
-              bml_->GetRenderContext()->GetViewRect(screen_size);
-              mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();
-              if (gui_->Intersect(mouse_pos.x, mouse_pos.y, selected_server_background_)) {
-                  if (mouse_down.first)
-                      connect_to_server();
-                  else
-                      enter_server_edit();
-                  return;
-              }
-              for (size_t i = 0; i < servers_.size(); ++i) {
-                  if (!gui_->Intersect(mouse_pos.x, mouse_pos.y, server_labels_[i])) continue;
-                  select_server(i);
-                  break;
-              }
-              if (gui_->Intersect(mouse_pos.x, mouse_pos.y, new_server_))
-                  select_server(servers_.size());
+                }; mouse_down.first || mouse_down.second) {
+            Vx2DVector mouse_pos; VxRect screen_size;
+            input_manager_->GetMousePosition(mouse_pos, false);
+            bml_->GetRenderContext()->GetViewRect(screen_size);
+            mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();
+            if (gui_->Intersect(mouse_pos.x, mouse_pos.y, selected_server_background_)) {
+                if (mouse_down.first)
+                    connect_to_server();
+                else
+                    enter_server_edit();
+                return;
+            }
+            for (size_t i = 0; i < servers_.size(); ++i) {
+                if (!gui_->Intersect(mouse_pos.x, mouse_pos.y, server_labels_[i])) continue;
+                select_server(i);
+                break;
+            }
+            if (gui_->Intersect(mouse_pos.x, mouse_pos.y, new_server_))
+                select_server(servers_.size());
         }
+        break;
+    default:
+        break;
     }
 }
 

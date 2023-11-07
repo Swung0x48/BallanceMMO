@@ -4,7 +4,6 @@
 #include <functional>
 #include <boost/circular_buffer.hpp>
 #include "bml_includes.h"
-#include "common.hpp"
 #include "log_manager.h"
 
 class console_window {

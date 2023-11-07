@@ -798,42 +798,6 @@ private:
 		//beh->Activate();
 	}
 
-	static std::string pretty_percentage(float value) {
-		if (value < 0)
-			return "N/A";
-
-		return std::format("{:.2f}%", value * 100.0f);
-	}
-
-	static std::string pretty_bytes(float bytes)
-	{
-		const char* suffixes[] = { "B", "KB", "MB", "GB", "TB", "PB", "EB" };
-		int s = 0; // which suffix to use
-		while (bytes >= 1024 && s < 7)
-		{
-			++s;
-			bytes /= 1024;
-		}
-
-		return std::format("{:.1f}{}", bytes, suffixes[s]);
-	}
-
-	static inline const std::string MICRO_SIGN = bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide("µ"));
-	static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
-		std::string s;
-		s.reserve(512);
-		s += std::format("Ping: {} ms\n", status.m_nPing);
-		s += "ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n";
-		s += "ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n";
-		s += std::format("Tx: {:.3g}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
-		s += std::format("Rx: {:.3g}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
-		s += "Est. MaxBandwidth: " + pretty_bytes((float)status.m_nSendRateBytesPerSecond) + "/s\n";
-		s += std::format("Queue time: {}{}s\n", status.m_usecQueueTime, MICRO_SIGN);
-		s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
-		s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
-		return s;
-	}
-
 	void send_countdown_message(bmmo::countdown_type type, bmmo::level_mode mode) {
 		bmmo::countdown_msg msg{};
 		msg.content.type = type;

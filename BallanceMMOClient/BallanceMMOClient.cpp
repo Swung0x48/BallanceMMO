@@ -23,12 +23,11 @@ void BallanceMMOClient::show_player_list() {
             player_list.sprite_->SetPosition({0.596f, 0.412f});
             player_list.sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
             player_list.sprite_->SetZOrder(128);
-            player_list.sprite_->SetFont(utils::get_system_font(), 10, 400, false, false);
             player_list.paint(player_list_color_);
             // player_list.paint_background(0x44444444);
             player_list.set_visible(true);
             player_list_visible_ = true;
-            int last_player_count = -1, last_font_size = utils_.get_display_font_size(9.78f);
+            int last_player_count = -1, last_font_size = -1;
             while (player_list_visible_) {
                 update_player_list(player_list, last_player_count, last_font_size);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -85,7 +84,7 @@ inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
     auto size = int(status_list.size());
     if (size != last_player_count) {
         last_player_count = size;
-        auto font_size = utils_.get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 29));
+        auto font_size = utils_.get_display_font_size(10.9f - (1.0f / 6) * std::clamp(size, 7, 29));
         if (last_font_size != font_size) {
             last_font_size = font_size;
             player_list.sprite_->SetFont(utils::get_system_font(), font_size, 400, false, false);
@@ -577,14 +576,16 @@ void BallanceMMOClient::init_commands() {
     });
     console_.register_aliases("say", {"s"});
     console_.register_command("announce", [&] {
-        bmmo::important_notification_msg msg{};
+        using in_msg = bmmo::important_notification_msg;
+        in_msg msg{};
         msg.chat_content = console_.get_rest_of_line();
+        msg.type = (console_.get_command_name() == "notice") ? in_msg::Notice : in_msg::Announcement;
         msg.serialize();
 
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         return;
     });
-    console_.register_aliases("announce", {"a"});
+    console_.register_aliases("announce", {"a", "notice"});
     console_.register_command("bulletin", [&] {
         bmmo::permanent_notification_msg msg{};
         msg.text_content = console_.get_rest_of_line();
@@ -1170,7 +1171,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             }
             while (connected()) {
                 auto status = get_status();
-                std::string str = pretty_status(status);
+                std::string str = utils::pretty_status(status);
                 ping_->update(str, false);
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             };
@@ -1429,14 +1430,25 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         std::string name = get_username(msg.player_id);
-        SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content),
-                          bmmo::ansi::BrightCyan | bmmo::ansi::Bold);
+        SendIngameMessage(std::format("[{}] {}: {}", msg.get_type_name(), name, msg.chat_content),
+                          msg.get_ansi_color());
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
             utils_.flash_window();
             play_wave_sound(sound_notification_, !utils_.is_foreground_window());
-            auto line_count = utils_.split_lines(msg.chat_content, 700);
-            msg.chat_content += "\n[" + name + "]";
-            utils_.display_important_notification(msg.chat_content, 19, line_count);
+            float font_size = 16.0f, y_pos = 0.7f;
+            int font_weight = 400;
+            if (msg.type == bmmo::important_notification_msg::Announcement) {
+                font_size = 19.0f;
+                font_weight = 700;
+                y_pos = 0.4f;
+            }
+            auto line_count = utils_.split_lines(msg.chat_content, 0.68f, font_size, font_weight);
+            if (msg.type == bmmo::important_notification_msg::Announcement) {
+                msg.chat_content += '\n';
+                ++line_count;
+            }
+            msg.chat_content += "[" + name + "]";
+            utils_.display_important_notification(msg.chat_content, font_size, line_count, font_weight, y_pos);
         });
         break;
     }

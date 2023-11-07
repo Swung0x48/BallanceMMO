@@ -1,6 +1,7 @@
 #include <iostream>
 #include <io.h>
 #include <fcntl.h>
+#include "common.hpp"
 #include "console_window.h"
 
 void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {

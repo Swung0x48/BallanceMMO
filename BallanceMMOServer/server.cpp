@@ -1045,9 +1045,9 @@ protected:
                 msg.player_id = networking_msg->m_conn;
                 const bool muted = is_muted(client_it->second.uuid);
 
-                Printf(bmmo::ansi::BrightCyan | (muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Bold),
-                    "%s[Announcement] (%u, %s): %s", muted ? "[Muted] " : "",
-                    msg.player_id, client_it->second.name, msg.chat_content);
+                Printf(msg.get_ansi_color() | (muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset),
+                    "%s[%s] (%u, %s): %s", muted ? "[Muted] " : "",
+                    msg.get_type_name(), msg.player_id, client_it->second.name, msg.chat_content);
                 if (muted) break;
                 msg.clear();
                 msg.serialize();
@@ -1580,20 +1580,25 @@ int main(int argc, char** argv) {
     };
     console.register_command("popup", send_popup_msg);
     console.register_command("popup#", std::bind(send_popup_msg, false));
-    auto send_important_notification = [&](bool broadcast = true) {
+    using imnnt = bmmo::important_notification_msg::notification_type;
+    auto send_important_notification = [&](bool broadcast = true, imnnt type = imnnt::Announcement) {
         bmmo::important_notification_msg msg{};
         HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
         msg.chat_content = console.get_rest_of_line();
+        msg.type = type;
         msg.serialize();
         if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(bmmo::ansi::BrightCyan | bmmo::ansi::Bold,
-                "[Announcement] ([Server]): %s", msg.chat_content);
+        server.Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s",
+                msg.get_type_name(), broadcast ? "" : " -> #" + std::to_string(client),
+                msg.chat_content);
     };
     console.register_command("announce", send_important_notification);
     console.register_command("announce#", std::bind(send_important_notification, false));
+    console.register_command("notice", std::bind(send_important_notification, true, imnnt::Notice));
+    console.register_command("notice#", std::bind(send_important_notification, false, imnnt::Notice));
     console.register_command("cheat", [&] {
         bool cheat_state = (console.get_next_word(true) == "on");
         server.toggle_cheat(cheat_state);

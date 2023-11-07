@@ -504,8 +504,8 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                Printf(bmmo::ansi::BrightCyan | bmmo::ansi::Bold, "[Announcement] (%u, %s): %s",
-                        msg.player_id, get_player_name(msg.player_id), msg.chat_content);
+                Printf(msg.get_ansi_color(), "[%s] (%u, %s): %s",
+                        msg.get_type_name(), msg.player_id, get_player_name(msg.player_id), msg.chat_content);
                 break;
             }
             case bmmo::PermanentNotification: {
@@ -995,8 +995,10 @@ int main(int argc, char** argv) {
     });
     console.register_aliases("countdown", {"cd"});
     console.register_command("announce", [&] {
-        bmmo::important_notification_msg msg{};
+        using in_msg = bmmo::important_notification_msg;
+        in_msg msg{};
         msg.chat_content = console.get_rest_of_line();
+        msg.type = (console.get_command_name() == "notice") ? in_msg::Notice : in_msg::Announcement;
         msg.serialize();
         client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });

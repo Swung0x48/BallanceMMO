@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <steam/steamnetworkingtypes.h>
 #include "bml_includes.h"
 
 class utils {
@@ -18,7 +19,7 @@ public:
     bool is_foreground_window();
     void flash_window();
 
-    int split_lines(std::string& text, int font_weight);
+    int split_lines(std::string& text, float max_width, float font_size, int font_weight);
 
     static const char* get_system_font();
 
@@ -27,7 +28,11 @@ public:
     int get_display_font_size(float size);
 
     // blocks as it uses this_thread::sleep
-    void display_important_notification(const std::string& text, float font_size, int line_count, int weight = 700);
+    void display_important_notification(const std::string& text, float font_size, int line_count, int weight = 700, float y_pos = 0.4f);
 
     static void cleanup_old_crash_dumps();
+
+		static std::string pretty_percentage(float value);
+		static std::string pretty_bytes(float bytes);
+		static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status);
 };
