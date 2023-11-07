@@ -11,7 +11,6 @@
 # endif
 #endif
 
-#include "message/message_all.hpp"
 #include "entity/constants.hpp"
 #include "entity/entity.hpp"
 #include "entity/ranking_entry.hpp"
@@ -23,5 +22,6 @@
 #include "utility/console.hpp"
 #include "utility/hostname_parser.hpp"
 #include "utility/string_utils.hpp"
+#include "message/message_all.hpp"
 
 #endif //BALLANCEMMOSERVER_HEADERS_COMMON_HPP

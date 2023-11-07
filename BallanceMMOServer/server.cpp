@@ -304,7 +304,7 @@ public:
             const auto& data = clients_[id];
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
-                data.current_sector, bmmo::get_ordinal_suffix(data.current_sector),
+                data.current_sector, bmmo::string_utils::get_ordinal_suffix(data.current_sector),
                 data.current_map.get_display_name(map_names_));
         }
     }
@@ -1162,7 +1162,7 @@ protected:
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_), get_level_mode_label(msg->content.mode),
-                    current_map.rank, bmmo::get_ordinal_suffix(current_map.rank),
+                    current_map.rank, bmmo::string_utils::get_ordinal_suffix(current_map.rank),
                     formatted_score, formatted_time);
 
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
@@ -1247,7 +1247,7 @@ protected:
                         Printf(bmmo::ansi::Italic, "%s(#%u, %s) is at the %d%s sector of %s.",
                             client_it->second.cheated ? "[CHEAT] " : "",
                             networking_msg->m_conn, client_it->second.name,
-                            msg->content.sector, bmmo::get_ordinal_suffix(msg->content.sector),
+                            msg->content.sector, bmmo::string_utils::get_ordinal_suffix(msg->content.sector),
                             msg->content.map.get_display_name(map_names_));
                         break;
                     }

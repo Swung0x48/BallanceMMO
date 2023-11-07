@@ -80,8 +80,11 @@ set(BMMO_CLIENT_HDR
         local_state_handler_impl.h
         log_manager.h
         server_list.h
-        text_sprite.h)
-set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp)
+        text_sprite.h
+        utils.h
+)
+set(BMMO_CLIENT_SRC BallanceMMOClient.cpp game_repository.cpp
+        config_manager.cpp console_window.cpp dumpfile.cpp server_list.cpp utils.cpp)
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 

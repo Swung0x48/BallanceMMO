@@ -46,7 +46,7 @@ namespace bmmo {
         current_version        = version_t::from_string(BMMO_VER_STRING),
         minimum_client_version = version_t::from_string(BMMO_MIN_CLIENT_VER_STRING);
 
-    const std::string version_t::to_string() const {
+    inline const std::string version_t::to_string() const {
         std::stringstream ss;
         ss << (int)major << '.' << (int)minor << '.' << (int)subminor;
         switch (stage) {
@@ -59,7 +59,7 @@ namespace bmmo {
         return ss.str();
     }
 
-    version_t version_t::from_string(const std::string& input) {
+    inline version_t version_t::from_string(const std::string& input) {
         version_t v{};
         char stage_str[16]{};
         std::ignore = sscanf(input.c_str(), "%hhu.%hhu.%hhu-%15[^0123456789]%hhu",

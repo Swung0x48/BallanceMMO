@@ -118,6 +118,17 @@ namespace bmmo::string_utils {
         }
         return parsed_text;
     }
+
+    inline std::string get_ordinal_suffix(uint32_t n) {
+        if ((n / 10) % 10 != 1) {
+            switch (n % 10) {
+                case 1: return "st";
+                case 2: return "nd";
+                case 3: return "rd";
+            }
+        }
+        return "th";
+    };
 }
 
 #endif //BALLANCEMMOSERVER_STRING_UTILS_HPP

@@ -10,6 +10,7 @@
 #include "local_state_handler_impl.h"
 #include "dumpfile.h"
 #include "log_manager.h"
+#include "utils.h"
 #include "server_list.h"
 #include "config_manager.h"
 #include "console_window.h"
@@ -23,7 +24,6 @@
 #include <filesystem>
 #include <asio.hpp>
 #include <boost/regex.hpp>
-#include <openssl/md5.h>
 // #include <openssl/sha.h>
 #include <fstream>
 // #include <filesystem>
@@ -38,6 +38,7 @@ public:
 		IMod(bml),
 		objects_(bml, db_),
 		log_manager_(GetLogger(), [this](std::string msg, int ansi_color) { SendIngameMessage(msg, ansi_color); }),
+		utils_(bml),
 		config_manager_(&log_manager_, [this] { return GetConfig(); }),
 		server_list_(bml, &log_manager_, [this](std::string addr, std::string name) { connect_to_server(addr, name); }),
 		console_window_(bml, &log_manager_, [this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); })
@@ -46,8 +47,6 @@ public:
 	{
 		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this, std::placeholders::_1));
 		this_instance_ = this;
-
-		SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(system_font_struct_), &system_font_struct_, 0);
 	}
 
 	const std::string version_string = bmmo::current_version.to_string();
@@ -168,8 +167,6 @@ private:
 		LoggingOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
 	}
 
-	inline HWND get_main_window() { return static_cast<HWND>(m_bml->GetCKContext()->GetMainWindow()); }
-
 	std::mutex bml_mtx_;
 	std::mutex client_mtx_;
 	std::condition_variable client_cv_;
@@ -199,6 +196,7 @@ private:
 	game_objects objects_;
 
 	log_manager log_manager_;
+	utils utils_;
 	config_manager config_manager_;
 	server_list server_list_;
 	console_window console_window_;
@@ -299,9 +297,6 @@ private:
 		return db_.get_nickname();
 	}
 
-	LOGFONT system_font_struct_{};
-	const char* system_font_ = system_font_struct_.lfFaceName;
-
 	bool connecting() override {
 		return client::connecting() || resolving_endpoint_;
 	}
@@ -336,10 +331,6 @@ private:
 		map_it->second.sector_timestamps.try_emplace(sector, timestamp);
 	}
 
-	inline bool is_foreground_window() {
-		return GetForegroundWindow() == get_main_window();
-	}
-
 	void resume_counter() {
 		auto* mm = m_bml->GetMessageManager();
 		CKMessageType unpause_level_msg = mm->AddMessageType("Unpause Level");
@@ -362,43 +353,6 @@ private:
 			show_player_list();
 		}
 		if (permanent_notification_) permanent_notification_->paint(player_list_color_);
-	}
-
-	// blocks as it uses this_thread::sleep
-	void display_important_notification(const std::string& text, float font_size, int line_count, int weight = 700) {
-		auto current_ms = (SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_) / 1000000;
-		text_sprite notification(std::format("Notification{}", current_ms),
-														 text, 0.0f, 0.4f - 0.001053f * font_size * line_count);
-		notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-		notification.sprite_->SetZOrder(65536 + static_cast<int>(current_ms));
-		notification.sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });
-		notification.sprite_->SetFont(system_font_, get_display_font_size(font_size), weight, false, false);
-		notification.set_visible(true);
-		for (int i = 1; i < 15; ++i) {
-			notification.paint(0x11FF1190 + i * 0x11001001);
-			std::this_thread::sleep_for(std::chrono::milliseconds(44));
-		}
-		std::this_thread::sleep_for(std::chrono::seconds(9));
-		for (int i = 1; i < 15; ++i) {
-			notification.paint(0xFFFFF19E - i * 0x11100000);
-			std::this_thread::sleep_for(std::chrono::milliseconds(80));
-		}
-	}
-
-	void cleanup_old_crash_dumps() {
-		if (!std::filesystem::is_directory(NSDumpFile::DumpPath)) return;
-		for (const auto& entry : std::filesystem::directory_iterator(NSDumpFile::DumpPath)) {
-			if (entry.is_directory()) continue;
-			char dump_ver[32]{}, dump_time_str[32]{};
-			std::ignore = std::sscanf(entry.path().filename().string().c_str(), "BMMO_%31[^_]_%31[^.].dmp",
-																dump_ver, dump_time_str);
-			std::stringstream time_stream(dump_time_str); std::tm time_struct;
-			time_stream >> std::get_time(&time_struct, "%Y%m%d-%H%M%S");
-			if (time_stream.fail()) continue;
-			auto time_diff = std::time(nullptr) - std::mktime(&time_struct);
-			if (time_diff > 86400ll * 7)
-				std::filesystem::remove(entry);
-		}
 	}
 
 	struct KeyVector {
@@ -927,39 +881,6 @@ private:
 		assert(state.has_value() || (db_.get_client_id() == client_id));
 		return state.has_value() ? state->name : get_display_nickname();
 	}
-
-	void md5_from_file(const std::string& path, uint8_t* result) {
-		std::ifstream file(path, std::ifstream::binary);
-		if (!file.is_open())
-			return;
-		MD5_CTX md5Context;
-		MD5_Init(&md5Context);
-		constexpr static size_t SIZE = 1024 * 16;
-		auto buf = std::make_unique_for_overwrite<char[]>(SIZE);
-		while (file.good()) {
-			file.read(buf.get(), SIZE);
-			MD5_Update(&md5Context, buf.get(), (size_t)file.gcount());
-		}
-		MD5_Final(result, &md5Context);
-	}
-
-	// Windows 7 does not have GetDpiForSystem
-	typedef UINT (WINAPI* GetDpiForSystemPtr) (void);
-	GetDpiForSystemPtr const get_system_dpi = [] {
-		auto hMod = GetModuleHandleW(L"user32.dll");
-		if (hMod) {
-			return (GetDpiForSystemPtr)GetProcAddress(hMod, "GetDpiForSystem");
-		}
-		return (GetDpiForSystemPtr)nullptr;
-	}();
-
-	// input: desired font size on BallanceBug's screen
-	// window size: 1024x768; dpi: 119
-	int get_display_font_size(float size) {
-		return (int)std::round(m_bml->GetRenderContext()->GetHeight() / (768.0f / 119) * size / ((get_system_dpi == nullptr) ? 96 : get_system_dpi()));
-	}
-
-	inline void flash_window() { FlashWindow(get_main_window(), false); }
 
 	inline void call_sync_method(std::function<void()>&& func) {
 		m_bml->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });

@@ -20,6 +20,11 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #endif
+#include <steam/steamnetworkingsockets.h>
+#include <steam/isteamnetworkingutils.h>
+#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
+#include <steam/steam_api.h>
+#endif
 #include "../utility/ansi_colors.hpp"
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;

@@ -175,7 +175,7 @@ public:
         for (const auto& [id, data]: players)
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
-                data.current_sector, bmmo::get_ordinal_suffix(data.current_sector),
+                data.current_sector, bmmo::string_utils::get_ordinal_suffix(data.current_sector),
                 data.current_map.get_display_name(map_names_));
     }
 
@@ -612,7 +612,7 @@ private:
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_), get_level_mode_label(msg->content.mode),
-                    msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
+                    msg->content.rank, bmmo::string_utils::get_ordinal_suffix(msg->content.rank),
                     formatted_score, formatted_time);
                 local_rankings_[msg->content.map.get_hash_bytes_string()].first.push_back({
                     (bool)msg->content.cheated, player_name, msg->content.mode,

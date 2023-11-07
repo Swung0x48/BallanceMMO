@@ -4,17 +4,6 @@
 #include "../entity/map.hpp"
 
 namespace bmmo {
-    std::string get_ordinal_suffix(uint32_t n) {
-        if ((n / 10) % 10 != 1) {
-            switch (n % 10) {
-                case 1: return "st";
-                case 2: return "nd";
-                case 3: return "rd";
-            }
-        }
-        return "th";
-    };
-
     struct level_finish_v2 {
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
         int32_t points = 0;

@@ -23,12 +23,12 @@ void BallanceMMOClient::show_player_list() {
             player_list.sprite_->SetPosition({0.596f, 0.412f});
             player_list.sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
             player_list.sprite_->SetZOrder(128);
-            player_list.sprite_->SetFont(system_font_, 10, 400, false, false);
+            player_list.sprite_->SetFont(utils::get_system_font(), 10, 400, false, false);
             player_list.paint(player_list_color_);
             // player_list.paint_background(0x44444444);
             player_list.set_visible(true);
             player_list_visible_ = true;
-            int last_player_count = -1, last_font_size = get_display_font_size(9.78f);
+            int last_player_count = -1, last_font_size = utils_.get_display_font_size(9.78f);
             while (player_list_visible_) {
                 update_player_list(player_list, last_player_count, last_font_size);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -85,10 +85,10 @@ inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
     auto size = int(status_list.size());
     if (size != last_player_count) {
         last_player_count = size;
-        auto font_size = get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 29));
+        auto font_size = utils_.get_display_font_size(10.9f - 0.16f * std::clamp(size, 7, 29));
         if (last_font_size != font_size) {
             last_font_size = font_size;
-            player_list.sprite_->SetFont(system_font_, font_size, 400, false, false);
+            player_list.sprite_->SetFont(utils::get_system_font(), font_size, 400, false, false);
         }
     }
 
@@ -150,7 +150,7 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_bubble_, "MMO_Sound_Bubble", "..\\Sounds\\Extra_Life_Blob.wav", 0.88f);
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 
-    cleanup_old_crash_dumps();
+    utils::cleanup_old_crash_dumps();
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -174,7 +174,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
             current_map_.name = std::string(filename);
             current_map_.type = bmmo::map_type::Unknown;
         }
-        md5_from_file(path, current_map_.md5);
+        utils::md5_from_file(path, current_map_.md5);
         static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementValue(0, 0, &current_map_.level);
         current_level_mode_ = bmmo::level_mode::Speedrun;
         if (connected()) {
@@ -256,9 +256,9 @@ void BallanceMMOClient::OnPostStartMenu()
     else {
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
         ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
-        ping_->sprite_->SetFont("Arial", get_display_font_size(10), 500, false, false);
+        ping_->sprite_->SetFont("Arial", utils_.get_display_font_size(10), 500, false, false);
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
-        status_->sprite_->SetFont("Times New Roman", get_display_font_size(11), 700, false, false);
+        status_->sprite_->SetFont("Times New Roman", utils_.get_display_font_size(11), 700, false, false);
         status_->paint(0xffff0000);
 
         using namespace std::placeholders;
@@ -267,7 +267,7 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
 
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
-        md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
+        utils::md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
 
         config_manager_.validate_nickname();
         db_.set_nickname(config_manager_["playername"]->GetString());
@@ -637,7 +637,7 @@ void BallanceMMOClient::init_commands() {
                 console_window_.print_text(line.c_str());
                 GetLogger()->Info("%s", line.c_str());
             }
-            display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);
+            utils_.display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);
         });
     });
     console_.register_command("whisper", [&] {
@@ -757,7 +757,7 @@ void BallanceMMOClient::init_commands() {
             SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
                               pair.second.cheated ? "[CHEAT] " : "",
                               pair.second.name, pair.second.current_sector,
-                              bmmo::get_ordinal_suffix(pair.second.current_sector),
+                              bmmo::string_utils::get_ordinal_suffix(pair.second.current_sector),
                               pair.second.current_map.get_display_name(map_names_)));
             return true;
         });
@@ -1143,7 +1143,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
             local_state_handler_ = std::make_unique<spectator_state_handler>(thread_pool_, this, GetLogger());
             spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.96f);
-            spectator_label_->sprite_->SetFont("Arial", get_display_font_size(12), 500, false, false);
+            spectator_label_->sprite_->SetFont("Arial", utils_.get_display_font_size(12), 500, false, false);
             spectator_label_->set_visible(true);
         }
         else {
@@ -1387,7 +1387,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         db_.create(msg.connection_id, msg.name, msg.cheated);
 
         play_wave_sound(sound_bubble_);
-        flash_window();
+        utils_.flash_window();
         // TODO: call this when the player enters a map
 
         break;
@@ -1402,7 +1402,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             db_.remove(msg->content.connection_id);
             objects_.remove(msg->content.connection_id);
             play_wave_sound(sound_knock_);
-            flash_window();
+            utils_.flash_window();
         }
         break;
     }
@@ -1412,7 +1412,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
 
         SendIngameMessage(std::format("{}: {}", get_username(msg.player_id), msg.chat_content).c_str());
-        flash_window();
+        utils_.flash_window();
         break;
     }
     case bmmo::PrivateChat: {
@@ -1421,7 +1421,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         SendIngameMessage(std::format("{} whispers to you: {}",
                                       get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
-        flash_window();
+        utils_.flash_window();
         break;
     }
     case bmmo::ImportantNotification: {
@@ -1431,32 +1431,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::string name = get_username(msg.player_id);
         SendIngameMessage(std::format("[Announcement] {}: {}", name, msg.chat_content),
                           bmmo::ansi::BrightCyan | bmmo::ansi::Bold);
-        asio::post(thread_pool_, [this, name, msg = std::move(msg)]() {
-            flash_window();
-            play_wave_sound(sound_notification_, !is_foreground_window());
-            std::wstringstream ws {bmmo::string_utils::ConvertAnsiToWide(bmmo::string_utils::get_parsed_string(msg.chat_content))};
-            auto hdc = GetDC(get_main_window());
-            LOGFONT font_struct_bold = system_font_struct_;
-            font_struct_bold.lfWeight = 700;
-            HFONT font = CreateFontIndirect(&font_struct_bold);
-            SelectObject(hdc, font);
-            SIZE sz;
-            int max_length{}, line_length, line_count = 1;
-            std::string text;
-            while (!ws.eof()) {
-                std::wstring wline; std::getline(ws, wline);
-                do {
-                    line_length = wline.length();
-                    GetTextExtentExPointW(hdc, wline.c_str(), line_length, int(680 / 1.44f / 19.0f * 12), &max_length, NULL, &sz);
-                    text += bmmo::string_utils::ConvertWideToANSI(wline.substr(0, max_length)) + '\n';
-                    wline.erase(0, max_length);
-                    ++line_count;
-                } while (max_length < line_length);
-            }
-            // GetTextExtentPoint32W(hdc, wtext.c_str(), wtext.length(), &sz);
-            DeleteObject(font);
-            text += "\n[" + name + "]";
-            display_important_notification(text, 19, line_count);
+        asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
+            utils_.flash_window();
+            play_wave_sound(sound_notification_, !utils_.is_foreground_window());
+            auto line_count = utils_.split_lines(msg.chat_content, 700);
+            msg.chat_content += "\n[" + name + "]";
+            utils_.display_important_notification(msg.chat_content, 19, line_count);
         });
         break;
     }
@@ -1537,7 +1517,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             default:
                 return;
         }
-        flash_window();
+        utils_.flash_window();
         break;
     }
     case bmmo::DidNotFinish: {
@@ -1555,7 +1535,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
             (bool)msg->content.cheated, player_name, msg->content.sector});
         play_wave_sound(sound_dnf_);
-        flash_window();
+        utils_.flash_window();
         break;
     }
     case bmmo::LevelFinishV2: {
@@ -1572,7 +1552,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             "{}{} finished {}{} in {}{} place (score: {}; real time: {}).",
             msg->content.cheated ? "[CHEAT] " : "", player_name,
             map_name, get_level_mode_label(msg->content.mode),
-            msg->content.rank, bmmo::get_ordinal_suffix(msg->content.rank),
+            msg->content.rank, bmmo::string_utils::get_ordinal_suffix(msg->content.rank),
             formatted_score, formatted_time).c_str());
 
         std::lock_guard lk(client_mtx_);
@@ -1582,7 +1562,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);
-        flash_window();
+        utils_.flash_window();
         break;
     }
     case bmmo::LevelFinish:
@@ -1619,7 +1599,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             m_bml->EnableCheat(cheat);
             notify_cheat_toggle_ = true;
             play_wave_sound(sound_knock_);
-            flash_window();
+            utils_.flash_window();
         }
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
         SendIngameMessage(str.c_str(), bmmo::ansi::BrightBlue);
@@ -1636,7 +1616,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 m_bml->EnableCheat(cheat);
                 notify_cheat_toggle_ = true;
                 play_wave_sound(sound_knock_);
-                flash_window();
+                utils_.flash_window();
             }
             SendIngameMessage(str.c_str(), bmmo::ansi::BrightBlue);
         }
@@ -1686,7 +1666,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               (db_.get_client_id() == msg->content.player_id ? m_bml->IsCheatEnabled()
                               : db_.get(msg->content.player_id).value().cheated) ? "[CHEAT] " : "",
                               get_username(msg->content.player_id), msg->content.sector,
-                              bmmo::get_ordinal_suffix(msg->content.sector),
+                              bmmo::string_utils::get_ordinal_suffix(msg->content.sector),
                               msg->content.map.get_display_name(map_names_)),
                               bmmo::ansi::Italic);
         }
@@ -1729,7 +1709,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
             permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
             permanent_notification_->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-            permanent_notification_->sprite_->SetFont(system_font_, get_display_font_size(11.72f), 400, false, false);
+            permanent_notification_->sprite_->SetFont(utils::get_system_font(), utils_.get_display_font_size(11.72f), 400, false, false);
             permanent_notification_->sprite_->SetZOrder(65536);
             permanent_notification_->paint(player_list_color_);
             permanent_notification_->set_visible(true);
@@ -1737,8 +1717,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         else
             permanent_notification_->update(parsed_text.c_str());
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content), bmmo::ansi::BrightCyan);
-        flash_window();
-        play_wave_sound(sound_notification_, !is_foreground_window());
+        utils_.flash_window();
+        play_wave_sound(sound_notification_, !utils_.is_foreground_window());
         break;
     }
     case bmmo::PlainText: {
@@ -1746,13 +1726,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         SendIngameMessage(msg.text_content.c_str());
-        flash_window();
+        utils_.flash_window();
         break;
     }
     case bmmo::PublicNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(network_msg);
         SendIngameMessage("[" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
-        flash_window();
+        utils_.flash_window();
         play_wave_sound(sound_knock_);
         break;
     }
@@ -1761,7 +1741,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (!msg.caption.empty())
             SendIngameMessage("Now playing: " + msg.caption);
         asio::post(thread_pool_, [this, msg = std::move(msg)] {
-            flash_window();
+            utils_.flash_window();
             GetLogger()->Info("Playing sound from server%s", msg.caption.empty() ? "" : (": " + msg.caption).c_str());
             std::stringstream data_text;
             for (const auto& [frequency, duration]: msg.sounds) {
@@ -1782,7 +1762,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::thread([this, msg = std::move(msg)] {
             if (!msg.caption.empty())
                 SendIngameMessage("Now playing: " + msg.caption);
-            flash_window();
+            utils_.flash_window();
             std::string path = msg.path;
             std::string sound_name = "MMO_Sound" + path.substr(path.find_last_of("BMMO_"));
             /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
