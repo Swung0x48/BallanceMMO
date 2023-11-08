@@ -1,10 +1,12 @@
 #include <fstream>
 #include "server_list.h"
 
-inline static const picojson::object DEFAULT_CONFIG {
-    {"servers", picojson::value{picojson::array{}}},
-    {"selected_server", picojson::value{0ll}},
-};
+namespace {
+    inline static const picojson::object DEFAULT_CONFIG {
+        {"servers", picojson::value{picojson::array{}}},
+        {"selected_server", picojson::value{0ll}},
+    };
+}
 
 void server_list::select_server(size_t index, bool save_to_config) {
     std::lock_guard lk(mtx_);

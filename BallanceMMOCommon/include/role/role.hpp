@@ -146,16 +146,16 @@ protected:
         this_instance_->on_connection_status_changed(pInfo);
     }
 
-    static void set_logging_level(ESteamNetworkingSocketsDebugOutputType eType) {
-        SteamNetworkingUtils()->SetDebugOutputFunction(eType, DebugOutput);
-    }
-
     // triggers an actual segmentation fault; I was too lazy to fake one
     static void trigger_fatal_error() {
         *(int*)0 = 0;
     }
 
 public:
+    static void set_logging_level(ESteamNetworkingSocketsDebugOutputType eType) {
+        SteamNetworkingUtils()->SetDebugOutputFunction(eType, DebugOutput);
+    }
+
     static void LogFileOutput(const char* pMsg) {
         if (log_file_) {
             auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());

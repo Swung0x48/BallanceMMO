@@ -21,25 +21,8 @@
 
 #define PICOJSON_USE_INT64
 #include <picojson/picojson.h>
-
-struct client_data {
-    std::string name;
-    bool cheated = false;
-    bool state_updated = true;
-    bool timestamp_updated = true;
-    bool ready = false;
-    bmmo::timed_ball_state state{};
-    bmmo::map current_map{};
-    int32_t current_sector = 0;
-    uint8_t uuid[16]{};
-    int64_t login_time{};
-};
-
-struct map_data {
-    int rank = 0;
-    SteamNetworkingMicroseconds start_time = 0;
-    bmmo::ranking_entry::player_rankings rankings{};
-};
+#include "server_data.hpp"
+#include "config_manager.hpp"
 
 class server: public role {
 public:
@@ -131,6 +114,8 @@ public:
 
     inline int get_client_count() const noexcept { return clients_.size(); }
 
+    inline config_manager get_config() { return config_; }
+
     bool kick_client(HSteamNetConnection client, std::string reason = "",
             HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
             bmmo::connection_end::code type = bmmo::connection_end::Kicked) {
@@ -176,90 +161,17 @@ public:
     }
 
     bool load_config() {
-        std::string logging_level_string = "important";
-        std::ifstream ifile("config.yml");
-        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
-            try {
-                config_ = YAML::Load(ifile);
-                if (config_["op_list"])
-                    op_players_ = config_["op_list"].as<decltype(op_players_)>();
-                if (config_["enable_op_privileges"])
-                    op_mode_ = config_["enable_op_privileges"].as<bool>();
-                if (config_["ban_list"])
-                    banned_players_ = config_["ban_list"].as<decltype(banned_players_)>();
-                if (config_["mute_list"]) {
-                    auto muted_vector = config_["mute_list"].as<std::vector<std::string>>();
-                    muted_players_ = std::unordered_set(muted_vector.begin(), muted_vector.end());
-                }
-                if (config_["restart_level_after_countdown"])
-                    restart_level_ = config_["restart_level_after_countdown"].as<bool>();
-                if (config_["force_restart_after_countdown"])
-                    force_restart_level_ = config_["force_restart_after_countdown"].as<bool>();
-                if (config_["logging_level"])
-                    logging_level_string = config_["logging_level"].as<std::string>();
-                if (config_["save_player_status_to_file"])
-                    save_player_status_to_file_ = config_["save_player_status_to_file"].as<bool>();
-            } catch (const std::exception& e) {
-                Printf("Error: failed to parse config: %s", e.what());
-                return false;
-            }
-        } else {
-            Printf("Config is empty. Generating default config...");
-            op_players_ = {{"example_player", "00000001-0002-0003-0004-000000000005"}};
-            banned_players_ = {{"00000001-0002-0003-0004-000000000005", "You're banned from this server."}};
-            muted_players_ = {"00000001-0002-0003-0004-000000000005"};
-        }
-
-        config_["enable_op_privileges"] = op_mode_;
-        config_["restart_level_after_countdown"] = restart_level_;
-        config_["force_restart_after_countdown"] = force_restart_level_;
-        config_["save_player_status_to_file"] = save_player_status_to_file_;
-        if (logging_level_string == "msg")
-            logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Msg;
-        else if (logging_level_string == "warning")
-            logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Warning;
-        else {
-            logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
-            config_["logging_level"] = "important";
-        }
-        set_logging_level(logging_level_);
-        if (config_["map_name_list"]) {
-            default_map_names_.clear();
-            for (const auto& element: config_["map_name_list"]) {
-                std::string hash(sizeof(bmmo::map::md5), 0);
-                bmmo::string_utils::hex_chars_from_string(reinterpret_cast<uint8_t*>(hash.data()), element.first.as<std::string>());
-                default_map_names_.try_emplace(hash, element.second.as<std::string>());
-            }
-            if (get_client_count() < 1) map_names_.clear();
-            map_names_.insert(default_map_names_.begin(), default_map_names_.end());
-        } else
-            config_["map_name_list"] = YAML::Node(YAML::NodeType::Map);
- 
+        if (!config_.load())
+            return false;
+        if (get_client_count() < 1) map_names_.clear();
+        map_names_.insert(config_.default_map_names.begin(), config_.default_map_names.end());
         if (get_client_count() > 0 && !map_names_.empty()) {
             bmmo::map_names_msg name_msg;
             name_msg.maps = map_names_;
             name_msg.serialize();
             broadcast_message(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-
-        ifile.close();
-        save_config_to_file();
-        Printf("Config loaded successfully.");
         return true;
-    }
-
-    void print_bans() {
-        for (const auto& [uuid, reason]: banned_players_)
-            Printf("%s: %s", uuid, reason);
-        Printf("%d UUID%s banned in total.", banned_players_.size(),
-                banned_players_.size() == 1 ? "" : "s");
-    }
-
-    void print_mutes() {
-        for (const auto& uuid: muted_players_)
-            Printf("%s", uuid);
-        Printf("%d UUID%s muted in total.", muted_players_.size(),
-                muted_players_.size() == 1 ? "" : "s");
     }
 
     void print_clients(bool print_uuid = false) {
@@ -374,11 +286,11 @@ public:
         if (!client_exists(client))
             return;
         const std::string uuid_string = get_uuid_string(clients_[client].uuid);
-        banned_players_[uuid_string] = reason;
+        config_.banned_players[uuid_string] = reason;
         Printf(bmmo::ansi::WhiteInverse, "Banned %s (%s)%s.",
                 clients_[client].name, uuid_string, reason.empty() ? "" : ": " + reason);
         kick_client(client, "Banned" + (reason.empty() ? "" : ": " + reason));
-        save_config_to_file();
+        config_.save();
     }
 
     void set_mute(HSteamNetConnection client, bool action) {
@@ -388,15 +300,15 @@ public:
         if (action) {
             Printf(bmmo::ansi::WhiteInverse, "Muted %s (%s)%s.",
                 clients_[client].name, uuid_string,
-                muted_players_.insert(uuid_string).second
+                config_.muted_players.insert(uuid_string).second
                 ? "" : " (client was already muted previously)");
         } else {
             Printf(bmmo::ansi::WhiteInverse, "Unmuted %s (%s)%s.",
                 clients_[client].name, uuid_string,
-                muted_players_.erase(uuid_string) != 0
+                config_.muted_players.erase(uuid_string) != 0
                 ? "" : " (client is already not muted)");
         }
-        save_config_to_file();
+        config_.save();
     }
 
     void set_op(HSteamNetConnection client, bool action) {
@@ -404,34 +316,34 @@ public:
             return;
         std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
         if (action) {
-            if (auto it = op_players_.find(name); it != op_players_.end()) {
+            if (auto it = config_.op_players.find(name); it != config_.op_players.end()) {
                 if (it->second == get_uuid_string(clients_[client].uuid)) {
                     Printf("Error: client \"%s\" already has OP privileges.", name);
                     return;
                 }
             }
-            op_players_[name] = get_uuid_string(clients_[client].uuid);
+            config_.op_players[name] = get_uuid_string(clients_[client].uuid);
             Printf(bmmo::ansi::WhiteInverse, "%s is now an operator.", name);
         } else {
-            if (!op_players_.erase(name))
+            if (!config_.op_players.erase(name))
                 return;
             Printf(bmmo::ansi::WhiteInverse, "%s is no longer an operator.", name);
         }
-        save_config_to_file();
+        config_.save();
         bmmo::op_state_msg msg{};
         msg.content.op = action;
         send(client, msg, k_nSteamNetworkingSend_Reliable);
     }
 
     void set_unban(std::string uuid_string) {
-        auto it = banned_players_.find(uuid_string);
-        if (it == banned_players_.end()) {
+        auto it = config_.banned_players.find(uuid_string);
+        if (it == config_.banned_players.end()) {
             Printf("Error: %s is not banned.", uuid_string);
             return;
         }
-        banned_players_.erase(it);
+        config_.banned_players.erase(it);
         Printf(bmmo::ansi::WhiteInverse, "Unbanned %s.", uuid_string);
-        save_config_to_file();
+        config_.save();
     }
 
     void toggle_cheat(bool cheat) {
@@ -499,74 +411,8 @@ protected:
         interface_->GetConnectionInfo(client, &pInfo);
         SteamNetworkingIPAddr ip = pInfo.m_addrRemote;
         char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
-        std::string uuid_str = get_uuid_string(clients_[client].uuid),
-                    name = clients_[client].name;
         ip.ToString(ip_str, sizeof(ip_str), false);
-        YAML::Node login_data;
-        std::ifstream ifile("login_data.yml");
-        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
-            try {
-                login_data = YAML::Load(ifile);
-            } catch (const std::exception& e) {
-                Printf("Error: failed to parse config: %s", e.what());
-                return;
-            }
-        }
-        ifile.close();
-        auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::string time_str(20, 0);
-        time_str.resize(std::strftime(&time_str[0], time_str.size(),
-            "%F %X", std::localtime(&time)));
-        if (!login_data[uuid_str])
-            login_data[uuid_str] = YAML::Node(YAML::NodeType::Map);
-        if (!login_data[uuid_str][name])
-            login_data[uuid_str][name] = YAML::Node(YAML::NodeType::Map);
-        login_data[uuid_str][name][time_str] = ip_str;
-        std::ofstream ofile("login_data.yml");
-        if (ofile.is_open()) {
-            ofile << login_data;
-            ofile.close();
-        }
-    }
-
-    void save_player_status() {
-        picojson::array player_list{};
-        using picojson::value;
-        for (const auto& [_, data]: clients_) {
-            player_list.emplace_back(picojson::object{
-                {"name", value{data.name}},
-                {"login_time", value{data.login_time}},
-            });
-        }
-        std::ofstream player_status_file("player_status.json");
-        if (player_status_file.is_open()) {
-            player_status_file << value{player_list};
-        }
-    }
-
-    void save_config_to_file() {
-        config_["op_list"] = op_players_;
-        config_["ban_list"] = banned_players_;
-        config_["mute_list"] = std::vector<std::string>(muted_players_.begin(), muted_players_.end());
-        std::ofstream config_file("config.yml");
-        if (!config_file.is_open()) {
-            Printf("Error: failed to open config file for writing.");
-            return;
-        }
-        auto current_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        config_file << "# Config file for Ballance MMO Server v" << bmmo::current_version.to_string() << " - "
-                        << std::put_time(std::localtime(&current_time), "%F %T") << "\n"
-                    << "# Notes:\n"
-                    << "# - Op list player data style: \"playername: uuid\".\n"
-                    << "# - Ban list style: \"uuid: reason\".\n"
-                    << "# - Mute list style: \"- uuid\".\n"
-                    << "# - Map name list style: \"md5_hash: name\".\n"
-                    << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
-                    << "# - Options for log levels: important, warning, msg.\n"
-                    << std::endl;
-        config_file << config_;
-        config_file << std::endl;
-        config_file.close();
+        config_.save_login_data(ip_str, get_uuid_string(clients_[client].uuid), clients_[client].name);
     }
 
     // Fail silently if the client doesn't exist.
@@ -590,7 +436,7 @@ protected:
         switch (get_client_count()) {
             case 0:
                 maps_.clear();
-                map_names_ = default_map_names_;
+                map_names_ = config_.default_map_names;
                 permanent_notification_ = {};
                 [[fallthrough]];
             case 1:
@@ -600,8 +446,7 @@ protected:
             default:
                 break;
         }
-        if (save_player_status_to_file_)
-            save_player_status();
+        config_.save_player_status(clients_);
     }
 
     bool client_exists(HSteamNetConnection client, bool suppress_error = false) const {
@@ -616,7 +461,7 @@ protected:
     }
 
     bool deny_action(HSteamNetConnection client) {
-        if (op_mode_ && op_online() && !is_op(client)) {
+        if (config_.op_mode && op_online() && !is_op(client)) {
             bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::NoPermission}};
             send(client, denied_msg, k_nSteamNetworkingSend_Reliable);
             return true;
@@ -643,15 +488,15 @@ protected:
 
     inline bool is_muted(HSteamNetConnection client) { return is_muted(clients_[client].uuid); }
     inline bool is_muted(uint8_t* uuid) const {
-        return muted_players_.contains(get_uuid_string(uuid));
+        return config_.muted_players.contains(get_uuid_string(uuid));
     }
 
     bool is_op(HSteamNetConnection client) {
         if (!client_exists(client))
             return false;
         std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
-        auto op_it = op_players_.find(name);
-        if (op_it == op_players_.end())
+        auto op_it = config_.op_players.find(name);
+        if (op_it == config_.op_players.end())
             return false;
         if (op_it->second == get_uuid_string(clients_[client].uuid))
             return true;
@@ -672,7 +517,7 @@ protected:
         std::string real_nickname = bmmo::name_validator::get_real_nickname(msg.nickname);
 
         // check if client is banned
-        if (auto it = banned_players_.find(get_uuid_string(msg.uuid)); it != banned_players_.end()) {
+        if (auto it = config_.banned_players.find(get_uuid_string(msg.uuid)); it != config_.banned_players.end()) {
             reason << "You are banned from this server";
             if (!it->second.empty())
                 reason << ": " << it->second;
@@ -725,7 +570,7 @@ protected:
                 // before we accepted the connection.)
                 if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
                     // Select appropriate log messages
-                    if (logging_level_ < k_ESteamNetworkingSocketsDebugOutputType_Msg) {
+                    if (config_.logging_level < k_ESteamNetworkingSocketsDebugOutputType_Msg) {
                         const char* pszDebugLogAction;
                         if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
                             pszDebugLogAction = "problem detected locally";
@@ -914,8 +759,7 @@ protected:
 
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
-                if (save_player_status_to_file_)
-                    save_player_status();
+                config_.save_player_status(clients_);
 
                 break;
             }
@@ -1081,15 +925,15 @@ protected:
                             networking_msg->m_conn, client_it->second.name, map_name,
                             msg->content.get_level_mode_label(),
                             msg->content.force_restart ? " (rank reset)" : "");
-                        if (force_restart_level_ || msg->content.force_restart) {
+                        if (config_.force_restart_level || msg->content.force_restart) {
                             maps_.clear();
                             for (const auto& map: map_names_)
                                 maps_[map.first] = {0, networking_msg->m_usecTimeReceived, {}};
                         } else {
                             maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived, {}};
                         }
-                        msg->content.restart_level = restart_level_;
-                        msg->content.force_restart = force_restart_level_;
+                        msg->content.restart_level = config_.restart_level;
+                        msg->content.force_restart = config_.force_restart_level;
                         for (auto& i: clients_)
                             i.second.ready = false;
                         break;
@@ -1413,7 +1257,7 @@ protected:
     HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 //    std::thread server_thread_;
-    std::unordered_map<HSteamNetConnection, client_data> clients_;
+    client_data_collection clients_;
     std::unordered_map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
     std::mutex client_data_mutex_;
     std::pair<std::string, std::string> permanent_notification_; // <username (title), text>
@@ -1423,15 +1267,12 @@ protected:
 
     // std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
-    YAML::Node config_;
-    std::unordered_map<std::string, std::string> op_players_, banned_players_, map_names_, default_map_names_;
-    std::unordered_set<std::string> muted_players_;
-    std::unordered_map<std::string, map_data> maps_;
+    map_data_collection maps_;
     bmmo::map last_countdown_map_{};
 
-    bool op_mode_ = true, restart_level_ = true, force_restart_level_ = false,
-        save_player_status_to_file_ = false;
-    ESteamNetworkingSocketsDebugOutputType logging_level_ = k_ESteamNetworkingSocketsDebugOutputType_Important;
+    config_manager config_;
+
+    std::unordered_map<std::string, std::string> map_names_;
 };
 
 // parse arguments (optional port and help/version/log) with getopt
@@ -1645,8 +1486,8 @@ int main(int argc, char** argv) {
             server.set_mute(client, action);
     });
     console.register_aliases("op", {"deop", "mute", "unmute"});
-    console.register_command("listban", [&] { server.print_bans(); });
-    console.register_command("listmute", [&] { server.print_mutes(); });
+    console.register_command("listban", [&] { server.get_config().print_bans(); });
+    console.register_command("listmute", [&] { server.get_config().print_mutes(); });
     console.register_command("unban", [&] { server.set_unban(console.get_next_word()); });
     console.register_command("reload", [&] {
         if (!server.load_config())

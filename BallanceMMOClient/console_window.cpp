@@ -4,6 +4,7 @@
 #include "common.hpp"
 #include "console_window.h"
 
+namespace {
 void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {
     // Re-initialize the C runtime "FILE" handles with clean handles bound to "nul". We do this because it has been
     // observed that the file number of our standard handle file objects can be assigned internally to a value of -2
@@ -92,6 +93,7 @@ void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr
         std::wcerr.clear();
         std::cerr.clear();
     }
+}
 }
 
 void console_window::print_text(const char* text, int ansi_color) {

@@ -8,7 +8,9 @@
 #include "text_sprite.h"
 #include "dumpfile.h"
 
-LOGFONT system_font_struct_{};
+namespace {
+    LOGFONT system_font_struct_{};
+}
 
 utils::utils(IBML* bml) : bml_(bml) {
     SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(system_font_struct_), &system_font_struct_, 0);
