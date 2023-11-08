@@ -13,7 +13,7 @@ namespace bmmo {
 
         // spectator status is only indicated by the prefix as in spectator_prefix;
         // their different behaviors from normal players are entirely client-side
-        constexpr bool is_spectator(const std::string& name) {
+        inline bool is_spectator(const std::string& name) {
             return name.starts_with(spectator_prefix);
         }
 
@@ -22,7 +22,7 @@ namespace bmmo {
 
         std::string get_spectator_nickname(const std::string& name);
 
-        constexpr bool is_of_valid_length(const std::string& name) {
+        inline bool is_of_valid_length(const std::string& name) {
             return (name.length() >= min_length && name.length() <= max_length);
         };
 
