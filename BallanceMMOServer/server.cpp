@@ -1421,8 +1421,8 @@ int main(int argc, char** argv) {
     };
     console.register_command("popup", send_popup_msg);
     console.register_command("popup#", std::bind(send_popup_msg, false));
-    using imnnt = bmmo::important_notification_msg::notification_type;
-    auto send_important_notification = [&](bool broadcast = true, imnnt type = imnnt::Announcement) {
+    using in_msg = bmmo::important_notification_msg;
+    auto send_important_notification = [&](bool broadcast = true, in_msg::notification_type type = in_msg::Announcement) {
         bmmo::important_notification_msg msg{};
         HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
         msg.chat_content = console.get_rest_of_line();
@@ -1438,8 +1438,8 @@ int main(int argc, char** argv) {
     };
     console.register_command("announce", send_important_notification);
     console.register_command("announce#", std::bind(send_important_notification, false));
-    console.register_command("notice", std::bind(send_important_notification, true, imnnt::Notice));
-    console.register_command("notice#", std::bind(send_important_notification, false, imnnt::Notice));
+    console.register_command("notice", std::bind(send_important_notification, true, in_msg::Notice));
+    console.register_command("notice#", std::bind(send_important_notification, false, in_msg::Notice));
     console.register_command("cheat", [&] {
         bool cheat_state = (console.get_next_word(true) == "on");
         server.toggle_cheat(cheat_state);
