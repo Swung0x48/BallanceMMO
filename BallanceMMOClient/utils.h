@@ -35,4 +35,8 @@ public:
 		static std::string pretty_percentage(float value);
 		static std::string pretty_bytes(float bytes);
 		static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status);
+
+    inline void call_sync_method(std::function<void()>&& func) {
+        bml_->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });
+    }
 };

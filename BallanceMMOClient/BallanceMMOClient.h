@@ -76,7 +76,7 @@ public:
 		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingOutput);
 	}
 
-	using role::this_instance_; // public
+	static inline auto get_instance() { return static_cast<BallanceMMOClient*>(role::this_instance_); } // public
 
 	HWINEVENTHOOK move_size_hook_{};
 
@@ -221,7 +221,7 @@ private:
 
 	struct map_data {
 		float level_start_timestamp{};
-		// pair <earliest timestamp of reaching the sector, whether to display time diffs>
+		// pair <sector, earliest timestamp of reaching the sector>
 		std::map<int, int64_t> sector_timestamps{};
 		bmmo::ranking_entry::player_rankings rankings{};
 	};
@@ -268,10 +268,10 @@ private:
 		sound->Play();
 	}
 	void load_wave_sound(CKWaveSound** sound, CKSTRING name, CKSTRING path, float gain = 1.0f, float pitch = 1.0f, bool streaming = false) {
-		*sound = static_cast<CKWaveSound*>(m_bml->GetCKContext()->CreateObject(CKCID_WAVESOUND, name));
-		(**sound).Create(streaming, path);
-		(**sound).SetGain(gain);
-		(**sound).SetPitch(pitch);
+		sound[0] = static_cast<CKWaveSound*>(m_bml->GetCKContext()->CreateObject(CKCID_WAVESOUND, name));
+		sound[0]->Create(streaming, path);
+		sound[0]->SetGain(gain);
+		sound[0]->SetPitch(pitch);
 	}
 
 	std::set<CKWaveSound*> received_wave_sounds_;
@@ -846,13 +846,9 @@ private:
 		return state.has_value() ? state->name : get_display_nickname();
 	}
 
-	inline void call_sync_method(std::function<void()>&& func) {
-		m_bml->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });
-	}
-
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		console_window_.print_text(msg.c_str(), ansi_color);
-		call_sync_method([this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
+		utils_.call_sync_method([this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;

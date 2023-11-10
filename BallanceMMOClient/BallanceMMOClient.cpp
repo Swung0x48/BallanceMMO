@@ -6,8 +6,8 @@ IMod* BMLEntry(IBML* bml) {
 }
 
 VOID CALLBACK WinEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-    if (!BallanceMMOClient::this_instance_) return;
-    auto instance = static_cast<BallanceMMOClient*>(BallanceMMOClient::this_instance_);
+    if (!BallanceMMOClient::get_instance()) return;
+    auto instance = BallanceMMOClient::get_instance();
     if (dwEvent == EVENT_SYSTEM_MOVESIZESTART) instance->enter_size_move();
     else if (dwEvent == EVENT_SYSTEM_MOVESIZEEND) instance->exit_size_move();
 }
@@ -935,7 +935,7 @@ void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
 }
 
 void BallanceMMOClient::terminate(long delay) {
-    static_cast<BallanceMMOClient*>(this_instance_)->SendIngameMessage(
+    get_instance()->SendIngameMessage(
         std::format("Nuking process in {} seconds...", delay).c_str());
     std::this_thread::sleep_for(std::chrono::seconds(delay));
 
@@ -1435,14 +1435,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
             utils_.flash_window();
             play_wave_sound(sound_notification_, !utils_.is_foreground_window());
-            float font_size = 16.0f, y_pos = 0.7f;
+            float font_size = 16.0f, y_pos = 0.684f;
             int font_weight = 400;
             if (msg.type == bmmo::important_notification_msg::Announcement) {
                 font_size = 19.0f;
                 font_weight = 700;
                 y_pos = 0.4f;
             }
-            auto line_count = utils_.split_lines(msg.chat_content, 0.68f, font_size, font_weight);
+            auto line_count = utils_.split_lines(msg.chat_content, 0.7f, font_size, font_weight);
             if (msg.type == bmmo::important_notification_msg::Announcement) {
                 msg.chat_content += '\n';
                 ++line_count;
@@ -1789,12 +1789,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 duration = sound->GetSoundLength();
             GetLogger()->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
                               duration, msg.pitch, duration / msg.pitch, msg.gain, msg.pitch);
-            call_sync_method([=] { sound->Play(); });
+            utils_.call_sync_method([=] { sound->Play(); });
 
             if (duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength() + 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
-            call_sync_method([=] {
+            utils_.call_sync_method([=] {
                 std::lock_guard<std::mutex> lk(bml_mtx_);
                 if (!received_wave_sounds_.contains(sound))
                     return;
@@ -1825,18 +1825,18 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     switch (eType) {
         case k_ESteamNetworkingSocketsDebugOutputType_Bug:
         case k_ESteamNetworkingSocketsDebugOutputType_Error:
-            static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
+            get_instance()->GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
             break;
         case k_ESteamNetworkingSocketsDebugOutputType_Important:
         case k_ESteamNetworkingSocketsDebugOutputType_Warning:
-            static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
+            get_instance()->GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
             break;
         default:
-            static_cast<BallanceMMOClient*>(this_instance_)->GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
+            get_instance()->GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-        static_cast<BallanceMMOClient*>(this_instance_)->SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
+        get_instance()->SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
         terminate(5);
     }
 }

@@ -180,66 +180,6 @@ void server_list::set_input_block(bool block, CKDWORD defer_key, std::function<b
     });
 }
 
-void server_list::poll_local_input() {
-    switch (screen_) {
-    case ServerEditor:
-        if (input_manager_->oIsKeyPressed(CKKEY_UP))
-            gui_->SetFocus(server_address_);
-        else if (input_manager_->oIsKeyPressed(CKKEY_DOWN))
-            gui_->SetFocus(server_name_);
-        else if (input_manager_->oIsKeyPressed(CKKEY_RETURN))
-            save_server_data();
-        else if (input_manager_->oIsKeyPressed(CKKEY_ESCAPE))
-            enter_server_list();
-        else if (input_manager_->oIsKeyPressed(CKKEY_TAB)) {
-            if (server_address_->GetTextFlags() & TEXT_SHOWCARET) // on focus
-                gui_->SetFocus(server_name_);
-            else
-                gui_->SetFocus(server_address_);
-        }
-        break;
-    case ServerList:
-        if (input_manager_->oIsKeyPressed(CKKEY_DOWN))
-            select_server((server_index_ + 1) % (servers_.size() + 1));
-        else if (input_manager_->oIsKeyPressed(CKKEY_UP))
-            select_server((server_index_ + servers_.size()) % (servers_.size() + 1));
-        else if (input_manager_->oIsKeyPressed(CKKEY_E))
-            enter_server_edit();
-        else if (input_manager_->oIsKeyPressed(CKKEY_DELETE))
-            delete_selected_server();
-        else if (input_manager_->oIsKeyPressed(CKKEY_ESCAPE))
-            exit_gui(CKKEY_ESCAPE);
-        else if (input_manager_->oIsKeyPressed(CKKEY_RETURN))
-            connect_to_server();
-        else if (std::pair<bool, bool> mouse_down = {
-                      input_manager_->oIsMouseClicked(CK_MOUSEBUTTON_LEFT),
-                      input_manager_->oIsMouseClicked(CK_MOUSEBUTTON_RIGHT)
-                }; mouse_down.first || mouse_down.second) {
-            Vx2DVector mouse_pos; VxRect screen_size;
-            input_manager_->GetMousePosition(mouse_pos, false);
-            bml_->GetRenderContext()->GetViewRect(screen_size);
-            mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();
-            if (gui_->Intersect(mouse_pos.x, mouse_pos.y, selected_server_background_)) {
-                if (mouse_down.first)
-                    connect_to_server();
-                else
-                    enter_server_edit();
-                return;
-            }
-            for (size_t i = 0; i < servers_.size(); ++i) {
-                if (!gui_->Intersect(mouse_pos.x, mouse_pos.y, server_labels_[i])) continue;
-                select_server(i);
-                break;
-            }
-            if (gui_->Intersect(mouse_pos.x, mouse_pos.y, new_server_))
-                select_server(servers_.size());
-        }
-        break;
-    default:
-        break;
-    }
-}
-
 server_list::server_list(IBML* bml, log_manager* log_manager, decltype(connect_callback_) connect_callback):
         bml_(bml), log_manager_(log_manager), connect_callback_(connect_callback) {
     picojson::value v;
@@ -258,7 +198,7 @@ server_list::server_list(IBML* bml, log_manager* log_manager, decltype(connect_c
 
 void server_list::init_gui() {
     input_manager_ = bml_->GetInputManager();
-    gui_ = std::make_unique<decltype(gui_)::element_type>();
+    gui_ = std::make_unique<decltype(gui_)::element_type>(this);
     gui_->AddPanel("MMO_Server_List_Background", VxColor(0, 0, 0, 140), 0.25f, 0.25f, 0.5f, 0.5f)->SetZOrder(1024);
     header_ = gui_->AddTextLabel("MMO_Server_List_Title", "", ExecuteBB::GAMEFONT_01, 0.27f, 0.27f, 0.46f, 0.06f);
     header_->SetZOrder(1032);
@@ -338,9 +278,69 @@ void server_list::enter_gui() {
     previous_mouse_visibility_ = input_manager_->GetCursorVisibility() || !bml_->IsIngame();
     input_manager_->ShowCursor(true);
     set_input_block(true, CKKEY_RETURN, [this] { return !gui_visible_; });
-    process_ = [this] {
-        poll_local_input();
-        gui_->Process();
-    };
+    process_ = [this] { gui_->Process(); };
     enter_server_list();
 }
+
+void server_list::on_key_typed(CKDWORD key) {
+    switch (screen_) {
+    case ServerEditor:
+        switch (key) {
+            case CKKEY_UP: gui_->SetFocus(server_address_); break;
+            case CKKEY_DOWN: gui_->SetFocus(server_name_); break;
+            case CKKEY_RETURN: save_server_data(); break;
+            case CKKEY_ESCAPE: enter_server_list(); break;
+            case CKKEY_TAB: {
+                gui_->SetFocus((server_address_->GetTextFlags() & TEXT_SHOWCARET)
+                               ? server_name_ : server_address_);
+                break;
+            }
+        }
+        break;
+    case ServerList:
+        switch (key) {
+            case CKKEY_DOWN: select_server((server_index_ + 1) % (servers_.size() + 1)); break;
+            case CKKEY_UP: select_server((server_index_ + servers_.size()) % (servers_.size() + 1)); break;
+            case CKKEY_E: enter_server_edit(); break;
+            case CKKEY_DELETE: delete_selected_server(); break;
+            case CKKEY_ESCAPE: exit_gui(key); break;
+            case CKKEY_RETURN: connect_to_server(); break;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void server_list::on_mouse_down(float x, float y, CK_MOUSEBUTTON key) {
+    if (key != CK_MOUSEBUTTON_LEFT && key != CK_MOUSEBUTTON_RIGHT)
+        return;
+    /*Vx2DVector mouse_pos; VxRect screen_size;
+    input_manager_->GetMousePosition(mouse_pos, false);
+    bml_->GetRenderContext()->GetViewRect(screen_size);
+    mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();*/
+    if (gui_->Intersect(x, y, selected_server_background_)) {
+        if (key == CK_MOUSEBUTTON_LEFT)
+            connect_to_server();
+        else
+            enter_server_edit();
+        return;
+    }
+    for (size_t i = 0; i < servers_.size(); ++i) {
+        if (!gui_->Intersect(x, y, server_labels_[i])) continue;
+        select_server(i);
+        break;
+    }
+    if (gui_->Intersect(x, y, new_server_))
+        select_server(servers_.size());
+}
+
+void server_list_gui::OnCharTyped(CKDWORD key) {
+    BGui::Gui::OnCharTyped(key);
+    server_list_->on_key_typed(key);
+}
+
+void server_list_gui::OnMouseDown(float x, float y, CK_MOUSEBUTTON key) {
+    BGui::Gui::OnMouseDown(x, y, key);
+    server_list_->on_mouse_down(x, y, key);
+};

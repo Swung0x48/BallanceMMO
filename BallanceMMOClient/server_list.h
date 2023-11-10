@@ -9,13 +9,15 @@
 #include "bml_includes.h"
 #include "log_manager.h"
 
+class server_list_gui;
+
 class server_list {
 private:
     IBML* bml_;
     log_manager* log_manager_;
     InputHook* input_manager_{};
     std::mutex mtx_{};
-    std::unique_ptr<BGui::Gui> gui_;
+    std::unique_ptr<server_list_gui> gui_;
     static constexpr float SERVER_ENTRY_HEIGHT = 0.034f, SERVER_LIST_Y_BEGIN = 0.33f,
         SERVER_NAME_Y_BEGIN = SERVER_LIST_Y_BEGIN + (SERVER_ENTRY_HEIGHT + 0.01f) * 3;
     static constexpr size_t MAX_SERVERS_COUNT = 10;
@@ -62,15 +64,24 @@ private:
     void set_input_block(bool block, CKDWORD defer_key, std::function<bool()> cancel_condition,
                          std::function<void()> callback = [] {});
 
-    void poll_local_input();
-
 public:
     server_list(IBML* bml, log_manager* log_manager, decltype(connect_callback_) connect_callback);
 
     void init_gui();
     void enter_gui();
 
-    inline void process() {
-        process_();
-    }
+    void on_key_typed(CKDWORD key);
+    void on_mouse_down(float x, float y, CK_MOUSEBUTTON key);
+
+    inline void process() { process_(); }
+};
+
+class server_list_gui : public BGui::Gui {
+    server_list* server_list_;
+
+public:
+    server_list_gui(server_list* list): server_list_(list) {}
+
+    void OnCharTyped(CKDWORD key) override;
+    void OnMouseDown(float x, float y, CK_MOUSEBUTTON key) override;
 };
