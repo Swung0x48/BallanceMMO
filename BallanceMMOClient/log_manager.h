@@ -14,5 +14,7 @@ public:
 
     inline ILogger* get_logger() { return logger_; }
 
-    void send_ingame_message(const std::string& msg, int ansi_color = 0) { ingame_msg_callback_(msg, ansi_color); }
+    void send_ingame_message(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
+        ingame_msg_callback_(msg, ansi_color);
+    }
 };

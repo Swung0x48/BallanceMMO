@@ -150,6 +150,10 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 
     utils::cleanup_old_crash_dumps();
+
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+    spect_cam_ = static_cast<CKCamera*>(m_bml->GetCKContext()->CreateObject(CKCID_CAMERA, "SpectatorCam"));
+#endif
 }
 
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
@@ -301,26 +305,48 @@ void BallanceMMOClient::OnProcess() {
 
     std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
 
-    if (m_bml->IsIngame() && bml_lk) {
-        const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+    if (!(m_bml->IsIngame() && bml_lk))
+        return;
+    const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 
-        objects_.update(current_timestamp, db_.flush());
+    objects_.update(current_timestamp, db_.flush());
 
-        if (current_timestamp >= next_update_timestamp_) {
-            if (current_timestamp - next_update_timestamp_ > 1048576)
-                next_update_timestamp_ = current_timestamp;
-            next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+    if (current_timestamp >= next_update_timestamp_) {
+        if (current_timestamp - next_update_timestamp_ > 1048576)
+            next_update_timestamp_ = current_timestamp;
+        next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
 
-            auto ball = get_current_ball();
-            if (player_ball_ == nullptr)
-                player_ball_ = ball;
+        auto ball = get_current_ball();
+        if (player_ball_ == nullptr)
+            player_ball_ = ball;
 
-            check_on_trafo(ball);
-            local_state_handler_->poll_and_send_state(ball);
-        }
-
-        if (compensation_lives_label_) compensation_lives_label_->process();
+        check_on_trafo(ball);
+        local_state_handler_->poll_and_send_state(ball);
     }
+
+    if (compensation_lives_label_) compensation_lives_label_->process();
+
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+    if (spectating_first_person_) {
+        spect_player_pos_ = objects_.get_ball_state(spect_player_).first;
+        if (input_manager_->IsKeyDown(CKKEY_LSHIFT)) {
+            CKCamera* cam = m_bml->GetTargetCameraByName("InGameCam");
+            VxVector cam_pos, ball_pos;
+            cam->GetPosition(&cam_pos);
+            player_ball_->GetPosition(&ball_pos);
+            spect_pos_diff_ = cam_pos - ball_pos;
+            VxQuaternion rot;
+            cam->GetQuaternion(&rot);
+            spect_cam_->SetQuaternion(rot);
+        }
+        VxVector current_cam_pos;
+        spect_cam_->GetPosition(&current_cam_pos);
+        auto delta = m_bml->GetTimeManager()->GetLastDeltaTime();
+        spect_cam_->SetPosition(Interpolate(0.006f * delta, current_cam_pos, spect_player_pos_ + spect_pos_diff_) - VxVector(0, 0.0046f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0));
+        spect_target_pos_ = Interpolate(0.011f * delta, spect_target_pos_, spect_player_pos_);
+        spect_cam_->LookAt(spect_target_pos_);
+    }
+#endif
 }
 
 void BallanceMMOClient::OnStartLevel()
@@ -884,6 +910,55 @@ void BallanceMMOClient::init_commands() {
             SendIngameMessage(std::format("Local level mode set to {}.", mode_name));
         }
     });
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+    console_.register_command("spectate", [&] {
+        HSteamNetConnection id = k_HSteamNetConnection_Invalid;
+        auto next_word = console_.get_next_word();
+        if (next_word.empty()) return;
+        if (next_word[0] == '#')
+            id = (HSteamNetConnection) atoll(next_word.substr(1).c_str());
+        else
+            id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+        if (id == k_HSteamNetConnection_Invalid) {
+            m_bml->GetRenderContext()->AttachViewpointToCamera(last_cam_ ? last_cam_ : m_bml->GetTargetCameraByName("InGameCam"));
+            spectating_first_person_ = false;
+            m_bml->GetGroupByName("HUD_sprites")->Show();
+            m_bml->GetGroupByName("LifeBalls")->Show();
+            SendIngameMessage("Exited spectation.");
+            return;
+        }
+        const auto& state = db_.get(id);
+        if (!state.has_value()) {
+            SendIngameMessage("Error: player not found.");
+            return;
+        }
+        CKCamera* cam = m_bml->GetTargetCameraByName("InGameCam");
+        spect_cam_->SetWorldMatrix(cam->GetWorldMatrix());
+        int width, height;
+        cam->GetAspectRatio(width, height);
+        spect_cam_->SetAspectRatio(width, height);
+        spect_cam_->SetFov(cam->GetFov());
+        VxVector cam_pos, ball_pos;
+        cam->GetPosition(&cam_pos);
+        player_ball_->GetPosition(&ball_pos);
+        spect_pos_diff_ = cam_pos - ball_pos;
+        last_cam_ = m_bml->GetRenderContext()->GetAttachedCamera();
+        m_bml->GetRenderContext()->AttachViewpointToCamera(spect_cam_);
+        spect_player_ = id;
+        spectating_first_person_ = true;
+        spect_target_pos_ = objects_.get_ball_state(id).first;
+        m_bml->GetGroupByName("HUD_sprites")->Show(CKHIDE);
+        m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
+        SendIngameMessage(std::format("Spectating {}.", state.value().name));
+    });
+    console_.register_command("bind", [&] {
+        spect_bindings_ = decltype(spect_bindings_){"#0"};
+        while (!console_.empty())
+            spect_bindings_.emplace_back(console_.get_next_word(true));
+        auto names_text = bmmo::string_utils::join_strings(spect_bindings_, 1, ", ");
+        SendIngameMessage("Spectator hotkeys bound to " + names_text);
+    });
+#endif
 }
 
 const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::vector<std::string>& args) {
@@ -892,11 +967,18 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
     if (length > 1) lower1 = boost::algorithm::to_lower_copy(args[1]);
 
     switch (length) {
+        case 1:
+            break;
         case 2: {
             return console_.get_command_list();
         }
-        case 3: {
-            if (std::set<std::string>{"teleport", "tp", "kick", "whisper", "w"}.contains(lower1)) {
+        case 3:
+        default: {
+            if (std::set<std::string>{"teleport", "tp", "kick", "whisper", "w",
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+                "spectate", "bindspectation"
+#endif
+            }.contains(lower1)) {
                 std::vector<std::string> options;
                 options.reserve(2 * db_.player_count() + 2);
                 db_.for_each([this, &options, &args](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
@@ -913,8 +995,6 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
                 return std::vector<std::string>{"hs", "sr"};
             break;
         }
-        default:
-            break;
     }
     return std::vector<std::string>{};
 }
@@ -956,7 +1036,7 @@ void BallanceMMOClient::connect_to_server(std::string address, std::string name)
         }
     }
     if (address.empty()) {
-        m_bml->AddTimer(CKDWORD(0), [this] { server_list_.enter_gui(); });
+        utils_.call_sync_method([this] { server_list_.enter_gui(); });
         return;
     }
     if (connected() || connecting()) {

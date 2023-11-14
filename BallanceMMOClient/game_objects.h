@@ -129,7 +129,7 @@ public:
 			if (!player.physicalized) {
 #ifdef DEBUG
 				item.second.counter++;
-				if (item.second.counter % 33 == 0) {
+				if (item.second.counter % 66 == 0) {
 					username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + " " + std::to_string(item.second.time_variance / 100000));
 				}
 #endif
@@ -293,6 +293,19 @@ public:
 
 		return ball;
 	}
+
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+	inline const std::pair<VxVector, VxQuaternion> get_ball_state(HSteamNetConnection id) {
+		if (!db_.exists(id))
+			return {};
+		auto* player_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(
+			objects_[id].balls[db_.get(id).value().ball_state.front().type]));
+		VxVector pos; VxQuaternion rot;
+		player_ball->GetPosition(&pos);
+		player_ball->GetQuaternion(&rot);
+		return {pos, rot};
+	}
+#endif
 
 	void toggle_extrapolation(bool enabled) { extrapolation_ = enabled; }
 

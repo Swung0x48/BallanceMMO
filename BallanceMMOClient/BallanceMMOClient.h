@@ -1,5 +1,6 @@
 #pragma once
 
+//#define BMMO_WITH_PLAYER_SPECTATION
 #include "bml_includes.h"
 #include "CommandMMO.h"
 #include "text_sprite.h"
@@ -251,7 +252,15 @@ private:
 
 	std::unordered_map<IMod*, std::function<void()>> login_callbacks_, logout_callbacks_;
 
-	std::atomic_bool sound_enabled_ = true;
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+	CKCamera* spect_cam_ = nullptr, * last_cam_ = nullptr;
+	HSteamNetConnection spect_player_ = k_HSteamNetConnection_Invalid;
+	bool spectating_first_person_ = false;
+	VxVector spect_pos_diff_{}, spect_target_pos_{}, spect_player_pos_{};
+	std::vector<std::string> spect_bindings_{"#0"};
+#endif
+
+	bool sound_enabled_ = true;
 	CKWaveSound* sound_countdown_{}, * sound_go_{},
 		* sound_level_finish_{}, * sound_level_finish_cheat_{}, * sound_dnf_{},
 		* sound_notification_{}, * sound_bubble_{}, * sound_knock_{};
@@ -502,7 +511,9 @@ private:
 			}
 		}
 
-		if (input_manager_->IsKeyDown(CKKEY_LCONTROL) && connected()) {
+		if (!connected())
+			return;
+		if (input_manager_->IsKeyDown(CKKEY_LCONTROL)) {
 		  if (m_bml->IsIngame()) {
 				for (int i = 0; i < sizeof(KEYS_TO_CHECK) / sizeof(CKKEYBOARD); ++i) {
 					if (input_manager_->IsKeyPressed(KEYS_TO_CHECK[i])) {
@@ -558,6 +569,22 @@ private:
 			std::lock_guard<std::mutex> lk(bml_mtx_);
 			db_.toggle_nametag_visible();
 		}
+
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+		if (input_manager_->IsKeyDown(CKKEY_RMENU)) {
+			static constexpr CKKEYBOARD keys[] = {
+				CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5, CKKEY_6, CKKEY_7, CKKEY_8, CKKEY_9
+			};
+			for (size_t i = 0; i < spect_bindings_.size(); ++i) {
+				if (!input_manager_->IsKeyPressed(keys[i]))
+					continue;
+				OnCommand(m_bml, { "mmo", "spectate", spect_bindings_[i] });
+				break;
+			}
+			return;
+		}
+#endif
+			
 
 #ifdef DEBUG
 		if (input_manager->IsKeyPressed(CKKEY_5)) {
