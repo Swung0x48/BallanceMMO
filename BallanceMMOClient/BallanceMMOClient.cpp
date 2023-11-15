@@ -180,6 +180,8 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         utils::md5_from_file(path, current_map_.md5);
         static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementValue(0, 0, &current_map_.level);
         current_level_mode_ = bmmo::level_mode::Speedrun;
+        did_not_finish_ = false;
+        max_sector_ = 0;
         if (connected()) {
             const auto name_it = map_names_.find(current_map_.get_hash_bytes_string());
             if (name_it == map_names_.end()) {
@@ -223,6 +225,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
 
 void BallanceMMOClient::on_sector_changed() {
     if (!update_current_sector()) return;
+    max_sector_ = std::max(current_sector_, max_sector_);
     if (connected()) send_current_sector();
     if (current_level_mode_ != bmmo::level_mode::Highscore) return;
     extra_life_received_ = false;
@@ -365,7 +368,6 @@ void BallanceMMOClient::OnStartLevel()
 
     if (!connected()) countdown_restart_ = true;
 
-    did_not_finish_ = false;
     level_finished_ = false;
     ball_off_ = false;
     extra_life_received_ = false;
@@ -436,6 +438,10 @@ void BallanceMMOClient::OnLevelFinish() {
     if (!connected() || spectator_mode_)
         return;
 
+    if (did_not_finish_) {
+        SendIngameMessage("Not sending level completion messages as you have already forfeited it.");
+        return;
+    }
     auto* array_energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
     int lives; array_energy->GetElementValue(0, 1, &lives);
     lives += compensation_lives_;
@@ -535,8 +541,8 @@ inline void BallanceMMOClient::on_fatal_error(std::string& extra_text) {
     if (current_level_mode_ == bmmo::level_mode::Highscore
             && !spectator_mode_ && !level_finished_ && !did_not_finish_) {
         send_dnf_message();
-        extra_text = std::format("You did not finish {}.\nAborted at sector {}.",
-                                 current_map_.get_display_name(), current_sector_);
+        extra_text = std::format("You did not finish {}.\nFurthest reach: sector {}.",
+                                 current_map_.get_display_name(), max_sector_);
     }
     bmmo::simple_action_msg msg{};
     msg.content.action = bmmo::action_type::FatalError;
@@ -1561,6 +1567,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 last_map_data.sector_timestamps = {};
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
+                did_not_finish_ = false;
+                max_sector_ = 1;
                 if (msg->content.restart_level) {
                     countdown_restart_ = true;
                     restart_current_level();
@@ -1616,7 +1624,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
         auto player_name = get_username(msg->content.player_id);
         SendIngameMessage(std::format(
-            "{}{} did not finish {} (aborted at sector {}).",
+            "{}{} did not finish {} (furthest reach: sector {}).",
             msg->content.cheated ? "[CHEAT] " : "",
             player_name,
             msg->content.map.get_display_name(map_names_),
@@ -1823,7 +1831,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::PublicNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::public_notification_msg>(network_msg);
-        SendIngameMessage("[" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
+        SendIngameMessage("[BMMO/" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
         utils_.flash_window();
         play_wave_sound(sound_knock_);
         break;

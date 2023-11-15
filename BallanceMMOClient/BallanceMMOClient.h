@@ -215,7 +215,7 @@ private:
 	bmmo::map last_countdown_map_{};
 	bmmo::level_mode current_level_mode_ = bmmo::level_mode::Speedrun, countdown_mode_{};
 	float counter_start_timestamp_ = 0;
-	int32_t current_sector_ = 0;
+	int32_t current_sector_ = 0, max_sector_ = 0;
 	int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
@@ -836,8 +836,12 @@ private:
 	}
 
 	void send_dnf_message() {
+		if (did_not_finish_) {
+			SendIngameMessage("Error: you have already forfeited this map and cannot do so again.");
+			return;
+		}
 		bmmo::did_not_finish_msg msg{};
-		msg.content.sector = current_sector_;
+		msg.content.sector = max_sector_;
 		msg.content.map = current_map_;
 		msg.content.cheated = m_bml->IsCheatEnabled();
 		send(msg, k_nSteamNetworkingSend_Reliable);

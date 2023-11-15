@@ -592,7 +592,7 @@ private:
                 auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
                 std::string player_name = get_player_name(msg->content.player_id);
                 Printf(
-                    "%s(#%u, %s) did not finish %s (aborted at sector %d).",
+                    "%s(#%u, %s) did not finish %s (furthest reach: sector %d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_),

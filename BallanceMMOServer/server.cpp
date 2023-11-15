@@ -966,7 +966,7 @@ protected:
                 msg->content.player_id = networking_msg->m_conn;
                 std::string& player_name = client_it->second.name;
                 Printf(
-                    "%s(#%u, %s) did not finish %s (aborted at sector %d).",
+                    "%s(#%u, %s) did not finish %s (furthest reach: sector %d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_),
