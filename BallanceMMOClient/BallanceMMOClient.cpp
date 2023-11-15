@@ -951,7 +951,7 @@ void BallanceMMOClient::init_commands() {
         m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
         SendIngameMessage(std::format("Spectating {}.", state.value().name));
     });
-    console_.register_command("bind", [&] {
+    console_.register_command("bindspectation", [&] {
         spect_bindings_ = decltype(spect_bindings_){"#0"};
         while (!console_.empty())
             spect_bindings_.emplace_back(console_.get_next_word(true));

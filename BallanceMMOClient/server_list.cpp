@@ -103,7 +103,7 @@ void server_list::enter_server_edit() {
     server_name_->SetVisible(true);
     server_name_label_->SetVisible(true);
     server_name_background_->SetVisible(true);
-    gui_->SetFocus(nullptr);
+    SetFocus(nullptr);
     bool create_new = (server_index_ >= servers_.size());
     hints_->SetText("Default port: 26676 \xB7 <Enter> Save data\n<Up|Down|Tab> Move input focus \xB7 <Esc>");
     hints_->SetVisible(true);
@@ -114,9 +114,9 @@ void server_list::enter_server_edit() {
     edit_cancel_->SetVisible(true);
     edit_save_->SetVisible(true);
     bml_->AddTimerLoop(CKDWORD(1), [this] {
-        if (input_manager_->oIsKeyDown(CKKEY_E))
+        if (bml_->GetInputManager()->oIsKeyDown(CKKEY_E))
             return true;
-        gui_->SetFocus(server_address_);
+        SetFocus(server_address_);
         return false;
     });
     screen_ = ServerEditor;
@@ -138,11 +138,11 @@ void server_list::save_config() {
 
 void server_list::exit_gui(CKDWORD key) {
     gui_visible_ = false;
-    input_manager_->ShowCursor(previous_mouse_visibility_);
+    bml_->GetInputManager()->ShowCursor(previous_mouse_visibility_);
     if (config_modified_) save_config();
     screen_ = None;
     set_input_block(false, key, [this] { return gui_visible_; }, [this] {
-        gui_->SetVisible(false);
+        SetVisible(false);
         process_ = [] {};
     });
 }
@@ -169,12 +169,13 @@ void server_list::connect_to_server() {
 }
 
 void server_list::set_input_block(bool block, CKDWORD defer_key, std::function<bool()> cancel_condition, std::function<void()> callback) {
+    auto input_manager = bml_->GetInputManager();
     bml_->AddTimerLoop(CKDWORD(1), [=, this] {
         if (cancel_condition())
             return false;
-        if (input_manager_->oIsKeyDown(defer_key))
+        if (input_manager->oIsKeyDown(defer_key))
             return true;
-        input_manager_->SetBlock(block);
+        input_manager->SetBlock(block);
         callback();
         return false;
     });
@@ -197,102 +198,102 @@ server_list::server_list(IBML* bml, log_manager* log_manager, decltype(connect_c
 }
 
 void server_list::init_gui() {
-    input_manager_ = bml_->GetInputManager();
-    gui_ = std::make_unique<decltype(gui_)::element_type>(this);
-    gui_->AddPanel("MMO_Server_List_Background", VxColor(0, 0, 0, 140), 0.25f, 0.25f, 0.5f, 0.5f)->SetZOrder(1024);
-    header_ = gui_->AddTextLabel("MMO_Server_List_Title", "", ExecuteBB::GAMEFONT_01, 0.27f, 0.27f, 0.46f, 0.06f);
+    AddPanel("MMO_Server_List_Background", VxColor(0, 0, 0, 140), 0.25f, 0.25f, 0.5f, 0.5f)->SetZOrder(1024);
+    header_ = AddTextLabel("MMO_Server_List_Title", "", ExecuteBB::GAMEFONT_01, 0.27f, 0.27f, 0.46f, 0.06f);
     header_->SetZOrder(1032);
     header_->SetAlignment(ALIGN_CENTER);
     float server_list_bottom_ = 0.33f;
-    selected_server_background_ = gui_->AddPanel("MMO_Selected_Server", VxColor(255, 175, 28, 96), 0, 0, 0.4f, 0.032f);
+    selected_server_background_ = AddPanel("MMO_Selected_Server", VxColor(255, 175, 28, 96), 0, 0, 0.4f, 0.032f);
     selected_server_background_->SetZOrder(1028);
     for (size_t i = 0; i < MAX_SERVERS_COUNT; ++i) {
-        auto* label = gui_->AddTextLabel(("MMO_Server_Entry_" + std::to_string(i)).c_str(),
-                                          "", ExecuteBB::GAMEFONT_03,
-                                          0.31f, SERVER_LIST_Y_BEGIN + SERVER_ENTRY_HEIGHT * i,
-                                          0.38f, SERVER_ENTRY_HEIGHT);
+        auto* label = AddTextLabel(("MMO_Server_Entry_" + std::to_string(i)).c_str(),
+                                    "", ExecuteBB::GAMEFONT_03,
+                                    0.31f, SERVER_LIST_Y_BEGIN + SERVER_ENTRY_HEIGHT * i,
+                                    0.38f, SERVER_ENTRY_HEIGHT);
         label->SetAlignment(ALIGN_CENTER);
         label->SetZOrder(1032);
         server_labels_[i] = label;
     }
-    new_server_ = gui_->AddTextLabel("MMO_New_Server", "[ Add New ]", ExecuteBB::GAMEFONT_03A,
-                                      0, 0, 0.38f, SERVER_ENTRY_HEIGHT);
+    new_server_ = AddTextLabel("MMO_New_Server", "[ Add New ]", ExecuteBB::GAMEFONT_03A,
+                               0, 0, 0.38f, SERVER_ENTRY_HEIGHT);
     new_server_->SetAlignment(ALIGN_CENTER);
     new_server_->SetZOrder(1032);
-    hints_ = gui_->AddTextLabel("MMO_Server_List_Hints", "", ExecuteBB::GAMEFONT_03A,
-                                0.27f, 0.67f, 0.46f, 0.08f);
+    hints_ = AddTextLabel("MMO_Server_List_Hints", "", ExecuteBB::GAMEFONT_03A,
+                          0.27f, 0.67f, 0.46f, 0.08f);
     hints_->SetAlignment(ALIGN_CENTER);
     hints_->SetZOrder(1032);
 
-    server_address_label_ = gui_->AddTextLabel("MMO_Server_Address_Label", "Server Address [*Required]",
-                                                ExecuteBB::GAMEFONT_03, 0.3f, SERVER_LIST_Y_BEGIN + 0.03f,
-                                                0.4f, SERVER_ENTRY_HEIGHT);
+    server_address_label_ = AddTextLabel("MMO_Server_Address_Label", "Server Address [*Required]",
+                                         ExecuteBB::GAMEFONT_03, 0.3f, SERVER_LIST_Y_BEGIN + 0.03f,
+                                         0.4f, SERVER_ENTRY_HEIGHT);
     server_address_label_->SetAlignment(ALIGN_LEFT);
     server_address_label_->SetZOrder(1032);
-    server_address_background_ = gui_->AddPanel("MMO_Server_Address_Background", VxColor(0, 0, 0, 140),
-                                                0.31f, SERVER_LIST_Y_BEGIN + 0.035f + SERVER_ENTRY_HEIGHT,
-                                                0.38f, SERVER_ENTRY_HEIGHT + 0.001f);
+    server_address_background_ = AddPanel("MMO_Server_Address_Background", VxColor(0, 0, 0, 140),
+                                          0.31f, SERVER_LIST_Y_BEGIN + 0.035f + SERVER_ENTRY_HEIGHT,
+                                          0.38f, SERVER_ENTRY_HEIGHT + 0.001f);
     server_address_background_->SetZOrder(1036);
-    server_address_ = gui_->AddTextInput("MMO_Server_Address_Input", ExecuteBB::GAMEFONT_03,
-                                          0.315f, SERVER_LIST_Y_BEGIN + 0.04f + SERVER_ENTRY_HEIGHT,
-                                          0.37f, SERVER_ENTRY_HEIGHT - 0.002f, [this](CKDWORD key) {});
+    server_address_ = AddTextInput("MMO_Server_Address_Input", ExecuteBB::GAMEFONT_03,
+                                   0.315f, SERVER_LIST_Y_BEGIN + 0.04f + SERVER_ENTRY_HEIGHT,
+                                   0.37f, SERVER_ENTRY_HEIGHT - 0.002f, [this](CKDWORD key) {});
     server_address_->SetAlignment(ALIGN_LEFT);
     server_address_->SetTextFlags(TEXT_SCREEN | TEXT_RESIZE_VERT);
     server_address_->SetZOrder(1040);
-    server_name_label_ = gui_->AddTextLabel("MMO_Server_Name_Label", "Server Name (alias)",
-                                            ExecuteBB::GAMEFONT_03, 0.3f, SERVER_NAME_Y_BEGIN,
-                                            0.4f, SERVER_ENTRY_HEIGHT);
+    server_name_label_ = AddTextLabel("MMO_Server_Name_Label", "Server Name (alias)",
+                                      ExecuteBB::GAMEFONT_03, 0.3f, SERVER_NAME_Y_BEGIN,
+                                      0.4f, SERVER_ENTRY_HEIGHT);
     server_name_label_->SetAlignment(ALIGN_LEFT);
     server_name_label_->SetZOrder(1032);
-    server_name_background_ = gui_->AddPanel("MMO_Server_Name_Background", VxColor(0, 0, 0, 140),
-                                              0.31f, SERVER_NAME_Y_BEGIN + 0.005f + SERVER_ENTRY_HEIGHT,
-                                              0.38f, SERVER_ENTRY_HEIGHT + 0.001f);
+    server_name_background_ = AddPanel("MMO_Server_Name_Background", VxColor(0, 0, 0, 140),
+                                       0.31f, SERVER_NAME_Y_BEGIN + 0.005f + SERVER_ENTRY_HEIGHT,
+                                       0.38f, SERVER_ENTRY_HEIGHT + 0.001f);
     server_name_background_->SetZOrder(1036);
-    server_name_ = gui_->AddTextInput("MMO_Server_Name_Input", ExecuteBB::GAMEFONT_03,
-                                      0.315f, SERVER_NAME_Y_BEGIN + 0.01f + SERVER_ENTRY_HEIGHT,
-                                      0.37f, SERVER_ENTRY_HEIGHT - 0.002f, [this](CKDWORD key) {});
+    server_name_ = AddTextInput("MMO_Server_Name_Input", ExecuteBB::GAMEFONT_03,
+                                0.315f, SERVER_NAME_Y_BEGIN + 0.01f + SERVER_ENTRY_HEIGHT,
+                                0.37f, SERVER_ENTRY_HEIGHT - 0.002f, [this](CKDWORD key) {});
     server_name_->SetAlignment(ALIGN_LEFT);
     server_name_->SetTextFlags(TEXT_SCREEN | TEXT_RESIZE_VERT);
     server_name_->SetZOrder(1040);
-    edit_cancel_ = gui_->AddSmallButton("MMO_Server_Edit_Cancel", "Cancel", 0.59f, 0.3912f,
-                                        [this] { enter_server_list(); });
+    edit_cancel_ = AddSmallButton("MMO_Server_Edit_Cancel", "Cancel", 0.59f, 0.3912f,
+                                  [this] { enter_server_list(); });
     edit_cancel_->SetZOrder(1032);
     edit_cancel_->SetActive(false);
-    edit_save_ = gui_->AddSmallButton("MMO_Server_Edit_Save", "Save", 0.59f, 0.54f,
-                                      [this] { save_server_data(); });
+    edit_save_ = AddSmallButton("MMO_Server_Edit_Save", "Save", 0.59f, 0.54f,
+                                [this] { save_server_data(); });
     edit_save_->SetZOrder(1032);
 
-    connection_status_ = gui_->AddTextLabel("MMO_Server_List_Connection_Status", "",
-                                            ExecuteBB::GAMEFONT_01, 0.3f, 0.39f, 0.4f, 0.22f);
+    connection_status_ = AddTextLabel("MMO_Server_List_Connection_Status", "",
+                                      ExecuteBB::GAMEFONT_01, 0.3f, 0.39f, 0.4f, 0.22f);
     connection_status_->SetAlignment(ALIGN_CENTER);
     connection_status_->SetZOrder(1032);
 
-    gui_->SetCanBeBlocked(false);
-    gui_->SetVisible(false);
+    SetCanBeBlocked(false);
+    SetVisible(false);
 }
 
 void server_list::enter_gui() {
     if (gui_visible_) return;
     gui_visible_ = true;
-    gui_->SetVisible(true);
-    previous_mouse_visibility_ = input_manager_->GetCursorVisibility() || !bml_->IsIngame();
-    input_manager_->ShowCursor(true);
+    SetVisible(true);
+    auto input_manager = bml_->GetInputManager();
+    previous_mouse_visibility_ = input_manager->GetCursorVisibility() || !bml_->IsIngame();
+    input_manager->ShowCursor(true);
     set_input_block(true, CKKEY_RETURN, [this] { return !gui_visible_; });
-    process_ = [this] { gui_->Process(); };
+    process_ = [this] { Process(); };
     enter_server_list();
 }
 
-void server_list::on_key_typed(CKDWORD key) {
+void server_list::OnCharTyped(CKDWORD key) {
+    BGui::Gui::OnCharTyped(key);
     switch (screen_) {
     case ServerEditor:
         switch (key) {
-            case CKKEY_UP: gui_->SetFocus(server_address_); break;
-            case CKKEY_DOWN: gui_->SetFocus(server_name_); break;
+            case CKKEY_UP: SetFocus(server_address_); break;
+            case CKKEY_DOWN: SetFocus(server_name_); break;
             case CKKEY_RETURN: save_server_data(); break;
             case CKKEY_ESCAPE: enter_server_list(); break;
             case CKKEY_TAB: {
-                gui_->SetFocus((server_address_->GetTextFlags() & TEXT_SHOWCARET)
-                               ? server_name_ : server_address_);
+                SetFocus((server_address_->GetTextFlags() & TEXT_SHOWCARET)
+                         ? server_name_ : server_address_);
                 break;
             }
         }
@@ -312,14 +313,15 @@ void server_list::on_key_typed(CKDWORD key) {
     }
 }
 
-void server_list::on_mouse_down(float x, float y, CK_MOUSEBUTTON key) {
+void server_list::OnMouseDown(float x, float y, CK_MOUSEBUTTON key) {
+    BGui::Gui::OnMouseDown(x, y, key);
     if (key != CK_MOUSEBUTTON_LEFT && key != CK_MOUSEBUTTON_RIGHT)
         return;
     /*Vx2DVector mouse_pos; VxRect screen_size;
     input_manager_->GetMousePosition(mouse_pos, false);
     bml_->GetRenderContext()->GetViewRect(screen_size);
     mouse_pos.x /= screen_size.GetWidth(); mouse_pos.y /= screen_size.GetHeight();*/
-    if (gui_->Intersect(x, y, selected_server_background_)) {
+    if (Intersect(x, y, selected_server_background_)) {
         if (key == CK_MOUSEBUTTON_LEFT)
             connect_to_server();
         else
@@ -327,20 +329,10 @@ void server_list::on_mouse_down(float x, float y, CK_MOUSEBUTTON key) {
         return;
     }
     for (size_t i = 0; i < servers_.size(); ++i) {
-        if (!gui_->Intersect(x, y, server_labels_[i])) continue;
+        if (!Intersect(x, y, server_labels_[i])) continue;
         select_server(i);
         break;
     }
-    if (gui_->Intersect(x, y, new_server_))
+    if (Intersect(x, y, new_server_))
         select_server(servers_.size());
 }
-
-void server_list_gui::OnCharTyped(CKDWORD key) {
-    BGui::Gui::OnCharTyped(key);
-    server_list_->on_key_typed(key);
-}
-
-void server_list_gui::OnMouseDown(float x, float y, CK_MOUSEBUTTON key) {
-    BGui::Gui::OnMouseDown(x, y, key);
-    server_list_->on_mouse_down(x, y, key);
-};
