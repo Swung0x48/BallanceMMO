@@ -1198,6 +1198,9 @@ protected:
                 break;
             }
             case bmmo::ModList: { // TODO: configurable mod blacklist/whitelist handling
+                auto msg = bmmo::message_utils::deserialize<bmmo::mod_list_msg>(networking_msg);
+                if (config_.log_installed_mods)
+                    config_.log_mod_list(msg.mods);
                 break;
             }
             case bmmo::SoundData:

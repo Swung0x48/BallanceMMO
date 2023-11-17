@@ -6,54 +6,45 @@
 #include "common.hpp"
 #include "config_manager.hpp"
 
+namespace {
+    template<typename T>
+    T yaml_load_value(YAML::Node& node, const char* key, const T& default_v) {
+        if (node[key])
+            return node[key].as<T>();
+        node[key] = default_v;
+        return default_v;
+    }
+}
+
 bool config_manager::load() {
-    std::string logging_level_string = "important";
     std::ifstream ifile("config.yml");
     if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
         try {
             config_ = YAML::Load(ifile);
-            if (config_["op_list"])
-                op_players = config_["op_list"].as<decltype(op_players)>();
-            if (config_["enable_op_privileges"])
-                op_mode = config_["enable_op_privileges"].as<bool>();
-            if (config_["ban_list"])
-                banned_players = config_["ban_list"].as<decltype(banned_players)>();
-            if (config_["mute_list"]) {
-                auto muted_vector = config_["mute_list"].as<std::vector<std::string>>();
-                muted_players = std::unordered_set(muted_vector.begin(), muted_vector.end());
-            }
-            if (config_["restart_level_after_countdown"])
-                restart_level = config_["restart_level_after_countdown"].as<bool>();
-            if (config_["force_restart_after_countdown"])
-                force_restart_level = config_["force_restart_after_countdown"].as<bool>();
-            if (config_["logging_level"])
-                logging_level_string = config_["logging_level"].as<std::string>();
-            if (config_["save_player_status_to_file"])
-                save_player_status_to_file_ = config_["save_player_status_to_file"].as<bool>();
         } catch (const std::exception& e) {
             role::Printf("Error: failed to parse config: %s", e.what());
             return false;
         }
     } else {
         role::Printf("Config is empty. Generating default config...");
-        op_players = {{"example_player", "00000001-0002-0003-0004-000000000005"}};
-        banned_players = {{"00000001-0002-0003-0004-000000000005", "You're banned from this server."}};
-        muted_players = {"00000001-0002-0003-0004-000000000005"};
     }
 
-    config_["enable_op_privileges"] = op_mode;
-    config_["restart_level_after_countdown"] = restart_level;
-    config_["force_restart_after_countdown"] = force_restart_level;
-    config_["save_player_status_to_file"] = save_player_status_to_file_;
+    op_mode = yaml_load_value(config_, "enable_op_privileges", op_mode);
+    restart_level = yaml_load_value(config_, "restart_level_after_countdown", restart_level);
+    force_restart_level = yaml_load_value(config_, "force_restart_after_countdown", force_restart_level);
+    save_player_status_to_file_ = yaml_load_value(config_, "save_player_status_to_file", save_player_status_to_file_);
+    log_installed_mods = yaml_load_value(config_, "log_installed_mods", log_installed_mods);
+
+    std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
     if (logging_level_string == "msg")
         logging_level = k_ESteamNetworkingSocketsDebugOutputType_Msg;
     else if (logging_level_string == "warning")
         logging_level = k_ESteamNetworkingSocketsDebugOutputType_Warning;
     else {
         logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
-        config_["logging_level"] = "important";
     }
     role::set_logging_level(logging_level);
+
     if (config_["map_name_list"]) {
         default_map_names.clear();
         for (const auto& element: config_["map_name_list"]) {
@@ -64,8 +55,16 @@ bool config_manager::load() {
     } else
         config_["map_name_list"] = YAML::Node(YAML::NodeType::Map);
 
+    op_players = yaml_load_value(config_, "op_list",
+            decltype(op_players){{"example_player", "00000001-0002-0003-0004-000000000005"}});
+    banned_players = yaml_load_value(config_, "ban_list",
+            decltype(banned_players){{"00000001-0002-0003-0004-000000000005", "You're banned from this server."}});
+    std::vector<std::string> mute_list_vector = yaml_load_value(config_, "mute_list",
+            decltype(mute_list_vector){"00000001-0002-0003-0004-000000000005"});
+    muted_players = std::unordered_set(mute_list_vector.begin(), mute_list_vector.end());
+
     ifile.close();
-    save();
+    save(false);
     role::Printf("Config loaded successfully.");
     return true;
 }
@@ -84,10 +83,20 @@ void config_manager::print_mutes() {
             muted_players.size() == 1 ? "" : "s");
 }
 
-void config_manager::save() {
-    config_["op_list"] = op_players;
-    config_["ban_list"] = banned_players;
-    config_["mute_list"] = std::vector<std::string>(muted_players.begin(), muted_players.end());
+void config_manager::log_mod_list(const std::unordered_map<std::string, std::string>& mod_list) {
+    std::string output;
+    for (const auto& [mod, ver]: mod_list) {
+        output += "; " + mod + ", " + ver;
+    }
+    role::Printf("Installed mods (%u): %s", mod_list.size(), output.erase(0, strlen("; ")));
+}
+
+void config_manager::save(bool reload_values) {
+    if (reload_values) {
+        config_["op_list"] = op_players;
+        config_["ban_list"] = banned_players;
+        config_["mute_list"] = std::vector<std::string>(muted_players.begin(), muted_players.end());
+    }
     std::ofstream config_file("config.yml");
     if (!config_file.is_open()) {
         role::Printf("Error: failed to open config file for writing.");
@@ -97,12 +106,12 @@ void config_manager::save() {
     config_file << "# Config file for Ballance MMO Server v" << bmmo::current_version.to_string() << " - "
                     << std::put_time(std::localtime(&current_time), "%F %T") << "\n"
                 << "# Notes:\n"
+                << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
+                << "# - Options for log levels: important, warning, msg.\n"
+                << "# - Map name list style: \"md5_hash: name\".\n"
                 << "# - Op list player data style: \"playername: uuid\".\n"
                 << "# - Ban list style: \"uuid: reason\".\n"
                 << "# - Mute list style: \"- uuid\".\n"
-                << "# - Map name list style: \"md5_hash: name\".\n"
-                << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
-                << "# - Options for log levels: important, warning, msg.\n"
                 << std::endl;
     config_file << config_;
     config_file << std::endl;
@@ -136,8 +145,6 @@ void config_manager::save_login_data(const std::string& ip_str, const std::strin
         ofile.close();
     }
 }
-
-
 
 void config_manager::save_player_status(const client_data_collection& clients) {
     if (!save_player_status_to_file_)
