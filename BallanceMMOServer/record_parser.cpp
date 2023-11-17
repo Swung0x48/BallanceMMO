@@ -708,7 +708,7 @@ private:
             username_.erase(itName);
         if (itClient != clients_.end())
             clients_.erase(itClient);
-        Printf(bmmo::ansi::BrightYellow, "%s (#%u) disconnected.", name, client);
+        Printf(bmmo::color_code(msg.code), "%s (#%u) disconnected.", name, client);
 
         bmmo::plain_text_msg text_msg;
         text_msg.text_content.resize(128);
@@ -751,7 +751,7 @@ private:
                 clients_[networking_msg->m_conn] = {msg.nickname, {}};  // add the client here
                 memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
                 username_[msg.nickname] = networking_msg->m_conn;
-                Printf(bmmo::ansi::BrightYellow, "%s (v%s) logged in!\n",
+                Printf(bmmo::color_code(bmmo::LoginAcceptedV3), "%s (v%s) logged in!\n",
                         msg.nickname,
                         msg.version.to_string());
 

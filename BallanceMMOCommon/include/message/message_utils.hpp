@@ -12,17 +12,21 @@ namespace bmmo::message_utils {
     using bmmo::string_utils::to_lower;
     using bmmo::string_utils::join_strings;
 
+    // template T: type to store length of the string
+    template<typename T = uint32_t>
     inline void write_string(std::string str, std::stringstream& stream) {
 #ifdef _WIN32
         str = string_utils::ConvertWideToUtf8(string_utils::ConvertAnsiToWide(str));
 #endif
-        uint32_t length = str.length();
+        T length = static_cast<T>(str.length());
         stream.write(reinterpret_cast<const char*>(&length), sizeof(length));
         stream.write(str.c_str(), str.length());
     }
 
+    // template T: type to store length of the string
+    template<typename T = uint32_t>
     inline bool read_string(std::stringstream& stream, std::string& str) {
-        uint32_t length = 0;
+        T length = 0;
         stream.read(reinterpret_cast<char*>(&length), sizeof(length));
         if (length > stream.tellp())
             return false;

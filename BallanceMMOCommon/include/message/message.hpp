@@ -70,6 +70,7 @@ namespace bmmo {
 
         OwnedCompressedBallState,
         SoundStream,
+        ScoreList,
     };
 
     template<typename T, opcode C = None>

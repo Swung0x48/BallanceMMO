@@ -41,8 +41,8 @@ public:
 		log_manager_(GetLogger(), [this](std::string msg, int ansi_color) { SendIngameMessage(msg, ansi_color); }),
 		utils_(bml),
 		config_manager_(&log_manager_, [this] { return GetConfig(); }),
-		server_list_(bml, &log_manager_, [this](std::string addr, std::string name) { connect_to_server(addr, name); }),
-		console_window_(bml, &log_manager_, [this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); })
+		server_list_(bml, &log_manager_, [this](auto addr, auto name) { connect_to_server(addr, name); }),
+		console_window_(bml, &log_manager_, [this](auto bml, auto args) { OnCommand(bml, args); })
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{

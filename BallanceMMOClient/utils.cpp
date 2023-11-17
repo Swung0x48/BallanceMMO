@@ -94,7 +94,7 @@ void utils::display_important_notification(const std::string& text, float font_s
     using namespace std::chrono;
     auto current_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
     text_sprite notification(std::format("Notification{}", current_ms),
-                             text, 0.0f, y_pos - 0.001053f * font_size * line_count);
+                              text, 0.0f, y_pos - 0.001053f * font_size * line_count);
     notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);
     notification.sprite_->SetZOrder(65536 + static_cast<int>(current_ms));
     notification.sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });

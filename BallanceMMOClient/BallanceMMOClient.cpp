@@ -641,6 +641,11 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("scores", [&] {
         bmmo::map rank_map;
         auto mode = console_.get_next_word(true);
+        bool use_local_data = false;
+        if (mode == "local") {
+            use_local_data = true;
+            mode = console_.get_next_word(true);
+        }
         if (!console_.empty()) {
             int level = std::clamp(atoi(console_.get_next_word().c_str()), 1, 13);
             bmmo::hex_chars_from_string(rank_map.md5, bmmo::map::original_map_hashes[level]);
@@ -649,7 +654,15 @@ void BallanceMMOClient::init_commands() {
         } else
             rank_map = last_countdown_map_;
 
-        asio::post(thread_pool_, [this, rank_map = std::move(rank_map), hs_mode = (mode == "hs")] {
+        asio::post(thread_pool_, [=, this, rank_map = std::move(rank_map)] {
+            bmmo::score_list_msg msg{};
+            msg.map = rank_map;
+            msg.mode = (mode == "hs") ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
+            if (!use_local_data) {
+                msg.serialize();
+                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                return;
+            }
             std::unique_lock lk(client_mtx_);
             auto map_it = maps_.find(rank_map.get_hash_bytes_string());
             if (map_it == maps_.end() ||
@@ -658,19 +671,8 @@ void BallanceMMOClient::init_commands() {
                                   bmmo::ansi::BrightRed);
                 return;
             }
-            auto& ranks = map_it->second.rankings;
-            bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
-            auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
-                    ranks, rank_map.get_display_name(map_names_), hs_mode);
-            lk.unlock();
-            size_t size = ranks.first.size() + ranks.second.size() + 1;
-            std::string text; text.reserve(size * 64);
-            for (const auto& line : formatted_texts) {
-                text += line + '\n';
-                console_window_.print_text(line.c_str());
-                GetLogger()->Info("%s", line.c_str());
-            }
-            utils_.display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);
+            msg.serialize(map_it->second.rankings);
+            receive(msg.raw.str().data(), msg.size());
         });
     });
     console_.register_command("whisper", [&] {
@@ -685,7 +687,7 @@ void BallanceMMOClient::init_commands() {
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         SendIngameMessage(std::format("Whispered to {}: {}",
-            get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
+            get_username(msg.player_id), msg.chat_content), bmmo::color_code(msg.code));
     });
     console_.register_aliases("whisper", {"w"});
     console_.register_command("help", [&] { OnAsyncCommand(m_bml, {"mmo"}); });
@@ -997,8 +999,10 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
                 options.push_back(get_display_nickname());
                 return options;
             }
-            else if (lower1 == "mode" || lower1 == "scores")
-                return std::vector<std::string>{"hs", "sr"};
+            else if (lower1 == "mode")
+                return {"hs", "sr"};
+            else if (lower1 == "scores")
+                return {"hs", "sr", "local"};
             break;
         }
     }
@@ -1399,7 +1403,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         reconnection_count_ = 0;
         status_->update("Connected");
         status_->paint(0xff00ff00);
-        SendIngameMessage("Logged in.");
+        SendIngameMessage("Logged in.", bmmo::color_code(msg.code));
 
         // post-connection actions
         player_ball_ = get_current_ball();
@@ -1464,7 +1468,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off"),
-                          bmmo::ansi::BrightYellow);
+                          bmmo::color_code(msg.code));
         if (m_bml->IsIngame()) {
             GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
             objects_.init_player(msg.connection_id, msg.name, msg.cheated);
@@ -1485,7 +1489,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto state = db_.get(msg->content.connection_id);
         //assert(state.has_value());
         if (state.has_value()) {
-            SendIngameMessage(state->name + " left the game.", bmmo::ansi::BrightYellow);
+            SendIngameMessage(state->name + " left the game.", bmmo::color_code(msg->code));
             db_.remove(msg->content.connection_id);
             objects_.remove(msg->content.connection_id);
             play_wave_sound(sound_knock_);
@@ -1507,7 +1511,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         SendIngameMessage(std::format("{} whispers to you: {}",
-                                      get_username(msg.player_id), msg.chat_content), bmmo::ansi::Xterm256 | 248);
+                                      get_username(msg.player_id), msg.chat_content), bmmo::color_code(msg.code));
         utils_.flash_window();
         break;
     }
@@ -1559,7 +1563,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             case ct::Go: {
                 SendIngameMessage(std::format("[{}]: {}{} - Go!",
                                   sender_name, map_name, msg->content.get_level_mode_label()),
-                                  bmmo::ansi::BrightGreen | bmmo::ansi::Bold);
+                                  bmmo::color_code(msg->code));
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
                 auto& last_map_data = maps_[last_countdown_map_.get_hash_bytes_string()];
@@ -1644,8 +1648,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         // Prepare message
         std::string map_name = msg->content.map.get_display_name(map_names_),
             player_name = get_username(msg->content.player_id),
-            formatted_score = msg->content.get_formatted_score(),
-            formatted_time = msg->content.get_formatted_time();
+            formatted_score = msg->content.get_formatted_score();
         //auto state = db_.get(msg->content.player_id);
         //assert(state.has_value() || (db_.get_client_id() == msg->content.player_id));
         SendIngameMessage(std::format(
@@ -1653,12 +1656,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg->content.cheated ? "[CHEAT] " : "", player_name,
             map_name, get_level_mode_label(msg->content.mode),
             msg->content.rank, bmmo::string_utils::get_ordinal_suffix(msg->content.rank),
-            formatted_score, formatted_time).c_str());
+            formatted_score, msg->content.get_formatted_time()));
 
         std::lock_guard lk(client_mtx_);
         maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
             (bool)msg->content.cheated, player_name, msg->content.mode,
-            msg->content.rank, formatted_score, formatted_time});
+            msg->content.rank, msg->content.timeElapsed, formatted_score});
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);
@@ -1702,7 +1705,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             utils_.flash_window();
         }
         std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
-        SendIngameMessage(str.c_str(), bmmo::ansi::BrightBlue);
+        SendIngameMessage(str.c_str(), bmmo::color_code(msg->code));
         break;
     }
     case bmmo::OwnedCheatToggle: {
@@ -1718,7 +1721,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 play_wave_sound(sound_knock_);
                 utils_.flash_window();
             }
-            SendIngameMessage(str.c_str(), bmmo::ansi::BrightBlue);
+            SendIngameMessage(str.c_str(), bmmo::color_code(msg->code));
         }
         break;
     }
@@ -1756,7 +1759,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::ActionDenied: {
         auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
-        SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str(), bmmo::ansi::Red);
+        SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str(), bmmo::color_code(msg->code));
         break;
     }
     case bmmo::CurrentMap: {
@@ -1768,7 +1771,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               get_username(msg->content.player_id), msg->content.sector,
                               bmmo::string_utils::get_ordinal_suffix(msg->content.sector),
                               msg->content.map.get_display_name(map_names_)),
-                              bmmo::ansi::Italic);
+                              bmmo::color_code(msg->code));
         }
         else {
             int64_t timestamp = db_.get_timestamp_ms();
@@ -1793,30 +1796,34 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::OpState: {
         auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
         SendIngameMessage(std::format("You have been {} Operator permission.",
-                msg->content.op ? "granted" : "removed from"), bmmo::ansi::WhiteInverse);
+                msg->content.op ? "granted" : "removed from"), bmmo::color_code(msg->code));
         break;
     }
     case bmmo::PermanentNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(network_msg);
         if (msg.text_content.empty()) {
-            permanent_notification_.reset();
-            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title), bmmo::ansi::BrightCyan);
+            utils_.call_sync_method([&] { permanent_notification_.reset(); });
+            SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title),
+                              bmmo::color_code(msg.code));
             break;
         }
         std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
         if (!permanent_notification_) {
-            permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", parsed_text.c_str(), 0.2f, 0.036f);
-            permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
-            permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
-            permanent_notification_->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-            permanent_notification_->sprite_->SetFont(utils::get_system_font(), utils_.get_display_font_size(11.72f), 400, false, false);
-            permanent_notification_->sprite_->SetZOrder(65536);
-            permanent_notification_->paint(player_list_color_);
-            permanent_notification_->set_visible(true);
+            utils_.call_sync_method([&] {
+                permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", parsed_text.c_str(), 0.2f, 0.036f);
+                permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
+                permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
+                permanent_notification_->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
+                permanent_notification_->sprite_->SetFont(utils::get_system_font(), utils_.get_display_font_size(11.72f), 400, false, false);
+                permanent_notification_->sprite_->SetZOrder(65536);
+                permanent_notification_->paint(player_list_color_);
+                permanent_notification_->set_visible(true);
+            });
         }
         else
-            permanent_notification_->update(parsed_text.c_str());
-        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content), bmmo::ansi::BrightCyan);
+            utils_.call_sync_method([&] { permanent_notification_->update(parsed_text.c_str()); });
+        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content),
+                          bmmo::color_code(msg.code));
         utils_.flash_window();
         play_wave_sound(sound_notification_, !utils_.is_foreground_window());
         break;
@@ -1834,6 +1841,24 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage("[BMMO/" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
         utils_.flash_window();
         play_wave_sound(sound_knock_);
+        break;
+    }
+    case bmmo::ScoreList: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::score_list_msg>(network_msg);
+        asio::post(thread_pool_, [this, msg = std::move(msg)]() mutable {
+            bool hs_mode = (msg.mode == bmmo::level_mode::Highscore);
+            bmmo::ranking_entry::sort_rankings(msg.rankings, hs_mode);
+            auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
+                    msg.rankings, msg.map.get_display_name(map_names_), hs_mode);
+            size_t size = msg.rankings.first.size() + msg.rankings.second.size() + 1;
+            std::string text; text.reserve(size * 64);
+            for (const auto& line : formatted_texts) {
+                text += line + '\n';
+                console_window_.print_text(line.c_str());
+                GetLogger()->Info("%s", line.c_str());
+            }
+            utils_.display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);
+        });
         break;
     }
     case bmmo::SoundData: {
@@ -1894,7 +1919,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::PopupBox: {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
-        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, bmmo::ansi::BrightCyan);
+        SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, bmmo::color_code(msg.code));
         std::thread([msg = std::move(msg)] {
             std::ignore = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
         }).detach();

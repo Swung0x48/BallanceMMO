@@ -15,7 +15,8 @@ namespace bmmo::ranking_entry {
     struct finish_entry: base_entry {
         level_mode mode = level_mode::Speedrun;
         int sr_ranking{};
-        std::string formatted_hs_score, formatted_sr_score;
+        float sr_time{};
+        std::string formatted_hs_score;
 
         std::string to_string(int ranking, level_mode default_mode) const;
     };

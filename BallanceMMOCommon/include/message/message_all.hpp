@@ -2,6 +2,7 @@
 #define BALLANCEMMOSERVER_MESSAGE_ALL_HPP
 
 #include "message.hpp"
+#include "message_colors.hpp"
 #include "login_request_msg.hpp"
 #include "login_request_v2_msg.hpp"
 #include "login_request_v3_msg.hpp"
@@ -46,5 +47,6 @@
 #include "public_notification_msg.hpp"
 #include "owned_compressed_ball_state_msg.hpp"
 #include "sound_stream_msg.hpp"
+#include "score_list_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

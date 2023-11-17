@@ -9,7 +9,7 @@ namespace bmmo::ranking_entry {
                         ranking,
                         default_mode == mode ? "" : get_level_mode_suffix(mode),
                         cheated ? "[C] " : "", name.c_str(),
-                        formatted_hs_score.c_str(), formatted_sr_score.c_str());
+                        formatted_hs_score.c_str(), bmmo::get_formatted_time(sr_time).c_str());
         return {text};
     }
 

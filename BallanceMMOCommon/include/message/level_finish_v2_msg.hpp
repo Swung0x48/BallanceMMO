@@ -31,16 +31,7 @@ namespace bmmo {
         }
 
         std::string get_formatted_time() {
-            int total = int(timeElapsed);
-            int minutes = total / 60;
-            int seconds = total % 60;
-            int hours = minutes / 60;
-            minutes = minutes % 60;
-            int ms = int((timeElapsed - total) * 1000);
-            std::string text(64, 0);
-            text.resize(std::snprintf(text.data(), text.size(),
-                "%02d:%02d:%02d.%03d", hours, minutes, seconds, ms));
-            return text;
+            return bmmo::get_formatted_time(timeElapsed);
         }
     };
 

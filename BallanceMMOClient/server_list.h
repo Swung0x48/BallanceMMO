@@ -8,7 +8,7 @@
 #include "bml_includes.h"
 #include "log_manager.h"
 
-class server_list : private BGui::Gui {
+class server_list final : private BGui::Gui {
 private:
     IBML* bml_;
     log_manager* log_manager_;
@@ -59,14 +59,14 @@ private:
     void set_input_block(bool block, CKDWORD defer_key, std::function<bool()> cancel_condition,
                          std::function<void()> callback = [] {});
 
+    void OnCharTyped(CKDWORD key) override;
+    void OnMouseDown(float x, float y, CK_MOUSEBUTTON key) override;
+
 public:
     server_list(IBML* bml, log_manager* log_manager, decltype(connect_callback_) connect_callback);
 
     void init_gui();
     void enter_gui();
-
-    void OnCharTyped(CKDWORD key) override;
-    void OnMouseDown(float x, float y, CK_MOUSEBUTTON key) override;
 
     inline void process() { process_(); }
 };

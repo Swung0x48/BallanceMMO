@@ -139,6 +139,19 @@ namespace bmmo {
             return true;
         }
     };
+
+    inline std::string get_formatted_time(float time_elapsed) {
+        int total = int(time_elapsed);
+        int minutes = total / 60;
+        int seconds = total % 60;
+        int hours = minutes / 60;
+        minutes = minutes % 60;
+        int ms = int((time_elapsed - total) * 1000);
+        std::string text(64, 0);
+        text.resize(std::snprintf(text.data(), text.size(),
+            "%02d:%02d:%02d.%03d", hours, minutes, seconds, ms));
+        return text;
+    }
 }
 
 #endif //BALLANCEMMOSERVER_MAP_HPP
