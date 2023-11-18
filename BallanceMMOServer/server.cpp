@@ -115,6 +115,14 @@ public:
     inline int get_client_count() const noexcept { return clients_.size(); }
 
     inline config_manager get_config() { return config_; }
+    inline const bmmo::map& get_last_countdown_map() { return last_countdown_map_; }
+    
+    const bmmo::ranking_entry::player_rankings* get_map_rankings(const bmmo::map& map) {
+        auto map_it = maps_.find(map.get_hash_bytes_string());
+        if (map_it == maps_.end() || (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty()))
+            return nullptr;
+        return &(map_it->second.rankings);
+    }
 
     bool kick_client(HSteamNetConnection client, std::string reason = "",
             HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
@@ -233,7 +241,6 @@ public:
     }
 
     void print_scores(bool hs_mode, bmmo::map map) {
-        if (map == bmmo::map{}) map = last_countdown_map_;
         auto map_it = maps_.find(map.get_hash_bytes_string());
         if (map_it == maps_.end() || (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
             Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
@@ -398,7 +405,8 @@ public:
         running_ = true;
         startup_cv_.notify_all();
 
-        Printf("Server (v%s; client min. v%s) started at port %u.\n",
+        Printf(bmmo::ansi::BrightYellow,
+                "Server (v%s; client min. v%s) started at port %u.\n",
                 bmmo::current_version.to_string(),
                 bmmo::minimum_client_version.to_string(), port_);
 
@@ -1164,19 +1172,18 @@ protected:
             }
             case bmmo::ScoreList: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::score_list_msg>(networking_msg);
-                auto map_it = maps_.find(msg.map.get_hash_bytes_string());
-                bool map_not_found = (map_it == maps_.end() || (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty()));
+                auto* rankings = get_map_rankings(msg.map);
                 Printf(bmmo::color_code(msg.code), "(%u, %s) queried the score list of %s%s.",
                         networking_msg->m_conn, client_it->second.name,
                         msg.map.get_display_name(map_names_),
-                        map_not_found ? " [Not found]" : "");
+                        rankings ? "" : " [Not found]");
                 msg.clear();
-                if (map_not_found) {
+                if (!rankings) {
                     send(networking_msg->m_conn, bmmo::action_denied_msg{.content = bmmo::deny_reason::TargetNotFound},
                             k_nSteamNetworkingSend_Reliable);
                     break;
                 }
-                msg.serialize(map_it->second.rankings);
+                msg.serialize(*rankings);
                 send(networking_msg->m_conn, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
@@ -1635,8 +1642,30 @@ int main(int argc, char** argv) {
     console.register_command("scores", [&] {
         if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
         bool hs_mode = (console.get_next_word(true) == "hs");
-        server.print_scores(hs_mode, console.empty() ? bmmo::map{} : static_cast<bmmo::map>(console.get_next_map()));
+        server.print_scores(hs_mode, console.empty() ? server.get_last_countdown_map() : static_cast<bmmo::map>(console.get_next_map()));
     });
+    console.register_command("sendscores", [&] {
+        HSteamNetConnection client{};
+        if (console.get_command_name() == "sendscores#") {
+            client = get_client_id_from_console();
+            if (client == k_HSteamNetConnection_Invalid) return;
+        }
+        bmmo::score_list_msg msg{};
+        msg.mode = (console.get_next_word(true) == "hs") ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
+        msg.map = console.empty() ? server.get_last_countdown_map() : static_cast<bmmo::map>(console.get_next_map());
+        auto* rankings = server.get_map_rankings(msg.map);
+        if (!rankings) {
+            server.Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
+            return;
+        }
+        msg.serialize(*rankings);
+        if (client == 0)
+            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        else
+            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        server.Printf(bmmo::color_code(msg.code), "Sending score list data to #%u.", client);
+    });
+    console.register_aliases("sendscores", {"sendscores#"});
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();
