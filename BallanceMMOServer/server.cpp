@@ -1179,7 +1179,7 @@ protected:
                         rankings ? "" : " [Not found]");
                 msg.clear();
                 if (!rankings) {
-                    send(networking_msg->m_conn, bmmo::action_denied_msg{.content = bmmo::deny_reason::TargetNotFound},
+                    send(networking_msg->m_conn, bmmo::action_denied_msg{.content = {bmmo::deny_reason::TargetNotFound}},
                             k_nSteamNetworkingSend_Reliable);
                     break;
                 }
