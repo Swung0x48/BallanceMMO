@@ -33,7 +33,7 @@ namespace bmmo {
         static constexpr int ROTATION_LENGTH = sizeof(quaternion::v) / sizeof(std::remove_all_extents_t<decltype(quaternion::v)>);
         static constexpr int ROTATION_BIT_LENGTH = 9;
         static constexpr int ROTATION_COUNT = 512;
-        static constexpr float ROTATION_STEP = std::numbers::sqrt2_v<float> / ROTATION_COUNT;
+        static constexpr float ROTATION_STEP = std::numbers::sqrt2_v<float> / (ROTATION_COUNT - 2);
         static constexpr int TIMESTAMP_SIZE = 6;
 
         struct compressed_bitfield {
@@ -126,7 +126,7 @@ namespace bmmo {
                 raw.read(reinterpret_cast<char*>(&bits), sizeof(bits));
                 if (!raw.good() || raw.gcount() != sizeof(bits))
                     return false;
-                int max_value_index = (bits.flag >> 1) & 0x3;
+                int max_value_index = (bits.flag >> 1) & 0b11;
                 float max_value_squared = 1;
 
                 int compressed_rotation[] = {bits.rotation0, bits.rotation1, bits.rotation2}, i = 0;
