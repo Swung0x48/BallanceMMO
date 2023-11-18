@@ -27,12 +27,14 @@ namespace bmmo::ranking_entry {
         std::string to_string(int ranking) const;
     };
 
-    static inline bool hs_sorter(const finish_entry& r1, decltype(r1) r2) {
-        return atoi(r1.formatted_hs_score.c_str()) >= atoi(r2.formatted_hs_score.c_str());
-    };
-
     static constexpr bool sr_sorter(const finish_entry& r1, decltype(r1) r2) {
         return r1.sr_ranking < r2.sr_ranking;
+    };
+
+    static inline bool hs_sorter(const finish_entry& r1, decltype(r1) r2) {
+        const auto score_diff = atoi(r1.formatted_hs_score.c_str()) - atoi(r2.formatted_hs_score.c_str());
+        if (score_diff == 0) return sr_sorter(r1, r2);
+        return score_diff > 0;
     };
 
     static constexpr bool dnf_sorter(const dnf_entry& r1, decltype(r1) r2) {

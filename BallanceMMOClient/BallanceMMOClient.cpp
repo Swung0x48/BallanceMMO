@@ -1802,14 +1802,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::PermanentNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(network_msg);
         if (msg.text_content.empty()) {
-            utils_.call_sync_method([&] { permanent_notification_.reset(); });
+            utils_.call_sync_method([=] { permanent_notification_.reset(); });
             SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title),
                               bmmo::color_code(msg.code));
             break;
         }
         std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
         if (!permanent_notification_) {
-            utils_.call_sync_method([&] {
+            utils_.call_sync_method([=] {
                 permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", parsed_text.c_str(), 0.2f, 0.036f);
                 permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
                 permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
@@ -1821,7 +1821,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             });
         }
         else
-            utils_.call_sync_method([&] { permanent_notification_->update(parsed_text.c_str()); });
+            utils_.call_sync_method([=] { permanent_notification_->update(parsed_text.c_str()); });
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content),
                           bmmo::color_code(msg.code));
         utils_.flash_window();

@@ -36,7 +36,7 @@ namespace bmmo {
             message_utils::write_variable(&size, raw);
             for (const auto& entry: rankings.second) {
                 message_utils::write_variable(&entry.cheated, raw);
-                message_utils::write_string(entry.name, raw);
+                message_utils::write_string<uint8_t>(entry.name, raw);
                 message_utils::write_variable(&entry.dnf_sector, raw);
             }
 

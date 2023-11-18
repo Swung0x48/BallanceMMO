@@ -1009,6 +1009,7 @@ int main(int argc, char** argv) {
         msg.serialize();
         client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
+    console.register_aliases("announce", {"notice"});
     console.register_command("kick", [&] {
         auto name = console.get_next_word();
         bmmo::kick_request_msg msg{};
