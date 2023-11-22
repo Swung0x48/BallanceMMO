@@ -148,7 +148,7 @@ public:
             // A dirty hack, but it works and we don't need to
             // worry about the outcome; client will just terminate immediately.
             bmmo::simple_action_msg fatal_error_msg{};
-            fatal_error_msg.content.action = bmmo::action_type::TriggerFatalError;
+            fatal_error_msg.content = bmmo::simple_action::TriggerFatalError;
             send(client, fatal_error_msg, k_nSteamNetworkingSend_Reliable);
             reason = "fatal error";
         }
@@ -558,7 +558,7 @@ protected:
         }
 
         if (nReason != k_ESteamNetConnectionEnd_Invalid) {
-            bmmo::simple_action_msg new_msg{.content = {bmmo::action_type::LoginDenied}};
+            bmmo::simple_action_msg new_msg{.content = bmmo::simple_action::LoginDenied};
             send(client, new_msg, k_nSteamNetworkingSend_Reliable);
             interface_->CloseConnection(client, nReason, reason.str().c_str(), true);
             return false;
@@ -686,7 +686,7 @@ protected:
 
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
-                bmmo::simple_action_msg msg{.content = {bmmo::action_type::LoginDenied}};
+                bmmo::simple_action_msg msg{.content = bmmo::simple_action::LoginDenied};
                 send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
                 interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::OutdatedClient, "Outdated client", true);
                 break;
@@ -700,7 +700,7 @@ protected:
 
                 std::string reason = "Outdated client (client: " + msg.version.to_string()
                         + "; minimum: " + bmmo::minimum_client_version.to_string() + ")";
-                bmmo::simple_action_msg new_msg{.content = {bmmo::action_type::LoginDenied}};
+                bmmo::simple_action_msg new_msg{.content = bmmo::simple_action::LoginDenied};
                 send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
                 interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::OutdatedClient, reason.c_str(), true);
                 break;
@@ -1122,15 +1122,19 @@ protected:
             }
             case bmmo::SimpleAction: {
                 auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
-                switch (msg->content.action) {
-                    case bmmo::action_type::CurrentMapQuery: {
+                switch (msg->content) {
+                    using sa = bmmo::simple_action;
+                    case sa::CurrentMapQuery: {
                         break;
                     }
-                    case bmmo::action_type::FatalError: {
+                    case sa::FatalError: {
                         Printf("(#%u, %s) has encountered a fatal error!",
                             networking_msg->m_conn, client_it->second.name);
                         // they already got their own fatal error, so we don't need to induce one here.
                         kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::connection_end::SelfTriggeredFatalError);
+                        break;
+                    }
+                    case sa::BallOff: {
                         break;
                     }
                     default:

@@ -401,6 +401,8 @@ void BallanceMMOClient::OnPauseLevel() {
 void BallanceMMOClient::OnBallOff() {
     if (current_level_mode_ == bmmo::level_mode::Highscore) resume_counter();
     ball_off_ = true;
+    if (!spectator_mode_)
+        send(bmmo::simple_action_msg{ .content = bmmo::simple_action::BallOff }, k_nSteamNetworkingSend_Reliable);
 }
 
 void BallanceMMOClient::OnCamNavActive() {
@@ -545,7 +547,7 @@ inline void BallanceMMOClient::on_fatal_error(std::string& extra_text) {
                                  current_map_.get_display_name(), max_sector_);
     }
     bmmo::simple_action_msg msg{};
-    msg.content.action = bmmo::action_type::FatalError;
+    msg.content = bmmo::simple_action::FatalError;
     send(msg, k_nSteamNetworkingSend_Reliable);
 }
 
@@ -1741,17 +1743,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::SimpleAction: {
         auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(network_msg->m_pData);
-        switch (msg->content.action) {
-            case bmmo::action_type::LoginDenied:
+        switch (msg->content) {
+            using sa = bmmo::simple_action;
+            case sa::LoginDenied:
                 SendIngameMessage("Login denied.");
                 break;
-            case bmmo::action_type::TriggerFatalError:
+            case sa::TriggerFatalError:
                 trigger_fatal_error();
                 break;
-            case bmmo::action_type::CurrentMapQuery: {
+            case sa::CurrentMapQuery: {
                 break;
             }
-            case bmmo::action_type::Unknown:
+            case sa::Unknown:
             default:
                 GetLogger()->Error("Unknown action request received.");
         }

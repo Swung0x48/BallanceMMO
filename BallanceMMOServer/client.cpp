@@ -668,21 +668,22 @@ private:
             }
             case bmmo::SimpleAction: {
                 auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
-                switch (msg->content.action) {
-                    case bmmo::action_type::LoginDenied: {
+                switch (msg->content) {
+                    using sa = bmmo::simple_action;
+                    case sa::LoginDenied: {
                         Printf("Login denied.");
                         break;
                     }
-                    case bmmo::action_type::CurrentMapQuery: {
+                    case sa::CurrentMapQuery: {
                         bmmo::current_map_msg new_msg{};
                         send(new_msg, k_nSteamNetworkingSend_Reliable);
                         break;
                     }
-                    case bmmo::action_type::TriggerFatalError: {
+                    case sa::TriggerFatalError: {
                         trigger_fatal_error();
                         break;
                     }
-                    case bmmo::action_type::Unknown: {
+                    case sa::Unknown: {
                         Printf("Unknown action request received.");
                         break;
                     }

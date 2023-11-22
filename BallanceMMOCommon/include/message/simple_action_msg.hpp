@@ -4,17 +4,18 @@
 #include <cstdint>
 
 namespace bmmo {
-    enum class action_type: uint8_t {
+    enum class simple_action: int32_t {
         Unknown,
         LoginDenied,
         CurrentMapQuery,
         FatalError, // client encountered a fatal error; end connection from server
         TriggerFatalError, // produce a fatal error just for fun
+        BallOff, // we already have map/sector info so it's as simple as this
     };
 
-    struct simple_action {
-        action_type action = action_type::Unknown;
-    };
+    // struct simple_action {
+    //     action_type action = action_type::Unknown;
+    // };
 
     typedef struct message<simple_action, SimpleAction> simple_action_msg;
 }
