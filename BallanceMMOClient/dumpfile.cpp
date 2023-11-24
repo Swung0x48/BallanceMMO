@@ -88,6 +88,7 @@ namespace NSDumpFile {
     }
 
     std::function<void(std::string&)> CrashCallback{};
+    static bool messageBoxTriggered = false;
 
     LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
     {
@@ -112,6 +113,8 @@ namespace NSDumpFile {
         CreateDumpFile(szFileName, pException);
 
         // TODO: MiniDumpWriteDump
+        if (messageBoxTriggered)
+            return EXCEPTION_CONTINUE_SEARCH;
         std::string extraText;
         CrashCallback(extraText);
         if (!extraText.empty())
@@ -142,6 +145,7 @@ namespace NSDumpFile {
         //FatalAppExit(-1, extraText.c_str());
         char basename[128];
         GetModuleBaseName(GetCurrentProcess(), NULL, basename, sizeof(basename));
+        messageBoxTriggered = true;
         MessageBox(NULL, extraText.c_str(),
                         (basename + std::string{" - Fatal Application Exit"}).c_str(),
                         MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
