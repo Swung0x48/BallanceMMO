@@ -100,14 +100,14 @@ void utils::display_important_notification(const std::string& text, float font_s
     notification.sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });
     notification.sprite_->SetFont(get_system_font(), get_display_font_size(font_size), weight, false, false);
     notification.set_visible(true);
-    for (int i = 1; i < 15; ++i) {
+    for (int i = 0; i < 15; i += 2) {
         notification.paint(0x11FF1190 + i * 0x11001001);
-        std::this_thread::sleep_for(44ms);
+        std::this_thread::sleep_for(72ms);
     }
     std::this_thread::sleep_for(9s);
-    for (int i = 1; i < 15; ++i) {
+    for (int i = 1; i <= 15; i += 2) {
         notification.paint(0xFFFFF19E - i * 0x11100000);
-        std::this_thread::sleep_for(80ms);
+        std::this_thread::sleep_for(120ms);
     }
 }
 

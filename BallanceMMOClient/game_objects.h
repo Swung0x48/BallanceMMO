@@ -127,7 +127,7 @@ public:
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!player.physicalized) {
-#ifdef DEBUG
+#if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
 				item.second.counter++;
 				if (item.second.counter % 66 == 0) {
 					username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + " " + std::to_string(item.second.time_variance / 100000));
