@@ -1105,10 +1105,10 @@ protected:
                         break;
                     }
                     case bmmo::current_map_state::EnteringMap: {
-                        auto& client_map = maps_[client_it->second.current_map.get_hash_bytes_string()];
+                        auto& client_map = maps_[msg->content.map.get_hash_bytes_string()];
                         if (client_map.mode == bmmo::level_mode::Highscore) {
                             bmmo::highscore_timer_calibration_msg hs_msg{.content = {
-                                .map = client_it->second.current_map,
+                                .map = msg->content.map,
                                 .time_diff_microseconds = SteamNetworkingUtils()->GetLocalTimestamp() - client_map.start_time,
                             }};
                             send(networking_msg->m_conn, hs_msg, k_nSteamNetworkingSend_Reliable);

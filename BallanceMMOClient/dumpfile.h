@@ -31,7 +31,7 @@ namespace NSDumpFile
          "A wild exception appeared!\nException used Fatal Error!\nIt's super effective!",
     };
 
-    void RunCrashHandler(std::function<void(std::string&)> Callback);
+    void RunCrashHandler(std::function<void(char*)> Callback);
 };
 
 

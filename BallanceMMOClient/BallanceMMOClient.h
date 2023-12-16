@@ -151,7 +151,7 @@ private:
 	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
 	void on_message(ISteamNetworkingMessage* network_msg) override;
 
-	void on_fatal_error(std::string& extra_text);
+	void on_fatal_error(char* extra_text);
 
 	inline void on_sector_changed();
 
@@ -230,6 +230,8 @@ private:
 	int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	uint8_t balls_nmo_md5_[16]{};
+	SteamNetworkingMicroseconds map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
+	bool force_hs_calibration_ = false, hs_calibrated_ = false;
 
 	struct map_data {
 		float level_start_timestamp{};

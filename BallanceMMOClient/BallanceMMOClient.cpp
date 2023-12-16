@@ -196,6 +196,8 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
             on_sector_changed();
             send_current_map();
         };
+        map_enter_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
+        hs_begin_delay_ = 0;
         GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
             current_map_.name.c_str(), (int)current_map_.type, current_map_.get_hash_string().c_str());
         reset_timer_ = true;
@@ -234,9 +236,11 @@ void BallanceMMOClient::on_sector_changed() {
 void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
 
 void BallanceMMOClient::OnPostExitLevel() {
+    countdown_restart_ = false;
+    force_hs_calibration_ = false;
     if (current_level_mode_ == bmmo::level_mode::Highscore && !spectator_mode_) {
         if (!level_finished_ && !did_not_finish_)
-            send_dnf_message();
+            ; //send_dnf_message();
         level_finished_ = false;
         compensation_lives_label_.reset();
     }
@@ -245,9 +249,29 @@ void BallanceMMOClient::OnPostExitLevel() {
 
 void BallanceMMOClient::OnCounterActive() {
     on_sector_changed();
+    bool reset_counter = true;
+    if (map_enter_timestamp_ != 0) {
+        std::lock_guard lk(bml_mtx_);
+        if (force_hs_calibration_ && !hs_calibrated_) {
+            int points;
+            auto* energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
+            energy->GetElementValue(0, 0, &points);
+            points -= (int) std::ceilf(hs_begin_delay_ / 1e3f / point_decrease_interval_);
+            energy->SetElementValue(0, 0, &points);
+            counter_start_timestamp_ = -(hs_begin_delay_ / 1e3f);
+            reset_counter = false;
+            countdown_restart_ = true;
+            hs_calibrated_ = true;
+        } else {
+            hs_begin_delay_ -= (SteamNetworkingUtils()->GetLocalTimestamp() - map_enter_timestamp_);
+        }
+        force_hs_calibration_ = false;
+        map_enter_timestamp_ = 0;
+    }
     if (countdown_restart_) {
         move_size_time_length_ = 0;
-        counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
+        if (reset_counter) counter_start_timestamp_ = 0;
+        counter_start_timestamp_ += m_bml->GetTimeManager()->GetTime();
         countdown_restart_ = false;
     }
 }
@@ -373,6 +397,8 @@ void BallanceMMOClient::OnStartLevel()
     extra_life_received_ = false;
     compensation_lives_ = 0;
     if (compensation_lives_label_) compensation_lives_label_.reset();
+    hs_begin_delay_ += SteamNetworkingUtils()->GetLocalTimestamp() - map_enter_timestamp_;
+    hs_calibrated_ = false;
 
     m_bml->AddTimer(CKDWORD(10), [this]() {
         if (current_map_.level == 1 && countdown_restart_ && connected()) {
@@ -380,11 +406,13 @@ void BallanceMMOClient::OnStartLevel()
             tutorial_exit->Activate();
         }
 
-        if (!countdown_restart_ && current_level_mode_ == bmmo::level_mode::Highscore) {
+        if (!countdown_restart_ && current_level_mode_ == bmmo::level_mode::Highscore && map_enter_timestamp_ == 0) {
+            std::lock_guard lk(bml_mtx_);
             int new_points = (current_map_.level == 1) ? initial_points_ : initial_points_ - 1;
             new_points -= (int) std::ceilf((m_bml->GetTimeManager()->GetTime() - counter_start_timestamp_) / point_decrease_interval_);
             static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_))->SetElementValue(0, 0, &new_points);
             resume_counter();
+            hs_calibrated_ = true;
         }
 
         on_sector_changed();
@@ -536,16 +564,16 @@ void BallanceMMOClient::OnExitGame()
     client::destroy();
 }
 
-inline void BallanceMMOClient::on_fatal_error(std::string& extra_text) {
+inline void BallanceMMOClient::on_fatal_error(char* extra_text) {
     if (!connected())
         return;
 
-    if (current_level_mode_ == bmmo::level_mode::Highscore
+    /*if (current_level_mode_ == bmmo::level_mode::Highscore
             && !spectator_mode_ && !level_finished_ && !did_not_finish_) {
         send_dnf_message();
         extra_text = std::format("You did not finish {}.\nFurthest reach: sector {}.",
                                  current_map_.get_display_name(), max_sector_);
-    }
+    }*/
     bmmo::simple_action_msg msg{};
     msg.content = bmmo::simple_action::FatalError;
     send(msg, k_nSteamNetworkingSend_Reliable);
@@ -1650,6 +1678,28 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             (bool)msg->content.cheated, player_name, msg->content.sector});
         play_wave_sound(sound_dnf_);
         utils_.flash_window();
+        break;
+    }
+    case bmmo::HighscoreTimerCalibration: {
+        auto* msg = reinterpret_cast<bmmo::highscore_timer_calibration_msg*>(network_msg->m_pData);
+        if (current_map_ != msg->content.map) break;
+        current_level_mode_ = bmmo::level_mode::Highscore;
+        hs_begin_delay_ += msg->content.time_diff_microseconds;
+        std::lock_guard lk(bml_mtx_);
+        if (map_enter_timestamp_ != 0) {
+            force_hs_calibration_ = true;
+            break;
+        }
+        else if (hs_calibrated_) {
+            break;
+        }
+        int points;
+        auto* energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
+        energy->GetElementValue(0, 0, &points);
+        points -= (int)std::ceilf((hs_begin_delay_ / 1e3f + counter_start_timestamp_ - m_bml->GetTimeManager()->GetTime()) / point_decrease_interval_);
+        energy->SetElementValue(0, 0, &points);
+        counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime() - (hs_begin_delay_ / 1e3f);
+        move_size_time_length_ = 0;
         break;
     }
     case bmmo::LevelFinishV2: {

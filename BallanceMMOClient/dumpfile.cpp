@@ -87,7 +87,7 @@ namespace NSDumpFile {
         return bRet;
     }
 
-    std::function<void(std::string&)> CrashCallback{};
+    std::function<void(char*)> CrashCallback{};
     static bool messageBoxTriggered = false;
 
     LONG WINAPI UnhandledExceptionFilterEx(struct ::_EXCEPTION_POINTERS* pException)
@@ -116,9 +116,10 @@ namespace NSDumpFile {
         if (messageBoxTriggered)
             return EXCEPTION_CONTINUE_SEARCH;
         std::string extraText;
-        CrashCallback(extraText);
-        if (!extraText.empty())
-            extraText = "--------\n" + extraText + "\n";
+        char callbackText[128];
+        CrashCallback(callbackText);
+        if (std::strlen(callbackText) != 0)
+            extraText.append("--------\n").append(callbackText).append("\n");
         extraText = "Fatal Error\n" + extraText + "========\n"
                 + std::string{ szFileName }.erase(0, strlen(DumpPath) + 1);
         EXCEPTION_RECORD* record{};
@@ -153,7 +154,7 @@ namespace NSDumpFile {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    void RunCrashHandler(std::function<void(std::string&)> Callback)
+    void RunCrashHandler(std::function<void(char*)> Callback)
     {
         CrashCallback = Callback;
         SetUnhandledExceptionFilter(UnhandledExceptionFilterEx);
