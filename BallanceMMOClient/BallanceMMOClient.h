@@ -101,14 +101,24 @@ public:
 		});
 		return list;
 	}
-	void register_login_callback(IMod* mod, std::function<void()> callback) override {
+	bool register_listener(bmmo::exported::listener* listener) override {
 		std::lock_guard lk(client_mtx_);
-		login_callbacks_.emplace(mod, callback);
+		return listeners_.insert(listener).second;
 	};
-	void register_logout_callback(IMod* mod, std::function<void()> callback) override {
+	bool remove_listener(bmmo::exported::listener* listener) override {
 		std::lock_guard lk(client_mtx_);
-		logout_callbacks_.emplace(mod, callback);
+		return listeners_.erase(listener) > 0;
 	};
+	std::string get_username(HSteamNetConnection client_id) override {
+		if (client_id == k_HSteamNetConnection_Invalid)
+			return { "[Server]" };
+		auto state = db_.get(client_id);
+		assert(state.has_value() || (db_.get_client_id() == client_id));
+		return state.has_value() ? state->name : get_display_nickname();
+	}
+	std::string get_map_name(const bmmo::map& map) override {
+		return map.get_display_name(map_names_);
+	}
 
 private:
 	void OnLoad() override;
@@ -251,7 +261,7 @@ private:
 	bool reset_rank_ = false, reset_timer_ = true;
 	bool countdown_restart_ = false, did_not_finish_ = false;
 
-	std::unordered_map<IMod*, std::function<void()>> login_callbacks_, logout_callbacks_;
+	std::set<bmmo::exported::listener*> listeners_;
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 	CKCamera* spect_cam_ = nullptr, * last_cam_ = nullptr;
@@ -745,8 +755,8 @@ private:
 
 		{
 			std::lock_guard client_lk(client_mtx_);
-			for (const auto& i : logout_callbacks_)
-				(i.second)();
+			for (const auto& i : listeners_)
+				i->on_logout();
 		}
 
 		if (!io_ctx_.stopped())
@@ -868,14 +878,6 @@ private:
 		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_Reliable);
 		std::lock_guard<std::mutex> lk(client_mtx_);
 		if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
-	}
-
-	std::string get_username(HSteamNetConnection client_id) {
-		if (client_id == k_HSteamNetConnection_Invalid)
-			return {"[Server]"};
-		auto state = db_.get(client_id);
-		assert(state.has_value() || (db_.get_client_id() == client_id));
-		return state.has_value() ? state->name : get_display_nickname();
 	}
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {

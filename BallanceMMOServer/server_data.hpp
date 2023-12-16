@@ -17,6 +17,7 @@ struct client_data {
 struct map_data {
     int rank = 0;
     SteamNetworkingMicroseconds start_time = 0;
+    bmmo::level_mode mode = bmmo::level_mode::Speedrun;
     bmmo::ranking_entry::player_rankings rankings{};
 };
 

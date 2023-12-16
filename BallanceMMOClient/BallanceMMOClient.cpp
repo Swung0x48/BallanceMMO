@@ -904,7 +904,7 @@ void BallanceMMOClient::init_commands() {
         name_msg.maps.emplace(map.get_hash_bytes_string(), next_word);
         name_msg.serialize();
         send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
-        send(bmmo::current_map_msg{ .content = {.map = map, .type = bmmo::current_map_state::EnteringMap} }, k_nSteamNetworkingSend_Reliable);
+        send(bmmo::current_map_msg{ .content = {.map = map, .type = bmmo::current_map_state::NameChange} }, k_nSteamNetworkingSend_Reliable);
         SendIngameMessage(std::format("Current map name set to \"{}\".", next_word), bmmo::ansi::WhiteInverse);
     });
     console_.register_command("mode", [&] {
@@ -1422,8 +1422,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         {
             std::lock_guard client_lk(client_mtx_);
-            for (const auto& i : login_callbacks_)
-                (i.second)();
+            for (const auto& i : listeners_)
+                i->on_login(server_addr_.c_str(), server_name_.c_str());
         }
 
         if (spectator_mode_)
@@ -1481,6 +1481,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         play_wave_sound(sound_bubble_);
         utils_.flash_window();
+
+        for (const auto& i : listeners_)
+            i->on_player_login(msg.connection_id);
         // TODO: call this when the player enters a map
 
         break;
@@ -1496,6 +1499,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             objects_.remove(msg->content.connection_id);
             play_wave_sound(sound_knock_);
             utils_.flash_window();
+            for (const auto& i : listeners_)
+                i->on_player_logout(msg->content.connection_id);
         }
         break;
     }
@@ -1559,6 +1564,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (msg->content.map == current_map_ || msg->content.force_restart)
             current_level_mode_ = msg->content.mode;
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
+
+        for (const auto& i : listeners_)
+            i->on_countdown(msg);
 
         switch (msg->content.type) {
             using ct = bmmo::countdown_type;
@@ -1646,6 +1654,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::LevelFinishV2: {
         auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(network_msg->m_pData);
+
+        for (const auto& i : listeners_)
+            i->on_level_finish(msg);
 
         // Prepare message
         std::string map_name = msg->content.map.get_display_name(map_names_),

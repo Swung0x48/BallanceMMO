@@ -937,9 +937,9 @@ protected:
                         if (config_.force_restart_level || msg->content.force_restart) {
                             maps_.clear();
                             for (const auto& map: map_names_)
-                                maps_[map.first] = {0, networking_msg->m_usecTimeReceived, {}};
+                                maps_[map.first] = {0, networking_msg->m_usecTimeReceived, msg->content.mode, {}};
                         } else {
-                            maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived, {}};
+                            maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived, msg->content.mode, {}};
                         }
                         msg->content.restart_level = config_.restart_level;
                         msg->content.force_restart = config_.force_restart_level;
@@ -960,6 +960,7 @@ protected:
                                 {ct::Ready, "Get ready"},
                                 {ct::ConfirmReady, "Please use \"/mmo ready\" to confirm if you are ready"},
                             }[msg->content.type]);
+                        maps_[msg->content.map.get_hash_bytes_string()].mode = msg->content.mode;
                         break;
                     case ct::Unknown:
                     default:
@@ -1104,6 +1105,17 @@ protected:
                         break;
                     }
                     case bmmo::current_map_state::EnteringMap: {
+                        auto& client_map = maps_[client_it->second.current_map.get_hash_bytes_string()];
+                        if (client_map.mode == bmmo::level_mode::Highscore) {
+                            bmmo::highscore_timer_calibration_msg hs_msg{.content = {
+                                .map = client_it->second.current_map,
+                                .time_diff_microseconds = SteamNetworkingUtils()->GetLocalTimestamp() - client_map.start_time,
+                            }};
+                            send(networking_msg->m_conn, hs_msg, k_nSteamNetworkingSend_Reliable);
+                        }
+                        [[fallthrough]];
+                    }
+                    case bmmo::current_map_state::NameChange: {
                         client_it->second.current_map = msg->content.map;
                         client_it->second.current_sector = msg->content.sector;
                         broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);

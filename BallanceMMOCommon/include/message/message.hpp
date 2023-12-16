@@ -71,6 +71,7 @@ namespace bmmo {
         OwnedCompressedBallState,
         SoundStream,
         ScoreList,
+        HighscoreTimerCalibration,
     };
 
     template<typename T, opcode C = None>

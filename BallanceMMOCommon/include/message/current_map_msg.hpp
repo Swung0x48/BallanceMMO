@@ -5,7 +5,7 @@
 
 namespace bmmo {
     struct current_map_state {
-        enum state_type: uint8_t { None, Announcement, EnteringMap };
+        enum state_type: uint8_t { None, Announcement, EnteringMap, NameChange };
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
         struct map map{};
         int32_t sector = 0;

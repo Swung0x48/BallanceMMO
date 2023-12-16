@@ -49,7 +49,7 @@ public:
             get_connection_state() == k_ESteamNetworkingConnectionState_FindingRoute;
     }
 
-    EResult send(void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
         return interface_->SendMessageToConnection(connection_,
             buffer,
             size,
@@ -59,7 +59,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(T msg, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(T msg, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(&msg,
             sizeof(msg),
