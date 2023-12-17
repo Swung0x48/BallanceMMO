@@ -150,6 +150,14 @@ private:
 	static void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
 	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
 	void on_message(ISteamNetworkingMessage* network_msg) override;
+	void receive(void* data, size_t size) override {
+		auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
+		networking_msg->m_conn = connection_;
+		networking_msg->m_pData = data;
+		networking_msg->m_cbSize = size;
+		on_message(networking_msg);
+		networking_msg->Release();
+	}
 
 	void on_fatal_error(char* extra_text);
 
@@ -158,8 +166,8 @@ private:
 	void show_player_list();
 	inline void update_player_list(text_sprite& player_list, int& last_player_count, int& last_font_size);
 
-	void connect_to_server(std::string address, std::string name = "");
-	void disconnect_from_server();
+	void connect_to_server(const char* address, const char* name = "") override;
+	void disconnect_from_server() override;
 	// 3 attempts: delay, delay * scale, delay * scale ^ 2
 	void reconnect(int delay, float scale = 1.0f);
 

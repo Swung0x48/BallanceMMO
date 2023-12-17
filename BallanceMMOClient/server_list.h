@@ -30,7 +30,7 @@ private:
     BGui::Button* edit_cancel_{}, * edit_save_{};
     size_t server_index_{};
     std::function<void()> process_ = [this] {};
-    std::function<void(std::string, std::string)> connect_callback_{};
+    std::function<void(const char*, const char*)> connect_callback_{};
 
     enum screen_state { None, ServerList, ServerEditor, ConnectionScreen };
     screen_state screen_;

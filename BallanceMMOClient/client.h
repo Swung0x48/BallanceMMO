@@ -67,14 +67,7 @@ public:
             out_message_number);
     }
 
-    void receive(void* data, size_t size) {
-        auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
-        networking_msg->m_conn = connection_;
-        networking_msg->m_pData = data;
-        networking_msg->m_cbSize = size;
-        on_message(networking_msg);
-        networking_msg->Release();
-    }
+    virtual void receive(void* data, size_t size) {}
 
     std::string get_detailed_status() {
         char info[2048];

@@ -12,6 +12,10 @@ namespace bmmo::exported:: inline _v3 {
         virtual void on_level_finish(const bmmo::level_finish_v2_msg* msg) {};
         virtual void on_player_login(HSteamNetConnection id) {};
         virtual void on_player_logout(HSteamNetConnection id) {};
+
+        // return: whether to cancel the event
+        virtual bool on_pre_login(const char* address, const char* name) { return true; };
+        virtual bool on_pre_chat(const char* text, const size_t size) { return true; };
     };
 
     class client : public ::client {
@@ -25,5 +29,8 @@ namespace bmmo::exported:: inline _v3 {
 
         virtual bool register_listener(listener* listener) = 0;
         virtual bool remove_listener(listener* listener) = 0;
+
+        virtual void connect_to_server(const char* address, const char* name = "") = 0;
+        virtual void disconnect_from_server() = 0;
     };
 };

@@ -552,7 +552,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
     if (connected() || connecting()) {
         disconnect_from_server();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        connect_to_server(server_addr_, server_name_);
+        connect_to_server(server_addr_.c_str(), server_name_.c_str());
     }
 }
 
@@ -631,8 +631,11 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("say", [&] {
         bmmo::chat_msg msg{};
         msg.chat_content = console_.get_rest_of_line();
+        
+        for (const auto& i : listeners_)
+            if (!i->on_pre_chat(msg.chat_content.c_str(), msg.chat_content.size())) return;
+        
         msg.serialize();
-
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         return;
     });
@@ -721,7 +724,7 @@ void BallanceMMOClient::init_commands() {
     });
     console_.register_aliases("whisper", {"w"});
     console_.register_command("help", [&] { OnAsyncCommand(m_bml, {"mmo"}); });
-    console_.register_command("connect", [&] { connect_to_server(console_.get_next_word()); });
+    console_.register_command("connect", [&] { connect_to_server(console_.get_next_word().c_str()); });
     console_.register_aliases("connect", {"c"});
     console_.register_command("disconnect", [&] { disconnect_from_server(); });
     console_.register_aliases("disconnect", {"d"});
@@ -1062,8 +1065,11 @@ void BallanceMMOClient::terminate(long delay) {
     std::terminate();
 }
 
-void BallanceMMOClient::connect_to_server(std::string address, std::string name) {
-    if (server_addr_ == address) {
+void BallanceMMOClient::connect_to_server(const char* address, const char* name) {
+    for (const auto& i : listeners_)
+        if (!i->on_pre_login(address, name)) return;
+
+    if (std::strcmp(server_addr_.c_str(), address) == 0) {
         if (connected()) {
             std::lock_guard<std::mutex> lk(bml_mtx_);
             SendIngameMessage("Already connected.");
@@ -1075,7 +1081,7 @@ void BallanceMMOClient::connect_to_server(std::string address, std::string name)
             return;
         }
     }
-    if (address.empty()) {
+    if (std::strlen(address) == 0) {
         utils_.call_sync_method([this] { server_list_.enter_gui(); });
         return;
     }
@@ -1095,7 +1101,7 @@ void BallanceMMOClient::connect_to_server(std::string address, std::string name)
 
     // Resolve address
     server_addr_ = address;
-    server_name_ = (name.empty()) ? address : name;
+    server_name_ = (std::strlen(name) == 0) ? address : name;
     const auto& [host, port] = bmmo::hostname_parser(server_addr_).get_host_components();
     GetLogger()->Info("Server name: %s; address: %s (%s:%s).",
                       server_name_.c_str(), server_addr_.c_str(), host.c_str(), port.c_str());
@@ -1169,7 +1175,7 @@ void BallanceMMOClient::reconnect(int delay, float scale) {
                                       server_name_, delay, delay == 1 ? "" : "s"));
         std::this_thread::sleep_for(std::chrono::seconds(delay));
         if (!connecting() && !connected())
-            connect_to_server(server_addr_, server_name_);
+            connect_to_server(server_addr_.c_str(), server_name_.c_str());
     });
 }
 
@@ -1672,6 +1678,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg->content.map.get_display_name(map_names_),
             msg->content.sector
         ).c_str());
+        if (msg->content.player_id == db_.get_client_id())
+            did_not_finish_ = true;
 
         std::lock_guard lk(client_mtx_);
         maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({

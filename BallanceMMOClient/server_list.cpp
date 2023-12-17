@@ -164,7 +164,7 @@ void server_list::connect_to_server() {
                                   + "]\n...").c_str());
     connection_status_->SetVisible(true);
     bml_->AddTimer(500.0f, [this] { exit_gui(CKKEY_RETURN); });
-    connect_callback_(address, name);
+    connect_callback_(address.c_str(), name.c_str());
     screen_ = ConnectionScreen;
 }
 
