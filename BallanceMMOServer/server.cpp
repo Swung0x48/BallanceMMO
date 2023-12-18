@@ -715,6 +715,21 @@ protected:
                 if (!validate_client(networking_msg->m_conn, msg))
                     break;
 
+                std::string uuid_string = get_uuid_string(msg.uuid);
+                if (config_.has_forced_name(uuid_string)) {
+                    std::string new_name = config_.get_forced_name(uuid_string);
+                    bmmo::name_update_msg nu_msg;
+                    nu_msg.text_content = new_name;
+                    nu_msg.serialize();
+                    send(networking_msg->m_conn, nu_msg.raw.str().data(), nu_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    if (bmmo::name_validator::is_spectator(msg.nickname))
+                        new_name = bmmo::name_validator::get_spectator_nickname(new_name);
+                    Printf("Forced name change - #%u: \"%s\" -> \"%s\"",
+                            networking_msg->m_conn, msg.nickname, new_name);
+                    interface_->SetConnectionName(networking_msg->m_conn, new_name.c_str());
+                    msg.nickname = new_name;
+                }
+
                 // accepting client and adding it to the client list
                 client_it = clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}}).first;
                 memcpy(client_it->second.uuid, msg.uuid, sizeof(msg.uuid));
@@ -723,7 +738,7 @@ protected:
                 Printf(bmmo::color_code(bmmo::LoginAcceptedV3),
                         "%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
-                        get_uuid_string(msg.uuid).substr(0, 8),
+                        uuid_string.substr(0, 8),
                         msg.version.to_string(),
                         msg.cheated ? "on" : "off");
 
@@ -943,8 +958,9 @@ protected:
                         }
                         msg->content.restart_level = config_.restart_level;
                         msg->content.force_restart = config_.force_restart_level;
-                        for (auto& i: clients_)
-                            i.second.ready = false;
+                        for (auto& i: clients_) {
+                            i.second.ready = i.second.dnf = false;
+                        }
                         break;
                     }
                     case ct::Countdown_1:
@@ -982,6 +998,7 @@ protected:
                     msg->content.map.get_display_name(map_names_),
                     msg->content.sector
                 );
+                client_it->second.dnf = true;
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
                 maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
                     (bool)msg->content.cheated, player_name, msg->content.sector});
@@ -1192,7 +1209,8 @@ protected:
                 Printf(msg.get_ansi_color_code(), "[%s] (%u, %s): %s",
                         msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.text_content);
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-                if (msg.type == bmmo::public_notification_type::SeriousWarning && config_.serious_warning_as_dnf) {
+                if (msg.type == bmmo::public_notification_type::SeriousWarning
+                        && config_.serious_warning_as_dnf && !client_it->second.dnf) {
                     bmmo::did_not_finish_msg dnf_msg{.content = {
                         .cheated = client_it->second.cheated,
                         .map = client_it->second.current_map,
@@ -1251,6 +1269,8 @@ protected:
             case bmmo::LoginAcceptedV2:
             case bmmo::LoginAcceptedV3:
             case bmmo::PlayerConnectedV2:
+            case bmmo::HighscoreTimerCalibration:
+            case bmmo::NameUpdate:
             case bmmo::OwnedCheatState:
             case bmmo::OwnedCheatToggle:
             case bmmo::PlayerKicked:
@@ -1560,7 +1580,7 @@ int main(int argc, char** argv) {
             role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [mode] [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
         };
-        auto client = (HSteamNetConnection) console.get_next_long();
+        auto client = get_client_id_from_console();
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word(true);
         if (console.empty()) { print_hint(); return; }

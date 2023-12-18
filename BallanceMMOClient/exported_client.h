@@ -18,11 +18,12 @@ namespace bmmo::exported:: inline _v3 {
         /**
          * Called before sending the chat.
          * 
-         * Note that if you want to replace the original message then you need
+         * Note that if you want to modify the original message then you need
          * to ensure the lifetime of the replacement character sequence.
          * 
-         * @param[out] text - text of the chat message.
-         * @param[in] new_text - pointer to a char sequence holding text to replace the original message.
+         * @param[out] text - Text of the chat message.
+         * @param[in] new_text - Pointer to a char sequence holding text to replace the original message.
+         *     Ignored if it points to a nullptr.
          * 
          * @returns Whether to cancel the event.
          */

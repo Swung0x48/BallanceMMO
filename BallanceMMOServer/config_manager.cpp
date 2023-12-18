@@ -57,6 +57,8 @@ bool config_manager::load() {
     } else
         config_["map_name_list"] = YAML::Node(YAML::NodeType::Map);
 
+    forced_names_ = yaml_load_value(config_, "forced_names",
+            decltype(forced_names_){{"00000001-0002-0003-0004-000000000005", "example_player"}});
     op_players = yaml_load_value(config_, "op_list",
             decltype(op_players){{"example_player", "00000001-0002-0003-0004-000000000005"}});
     banned_players = yaml_load_value(config_, "ban_list",
@@ -90,8 +92,18 @@ void config_manager::log_mod_list(const std::unordered_map<std::string, std::str
     for (const auto& [mod, ver]: mod_list) {
         output += "; " + mod + ", " + ver;
     }
-    role::Printf("Installed mods (%u): %s", mod_list.size(), output.erase(0, strlen("; ")));
+    output.erase(0, strlen("; "));
+    output = "Installed mods (" + std::to_string(mod_list.size()) + "): " + output;
+    role::LogFileOutput(output.c_str());
 }
+
+bool config_manager::has_forced_name(const std::string& uuid_string) {
+    return forced_names_.contains(uuid_string);
+};
+
+const std::string& config_manager::get_forced_name(const std::string& uuid_string) {
+    return forced_names_[uuid_string];
+};
 
 void config_manager::save(bool reload_values) {
     if (reload_values) {

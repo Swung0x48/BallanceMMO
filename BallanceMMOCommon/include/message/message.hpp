@@ -72,6 +72,7 @@ namespace bmmo {
         SoundStream,
         ScoreList,
         HighscoreTimerCalibration,
+        NameUpdate,
     };
 
     template<typename T, opcode C = None>

@@ -7,6 +7,7 @@ struct client_data {
     bool state_updated = true;
     bool timestamp_updated = true;
     bool ready = false;
+    bool dnf = false;
     bmmo::timed_ball_state state{};
     bmmo::map current_map{};
     int32_t current_sector = 0;

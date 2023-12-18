@@ -13,7 +13,7 @@ namespace bmmo {
 
         std::string caption; // optional
         sound_type type{};
-        bool save_to_pwd = false;
+        bool save_sound_file = true, save_to_pwd = false;
         uint32_t duration_ms = 0; // in milliseconds
         float gain = 1.0f;
         float pitch = 1.0f;
@@ -75,8 +75,10 @@ namespace bmmo {
 
             path = "BMMO_" + std::to_string(SteamNetworkingUtils()->GetLocalTimestamp()) + get_extension();
             if (!save_to_pwd) path = "..\\ModLoader\\Cache\\" + path;
-            std::ofstream ofile(path, std::ios::binary);
-            ofile << raw.rdbuf();
+            if (save_sound_file) {
+                std::ofstream ofile(path, std::ios::binary);
+                ofile << raw.rdbuf();
+            }
 
             return raw.good();
         }

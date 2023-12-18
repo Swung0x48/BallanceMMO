@@ -9,6 +9,7 @@ class config_manager {
 private:
     YAML::Node config_;
     bool save_player_status_to_file_ = false;
+    std::unordered_map<std::string, std::string> forced_names_;
 
 public:
     std::unordered_map<std::string, std::string> op_players, banned_players, default_map_names;
@@ -22,6 +23,9 @@ public:
     void print_bans();
     void print_mutes();
     void log_mod_list(const std::unordered_map<std::string, std::string>& mod_list);
+
+    bool has_forced_name(const std::string& uuid_string);
+    const std::string& get_forced_name(const std::string& uuid_string);
 
     void save(bool reload_values = true);
     void save_login_data(const std::string& ip_str, const std::string& uuid_str, const std::string& name);

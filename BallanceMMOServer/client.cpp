@@ -35,6 +35,13 @@ struct client_data {
     int32_t current_sector = 0;
 };
 
+static struct option_t {
+    std::string server_addr = "127.0.0.1:26676", username = "MockClient",
+                uuid = "00010002-0003-0004-0005-000600070008", log_path;
+    bool print_states = false, recorder_mode = false, save_sound_files = true;
+    ESteamNetworkingSocketsDebugOutputType detail = k_ESteamNetworkingSocketsDebugOutputType_Important;
+} options;
+
 class client: public role {
 public:
     bool connect(const std::string& connection_string) {
@@ -337,6 +344,7 @@ private:
                 interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
                 connection_ = k_HSteamNetConnection_Invalid;
                 permanent_notification_text_.clear();
+                set_nickname(options.username);
                 break;
             }
 
@@ -540,6 +548,7 @@ private:
             case bmmo::SoundStream: {
                 bmmo::sound_stream_msg msg{};
                 msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.save_sound_file = options.save_sound_files;
                 msg.save_to_pwd = true;
                 if (!msg.deserialize()) {
                     Printf("Error receiving sound!");
@@ -632,6 +641,14 @@ private:
                 msg.deserialize();
 
                 map_names_.insert(msg.maps.begin(), msg.maps.end());
+                break;
+            }
+            case bmmo::NameUpdate: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::name_update_msg>(networking_msg);
+                set_nickname(bmmo::name_validator::is_spectator(options.username)
+                        ? bmmo::name_validator::get_spectator_nickname(msg.text_content) : msg.text_content);
+                Printf(bmmo::ansi::WhiteInverse, "Your name has been changed to \"%s\" upon server request.",
+                        nickname_);
                 break;
             }
             case bmmo::OpState: {
@@ -762,15 +779,9 @@ private:
     std::atomic_bool print_states_ = false, recorder_mode_ = false;
 };
 
-static struct option_t {
-    std::string server_addr = "127.0.0.1:26676", username = "MockClient",
-                uuid = "00010002-0003-0004-0005-000600070008", log_path;
-    bool print_states = false, recorder_mode = false;
-    ESteamNetworkingSocketsDebugOutputType detail = k_ESteamNetworkingSocketsDebugOutputType_Important;
-} options;
-
 // parse command line arguments (server/name/uuid/help/version) with getopt
 int parse_args(int argc, char** argv) {
+    enum option_values { NoSoundFiles = UINT8_MAX + 1 };
     static struct option long_options[] = {
         {"recorder-mode", required_argument, 0, 'r'},
         {"server", required_argument, 0, 's'},
@@ -781,6 +792,7 @@ int parse_args(int argc, char** argv) {
         {"print", no_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
+        {"no-sound-files", no_argument, 0, NoSoundFiles},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
@@ -804,6 +816,8 @@ int parse_args(int argc, char** argv) {
                 break;
             case 'p':
                 options.print_states = true; break;
+            case NoSoundFiles:
+                options.save_sound_files = false; break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
@@ -813,6 +827,7 @@ int parse_args(int argc, char** argv) {
                 puts("  -l, --log=PATH\t Write log to the file at PATH in addition to stdout.");
                 puts("  -d, --detail=LEVEL\t Set the detail level (0 to 2, from low to high) of output (default: 0).");
                 puts("  -r, --recorder-mode\t Record data received from the server and save them to a binary file.");
+                puts("      --no-sound-files\t Discard sound files sent by the server.");
                 puts("  -p, --print\t\t Print player state changes.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");

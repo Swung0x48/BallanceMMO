@@ -788,6 +788,7 @@ private:
 
 		spectator_label_.reset();
 		permanent_notification_.reset();
+		db_.set_nickname(config_manager_["playername"]->GetString());
 		db_.set_client_id(k_HSteamNetConnection_Invalid + ((rand() << 16) | rand())); // invalid id indicates server
 	}
 

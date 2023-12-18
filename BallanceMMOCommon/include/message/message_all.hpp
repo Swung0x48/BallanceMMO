@@ -49,5 +49,6 @@
 #include "sound_stream_msg.hpp"
 #include "score_list_msg.hpp"
 #include "highscore_timer_calibration_msg.hpp"
+#include "name_update_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

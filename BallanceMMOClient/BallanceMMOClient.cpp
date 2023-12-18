@@ -1873,6 +1873,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             update_sector_timestamp(client_map.value(), msg->content.sector, timestamp);
         break;
     }
+    case bmmo::NameUpdate: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::name_update_msg>(network_msg);
+        db_.set_nickname(msg.text_content);
+        SendIngameMessage(std::format("Your name has been changed to \"{}\" upon server request.",
+                          spectator_mode_ ? bmmo::name_validator::get_spectator_nickname(msg.text_content)
+                              : msg.text_content), bmmo::ansi::WhiteInverse);
+        break;
+    }
     case bmmo::OpState: {
         auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
         SendIngameMessage(std::format("You have been {} Operator permission.",
