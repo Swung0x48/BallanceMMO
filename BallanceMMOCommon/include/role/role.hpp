@@ -162,7 +162,7 @@ public:
             char timeStr[15];
             std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
             fprintf(log_file_, "[%s] %s\n", timeStr, pMsg);
-            fflush(log_file_);
+            // fflush(log_file_);
         }
     }
 
@@ -180,6 +180,7 @@ public:
             fprintf(stderr, "\r[%s] %s\n> ", timeStr, pszMsg);
             fflush(stdout);
             fflush(stderr);
+            if (log_file_) fflush(log_file_);
             exit(2);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);

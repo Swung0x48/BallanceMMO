@@ -1147,6 +1147,14 @@ protected:
                         break;
                     }
                     case sa::BallOff: {
+                        if (!config_.log_ball_offs)
+                            break;
+                        char text[256];
+                        std::snprintf(text, sizeof(text), "(#%u, %s) just fell at sector %d of %s.",
+                                networking_msg->m_conn, client_it->second.name.c_str(),
+                                client_it->second.current_sector,
+                                client_it->second.current_map.get_display_name(map_names_).c_str());
+                        LogFileOutput(text);
                         break;
                     }
                     default:
@@ -1184,6 +1192,14 @@ protected:
                 Printf(msg.get_ansi_color_code(), "[%s] (%u, %s): %s",
                         msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.text_content);
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                if (msg.type == bmmo::public_notification_type::SeriousWarning && config_.serious_warning_as_dnf) {
+                    bmmo::did_not_finish_msg dnf_msg{.content = {
+                        .cheated = client_it->second.cheated,
+                        .map = client_it->second.current_map,
+                        .sector = client_it->second.current_sector,
+                    }};
+                    receive(&dnf_msg, sizeof(dnf_msg), networking_msg->m_conn);
+                }
                 break;
             }
             case bmmo::ScoreList: {

@@ -13,9 +13,20 @@ namespace bmmo::exported:: inline _v3 {
         virtual void on_player_login(HSteamNetConnection id) {};
         virtual void on_player_logout(HSteamNetConnection id) {};
 
-        // return: whether to cancel the event
+        // @returns Whether to cancel the event.
         virtual bool on_pre_login(const char* address, const char* name) { return true; };
-        virtual bool on_pre_chat(const char* text, const size_t size) { return true; };
+        /**
+         * Called before sending the chat.
+         * 
+         * Note that if you want to replace the original message then you need
+         * to ensure the lifetime of the replacement character sequence.
+         * 
+         * @param[out] text - text of the chat message.
+         * @param[in] new_text - pointer to a char sequence holding text to replace the original message.
+         * 
+         * @returns Whether to cancel the event.
+         */
+        virtual bool on_pre_chat(const char* text, const char** new_text) { return true; };
     };
 
     class client : public ::client {

@@ -4,7 +4,7 @@
 #include "../utility/ansi_colors.hpp"
 
 namespace bmmo {
-    enum class public_notification_type: uint8_t { Info, Warning, Error };
+    enum class public_notification_type: uint8_t { Info, Warning, Error, SeriousWarning = Warning << 4 };
 
     struct public_notification_msg: public serializable_message {
         public_notification_msg(): serializable_message(bmmo::PublicNotification) {}
@@ -16,6 +16,7 @@ namespace bmmo {
             using pn = public_notification_type;
             switch (type) {
                 case pn::Info: return "Info";
+                case pn::SeriousWarning:
                 case pn::Warning: return "Warning";
                 case pn::Error: return "Error";
                 default: return "Unknown";
@@ -26,6 +27,7 @@ namespace bmmo {
             using pn = public_notification_type;
             switch (type) {
                 case pn::Info: return ansi::Default;
+                case pn::SeriousWarning:
                 case pn::Warning: return ansi::Xterm256 | 216;
                 case pn::Error: return ansi::Xterm256 | 202;
                 default: return ansi::Reset;

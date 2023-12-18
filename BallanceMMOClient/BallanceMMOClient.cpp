@@ -632,8 +632,14 @@ void BallanceMMOClient::init_commands() {
         bmmo::chat_msg msg{};
         msg.chat_content = console_.get_rest_of_line();
         
+        const char* new_text = nullptr;
+        bool canceled = false;
         for (const auto& i : listeners_)
-            if (!i->on_pre_chat(msg.chat_content.c_str(), msg.chat_content.size())) return;
+            canceled |= !i->on_pre_chat(msg.chat_content.c_str(), &new_text);
+        if (canceled) return;
+
+        if (new_text && std::strlen(new_text) < UINT16_MAX)
+            msg.chat_content.assign(new_text);
         
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1066,8 +1072,10 @@ void BallanceMMOClient::terminate(long delay) {
 }
 
 void BallanceMMOClient::connect_to_server(const char* address, const char* name) {
+    bool canceled = false;
     for (const auto& i : listeners_)
-        if (!i->on_pre_login(address, name)) return;
+        canceled |= !i->on_pre_login(address, name);
+    if (canceled) return;
 
     if (std::strcmp(server_addr_.c_str(), address) == 0) {
         if (connected()) {

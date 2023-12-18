@@ -116,7 +116,7 @@ namespace NSDumpFile {
         if (messageBoxTriggered)
             return EXCEPTION_CONTINUE_SEARCH;
         std::string extraText;
-        char callbackText[128];
+        char callbackText[128]{};
         CrashCallback(callbackText);
         if (std::strlen(callbackText) != 0)
             extraText.append("--------\n").append(callbackText).append("\n");

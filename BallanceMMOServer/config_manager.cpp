@@ -34,6 +34,8 @@ bool config_manager::load() {
     force_restart_level = yaml_load_value(config_, "force_restart_after_countdown", force_restart_level);
     save_player_status_to_file_ = yaml_load_value(config_, "save_player_status_to_file", save_player_status_to_file_);
     log_installed_mods = yaml_load_value(config_, "log_installed_mods", log_installed_mods);
+    log_ball_offs = yaml_load_value(config_, "log_ball_offs", log_ball_offs);
+    serious_warning_as_dnf = yaml_load_value(config_, "serious_warning_as_dnf", serious_warning_as_dnf);
 
     std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
     if (logging_level_string == "msg")
@@ -107,6 +109,8 @@ void config_manager::save(bool reload_values) {
                     << std::put_time(std::localtime(&current_time), "%F %T") << "\n"
                 << "# Notes:\n"
                 << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
+                << "# - Log ball-offs: whether to write player ball-off events to the log file.\n"
+                << "# - Serious warning as DNF: mark the client's status as Did-Not-Finish upon receiving a serious warning.\n"
                 << "# - Options for log levels: important, warning, msg.\n"
                 << "# - Map name list style: \"md5_hash: name\".\n"
                 << "# - Op list player data style: \"playername: uuid\".\n"
