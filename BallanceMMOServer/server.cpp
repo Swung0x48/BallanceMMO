@@ -116,7 +116,7 @@ public:
 
     inline config_manager get_config() { return config_; }
     inline const bmmo::map& get_last_countdown_map() { return last_countdown_map_; }
-    
+
     const bmmo::ranking_entry::player_rankings* get_map_rankings(const bmmo::map& map) {
         auto map_it = maps_.find(map.get_hash_bytes_string());
         if (map_it == maps_.end() || (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty()))
@@ -1122,11 +1122,11 @@ protected:
                         break;
                     }
                     case bmmo::current_map_state::EnteringMap: {
-                        auto& client_map = maps_[msg->content.map.get_hash_bytes_string()];
-                        if (client_map.mode == bmmo::level_mode::Highscore) {
+                        auto client_map_it = maps_.find(msg->content.map.get_hash_bytes_string());
+                        if (client_map_it != maps_.end() && client_map_it->second.mode == bmmo::level_mode::Highscore) {
                             bmmo::highscore_timer_calibration_msg hs_msg{.content = {
                                 .map = msg->content.map,
-                                .time_diff_microseconds = SteamNetworkingUtils()->GetLocalTimestamp() - client_map.start_time,
+                                .time_diff_microseconds = SteamNetworkingUtils()->GetLocalTimestamp() - client_map_it->second.start_time,
                             }};
                             send(networking_msg->m_conn, hs_msg, k_nSteamNetworkingSend_Reliable);
                         }
@@ -1211,6 +1211,10 @@ protected:
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 if (msg.type == bmmo::public_notification_type::SeriousWarning
                         && config_.serious_warning_as_dnf && !client_it->second.dnf) {
+                    auto client_map_it = maps_.find(client_it->second.current_map.get_hash_bytes_string());
+                    if (client_map_it == maps_.end() || SteamNetworkingUtils()->GetLocalTimestamp()
+                            - maps_[client_it->second.current_map.get_hash_bytes_string()].start_time > 20ll * 60 * 1000000)
+                        break;
                     bmmo::did_not_finish_msg dnf_msg{.content = {
                         .cheated = client_it->second.cheated,
                         .map = client_it->second.current_map,
