@@ -65,6 +65,7 @@ get_target_property(_inc yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warnings
 set_target_properties(GameNetworkingSockets yaml-cpp PROPERTIES
                             LIBRARY_OUTPUT_DIRECTORY ${BMMO_LIB_DIR})
+# set_target_properties(yaml-cpp PROPERTIES VERSION "" SOVERSION "")
 
 if (MSVC)
     set(compile_options /Wall)

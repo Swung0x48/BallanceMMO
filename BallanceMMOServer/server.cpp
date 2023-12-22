@@ -103,13 +103,26 @@ public:
     auto& get_bulletin() { return permanent_notification_; }
 
     HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) const {
-        auto username_it = username_.find(bmmo::message_utils::to_lower(username));
-        if (username_it == username_.end()) {
+        if (username.empty()) return k_HSteamNetConnection_Invalid;
+        std::string begin_name(bmmo::message_utils::to_lower(username));
+        std::string end_name(username);
+        ++end_name[end_name.length() - 1];
+        auto username_it = username_.lower_bound(begin_name);
+        const auto username_it_end = username_.lower_bound(end_name);
+        if (username_it == username_it_end) {
             if (!suppress_error)
                 Printf("Error: client \"%s\" not found.", username);
             return k_HSteamNetConnection_Invalid;
         }
-        return username_it->second;
+        else if (std::next(username_it) == username_it_end) {
+            return username_it->second;
+        }
+        std::string names;
+        for (; username_it != username_it_end; ++username_it)
+            names += ", " + username_it->first;
+        if (!suppress_error)
+            Printf("Error: multiple possible players: %s.", names.erase(0, 2));
+        return k_HSteamNetConnection_Invalid;
     };
 
     inline int get_client_count() const noexcept { return clients_.size(); }
@@ -183,7 +196,7 @@ public:
     }
 
     void print_clients(bool print_uuid = false) {
-        std::map<decltype(username_)::key_type, decltype(username_)::mapped_type> spectators;
+        decltype(username_) spectators;
         static const auto print_client = [&](auto id, auto data) {
             SteamNetConnectionRealTimeStatus_t status{};
             interface_->GetConnectionRealTimeStatus(id, &status, 0, nullptr);
@@ -197,7 +210,7 @@ public:
                     data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "",
                     is_muted(data.uuid) ? " [Muted]" : "");
         };
-        for (const auto& i: std::map(username_.begin(), username_.end())) {
+        for (const auto& i: username_) {
             if (bmmo::name_validator::is_spectator(i.first))
                 spectators.insert(i);
             else
@@ -220,7 +233,7 @@ public:
     }
 
     void print_player_maps() {
-        for (const auto& [_, id]: std::map(username_.begin(), username_.end())) {
+        for (const auto& [_, id]: username_) {
             const auto& data = clients_[id];
             Printf("%s(#%u, %s) is at the %d%s sector of %s.",
                 data.cheated ? "[CHEAT] " : "", id, data.name,
@@ -230,7 +243,7 @@ public:
     }
 
     void print_positions() {
-        for (const auto& [_, id]: std::map(username_.begin(), username_.end())) {
+        for (const auto& [_, id]: username_) {
             const auto& data = clients_[id];
             Printf("(%u, %s) is at %.2f, %.2f, %.2f with %s ball.",
                     id, data.name,
@@ -1342,7 +1355,7 @@ protected:
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 //    std::thread server_thread_;
     client_data_collection clients_;
-    std::unordered_map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
+    std::map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
     std::mutex client_data_mutex_;
     std::pair<std::string, std::string> permanent_notification_; // <username (title), text>
 
@@ -1458,6 +1471,7 @@ int main(int argc, char** argv) {
     };
     auto send_plain_text_msg = [&](bool broadcast = true) {
         HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
+        if (!broadcast && client == k_HSteamNetConnection_Invalid) return;
         bmmo::plain_text_msg msg{};
         msg.text_content = console.get_rest_of_line();
         msg.serialize();
@@ -1473,6 +1487,7 @@ int main(int argc, char** argv) {
     console.register_command("plaintext#", std::bind(send_plain_text_msg, false));
     auto send_popup_msg = [&](bool broadcast = true) {
         HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
+        if (!broadcast && client == k_HSteamNetConnection_Invalid) return;
         bmmo::popup_box_msg msg{};
         msg.title = "BallanceMMO - Message";
         msg.text_content = console.get_rest_of_line();
@@ -1509,6 +1524,7 @@ int main(int argc, char** argv) {
     auto send_important_notification = [&](bool broadcast = true, in_msg::notification_type type = in_msg::Announcement) {
         bmmo::important_notification_msg msg{};
         HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
+        if (!broadcast && client == k_HSteamNetConnection_Invalid) return;
         msg.chat_content = console.get_rest_of_line();
         msg.type = type;
         msg.serialize();
@@ -1584,6 +1600,7 @@ int main(int argc, char** argv) {
             role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [mode] [type]\".");
             role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
         };
+        if (console.empty()) { print_hint(); return; }
         auto client = get_client_id_from_console();
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word(true);
