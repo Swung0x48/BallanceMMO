@@ -40,6 +40,7 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
 
 bool console::read_input(std::string &buf) {
 #ifdef _WIN32
+    std::cout << "\r> " << std::flush;
     std::wstring wbuf;
     bool success = bool(std::getline(std::wcin, wbuf));
     buf = bmmo::string_utils::ConvertWideToANSI(wbuf);
@@ -47,7 +48,8 @@ bool console::read_input(std::string &buf) {
         buf.erase(pos);
     return success;
 #else
-    auto input_cstr = readline("\r> ");
+    std::putchar('\r');
+    auto input_cstr = readline("> ");
     if (!input_cstr)
         return false;
     buf.assign(input_cstr);

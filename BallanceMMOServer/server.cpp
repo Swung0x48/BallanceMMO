@@ -1747,7 +1747,6 @@ int main(int argc, char** argv) {
         server.shutdown();
 
     while (server.running()) {
-        std::cout << "\r> " << std::flush;
         std::string line;
         if (!console.read_input(line)) {
             puts("stop");

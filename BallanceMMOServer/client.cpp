@@ -1117,7 +1117,6 @@ int main(int argc, char** argv) {
         });
     }
     while (client.running()) {
-        std::cout << "\r> " << std::flush;
         std::string input;
         if (!console.read_input(input)) {
             puts("stop");

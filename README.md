@@ -38,9 +38,9 @@ BallanceMMO is a project which brings online experiences to Ballance.
 - A build tool like GNU Make, Ninja: Build server binary
 - A compiler with core C++20 feature support
   - This project has been successfully compiled under:
-    - GCC ~~9.4~~, 10.3, 11.3, and 12.2 (server-side components; GCC 9 support dropped since January 2023)
-    - Apple Clang 13.1 (server-side)
-    - Visual Studio 2019 and 2022 (client-side, or specifically, BML related stuff)
+    - GCC ~~9.4~~, 10.3, 11.3, 12.2, and 13.2 (server-side components; GCC 9 support dropped since January 2023)
+    - Apple Clang 13.1 and 16.0 (server-side)
+    - Visual Studio 2019 and 2022 (client-side, or specifically, BML-related stuff)
 - One of the following crypto solutions:
   - OpenSSL 1.1.1 or later
   - OpenSSL 1.1.x, plus ed25519-donna and curve25519-donna. (Valve GNS has made some minor changes, so the source is included in this project.)

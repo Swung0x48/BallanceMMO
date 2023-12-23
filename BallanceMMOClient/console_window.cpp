@@ -111,7 +111,6 @@ void console_window::run() {
     if (owned_console_)
         for (const auto& i : previous_msg_) role::Printf(i.c_str());
     while (true) {
-        std::cout << "\r> " << std::flush;
         std::string line;
         /*wchar_t wc;
         do {

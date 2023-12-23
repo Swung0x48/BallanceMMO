@@ -1024,7 +1024,6 @@ int main(int argc, char** argv) {
     replayer.wait_till_started();
 
     while (replayer.running()) {
-        std::cout << "\r> " << std::flush;
         std::string line;
         if (!console.read_input(line)) {
             puts("stop");
