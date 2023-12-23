@@ -19,6 +19,8 @@
 #else
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 #endif
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
@@ -57,6 +59,8 @@ public:
         GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
         SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
+#else
+        using_history();
 #endif
         init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
         init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());

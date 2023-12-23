@@ -66,6 +66,11 @@ target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warning
 set_target_properties(GameNetworkingSockets yaml-cpp PROPERTIES
                             LIBRARY_OUTPUT_DIRECTORY ${BMMO_LIB_DIR})
 # set_target_properties(yaml-cpp PROPERTIES VERSION "" SOVERSION "")
+if (NOT WIN32)
+    target_link_libraries(BallanceMMOServer readline)
+    target_link_libraries(BallanceMMOMockClient readline)
+    target_link_libraries(BallanceMMORecordParser readline)
+endif()
 
 if (MSVC)
     set(compile_options /Wall)

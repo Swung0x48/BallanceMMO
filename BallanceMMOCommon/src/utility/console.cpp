@@ -1,5 +1,9 @@
 #include <iostream>
 #include <algorithm>
+#ifndef _WIN32
+#include <readline/readline.h>
+#include <readline/history.h>
+#endif
 #include "utility/console.hpp"
 #include "utility/string_utils.hpp"
 
@@ -43,7 +47,13 @@ bool console::read_input(std::string &buf) {
         buf.erase(pos);
     return success;
 #else
-    return bool(std::getline(std::cin, buf));
+    auto input_cstr = readline("\r> ");
+    if (!input_cstr)
+        return false;
+    buf.assign(input_cstr);
+    add_history(buf.c_str());
+    return std::cin.good();
+    // return bool(std::getline(std::cin, buf));
 #endif
 }
 
