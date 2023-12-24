@@ -105,7 +105,7 @@ public:
     HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) const {
         if (username.empty()) return k_HSteamNetConnection_Invalid;
         std::string begin_name(bmmo::message_utils::to_lower(username));
-        std::string end_name(username);
+        std::string end_name(begin_name);
         ++end_name[end_name.length() - 1];
         auto username_it = username_.lower_bound(begin_name);
         const auto username_it_end = username_.lower_bound(end_name);

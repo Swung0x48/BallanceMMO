@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+// vcpkg win32 readline doesn't support multibyte characters
 #endif
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
@@ -193,7 +194,11 @@ public:
                 || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
 #endif
             ) {
-                printf("\r[%s] %s\n> ", timeStr, pszMsg);
+                printf("\r[%s] %s\n"
+#ifdef _WIN32
+                       "> "
+#endif
+                , timeStr, pszMsg);
                 fflush(stdout);
                 return;
             }
@@ -201,19 +206,27 @@ public:
             CONSOLE_SCREEN_BUFFER_INFO csbi;
             GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
             short width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+            unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
+            //PeekConsoleInputW(GetStdHandle(STD_INPUT_HANDLE), input_records.get(), 128, &length);
+            //if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown && ir.Event.KeyEvent.uChar.UnicodeChar)
+            if (ansiColor == bmmo::ansi::Reset)
+                printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, timeStr, pszMsg, lines);
+            else
+                printf("\033[s\033[%uL\033[G[%s] %s%s\033[m\n> \033[u\033[%uB", lines, timeStr,
+                       bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg, lines);
 #else
-            struct winsize w;
+            /*struct winsize w;
             ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
             short width = w.ws_col;
             if (width <= 0)
                 width = 80;
-#endif
-            unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
+            unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;*/
             if (ansiColor == bmmo::ansi::Reset)
-                printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, timeStr, pszMsg, lines);
+                printf("\r[%s] %s\n", timeStr, pszMsg);
             else
-                printf("\033[s\033[%uL\033[G[%s] %s%s\033[0m\n> \033[u\033[%uB",
-                        lines, timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg, lines);
+                printf("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
+            rl_forced_update_display();
+#endif
             fflush(stdout);
         }
     }

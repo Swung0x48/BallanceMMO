@@ -28,6 +28,8 @@ if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     endif ()
     find_package(Protobuf REQUIRED)
     find_package(GameNetworkingSockets REQUIRED)
+    # find_package(unofficial-readline-win32 CONFIG REQUIRED)
+    # add_library(readline ALIAS unofficial::readline-win32::readline)
 endif ()
 
 set(VIRTOOLS_SDK_PATH "${VIRTOOLS_SDK_PATH}" CACHE PATH "Path to the Virtools SDK")
@@ -113,7 +115,7 @@ target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE
                             ${BMLPLUS_LIB_DIR})
-target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE 
+target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE
                         GameNetworkingSockets::shared
                         CK2
                         VxMath

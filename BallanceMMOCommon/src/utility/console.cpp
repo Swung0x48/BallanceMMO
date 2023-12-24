@@ -1,6 +1,6 @@
 #include <iostream>
 #include <algorithm>
-#ifndef _WIN32
+#ifndef _WIN32 // vcpkg win32 readline doesn't support multibyte characters
 #include <readline/readline.h>
 #include <readline/history.h>
 #endif
@@ -8,6 +8,48 @@
 #include "utility/string_utils.hpp"
 
 namespace bmmo {
+
+namespace {
+#ifndef _WIN32
+    char* command_name_generator(const char* text, int state) {
+        static char** cmd_matches;
+        static int list_index;
+
+        if (!state) {
+            auto cmd_matches_stdstring = console::instance_->get_command_hints(false, text);
+            cmd_matches = (char**) std::malloc((cmd_matches_stdstring.size() + 1) * sizeof(char*));
+            if (!cmd_matches) return nullptr;
+            for (size_t i = 0; i < cmd_matches_stdstring.size(); ++i) {
+                // not using strdup as it is posix-only before c23
+                auto data = (char*) std::malloc(cmd_matches_stdstring[i].size() * sizeof(char));
+                if (!data) return nullptr;
+                std::strcpy(data, cmd_matches_stdstring[i].c_str());
+                cmd_matches[i] = data;
+            }
+            cmd_matches[cmd_matches_stdstring.size()] = nullptr;
+            list_index = 0;
+        }
+        return cmd_matches[list_index++];
+    }
+
+    char** command_name_completion(const char* text, [[maybe_unused]] int start, [[maybe_unused]] int end) {
+        if (std::strchr(rl_line_buffer, ' ')) {
+            if (std::strncmp(rl_line_buffer, "playstream", sizeof("playstream") - 1) != 0)
+                rl_attempted_completion_over = 1;
+            return nullptr;
+        }
+        rl_attempted_completion_over = 1;
+        return rl_completion_matches(text, command_name_generator);
+    }
+#endif // !_WIN32
+}
+
+console::console() {
+    instance_ = this;
+#ifndef _WIN32
+    rl_attempted_completion_function = command_name_completion;
+#endif // !_WIN32
+}
 
 const std::string console::get_help_string() const {
     std::string help_string;
@@ -24,8 +66,10 @@ const std::vector<std::string> console::get_command_list() const {
     return command_list;
 };
 
-const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) const {
-    std::string start_name(command_name_);
+const std::vector<std::string> console::get_command_hints(bool fuzzy_matching, const char* cmd) const {
+    std::string start_name(cmd ? cmd : command_name_.c_str());
+    if (start_name.empty())
+        return {"help"};
     if (fuzzy_matching && start_name.length() > 1)
         start_name.erase((start_name.length() - 1) * 2 / 3 + 1);
     std::string end_name(start_name);
@@ -39,24 +83,27 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching) c
 };
 
 bool console::read_input(std::string &buf) {
+    bool success{};
 #ifdef _WIN32
     std::cout << "\r> " << std::flush;
     std::wstring wbuf;
-    bool success = bool(std::getline(std::wcin, wbuf));
+    success = bool(std::getline(std::wcin, wbuf));
     buf = bmmo::string_utils::ConvertWideToANSI(wbuf);
     if (auto pos = buf.rfind('\r'); pos != std::string::npos)
         buf.erase(pos);
-    return success;
 #else
     std::putchar('\r');
     auto input_cstr = readline("> ");
     if (!input_cstr)
         return false;
     buf.assign(input_cstr);
-    add_history(buf.c_str());
-    return std::cin.good();
+    free(input_cstr);
+    success = std::cin.good();
     // return bool(std::getline(std::cin, buf));
+    rl_delete_text(0, rl_end);
+    add_history(buf.c_str());
 #endif
+    return success;
 }
 
 bool console::execute(const std::string &cmd) {
