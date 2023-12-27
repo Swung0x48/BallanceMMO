@@ -45,8 +45,9 @@ BallanceMMO is a project which brings online experiences to Ballance.
   - OpenSSL 1.1.1 or later
   - OpenSSL 1.1.x, plus ed25519-donna and curve25519-donna. (Valve GNS has made some minor changes, so the source is included in this project.)
   - libsodium
-- Google protobuf 2.6.1+ (included in submodule)
-- GNU Readline (for UNIX-like systems)
+- Google protobuf 2.6.1+ (included in submodules)
+- Steam GameNetworkingSockets (included in submodules)
+- [Read Evaluate Print Loop ++ (*replxx*)](https://github.com/AmokHuginnsson/replxx) (included in submodules)
 - Dev pack of BallanceModLoader (client-side, [*release page*](https://github.com/Gamepiaynmo/BallanceModLoader/releases)) and (optionally) [BallanceModLoaderPlus](https://github.com/doyaGu/BallanceModLoaderPlus)
 
 ## Building server
@@ -59,14 +60,13 @@ BallanceMMO is a project which brings online experiences to Ballance.
     git clone https://github.com/Swung0x48/BallanceMMO.git --recursive
     ```
 
-2. Install OpenSSL, protobuf, and GNU Readline
+2. Install OpenSSL and Protobuf
 
     - Debian/Ubuntu
 
         ```commandline
         apt install libssl-dev
         apt install libprotobuf-dev protobuf-compiler
-        apt install libreadline-dev
         ```
 
     - Arch
@@ -74,7 +74,6 @@ BallanceMMO is a project which brings online experiences to Ballance.
         ```commandline
         pacman -S openssl
         pacman -S protobuf
-        pacman -S readline
         ```
 
     - macOS with brew
@@ -83,7 +82,6 @@ BallanceMMO is a project which brings online experiences to Ballance.
         brew install openssl@1.1
         export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:/usr/local/opt/openssl@1.1/lib/pkgconfig
         brew install protobuf
-        brew install readline
         ```
 
     (Haven't tried on a Linux distro with yum as package manager. Sorry Fedora/RHEL/CentOS guys...)

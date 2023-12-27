@@ -17,11 +17,13 @@ class console {
 public:
     console();
 
-    static inline console* instance_;
+    static inline console *instance;
 
     const std::string get_help_string() const;
     const std::vector<std::string> get_command_list() const;
-    const std::vector<std::string> get_command_hints(bool fuzzy_matching = false, const char* cmd = nullptr) const;
+    const std::vector<std::string> get_command_hints(bool fuzzy_matching = false, const char *cmd = nullptr) const;
+    
+    static void set_completion_callback(std::function<std::vector<std::string>(const std::vector<std::string>&)> func);
 
     // returns true if the stream doesn't have any errors.
     static bool read_input(std::string &buf);
@@ -32,7 +34,7 @@ public:
     bool unregister_command(const std::string &name);
 
     bool empty() const noexcept;
-    inline const std::string& get_command_name() const noexcept { return command_name_; };
+    inline const std::string &get_command_name() const noexcept { return command_name_; };
 
     const std::string get_next_word(bool to_lowercase = false);
     const std::string get_rest_of_line();

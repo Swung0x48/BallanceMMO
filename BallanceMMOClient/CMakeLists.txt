@@ -28,9 +28,9 @@ if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     endif ()
     find_package(Protobuf REQUIRED)
     find_package(GameNetworkingSockets REQUIRED)
-    # find_package(unofficial-readline-win32 CONFIG REQUIRED)
-    # add_library(readline ALIAS unofficial::readline-win32::readline)
 endif ()
+
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/replxx ${CMAKE_CURRENT_BINARY_DIR}/replxx)
 
 set(VIRTOOLS_SDK_PATH "${VIRTOOLS_SDK_PATH}" CACHE PATH "Path to the Virtools SDK")
 set(VIRTOOLS_SDK_FETCH_FROM_GIT "${VIRTOOLS_SDK_FETCH_FROM_GIT}" CACHE BOOL "Set to ON to fetch copy of SDK from git if not otherwise locatable")
@@ -62,6 +62,7 @@ find_package(VirtoolsSDK REQUIRED HINTS ${VIRTOOLS_SDK_PATH})
 
 set(ASIO_INCLUDE_DIR ../submodule/asio/asio/include)
 set(GNS_EXT_INCLUDE_DIR ../submodule/GameNetworkingSockets/src/external)
+set(REPLXX_INCLUDE_DIR ../submodule/replxx/include)
 set(BML_LIB_DIR lib/BML)
 set(BMLPLUS_LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/BMLPlus)
 
@@ -95,11 +96,13 @@ set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClien
 set_target_properties(BallanceMMOClient PROPERTIES SUFFIX ".bmod")
 target_include_directories(BallanceMMOClient PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
+                            ${REPLXX_INCLUDE_DIR}
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE
                             ${BML_LIB_DIR})
-target_link_libraries(BallanceMMOClient PRIVATE 
+target_link_libraries(BallanceMMOClient PRIVATE
+                        replxx
                         GameNetworkingSockets::shared
                         BML.lib)
 
@@ -111,11 +114,13 @@ set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES OUTPUT_NAME "Ballance
 set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES SUFFIX ".bmodp")
 target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
+                            ${REPLXX_INCLUDE_DIR}
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE
                             ${BMLPLUS_LIB_DIR})
 target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE
+                        replxx
                         GameNetworkingSockets::shared
                         CK2
                         VxMath
@@ -136,6 +141,8 @@ if (WIN32)
     target_compile_definitions(BallanceMMOClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_definitions(BallanceMMOClient-BMLPlus PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX BMMO_USE_BML_PLUS)
 endif() 
+target_compile_definitions(BallanceMMOClient PRIVATE BMMO_INCLUDE_INTERNAL REPLXX_STATIC)
+target_compile_definitions(BallanceMMOClient-BMLPlus PRIVATE BMMO_INCLUDE_INTERNAL REPLXX_STATIC)
 
 foreach (LIB IN ITEMS BallanceMMOClient BallanceMMOClient-BMLPlus)
     # Disable msvc unsafe warnings

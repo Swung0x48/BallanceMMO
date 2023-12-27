@@ -415,6 +415,26 @@ public:
             return false;
         }
 
+        bmmo::console::set_completion_callback([this](const std::vector<std::string>& args) -> std::vector<std::string> {
+            switch (args.size()) {
+                case 0: return {};
+                case 1: return bmmo::console::instance->get_command_hints(false, args[0].c_str());
+                default: {
+                    if (args[0] == "playstream" || (args.size() > 2 && args[0] == "playstream#"))
+                        return bmmo::string_utils::get_file_matches(args[args.size() - 1]);
+                    else {
+                        std::lock_guard lk(client_data_mutex_);
+                        std::vector<std::string> player_hints;
+                        for (const auto& [id, data]: clients_) {
+                            player_hints.emplace_back("#" + std::to_string(id));
+                            player_hints.emplace_back(data.name);
+                        }
+                        return player_hints;
+                    }
+                }
+            }
+        });
+
         running_ = true;
         startup_cv_.notify_all();
 
@@ -450,8 +470,11 @@ protected:
         msg.content.connection_id = client;
         broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
         std::string name = itClient->second.name;
-        username_.erase(bmmo::message_utils::to_lower(name));
-        clients_.erase(itClient);
+        {
+            std::lock_guard lk(client_data_mutex_);
+            username_.erase(bmmo::message_utils::to_lower(name));
+            clients_.erase(itClient);
+        }
         Printf(bmmo::color_code(msg.code), "%s (#%u) disconnected.", name, client);
 
         switch (get_client_count()) {
@@ -744,7 +767,10 @@ protected:
                 }
 
                 // accepting client and adding it to the client list
-                client_it = clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}}).first;
+                {
+                    std::lock_guard lk(client_data_mutex_);
+                    client_it = clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}}).first;
+                }
                 memcpy(client_it->second.uuid, msg.uuid, sizeof(msg.uuid));
                 client_it->second.login_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                 username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;

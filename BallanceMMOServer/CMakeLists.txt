@@ -12,7 +12,7 @@ set(BMMO_LIB_DIR ${PROJECT_BINARY_DIR}/lib)
 set(BMMO_RUNTIME_DIR ${PROJECT_BINARY_DIR})
 
 # sets RPATH for *install*ed files
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:\$ORIGIN:${BMMO_LIB_DIR}") # Note CMake escaping around '$' sign.
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:\$ORIGIN:lib") # Note CMake escaping around '$' sign.
 # *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 # if (CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -31,11 +31,13 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 # endif ()
 
 #add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets ${CMAKE_CURRENT_BINARY_DIR}/BallanceMMO)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets ${CMAKE_CURRENT_BINARY_DIR}/GameNetworkingSockets)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/replxx ${CMAKE_CURRENT_BINARY_DIR}/replxx)
 
 include_directories(../submodule/asio/asio/include)
 include_directories(../submodule/ya_getopt)
 include_directories(../submodule/GameNetworkingSockets/src/external)
+include_directories(../submodule/replxx/include)
 
 include_directories("${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include"
                     "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config")
@@ -48,29 +50,30 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(yaml-cpp)
 
+set(YA_GETOPT_SRC "../submodule/ya_getopt/ya_getopt.c")
+
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
-add_executable(BallanceMMOServer server.cpp config_manager.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
+add_executable(BallanceMMOServer server.cpp config_manager.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMOServer PRIVATE)
-target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp)
-add_executable(BallanceMMOMockClient client.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
+target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp replxx)
+add_executable(BallanceMMOMockClient client.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMOMockClient PRIVATE)
-target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared)
-add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ../submodule/ya_getopt/ya_getopt.c)
+target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared replxx)
+add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMORecordParser PRIVATE)
-target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared)
+target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared replxx)
+
+target_compile_definitions(BallanceMMOServer PRIVATE BMMO_INCLUDE_INTERNAL)
+target_compile_definitions(BallanceMMOMockClient PRIVATE BMMO_INCLUDE_INTERNAL)
+target_compile_definitions(BallanceMMORecordParser PRIVATE BMMO_INCLUDE_INTERNAL)
 
 get_target_property(_inc yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(yaml-cpp SYSTEM INTERFACE ${_inc}) # suppress warnings
-set_target_properties(GameNetworkingSockets yaml-cpp PROPERTIES
+set_target_properties(GameNetworkingSockets yaml-cpp replxx PROPERTIES
                             LIBRARY_OUTPUT_DIRECTORY ${BMMO_LIB_DIR})
 # set_target_properties(yaml-cpp PROPERTIES VERSION "" SOVERSION "")
-if (NOT WIN32)
-    target_link_libraries(BallanceMMOServer readline)
-    target_link_libraries(BallanceMMOMockClient readline)
-    target_link_libraries(BallanceMMORecordParser readline)
-endif()
 
 if (MSVC)
     set(compile_options /Wall)
@@ -89,7 +92,7 @@ if (WIN32)
     target_compile_definitions(BallanceMMOServer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_definitions(BallanceMMOMockClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_definitions(BallanceMMORecordParser PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    set_target_properties(GameNetworkingSockets yaml-cpp PROPERTIES
+    set_target_properties(GameNetworkingSockets yaml-cpp replxx PROPERTIES
                             RUNTIME_OUTPUT_DIRECTORY ${BMMO_RUNTIME_DIR})
 endif() 
 

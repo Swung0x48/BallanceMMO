@@ -30,8 +30,8 @@ jobs:
     - name: Fetch git submodules
       run: git submodule update --init --recursive
 
-    - name: Install dependencies (OpenSSL, Protobuf, Readline)
-      run: sudo apt install libssl-dev libprotobuf-dev protobuf-compiler libreadline-dev
+    - name: Install dependencies (OpenSSL, Protobuf)
+      run: sudo apt install libssl-dev libprotobuf-dev protobuf-compiler
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.

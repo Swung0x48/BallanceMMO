@@ -22,8 +22,6 @@ if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     endif ()
     find_package(Protobuf REQUIRED)
     find_package(GameNetworkingSockets REQUIRED)
-    # find_package(unofficial-readline-win32 CONFIG REQUIRED)
-    # add_library(readline ALIAS unofficial::readline-win32::readline)
 endif ()
 
 project(${PROJECT_NAME})

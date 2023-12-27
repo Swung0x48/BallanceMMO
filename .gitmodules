@@ -10,3 +10,6 @@
 [submodule "submodule/ya_getopt"]
 	path = submodule/ya_getopt
 	url = https://github.com/kubo/ya_getopt.git
+[submodule "submodule/replxx"]
+	path = submodule/replxx
+	url = https://github.com/AmokHuginnsson/replxx.git

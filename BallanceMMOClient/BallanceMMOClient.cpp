@@ -627,6 +627,12 @@ void BallanceMMOClient::init_commands() {
     /*console_.register_command("p", [&] { objects_.physicalize_all(); });
     console_.register_command("f", [&] { ExecuteBB::SetPhysicsForce(player_ball_, VxVector(0, 0, 0), player_ball_, VxVector(1, 0, 0), m_bml->Get3dObjectByName("Cam_OrientRef"), .43f); });
     console_.register_command("u", [&] { ExecuteBB::UnsetPhysicsForce(player_ball_); });*/
+    console_.set_completion_callback([this](const std::vector<std::string>& args) {
+        std::vector<std::string> args_copy(args);
+        if (args.size() > 0 && (args[0] != "mmo" && args[0] != "ballancemmo"))
+            args_copy.insert(args_copy.begin(), "ballancemmo");
+        return OnTabComplete(m_bml, args_copy);
+    });
 
     console_.register_command("say", [&] {
         bmmo::chat_msg msg{};
@@ -738,7 +744,7 @@ void BallanceMMOClient::init_commands() {
         if (!connected())
             return;
 
-        auto cmd_name = console_.get_command_name();
+        const auto& cmd_name = console_.get_command_name();
         bool show_id = (cmd_name == "list-id" || cmd_name == "li");
 
         typedef std::tuple<HSteamNetConnection, std::string, bool> player_data;
@@ -1021,7 +1027,8 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
         }
         case 3:
         default: {
-            if (std::set<std::string>{"teleport", "tp", "kick", "whisper", "w",
+            if (std::set<std::string>{
+                "teleport", "tp", "kick", "whisper", "w", "say", "s", "announce", "a", "b", "bulletin", "notice"
 #ifdef BMMO_WITH_PLAYER_SPECTATION
                 "spectate", "bindspectation"
 #endif

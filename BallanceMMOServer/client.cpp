@@ -87,6 +87,21 @@ public:
     }
 
     void run() override {
+        bmmo::console::set_completion_callback([this](const std::vector<std::string>& args) -> std::vector<std::string> {
+            switch (args.size()) {
+                case 0: return {};
+                case 1: return bmmo::console::instance->get_command_hints(false, args[0].c_str());
+                default: {
+                    std::vector<std::string> player_hints;
+                    for (const auto& [id, data]: clients_) {
+                        player_hints.emplace_back("#" + std::to_string(id));
+                        player_hints.emplace_back(data.name);
+                    }
+                    return player_hints;
+                }
+            }
+        });
+
         running_ = true;
         startup_cv_.notify_all();
         while (running_) {

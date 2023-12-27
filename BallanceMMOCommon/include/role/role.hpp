@@ -19,16 +19,18 @@
 #else
 #include <sys/ioctl.h>
 #include <unistd.h>
-#include <readline/readline.h>
-#include <readline/history.h>
-// vcpkg win32 readline doesn't support multibyte characters
 #endif
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
 #include <steam/steam_api.h>
 #endif
+#include "../entity/globals.hpp"
 #include "../utility/ansi_colors.hpp"
+
+#ifdef BMMO_INCLUDE_INTERNAL
+#include "../entity/globals.hpp"
+#endif
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
@@ -59,9 +61,7 @@ public:
         DWORD mode;
         GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
         SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
-#else
-        using_history();
+        // std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
 #endif
         init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
         init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -189,43 +189,24 @@ public:
             exit(2);
         } else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            if (!isatty(fileno(stdout))
-#ifdef _WIN32
-                || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
-#endif
-            ) {
-                printf("\r[%s] %s\n"
-#ifdef _WIN32
-                       "> "
-#endif
-                , timeStr, pszMsg);
+            if (!isatty(fileno(stdout))) {
+                printf("\r[%s] %s\n", timeStr, pszMsg);
                 fflush(stdout);
                 return;
             }
+#ifdef BMMO_INCLUDE_INTERNAL
+            bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
+#endif
+            if (ansiColor == bmmo::ansi::Reset
 #ifdef _WIN32
-            CONSOLE_SCREEN_BUFFER_INFO csbi;
-            GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
-            short width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-            unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;
-            //PeekConsoleInputW(GetStdHandle(STD_INPUT_HANDLE), input_records.get(), 128, &length);
-            //if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown && ir.Event.KeyEvent.uChar.UnicodeChar)
-            if (ansiColor == bmmo::ansi::Reset)
-                printf("\033[s\033[%uL\033[G[%s] %s\n> \033[u\033[%uB", lines, timeStr, pszMsg, lines);
-            else
-                printf("\033[s\033[%uL\033[G[%s] %s%s\033[m\n> \033[u\033[%uB", lines, timeStr,
-                       bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg, lines);
-#else
-            /*struct winsize w;
-            ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-            short width = w.ws_col;
-            if (width <= 0)
-                width = 80;
-            unsigned short lines = ((short) strlen(pszMsg) + 17) / width + 1;*/
-            if (ansiColor == bmmo::ansi::Reset)
+                || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
+#endif
+            )
                 printf("\r[%s] %s\n", timeStr, pszMsg);
             else
                 printf("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
-            rl_forced_update_display();
+#ifdef BMMO_INCLUDE_INTERNAL
+            bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
 #endif
             fflush(stdout);
         }

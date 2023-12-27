@@ -1,54 +1,73 @@
 #include <iostream>
 #include <algorithm>
-#ifndef _WIN32 // vcpkg win32 readline doesn't support multibyte characters
-#include <readline/readline.h>
-#include <readline/history.h>
-#endif
+#include <replxx.hxx>
+#include "entity/globals.hpp"
 #include "utility/console.hpp"
 #include "utility/string_utils.hpp"
 
 namespace bmmo {
 
 namespace {
-#ifndef _WIN32
-    char* command_name_generator(const char* text, int state) {
-        static char** cmd_matches;
-        static int list_index;
-
-        if (!state) {
-            auto cmd_matches_stdstring = console::instance_->get_command_hints(false, text);
-            cmd_matches = (char**) std::malloc((cmd_matches_stdstring.size() + 1) * sizeof(char*));
-            if (!cmd_matches) return nullptr;
-            for (size_t i = 0; i < cmd_matches_stdstring.size(); ++i) {
-                // not using strdup as it is posix-only before c23
-                auto data = (char*) std::malloc(cmd_matches_stdstring[i].size() * sizeof(char));
-                if (!data) return nullptr;
-                std::strcpy(data, cmd_matches_stdstring[i].c_str());
-                cmd_matches[i] = data;
-            }
-            cmd_matches[cmd_matches_stdstring.size()] = nullptr;
-            list_index = 0;
-        }
-        return cmd_matches[list_index++];
+    replxx::Replxx::hints_t command_hint(std::string const& input, int& contextLen, [[maybe_unused]] replxx::Replxx::Color& color) {
+        if (input.empty() || input.find_first_of(" \t\n\v\f\r") != std::string::npos)
+            return {};
+        auto hints = console::instance->get_command_hints(false, input.c_str());
+        contextLen = input.length();
+        if (hints.size() == 1)
+            return hints;
+        return {};
     }
 
-    char** command_name_completion(const char* text, [[maybe_unused]] int start, [[maybe_unused]] int end) {
-        if (std::strchr(rl_line_buffer, ' ')) {
-            if (std::strncmp(rl_line_buffer, "playstream", sizeof("playstream") - 1) != 0)
-                rl_attempted_completion_over = 1;
-            return nullptr;
+    size_t last_line_length = 0;
+    // deleted characters somehow remain on win32 conhost
+    // so we have to clear them manually
+    [[maybe_unused]] void command_modify_repaint(std::string& line, [[maybe_unused]] int& cursorPosition) {
+        if (line.length() < last_line_length) {
+            // fputs("\r\033[0K", stdout); // windows7: no ansi
+            // printf("\r%*s\r", int(last_line_length + 2), "");
+            replxx_instance.print("\033[0K");
+            replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
         }
-        rl_attempted_completion_over = 1;
-        return rl_completion_matches(text, command_name_generator);
+        last_line_length = line.length();
     }
-#endif // !_WIN32
 }
 
+replxx::Replxx replxx_instance = [] {
+    replxx::Replxx instance;
+    
+    instance.install_window_change_handler();
+    instance.set_complete_on_empty(false);
+    instance.set_hint_callback(command_hint);
+    instance.set_indent_multiline(true);
+    instance.set_ignore_case(true);
+#ifdef _WIN32
+    instance.set_modify_callback(command_modify_repaint);
+#endif // _WIN32
+
+    console::set_completion_callback([](const std::vector<std::string>& args) -> std::vector<std::string> {
+        if (args.size() == 1)
+            return console::instance->get_command_hints(false, args[0].c_str());
+        return {};
+    });
+
+    return instance;
+}();
+
 console::console() {
-    instance_ = this;
-#ifndef _WIN32
-    rl_attempted_completion_function = command_name_completion;
-#endif // !_WIN32
+    instance = this;
+}
+
+void console::set_completion_callback(std::function<std::vector<std::string>(const std::vector<std::string>&)> func) {
+    replxx_instance.set_completion_callback([func](std::string const& input, int& contextLen)
+                                            -> replxx::Replxx::completions_t {
+        const auto words = string_utils::split_strings(input);
+        const auto& last_word = words[words.size() - 1];
+        contextLen = last_word.length();
+        replxx::Replxx::completions_t completions;
+        for (const auto& hint: func(words))
+            if (hint.starts_with(last_word)) completions.emplace_back(hint);
+        return completions;
+    });
 }
 
 const std::string console::get_help_string() const {
@@ -83,27 +102,21 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching, c
 };
 
 bool console::read_input(std::string &buf) {
-    bool success{};
-#ifdef _WIN32
-    std::cout << "\r> " << std::flush;
-    std::wstring wbuf;
-    success = bool(std::getline(std::wcin, wbuf));
-    buf = bmmo::string_utils::ConvertWideToANSI(wbuf);
-    if (auto pos = buf.rfind('\r'); pos != std::string::npos)
-        buf.erase(pos);
-#else
-    std::putchar('\r');
-    auto input_cstr = readline("> ");
+    replxx_instance.print("\r\033[0K");
+    auto input_cstr = replxx_instance.input("> ");
     if (!input_cstr)
         return false;
+#ifdef _WIN32
+    buf = bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide(input_cstr));
+#else
     buf.assign(input_cstr);
-    free(input_cstr);
-    success = std::cin.good();
+#endif // _WIN32
     // return bool(std::getline(std::cin, buf));
-    rl_delete_text(0, rl_end);
-    add_history(buf.c_str());
-#endif
-    return success;
+    if (!buf.empty())
+        replxx_instance.history_add(buf);
+    // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
+    // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
+    return std::cin.good();
 }
 
 bool console::execute(const std::string &cmd) {

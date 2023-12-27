@@ -6,6 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdint>
+#include <filesystem>
 #ifdef _WIN32
 # ifndef WIN32_LEAN_AND_MEAN
 # define WIN32_LEAN_AND_MEAN
@@ -61,6 +62,17 @@ namespace bmmo::string_utils {
                 str.append(delim + strings[i]);
         }
         return str.substr(0, MAX_LENGTH);
+    }
+
+    inline std::vector<std::string> split_strings(const std::string& str) {
+        std::stringstream ss { str };
+        std::vector<std::string> words;
+        while (!ss.eof()) {
+            std::string s;
+            ss >> s;
+            words.push_back(s);
+        }
+        return words;
     }
 
     inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
@@ -129,6 +141,21 @@ namespace bmmo::string_utils {
         }
         return "th";
     };
+
+    inline std::vector<std::string> get_file_matches(const std::string& prefix) {
+        decltype(get_file_matches({})) files;
+        std::filesystem::path path(prefix), parent_path(path.parent_path());
+        if (path.parent_path().empty()) parent_path.assign(".");
+        for (const auto& entry : std::filesystem::directory_iterator(parent_path)) {
+            std::filesystem::path entry_path = entry.path();
+            if (path.parent_path().empty())
+                entry_path = entry_path.filename();
+            if (!entry_path.string().starts_with(prefix))
+                continue;
+            files.emplace_back(entry_path.string());
+        }
+        return files;
+    }
 }
 
 #endif //BALLANCEMMOSERVER_STRING_UTILS_HPP
