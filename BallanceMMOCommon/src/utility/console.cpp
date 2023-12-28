@@ -13,8 +13,10 @@ namespace {
             return {};
         auto hints = console::instance->get_command_hints(false, input.c_str());
         contextLen = input.length();
-        if (hints.size() == 1)
-            return hints;
+        switch (hints.size()) {
+            case 1: return hints;
+            case 2: if (hints[0] + '#' == hints[1]) return {hints[0]};
+        }
         return {};
     }
 
