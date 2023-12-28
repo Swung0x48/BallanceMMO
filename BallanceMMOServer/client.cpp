@@ -91,15 +91,17 @@ public:
             switch (args.size()) {
                 case 0: return {};
                 case 1: return bmmo::console::instance->get_command_hints(false, args[0].c_str());
-                default: {
-                    std::vector<std::string> player_hints;
-                    for (const auto& [id, data]: clients_) {
-                        player_hints.emplace_back("#" + std::to_string(id));
-                        player_hints.emplace_back(data.name);
-                    }
-                    return player_hints;
-                }
             }
+            std::vector<std::string> player_hints;
+            player_hints.reserve(clients_.size());
+            bool hint_client_id = (args[args.size() - 1].starts_with('#'));
+            for (const auto& [id, data]: clients_) {
+                if (hint_client_id)
+                    player_hints.emplace_back('#' + std::to_string(id));
+                else
+                    player_hints.emplace_back(data.name);
+            }
+            return player_hints;
         });
 
         running_ = true;

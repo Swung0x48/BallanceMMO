@@ -39,7 +39,7 @@ replxx::Replxx replxx_instance = [] {
     instance.set_complete_on_empty(false);
     instance.set_hint_callback(command_hint);
     instance.set_indent_multiline(true);
-    instance.set_ignore_case(true);
+    instance.set_ignore_case(false);
 #ifdef _WIN32
     instance.set_modify_callback(command_modify_repaint);
 #endif // _WIN32

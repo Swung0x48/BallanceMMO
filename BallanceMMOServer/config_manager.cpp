@@ -134,7 +134,9 @@ void config_manager::save(bool reload_values) {
     config_file.close();
 }
 
-void config_manager::save_login_data(const std::string& ip_str, const std::string& uuid_str, const std::string& name) {
+void config_manager::save_login_data(const SteamNetworkingIPAddr& ip, const std::string& uuid_str, const std::string& name) {
+    char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
+    ip.ToString(ip_str, sizeof(ip_str), false);
     YAML::Node login_data;
     std::ifstream ifile("login_data.yml");
     if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {

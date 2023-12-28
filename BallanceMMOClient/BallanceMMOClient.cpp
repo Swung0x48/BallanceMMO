@@ -1034,15 +1034,20 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
 #endif
             }.contains(lower1)) {
                 std::vector<std::string> options;
-                options.reserve(2 * db_.player_count() + 2);
-                db_.for_each([this, &options, &args](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                options.reserve(db_.player_count() + 1);
+                bool hint_client_id = (args[args.size() - 1]).starts_with('#');
+                db_.for_each([=, this, &options, &args](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     if (pair.first == db_.get_client_id()) return true;
-                    options.push_back('#' + std::to_string(pair.first));
-                    options.push_back(pair.second.name);
+                    if (hint_client_id)
+                        options.push_back('#' + std::to_string(pair.first));
+                    else
+                        options.push_back(pair.second.name);
                     return true;
                 });
-                options.push_back('#' + std::to_string(db_.get_client_id()));
-                options.push_back(get_display_nickname());
+                if (hint_client_id)
+                    options.push_back('#' + std::to_string(db_.get_client_id()));
+                else
+                    options.push_back(get_display_nickname());
                 return options;
             }
             else if (lower1 == "mode")
@@ -1052,7 +1057,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
             break;
         }
     }
-    return std::vector<std::string>{};
+    return {};
 }
 
 void BallanceMMOClient::OnTrafo(int from, int to)

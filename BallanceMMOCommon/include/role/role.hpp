@@ -5,7 +5,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include <unordered_map>
+#include <mutex>
 #include <cassert>
 #include <cstdarg>
 #include <ctime>
@@ -205,10 +205,10 @@ public:
                 printf("\r[%s] %s\n", timeStr, pszMsg);
             else
                 printf("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
+            fflush(stdout);
 #ifdef BMMO_INCLUDE_INTERNAL
             bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
 #endif
-            fflush(stdout);
         }
     }
 

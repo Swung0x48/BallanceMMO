@@ -419,19 +419,21 @@ public:
             switch (args.size()) {
                 case 0: return {};
                 case 1: return bmmo::console::instance->get_command_hints(false, args[0].c_str());
-                default: {
-                    if (args[0] == "playstream" || (args.size() > 2 && args[0] == "playstream#"))
-                        return bmmo::string_utils::get_file_matches(args[args.size() - 1]);
-                    else {
-                        std::lock_guard lk(client_data_mutex_);
-                        std::vector<std::string> player_hints;
-                        for (const auto& [id, data]: clients_) {
-                            player_hints.emplace_back("#" + std::to_string(id));
-                            player_hints.emplace_back(data.name);
-                        }
-                        return player_hints;
-                    }
+            }
+            if (args[0] == "playstream" || (args.size() > 2 && args[0] == "playstream#"))
+                return bmmo::string_utils::get_file_matches(args[args.size() - 1]);
+            else {
+                std::lock_guard lk(client_data_mutex_);
+                std::vector<std::string> player_hints;
+                player_hints.reserve(clients_.size());
+                bool hint_client_id = args[args.size() - 1].starts_with('#');
+                for (const auto& [id, data]: clients_) {
+                    if (hint_client_id)
+                        player_hints.emplace_back('#' + std::to_string(id));
+                    else
+                        player_hints.emplace_back(data.name);
                 }
+                return player_hints;
             }
         });
 
@@ -450,10 +452,7 @@ protected:
     void save_login_data(HSteamNetConnection client) {
         SteamNetConnectionInfo_t pInfo;
         interface_->GetConnectionInfo(client, &pInfo);
-        SteamNetworkingIPAddr ip = pInfo.m_addrRemote;
-        char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
-        ip.ToString(ip_str, sizeof(ip_str), false);
-        config_.save_login_data(ip_str, get_uuid_string(clients_[client].uuid), clients_[client].name);
+        config_.save_login_data(pInfo.m_addrRemote, get_uuid_string(clients_[client].uuid), clients_[client].name);
     }
 
     // Fail silently if the client doesn't exist.

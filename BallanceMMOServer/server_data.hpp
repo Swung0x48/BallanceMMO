@@ -1,5 +1,8 @@
 #ifndef BALLANCEMMOSERVER_SERVER_DATA_HPP
 #define BALLANCEMMOSERVER_SERVER_DATA_HPP
+#include <steam/steamnetworkingsockets.h>
+#include <steam/isteamnetworkingutils.h>
+#include "../BallanceMMOCommon/common.hpp"
 
 struct client_data {
     std::string name;

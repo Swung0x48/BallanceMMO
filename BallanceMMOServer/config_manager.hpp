@@ -28,7 +28,7 @@ public:
     const std::string& get_forced_name(const std::string& uuid_string);
 
     void save(bool reload_values = true);
-    void save_login_data(const std::string& ip_str, const std::string& uuid_str, const std::string& name);
+    void save_login_data(const SteamNetworkingIPAddr& ip, const std::string& uuid_str, const std::string& name);
     void save_player_status(const client_data_collection& clients);
 };
 
