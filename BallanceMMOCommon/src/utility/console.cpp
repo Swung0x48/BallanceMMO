@@ -16,6 +16,7 @@ namespace {
         switch (hints.size()) {
             case 1: return hints;
             case 2: if (hints[0] + '#' == hints[1]) return {hints[0]};
+            // no common prefix here to prevents confusions
         }
         return {};
     }
@@ -105,7 +106,7 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching, c
 
 bool console::read_input(std::string &buf) {
     replxx_instance.print("\r\033[0K");
-    auto input_cstr = replxx_instance.input("> ");
+    auto input_cstr = replxx_instance.input("\r> ");
     if (!input_cstr)
         return false;
 #ifdef _WIN32
@@ -119,6 +120,11 @@ bool console::read_input(std::string &buf) {
     // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
     // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
     return std::cin.good();
+}
+
+void console::end_input() {
+    //bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::SEND_EOF, '\0');
+    bmmo::replxx_instance.emulate_key_press(replxx::Replxx::KEY::ABORT);
 }
 
 bool console::execute(const std::string &cmd) {

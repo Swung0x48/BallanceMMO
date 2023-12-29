@@ -16,6 +16,8 @@ private:
     std::atomic_bool running_ = false;
     boost::circular_buffer<std::string> previous_msg_ = decltype(previous_msg_)(8);
 
+    bool cleanup();
+
 public:
     console_window(IBML* bml, log_manager* log_manager, decltype(command_callback_) command_callback):
         bml_(bml), log_manager_(log_manager), command_callback_(command_callback) {}

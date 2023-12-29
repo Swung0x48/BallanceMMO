@@ -123,7 +123,7 @@ void console_window::run() {
         std::cout << '\n';*/
         if (!bmmo::console::read_input(line)) {
             puts("stop");
-            hide();
+            cleanup();
             break;
         };
         if (!running_)
@@ -166,7 +166,7 @@ bool console_window::show() {
     return true;
 }
 
-bool console_window::hide() {
+bool console_window::cleanup() {
     running_ = false;/*
     _dup2(old_stdin, _fileno(stdin));
     _dup2(old_stdout, _fileno(stdout));
@@ -179,9 +179,18 @@ bool console_window::hide() {
     if (!owned_console_)
         return false;
     owned_console_ = false;
+    //bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::ABORT_LINE, '\0');
+    //bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::SEND_EOF, '\0');
     if (FreeConsole())
         return true;
     return false;
+}
+
+bool console_window::hide() {
+  if (!running_ || !owned_console_)
+    return false;
+  bmmo::console::end_input();
+  return true;
 }
 
 void console_window::free_thread() {

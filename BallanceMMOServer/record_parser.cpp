@@ -114,16 +114,29 @@ public:
         Printf("Start building seek index...");
         SteamNetworkingMicroseconds last_segmented_timestamp = 0;
         segments_.emplace_back(segment_info_t{ position, 0 });
+
+        bool pending_print_status = false;
+        auto print_status = [this, position, &pending_print_status] {
+            char time_str[20];
+            auto timer = std::time(nullptr);
+            std::strftime(time_str, sizeof(time_str), "%m-%d %T", std::localtime(&timer));
+            std::printf("%s[%s] Building seek index... [%" PRIu64 "/%" PRIu64 "] %.2lf%%   ",
+                    isatty(fileno(stdout)) ? "\r" : "", time_str,
+                    (uint64_t)record_stream_.tellg() - position,
+                    (uint64_t)(file_size_ - position),
+                    ((double)((uint64_t)record_stream_.tellg() - position) / (double)(file_size_ - position)) * 100.0);
+            pending_print_status = false;
+        };
+
         while (record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof()) {
             current_record_time_ = read_variable<SteamNetworkingMicroseconds>(record_stream_) - record_start_time_;
-            bool print_status = false;
             if (auto last_segment_index = get_segment_index(last_segmented_timestamp),
                     current_segment_index = get_segment_index(current_record_time_);
                     current_segment_index > last_segment_index) {
                 for (; last_segment_index <= current_segment_index; ++last_segment_index)
                     segments_.emplace_back(segment_info_t{ (int64_t)record_stream_.tellg() - (int64_t)sizeof(SteamNetworkingMicroseconds), current_record_time_ });
                 last_segmented_timestamp = current_record_time_;
-                print_status = true;
+                pending_print_status = true;
             }
             auto size = read_variable<int32_t>(record_stream_);
             bmmo::record_entry entry(size);
@@ -211,14 +224,14 @@ public:
                 }
             }
 
-            if (print_status)
-                printf("\rBuilding seek index...[%" PRIu64 "/%" PRIu64 "] %.2lf%%",
-                        (uint64_t)record_stream_.tellg() - position,
-                        (uint64_t)(file_size_ - position),
-                        ((double)((uint64_t)record_stream_.tellg() - position) / (double)(file_size_ - position)) * 100.0);
+            if (pending_print_status)
+                print_status();
         }
 
         if (!(record_stream_.good() && record_stream_.peek() != std::ifstream::traits_type::eof())) {
+            record_stream_.clear();
+            print_status();
+            std::putchar('\n');
             Printf("Seek index built successfully.");
         }
         duration_ = current_record_time_;
@@ -240,7 +253,7 @@ public:
         int64_t position = 0;
         SteamNetworkingMicroseconds time = 0;
     };
-    // record byte position for every 10 second
+    // record byte position every 10 seconds
     std::vector<segment_info_t> segments_;
     SteamNetworkingMicroseconds duration_;
 #pragma endregion

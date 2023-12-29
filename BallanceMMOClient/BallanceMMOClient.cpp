@@ -161,13 +161,15 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
     if (isMap) {
         GetLogger()->Info("Initializing peer objects...");
         objects_.init_players();
-        boost::regex name_pattern(".*\\\\(Level|Maps)\\\\(.*).nmo", boost::regex::icase);
+        boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).nmo$", boost::regex::icase);
         std::string path(filename);
         boost::smatch matched;
         if (boost::regex_search(path, matched, name_pattern)) {
             current_map_.name = matched[2].str();
             if (boost::iequals(matched[1].str(), "Maps")) {
                 current_map_.type = bmmo::map_type::CustomMap;
+                if (auto slash_pos = current_map_.name.rfind('\\'); slash_pos != std::string::npos)
+                    current_map_.name.erase(0, slash_pos + 1);
             }
             else {
                 current_map_.type = bmmo::map_type::OriginalLevel;
@@ -294,7 +296,7 @@ void BallanceMMOClient::OnPostStartMenu()
         using namespace std::placeholders;
 
         m_bml->RegisterCommand(new CommandMMO(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
-        m_bml->RegisterCommand(new CommandMMOSay([this](IBML* bml, const std::vector<std::string>& args) { OnCommand(bml, args); }));
+        m_bml->RegisterCommand(new CommandMMOSay(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
 
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
         utils::md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);

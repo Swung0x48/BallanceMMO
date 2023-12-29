@@ -21,12 +21,15 @@ public:
 
     const std::string get_help_string() const;
     const std::vector<std::string> get_command_list() const;
+    // @param cmd - current command name/prefix, `nullptr` -> local command name.
+    // @returns a sorted `std::vector` containing matching command names.
     const std::vector<std::string> get_command_hints(bool fuzzy_matching = false, const char *cmd = nullptr) const;
     
     static void set_completion_callback(std::function<std::vector<std::string>(const std::vector<std::string>&)> func);
 
-    // returns true if the stream doesn't have any errors.
+    // @returns `true` if the stream doesn't have any errors.
     static bool read_input(std::string &buf);
+    static void end_input();
     bool execute(const std::string &cmd);
 
     bool register_command(const std::string &name, const std::function<void()> &handler);

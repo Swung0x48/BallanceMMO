@@ -36,8 +36,8 @@ public:
     // we have to migrate our config before using bml's config manager
     // thus the getter instead of directly asking for IConfig* in our constructor
     inline auto get_config() { return config_getter_(); }
-    inline IProperty* get_property(std::string name) { return props_[name]; }
-    inline IProperty* operator[](std::string name) { return props_[name]; }
+    inline IProperty* get_property(const std::string& name) { return props_[name]; }
+    inline IProperty* operator[](const std::string& name) { return props_[name]; }
 
     // ver <= 3.4.5-alpha6: no external config
     // 3.4.5-alpha6 < ver < 3.4.8-beta12: external plain text uuid config
