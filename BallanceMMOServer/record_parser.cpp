@@ -71,6 +71,7 @@ public:
 
 #pragma region FileIO
     void set_record_file(const std::string& filename) {
+        if (playing()) pause();
         if (record_stream_.is_open()) {
             record_stream_.close();
             record_stream_.clear();
