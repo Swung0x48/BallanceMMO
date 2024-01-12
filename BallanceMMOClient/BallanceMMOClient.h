@@ -237,7 +237,7 @@ private:
 	int32_t current_sector_ = 0, max_sector_ = 0;
 	int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
-	uint8_t balls_nmo_md5_[16]{};
+	std::unordered_map<std::string, std::array<uint8_t, 16>> md5_data_;
 	SteamNetworkingMicroseconds map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
 

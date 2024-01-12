@@ -299,7 +299,10 @@ void BallanceMMOClient::OnPostStartMenu()
         m_bml->RegisterCommand(new CommandMMOSay(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
 
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
-        utils::md5_from_file("..\\3D Entities\\Balls.nmo", balls_nmo_md5_);
+        for (const auto& file_data: bmmo::HASHES_TO_CHECK) {
+            auto& hash_data = md5_data_[file_data[0]];
+            utils::md5_from_file(std::string{"..\\"}.append(file_data[0]), hash_data.data());
+        }
 
         config_manager_.validate_nickname();
         db_.set_nickname(config_manager_["playername"]->GetString());
@@ -1496,8 +1499,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
 
         bmmo::hash_data_msg hash_msg{};
-        hash_msg.data_name = "Balls.nmo";
-        memcpy(hash_msg.md5, balls_nmo_md5_, sizeof(balls_nmo_md5_));
+        hash_msg.data = md5_data_;
         hash_msg.serialize();
         send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
         break;

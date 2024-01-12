@@ -1284,12 +1284,17 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                if (msg.data_name == "Balls.nmo" && !msg.is_same_data("fb29d77e63aad08499ce38d36266ec33")) {
+                for (const auto* file_data: bmmo::HASHES_TO_CHECK) {
+                    if (!msg.data.contains(file_data[0]) || msg.is_same_data(file_data[0], file_data[1]))
+                        continue;
                     bmmo::public_notification_msg new_msg{};
                     new_msg.type = bmmo::public_notification_type::Warning;
-                    std::string md5_string;
-                    bmmo::string_from_hex_chars(md5_string, msg.md5, sizeof(msg.md5));
-                    new_msg.text_content = client_it->second.name + " has a modified Balls.nmo (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
+                    std::string file_name{file_data[0]}, md5_string;
+                    const auto& md5 = msg.data[file_name];
+                    bmmo::string_from_hex_chars(md5_string, md5.data(), md5.size());
+                    if (auto slash_pos = file_name.rfind('\\'); slash_pos != std::string::npos)
+                        file_name.erase(0, slash_pos + 1);
+                    new_msg.text_content = client_it->second.name + " has a modified " + file_name + " (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
                     Printf("[%s] %s", new_msg.get_type_name(), new_msg.text_content);
                     new_msg.serialize();
                     broadcast_message(new_msg.raw.str().data(), new_msg.size(), k_nSteamNetworkingSend_Reliable);
