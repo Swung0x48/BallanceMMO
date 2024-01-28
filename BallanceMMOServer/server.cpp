@@ -197,14 +197,19 @@ public:
 
     void print_clients(bool print_uuid = false) {
         decltype(username_) spectators;
+        const auto max_name_length = (int) std::min(bmmo::name_validator::max_length + 1,
+            std::ranges::max_element(
+                username_,
+                [](const auto& p1, decltype(p1) p2) { return p1.first.length() < p2.first.length(); }
+            )->first.length());
         static const auto print_client = [&](auto id, auto data) {
             SteamNetConnectionRealTimeStatus_t status{};
             interface_->GetConnectionRealTimeStatus(id, &status, 0, nullptr);
             char quality_str[32]{};
             if (std::abs(status.m_flConnectionQualityLocal) != 1)
                 Sprintf(quality_str, "  %5.2f%% quality", 100 * status.m_flConnectionQualityLocal);
-            Printf("%10u  %-16s%s  %4dms%s %s%s%s",
-                    id, data.name,
+            Printf("%10u  %*s%s  %4dms%s %s%s%s",
+                    id, -max_name_length, data.name,
                     print_uuid ? ("  " + get_uuid_string(data.uuid)) : "",
                     status.m_nPing, quality_str,
                     data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "",
