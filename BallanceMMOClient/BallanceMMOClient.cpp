@@ -677,6 +677,8 @@ void BallanceMMOClient::init_commands() {
     console_.register_aliases("bulletin", {"b"});
     console_.register_command("kick", [&] {
         bmmo::kick_request_msg msg{};
+        if (console_.get_command_name() == "crash")
+            msg.crash = true;
         auto next_word = console_.get_next_word();
         if (next_word.empty()) return;
         if (next_word[0] == '#')
@@ -688,6 +690,7 @@ void BallanceMMOClient::init_commands() {
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
+    console_.register_aliases("kick", {"crash"});
     console_.register_command("scores", [&] {
         bmmo::map rank_map;
         auto mode = console_.get_next_word(true);
@@ -1033,9 +1036,11 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
         case 3:
         default: {
             if (std::set<std::string>{
-                "teleport", "tp", "kick", "whisper", "w", "say", "s", "announce", "a", "b", "bulletin", "notice"
+                "teleport", "tp", "kick", "crash",
+                "whisper", "w", "say", "s",
+                "announce", "a", "b", "bulletin", "notice",
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-                "spectate", "bindspectation"
+                "spectate", "bindspectation",
 #endif
             }.contains(lower1)) {
                 std::vector<std::string> options;

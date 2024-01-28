@@ -1046,12 +1046,15 @@ int main(int argc, char** argv) {
     console.register_command("kick", [&] {
         auto name = console.get_next_word();
         bmmo::kick_request_msg msg{};
+        if (console.get_command_name() == "crash")
+            msg.crash = true;
         if (name[0] == '#') msg.player_id = static_cast<HSteamNetConnection>(console.get_next_long());
         else msg.player_name = name;
         msg.reason = console.get_rest_of_line();
         msg.serialize();
         client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
+    console.register_aliases("kick", {"crash"});
     console.register_command("say", [&] {
         bmmo::chat_msg msg{};
         msg.chat_content = console.get_rest_of_line();

@@ -11,6 +11,7 @@ struct PlayerObjects {
 	std::unique_ptr<label_sprite> username_label;
 	uint32_t visible_ball_type = std::numeric_limits<decltype(visible_ball_type)>::max();
 	float last_opacity = 0.5;
+	int opacity_counter = 0;
 	bool physicalized = false;
 
 	~PlayerObjects() {
@@ -160,13 +161,14 @@ public:
 
 			if (dynamic_opacity_) {
 				const auto new_opacity = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
-				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f) {
+				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f || player.opacity_counter % 256 == 0) {
 					player.last_opacity = new_opacity;
 					auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
 					VxColor color = current_material->GetDiffuse();
 					color.a = new_opacity;
 					current_material->SetDiffuse(color);
 				}
+				++player.opacity_counter;
 			}
 
 			// Update username label

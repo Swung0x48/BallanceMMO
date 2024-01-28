@@ -157,7 +157,7 @@ public:
         }
 
         if (type == bmmo::connection_end::FatalError) {
-            // Triggers a segment fault explicitly on client's side.
+            // Triggers a segmentation fault explicitly on client's side.
             // A dirty hack, but it works and we don't need to
             // worry about the outcome; client will just terminate immediately.
             bmmo::simple_action_msg fatal_error_msg{};
@@ -172,7 +172,7 @@ public:
         }
         kick_notice.append(".");
 
-        msg.crashed = (type >= bmmo::connection_end::Crash);
+        msg.crashed = (type >= bmmo::connection_end::Crash && type < bmmo::connection_end::PlayerKicked_Max);
 
         interface_->CloseConnection(client, type, kick_notice.c_str(), true);
         msg.serialize();
@@ -1143,7 +1143,8 @@ protected:
 
                 bmmo::string_utils::sanitize_string(msg.reason);
 
-                if (!kick_client(player_id, msg.reason, client_it->first)) {
+                if (!kick_client(player_id, msg.reason, client_it->first,
+                        msg.crash ? bmmo::connection_end::Crash : bmmo::connection_end::Kicked)) {
                     bmmo::action_denied_msg new_msg{};
                     new_msg.content.reason = bmmo::deny_reason::TargetNotFound;
                     send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
@@ -1584,15 +1585,17 @@ int main(int argc, char** argv) {
     console.register_command("getmap", [&] { server.print_player_maps(); });
     console.register_command("getpos", [&] { server.print_positions(); });
     console.register_command("kick", [&] {
+        bmmo::connection_end::code end_code = bmmo::connection_end::Kicked;
+        if (console.get_command_name() == "kick#")
+            end_code = static_cast<decltype(end_code)>(console.get_next_int());
+        else if (console.get_command_name() == "crash")
+            end_code = bmmo::connection_end::Crash;
+        else if (console.get_command_name() == "fatalerror")
+            end_code = bmmo::connection_end::FatalError;
         auto client = get_client_id_from_console();
         if (client == k_HSteamNetConnection_Invalid) return;
         std::string text = console.get_rest_of_line();
-        bmmo::connection_end::code crash = bmmo::connection_end::Kicked;
-        if (console.get_command_name() == "crash")
-            crash = bmmo::connection_end::Crash;
-        else if (console.get_command_name() == "fatalerror")
-            crash = bmmo::connection_end::FatalError;
-        server.kick_client(client, text, k_HSteamNetConnection_Invalid, crash);
+        server.kick_client(client, text, k_HSteamNetConnection_Invalid, end_code);
     });
     console.register_aliases("kick", {"crash", "fatalerror"});
     console.register_command("whisper", [&] {

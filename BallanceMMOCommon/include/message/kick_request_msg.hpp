@@ -10,6 +10,7 @@ namespace bmmo {
         std::string player_name = "";
         HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
         std::string reason = "";
+        bool crash = false;
 
         bool serialize() override {
             if (!serializable_message::serialize()) return false;
@@ -17,6 +18,7 @@ namespace bmmo {
             message_utils::write_string(player_name, raw);
             raw.write(reinterpret_cast<const char*>(&player_id), sizeof(player_id));
             message_utils::write_string(reason, raw);
+            raw.write(reinterpret_cast<const char*>(&crash), sizeof(crash));
             return raw.good();
         }
 
@@ -29,6 +31,9 @@ namespace bmmo {
             if (!raw.good() || raw.gcount() != sizeof(player_id)) return false;
 
             if (!message_utils::read_string(raw, reason)) return false;
+
+            raw.read(reinterpret_cast<char*>(&crash), sizeof(crash));
+            if (!raw.good() || raw.gcount() != sizeof(crash)) return false;
 
             return raw.good();
         }
