@@ -59,6 +59,8 @@ bool config_manager::load() {
 
     forced_names_ = yaml_load_value(config_, "forced_names",
             decltype(forced_names_){{"00000001-0002-0003-0004-000000000005", "example_player"}});
+    forced_cheat_modes_ = yaml_load_value(config_, "forced_cheat_modes",
+            decltype(forced_cheat_modes_){{"00000001-0002-0003-0004-000000000005", false}});
     op_players = yaml_load_value(config_, "op_list",
             decltype(op_players){{"example_player", "00000001-0002-0003-0004-000000000005"}});
     banned_players = yaml_load_value(config_, "ban_list",
@@ -103,6 +105,14 @@ bool config_manager::has_forced_name(const std::string& uuid_string) {
 
 const std::string& config_manager::get_forced_name(const std::string& uuid_string) {
     return forced_names_[uuid_string];
+};
+
+bool config_manager::get_forced_cheat_mode(const std::string& uuid_string, bool& cheat_mode) {
+    auto it = forced_cheat_modes_.find(uuid_string);
+    if (it == forced_cheat_modes_.end())
+        return false;
+    cheat_mode = it->second;
+    return true;
 };
 
 void config_manager::save(bool reload_values) {

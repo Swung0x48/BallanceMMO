@@ -140,8 +140,8 @@ public:
     bool kick_client(HSteamNetConnection client, std::string reason = "",
             HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
             bmmo::connection_end::code type = bmmo::connection_end::Kicked) {
-        if (!client_exists(client) ||
-                type < bmmo::connection_end::PlayerKicked_Min || type >= bmmo::connection_end::PlayerKicked_Max)
+        if (!client_exists(client))
+                // || type < bmmo::connection_end::PlayerKicked_Min || type >= bmmo::connection_end::PlayerKicked_Max
             return false;
         bmmo::player_kicked_msg msg{};
         msg.kicked_player_name = clients_[client].name;
@@ -559,6 +559,18 @@ protected:
         return false;
     }
 
+    bool process_forced_cheat_mode(std::pair<const HSteamNetConnection, client_data>& data, bool new_cheat_mode) {
+        bool forced_cheat;
+        if (!config_.get_forced_cheat_mode(get_uuid_string(data.second.uuid), forced_cheat)
+                || forced_cheat == new_cheat_mode)
+            return false;
+        send(data.first, bmmo::cheat_toggle_msg{.content = {.cheated = forced_cheat}},
+                k_nSteamNetworkingSend_Reliable);
+        Printf(bmmo::color_code(bmmo::CheatToggle), "Forcing cheat mode of (#%u, %s) to [%s].",
+                data.first, data.second.name, forced_cheat ? "on" : "off");
+        return true;
+    }
+
     bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
@@ -809,6 +821,8 @@ protected:
                 connected_msg.connection_id = networking_msg->m_conn;
                 connected_msg.name = msg.nickname;
                 connected_msg.cheated = msg.cheated;
+                if (process_forced_cheat_mode(*client_it, msg.cheated))
+                    connected_msg.cheated = !msg.cheated;
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
 
@@ -1100,6 +1114,9 @@ protected:
             }
             case bmmo::CheatState: {
                 auto* state_msg = reinterpret_cast<bmmo::cheat_state_msg*>(networking_msg->m_pData);
+                if (process_forced_cheat_mode(*client_it, state_msg->content.cheated))
+                    return;
+
                 client_it->second.cheated = state_msg->content.cheated;
                 Printf("(#%u, %s) turned cheat [%s]!",
                     networking_msg->m_conn, client_it->second.name, state_msg->content.cheated ? "on" : "off");
@@ -1585,6 +1602,10 @@ int main(int argc, char** argv) {
     console.register_command("getmap", [&] { server.print_player_maps(); });
     console.register_command("getpos", [&] { server.print_positions(); });
     console.register_command("kick", [&] {
+        if (console.empty() && console.get_command_name() == "kick#") {
+            server.Printf("Usage: \"kick# <code> <player> <reason>\".");
+            return;
+        }
         bmmo::connection_end::code end_code = bmmo::connection_end::Kicked;
         if (console.get_command_name() == "kick#")
             end_code = static_cast<decltype(end_code)>(console.get_next_int());
@@ -1597,7 +1618,7 @@ int main(int argc, char** argv) {
         std::string text = console.get_rest_of_line();
         server.kick_client(client, text, k_HSteamNetConnection_Invalid, end_code);
     });
-    console.register_aliases("kick", {"crash", "fatalerror"});
+    console.register_aliases("kick", {"crash", "fatalerror", "kick#"});
     console.register_command("whisper", [&] {
         auto client = get_client_id_from_console();
         if (client == k_HSteamNetConnection_Invalid) return;
