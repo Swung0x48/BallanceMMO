@@ -583,7 +583,10 @@ private:
             }
             case bmmo::CheatToggle: {
                 auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
-                Printf(bmmo::color_code(msg->code), "Server toggled cheat %s globally!", msg->content.cheated ? "on" : "off");
+                Printf(bmmo::color_code(msg->code), "[Server] toggled%s cheat %s%s!",
+                    msg->content.notify ? "" : " your",
+                    msg->content.cheated ? "on" : "off",
+                    msg->content.notify ? " globally" : "");
                 if (cheat == msg->content.cheated)
                     return;
                 cheat = msg->content.cheated;

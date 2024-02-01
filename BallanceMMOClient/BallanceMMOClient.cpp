@@ -318,7 +318,8 @@ void BallanceMMOClient::OnPostStartMenu()
 
         move_size_hook_ = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, NULL,
                                           WinEventProcCallback, 0, 0, WINEVENT_OUTOFCONTEXT);
-        server_list_.init_gui();
+        server_list_ = std::make_unique<server_list>(m_bml, &log_manager_, [this](auto addr, auto name) { connect_to_server(addr, name); });
+        server_list_->init_gui();
 
         init_ = true;
     }
@@ -330,7 +331,8 @@ void BallanceMMOClient::OnProcess() {
 
     //poll_status_toggle();
     poll_local_input();
-    server_list_.process();
+    if (init_)
+      server_list_->process();
 
     if (!connected())
         return;
@@ -1112,7 +1114,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
         }
     }
     if (std::strlen(address) == 0) {
-        utils_.call_sync_method([this] { server_list_.enter_gui(); });
+        utils_.call_sync_method([this] { server_list_->enter_gui(); });
         return;
     }
     if (connected() || connecting()) {
@@ -1804,7 +1806,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             play_wave_sound(sound_knock_);
             utils_.flash_window();
         }
-        std::string str = std::format("Server toggled cheat [{}] globally!", cheat ? "on" : "off");
+        std::string str = std::format("[Server] toggled{} cheat [{}]{}!",
+                                      msg->content.notify ? "" : " your",
+                                      cheat ? "on" : "off",
+                                      msg->content.notify ? " globally" : "");
         SendIngameMessage(str.c_str(), bmmo::color_code(msg->code));
         break;
     }

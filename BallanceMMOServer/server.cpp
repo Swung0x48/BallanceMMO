@@ -54,7 +54,7 @@ public:
         }
     }
 
-    EResult send(const HSteamNetConnection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
         return interface_->SendMessageToConnection(destination,
                                                    buffer,
                                                    size,
@@ -64,7 +64,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(const HSteamNetConnection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, const T& msg, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
                     &msg,
@@ -73,7 +73,7 @@ public:
                     out_message_number);
     }
 
-    void broadcast_message(void* buffer, size_t size, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
+    void broadcast_message(const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
         for (auto& i: clients_)
             if (ignored_client != i.first)
                 send(i.first, buffer, size,
@@ -82,7 +82,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    void broadcast_message(T msg, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
+    void broadcast_message(const T& msg, int send_flags = k_nSteamNetworkingSend_Reliable, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
         static_assert(std::is_trivially_copyable<T>());
 
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
@@ -564,7 +564,7 @@ protected:
         if (!config_.get_forced_cheat_mode(get_uuid_string(data.second.uuid), forced_cheat)
                 || forced_cheat == new_cheat_mode)
             return false;
-        send(data.first, bmmo::cheat_toggle_msg{.content = {.cheated = forced_cheat}},
+        send(data.first, bmmo::cheat_toggle_msg{.content = {.cheated = forced_cheat, .notify = false}},
                 k_nSteamNetworkingSend_Reliable);
         Printf(bmmo::color_code(bmmo::CheatToggle), "Forcing cheat mode of (#%u, %s) to [%s].",
                 data.first, data.second.name, forced_cheat ? "on" : "off");
