@@ -58,7 +58,7 @@ jobs:
           $BOOST_VER_UNDERSCORES = "${{env.BOOST_VER}}".Replace('.', '_')
           curl -o boost.tar.gz -L "https://boostorg.jfrog.io/artifactory/main/release/${{env.BOOST_VER}}/source/boost_$BOOST_VER_UNDERSCORES.tar.gz"
           tar -xzf boost.tar.gz boost_$BOOST_VER_UNDERSCORES/boost
-          New-Item -ItemType Junction -Path include/boost -Target boost_$BOOST_VER_UNDERSCORES/boost
+          New-Item -ItemType Junction -Path include/boost -Target (Get-Item boost_$BOOST_VER_UNDERSCORES/boost).FullName
 
       # Setup MSVC command prompt environment vars
       - uses: ilammy/msvc-dev-cmd@v1
