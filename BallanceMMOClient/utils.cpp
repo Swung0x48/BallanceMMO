@@ -72,7 +72,7 @@ int utils::split_lines(std::string& text, float max_width, float font_size, int 
             GetTextExtentExPointW(hdc, wline.c_str(), line_length,
                                   int(max_width * bml_->GetRenderContext()->GetWidth() / 1.44f * 12 / font_size),
                                   &max_length, NULL, &sz);
-            text += bmmo::string_utils::ConvertWideToANSI(wline.substr(0, max_length)) + '\n';
+            text += bmmo::string_utils::ConvertWideToUtf8(wline.substr(0, max_length)) + '\n';
             wline.erase(0, max_length);
             ++line_count;
         } while (max_length < line_length);
@@ -93,9 +93,7 @@ int utils::get_display_font_size(float size) {
 void utils::display_important_notification(std::string text, float font_size, int line_count, int weight, float y_pos) {
     using namespace std::chrono;
     auto current_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-#ifdef _WIN32
     text = bmmo::string_utils::utf8_to_ansi(text);
-#endif
     text_sprite notification(std::format("Notification{}", current_ms),
                               text, 0.0f, y_pos - 0.001053f * font_size * line_count);
     notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);

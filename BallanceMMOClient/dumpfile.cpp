@@ -9,6 +9,7 @@
 #include <psapi.h>
 #include <direct.h>
 #include "entity/version.hpp"
+#include "utility/string_utils.hpp"
 #include "dumpfile.h"
 
 
@@ -144,12 +145,12 @@ namespace NSDumpFile {
         srand(time(nullptr));
         extraText.append(Quotes[rand() % (sizeof(Quotes) / sizeof(char*))]);
         //FatalAppExit(-1, extraText.c_str());
-        char basename[128];
-        GetModuleBaseName(GetCurrentProcess(), NULL, basename, sizeof(basename));
+        wchar_t basename[128];
+        GetModuleBaseNameW(GetCurrentProcess(), NULL, basename, sizeof(basename) / sizeof(wchar_t));
         messageBoxTriggered = true;
-        MessageBox(NULL, extraText.c_str(),
-                        (basename + std::string{" - Fatal Application Exit"}).c_str(),
-                        MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
+        MessageBoxW(NULL, bmmo::string_utils::ConvertUtf8ToWide(extraText).c_str(),
+                    (basename + std::wstring{ L" - Fatal Application Exit" }).c_str(),
+                    MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
         FatalExit(-1);
         return EXCEPTION_CONTINUE_SEARCH;
     }

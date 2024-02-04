@@ -111,7 +111,7 @@ inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
         text.append(std::format("{}{}: {}, S{:02d}{}\n",
                 i.cheated ? "[C] " : "", i.name, map_display_name, i.sector, time_diff_str));
     }
-    player_list.update(text);
+    player_list.update(bmmo::string_utils::utf8_to_ansi(text));
 }
 
 inline void BallanceMMOClient::enter_size_move() {
@@ -138,7 +138,7 @@ void BallanceMMOClient::OnLoad()
     sound_enabled_ = config_manager_["sound_notification"]->GetBoolean();
 
     init_commands();
-    //client_ = std::make_unique<client>(GetLogger(), m_bml);
+    //client_ = std::make_unique<client>(logger_, m_bml);
     input_manager_ = m_bml->GetInputManager();
     load_wave_sound(&sound_countdown_, "MMO_Sound_Countdown", "..\\Sounds\\Menu_dong.wav", 0.88f);
     load_wave_sound(&sound_go_, "MMO_Sound_Go", "..\\Sounds\\Menu_dong.wav", 1.0f, 1.75f);
@@ -159,13 +159,13 @@ void BallanceMMOClient::OnLoad()
 void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj)
 {
     if (isMap) {
-        GetLogger()->Info("Initializing peer objects...");
+        logger_->Info("Initializing peer objects...");
         objects_.init_players();
         boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).nmo$", boost::regex::icase);
         std::string path(filename);
         boost::smatch matched;
         if (boost::regex_search(path, matched, name_pattern)) {
-            current_map_.name = matched[2].str();
+            current_map_.name = bmmo::string_utils::ansi_to_utf8(matched[2].str());
             if (boost::iequals(matched[1].str(), "Maps")) {
                 current_map_.type = bmmo::map_type::CustomMap;
                 if (auto slash_pos = current_map_.name.rfind('\\'); slash_pos != std::string::npos)
@@ -176,7 +176,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
                 path = "..\\" + path;
             }
         } else {
-            current_map_.name = std::string(filename);
+            current_map_.name = bmmo::string_utils::ansi_to_utf8(filename);
             current_map_.type = bmmo::map_type::Unknown;
         }
         utils::md5_from_file(path, current_map_.md5);
@@ -200,10 +200,10 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         };
         map_enter_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
         hs_begin_delay_ = 0;
-        GetLogger()->Info("Current map: %s; type: %d; md5: %s.",
+        logger_->Info("Current map: %s; type: %d; md5: %s.",
             current_map_.name.c_str(), (int)current_map_.type, current_map_.get_hash_string().c_str());
         reset_timer_ = true;
-        GetLogger()->Info("Initialization completed.");
+        logger_->Info("Initialization completed.");
     }
     /*if (isMap) {
         std::string filename_string(filename);
@@ -281,9 +281,9 @@ void BallanceMMOClient::OnCounterActive() {
 void BallanceMMOClient::OnPostStartMenu()
 {
     if (init_) {
-        GetLogger()->Info("Destroying peer objects...");
+        logger_->Info("Destroying peer objects...");
         objects_.destroy_all_objects();
-        GetLogger()->Info("Destroy completed.");
+        logger_->Info("Destroy completed.");
     }
     else {
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
@@ -502,7 +502,7 @@ void BallanceMMOClient::OnLevelFinish() {
         msg.content.cheated = m_bml->IsCheatEnabled();
         msg.content.mode = current_level_mode_;
         msg.content.map = current_map_;
-        GetLogger()->Info("Sending level finish message...");
+        logger_->Info("Sending level finish message...");
 
         send(msg, k_nSteamNetworkingSend_Reliable);
     });
@@ -1080,7 +1080,7 @@ void BallanceMMOClient::OnTrafo(int from, int to)
 
 void BallanceMMOClient::OnPeerTrafo(uint64_t id, int from, int to)
 {
-    GetLogger()->Info("OnPeerTrafo, %d -> %d", from, to);
+    logger_->Info("OnPeerTrafo, %d -> %d", from, to);
     /*PeerState& peer = peer_[id];
     peer.current_ball = to;
     peer.balls[from]->Show(CKHIDE);
@@ -1135,7 +1135,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
     server_addr_ = address;
     server_name_ = (std::strlen(name) == 0) ? address : name;
     const auto& [host, port] = bmmo::hostname_parser(server_addr_).get_host_components();
-    GetLogger()->Info("Server name: %s; address: %s (%s:%s).",
+    logger_->Info("Server name: %s; address: %s (%s:%s).",
                       server_name_.c_str(), server_addr_.c_str(), host.c_str(), port.c_str());
     resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
     resolver_->async_resolve(host, port, [this](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
@@ -1148,7 +1148,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
             for (const auto& i : results) {
                 auto endpoint = i.endpoint();
                 std::string connection_string = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
-                GetLogger()->Info("Trying %s", connection_string.c_str());
+                logger_->Info("Trying %s", connection_string.c_str());
                 if (connect(connection_string)) {
                     SendIngameMessage("Connecting...");
                     if (network_thread_.joinable())
@@ -1169,7 +1169,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
         }
         // If not correctly resolved...
         SendIngameMessage("Failed to resolve hostname.");
-        GetLogger()->Error(ec.message().c_str());
+        logger_->Error(ec.message().c_str());
         work_guard_.reset();
         io_ctx_.stop();
     });
@@ -1213,7 +1213,7 @@ void BallanceMMOClient::reconnect(int delay, float scale) {
 
 void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo)
 {
-    GetLogger()->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
+    logger_->Info("Connection status changed. %d -> %d", pInfo->m_eOldState, pInfo->m_info.m_eState);
     estate_ = pInfo->m_info.m_eState;
 
     switch (pInfo->m_info.m_eState) {
@@ -1228,7 +1228,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
             SendIngameMessage("Connect failed. (ClosedByPeer)");
-            GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
+            logger_->Warn(pInfo->m_info.m_szEndDebug);
             break;
         }
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
@@ -1259,12 +1259,12 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             // Note: we could distinguish between a timeout, a rejected connection,
             // or some other transport problem.
             SendIngameMessage("Connect failed. (ProblemDetectedLocally)");
-            GetLogger()->Warn(pInfo->m_info.m_szEndDebug);
+            logger_->Warn(pInfo->m_info.m_szEndDebug);
         }
         else {
             // NOTE: We could check the reason code for a normal disconnection
             SendIngameMessage("Connect failed. (UnknownError)");
-            GetLogger()->Warn("Unknown error. (%d->%d) %s", pInfo->m_eOldState, pInfo->m_info.m_eState, pInfo->m_info.m_szEndDebug);
+            logger_->Warn("Unknown error. (%d->%d) %s", pInfo->m_eOldState, pInfo->m_info.m_eState, pInfo->m_info.m_szEndDebug);
         }
         SendIngameMessage(s.c_str());
         // Clean up the connection.  This is important!
@@ -1346,7 +1346,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
 
     if (network_msg->m_cbSize < static_cast<decltype(network_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
-        GetLogger()->Error("Invalid message with size %d received.", network_msg->m_cbSize);
+        logger_->Error("Invalid message with size %d received.", network_msg->m_cbSize);
         return;
     }
 
@@ -1357,10 +1357,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bool success = db_.update(obs->content.player_id, TimedBallState(obs->content.state));
         //assert(success);
         if (!success) {
-            GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", obs->content.player_id);
+            logger_->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", obs->content.player_id);
         }
         /*auto state = db_.get(obs->content.player_id);
-        GetLogger()->Info("%s: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
+        logger_->Info("%s: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
             state->name.c_str(),
             state->ball_state.type,
             state->ball_state.position.x,
@@ -1379,7 +1379,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         for (auto& i : msg.balls) {
             if (!db_.update(i.player_id, TimedBallState(i.state)) && i.player_id != db_.get_client_id()) {
-                GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
+                logger_->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
         break;
@@ -1401,12 +1401,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               i.state.rotation.x, i.state.rotation.y, i.state.rotation.z, i.state.rotation.w,
                               int64_t(i.state.timestamp));*/
             if (!db_.update(i.player_id, TimedBallState(i.state)) && i.player_id != db_.get_client_id()) {
-                GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
+                logger_->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
         for (const auto& i : msg.unchanged_balls) {
             if (!db_.update(i.player_id, i.timestamp) && i.player_id != db_.get_client_id()) {
-                GetLogger()->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
+                logger_->Warn("Update db failed: Cannot find such ConnectionID %u. (on_message - OwnedBallState)", i.player_id);
             }
         }
         break;
@@ -1419,9 +1419,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::login_accepted_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (!msg.deserialize()) {
-            GetLogger()->Error("Deserialize failed!");
+            logger_->Error("Deserialize failed!");
         }
-        GetLogger()->Info("Online players: ");
+        logger_->Info("Online players: ");
 
         for (auto& i : msg.online_players) {
             if (i.second == db_.get_nickname()) {
@@ -1429,9 +1429,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             } else {
                 db_.create(i.first, i.second);
             }
-            GetLogger()->Info(i.second.c_str());
+            logger_->Info(i.second.c_str());
         }*/
-        GetLogger()->Warn("Outdated LoginAccepted%s msg received!", (raw_msg->code == bmmo::LoginAcceptedV2) ? "V2" : "");
+        logger_->Warn("Outdated LoginAccepted%s msg received!", (raw_msg->code == bmmo::LoginAcceptedV2) ? "V2" : "");
         break;
     }
     case bmmo::LoginAcceptedV3: {
@@ -1439,11 +1439,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
 
         if (logged_in_) {
-            GetLogger()->Info("New LoginAccepted message received. Resetting current data.");
+            logger_->Info("New LoginAccepted message received. Resetting current data.");
             db_.clear();
             objects_.destroy_all_objects();
         }
-        GetLogger()->Info("%d player(s) online: ", msg.online_players.size());
+        logger_->Info("%d player(s) online: ", msg.online_players.size());
         auto nickname = get_display_nickname();
         for (const auto& [id, data] : msg.online_players) {
             if (data.name == nickname) {
@@ -1456,7 +1456,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 if (!bmmo::name_validator::is_spectator(data.name))
                     update_sector_timestamp(data.map, data.sector, timestamp);
             }
-            GetLogger()->Info(data.name.c_str());
+            logger_->Info(data.name.c_str());
         }
 
         if (logged_in_) {
@@ -1517,15 +1517,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         //msg.deserialize();
         //SendIngameMessage((msg.name + " joined the game.").c_str());
         //if (m_bml->IsIngame()) {
-        //    GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
+        //    logger_->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
         //    objects_.init_player(msg.connection_id, msg.name);
         //}
 
-        //GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
+        //logger_->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
         //db_.create(msg.connection_id, msg.name);
 
         //// TODO: call this when the player enters a map
-        GetLogger()->Warn("Outdated PlayerConnected msg received!");
+        logger_->Warn("Outdated PlayerConnected msg received!");
 
         break;
     }
@@ -1537,11 +1537,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off"),
                           bmmo::color_code(msg.code));
         if (m_bml->IsIngame()) {
-            GetLogger()->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
+            logger_->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
             objects_.init_player(msg.connection_id, msg.name, msg.cheated);
         }
 
-        GetLogger()->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
+        logger_->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
         db_.create(msg.connection_id, msg.name, msg.cheated);
 
         play_wave_sound(sound_bubble_);
@@ -1859,7 +1859,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             }
             case sa::Unknown:
             default:
-                GetLogger()->Error("Unknown action request received.");
+                logger_->Error("Unknown action request received.");
         }
         break;
     }
@@ -1969,7 +1969,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             for (const auto& line : formatted_texts) {
                 text += line + '\n';
                 console_window_.print_text(line.c_str());
-                GetLogger()->Info("%s", line.c_str());
+                logger_->Info("%s", line.c_str());
             }
             utils_.display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);
         });
@@ -1981,13 +1981,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             SendIngameMessage("Now playing: " + msg.caption);
         asio::post(thread_pool_, [this, msg = std::move(msg)] {
             utils_.flash_window();
-            GetLogger()->Info("Playing sound from server%s", msg.caption.empty() ? "" : (": " + msg.caption).c_str());
+            logger_->Info("Playing sound from server%s", msg.caption.empty() ? "" : (": " + msg.caption).c_str());
             std::stringstream data_text;
             for (const auto& [frequency, duration]: msg.sounds) {
                 data_text << ", (" << frequency << ", " << duration << ")";
                 play_beep(frequency, duration);
             }
-            GetLogger()->Info("Finished playing sound: [%s]", data_text.str().erase(0, 2).c_str());
+            logger_->Info("Finished playing sound: [%s]", data_text.str().erase(0, 2).c_str());
         });
         break;
     }
@@ -2008,13 +2008,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             CKWaveSound* sound;
             load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, false);
             received_wave_sounds_.insert(sound);
-            GetLogger()->Info("Playing sound <%s> from server%s",
+            logger_->Info("Playing sound <%s> from server%s",
                               sound_name.c_str(),
                               msg.caption.empty() ? "" : (": " + msg.caption).c_str());
             int duration = int(msg.duration_ms);
             if (duration <= 0 || duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength();
-            GetLogger()->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
+            logger_->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
                               duration, msg.pitch, duration / msg.pitch, msg.gain, msg.pitch);
             utils_.call_sync_method([=] { sound->Play(); });
 
@@ -2035,12 +2035,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
         SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, bmmo::color_code(msg.code));
         std::thread([msg = std::move(msg)] {
-            std::ignore = MessageBox(NULL, msg.text_content.c_str(), msg.title.c_str(), MB_OK | MB_ICONINFORMATION);
+            std::ignore = MessageBoxW(NULL,
+                                      bmmo::string_utils::ConvertUtf8ToWide(msg.text_content).c_str(),
+                                      bmmo::string_utils::ConvertUtf8ToWide(msg.title).c_str(),
+                                      MB_OK | MB_ICONINFORMATION);
         }).detach();
         break;
     }
     default:
-        GetLogger()->Error("Invalid message with opcode %d received.", raw_msg->code);
+        logger_->Error("Invalid message with opcode %d received.", raw_msg->code);
         break;
     }
 }
@@ -2052,14 +2055,14 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     switch (eType) {
         case k_ESteamNetworkingSocketsDebugOutputType_Bug:
         case k_ESteamNetworkingSocketsDebugOutputType_Error:
-            get_instance()->GetLogger()->Error(fmt_string, eType, time * 1e-6, pszMsg);
+            get_instance()->logger_->Error(fmt_string, eType, time * 1e-6, pszMsg);
             break;
         case k_ESteamNetworkingSocketsDebugOutputType_Important:
         case k_ESteamNetworkingSocketsDebugOutputType_Warning:
-            get_instance()->GetLogger()->Warn(fmt_string, eType, time * 1e-6, pszMsg);
+            get_instance()->logger_->Warn(fmt_string, eType, time * 1e-6, pszMsg);
             break;
         default:
-            get_instance()->GetLogger()->Info(fmt_string, eType, time * 1e-6, pszMsg);
+            get_instance()->logger_->Info(fmt_string, eType, time * 1e-6, pszMsg);
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {

@@ -156,6 +156,21 @@ protected:
         *(int*)0 = 0;
     }
 
+    static void RightTrim(char* text) {
+        char* el = strchr(text, '\0');
+        if (el > text && el[-1] == '\n')
+            text[el - text - 1] = '\0';
+    }
+
+    template <typename T>
+    static inline const T& ConvertArgument(const T& arg) noexcept {
+        return arg;
+    }
+
+    static inline const char* ConvertArgument(const std::string& str) noexcept {
+        return str.c_str();
+    }
+
 public:
     static void set_logging_level(ESteamNetworkingSocketsDebugOutputType eType) {
         SteamNetworkingUtils()->SetDebugOutputFunction(eType, DebugOutput);
@@ -214,21 +229,6 @@ public:
 
     static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         DebugOutput(eType, pszMsg, bmmo::ansi::Reset);
-    }
-
-    static void RightTrim(char* text) {
-        char* el = strchr(text, '\0');
-        if (el > text && el[-1] == '\n')
-            text[el - text - 1] = '\0';
-    }
-
-    template <typename T>
-    static inline const T& ConvertArgument(const T& arg) noexcept {
-        return arg;
-    }
-
-    static inline const char* ConvertArgument(const std::string& str) noexcept {
-        return str.c_str();
     }
 
     template <typename ... Args>

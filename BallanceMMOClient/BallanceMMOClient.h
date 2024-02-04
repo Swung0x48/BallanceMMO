@@ -40,6 +40,7 @@ public:
 		IMod(bml),
 		objects_(bml, db_),
 		log_manager_(GetLogger(), [this](std::string msg, int ansi_color) { SendIngameMessage(msg, ansi_color); }),
+		logger_(log_manager_.get_logger()),
 		utils_(bml),
 		config_manager_(&log_manager_, [this] { return GetConfig(); }),
 		console_window_(bml, &log_manager_, [this](auto bml, auto args) { OnCommand(bml, args); })
@@ -215,6 +216,7 @@ private:
 	game_objects objects_;
 
 	log_manager log_manager_;
+	logger_wrapper* logger_;
 	utils utils_;
 	config_manager config_manager_;
 	std::unique_ptr<server_list> server_list_;
@@ -371,7 +373,7 @@ private:
 		try {
 			color = (CKDWORD) std::stoul(prop->GetString(), nullptr, 16);
 		} catch (const std::exception& e) {
-			GetLogger()->Warn("Error parsing the color code: %s. Resetting to %06X.", e.what(), color & 0x00FFFFFF);
+			logger_->Warn("Error parsing the color code: %s. Resetting to %06X.", e.what(), color & 0x00FFFFFF);
 			prop->SetString(std::format("{:06X}", color & 0x00FFFFFF).data());
 		}
 		if (player_list_color_ == color) return;
@@ -495,7 +497,7 @@ private:
 		std::lock_guard lk(ball_toggle_mutex_);
 		if (own_ball_visible_ == visible || spectator_mode_)
 			return;
-		GetLogger()->Info("Toggling visibility of own ball to %s", visible ? "on" : "off");
+		logger_->Info("Toggling visibility of own ball to %s", visible ? "on" : "off");
 		if (visible) {
 			objects_.init_player(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
 			db_.create(db_.get_client_id(), db_.get_nickname(), m_bml->IsCheatEnabled());
@@ -667,7 +669,7 @@ private:
 								m_phyNewBall->Activate();
 								m_phyNewBall->GetParent()->Activate();
 
-								GetLogger()->Info("Sector Reset");
+								logger_->Info("Sector Reset");
 								});
 							});
 
@@ -718,7 +720,7 @@ private:
 	void check_on_trafo(CK3dObject* ball) {
 		if (strcmp(ball->GetName(), player_ball_->GetName()) != 0) {
 			// OnTrafo
-			GetLogger()->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
+			logger_->Info("OnTrafo, %s -> %s", player_ball_->GetName(), ball->GetName());
 			OnTrafo(db_.get_ball_id(player_ball_->GetName()), db_.get_ball_id(ball->GetName()));
 			// Update current player ball
 			player_ball_ = ball;
@@ -892,7 +894,9 @@ private:
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		console_window_.print_text(msg.c_str(), ansi_color);
-		utils_.call_sync_method([this, msg] { m_bml->SendIngameMessage(msg.c_str()); });
+		utils_.call_sync_method([this, msg] {
+			m_bml->SendIngameMessage(bmmo::string_utils::utf8_to_ansi(msg).c_str());
+		});
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;
