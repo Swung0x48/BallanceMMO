@@ -56,7 +56,7 @@ void utils::flash_window() {
 }
 
 int utils::split_lines(std::string& text, float max_width, float font_size, int font_weight) {
-    std::wstringstream ws {bmmo::string_utils::ConvertAnsiToWide(bmmo::string_utils::get_parsed_string(text))};
+    std::wstringstream ws {bmmo::string_utils::ConvertUtf8ToWide(bmmo::string_utils::get_parsed_string(text))};
     text.clear();
     auto hdc = GetDC(get_main_window());
     LOGFONT font_struct = system_font_struct_;
@@ -90,9 +90,12 @@ int utils::get_display_font_size(float size) {
     return (int)std::round(bml_->GetRenderContext()->GetHeight() / (768.0f / 119) * size / utils::get_system_dpi());
 }
 
-void utils::display_important_notification(const std::string& text, float font_size, int line_count, int weight, float y_pos) {
+void utils::display_important_notification(std::string text, float font_size, int line_count, int weight, float y_pos) {
     using namespace std::chrono;
     auto current_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+#ifdef _WIN32
+    text = bmmo::string_utils::utf8_to_ansi(text);
+#endif
     text_sprite notification(std::format("Notification{}", current_ms),
                               text, 0.0f, y_pos - 0.001053f * font_size * line_count);
     notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);

@@ -1083,12 +1083,12 @@ int main(int argc, char** argv) {
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("dnf", [&] {
-        if (console.empty()) { role::Printf("Usage: \"dnf <map> <sector>\"."); return; }
+        if (console.empty()) return role::Printf("Usage: \"dnf <map> <sector>\".");
         client.send(bmmo::did_not_finish_msg{.content = {.cheated = cheat, .map = get_map_from_input(),
             .sector = console.get_next_int()}}, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("win", [&] {
-        if (console.empty()) { role::Printf("Usage: \"win <map> <mode> <points> <lives> <time>\"."); return; }
+        if (console.empty()) return role::Printf("Usage: \"win <map> <mode> <points> <lives> <time>\".");
         auto map = get_map_from_input();
         auto mode = console.get_next_word(true) == "hs" ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
         client.send(bmmo::level_finish_v2_msg{.content = {
@@ -1105,7 +1105,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("getbulletin", [&] { client.print_bulletin(); });
     console.register_command("scores", [&] {
-        if (console.empty()) { role::Printf("Usage: \"scores [local] <hs|sr> [map]\""); return; }
+        if (console.empty()) return role::Printf("Usage: \"scores [local] <hs|sr> [map]\"");
         auto mode = console.get_next_word(true);
         // bool hs_mode = (console.get_next_word(true) == "hs");
         bool use_local_data = false;

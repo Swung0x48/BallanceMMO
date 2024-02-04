@@ -1500,7 +1500,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         mod_msg.mods.reserve(count);
         for (auto i = 1; i < count; ++i) {
             auto* mod = m_bml->GetMod(i);
-            mod_msg.mods.try_emplace(mod->GetID(), mod->GetVersion());
+            mod_msg.mods.try_emplace(bmmo::string_utils::ansi_to_utf8(mod->GetID()), bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
         }
         mod_msg.serialize();
         send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1924,7 +1924,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
         if (!permanent_notification_) {
             utils_.call_sync_method([=] {
-                permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", parsed_text.c_str(), 0.2f, 0.036f);
+                permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", bmmo::string_utils::utf8_to_ansi(parsed_text).c_str(), 0.2f, 0.036f);
                 permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
                 permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
                 permanent_notification_->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
@@ -1935,7 +1935,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             });
         }
         else
-            utils_.call_sync_method([=] { permanent_notification_->update(parsed_text.c_str()); });
+            utils_.call_sync_method([=] { permanent_notification_->update(bmmo::string_utils::utf8_to_ansi(parsed_text).c_str()); });
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content),
                           bmmo::color_code(msg.code));
         utils_.flash_window();

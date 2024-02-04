@@ -14,15 +14,7 @@ namespace bmmo::message_utils {
 
     // template T: type to store length of the string
     template<typename T = uint32_t>
-    inline void write_string(std::string str, std::stringstream& stream
-#ifdef _WIN32
-                             //, bool convert_utf8 = true
-    ) {
-        //if (convert_utf8)
-            str = string_utils::ConvertWideToUtf8(string_utils::ConvertAnsiToWide(str));
-#else
-    ) {
-#endif
+    inline void write_string(std::string str, std::stringstream& stream) {
         T length = static_cast<T>(str.length());
         stream.write(reinterpret_cast<const char*>(&length), sizeof(length));
         stream.write(str.c_str(), str.length());
@@ -37,9 +29,6 @@ namespace bmmo::message_utils {
             return false;
         str.resize(length);
         stream.read(str.data(), length);
-#ifdef _WIN32
-        str = string_utils::ConvertWideToANSI(string_utils::ConvertUtf8ToWide(str));
-#endif
         return true;
     }
 

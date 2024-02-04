@@ -109,11 +109,11 @@ bool console::read_input(std::string &buf) {
     auto input_cstr = replxx_instance.input("\r> ");
     if (!input_cstr)
         return false;
-#ifdef _WIN32
-    buf = bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide(input_cstr));
-#else
+//#ifdef _WIN32
+//    buf = bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide(input_cstr));
+//#else
     buf.assign(input_cstr);
-#endif // _WIN32
+//#endif // _WIN32
     // return bool(std::getline(std::cin, buf));
     if (!buf.empty())
         replxx_instance.history_add(buf);

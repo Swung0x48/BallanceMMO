@@ -43,6 +43,14 @@ namespace bmmo::string_utils {
         MultiByteToWideChar(CP_UTF8, 0, str.c_str(), str.length(), wstr.data(), count);
         return wstr;
     }
+
+    inline std::string ansi_to_utf8(const std::string& str) {
+        return bmmo::string_utils::ConvertWideToUtf8(bmmo::string_utils::ConvertAnsiToWide(str));
+    }
+
+    inline std::string utf8_to_ansi(const std::string& str) {
+        return bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide(str));
+    }
 #endif
 
     inline std::string to_lower(std::string data) {

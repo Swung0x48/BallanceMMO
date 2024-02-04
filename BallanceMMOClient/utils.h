@@ -28,7 +28,7 @@ public:
     int get_display_font_size(float size);
 
     // blocks as it uses this_thread::sleep
-    void display_important_notification(const std::string& text, float font_size, int line_count, int weight = 700, float y_pos = 0.4f);
+    void display_important_notification(std::string text, float font_size, int line_count, int weight = 700, float y_pos = 0.4f);
 
     static void cleanup_old_crash_dumps();
 
