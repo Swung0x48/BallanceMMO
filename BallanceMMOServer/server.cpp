@@ -1286,6 +1286,8 @@ protected:
                 break;
             }
             case bmmo::RestartRequest: {
+                if (deny_action(networking_msg->m_conn))
+                    break;
                 auto msg = bmmo::message_utils::deserialize<bmmo::restart_request_msg>(networking_msg);
                 if (!client_exists(msg.content.victim, true)) {
                     Printf(bmmo::ansi::Italic, "(#%u, %s) requested to restart #%u's (not found) current level!",
