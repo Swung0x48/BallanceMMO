@@ -33,6 +33,7 @@ namespace bmmo {
                 return a::BrightBlue;
             case OpState:
             case PlayerKicked:
+            case RestartRequest:
                 return a::WhiteInverse;
             case KickRequest:
                 return a::Italic;

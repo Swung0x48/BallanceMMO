@@ -543,6 +543,14 @@ private:
                 Printf(bmmo::color_code(msg.code), "[Popup] {%s}: %s", msg.title, msg.text_content);
                 break;
             }
+            case bmmo::RestartRequest: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::restart_request_msg>(networking_msg);
+                const bool restart = (msg.content.victim == own_id_);
+                Printf(bmmo::color_code(msg.code), "(#%u, %s) requested to restart %s current level.",
+                        msg.content.requester, get_player_name(msg.content.requester),
+                        restart ? "your" : get_player_name(msg.content.victim) + "'s");
+                break;
+            }
             case bmmo::ScoreList: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::score_list_msg>(networking_msg);
                 bool hs_mode = (msg.mode == bmmo::level_mode::Highscore);
@@ -1129,6 +1137,10 @@ int main(int argc, char** argv) {
         }
         msg.serialize(ranks_it->second);
         client.receive(msg.raw.str().data(), msg.size());
+    });
+    console.register_command("restartlevel", [&] {
+        bmmo::restart_request_msg msg{.content = {.victim = (HSteamNetConnection) console.get_next_long()}};
+        client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
 
     client.wait_till_started();

@@ -3,6 +3,7 @@
 
 #include <ShlObj.h>
 
+#include "utility/string_utils.hpp"
 #include "config_manager.h"
 
 std::wstring config_manager::get_local_appdata_path() { // local appdata
@@ -139,7 +140,7 @@ bool config_manager::check_and_set_nickname(IProperty* prop, game_state& db) {
         return false;
     name_changed_ = true;
     validate_nickname();
-    db.set_nickname(prop->GetString());
+    db.set_nickname(bmmo::string_utils::ansi_to_utf8(prop->GetString()));
     return true;
 }
 

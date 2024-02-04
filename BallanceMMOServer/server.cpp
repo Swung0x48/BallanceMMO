@@ -1285,6 +1285,22 @@ protected:
                 }
                 break;
             }
+            case bmmo::RestartRequest: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::restart_request_msg>(networking_msg);
+                if (!client_exists(msg.content.victim, true)) {
+                    Printf(bmmo::ansi::Italic, "(#%u, %s) requested to restart #%u's (not found) current level!",
+                        networking_msg->m_conn, client_it->second.name,
+                        msg.content.victim);
+                    send(networking_msg->m_conn, bmmo::action_denied_msg{.content = {bmmo::deny_reason::TargetNotFound}});
+                    break;
+                }
+                Printf(bmmo::ansi::Italic, "(#%u, %s) requested to restart (#%u, %s)'s current level!",
+                    networking_msg->m_conn, client_it->second.name,
+                    msg.content.victim, clients_[msg.content.victim].name);
+                msg.content.requester = networking_msg->m_conn;
+                broadcast_message(msg);
+                break;
+            }
             case bmmo::ScoreList: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::score_list_msg>(networking_msg);
                 auto* rankings = get_map_rankings(msg.map);
@@ -1764,7 +1780,7 @@ int main(int argc, char** argv) {
                 server.Printf("Error serializing message.");
                 return;
             }
-            server.Printf(bmmo::ansi::WhiteInverse, "Sending sound <%s>, size: %d to %s",
+            server.Printf(bmmo::ansi::WhiteInverse, "Sound <%s> (size: %d) sent to %s",
                     msg.path, (uint32_t) msg.size(), broadcast ? "[all]" : std::to_string(client));
             if (broadcast) server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             else server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1795,9 +1811,17 @@ int main(int argc, char** argv) {
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(bmmo::color_code(msg.code), "Sending score list data to #%u.", client);
+        server.Printf(bmmo::color_code(msg.code), "Score list data sent to #%u.", client);
     });
     console.register_aliases("sendscores", {"sendscores#"});
+    console.register_command("restartlevel", [&] {
+        if (console.empty()) return server.Printf("Usage: \"restartlevel <player>\".");
+        auto client = get_client_id_from_console();
+        if (client == k_HSteamNetConnection_Invalid) return;
+        bmmo::restart_request_msg msg{.content = {.victim = client}};
+        server.broadcast_message(msg);
+        server.Printf(bmmo::color_code(msg.code), "Requested to restart #%u's current level.", client);
+    });
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();

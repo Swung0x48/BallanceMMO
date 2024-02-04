@@ -73,6 +73,8 @@ namespace bmmo {
         ScoreList,
         HighscoreTimerCalibration,
         NameUpdate,
+        OwnedSimpleAction,
+        RestartRequest,
     };
 
     template<typename T, opcode C = None>

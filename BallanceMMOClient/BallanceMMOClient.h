@@ -142,7 +142,7 @@ private:
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
 	void OnAsyncCommand(IBML* bml, const std::vector<std::string>& args);
-	const std::vector<std::string> OnTabComplete(IBML* bml, const std::vector<std::string>& args);
+	std::vector<std::string> OnTabComplete(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);
 	void OnPeerTrafo(uint64_t id, int from, int to);
 

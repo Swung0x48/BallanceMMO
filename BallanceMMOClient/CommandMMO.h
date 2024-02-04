@@ -1,11 +1,17 @@
 #pragma once
 #include "bml_includes.h"
+#include "common.hpp"
 
 class CommandMMO: public ICommand
 {
 protected:
 	std::function<void(IBML* bml, const std::vector<std::string>& args)> execute_callback_;
-	std::function<const std::vector<std::string>(IBML* bml, const std::vector<std::string>& args)> tab_callback_;
+	std::function<std::vector<std::string>(IBML* bml, const std::vector<std::string>& args)> tab_callback_;
+	void transform_ansi(std::vector<std::string>& strings) {
+		std::ranges::transform(strings, strings.begin(),
+													 [](const auto& s) { return bmmo::string_utils::utf8_to_ansi(s); });
+	}
+
 public:
 	CommandMMO(decltype(execute_callback_) execute_callback, decltype(tab_callback_) tab_callback):
 		execute_callback_(std::move(execute_callback)), tab_callback_(std::move(tab_callback))
@@ -19,7 +25,9 @@ public:
 		execute_callback_(bml, args);
 	}
 	virtual const std::vector<std::string> GetTabCompletion(IBML* bml, const std::vector<std::string>& args) override {
-		return tab_callback_(bml, args);
+		auto completions = tab_callback_(bml, args);
+		transform_ansi(completions);
+		return completions;
 	};
 };
 
@@ -38,9 +46,9 @@ public:
 	virtual bool IsCheat() override { return false; };
 
 	virtual void Execute(IBML* bml, const std::vector<std::string>& args) override {
-		execute_callback_(bml, insert_mmo_prefix(args));
+		return CommandMMO::Execute(bml, insert_mmo_prefix(args));
 	}
 	virtual const std::vector<std::string> GetTabCompletion(IBML* bml, const std::vector<std::string>& args) override {
-		return tab_callback_(bml, insert_mmo_prefix(args));
+		return CommandMMO::GetTabCompletion(bml, insert_mmo_prefix(args));
 	};
 };

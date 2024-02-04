@@ -305,7 +305,7 @@ void BallanceMMOClient::OnPostStartMenu()
         }
 
         config_manager_.validate_nickname();
-        db_.set_nickname(config_manager_["playername"]->GetString());
+        db_.set_nickname(bmmo::string_utils::ansi_to_utf8(config_manager_["playername"]->GetString()));
 
         auto* energy_array_ptr = m_bml->GetArrayByName("Energy");
         energy_array_ = CKOBJID(energy_array_ptr);
@@ -641,6 +641,14 @@ void BallanceMMOClient::init_commands() {
         return OnTabComplete(m_bml, args_copy);
     });
 
+    static auto get_client_id_from_console = [this] {
+        auto next_word = console_.get_next_word();
+        if (next_word.empty()) return k_HSteamNetConnection_Invalid;
+        if (next_word[0] == '#')
+            return (HSteamNetConnection) std::atoll(next_word.substr(1).c_str());
+        return (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+    };
+
     console_.register_command("say", [&] {
         bmmo::chat_msg msg{};
         msg.chat_content = console_.get_rest_of_line();
@@ -693,6 +701,11 @@ void BallanceMMOClient::init_commands() {
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
     console_.register_aliases("kick", {"crash"});
+    console_.register_command("restartlevel", [&] {
+        bmmo::restart_request_msg msg{};
+        msg.content.victim = get_client_id_from_console();
+        send(msg);
+    });
     console_.register_command("scores", [&] {
         bmmo::map rank_map;
         auto mode = console_.get_next_word(true);
@@ -732,12 +745,7 @@ void BallanceMMOClient::init_commands() {
     });
     console_.register_command("whisper", [&] {
         bmmo::private_chat_msg msg{};
-        auto next_word = console_.get_next_word();
-        if (next_word.empty()) return;
-        if (next_word[0] == '#')
-            msg.player_id = (HSteamNetConnection) atoll(next_word.substr(1).c_str());
-        else
-            msg.player_id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+        msg.player_id = get_client_id_from_console();
         msg.chat_content = console_.get_rest_of_line();
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1024,7 +1032,7 @@ void BallanceMMOClient::init_commands() {
 #endif
 }
 
-const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::vector<std::string>& args) {
+std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::vector<std::string>& args) {
     const size_t length = args.size();
     std::string lower1;
     if (length > 1) lower1 = boost::algorithm::to_lower_copy(args[1]);
@@ -1038,7 +1046,7 @@ const std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const
         case 3:
         default: {
             if (std::set<std::string>{
-                "teleport", "tp", "kick", "crash",
+                "teleport", "tp", "kick", "crash", "restartlevel",
                 "whisper", "w", "say", "s",
                 "announce", "a", "b", "bulletin", "notice",
 #ifdef BMMO_WITH_PLAYER_SPECTATION
@@ -1955,6 +1963,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage("[BMMO/" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
         utils_.flash_window();
         play_wave_sound(sound_knock_);
+        break;
+    }
+    case bmmo::RestartRequest: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::restart_request_msg>(network_msg);
+        const bool restart = (msg.content.victim == db_.get_client_id());
+        SendIngameMessage(std::format("{} requested to restart {} current level.",
+                          get_username(msg.content.requester),
+                          restart ? "your" : get_username(msg.content.victim) + "'s"),
+                          bmmo::color_code(msg.code));
+        if (restart && m_bml->IsIngame() && !spectator_mode_)
+            restart_current_level();
         break;
     }
     case bmmo::ScoreList: {

@@ -7,7 +7,7 @@
 class logger_wrapper {
 private:
     ILogger* logger_;
-    // we just need some place that guarantees that our data would never be moved
+    // we just need somewhere that guarantees to never move our data
     std::forward_list<std::string> converted_strings_;
 
     // @returns converted pointer. must be freed manually.

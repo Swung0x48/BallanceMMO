@@ -50,5 +50,7 @@
 #include "score_list_msg.hpp"
 #include "highscore_timer_calibration_msg.hpp"
 #include "name_update_msg.hpp"
+#include "owned_simple_action_msg.hpp"
+#include "restart_request_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP
