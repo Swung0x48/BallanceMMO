@@ -39,9 +39,15 @@ public:
     bool empty() const noexcept;
     inline const std::string &get_command_name() const noexcept { return command_name_; };
 
-    const std::string get_next_word(bool to_lowercase = false);
-    const std::string get_rest_of_line();
-    const bmmo::named_map get_next_map(bool with_name = false);
+    std::string get_next_word(bool to_lowercase = false);
+    std::string get_rest_of_line();
+
+    // style: `level <number> [name]` or `<hash> <number> [name]`.
+    // @returns a `bmmo::named_map` which can be cast into a `bmmo::map`.
+    bmmo::named_map get_next_map(bool with_name = false);
+    // style: client id number, optionally prefixed with a `#`.
+    uint32_t get_next_client_id();
+
     inline int32_t get_next_int() { return std::atoi(get_next_word().c_str()); };
     inline int64_t get_next_long() { return std::atoll(get_next_word().c_str()); };
     inline double get_next_double() { return std::atof(get_next_word().c_str()); };

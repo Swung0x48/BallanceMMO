@@ -1001,14 +1001,14 @@ int main(int argc, char** argv) {
         options.print_states = !options.print_states;
         client.set_print_states(options.print_states);
     });
-    console.register_command("teleport", [&] { client.teleport_to(console.get_next_long()); });
+    console.register_command("teleport", [&] { client.teleport_to(console.get_next_client_id()); });
     console.register_command("balltype", [&] {
         auto& msg = client.get_local_state_msg();
         msg.content.type = console.get_next_int();
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("whisper", [&] {
-        HSteamNetConnection dest = console.get_next_long();
+        HSteamNetConnection dest = console.get_next_client_id();
         client.whisper_to(dest, console.get_rest_of_line());
     });
     console.register_command("getmap", [&] { client.print_player_maps(); });
@@ -1059,7 +1059,7 @@ int main(int argc, char** argv) {
         bmmo::kick_request_msg msg{};
         if (console.get_command_name() == "crash")
             msg.crash = true;
-        if (name[0] == '#') msg.player_id = static_cast<HSteamNetConnection>(console.get_next_long());
+        if (name[0] == '#') msg.player_id = console.get_next_client_id();
         else msg.player_name = name;
         msg.reason = console.get_rest_of_line();
         msg.serialize();
@@ -1139,7 +1139,7 @@ int main(int argc, char** argv) {
         client.receive(msg.raw.str().data(), msg.size());
     });
     console.register_command("restartlevel", [&] {
-        bmmo::restart_request_msg msg{.content = {.victim = (HSteamNetConnection) console.get_next_long()}};
+        bmmo::restart_request_msg msg{.content = {.victim = console.get_next_client_id()}};
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
 

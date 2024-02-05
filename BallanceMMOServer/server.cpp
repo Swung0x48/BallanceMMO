@@ -123,7 +123,15 @@ public:
         if (!suppress_error)
             Printf("Error: multiple possible players: %s.", names.erase(0, 2));
         return k_HSteamNetConnection_Invalid;
-    };
+    }
+
+    std::string get_client_name(HSteamNetConnection id) {
+        if (id == k_HSteamNetConnection_Invalid)
+            return "[Server]";
+        if (auto client_it = clients_.find(id); client_it != clients_.end())
+            return client_it->second.name;
+        return "";
+    }
 
     inline int get_client_count() const noexcept { return clients_.size(); }
 
@@ -1551,7 +1559,7 @@ int main(int argc, char** argv) {
             server.Printf("[Plain]: %s", msg.text_content);
         } else {
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("[Plain -> #%u]: %s", client, msg.text_content);
+            server.Printf("[Plain -> %s]: %s", server.get_client_name(client), msg.text_content);
         }
     };
     console.register_command("plaintext", send_plain_text_msg);
@@ -1586,7 +1594,7 @@ int main(int argc, char** argv) {
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         server.Printf(bmmo::color_code(msg.code), "[Popup -> %s] {%s}: %s",
-                client == k_HSteamNetConnection_Invalid ? "[all]" : std::to_string(client),
+                client == k_HSteamNetConnection_Invalid ? "[all]" : server.get_client_name(client),
                 msg.title, msg.text_content);
     };
     console.register_command("popup", send_popup_msg);
@@ -1604,7 +1612,7 @@ int main(int argc, char** argv) {
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         server.Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s",
-                msg.get_type_name(), broadcast ? "" : " -> #" + std::to_string(client),
+                msg.get_type_name(), broadcast ? "" : " -> " + server.get_client_name(client),
                 msg.chat_content);
     };
     console.register_command("announce", send_important_notification);
@@ -1645,7 +1653,7 @@ int main(int argc, char** argv) {
         msg.chat_content = text;
         msg.serialize();
         server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(bmmo::color_code(msg.code), "([Server]) -> #%u: %s", client, msg.chat_content);
+        server.Printf(bmmo::color_code(msg.code), "([Server]) -> %s: %s", server.get_client_name(client), msg.chat_content);
     });
     console.register_command("ban", [&] {
         auto client = get_client_id_from_console();

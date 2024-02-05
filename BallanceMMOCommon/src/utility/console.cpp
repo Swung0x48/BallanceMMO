@@ -169,15 +169,15 @@ bool console::empty() const noexcept {
     return parser_.empty();
 };
 
-const std::string console::get_next_word(bool to_lowercase) {
+std::string console::get_next_word(bool to_lowercase) {
     return parser_.get_next_word(to_lowercase);
 };
 
-const std::string console::get_rest_of_line() {
+std::string console::get_rest_of_line() {
     return parser_.get_rest_of_line();
 }
 
-const bmmo::named_map console::get_next_map(bool with_name) {
+bmmo::named_map console::get_next_map(bool with_name) {
     std::string hash = get_next_word();
     bmmo::named_map input_map = {{.type = bmmo::map_type::OriginalLevel,
                                 .level = std::clamp(get_next_int(), 0, 13)}, {}};
@@ -188,6 +188,13 @@ const bmmo::named_map console::get_next_map(bool with_name) {
     if (with_name && !empty())
         input_map.name = get_rest_of_line();
     return input_map;
+}
+
+uint32_t console::get_next_client_id() {
+    std::string word = get_next_word();
+    if (word.starts_with('#'))
+        word.erase(0, 1);
+    return decltype(get_next_client_id())(std::atoll(word.c_str()));
 }
 
 }
