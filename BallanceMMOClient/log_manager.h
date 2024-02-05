@@ -1,6 +1,7 @@
 #pragma once
 
 #include <forward_list>
+#include <mutex>
 #include "bml_includes.h"
 #include "common.hpp"
 
@@ -8,10 +9,13 @@ class logger_wrapper {
 private:
     ILogger* logger_;
     // we just need somewhere that guarantees to never move our data
+    // to store our converted strings temporarily
     std::forward_list<std::string> converted_strings_;
+    std::mutex mutex_;
 
-    // @returns converted pointer. must be freed manually.
-    inline const char* ConvertArgument(const std::string& str) noexcept {
+    // @returns converted pointer, stored in `converted_strings_`.
+    // must be freed manually.
+    const char* ConvertArgument(const std::string& str) noexcept {
         return converted_strings_.emplace_front(bmmo::string_utils::utf8_to_ansi(str)).c_str();
     }
 
@@ -29,18 +33,21 @@ public:
 
     template <typename ... Args>
     void Info(const char* fmt, Args&& ... args) {
+        std::lock_guard lk(mutex_);
         logger_->Info(ConvertArgument(fmt), ConvertArgument(args)...);
         converted_strings_.clear();
     }
 
     template <typename ... Args>
     void Warn(const char* fmt, Args&& ... args) {
+        std::lock_guard lk(mutex_);
         logger_->Warn(ConvertArgument(fmt), ConvertArgument(args)...);
         converted_strings_.clear();
     }
 
     template <typename ... Args>
     void Error(const char* fmt, Args&& ... args) {
+        std::lock_guard lk(mutex_);
         logger_->Error(ConvertArgument(fmt), ConvertArgument(args)...);
         converted_strings_.clear();
     }
