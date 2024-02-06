@@ -1,6 +1,10 @@
 #include <iostream>
 #include <algorithm>
 #include <replxx.hxx>
+//#ifdef _WIN32
+//#include <io.h>
+//#include <fcntl.h>
+//#endif
 #include "entity/globals.hpp"
 #include "utility/console.hpp"
 #include "utility/string_utils.hpp"

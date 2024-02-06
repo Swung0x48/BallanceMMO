@@ -30,6 +30,9 @@
 
 #ifdef BMMO_INCLUDE_INTERNAL
 #include "../entity/globals.hpp"
+#define BMMO_PRINTF bmmo::replxx_instance.print
+#else
+#define BMMO_PRINTF std::printf
 #endif
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
@@ -209,21 +212,16 @@ public:
                 fflush(stdout);
                 return;
             }
-#ifdef BMMO_INCLUDE_INTERNAL
-            bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
-#endif
+            // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
             if (ansiColor == bmmo::ansi::Reset
-#ifdef _WIN32
-                || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
-#endif
+//                 || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
+//                 // possible with replxx
             )
-                printf("\r[%s] %s\n", timeStr, pszMsg);
+                BMMO_PRINTF("\r[%s] %s\n", timeStr, pszMsg);
             else
-                printf("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
+                BMMO_PRINTF("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
             fflush(stdout);
-#ifdef BMMO_INCLUDE_INTERNAL
-            bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
-#endif
+            // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
         }
     }
 
