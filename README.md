@@ -34,7 +34,7 @@ BallanceMMO is a project which brings online experiences to Ballance.
 
 ## Dependencies or build tools
 
-- CMake 3.12 or later: Generate makefile for server
+- CMake 3.12 or later: Generate makefiles
 - A build tool like GNU Make, Ninja: Build server binary
 - A compiler with core C++20 feature support
   - This project has been successfully compiled under:
@@ -52,15 +52,13 @@ BallanceMMO is a project which brings online experiences to Ballance.
 
 ## Building server
 
-### Linux/macOS
-
 1. Clone this repo __RECURSIVELY__
 
     ```commandline
     git clone https://github.com/Swung0x48/BallanceMMO.git --recursive
     ```
 
-2. Install OpenSSL and Protobuf
+2. ***(Linux/macOS)*** Install OpenSSL and Protobuf
 
     - Debian/Ubuntu
 
@@ -88,33 +86,44 @@ BallanceMMO is a project which brings online experiences to Ballance.
 
 3. Building!
 
-    - Ninja
+    + **Linux/macOS**
+        - Ninja
+
+            ```commandline
+            chmod +x build_server.sh
+            ./build_server.sh
+            cd build
+            ninja
+            ```
+
+        - GNU Make
+
+            ```commandline
+            chmod +x build_server.sh
+            ./build_server.sh -G
+            cd build
+            make
+            ```
+
+        You may also want to supply command line arguments such as `-DCMAKE_BUILD_TYPE=Release` when running `build.sh`, to specify the build type.
+
+        If CMake failed to find openssl for some reason, you may need to specify path to openssl yourself.
+
+        For example:
 
         ```commandline
-        chmod +x build.sh
-        ./build.sh
-        cd build
-        ninja
+        $ ./build_server.sh -DOPENSSL_ROOT_DIR="/usr/local/opt/openssl@1.1/"
         ```
-
-    - GNU Make
+    
+    + **Windows**
+        
+        We're using vcpkg to take care of our dependencies on Windows. It should be automatically called during CMake setup.
 
         ```commandline
-        chmod +x build.sh
-        ./build.sh -G
-        cd build
-        make
+        > .\build_server.bat
         ```
 
-    You may also want to supply command line arguments such as `-DCMAKE_BUILD_TYPE=Release` when running `build.sh`, to specify the build type.
-
-    If CMake failed to find openssl for some reason, you may need to specify path to openssl yourself.
-
-    For example:
-
-    ```commandline
-    $ ./build.sh -DOPENSSL_ROOT_DIR="/usr/local/opt/openssl@1.1/"
-    ```
+        Open and compile the generated Visual Studio Solution file in `build_server` after finishing this, and you should be fine to go.
 
 4. Run your server!
 
@@ -145,45 +154,31 @@ BallanceMMO is a project which brings online experiences to Ballance.
 
 ## Building client (Game Mod)
 
+### Windows
+
 On Windows, we can use the vcpkg package manager. The following instructions assume that you will follow the steps and fetch vcpkg as a submodule. If you want to install vcpkg somewhere else, you're on your own.
 
 __Warning Beforehand__: DO NOT upgrade (cancel when prompted) when Visual Studio asks you to upgrade the solution/project on first launch. It will wipe include directories which has been set in the project file (wtf Microsoft???). Don't worry, following steps will guide you to switch to your already-set-up msvc toolchain.
 
-1. Install/Modify Visual Studio
+1. Install/Modify Visual Studio and CMake
     - In `Workload` tab, make sure you have installed `Desktop Development with C++`.
     - __IMPORTANT!__ In `Language pack` tab, make sure you have installed `English`.
 
 2. Bootstrap vcpkg
-    - In a `Visual Studio Developer PowerShell`/`Visual Studio Developer Command Prompt`
+    ```commandline
+    cd submodule\vcpkg
+    .\bootstrap-vcpkg.bat
+    ```
 
-        ```commandline
-        cd submodule\vcpkg
-        .\bootstrap-vcpkg.bat
-        ```
-
-3. Build the prerequisites using vcpkg
-
+3. Generate the Visual Studio project file with CMake
+    - CMake will automatically call vcpkg to take care of our dependecies during the setup.
     - This is the step where vcpkg will fail if you haven't got your English language pack installed. (Again, wtf Microsoft???)
 
         ```commandline
-        > .\vcpkg --overlay-ports=..\GameNetworkingSockets\vcpkg_ports install gamenetworkingsockets
+        > .\build.bat
         ```
 
-        You may also try
-
-        ```commandline
-        > .\vcpkg --overlay-ports=..\GameNetworkingSockets\vcpkg_ports install gamenetworkingsockets[core,libsodium]
-        ```
-
-        if openssl fails to compile.
-
-4. Install vcpkg integrate so that Visual Studio will pick up installed packages
-
-    ```commandline
-    > vcpkg integrate install
-    ```
-
-5. Extract BML Dev pack and [Boost Library](https://www.boost.org/users/download/), and place the following:
+4. Extract BML Dev pack and [Boost Library](https://www.boost.org/users/download/), and place the following:
     - *BML*:
         - include\BML -> BallanceMMOClient\include\BML
         - lib\Debug -> BallanceMMOClient\lib\BML\Debug
@@ -191,11 +186,6 @@ __Warning Beforehand__: DO NOT upgrade (cancel when prompted) when Visual Studio
     - *Boost*:
         - boost -> BallanceMMOClient\include\boost
 
-6. Open the Visual Studio project file `BallanceMMO.sln`.
-    - DO NOT upgrade the project(cancel) when prompted! (Yet again, wtf Microsoft???)
+5. Open the Visual Studio project file `BallanceMMO.sln`, which could be found in the `build` directory.
 
-7. In `Solution Explorer` panel, Right click on the project `BallanceMMOClient`, select `Properties`.
-
-8. Navigate to `Configuration Properties` - `General` - `Platform toolset`, select your toolset of your choice (tested under `v142`(Visual Studio 2019)/`v143`(Visual Studio 2022)), then press `OK`.
-
-9. Build the project!
+6. Build the project!
