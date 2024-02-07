@@ -20,7 +20,7 @@ namespace {
         switch (hints.size()) {
             case 1: return hints;
             case 2: if (hints[0] + '#' == hints[1]) return {hints[0]};
-            // no common prefix here to prevents confusions
+            // no common prefix here to prevent confusions
         }
         return {};
     }
@@ -41,7 +41,7 @@ namespace {
 
 replxx::Replxx replxx_instance = [] {
     replxx::Replxx instance;
-    
+
     instance.install_window_change_handler();
     instance.set_complete_on_empty(false);
     instance.set_hint_callback(command_hint);
@@ -56,6 +56,8 @@ replxx::Replxx replxx_instance = [] {
             return console::instance->get_command_hints(false, args[0].c_str());
         return {};
     });
+
+    instance.history_add(" "); // history access crash workaround
 
     return instance;
 }();

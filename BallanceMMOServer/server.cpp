@@ -114,7 +114,7 @@ public:
                 Printf("Error: client \"%s\" not found.", username);
             return k_HSteamNetConnection_Invalid;
         }
-        else if (std::next(username_it) == username_it_end) {
+        else if (std::next(username_it) == username_it_end || username_it->first == username) {
             return username_it->second;
         }
         std::string names;
@@ -1833,6 +1833,9 @@ int main(int argc, char** argv) {
         server.Printf(bmmo::color_code(msg.code), "Requested to restart #%u's current level.", client);
     });
     console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
+    console.register_command("savehistory", [] {
+        bmmo::replxx_instance.history_save("replxx_history");
+    });
 
     server.wait_till_started();
 
