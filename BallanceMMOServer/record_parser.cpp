@@ -20,6 +20,7 @@
 #include <ya_getopt.h>
 
 using bmmo::message_utils::read_variable;
+using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
 enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
 
@@ -954,14 +955,14 @@ int main(int argc, char** argv) {
 
     replayer.set_record_file(filename);
     if (!replayer.setup())
-        role::FatalError("Fake server failed on setup.");
+        FatalError("Fake server failed on setup.");
     std::thread server_thread([&replayer]() { replayer.run(); });
 
     bmmo::console console;
-    console.register_command("help", [&]() { role::Printf(console.get_help_string().c_str()); });
+    console.register_command("help", [&]() { Printf(console.get_help_string().c_str()); });
     console.register_command("play", [&]() {
         if (replayer.playing()) {
-            replayer.Printf("Record is already playing.");
+            Printf("Record is already playing.");
             return;
         }
         replayer.play();
@@ -974,16 +975,16 @@ int main(int argc, char** argv) {
     console.register_command("bulletins", std::bind(&record_replayer::print_permanent_notifications, &replayer));
     console.register_command("pause", [&]() {
         if (!replayer.playing()) {
-            replayer.Printf("Already not playing.");
+            Printf("Already not playing.");
             return;
         }
         replayer.pause();
     });
     console.register_command("seek", [&]() {
         constexpr auto print_hint = [] {
-            role::Printf("Usage: \"seek <time>\".");
-            role::Printf("Examples:\t seek 11.4 || seek -51.4 || seek +19:19.810");
-            role::Printf("\t\t seek 2019-08-10 11:45:14");
+            Printf("Usage: \"seek <time>\".");
+            Printf("Examples:\t seek 11.4 || seek -51.4 || seek +19:19.810");
+            Printf("\t\t seek 2019-08-10 11:45:14");
         };
         if (console.empty()) { print_hint(); return; }
         auto time_string = console.get_rest_of_line();
@@ -1020,7 +1021,7 @@ int main(int argc, char** argv) {
         text_msg.text_content = "[Reality] [Server]: " + text;
         text_msg.serialize();
         replayer.broadcast_message(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
-        replayer.Printf("[Server]: %s", text);
+        Printf("[Server]: %s", text);
     });
     console.register_command("load", [&]() {
         replayer.shutdown(4);
@@ -1028,12 +1029,12 @@ int main(int argc, char** argv) {
             server_thread.join();
         replayer.set_record_file(console.get_rest_of_line());
         if (!replayer.setup())
-            role::FatalError("Fake server failed on setup.");
+            FatalError("Fake server failed on setup.");
         server_thread = std::thread([&replayer]() { replayer.run(); });
         replayer.wait_till_started();
     });
 
-    role::Printf("To see all available commands, type \"help\".");
+    Printf("To see all available commands, type \"help\".");
 
     replayer.wait_till_started();
 
@@ -1047,7 +1048,7 @@ int main(int argc, char** argv) {
 
         // bmmo::command_parser parser(line);
         if (!console.execute(line)) {
-            role::Printf("Error: unknown command \"%s\".", console.get_command_name());
+            Printf("Error: unknown command \"%s\".", console.get_command_name());
         };
     }
 

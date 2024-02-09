@@ -1,6 +1,13 @@
 #include <iostream>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#include <io.h>
+#include <fcntl.h>
 #include "common.hpp"
 #include "console_window.h"
+#include "utility/misc.hpp"
 
 namespace {
 void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr) {
@@ -98,7 +105,7 @@ void console_window::print_text(const char* text, int ansi_color) {
     std::lock_guard lk(mutex_);
     previous_msg_.push_back({text, ansi_color});
     if (running_)
-        role::Printf(ansi_color, "%s", text);
+        bmmo::Printf(ansi_color, "%s", text);
 }
 
 void console_window::run() {
@@ -109,7 +116,7 @@ void console_window::run() {
     //std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
     if (owned_console_) {
         std::lock_guard lk(mutex_);
-        for (const auto& [text, color]: previous_msg_) role::Printf(color, text.c_str());
+        for (const auto& [text, color]: previous_msg_) bmmo::Printf(color, text.c_str());
     }
     while (true) {
         std::string line;

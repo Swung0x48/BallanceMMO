@@ -111,7 +111,7 @@ protected:
             return 0;
         else if (msg_count < 0)
             //break;
-            FatalError("Error checking for messages.");
+            bmmo::FatalError("Error checking for messages.");
         assert(msg_count > 0);
 
         for (int i = 0; i < msg_count; ++i) {

@@ -26,6 +26,8 @@
 #include "common.hpp"
 #include "entity/record_entry.hpp"
 
+using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
+
 bool cheat = false;
 struct client_data {
     std::string name;
@@ -880,7 +882,7 @@ int main(int argc, char** argv) {
             std::cerr << "Fatal: failed to open log file." << std::endl;
             return 1;
         }
-        client::set_log_file(log_file);
+        bmmo::set_log_file(log_file);
     }
 
     std::cout << "Initializing sockets..." << std::endl;
@@ -903,7 +905,7 @@ int main(int argc, char** argv) {
     std::thread client_thread([&client]() { client.run(); });
 
     bmmo::console console;
-    console.register_command("help", [&] { role::Printf(console.get_help_string().c_str()); });
+    console.register_command("help", [&] { Printf(console.get_help_string().c_str()); });
     console.register_command("stop", [&] { client.shutdown(); });
     auto pos_function = [&](bool translate = false) {
         std::mt19937 random_gen(std::random_device{}());
@@ -927,7 +929,7 @@ int main(int argc, char** argv) {
         }
         rot[3] = std::sqrt(last_squared);
         msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
-        client::Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.3f, %.3f, %.3f, %.3f)",
+        Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.3f, %.3f, %.3f, %.3f)",
             pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
 //        for (int i = 0; i < 50; ++i)
         client.send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
@@ -961,10 +963,10 @@ int main(int argc, char** argv) {
     });
     console.register_command("getinfo", [&] {
         auto status = client.get_info();
-        client::Printf("Ping: %dms\n", status.m_nPing);
-        client::Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
+        Printf("Ping: %dms\n", status.m_nPing);
+        Printf("ConnectionQualityRemote: %.2f%\n", status.m_flConnectionQualityRemote * 100.0f);
         auto l_status = client.get_lane_info();
-        client::Printf("PendingReliable: %d", l_status.m_cbPendingReliable);
+        Printf("PendingReliable: %d", l_status.m_cbPendingReliable);
     });
     console.register_command("reconnect", [&] {
         if (client_thread.joinable())
@@ -1025,9 +1027,9 @@ int main(int argc, char** argv) {
     };
     console.register_command("countdown", [&] {
         if (console.empty()) {
-            role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
-            role::Printf("Usage: \"countdown level|<hash> <level number> [mode] [type]\".");
-            role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
+            Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
+            Printf("Usage: \"countdown level|<hash> <level number> [mode] [type]\".");
+            Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
             return;
         }
         bmmo::countdown_msg msg{.content = {.map = get_map_from_input()}};
@@ -1076,7 +1078,7 @@ int main(int argc, char** argv) {
     console.register_command("getpos", [&] { client.print_positions(); });
     console.register_command("setmap", [&] {
         if (console.empty()) {
-            role::Printf("Usage: \"setmap level <level number>\", \"setmap <hash> [<level number> <name>]\".");
+            Printf("Usage: \"setmap level <level number>\", \"setmap <hash> [<level number> <name>]\".");
             return;
         }
         auto input_map = get_map_from_input(true);
@@ -1091,12 +1093,12 @@ int main(int argc, char** argv) {
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("dnf", [&] {
-        if (console.empty()) return role::Printf("Usage: \"dnf <map> <sector>\".");
+        if (console.empty()) return Printf("Usage: \"dnf <map> <sector>\".");
         client.send(bmmo::did_not_finish_msg{.content = {.cheated = cheat, .map = get_map_from_input(),
             .sector = console.get_next_int()}}, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("win", [&] {
-        if (console.empty()) return role::Printf("Usage: \"win <map> <mode> <points> <lives> <time>\".");
+        if (console.empty()) return Printf("Usage: \"win <map> <mode> <points> <lives> <time>\".");
         auto map = get_map_from_input();
         auto mode = console.get_next_word(true) == "hs" ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
         client.send(bmmo::level_finish_v2_msg{.content = {
@@ -1113,7 +1115,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("getbulletin", [&] { client.print_bulletin(); });
     console.register_command("scores", [&] {
-        if (console.empty()) return role::Printf("Usage: \"scores [local] <hs|sr> [map]\"");
+        if (console.empty()) return Printf("Usage: \"scores [local] <hs|sr> [map]\"");
         auto mode = console.get_next_word(true);
         // bool hs_mode = (console.get_next_word(true) == "hs");
         bool use_local_data = false;
@@ -1132,7 +1134,7 @@ int main(int argc, char** argv) {
         auto& rankings = client.get_local_rankings();
         auto ranks_it = rankings.find(msg.map.get_hash_bytes_string());
         if (ranks_it == rankings.end() || (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
-            role::Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
+            Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
             return;
         }
         msg.serialize(ranks_it->second);
@@ -1158,14 +1160,14 @@ int main(int argc, char** argv) {
             client.shutdown();
             break;
         };
-        role::LogFileOutput(("> " + input).c_str());
+        LogFileOutput(("> " + input).c_str());
 
         // std::cin >> input;
         if (!console.execute(input) && !console.get_command_name().empty()) {
             std::string extra_text;
             if (auto hints = console.get_command_hints(true); !hints.empty())
                 extra_text = " Did you mean: " + bmmo::message_utils::join_strings(hints, 0, ", ") + "?";
-            role::Printf("Error: unknown command \"%s\".%s", console.get_command_name(), extra_text);
+            Printf("Error: unknown command \"%s\".%s", console.get_command_name(), extra_text);
         }
     }
 

@@ -5,6 +5,9 @@
 
 #include "common.hpp"
 #include "config_manager.hpp"
+#include "utility/misc.hpp"
+
+using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
 namespace {
     template<typename T>
@@ -22,11 +25,11 @@ bool config_manager::load() {
         try {
             config_ = YAML::Load(ifile);
         } catch (const std::exception& e) {
-            role::Printf("Error: failed to parse config: %s", e.what());
+            Printf("Error: failed to parse config: %s", e.what());
             return false;
         }
     } else {
-        role::Printf("Config is empty. Generating default config...");
+        Printf("Config is empty. Generating default config...");
     }
 
     op_mode = yaml_load_value(config_, "enable_op_privileges", op_mode);
@@ -71,21 +74,21 @@ bool config_manager::load() {
 
     ifile.close();
     save(false);
-    role::Printf("Config loaded successfully.");
+    Printf("Config loaded successfully.");
     return true;
 }
 
 void config_manager::print_bans() {
     for (const auto& [uuid, reason]: banned_players)
-        role::Printf("%s: %s", uuid, reason);
-    role::Printf("%d UUID%s banned in total.", banned_players.size(),
+        Printf("%s: %s", uuid, reason);
+    Printf("%d UUID%s banned in total.", banned_players.size(),
             banned_players.size() == 1 ? "" : "s");
 }
 
 void config_manager::print_mutes() {
     for (const auto& uuid: muted_players)
-        role::Printf("%s", uuid);
-    role::Printf("%d UUID%s muted in total.", muted_players.size(),
+        Printf("%s", uuid);
+    Printf("%d UUID%s muted in total.", muted_players.size(),
             muted_players.size() == 1 ? "" : "s");
 }
 
@@ -96,7 +99,7 @@ void config_manager::log_mod_list(const std::unordered_map<std::string, std::str
     }
     output.erase(0, strlen("; "));
     output = "Installed mods (" + std::to_string(mod_list.size()) + "): " + output;
-    role::LogFileOutput(output.c_str());
+    LogFileOutput(output.c_str());
 }
 
 bool config_manager::has_forced_name(const std::string& uuid_string) {
@@ -123,7 +126,7 @@ void config_manager::save(bool reload_values) {
     }
     std::ofstream config_file("config.yml");
     if (!config_file.is_open()) {
-        role::Printf("Error: failed to open config file for writing.");
+        Printf("Error: failed to open config file for writing.");
         return;
     }
     auto current_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -153,7 +156,7 @@ void config_manager::save_login_data(const SteamNetworkingIPAddr& ip, const std:
         try {
             login_data = YAML::Load(ifile);
         } catch (const std::exception& e) {
-            role::Printf("Error: failed to parse config: %s", e.what());
+            Printf("Error: failed to parse config: %s", e.what());
             return;
         }
     }

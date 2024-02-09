@@ -24,6 +24,8 @@
 #include "server_data.hpp"
 #include "config_manager.hpp"
 
+using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
+
 class server: public role {
 public:
     explicit server(uint16_t port) {
@@ -1513,7 +1515,7 @@ int main(int argc, char** argv) {
             std::cerr << "Fatal: failed to open the log file." << std::endl;
             return 1;
         }
-        server::set_log_file(log_file);
+        bmmo::set_log_file(log_file);
     }
 
     printf("Initializing sockets...\n");
@@ -1525,7 +1527,7 @@ int main(int argc, char** argv) {
     printf("Bootstrapping server...\n");
     fflush(stdout);
     if (!server.setup())
-        server::FatalError("Server failed on setup.");
+        FatalError("Server failed on setup.");
     std::thread server_thread([&server]() { server.run(); });
 
     bmmo::console console;
@@ -1538,14 +1540,14 @@ int main(int argc, char** argv) {
         msg.serialize();
 
         server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf("([Server]): %s", msg.chat_content);
+        Printf("([Server]): %s", msg.chat_content);
     });
     auto get_client_id_from_console = [&]() -> HSteamNetConnection {
         std::string client_input = console.get_next_word();
         HSteamNetConnection client = (client_input.length() > 0 && client_input[0] == '#')
                 ? atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
         if (client == 0)
-            server.Printf("Error: invalid connection id.");
+            Printf("Error: invalid connection id.");
         return client;
     };
     auto send_plain_text_msg = [&](bool broadcast = true) {
@@ -1556,10 +1558,10 @@ int main(int argc, char** argv) {
         msg.serialize();
         if (broadcast) {
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("[Plain]: %s", msg.text_content);
+            Printf("[Plain]: %s", msg.text_content);
         } else {
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            server.Printf("[Plain -> %s]: %s", server.get_client_name(client), msg.text_content);
+            Printf("[Plain -> %s]: %s", server.get_client_name(client), msg.text_content);
         }
     };
     console.register_command("plaintext", send_plain_text_msg);
@@ -1585,7 +1587,7 @@ int main(int argc, char** argv) {
                     msg.text_content = ss.str();
             }
         } catch (const std::exception& e) {
-            server.Printf(e.what());
+            Printf(e.what());
             return;
         }
         msg.serialize();
@@ -1593,7 +1595,7 @@ int main(int argc, char** argv) {
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(bmmo::color_code(msg.code), "[Popup -> %s] {%s}: %s",
+        Printf(bmmo::color_code(msg.code), "[Popup -> %s] {%s}: %s",
                 client == k_HSteamNetConnection_Invalid ? "[all]" : server.get_client_name(client),
                 msg.title, msg.text_content);
     };
@@ -1611,7 +1613,7 @@ int main(int argc, char** argv) {
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s",
+        Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s",
                 msg.get_type_name(), broadcast ? "" : " -> " + server.get_client_name(client),
                 msg.chat_content);
     };
@@ -1629,7 +1631,7 @@ int main(int argc, char** argv) {
     console.register_command("getpos", [&] { server.print_positions(); });
     console.register_command("kick", [&] {
         if (console.empty() && console.get_command_name() == "kick#") {
-            server.Printf("Usage: \"kick# <code> <player> <reason>\".");
+            Printf("Usage: \"kick# <code> <player> <reason>\".");
             return;
         }
         bmmo::connection_end::code end_code = bmmo::connection_end::Kicked;
@@ -1653,7 +1655,7 @@ int main(int argc, char** argv) {
         msg.chat_content = text;
         msg.serialize();
         server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(bmmo::color_code(msg.code), "([Server]) -> %s: %s", server.get_client_name(client), msg.chat_content);
+        Printf(bmmo::color_code(msg.code), "([Server]) -> %s: %s", server.get_client_name(client), msg.chat_content);
     });
     console.register_command("ban", [&] {
         auto client = get_client_id_from_console();
@@ -1676,14 +1678,14 @@ int main(int argc, char** argv) {
     console.register_command("unban", [&] { server.set_unban(console.get_next_word()); });
     console.register_command("reload", [&] {
         if (!server.load_config())
-            server.Printf("Error: failed to reload config.");
+            Printf("Error: failed to reload config.");
     });
     console.register_command("listmap", [&] { server.print_maps(); });
     console.register_command("countdown", [&] {
         auto print_hint = [] {
-            role::Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
-            role::Printf("Usage: \"countdown <client id> level|<hash> <level number> [mode] [type]\".");
-            role::Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
+            Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
+            Printf("Usage: \"countdown <client id> level|<hash> <level number> [mode] [type]\".");
+            Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
         };
         if (console.empty()) { print_hint(); return; }
         auto client = get_client_id_from_console();
@@ -1718,7 +1720,7 @@ int main(int argc, char** argv) {
         for (int i = 3; i >= 0; --i) {
             msg.content.type = static_cast<bmmo::countdown_type>(i);
             server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
-            server.Printf(bmmo::color_code(msg.code), "[[Server]]: Countdown%s - %s",
+            Printf(bmmo::color_code(msg.code), "[[Server]]: Countdown%s - %s",
                 msg.content.mode == bmmo::level_mode::Highscore ? " <HS>" : "",
                 i == 0 ? "Go!" : std::to_string(i));
             if (i != 0)
@@ -1734,7 +1736,7 @@ int main(int argc, char** argv) {
             msg.serialize();
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
-        server.Printf(bmmo::color_code(bmmo::PermanentNotification), "[Bulletin] %s%s", bulletin.first,
+        Printf(bmmo::color_code(bmmo::PermanentNotification), "[Bulletin] %s%s", bulletin.first,
             bulletin.second.empty() ? " - Empty" : ": " + bulletin.second);
     });
     console.register_aliases("bulletin", {"getbulletin"});
@@ -1748,14 +1750,14 @@ int main(int argc, char** argv) {
                 msg.caption = sounds.begin()->first.as<decltype(msg.caption)>();
                 msg.sounds = sounds.begin()->second.as<decltype(msg.sounds)>();
             } else {
-                server.Printf("Usage: playsound <caption>: [[frequency, duration], [freq2, dur2]] (caption can be omitted).");
+                Printf("Usage: playsound <caption>: [[frequency, duration], [freq2, dur2]] (caption can be omitted).");
                 return;
             }
             std::stringstream temp; temp << sounds;
-            server.Printf(bmmo::ansi::WhiteInverse, "Playing sound - %s", temp.str());
+            Printf(bmmo::ansi::WhiteInverse, "Playing sound - %s", temp.str());
             msg.serialize();
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        } catch (const std::exception& e) { server.Printf(e.what()); return; }
+        } catch (const std::exception& e) { Printf(e.what()); return; }
     });
     console.register_command("playstream", [&] {
         auto client = k_HSteamNetConnection_Invalid;
@@ -1779,26 +1781,26 @@ int main(int argc, char** argv) {
                     msg.path = idata.as<std::string>();
                     break;
                 default:
-                    server.Printf("Usage: playstream {caption: <name>, path: <path>, duration: <duration_ms = 0>, gain: <1.0 ∈ [0, 1]>, pitch: <1.0 ∈ [0.1, 4.1]>}");
-                    server.Printf("Usage: playstream <path>");
-                    server.Printf("Current working directory: %s", std::filesystem::current_path().string());
-                    server.Printf("Maximum file size: %lld bytes", msg.get_max_stream_size());
+                    Printf("Usage: playstream {caption: <name>, path: <path>, duration: <duration_ms = 0>, gain: <1.0 ∈ [0, 1]>, pitch: <1.0 ∈ [0.1, 4.1]>}");
+                    Printf("Usage: playstream <path>");
+                    Printf("Current working directory: %s", std::filesystem::current_path().string());
+                    Printf("Maximum file size: %lld bytes", msg.get_max_stream_size());
                     return;
             }
             msg.type = bmmo::sound_stream_msg::sound_type::Wave;
             if (!msg.serialize()) {
-                server.Printf("Error serializing message.");
+                Printf("Error serializing message.");
                 return;
             }
-            server.Printf(bmmo::ansi::WhiteInverse, "Sound <%s> (size: %d) sent to %s",
+            Printf(bmmo::ansi::WhiteInverse, "Sound <%s> (size: %d) sent to %s",
                     msg.path, (uint32_t) msg.size(), broadcast ? "[all]" : std::to_string(client));
             if (broadcast) server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             else server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        } catch (const std::exception& e) { server.Printf(e.what()); return; }
+        } catch (const std::exception& e) { Printf(e.what()); return; }
     });
     console.register_aliases("playstream", {"playstream#"});
     console.register_command("scores", [&] {
-        if (console.empty()) { role::Printf("Usage: \"scores <hs|sr> [map]\""); return; }
+        if (console.empty()) { Printf("Usage: \"scores <hs|sr> [map]\""); return; }
         bool hs_mode = (console.get_next_word(true) == "hs");
         server.print_scores(hs_mode, console.empty() ? server.get_last_countdown_map() : static_cast<bmmo::map>(console.get_next_map()));
     });
@@ -1813,7 +1815,7 @@ int main(int argc, char** argv) {
         msg.map = console.empty() ? server.get_last_countdown_map() : static_cast<bmmo::map>(console.get_next_map());
         auto* rankings = server.get_map_rankings(msg.map);
         if (!rankings) {
-            server.Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
+            Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
             return;
         }
         msg.serialize(*rankings);
@@ -1821,21 +1823,18 @@ int main(int argc, char** argv) {
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         else
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        server.Printf(bmmo::color_code(msg.code), "Score list data sent to #%u.", client);
+        Printf(bmmo::color_code(msg.code), "Score list data sent to #%u.", client);
     });
     console.register_aliases("sendscores", {"sendscores#"});
     console.register_command("restartlevel", [&] {
-        if (console.empty()) return server.Printf("Usage: \"restartlevel <player>\".");
+        if (console.empty()) return Printf("Usage: \"restartlevel <player>\".");
         auto client = get_client_id_from_console();
         if (client == k_HSteamNetConnection_Invalid) return;
         bmmo::restart_request_msg msg{.content = {.victim = client}};
         server.broadcast_message(msg);
-        server.Printf(bmmo::color_code(msg.code), "Requested to restart #%u's current level.", client);
+        Printf(bmmo::color_code(msg.code), "Requested to restart #%u's current level.", client);
     });
-    console.register_command("help", [&] { server.Printf(console.get_help_string().c_str()); });
-    console.register_command("savehistory", [] {
-        bmmo::replxx_instance.history_save("replxx_history");
-    });
+    console.register_command("help", [&] { Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();
 
@@ -1849,13 +1848,13 @@ int main(int argc, char** argv) {
             server.shutdown();
             break;
         };
-        server.LogFileOutput(("> " + line).c_str());
+        LogFileOutput(("> " + line).c_str());
 
         if (!console.execute(line) && !console.get_command_name().empty()) {
             std::string extra_text;
             if (auto hints = console.get_command_hints(true); !hints.empty())
                 extra_text = " Did you mean: " + bmmo::string_utils::join_strings(hints, 0, ", ") + "?";
-            server.Printf("Error: unknown command \"%s\".%s", console.get_command_name(), extra_text);
+            Printf("Error: unknown command \"%s\".%s", console.get_command_name(), extra_text);
         }
     }
 

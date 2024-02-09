@@ -3,23 +3,9 @@
 
 #include <iostream>
 #include <thread>
-#include <chrono>
 #include <atomic>
 #include <mutex>
 #include <cassert>
-#include <cstdarg>
-#include <ctime>
-#ifdef _WIN32
-# ifndef WIN32_LEAN_AND_MEAN
-# define WIN32_LEAN_AND_MEAN
-# endif
-#include <Windows.h>
-#include <io.h>
-#include <fcntl.h>
-#else
-#include <sys/ioctl.h>
-#include <unistd.h>
-#endif
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
@@ -28,12 +14,7 @@
 #include "../entity/globals.hpp"
 #include "../utility/ansi_colors.hpp"
 
-#ifdef BMMO_INCLUDE_INTERNAL
-#include "../entity/globals.hpp"
-#define BMMO_PRINTF bmmo::replxx_instance.print
-#else
-#define BMMO_PRINTF std::printf
-#endif
+#include "../utility/misc.hpp"
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
@@ -43,7 +24,7 @@ public:
 #ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
         SteamDatagramErrMsg err_msg;
         if (!GameNetworkingSockets_Init(nullptr, err_msg))
-            FatalError("GameNetworkingSockets_Init failed.  %s", err_msg);
+            bmmo::FatalError("GameNetworkingSockets_Init failed.  %s", err_msg);
 #else
         SteamDatagramClient_SetAppID(570); // Just set something, doesn't matter what
         //SteamDatagramClient_SetUniverse( k_EUniverseDev );
@@ -68,11 +49,8 @@ public:
 #endif
         init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
         init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, DebugOutput);
-    }
-
-    static void set_log_file(FILE* file) {
-        log_file_ = file;
+        SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg,
+                bmmo::DebugOutput);
     }
 
     role() {
@@ -110,10 +88,7 @@ public:
 #else
         SteamDatagramClient_Kill();
 #endif
-        if (log_file_) {
-            fclose(log_file_);
-            log_file_ = nullptr;
-        }
+        bmmo::close_log();
     }
 
 protected:
@@ -123,21 +98,6 @@ protected:
     static inline time_t init_time_t_;
     std::atomic_bool running_ = false;
     ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
-    static inline FILE* log_file_ = nullptr;
-#ifdef _WIN32
-    static inline const bool LOWER_THAN_WIN10 = [] {
-        typedef void (WINAPI* RtlGetVersionPtr) (PRTL_OSVERSIONINFOW);
-        HMODULE hMod = GetModuleHandleW(L"ntdll.dll");
-        if (hMod) {
-            auto func = (RtlGetVersionPtr)GetProcAddress(hMod, "RtlGetVersion");
-            if (func) {
-                RTL_OSVERSIONINFOW VersionInformation{}; func(&VersionInformation);
-                return VersionInformation.dwMajorVersion < 10;
-            };
-        }
-        return true;
-    }(); // no manifest; we cannot use GetVersion or IsWindowsVersionXXXorGreater
-#endif
 
     virtual int poll_incoming_messages() = 0;
 
@@ -159,128 +119,9 @@ protected:
         *(int*)0 = 0;
     }
 
-    static void RightTrim(char* text) {
-        char* el = strchr(text, '\0');
-        if (el > text && el[-1] == '\n')
-            text[el - text - 1] = '\0';
-    }
-
-    template <typename T>
-    static inline const T& ConvertArgument(const T& arg) noexcept {
-        return arg;
-    }
-
-    static inline const char* ConvertArgument(const std::string& str) noexcept {
-        return str.c_str();
-    }
-
 public:
     static void set_logging_level(ESteamNetworkingSocketsDebugOutputType eType) {
-        SteamNetworkingUtils()->SetDebugOutputFunction(eType, DebugOutput);
-    }
-
-    static void LogFileOutput(const char* pMsg) {
-        if (log_file_) {
-            auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            char timeStr[15];
-            std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
-            fprintf(log_file_, "[%s] %s\n", timeStr, pMsg);
-            // fflush(log_file_);
-        }
-    }
-
-    static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor) {
-        // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
-        auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        char timeStr[15];
-        std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
-
-        if (log_file_) {
-            fprintf(log_file_, "[%s] %s\n", timeStr, pszMsg);
-        }
-
-        if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
-            fprintf(stderr, "\r[%s] %s\n> ", timeStr, pszMsg);
-            fflush(stdout);
-            fflush(stderr);
-            if (log_file_) fflush(log_file_);
-            exit(2);
-        } else {
-            // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            if (!isatty(fileno(stdout))) {
-                printf("\r[%s] %s\n", timeStr, pszMsg);
-                fflush(stdout);
-                return;
-            }
-            // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
-            if (ansiColor == bmmo::ansi::Reset
-//                 || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
-//                 // possible with replxx
-            )
-                BMMO_PRINTF("\r[%s] %s\n", timeStr, pszMsg);
-            else
-                BMMO_PRINTF("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
-            fflush(stdout);
-            // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
-        }
-    }
-
-    static void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
-        DebugOutput(eType, pszMsg, bmmo::ansi::Reset);
-    }
-
-    template <typename ... Args>
-    static void Sprintf(std::string& buf, const char* fmt, Args&& ... args) {
-        buf.resize(snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...));
-    }
-
-    // create a new string and format it
-    template <typename ... Args>
-    static std::string Sprintf(const char* fmt, Args&& ... args) {
-        std::string buf(2048, 0);
-        buf.resize(snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...));
-        return buf;
-    }
-
-    static void Printf(const char* fmt) {
-        char text[2048];
-        strcpy(text, fmt);
-        RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
-    }
-
-    static void Printf(int ansiColor, const char* fmt) {
-        Printf(ansiColor, "%s", fmt);
-    }
-
-    template <typename ... Args>
-    static void Printf(const char* fmt, Args&& ... args) {
-        char text[2048]{};
-        snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
-        // va_list ap;
-        // va_start(ap, fmt);
-        // vsprintf(text, fmt, ap);
-        // va_end(ap);
-        RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
-    }
-
-    template<typename ... Args>
-    static void Printf(int ansiColor, const char* fmt, Args&& ... args) {
-        char text[2048]{};
-        snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
-        RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text, ansiColor);
-    }
-
-    static void FatalError(const char* fmt, ...) {
-        char text[2048];
-        va_list ap;
-        va_start(ap, fmt);
-        vsprintf(text, fmt, ap);
-        va_end(ap);
-        RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
+        SteamNetworkingUtils()->SetDebugOutputFunction(eType, bmmo::DebugOutput);
     }
 };
 

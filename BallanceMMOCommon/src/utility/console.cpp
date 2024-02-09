@@ -7,6 +7,7 @@
 //#endif
 #include "entity/globals.hpp"
 #include "utility/console.hpp"
+#include "utility/misc.hpp"
 #include "utility/string_utils.hpp"
 
 namespace bmmo {
