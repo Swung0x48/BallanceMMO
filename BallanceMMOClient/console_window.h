@@ -2,6 +2,8 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <utility>
+#include <mutex>
 #include <boost/circular_buffer.hpp>
 #include "bml_includes.h"
 #include "log_manager.h"
@@ -14,7 +16,10 @@ private:
     std::thread console_thread_;
     bool owned_console_ = false;
     std::atomic_bool running_ = false;
-    boost::circular_buffer<std::string> previous_msg_ = decltype(previous_msg_)(8);
+    std::mutex mutex_;
+
+    // pair <text, color>
+    boost::circular_buffer<std::pair<std::string, int>> previous_msg_ = decltype(previous_msg_)(12);
 
     bool cleanup();
 

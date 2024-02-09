@@ -126,10 +126,10 @@ bool config_manager::check_and_set_nickname(IProperty* prop, game_state& db) {
     auto last_name_change = sys_time(seconds(last_name_change_time_));
     if (std::chrono::system_clock::now() - last_name_change < 24h) {
         bypass_name_check_ = true;
-        prop->SetString(db.get_nickname().c_str());
+        prop->SetString(bmmo::string_utils::utf8_to_ansi(db.get_nickname()).c_str());
         auto next_name_change = system_clock::to_time_t(last_name_change + 24h);
-        std::string error_msg(128, '\0');
-        std::strftime(error_msg.data(), error_msg.size(),
+        char error_msg[128];
+        std::strftime(error_msg, sizeof(error_msg),
             "Error: You can only change your name every 24 hours (after %F %T).",
             std::localtime(&next_name_change));
         log_manager_->send_ingame_message(error_msg, bmmo::ansi::BrightRed);

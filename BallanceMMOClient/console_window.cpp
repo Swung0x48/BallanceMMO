@@ -95,7 +95,8 @@ void BindCrtHandlesToStdHandles(bool bindStdIn, bool bindStdOut, bool bindStdErr
 }
 
 void console_window::print_text(const char* text, int ansi_color) {
-    previous_msg_.push_back(text);
+    std::lock_guard lk(mutex_);
+    previous_msg_.push_back({text, ansi_color});
     if (running_)
         role::Printf(ansi_color, "%s", text);
 }
@@ -106,8 +107,10 @@ void console_window::run() {
     GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
     SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     //std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
-    if (owned_console_)
-        for (const auto& i : previous_msg_) role::Printf(i.c_str());
+    if (owned_console_) {
+        std::lock_guard lk(mutex_);
+        for (const auto& [text, color]: previous_msg_) role::Printf(color, text.c_str());
+    }
     while (true) {
         std::string line;
         /*wchar_t wc;
