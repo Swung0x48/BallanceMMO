@@ -1,10 +1,10 @@
 #include <iostream>
 #include <algorithm>
 #include <replxx.hxx>
-//#ifdef _WIN32
-//#include <io.h>
-//#include <fcntl.h>
-//#endif
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 #include "entity/globals.hpp"
 #include "utility/console.hpp"
 #include "utility/misc.hpp"
@@ -112,6 +112,18 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching, c
 };
 
 bool console::read_input(std::string &buf) {
+#ifdef _WIN32
+    if (LOWER_THAN_WIN10) {
+        std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
+        std::cout << "\r> " << std::flush;
+        std::wstring wbuf;
+        bool success = bool(std::getline(std::wcin, wbuf));
+        buf = bmmo::string_utils::ConvertWideToUtf8(wbuf);
+        if (auto pos = buf.rfind('\r'); pos != std::string::npos)
+            buf.erase(pos);
+        return success;
+    }
+#endif
     replxx_instance.print("\r\033[0K");
     auto input_cstr = replxx_instance.input("\r> ");
     if (!input_cstr)

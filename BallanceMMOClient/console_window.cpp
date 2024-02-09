@@ -118,7 +118,7 @@ void console_window::run() {
         std::lock_guard lk(mutex_);
         for (const auto& [text, color]: previous_msg_) bmmo::Printf(color, text.c_str());
     }
-    while (true) {
+    while (!bmmo::LOWER_THAN_WIN10 || running()) {
         std::string line;
         /*wchar_t wc;
         do {
@@ -134,7 +134,7 @@ void console_window::run() {
             cleanup();
             break;
         };
-        if (!running_)
+        if (!running())
             break;
         std::string cmd = "ballancemmo";
         std::vector<std::string> args;
@@ -197,6 +197,7 @@ bool console_window::cleanup() {
 bool console_window::hide() {
   if (!running_ || !owned_console_)
     return false;
+  if (bmmo::LOWER_THAN_WIN10) return cleanup();
   bmmo::console::end_input();
   return true;
 }

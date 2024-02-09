@@ -57,8 +57,7 @@ namespace bmmo {
         if (el > text && el[-1] == '\n')
             text[el - text - 1] = '\0';
     }
-
-    
+ 
     void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor) {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -74,25 +73,27 @@ namespace bmmo {
             fflush(stdout);
             fflush(stderr);
             if (log_file) fflush(log_file);
-            exit(2);
-        } else {
+            return exit(2);
+        }
+        else if (!isatty(fileno(stdout))) {
+            printf("[%s] %s\n", timeStr, pszMsg);
+        }
+#ifdef _WIN32
+        else if (LOWER_THAN_WIN10) {
+            printf("\r[%s] %s\n> ", timeStr, bmmo::string_utils::utf8_to_ansi(pszMsg).c_str());
+        }
+#endif
+        else {
             // printf("\r%10.2f %s\n> ", time * 1e-6, pszMsg);
-            if (!isatty(fileno(stdout))) {
-                printf("\r[%s] %s\n", timeStr, pszMsg);
-                fflush(stdout);
-                return;
-            }
             // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::CLEAR_SELF, '\0');
-            if (ansiColor == bmmo::ansi::Reset
-//                 || LOWER_THAN_WIN10 // ansi sequences cannot be used on windows versions below 10
-//                 // possible with replxx
-            )
+            if (ansiColor == bmmo::ansi::Reset)
                 replxx_instance.print("\r[%s] %s\n", timeStr, pszMsg);
             else
-                replxx_instance.print("\r[%s] %s%s\033[m\n", timeStr, bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
-            fflush(stdout);
-            // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
+                replxx_instance.print("\r[%s] %s%s\033[m\n", timeStr,
+                                      bmmo::ansi::get_escape_code(ansiColor).c_str(), pszMsg);
         }
+        fflush(stdout);
+        // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
     }
 
     void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
@@ -100,9 +101,8 @@ namespace bmmo {
     }
 
     void close_log() {
-        if (log_file) {
-            fclose(log_file);
-            log_file = nullptr;
-        }
+        if (!log_file) return;
+        fclose(log_file);
+        log_file = nullptr;
     }
 }
