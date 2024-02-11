@@ -5,6 +5,12 @@
 #include <steam/steam_api.h>
 #endif
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "common.hpp"
 #include "entity/record_entry.hpp"
 #include <fstream>
