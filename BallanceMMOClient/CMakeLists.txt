@@ -15,22 +15,24 @@ include_directories("${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include"
 set(CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config)
 configure_file(${CONFIG_DIR}/version_config.h.in ${CONFIG_DIR}/version_config.h @ONLY)
 
-if (CMAKE_SYSTEM_NAME MATCHES "Windows")
-    # setting vcpkg toolchain file
-#    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake
-#            CACHE STRING "Vcpkg toolchain file")
+# if (CMAKE_SYSTEM_NAME MATCHES "Windows")
+#     # setting vcpkg toolchain file
+# #    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake
+# #            CACHE STRING "Vcpkg toolchain file")
 
-    if (MINGW)  # if mingw
-        # setting vcpkg
-        if (DEFINED ENV{VCPKG_DEFAULT_TRIPLET} AND NOT DEFINED VCPKG_TARGET_TRIPLET)
-            set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
-        endif ()
-    endif ()
-    find_package(Protobuf REQUIRED)
-    find_package(GameNetworkingSockets REQUIRED)
+#     if (MINGW)  # if mingw
+#         # setting vcpkg
+#         if (DEFINED ENV{VCPKG_DEFAULT_TRIPLET} AND NOT DEFINED VCPKG_TARGET_TRIPLET)
+#             set(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
+#         endif ()
+#     endif ()
+#     find_package(Protobuf REQUIRED)
+#     find_package(GameNetworkingSockets REQUIRED)
+# endif ()
+
+if (NOT TARGET replxx)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/replxx ${CMAKE_CURRENT_BINARY_DIR}/replxx)
 endif ()
-
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/replxx ${CMAKE_CURRENT_BINARY_DIR}/replxx)
 
 set(VIRTOOLS_SDK_PATH "${VIRTOOLS_SDK_PATH}" CACHE PATH "Path to the Virtools SDK")
 set(VIRTOOLS_SDK_FETCH_FROM_GIT "${VIRTOOLS_SDK_FETCH_FROM_GIT}" CACHE BOOL "Set to ON to fetch copy of SDK from git if not otherwise locatable")
