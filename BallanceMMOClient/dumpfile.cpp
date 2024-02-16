@@ -28,7 +28,7 @@ namespace NSDumpFile {
 
         // dump info
         //
-        MINIDUMP_EXCEPTION_INFORMATION dumpInfo;
+        MINIDUMP_EXCEPTION_INFORMATION dumpInfo{};
         dumpInfo.ExceptionPointers = pException;
         dumpInfo.ThreadId = GetCurrentThreadId();
         dumpInfo.ClientPointers = TRUE;
@@ -142,7 +142,7 @@ namespace NSDumpFile {
             }
         } while (record->ExceptionRecord);
         extraText.append("\n========\n");
-        srand(time(nullptr));
+        srand((unsigned int) time(nullptr));
         extraText.append(Quotes[rand() % (sizeof(Quotes) / sizeof(char*))]);
         //FatalAppExit(-1, extraText.c_str());
         wchar_t basename[128];

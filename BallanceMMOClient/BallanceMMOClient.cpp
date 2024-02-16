@@ -151,6 +151,15 @@ void BallanceMMOClient::OnLoad()
 
     utils::cleanup_old_crash_dumps();
 
+    using namespace std::placeholders;
+    m_bml->RegisterCommand(new CommandMMO(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
+    m_bml->RegisterCommand(new CommandMMOSay(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
+
+    for (const auto& file_data: bmmo::HASHES_TO_CHECK) {
+        auto& hash_data = md5_data_[file_data[0]];
+        utils::md5_from_file(std::string{"..\\"}.append(file_data[0]), hash_data.data());
+    }
+
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     spect_cam_ = static_cast<CKCamera*>(m_bml->GetCKContext()->CreateObject(CKCID_CAMERA, "SpectatorCam"));
 #endif
@@ -293,16 +302,7 @@ void BallanceMMOClient::OnPostStartMenu()
         status_->sprite_->SetFont("Times New Roman", utils_.get_display_font_size(11), 700, false, false);
         status_->paint(0xffff0000);
 
-        using namespace std::placeholders;
-
-        m_bml->RegisterCommand(new CommandMMO(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
-        m_bml->RegisterCommand(new CommandMMOSay(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
-
         edit_Gameplay_Tutorial(m_bml->GetScriptByName("Gameplay_Tutorial"));
-        for (const auto& file_data: bmmo::HASHES_TO_CHECK) {
-            auto& hash_data = md5_data_[file_data[0]];
-            utils::md5_from_file(std::string{"..\\"}.append(file_data[0]), hash_data.data());
-        }
 
         config_manager_.validate_nickname();
         db_.set_nickname(bmmo::string_utils::ansi_to_utf8(config_manager_["playername"]->GetString()));
