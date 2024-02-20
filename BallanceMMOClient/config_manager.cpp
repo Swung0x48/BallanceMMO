@@ -19,8 +19,12 @@ std::wstring config_manager::get_local_appdata_path() { // local appdata
 void config_manager::migrate_config() {
     constexpr const char* const config_path = "..\\ModLoader\\Config\\BallanceMMOClient.cfg";
     std::ifstream config(config_path);
-    if (!config.is_open())
-        return;
+    if (!config.is_open()) {
+        config.clear();
+        config.open("..\\ModLoader\\Configs\\BallanceMMOClient.cfg");
+        // BMLPlus parity issue
+        if (!config.is_open()) return;
+    }
     std::string temp_str;
     while (config >> temp_str) {
         if (temp_str == "BallanceMMOClient")
