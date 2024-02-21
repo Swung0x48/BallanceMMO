@@ -30,6 +30,11 @@ configure_file(${CONFIG_DIR}/version_config.h.in ${CONFIG_DIR}/version_config.h 
 #     find_package(GameNetworkingSockets REQUIRED)
 # endif ()
 
+if (NOT TARGET GameNetworkingSockets)
+    find_package(Protobuf REQUIRED)
+    find_package(GameNetworkingSockets REQUIRED)
+endif ()
+
 if (NOT TARGET replxx)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/replxx ${CMAKE_CURRENT_BINARY_DIR}/replxx)
 endif ()
