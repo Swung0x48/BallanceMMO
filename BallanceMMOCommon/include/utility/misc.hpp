@@ -78,6 +78,8 @@ namespace bmmo {
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
     }
 
+    void set_auto_flush_log(bool flush);
+    void flush_log();
     void close_log();
 }
 

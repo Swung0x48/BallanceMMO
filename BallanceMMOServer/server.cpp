@@ -1454,7 +1454,7 @@ protected:
 };
 
 // parse arguments (optional port and help/version/log) with getopt
-int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run) {
+static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run) {
     enum option_values { DryRun = UINT8_MAX + 1 };
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
@@ -1834,6 +1834,7 @@ int main(int argc, char** argv) {
         server.broadcast_message(msg);
         Printf(bmmo::color_code(msg.code), "Requested to restart #%u's current level.", client);
     });
+    console.register_command("flushlog", bmmo::flush_log);
     console.register_command("help", [&] { Printf(console.get_help_string().c_str()); });
 
     server.wait_till_started();

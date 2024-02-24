@@ -811,7 +811,7 @@ private:
 
 // parse command line arguments (server/name/uuid/help/version) with getopt
 int parse_args(int argc, char** argv) {
-    enum option_values { NoSoundFiles = UINT8_MAX + 1 };
+    enum option_values { NoSoundFiles = UINT8_MAX + 1, AutoFlush };
     static struct option long_options[] = {
         {"recorder-mode", required_argument, 0, 'r'},
         {"server", required_argument, 0, 's'},
@@ -823,6 +823,7 @@ int parse_args(int argc, char** argv) {
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {"no-sound-files", no_argument, 0, NoSoundFiles},
+        {"auto-flush", no_argument, 0, AutoFlush},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
@@ -848,6 +849,8 @@ int parse_args(int argc, char** argv) {
                 options.print_states = true; break;
             case NoSoundFiles:
                 options.save_sound_files = false; break;
+            case AutoFlush:
+                bmmo::set_auto_flush_log(true); break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
@@ -855,6 +858,7 @@ int parse_args(int argc, char** argv) {
                 puts("  -n, --name=NAME\t Set your name to NAME (default: \"MockClient\")");
                 puts("  -u, --uuid=UUID\t Set your UUID to UUID (default: \"00010002-0003-0004-0005-000600070008\")");
                 puts("  -l, --log=PATH\t Write log to the file at PATH in addition to stdout.");
+                puts("      --auto-flush\t Automatically flush the log file after each output.");
                 puts("  -d, --detail=LEVEL\t Set the detail level (0 to 2, from low to high) of output (default: 0).");
                 puts("  -r, --recorder-mode\t Record data received from the server and save them to a binary file.");
                 puts("      --no-sound-files\t Discard sound files sent by the server.");
@@ -1144,6 +1148,7 @@ int main(int argc, char** argv) {
         bmmo::restart_request_msg msg{.content = {.victim = console.get_next_client_id()}};
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
+    console.register_command("flushlog", bmmo::flush_log);
 
     client.wait_till_started();
     std::thread record_thread;

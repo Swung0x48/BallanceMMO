@@ -71,6 +71,7 @@ bool config_manager::load() {
     std::vector<std::string> mute_list_vector = yaml_load_value(config_, "mute_list",
             decltype(mute_list_vector){"00000001-0002-0003-0004-000000000005"});
     muted_players = std::unordered_set(mute_list_vector.begin(), mute_list_vector.end());
+    bmmo::set_auto_flush_log(yaml_load_value(config_, "auto_flush_log", false));
 
     ifile.close();
     save(false);
@@ -137,6 +138,7 @@ void config_manager::save(bool reload_values) {
                 << "# - Log ball-offs: whether to write player ball-off events to the log file.\n"
                 << "# - Serious warning as DNF: mark the client's status as Did-Not-Finish upon receiving a serious warning.\n"
                 << "# - Options for log levels: important, warning, msg.\n"
+                << "# - Auto flush log: whether to automatically flush the log file after each output.\n"
                 << "# - Map name list style: \"md5_hash: name\".\n"
                 << "# - Op list player data style: \"playername: uuid\".\n"
                 << "# - Ban list style: \"uuid: reason\".\n"

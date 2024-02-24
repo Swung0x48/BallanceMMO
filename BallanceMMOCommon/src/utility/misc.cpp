@@ -39,7 +39,11 @@ namespace bmmo {
     false;
 #endif
 
-    namespace { FILE* log_file = nullptr; }
+    namespace {
+        FILE* log_file = nullptr;
+        bool auto_flush = false;
+    }
+
     void set_log_file(FILE* file) { log_file = file; }
 
     void LogFileOutput(const char* pMsg) {
@@ -66,6 +70,7 @@ namespace bmmo {
 
         if (log_file) {
             fprintf(log_file, "[%s] %s\n", timeStr, pszMsg);
+            if (auto_flush) fflush(log_file);
         }
 
         if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
@@ -98,6 +103,16 @@ namespace bmmo {
 
     void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
         DebugOutput(eType, pszMsg, bmmo::ansi::Reset);
+    }
+
+    void set_auto_flush_log(bool flush) {
+        auto_flush = flush;
+    }
+
+    void flush_log() {
+        if (!log_file) return;
+        if (fflush(log_file) == 0)
+            Printf("Log file flushed successfully.");
     }
 
     void close_log() {
