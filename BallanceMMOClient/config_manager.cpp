@@ -66,11 +66,11 @@ void config_manager::init_config() {
     auto* tmp_prop = config->GetProperty("Player", "Playername");
     tmp_prop->SetComment("Player name. Can only be changed once every 24 hours (countdown starting after joining a server).");
     tmp_prop->SetDefaultString(bmmo::name_validator::get_random_nickname().c_str());
-    props_.emplace("playername", tmp_prop);
+    props_["playername"] = tmp_prop;
     tmp_prop = config->GetProperty("Player", "SpectatorMode");
     tmp_prop->SetComment("Whether to connect to the server as a spectator. Spectators are invisible to other players.");
     tmp_prop->SetDefaultBoolean(false);
-    props_.emplace("spectator", tmp_prop);
+    props_["spectator"] = tmp_prop;
     // Validation of player names fails at this stage of initialization
     // so we had to put it at the time of post startmenu events.
     load_external_config();
@@ -78,19 +78,19 @@ void config_manager::init_config() {
     tmp_prop = config->GetProperty("Gameplay", "Extrapolation");
     tmp_prop->SetComment("Apply quadratic extrapolation to make movement of balls look smoother at a slight cost of accuracy.");
     tmp_prop->SetBoolean(true); // force extrapolation for now
-    props_.emplace("extrapolation", tmp_prop);
+    props_["extrapolation"] = tmp_prop;
     tmp_prop = config->GetProperty("Gameplay", "PlayerListColor");
     tmp_prop->SetComment("Text color of the player list (press Ctrl+Tab to toggle visibility) in hexadecimal RGB format. Default: FFE3A1");
     tmp_prop->SetDefaultString("FFE3A1");
-    props_.emplace("player_list_color", tmp_prop);
+    props_["player_list_color"] = tmp_prop;
     tmp_prop = config->GetProperty("Gameplay", "DynamicOpacity");
     tmp_prop->SetComment("Whether to dynamically adjust opacities of other spirit balls based on their distances to the current camera.");
     tmp_prop->SetDefaultBoolean(true);
-    props_.emplace("dynamic_opacity", tmp_prop);
+    props_["dynamic_opacity"] = tmp_prop;
     tmp_prop = config->GetProperty("Gameplay", "SoundNotification");
     tmp_prop->SetComment("Whether to play beep sounds in addition to chat notifications on important server events.");
     tmp_prop->SetDefaultBoolean(true);
-    props_.emplace("sound_notification", tmp_prop);
+    props_["sound_notification"] = tmp_prop;
 }
 
 void config_manager::load_external_config() {

@@ -250,8 +250,8 @@ void BallanceMMOClient::OnPostExitLevel() {
     countdown_restart_ = false;
     force_hs_calibration_ = false;
     if (current_level_mode_ == bmmo::level_mode::Highscore && !spectator_mode_) {
-        if (!level_finished_ && !did_not_finish_)
-            ; //send_dnf_message();
+        /*if (!level_finished_ && !did_not_finish_)
+            send_dnf_message();*/
         level_finished_ = false;
         compensation_lives_label_.reset();
     }
