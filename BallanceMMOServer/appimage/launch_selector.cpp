@@ -46,7 +46,7 @@ int parse_args(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    std::string cmd = "$APPDIR/usr/bin/BallanceMMO";
+    std::string cmd = "BallanceMMO";
 
     if (argc < 1) return -1;
 
@@ -64,6 +64,11 @@ int main(int argc, char** argv) {
         cmd += ' ';
         cmd += argv[i];
     }
+
+    if (auto appdir = std::getenv("APPDIR"))
+        cmd = appdir + ("/usr/bin/" + cmd);
+    else
+        cmd = "./" + cmd;
 
     return std::system(cmd.c_str());
 }

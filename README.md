@@ -152,6 +152,51 @@ BallanceMMO is a project which brings online experiences to Ballance.
     $ ./start_ballancemmo_loop.sh
     ```
 
+5. (Linux bonus) Building portable AppImages
+
+    As you may have already seen, our Linux [server builds from GitHub Actions](https://github.com/Swung0x48/BallanceMMO/actions/workflows/server.yml) use AppImages. This is because some system dependencies used by our build outputs differ in version with different systems/distros, and we can pack them in an AppImage file to increase portability.
+
+    To build the AppImage, you have to first re-run the CMake configuration to tell it that you're trying to build one (append the `-G` switch if you want to continue with GNU Make):
+
+    ```commandline
+    $ ./build_server.sh -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SERVER_APPIMAGE=ON
+    ```
+
+    Then navigate to the binary output directory (this is to ensure that we can find our dependencies) and **install** the binaries somewhere (e.g. `AppDir`):
+
+    ```commandline
+    cd build/BallanceMMOServer
+    DESTDIR=AppDir ninja -C .. install
+    ```
+
+    (replace `ninja` with `make` if you want)
+
+    We use *linuxdeploy* to build our AppImages ([get its releases here](https://github.com/linuxdeploy/linuxdeploy/releases)), so download and place it in the binary output directory, then run the command to generate our AppImage (if you can't run this, then try using the `--appimage-extract` switch to extract and use `squashfs-root/AppRun` instead):
+
+    ```commandline
+    $ ./linuxdeploy.AppImage --appdir ../AppDir --output appimage --desktop-file ../../BallanceMMOServer/appimage/BMMOLaunchSelector.desktop --icon-file ../../BallanceMMOServer/appimage/BallanceMMO.svg
+    ```
+
+    If everything goes smoothly then a file named like `BallanceMMOLaunchSelector-*arch*.AppImage` should appear, which bundles required dependencies and includes other tools like *BallanceMMOMockClient* (thus the **LaunchSelector** name). To see its usage:
+
+    ```commandline
+    $ ./BallanceMMOLaunchSelector.AppImage --help
+    Usage: ./BallanceMMOLaunchSelector.AppImage [OPTION]...
+    Options:
+    -h, --help              Display this help and exit.
+    -l, --launch [Target]   Launch the selected target.
+    Additional options will be forwarded to the target.
+    Available targets (default: `Server`):
+      Server
+      MockClient
+      RecordParser
+    Examples:
+      To see the server help:
+        ./BallanceMMOLaunchSelector-x86_64.AppImage --launch Server --help
+      To launch a mock client with a custom name:
+        ./BallanceMMOLaunchSelector-x86_64.AppImage -l MockClient -n Name
+    ```
+
 ## Building client (Game Mod)
 
 ### Windows
