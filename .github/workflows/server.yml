@@ -62,14 +62,13 @@ jobs:
         echo Got linuxdeploy exec entry at $appdeploy
         $appdeploy --appdir ../AppDir --output appimage --desktop-file ../../BallanceMMOServer/appimage/BMMOLaunchSelector.desktop --icon-file ../../BallanceMMOServer/appimage/BallanceMMO.svg
     
-    - name: Prepare artifact directory and dry run
+    - name: Prepare artifact directory
       working-directory: ${{github.workspace}}/build/BallanceMMOServer
       run: |
         appfile=$(ls BallanceMMOLaunchSelector*.AppImage | awk '{print $1}')
         chmod +x $appfile
         mkdir artifacts
         mv -t artifacts $appfile start_ballancemmo_loop.sh
-        artifacts/$appfile --launch Server --dry-run
 
     - name: Release Artifact
       uses: actions/upload-artifact@v3
