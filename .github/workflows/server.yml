@@ -54,28 +54,28 @@ jobs:
       run: ctest -C ${{env.BUILD_TYPE}}
 
     - name: Build AppImage
-      working-directory: ${{github.workspace}}/build
+      working-directory: ${{github.workspace}}/build/BallanceMMOServer
       run: |
         curl -o linuxdeploy.AppImage -L https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage
         chmod +x linuxdeploy.AppImage
         appdeploy=$(./linuxdeploy.AppImage --appimage-extract | grep AppRun | head -n 1)
         echo Got linuxdeploy exec entry at $appdeploy
-        $appdeploy --appdir AppDir --output appimage --desktop-file ../BallanceMMOServer/appimage/BMMOLaunchSelector.desktop --icon-file ../BallanceMMOServer/appimage/BallanceMMO.svg
+        $appdeploy --appdir ../AppDir --output appimage --desktop-file ../../BallanceMMOServer/appimage/BMMOLaunchSelector.desktop --icon-file ../../BallanceMMOServer/appimage/BallanceMMO.svg
     
     - name: Prepare artifact directory and dry run
-      working-directory: ${{github.workspace}}/build
+      working-directory: ${{github.workspace}}/build/BallanceMMOServer
       run: |
         appfile=$(ls BallanceMMOLaunchSelector*.AppImage | awk '{print $1}')
         chmod +x $appfile
         mkdir artifacts
-        mv -t artifacts $appfile BallanceMMOServer/start_ballancemmo_loop.sh
+        mv -t artifacts $appfile start_ballancemmo_loop.sh
         artifacts/$appfile --launch Server --dry-run
 
     - name: Release Artifact
       uses: actions/upload-artifact@v3
       with:
         name: server-linux-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
-        path: build/artifacts
+        path: build/BallanceMMOServer/artifacts
 
   build-server-windows:
     runs-on: windows-latest
