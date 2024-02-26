@@ -12,7 +12,7 @@ set(BMMO_LIB_DIR ${PROJECT_BINARY_DIR}/lib)
 set(BMMO_RUNTIME_DIR ${PROJECT_BINARY_DIR})
 
 # sets RPATH for *install*ed files
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:\$ORIGIN:lib") # Note CMake escaping around '$' sign.
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:\$ORIGIN:lib:../lib") # Note CMake escaping around '$' sign.
 # *built* files will also use RPATH which has been set before
 set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 # if (CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -107,4 +107,13 @@ if (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # configure_file(${CMAKE_CURRENT_SOURCE_DIR}/postbuild.bat ${CMAKE_CURRENT_BINARY_DIR}/postbuild.bat COPYONLY)
 else()
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.sh ${BMMO_RUNTIME_DIR}/start_ballancemmo_loop.sh COPYONLY)
+    install(TARGETS BallanceMMOServer BallanceMMOMockClient BallanceMMORecordParser DESTINATION bin)
+    install(TARGETS GameNetworkingSockets yaml-cpp DESTINATION lib)
+endif()
+
+option(BUILD_SERVER_APPIMAGE "Build BallanceMMO Server AppImage" OFF)
+
+if (BUILD_SERVER_APPIMAGE)
+    add_executable(BallanceMMOLaunchSelector appimage/launch_selector.cpp)
+    install(TARGETS BallanceMMOLaunchSelector DESTINATION bin)
 endif()

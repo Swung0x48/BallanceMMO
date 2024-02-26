@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=BallanceMMOLaunchSelector
+Comment=BMMO Server
+Exec=BallanceMMOLaunchSelector
+Icon=BallanceMMO
+GenericName=Game Server
+Categories=Game
+Terminal=true
