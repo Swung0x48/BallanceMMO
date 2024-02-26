@@ -92,7 +92,7 @@ target_compile_options(BallanceMMOServer PRIVATE ${compile_options})
 target_compile_options(BallanceMMOMockClient PRIVATE ${compile_options})
 target_compile_options(BallanceMMORecordParser PRIVATE ${compile_options})
 if (WIN32)
-# Prevents Windows.h from adding unnecessary includes, and defining min/max as macros 
+    # Prevent Windows.h from adding unnecessary includes, and defining min/max as macros 
     target_compile_definitions(BallanceMMOServer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_definitions(BallanceMMOMockClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_definitions(BallanceMMORecordParser PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -102,8 +102,8 @@ endif()
 
 # os specific scripts
 if (CMAKE_SYSTEM_NAME MATCHES "Windows")
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/powershell_wrapper.bat ${BMMO_RUNTIME_DIR}/start_ballancemmo_loop.bat COPYONLY)
-    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.ps1 ${BMMO_RUNTIME_DIR}/bmmo_loop.ps1 COPYONLY)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/powershell_wrapper.bat ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}/${CMAKE_BUILD_TYPE}/start_ballancemmo_loop.bat COPYONLY)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.ps1 ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}/bmmo_loop.ps1 COPYONLY)
     # configure_file(${CMAKE_CURRENT_SOURCE_DIR}/postbuild.bat ${CMAKE_CURRENT_BINARY_DIR}/postbuild.bat COPYONLY)
 else()
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/start_ballancemmo_loop.sh ${BMMO_RUNTIME_DIR}/start_ballancemmo_loop.sh COPYONLY)
