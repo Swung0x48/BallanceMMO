@@ -38,13 +38,14 @@ jobs:
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
       run: |
         echo -e "\nfile(WRITE version.txt \${BMMO_VER})" >> CMakeLists.txt
-        cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
+        cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DCMAKE_INSTALL_PREFIX=/usr
         echo "BMMO_VER=$(cat version.txt)" >> "$GITHUB_ENV"
         echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> "$GITHUB_ENV"
 
-    - name: Build
+    - name: Build and install
       # Build your program with the given configuration
-      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+      working-directory: ${{github.workspace}}
+      run: DESTDIR=AppDir cmake --build ./build --config ${{env.BUILD_TYPE}} --target install
 
     - name: Test
       working-directory: ${{github.workspace}}
@@ -52,11 +53,29 @@ jobs:
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
       run: ctest -C ${{env.BUILD_TYPE}}
 
+    - name: Build AppImage
+      working-directory: ${{github.workspace}}/build
+      run: |
+        curl -o linuxdeploy.AppImage -L https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage
+        chmod +x linuxdeploy.AppImage
+        appdeploy=$(./linuxdeploy.AppImage --appimage-extract | grep AppRun | head -n 1)
+        echo Got linuxdeploy exec entry at $appdeploy
+        $appdeploy --appdir AppDir --output appimage --desktop-file ../BallanceMMOServer/appimage/BMMOLaunchSelector.desktop --icon-file ../BallanceMMOServer/appimage/BallanceMMO.svg
+    
+    - name: Prepare artifact directory and dry run
+      working-directory: ${{github.workspace}}/build
+      run: |
+        appfile=$(ls BallanceMMOLaunchSelector*.AppImage | awk '{print $1}')
+        chmod +x $appfile
+        mkdir artifacts
+        mv -t artifacts $appfile BallanceMMOServer/start_ballancemmo_loop.sh
+        artifacts/$appfile --launch Server --dry-run
+
     - name: Release Artifact
       uses: actions/upload-artifact@v3
       with:
         name: server-linux-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
-        path: build/BallanceMMOServer
+        path: build/artifacts
 
   build-server-windows:
     runs-on: windows-latest
@@ -108,9 +127,10 @@ jobs:
         working-directory: ${{github.workspace}}
         run: ctest -C ${{env.BUILD_TYPE}}
 
+      # by setting a different working directory we avoid releasing the config file
       - name: Dry run
-        working-directory: ${{github.workspace}}/build/BallanceMMOServer/${{env.BUILD_TYPE}}
-        run: ${{github.workspace}}/build/BallanceMMOServer/${{env.BUILD_TYPE}}/BallanceMMOServer.exe --dry-run
+        working-directory: ${{github.workspace}}/build/BallanceMMOServer
+        run: ${{env.BUILD_TYPE}}/BallanceMMOServer.exe --dry-run
 
       - name: Release Artifact
         uses: actions/upload-artifact@v3
