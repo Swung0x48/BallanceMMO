@@ -3,7 +3,7 @@
 #include <cstring>
 #include <string>
 
-const char* const available_binaries[] = { "Server", "MockClient", "RecordParser" };
+constexpr const char* const available_binaries[] = { "Server", "MockClient", "RecordParser" };
 const char* target;
 
 bool select_target(char* test_name) {
@@ -21,7 +21,7 @@ int parse_args(int argc, char** argv) {
         printf("Usage: %s [OPTION]...\n", argv[0]);
         puts("Options:");
         puts("  -h, --help\t\t Display this help and exit.");
-        puts("  -l, --launch [Target]\t Launch the selected target.");
+        puts("  -l, --launch TARGET\t Launch the selected target.");
         puts("Additional options will be forwarded to the target.");
         printf("Available targets (default: `%s`):\n", available_binaries[0]);
         for (const char* name: available_binaries)

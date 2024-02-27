@@ -16,6 +16,7 @@ private:
     log_manager* log_manager_;
     std::function<IConfig*()> config_getter_;
 
+    std::string config_directory_path = "..\\ModLoader\\Config";
     std::wstring get_local_appdata_path();
     const std::wstring LOCAL_APPDATA_PATH = get_local_appdata_path();
     const std::wstring LEGACY_UUID_FILE_PATH = LOCAL_APPDATA_PATH + L"\\BallanceMMOClient_UUID.cfg";
@@ -45,10 +46,12 @@ public:
     void migrate_config();
     void init_config();
     void load_external_config();
-    void save_external_config(std::string uuid = {});
+    void save_external_config(std::string uuid = {}) const;
 
     // returns: if the name changed
     bool check_and_set_nickname(IProperty* prop, game_state& db);
     void check_and_save_name_change_time();
     void validate_nickname();
+
+    inline std::string get_config_directory_path() { return config_directory_path; };
 };

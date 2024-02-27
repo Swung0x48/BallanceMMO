@@ -6,17 +6,18 @@
 #include <picojson/picojson.h>
 
 #include "bml_includes.h"
+#include "config_manager.h"
 #include "log_manager.h"
 
 class server_list final : private BGui::Gui {
 private:
     IBML* bml_;
     log_manager* log_manager_;
+    config_manager* config_manager_;
     std::mutex mtx_{};
     static constexpr float SERVER_ENTRY_HEIGHT = 0.034f, SERVER_LIST_Y_BEGIN = 0.33f,
         SERVER_NAME_Y_BEGIN = SERVER_LIST_Y_BEGIN + (SERVER_ENTRY_HEIGHT + 0.01f) * 3;
     static constexpr size_t MAX_SERVERS_COUNT = 10;
-    static constexpr const char* EXTRA_CONFIG_PATH = "..\\ModLoader\\Config\\BallanceMMOClient_extra.json";
     bool gui_visible_ = false, config_modified_ = false,
         previous_mouse_visibility_ = true;
     BGui::Panel* selected_server_background_{},
@@ -33,7 +34,11 @@ private:
     std::function<void(const char*, const char*)> connect_callback_{};
 
     enum screen_state { None, ServerList, ServerEditor, ConnectionScreen };
-    screen_state screen_;
+    screen_state screen_ = None;
+
+    inline std::string get_extra_config_path() {
+        return config_manager_->get_config_directory_path() + "\\" + "BallanceMMOClient_extra.json";
+    }
 
     void select_server(size_t index, bool save_to_config = true);
     void delete_selected_server();
@@ -63,7 +68,8 @@ private:
     void OnMouseDown(float x, float y, CK_MOUSEBUTTON key) override;
 
 public:
-    server_list(IBML* bml, log_manager* log_manager, decltype(connect_callback_) connect_callback);
+    server_list(IBML* bml, log_manager* log_manager, config_manager* config_manager,
+                decltype(connect_callback_) connect_callback);
 
     void init_gui();
     void enter_gui();

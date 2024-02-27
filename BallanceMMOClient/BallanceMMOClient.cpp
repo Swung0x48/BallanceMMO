@@ -318,7 +318,8 @@ void BallanceMMOClient::OnPostStartMenu()
 
         move_size_hook_ = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, NULL,
                                           WinEventProcCallback, 0, 0, WINEVENT_OUTOFCONTEXT);
-        server_list_ = std::make_unique<server_list>(m_bml, &log_manager_, [this](auto addr, auto name) { connect_to_server(addr, name); });
+        server_list_ = std::make_unique<server_list>(m_bml, &log_manager_, &config_manager_,
+                                       [this](auto addr, auto name) { connect_to_server(addr, name); });
         server_list_->init_gui();
 
         init_ = true;

@@ -123,7 +123,7 @@ void server_list::enter_server_edit() {
 }
 
 void server_list::save_config() {
-    std::ofstream extra_config(EXTRA_CONFIG_PATH);
+    std::ofstream extra_config(get_extra_config_path());
     if (!extra_config.is_open()) return;
     // we can use (picojson::) value::set<array> but using value::set(array)
     // gives value::set<array&> and linker error somehow
@@ -181,10 +181,12 @@ void server_list::set_input_block(bool block, CKDWORD defer_key, std::function<b
     });
 }
 
-server_list::server_list(IBML* bml, log_manager* log_manager, decltype(connect_callback_) connect_callback):
-        bml_(bml), log_manager_(log_manager), connect_callback_(connect_callback) {
+server_list::server_list(IBML* bml, log_manager* log_manager, config_manager* config_manager,
+                         decltype(connect_callback_) connect_callback) :
+        bml_(bml), log_manager_(log_manager), config_manager_(config_manager),
+        connect_callback_(connect_callback) {
     picojson::value v;
-    std::ifstream extra_config(EXTRA_CONFIG_PATH);
+    std::ifstream extra_config(get_extra_config_path());
     if (extra_config.is_open()) extra_config >> v;
     else v = picojson::value{ DEFAULT_CONFIG };
     extra_config.close();
@@ -193,7 +195,7 @@ server_list::server_list(IBML* bml, log_manager* log_manager, decltype(connect_c
         server_index_ = (size_t)v.get<picojson::object>()["selected_server"].get<int64_t>();
     }
     catch (const std::exception& e) {
-        log_manager_->get_logger()->Info("Error parsing %s: %s", EXTRA_CONFIG_PATH, e.what());
+        log_manager_->get_logger()->Info("Error parsing %s: %s", get_extra_config_path(), e.what());
     }
 }
 

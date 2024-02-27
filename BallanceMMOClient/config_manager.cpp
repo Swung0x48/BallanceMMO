@@ -17,11 +17,12 @@ std::wstring config_manager::get_local_appdata_path() { // local appdata
 }
 
 void config_manager::migrate_config() {
-    constexpr const char* const config_path = "..\\ModLoader\\Config\\BallanceMMOClient.cfg";
-    std::ifstream config(config_path);
+    constexpr const char* const config_name = "\\BallanceMMOClient.cfg";
+    std::ifstream config(config_directory_path + config_name);
     if (!config.is_open()) {
         config.clear();
-        config.open("..\\ModLoader\\Configs\\BallanceMMOClient.cfg");
+        config_directory_path += "s"; // configs
+        config.open(config_directory_path + config_name);
         // BMLPlus parity issue
         if (!config.is_open()) return;
     }
@@ -109,7 +110,7 @@ void config_manager::load_external_config() {
     }
 }
 
-void config_manager::save_external_config(std::string uuid) {
+void config_manager::save_external_config(std::string uuid) const {
     if (uuid.empty())
         uuid = boost::uuids::to_string(uuid_);
     picojson::object external_config{
