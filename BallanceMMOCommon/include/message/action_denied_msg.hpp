@@ -10,7 +10,7 @@ namespace bmmo {
         InvalidAction,
         InvalidTarget,
         TargetNotFound,
-        PlayerMuted
+        PlayerMuted,
     };
 
     struct action_denied {

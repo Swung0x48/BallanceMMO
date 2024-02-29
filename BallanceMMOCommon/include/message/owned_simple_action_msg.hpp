@@ -6,6 +6,7 @@
 namespace bmmo {
     enum class owned_simple_action_type: int32_t {
         Unknown,
+        RestartRequestFailed,
     };
 
     struct owned_simple_action {

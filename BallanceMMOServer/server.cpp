@@ -1250,6 +1250,24 @@ protected:
                 }
                 break;
             }
+            case bmmo::OwnedSimpleAction: {
+                auto* msg = reinterpret_cast<bmmo::owned_simple_action_msg*>(networking_msg->m_pData);
+                switch (msg->content.type) {
+                    using osa = bmmo::owned_simple_action_type;
+                    case osa::RestartRequestFailed: {
+                        Printf(bmmo::ansi::Italic, "(#%u, %s)'s restart request failed.",
+                            msg->content.player_id, get_client_name(msg->content.player_id));
+                        if (!client_exists(msg->content.player_id, true)
+                                && msg->content.player_id != k_HSteamNetConnection_Invalid)
+                            break;
+                        broadcast_message(*msg);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                break;
+            }
             case bmmo::PermanentNotification: {
                 if (deny_action(networking_msg->m_conn))
                     break;

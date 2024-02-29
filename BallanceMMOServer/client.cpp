@@ -551,6 +551,11 @@ private:
                 Printf(bmmo::color_code(msg.code), "(#%u, %s) requested to restart %s current level.",
                         msg.content.requester, get_player_name(msg.content.requester),
                         restart ? "your" : get_player_name(msg.content.victim) + "'s");
+                if (restart)
+                    send(bmmo::owned_simple_action_msg{.content = {
+                        .type = bmmo::owned_simple_action_type::RestartRequestFailed,
+                        .player_id = msg.content.requester,
+                    }}, k_nSteamNetworkingSend_Reliable);
                 break;
             }
             case bmmo::ScoreList: {
@@ -732,6 +737,20 @@ private:
                     }
                     case sa::Unknown: {
                         Printf("Unknown action request received.");
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                break;
+            }
+            case bmmo::OwnedSimpleAction: {
+                auto* msg = reinterpret_cast<bmmo::owned_simple_action_msg*>(networking_msg->m_pData);
+                switch (msg->content.type) {
+                    using osa = bmmo::owned_simple_action_type;
+                    case osa::RestartRequestFailed: {
+                        Printf(bmmo::ansi::Italic, "(#%u, %s)'s restart request failed.",
+                            msg->content.player_id, get_player_name(msg->content.player_id));
                         break;
                     }
                     default:

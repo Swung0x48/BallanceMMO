@@ -29,7 +29,7 @@ namespace bmmo::name_validator {
         auto time_struct = std::localtime(&current_time);
         std::srand((unsigned int) current_time);
         std::string name(15, 0);
-        name.resize(std::sprintf(name.data(), "Player%03d_%02d%02d",
+        name.resize(std::snprintf(name.data(), name.size(), "Player%03d_%02d%02d",
             std::rand() % 1000, time_struct->tm_mon + 1, time_struct->tm_mday));
         return name;
     };

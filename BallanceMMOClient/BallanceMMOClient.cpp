@@ -1507,8 +1507,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         const auto count = m_bml->GetModCount();
         bmmo::mod_list_msg mod_msg{};
         mod_msg.mods.reserve(count);
-        for (auto i = 1; i < count; ++i) {
+        for (auto i = 0; i < count; ++i) {
             auto* mod = m_bml->GetMod(i);
+            if (mod == this) continue; // ignore bmmo itself
             mod_msg.mods.try_emplace(bmmo::string_utils::ansi_to_utf8(mod->GetID()), bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
         }
         mod_msg.serialize();
@@ -1872,6 +1873,22 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         break;
     }
+    case bmmo::OwnedSimpleAction: {
+        auto* msg = reinterpret_cast<bmmo::owned_simple_action_msg*>(network_msg->m_pData);
+        switch (msg->content.type) {
+            using osa = bmmo::owned_simple_action_type;
+            case osa::RestartRequestFailed: {
+                SendIngameMessage(std::format("{} restart request failed.",
+                                  (msg->content.player_id == db_.get_client_id()) ?
+                                      "Your" : get_username(msg->content.player_id) + "'s"),
+                                  bmmo::ansi::Italic);
+                break;
+            }
+            default:
+                break;
+        }
+        break;
+    }
     case bmmo::ActionDenied: {
         auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
         SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str(), bmmo::color_code(msg->code));
@@ -1975,6 +1992,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                           bmmo::color_code(msg.code));
         if (restart && m_bml->IsIngame() && !spectator_mode_)
             restart_current_level();
+        else {
+            send(bmmo::owned_simple_action_msg{.content = {
+                .type = bmmo::owned_simple_action_type::RestartRequestFailed,
+                .player_id = msg.content.requester,
+            }});
+        }
         break;
     }
     case bmmo::ScoreList: {
