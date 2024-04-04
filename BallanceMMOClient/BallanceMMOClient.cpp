@@ -1990,13 +1990,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                           get_username(msg.content.requester),
                           restart ? "your" : get_username(msg.content.victim) + "'s"),
                           bmmo::color_code(msg.code));
-        if (restart && m_bml->IsIngame() && !spectator_mode_)
-            restart_current_level();
-        else {
-            send(bmmo::owned_simple_action_msg{.content = {
-                .type = bmmo::owned_simple_action_type::RestartRequestFailed,
-                .player_id = msg.content.requester,
-            }});
+        if (restart) {
+            if (m_bml->IsIngame() && !spectator_mode_)
+                restart_current_level();
+            else {
+                send(bmmo::owned_simple_action_msg{.content = {
+                    .type = bmmo::owned_simple_action_type::RestartRequestFailed,
+                    .player_id = msg.content.requester,
+                }});
+            }
         }
         break;
     }
