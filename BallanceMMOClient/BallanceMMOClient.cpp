@@ -409,6 +409,10 @@ void BallanceMMOClient::OnStartLevel()
     hs_calibrated_ = false;
 
     m_bml->AddTimer(CKDWORD(10), [this]() {
+        if (auto maps_it = maps_.find(current_map_.get_hash_bytes_string()); maps_it != maps_.end()) {
+            add_lives(maps_it->second.initial_life_count);
+        }
+
         if (current_map_.level == 1 && countdown_restart_ && connected()) {
             auto* tutorial_exit = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(tutorial_exit_event_));
             tutorial_exit->Activate();
@@ -1663,7 +1667,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     restart_current_level();
                 }
                 else {
-                    auto* array_energy = m_bml->GetArrayByName("Energy");
+                    auto* array_energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
                     int points = (current_map_.level == 1) ? initial_points_ : initial_points_ - 1;
                     array_energy->SetElementValue(0, 0, &points);
                     array_energy->SetElementValue(0, 1, &initial_lives_);
@@ -1923,6 +1927,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto client_map = db_.get_client_map(msg->content.player_id);
         if (client_map.has_value() && !bmmo::name_validator::is_spectator(get_username(msg->content.player_id)))
             update_sector_timestamp(client_map.value(), msg->content.sector, timestamp);
+        break;
+    }
+    case bmmo::ExtraLife: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::extra_life_msg>(network_msg);
+        for (auto& [_, data] : maps_)
+            data.initial_life_count = 3;
+        for (const auto& [hash, goal] : msg.life_count_goals)
+            maps_[hash].initial_life_count = goal;
         break;
     }
     case bmmo::NameUpdate: {

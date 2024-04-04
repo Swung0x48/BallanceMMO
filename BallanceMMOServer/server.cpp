@@ -196,11 +196,17 @@ public:
             return false;
         if (get_client_count() < 1) map_names_.clear();
         map_names_.insert(config_.default_map_names.begin(), config_.default_map_names.end());
-        if (get_client_count() > 0 && !map_names_.empty()) {
-            bmmo::map_names_msg name_msg;
-            name_msg.maps = map_names_;
-            name_msg.serialize();
-            broadcast_message(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+        if (get_client_count() > 0) {
+            if (!map_names_.empty()) {
+                bmmo::map_names_msg name_msg;
+                name_msg.maps = map_names_;
+                name_msg.serialize();
+                broadcast_message(name_msg.raw.str().data(), name_msg.size());
+            }
+            bmmo::extra_life_msg life_msg;
+            life_msg.life_count_goals = config_.initial_life_counts;
+            life_msg.serialize();
+            broadcast_message(life_msg.raw.str().data(), life_msg.size());
         }
         return true;
     }
@@ -848,6 +854,11 @@ protected:
                     send(networking_msg->m_conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
 
+                bmmo::extra_life_msg life_msg{};
+                life_msg.life_count_goals = config_.initial_life_counts;
+                life_msg.serialize();
+                send(networking_msg->m_conn, life_msg.raw.str().data(), life_msg.size());
+
                 if (!ticking_ && get_client_count() > 1)
                     start_ticking();
                 config_.save_player_status(clients_);
@@ -1391,6 +1402,7 @@ protected:
             case bmmo::OwnedCheatToggle:
             case bmmo::PlayerKicked:
             case bmmo::ActionDenied:
+            case bmmo::ExtraLife:
             case bmmo::OpState:
             case bmmo::KeyboardInput:
                 break;

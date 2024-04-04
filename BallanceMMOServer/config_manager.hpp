@@ -14,6 +14,7 @@ private:
 
 public:
     std::unordered_map<std::string, std::string> op_players, banned_players, default_map_names;
+    std::unordered_map<std::string, int> initial_life_counts;
     std::unordered_set<std::string> muted_players;
     bool op_mode = true, restart_level = true, force_restart_level = false;
     bool log_installed_mods = false, log_ball_offs = false, serious_warning_as_dnf = false;

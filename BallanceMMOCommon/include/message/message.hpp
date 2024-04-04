@@ -75,6 +75,7 @@ namespace bmmo {
         NameUpdate,
         OwnedSimpleAction,
         RestartRequest,
+        ExtraLife,
     };
 
     template<typename T, opcode C = None>

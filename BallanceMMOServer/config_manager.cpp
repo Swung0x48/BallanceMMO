@@ -59,6 +59,15 @@ bool config_manager::load() {
         }
     } else
         config_["map_name_list"] = YAML::Node(YAML::NodeType::Map);
+    if (config_["initial_life_counts"]) {
+        initial_life_counts.clear();
+        for (const auto& element: config_["initial_life_counts"]) {
+            std::string hash(sizeof(bmmo::map::md5), 0);
+            bmmo::string_utils::hex_chars_from_string(reinterpret_cast<uint8_t*>(hash.data()), element.first.as<std::string>());
+            initial_life_counts.try_emplace(hash, element.second.as<int>());
+        }
+    } else
+        config_["initial_life_counts"] = YAML::Node(YAML::NodeType::Map);
 
     forced_names_ = yaml_load_value(config_, "forced_names",
             decltype(forced_names_){{"00000001-0002-0003-0004-000000000005", "example_player"}});
@@ -140,6 +149,7 @@ void config_manager::save(bool reload_values) {
                 << "# - Options for log levels: important, warning, msg.\n"
                 << "# - Auto flush log: whether to automatically flush the log file after each output.\n"
                 << "# - Map name list style: \"md5_hash: name\".\n"
+                << "# - Life count list style: \"md5_hash: count\".\n"
                 << "# - Op list player data style: \"playername: uuid\".\n"
                 << "# - Ban list style: \"uuid: reason\".\n"
                 << "# - Mute list style: \"- uuid\".\n"

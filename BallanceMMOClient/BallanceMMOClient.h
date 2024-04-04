@@ -243,6 +243,7 @@ private:
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
 
 	struct map_data {
+		int initial_life_count = 3;
 		float level_start_timestamp{};
 		// pair <sector, earliest timestamp of reaching the sector>
 		std::map<int, int64_t> sector_timestamps{};
@@ -341,6 +342,23 @@ private:
 			return static_cast<CK3dObject*>(static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementObject(0, 1));
 
 		return nullptr;
+	}
+
+	int get_current_life_count() {
+		int lives;
+		static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_))->GetElementValue(0, 1, &lives);
+		return lives;
+	};
+
+	void add_lives(int goal) {
+		if (get_current_life_count() >= goal) return;
+
+		CKMessageManager* mm = m_bml->GetMessageManager();
+		CKMessageType addLife = mm->AddMessageType("Life_Up");
+		mm->SendMessageSingle(addLife, m_bml->GetGroupByName("All_Gameplay"));
+		mm->SendMessageSingle(addLife, m_bml->GetGroupByName("All_Sound"));
+
+		m_bml->AddTimer(1000.0f, [this, goal] { add_lives(goal); });
 	}
 
 	bool update_current_sector() { // true if changed
