@@ -43,6 +43,7 @@ struct TimedBallState : BallState {
 struct PlayerState {
 	std::string name;
 	bool cheated = false;
+	uint16_t ping = 0;
 	boost::circular_buffer<TimedBallState> ball_state = decltype(ball_state)(3, TimedBallState());
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
 	int64_t time_variance = 0;
@@ -202,6 +203,16 @@ public:
 
 		std::unique_lock lk(mutex_);
 		states_[id].cheated = cheated;
+		set_pending_flush(true);
+		return true;
+	}
+
+	bool update(HSteamNetConnection id, uint16_t ping) {
+		if (!exists(id))
+			return false;
+
+		std::unique_lock lk(mutex_);
+		states_[id].ping = ping;
 		set_pending_flush(true);
 		return true;
 	}

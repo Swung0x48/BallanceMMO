@@ -1393,6 +1393,7 @@ protected:
             case bmmo::OwnedBallStateV2:
             case bmmo::OwnedTimedBallState:
             case bmmo::OwnedCompressedBallState:
+            case bmmo::LatencyData:
             case bmmo::LoginAcceptedV2:
             case bmmo::LoginAcceptedV3:
             case bmmo::PlayerConnectedV2:
@@ -1438,12 +1439,27 @@ protected:
     }
 
     inline void tick() {
-        bmmo::owned_compressed_ball_state_msg msg{};
-        pull_unupdated_ball_states(msg.balls, msg.unchanged_balls);
-        if (msg.balls.empty() && msg.unchanged_balls.empty())
+        bmmo::owned_compressed_ball_state_msg ball_msg{};
+        pull_unupdated_ball_states(ball_msg.balls, ball_msg.unchanged_balls);
+        if (ball_msg.balls.empty() && ball_msg.unchanged_balls.empty())
             return;
-        msg.serialize();
-        broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+        ball_msg.serialize();
+        broadcast_message(ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+
+        ++ping_data_counter_;
+        if (ping_data_counter_ >= bmmo::PING_INTERVAL_TICKS) {
+            bmmo::latency_data_msg ping_msg{};
+            ping_msg.data.reserve(clients_.size());
+            for (const auto& i: clients_) {
+                SteamNetConnectionRealTimeStatus_t status{};
+                interface_->GetConnectionRealTimeStatus(i.first, &status, 0, nullptr);
+                ping_msg.data.try_emplace(i.first,
+                        (uint16_t) std::min(status.m_nPing, (int) std::numeric_limits<uint16_t>::max()));
+            }
+            ping_msg.serialize();
+            ping_data_counter_ = 0;
+            broadcast_message(ping_msg.raw.str().data(), ping_msg.size(), k_nSteamNetworkingSend_Reliable);
+        }
     };
 
     void start_ticking() {
@@ -1475,6 +1491,7 @@ protected:
 
     // std::thread ticking_thread_;
     std::atomic_bool ticking_ = false;
+    int ping_data_counter_ = 0;
     map_data_collection maps_;
     bmmo::map last_countdown_map_{};
 

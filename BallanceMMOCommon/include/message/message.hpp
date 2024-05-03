@@ -76,6 +76,7 @@ namespace bmmo {
         OwnedSimpleAction,
         RestartRequest,
         ExtraLife,
+        LatencyData,
     };
 
     template<typename T, opcode C = None>

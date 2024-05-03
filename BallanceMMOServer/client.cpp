@@ -32,6 +32,7 @@ bool cheat = false;
 struct client_data {
     std::string name;
     bool cheated;
+    uint16_t ping = 0;
     bmmo::ball_state state{};
     bmmo::map current_map{};
     int32_t current_sector = 0;
@@ -188,7 +189,8 @@ public:
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
         players.reserve(clients_.size());
         auto print_client = [&](auto i) {
-            Printf("%u: %s%s", i.first, i.second.name, i.second.cheated ? " [CHEAT]" : "");
+            Printf("%u: %s%s  %4dms",
+                    i.first, i.second.name, i.second.cheated ? " [CHEAT]" : "", i.second.ping);
         };
         for (const auto& i: clients_) {
             if (bmmo::name_validator::is_spectator(i.second.name)) {
@@ -414,7 +416,7 @@ private:
                 for (const auto& [id, data]: msg.online_players) {
                     if (data.name == nickname_) own_id_ = id;
                     Printf("%s (#%u)%s", data.name, id, (data.cheated ? " [CHEAT]" : ""));
-                    clients_.insert({ id, { data.name, (bool) data.cheated, {}, data.map, data.sector } });
+                    clients_.insert({ id, { data.name, (bool) data.cheated, {}, {}, data.map, data.sector } });
                 }
                 bmmo::plain_text_msg text_msg{};
                 text_msg.text_content = "Using Mock Client.";
@@ -652,6 +654,13 @@ private:
                 );
                 local_rankings_[msg->content.map.get_hash_bytes_string()].second.push_back({
                     (bool)msg->content.cheated, player_name, msg->content.sector});
+                break;
+            }
+            case bmmo::LatencyData: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::latency_data_msg>(networking_msg);
+                for (const auto& [id, ping]: msg.data) {
+                    clients_[id].ping = ping;
+                }
                 break;
             }
             case bmmo::LevelFinishV2: {

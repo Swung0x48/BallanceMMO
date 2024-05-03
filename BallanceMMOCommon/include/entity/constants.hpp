@@ -14,6 +14,8 @@ namespace bmmo {
 
     constexpr const uint16_t DEFAULT_PORT = 26676;
 
+    constexpr const int PING_INTERVAL_TICKS = 768;
+
     // - 0~99: denied at joining
     // -- 0~49: denied from incorrect configuration
     // -- 50~99: banned

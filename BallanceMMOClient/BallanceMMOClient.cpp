@@ -770,25 +770,27 @@ void BallanceMMOClient::init_commands() {
         const auto& cmd_name = console_.get_command_name();
         bool show_id = (cmd_name == "list-id" || cmd_name == "li");
 
-        typedef std::tuple<HSteamNetConnection, std::string, bool> player_data;
+        struct player_data {
+            HSteamNetConnection id; std::string name; bool cheated; uint16_t ping;
+        };
         std::vector<player_data> players, spectators;
         players.reserve(db_.player_count() + 1);
         db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
             if (pair.first == db_.get_client_id())
                 return true;
             if (bmmo::name_validator::is_spectator(pair.second.name))
-                spectators.emplace_back(pair.first, pair.second.name, pair.second.cheated);
+                spectators.emplace_back(pair.first, pair.second.name, pair.second.cheated, pair.second.ping);
             else
-                players.emplace_back(pair.first, pair.second.name, pair.second.cheated);
+                players.emplace_back(pair.first, pair.second.name, pair.second.cheated, pair.second.ping);
             return true;
         });
         if (spectator_mode_)
-            spectators.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
+            spectators.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled(), get_status().m_nPing);
         else
-            players.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled());
+            players.emplace_back(db_.get_client_id(), get_display_nickname(), m_bml->IsCheatEnabled(), get_status().m_nPing);
         int player_count = players.size();
         std::ranges::sort(players, [](const player_data& i1, const player_data& i2)
-            { return boost::algorithm::ilexicographical_compare(std::get<1>(i1), std::get<1>(i2)); });
+            { return boost::algorithm::ilexicographical_compare(i1.name, i2.name); });
         players.insert(players.begin(), spectators.begin(), spectators.end());
 
         SendIngameMessage(std::format("{} player{} and {} spectator{} ({} total) online:",
@@ -797,9 +799,9 @@ void BallanceMMOClient::init_commands() {
                                       players.size()));
         std::string line; player_count = players.size();
         for (int i = 0; i < player_count; ++i) {
-            const auto& [id, name, cheated] = players[i];
-            line.append(name + (cheated ? " [CHEAT]" : "")
-                        + (show_id ? (": " + std::to_string(id)) : ""));
+            const auto& [id, name, cheated, ping] = players[i];
+            line.append(name + (cheated ? " [CHEAT]" : "") + std::format(" [{}ms]", ping)
+                        + (show_id ? std::format(": {}", id) : ""));
             if (i != player_count - 1) line.append(", ");
             if (line.length() > 80) {
                 SendIngameMessage(line);
@@ -1753,6 +1755,15 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         energy->SetElementValue(0, 0, &points);
         counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime() - (hs_begin_delay_ / 1e3f);
         move_size_time_length_ = 0;
+        break;
+    }
+    case bmmo::LatencyData: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::latency_data_msg>(network_msg);
+        for (const auto& [id, ping] : msg.data) {
+            //if (! // do nothing for now
+            db_.update(id, ping);
+            //&& id != db_.get_client_id())
+        }
         break;
     }
     case bmmo::LevelFinishV2: {

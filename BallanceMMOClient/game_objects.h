@@ -71,7 +71,7 @@ public:
 			new_ball->Show(CKSHOW);
 	}
 
-	void update(SteamNetworkingMicroseconds timestamp, bool update_cheat = false) {
+	void update(SteamNetworkingMicroseconds timestamp, bool update_extra_info = false) {
 		// Can be costly
 		//cleanup();
 
@@ -174,8 +174,8 @@ public:
 			}
 
 			// Update username label
-			if (update_cheat) {
-				username_label->update(item.second.name + (item.second.cheated ? " [C]" : ""));
+			if (update_extra_info) {
+				username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + std::format(" [{}ms]", item.second.ping));
 			}
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (isnan(extent.left) || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight

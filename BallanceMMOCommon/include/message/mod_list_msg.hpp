@@ -1,7 +1,6 @@
 #ifndef BALLANCEMMOSERVER_MOD_LIST_MSG_HPP
 #define BALLANCEMMOSERVER_MOD_LIST_MSG_HPP
 #include "message.hpp"
-#include "map_names_msg.hpp"
 
 namespace bmmo {
     struct mod_list_msg: public serializable_message {
