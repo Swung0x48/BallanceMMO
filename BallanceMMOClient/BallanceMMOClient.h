@@ -163,8 +163,9 @@ private:
 
 	inline void on_sector_changed();
 
+	std::unique_ptr<text_sprite> player_list_display_;
 	void show_player_list();
-	inline void update_player_list(text_sprite& player_list, int& last_player_count, int& last_font_size);
+	inline void update_player_list(int& last_player_count, int& last_font_size);
 
 	void connect_to_server(const char* address, const char* name = "") override;
 	void disconnect_from_server() override;
@@ -913,7 +914,11 @@ private:
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		console_window_.print_text(msg.c_str(), ansi_color);
 		utils_.call_sync_method([this, msg] {
-			m_bml->SendIngameMessage(bmmo::string_utils::utf8_to_ansi(msg).c_str());
+			m_bml->SendIngameMessage(
+#ifndef BMMO_USE_BML_PLUS
+				bmmo::string_utils::utf8_to_ansi
+#endif // !BMMO_USE_BML_PLUS
+				(msg).c_str());
 		});
 	}
 

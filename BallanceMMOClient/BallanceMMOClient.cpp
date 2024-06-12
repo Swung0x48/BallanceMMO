@@ -18,26 +18,28 @@ void BallanceMMOClient::show_player_list() {
         player_list_visible_ = false;
         if (player_list_thread_.joinable())
             player_list_thread_.join();
-        player_list_thread_ = std::thread([&] {
-            text_sprite player_list("PlayerList", "", RIGHT_MOST, 0.412f);
-            player_list.sprite_->SetPosition({0.596f, 0.412f});
-            player_list.sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
-            player_list.sprite_->SetZOrder(128);
-            player_list.paint(player_list_color_);
-            // player_list.paint_background(0x44444444);
-            player_list.set_visible(true);
-            player_list_visible_ = true;
-            int last_player_count = -1, last_font_size = -1;
-            while (player_list_visible_) {
-                update_player_list(player_list, last_player_count, last_font_size);
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
+        utils_.call_sync_method([this] {
+            player_list_display_ = std::make_unique<decltype(player_list_display_)::element_type>("PlayerList", "", RIGHT_MOST, 0.412f);
+            player_list_display_->sprite_->SetPosition({0.596f, 0.412f});
+            player_list_display_->sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
+            player_list_display_->sprite_->SetZOrder(128);
+            player_list_display_->paint(player_list_color_);
+            // player_list_display_->paint_background(0x44444444);
+            player_list_display_->set_visible(true);
+            player_list_thread_ = std::thread([this] {
+                player_list_visible_ = true;
+                int last_player_count = -1, last_font_size = -1;
+                while (player_list_visible_) {
+                    update_player_list(last_player_count, last_font_size);
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                player_list_display_.reset();
+            });
         });
     });
 }
 
-inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
-                                                  int& last_player_count, int& last_font_size) {
+inline void BallanceMMOClient::update_player_list(int& last_player_count, int& last_font_size) {
     struct list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
     auto list_sorter = [](const list_entry& i1, const list_entry& i2) {
         const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
@@ -82,14 +84,6 @@ inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
                     current_sector_timestamp_, m_bml->IsCheatEnabled());
     std::sort(status_list.begin(), status_list.end(), list_sorter);
     auto size = int(status_list.size());
-    if (size != last_player_count) {
-        last_player_count = size;
-        auto font_size = utils_.get_display_font_size(10.9f - (1.0f / 6) * std::clamp(size, 7, 29));
-        if (last_font_size != font_size) {
-            last_font_size = font_size;
-            player_list.sprite_->SetFont(utils::get_system_font(), font_size, 400, false, false);
-        }
-    }
 
     std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
     text.reserve(1024);
@@ -111,7 +105,20 @@ inline void BallanceMMOClient::update_player_list(text_sprite& player_list,
         text.append(std::format("{}{}: {}, S{:02d}{}\n",
                 i.cheated ? "[C] " : "", i.name, map_display_name, i.sector, time_diff_str));
     }
-    player_list.update(bmmo::string_utils::utf8_to_ansi(text));
+
+    utils_.call_sync_method([&, this, text = bmmo::string_utils::utf8_to_ansi(text), size] {
+        if (size != last_player_count) {
+            last_player_count = size;
+            auto font_size = utils_.get_display_font_size(10.9f - (1.0f / 6) * std::clamp(size, 7, 29));
+            if (last_font_size != font_size) {
+                last_font_size = font_size;
+                if (player_list_display_)
+                    player_list_display_->sprite_->SetFont(utils::get_system_font(), font_size, 400, false, false);
+            }
+        }
+        if (player_list_display_)
+            player_list_display_->update(text);
+    });
 }
 
 inline void BallanceMMOClient::enter_size_move() {
