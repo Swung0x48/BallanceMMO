@@ -574,8 +574,8 @@ private:
 					VxVector pos;
 					camMF->GetPosition(&pos);
 					m_bml->RestoreIC(camMF, true);
-					camMF->SetOrientation(orient[0], orient[1], orient + 2);
-					camMF->SetPosition(pos);
+					camMF->SetOrientation(VT21_REF(orient[0]), VT21_REF(orient[1]), orient + 2);
+					camMF->SetPosition(VT21_REF(pos));
 					m_dynamicPos->ActivateInput(0);
 					m_dynamicPos->Activate();
 				}

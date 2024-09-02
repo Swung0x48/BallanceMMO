@@ -148,13 +148,13 @@ public:
 					const auto& [position, rotation] = (item.second.time_variance > MAX_EXTRAPOLATION_TIME_VARIANCE / 2)
 						? PlayerState::get_quadratic_extrapolated_state(tc, state_it[2], state_it[1], state_it[0])
 						: PlayerState::get_linear_extrapolated_state(tc, state_it[1], state_it[0]);
-					current_ball->SetPosition(position);
-					current_ball->SetQuaternion(rotation);
+					current_ball->SetPosition(VT21_REF(position));
+					current_ball->SetQuaternion(VT21_REF(rotation));
 					square_camera_distance = (position - camera_target_pos).SquareMagnitude();
 				}
 				else {
-					current_ball->SetPosition(state_it->position);
-					current_ball->SetQuaternion(state_it->rotation);
+					current_ball->SetPosition(VT21_REF(state_it->position));
+					current_ball->SetQuaternion(VT21_REF(state_it->rotation));
 					square_camera_distance = (state_it->position - camera_target_pos).SquareMagnitude();
 				}
 			}

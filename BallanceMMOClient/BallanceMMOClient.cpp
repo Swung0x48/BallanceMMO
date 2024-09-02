@@ -954,11 +954,11 @@ void BallanceMMOClient::init_commands() {
 
         m_bml->AddTimer(CKDWORD(2), [this, position, name]() {
             ExecuteBB::Unphysicalize(get_current_ball());
-            get_current_ball()->SetPosition(position);
+            get_current_ball()->SetPosition(VT21_REF(position));
             CK3dEntity* camMF = m_bml->Get3dEntityByName("Cam_MF");
             VxMatrix matrix = camMF->GetWorldMatrix();
             m_bml->RestoreIC(camMF, true);
-            camMF->SetPosition(position);
+            camMF->SetPosition(VT21_REF(position));
             camMF->SetWorldMatrix(matrix);
             m_dynamicPos->ActivateInput(0);
             m_dynamicPos->Activate();
