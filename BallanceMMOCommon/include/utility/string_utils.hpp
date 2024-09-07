@@ -154,6 +154,7 @@ namespace bmmo::string_utils {
         decltype(get_file_matches({})) files;
         std::filesystem::path path(prefix), parent_path(path.parent_path());
         if (path.parent_path().empty()) parent_path.assign(".");
+        if (!std::filesystem::exists(parent_path)) return {};
         for (const auto& entry : std::filesystem::directory_iterator(parent_path)) {
             std::filesystem::path entry_path = entry.path();
             if (path.parent_path().empty())
