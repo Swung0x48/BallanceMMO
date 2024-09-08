@@ -40,8 +40,7 @@ void BallanceMMOClient::show_player_list() {
 }
 
 inline void BallanceMMOClient::update_player_list(int& last_player_count, int& last_font_size) {
-    struct list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
-    auto list_sorter = [](const list_entry& i1, const list_entry& i2) {
+    auto list_sorter = [](const player_status_list_entry& i1, const player_status_list_entry& i2) {
         const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
         if (map_cmp > 0) return true;
         if (map_cmp < 0) return false;
@@ -57,10 +56,11 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     // (including the player that reaches it first) in the sector
     enum timestamp_diff_status { TdsNone = 0, TdsZero = 0b01, TdsNonZero = 0b10, TdsDisplay = 0b11 };
 
-    std::vector<list_entry> status_list;
     std::unordered_map<std::string, std::map<int, int>> timestamp_display; // std::map<int, tds>
-    status_list.reserve(db_.player_count() + !spectator_mode_);
-    auto push_entry = [&](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
+    std::unique_lock lk(player_status_list_mtx_);
+    player_status_list_.clear();
+    player_status_list_.reserve(db_.player_count() + !spectator_mode_);
+    auto push_entry = [&, this](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
         std::lock_guard lk(client_mtx_);
         const auto& times = maps_[map.get_hash_bytes_string()].sector_timestamps;
         auto time_it = times.find(sector);
@@ -69,7 +69,7 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
             timestamp -= time_it->second;
             timestamp_display[map_name][sector] |= (timestamp == 0 ? TdsZero : TdsNonZero);
         }
-        status_list.push_back({ map_name, name, sector, timestamp, cheated });
+        player_status_list_.push_back({ map_name, name, sector, timestamp, cheated });
     };
 
     db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
@@ -82,13 +82,13 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     if (!spectator_mode_)
         push_entry(current_map_, get_display_nickname(), current_sector_,
                     current_sector_timestamp_, m_bml->IsCheatEnabled());
-    std::sort(status_list.begin(), status_list.end(), list_sorter);
-    auto size = int(status_list.size());
+    std::sort(player_status_list_.begin(), player_status_list_.end(), list_sorter);
+    auto size = int(player_status_list_.size());
 
     std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
     text.reserve(1024);
     std::string last_map_name;
-    for (const auto& i: status_list /* | std::views::reverse */) {
+    for (const auto& i: player_status_list_ /* | std::views::reverse */) {
         std::string map_display_name;
         if (last_map_name != i.map_name)
             last_map_name = map_display_name = i.map_name;
@@ -379,14 +379,15 @@ void BallanceMMOClient::OnProcess() {
             spect_pos_diff_ = cam_pos - ball_pos;
             VxQuaternion rot;
             cam->GetQuaternion(&rot);
-            spect_cam_->SetQuaternion(rot);
+            spect_cam_->SetQuaternion(VT21_REF(rot));
         }
         VxVector current_cam_pos;
         spect_cam_->GetPosition(&current_cam_pos);
         auto delta = m_bml->GetTimeManager()->GetLastDeltaTime();
-        spect_cam_->SetPosition(Interpolate(0.006f * delta, current_cam_pos, spect_player_pos_ + spect_pos_diff_) - VxVector(0, 0.0046f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0));
+        current_cam_pos = Interpolate(0.006f * delta, current_cam_pos, spect_player_pos_ + spect_pos_diff_) - VxVector(0, 0.0046f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0);
+        spect_cam_->SetPosition(VT21_REF(current_cam_pos));
         spect_target_pos_ = Interpolate(0.011f * delta, spect_target_pos_, spect_player_pos_);
-        spect_cam_->LookAt(spect_target_pos_);
+        spect_cam_->LookAt(VT21_REF(spect_target_pos_));
     }
 #endif
 }
@@ -998,12 +999,22 @@ void BallanceMMOClient::init_commands() {
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     console_.register_command("spectate", [&] {
         HSteamNetConnection id = k_HSteamNetConnection_Invalid;
-        auto next_word = console_.get_next_word();
-        if (next_word.empty()) return;
-        if (next_word[0] == '#')
-            id = (HSteamNetConnection) atoll(next_word.substr(1).c_str());
-        else
-            id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+        if (console_.get_command_name() == "rankspectate") {
+            int rank = std::atoi(console_.get_next_word().c_str());
+            std::lock_guard lk(player_status_list_mtx_);
+            if (rank > 0 && rank <= player_status_list_.size()) {
+                const auto& name = player_status_list_[rank - 1].name;
+                id = (name == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(name);
+            }
+        }
+        else {
+            auto next_word = console_.get_next_word();
+            if (next_word.empty()) return;
+            if (next_word[0] == '#')
+                id = (HSteamNetConnection)atoll(next_word.substr(1).c_str());
+            else
+                id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+        }
         if (id == k_HSteamNetConnection_Invalid) {
             m_bml->GetRenderContext()->AttachViewpointToCamera(last_cam_ ? last_cam_ : m_bml->GetTargetCameraByName("InGameCam"));
             spectating_first_person_ = false;
@@ -1036,6 +1047,7 @@ void BallanceMMOClient::init_commands() {
         m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
         SendIngameMessage(std::format("Spectating {}.", state.value().name));
     });
+    console_.register_aliases("spectate", {"rankspectate"});
     console_.register_command("bindspectation", [&] {
         spect_bindings_ = decltype(spect_bindings_){"#0"};
         while (!console_.empty())

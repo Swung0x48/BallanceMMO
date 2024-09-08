@@ -164,6 +164,9 @@ private:
 	inline void on_sector_changed();
 
 	std::unique_ptr<text_sprite> player_list_display_;
+	struct player_status_list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
+	std::vector<player_status_list_entry> player_status_list_;
+	std::mutex player_status_list_mtx_;
 	void show_player_list();
 	inline void update_player_list(int& last_player_count, int& last_font_size);
 
@@ -288,12 +291,12 @@ private:
 	CKWaveSound* sound_countdown_{}, * sound_go_{},
 		* sound_level_finish_{}, * sound_level_finish_cheat_{}, * sound_dnf_{},
 		* sound_notification_{}, * sound_bubble_{}, * sound_knock_{};
-	void play_beep(uint32_t frequency, uint32_t duration) {
+	void play_beep(uint32_t frequency, uint32_t duration) const {
 		if (!sound_enabled_)
 			return;
 		Beep(frequency, duration);
 	};
-	void play_wave_sound(CKWaveSound* sound, bool forced = false) {
+	void play_wave_sound(CKWaveSound* sound, bool forced = false) const {
 		if (!sound_enabled_ && !forced)
 			return;
 		if (sound->IsPlaying())
@@ -410,7 +413,7 @@ private:
 		char y = 0;
 		char z = 0;
 
-		bool clear() {
+		bool clear() const {
 			return x == 0 && y == 0 && z == 0;
 		}
 
@@ -613,13 +616,17 @@ private:
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 		if (input_manager_->IsKeyDown(CKKEY_RMENU)) {
+			const bool rank_spectation = input_manager_->IsKeyDown(CKKEY_COMMA);
 			static constexpr CKKEYBOARD keys[] = {
 				CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5, CKKEY_6, CKKEY_7, CKKEY_8, CKKEY_9
 			};
-			for (size_t i = 0; i < spect_bindings_.size(); ++i) {
+			for (size_t i = 0; i < sizeof(keys) / sizeof(CKKEYBOARD); ++i) {
 				if (!input_manager_->IsKeyPressed(keys[i]))
 					continue;
-				OnCommand(m_bml, { "mmo", "spectate", spect_bindings_[i] });
+				if (rank_spectation)
+					OnCommand(m_bml, { "mmo", "rankspectate", std::to_string(i) });
+				else if (i < spect_bindings_.size())
+					OnCommand(m_bml, { "mmo", "spectate", spect_bindings_[i]});
 				break;
 			}
 			return;
