@@ -108,7 +108,8 @@ jobs:
         run: |
           echo "`n#define BMMO_WITH_PLAYER_SPECTATION" | Out-File "BallanceMMOClient/bml_includes.h" -Encoding "UTF8" -Append
           cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
-          rm ${{github.workspace}}/build/BallanceMMOClient/${{env.BUILD_TYPE}}/BallanceMMOClient.exp, ${{github.workspace}}/build/BallanceMMOClient/${{env.BUILD_TYPE}}/BallanceMMOClient.lib
+          cd ${{github.workspace}}/build/BallanceMMOClient/${{env.BUILD_TYPE}}
+          rm BallanceMMOClient.exp, BallanceMMOClient.lib
 
       - name: Release artifact
         uses: actions/upload-artifact@v3

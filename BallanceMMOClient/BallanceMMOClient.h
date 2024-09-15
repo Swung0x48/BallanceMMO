@@ -1,6 +1,6 @@
 #pragma once
 
-#define BMMO_WITH_PLAYER_SPECTATION
+//#define BMMO_WITH_PLAYER_SPECTATION
 //#define BMMO_NAME_LABEL_WITH_EXTRA_INFO
 #include "bml_includes.h"
 #include "CommandMMO.h"
