@@ -1371,8 +1371,10 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
                 std::unique_lock client_lk(client_mtx_);
                 client_cv_.wait(client_lk);
             }
+            average_ping_ = get_ping();
             while (connected()) {
                 auto status = get_status();
+                average_ping_ = (average_ping_ * 3 + status.m_nPing) / 4;
                 std::string str = utils::pretty_status(status);
                 ping_->update(str, false);
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -1669,6 +1671,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::Countdown: {
         auto* msg = reinterpret_cast<bmmo::countdown_msg*>(network_msg->m_pData);
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 120 - (int)average_ping_)));
         std::string sender_name = get_username(msg->content.sender),
                     map_name = msg->content.map.get_display_name(map_names_);
         if (msg->content.map == current_map_ || msg->content.force_restart)

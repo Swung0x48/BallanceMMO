@@ -206,6 +206,7 @@ private:
 	std::thread player_list_thread_;
 
 	std::atomic_bool player_list_visible_ = false;
+	std::atomic<float> average_ping_ = 0; // why no atomic_float
 
 	const float RIGHT_MOST = 0.98f;
 	CKDWORD player_list_color_ = 0xFFFFFFFF;
