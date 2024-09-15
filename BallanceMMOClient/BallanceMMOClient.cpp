@@ -1003,8 +1003,18 @@ void BallanceMMOClient::init_commands() {
             int rank = std::atoi(console_.get_next_word().c_str());
             std::lock_guard lk(player_status_list_mtx_);
             if (rank > 0 && rank <= player_status_list_.size()) {
-                const auto& name = player_status_list_[rank - 1].name;
-                id = (name == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(name);
+                std::string current_map_name = current_map_.get_display_name();
+                int counter = 0;
+                for (const auto& i : player_status_list_) {
+                    if (i.map_name != current_map_name)
+                        continue;
+                    ++counter;
+                    if (counter == rank) {
+                        const auto& name = i.name;
+                        id = (name == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(name);
+                        break;
+                    }
+                }
             }
         }
         else {
