@@ -98,8 +98,20 @@ jobs:
         working-directory: ${{github.workspace}}
         run: ctest -C ${{env.BUILD_TYPE}}
 
-      - name: Release Artifact
+      - name: Release artifact
         uses: actions/upload-artifact@v3
         with:
           name: client-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
+          path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
+
+      - name: Build spectation-enabled client
+        run: |
+          echo "`n#define BMMO_WITH_PLAYER_SPECTATION" | Out-File "BallanceMMOClient/bml_includes.h" -Encoding "UTF8" -Append
+          cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+          rm ${{github.workspace}}/build/BallanceMMOClient/${{env.BUILD_TYPE}}/allanceMMOClient.exp, ${{github.workspace}}/build/BallanceMMOClient/${{env.BUILD_TYPE}}/allanceMMOClient.lib
+
+      - name: Release artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: client-spectator-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
           path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
