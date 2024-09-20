@@ -282,7 +282,6 @@ private:
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 	CKCamera* spect_cam_ = nullptr, * last_cam_ = nullptr;
-	HSteamNetConnection spect_player_ = k_HSteamNetConnection_Invalid;
 	bool spectating_first_person_ = false;
 	VxVector spect_pos_diff_{}, spect_target_pos_{}, spect_player_pos_{};
 	std::vector<std::string> spect_bindings_{"#0"};
@@ -628,12 +627,10 @@ private:
 				CKKEY_NUMPAD7, CKKEY_NUMPAD8, CKKEY_NUMPAD9,
 			};
 			for (size_t i = 0; i < sizeof(keys) / sizeof(CKKEYBOARD); ++i) {
-				if (!input_manager_->IsKeyPressed(keys[i]) || !input_manager_->IsKeyPressed(numpad_keys[i]))
+				if (!input_manager_->IsKeyPressed(keys[i]) && !input_manager_->IsKeyPressed(numpad_keys[i]))
 					continue;
-				if (rank_spectation)
-					OnCommand(m_bml, { "mmo", "rankspectate", std::to_string(i) });
-				else if (i < spect_bindings_.size())
-					OnCommand(m_bml, { "mmo", "spectate", spect_bindings_[i] });
+				if (rank_spectation || i < spect_bindings_.size())
+					OnCommand(m_bml, { "mmo", rank_spectation ? "rankspectate" : "spectate", std::to_string(i)});
 				break;
 			}
 			return;

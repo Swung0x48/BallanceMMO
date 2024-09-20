@@ -88,12 +88,17 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
     text.reserve(1024);
     std::string last_map_name;
+    int ranking = 0;
+    const auto own_map_name = current_map_.get_display_name();
     for (const auto& i: player_status_list_ /* | std::views::reverse */) {
         std::string map_display_name;
         if (last_map_name != i.map_name)
             last_map_name = map_display_name = i.map_name;
         else
             map_display_name = "~";
+        bool show_rankings = input_manager_->IsKeyDown(CKKEY_RMENU) && i.map_name == own_map_name;
+        if (show_rankings)
+            ++ranking;
         std::string time_diff_str;
         const auto& time_diff_map = timestamp_display[i.map_name];
         if (auto time_it = time_diff_map.find(i.sector);
@@ -102,7 +107,8 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
             time_diff_str = std::abs(i.time_diff) < 100000
                     ? std::format(" {:+06.2f}s", float(i.time_diff) / 1000)
                     : std::format(" {:+#06.4g}s", float(i.time_diff) / 1000);
-        text.append(std::format("{}{}: {}, S{:02d}{}\n",
+        text.append(std::format("{}" "{}{}: {}, S{:02d}{}\n",
+                show_rankings ? std::format("({}) ", ranking) : "",
                 i.cheated ? "[C] " : "", i.name, map_display_name, i.sector, time_diff_str));
     }
 
@@ -370,7 +376,7 @@ void BallanceMMOClient::OnProcess() {
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     if (spectating_first_person_) {
-        spect_player_pos_ = objects_.get_ball_state(spect_player_).first;
+        spect_player_pos_ = objects_.get_spectated_ball_state().first;
         if (input_manager_->IsKeyDown(CKKEY_LSHIFT)) {
             CKCamera* cam = m_bml->GetTargetCameraByName("InGameCam");
             VxVector cam_pos, ball_pos;
@@ -999,8 +1005,9 @@ void BallanceMMOClient::init_commands() {
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     console_.register_command("spectate", [&] {
         HSteamNetConnection id = k_HSteamNetConnection_Invalid;
+        std::string extra_info;
+        int rank = std::atoi(console_.get_next_word().c_str());
         if (console_.get_command_name() == "rankspectate") {
-            int rank = std::atoi(console_.get_next_word().c_str());
             std::lock_guard lk(player_status_list_mtx_);
             if (rank > 0 && rank <= player_status_list_.size()) {
                 std::string current_map_name = current_map_.get_display_name();
@@ -1012,20 +1019,22 @@ void BallanceMMOClient::init_commands() {
                     if (counter == rank) {
                         const auto& name = i.name;
                         id = (name == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(name);
+                        extra_info = std::format("#{} in {}", rank, current_map_name);
                         break;
                     }
                 }
             }
         }
         else {
-            auto next_word = console_.get_next_word();
-            if (next_word.empty()) return;
-            if (next_word[0] == '#')
-                id = (HSteamNetConnection)atoll(next_word.substr(1).c_str());
+            auto spect_name = spect_bindings_[rank];
+            if (spect_name[0] == '#')
+                id = (HSteamNetConnection)atoll(spect_name.substr(1).c_str());
             else
-                id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
+                id = (spect_name == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(spect_name);
+            extra_info = std::format("binded as #{}", rank);
         }
         if (id == k_HSteamNetConnection_Invalid) {
+            objects_.set_spectated_id(id);
             m_bml->GetRenderContext()->AttachViewpointToCamera(last_cam_ ? last_cam_ : m_bml->GetTargetCameraByName("InGameCam"));
             spectating_first_person_ = false;
             m_bml->GetGroupByName("HUD_sprites")->Show();
@@ -1050,19 +1059,23 @@ void BallanceMMOClient::init_commands() {
         spect_pos_diff_ = cam_pos - ball_pos;
         last_cam_ = m_bml->GetRenderContext()->GetAttachedCamera();
         m_bml->GetRenderContext()->AttachViewpointToCamera(spect_cam_);
-        spect_player_ = id;
+        objects_.set_spectated_id(id);
         spectating_first_person_ = true;
-        spect_target_pos_ = objects_.get_ball_state(id).first;
+        spect_target_pos_ = objects_.get_spectated_ball_state().first;
         m_bml->GetGroupByName("HUD_sprites")->Show(CKHIDE);
         m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
-        SendIngameMessage(std::format("Spectating {}.", state.value().name));
+        SendIngameMessage(std::format("Spectating {} [{}].", state.value().name, extra_info));
     });
     console_.register_aliases("spectate", {"rankspectate"});
     console_.register_command("bindspectation", [&] {
         spect_bindings_ = decltype(spect_bindings_){"#0"};
         while (!console_.empty())
             spect_bindings_.emplace_back(console_.get_next_word(true));
-        auto names_text = bmmo::string_utils::join_strings(spect_bindings_, 1, ", ");
+        std::string names_text;
+        for (int i = 1; i < spect_bindings_.size(); ++i) {
+            names_text.append(std::format("[{}] {}, ", i, spect_bindings_[i]));
+        }
+        names_text.erase(names_text.length() - std::strlen(", "));
         SendIngameMessage("Spectator hotkeys bound to " + names_text);
     });
 #endif

@@ -159,7 +159,11 @@ public:
 				}
 			}
 
-			if (dynamic_opacity_) {
+			if (dynamic_opacity_
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+				&& spectated_id_ != item.first
+#endif
+			) {
 				const auto new_opacity = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f || player.opacity_counter > 256) {
 					player.last_opacity = new_opacity;
@@ -299,11 +303,36 @@ public:
 	}
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-	inline const std::pair<VxVector, VxQuaternion> get_ball_state(HSteamNetConnection id) {
-		if (!db_.exists(id))
+private:
+	int spectated_id_ = k_HSteamNetConnection_Invalid;
+
+public:
+	inline void set_spectated_id(HSteamNetConnection id) {
+		if (db_.exists(spectated_id_)) {
+			for (auto& mat_id : objects_[spectated_id_].materials) {
+				auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
+				// bml_->RestoreIC(mat); // that doesn't work
+				mat->EnableAlphaBlend(true);
+				mat->SetSourceBlend(VXBLEND_SRCALPHA);
+				mat->SetDestBlend(VXBLEND_INVSRCALPHA);
+			}
+		}
+		if (!db_.exists(id)) {
+			spectated_id_ = k_HSteamNetConnection_Invalid;
+			return;
+		}
+		spectated_id_ = id;
+		for (auto& mat_id : objects_[spectated_id_].materials) {
+			auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
+			mat->EnableAlphaBlend(false);
+		}
+	}
+
+	inline const std::pair<VxVector, VxQuaternion> get_spectated_ball_state() {
+		if (!db_.exists(spectated_id_))
 			return {};
 		auto* player_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(
-			objects_[id].balls[db_.get(id).value().ball_state.front().type]));
+			objects_[spectated_id_].balls[db_.get(spectated_id_).value().ball_state.front().type]));
 		VxVector pos; VxQuaternion rot;
 		player_ball->GetPosition(&pos);
 		player_ball->GetQuaternion(&rot);
