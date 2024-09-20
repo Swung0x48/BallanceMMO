@@ -617,17 +617,23 @@ private:
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 		if (input_manager_->IsKeyDown(CKKEY_RMENU)) {
-			const bool rank_spectation = input_manager_->IsKeyDown(CKKEY_COMMA);
+			const bool rank_spectation = input_manager_->IsKeyDown(CKKEY_COMMA) || input_manager_->IsKeyDown(CKKEY_PERIOD);
 			static constexpr CKKEYBOARD keys[] = {
 				CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5, CKKEY_6, CKKEY_7, CKKEY_8, CKKEY_9
 			};
+			static constexpr CKKEYBOARD numpad_keys[] = {
+				CKKEY_NUMPAD0,
+				CKKEY_NUMPAD1, CKKEY_NUMPAD2, CKKEY_NUMPAD3,
+				CKKEY_NUMPAD4, CKKEY_NUMPAD5, CKKEY_NUMPAD6,
+				CKKEY_NUMPAD7, CKKEY_NUMPAD8, CKKEY_NUMPAD9,
+			};
 			for (size_t i = 0; i < sizeof(keys) / sizeof(CKKEYBOARD); ++i) {
-				if (!input_manager_->IsKeyPressed(keys[i]))
+				if (!input_manager_->IsKeyPressed(keys[i]) || !input_manager_->IsKeyPressed(numpad_keys[i]))
 					continue;
 				if (rank_spectation)
 					OnCommand(m_bml, { "mmo", "rankspectate", std::to_string(i) });
 				else if (i < spect_bindings_.size())
-					OnCommand(m_bml, { "mmo", "spectate", spect_bindings_[i]});
+					OnCommand(m_bml, { "mmo", "spectate", spect_bindings_[i] });
 				break;
 			}
 			return;
