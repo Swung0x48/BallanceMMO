@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
 
     if (argc == 1) {
         target = available_binaries[0];
+        std::printf("No launch target selected, falling back to the default: %s.\n", target);
         argc = 0;
     }
     else {
@@ -64,6 +65,8 @@ int main(int argc, char** argv) {
         cmd += ' ';
         cmd += argv[i];
     }
+
+    std::printf("Executing command: %s\n", cmd.c_str());
 
     if (auto appdir = std::getenv("APPDIR"))
         cmd = appdir + ("/usr/bin/" + cmd);
