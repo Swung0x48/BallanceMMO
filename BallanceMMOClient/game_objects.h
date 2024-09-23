@@ -307,15 +307,22 @@ private:
 	int spectated_id_ = k_HSteamNetConnection_Invalid;
 
 public:
+	inline const int get_spectated_id() const { return spectated_id_; }
+
 	inline void set_spectated_id(HSteamNetConnection id) {
-		if (db_.exists(spectated_id_)) {
-			for (auto& mat_id : objects_[spectated_id_].materials) {
-				auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
+		if (auto spectated_player = db_.get(spectated_id_); spectated_player.has_value()) {
+			/* for (auto& mat_id : objects_[spectated_id_].materials) {
+				/auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
 				// bml_->RestoreIC(mat); // that doesn't work
-				mat->EnableAlphaBlend(true);
+				mat->EnableAlphaBlend(true); // a little problematic too
 				mat->SetSourceBlend(VXBLEND_SRCALPHA);
 				mat->SetDestBlend(VXBLEND_INVSRCALPHA);
-			}
+			} */
+			// better to just be safe here.
+			objects_.erase(spectated_id_);
+			// don't wait until the next frame;
+			// what if the player tries to spectate it again immediately?
+			init_player(spectated_id_, spectated_player.value().name, spectated_player.value().cheated);
 		}
 		if (!db_.exists(id)) {
 			spectated_id_ = k_HSteamNetConnection_Invalid;

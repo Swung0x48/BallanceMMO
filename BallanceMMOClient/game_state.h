@@ -313,7 +313,7 @@ public:
 		assigned_id_ = id;
 	}
 
-	HSteamNetConnection get_client_id() {
+	HSteamNetConnection get_client_id() const {
 		return assigned_id_;
 	}
 

@@ -5,7 +5,7 @@ IMod* BMLEntry(IBML* bml) {
     return new BallanceMMOClient(bml);
 }
 
-VOID CALLBACK WinEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
+static VOID CALLBACK WinEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
     if (!BallanceMMOClient::get_instance()) return;
     auto instance = BallanceMMOClient::get_instance();
     if (dwEvent == EVENT_SYSTEM_MOVESIZESTART) instance->enter_size_move();
@@ -31,7 +31,7 @@ void BallanceMMOClient::show_player_list() {
                 int last_player_count = -1, last_font_size = -1;
                 while (player_list_visible_) {
                     update_player_list(last_player_count, last_font_size);
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
                 player_list_display_.reset();
             });
@@ -390,7 +390,8 @@ void BallanceMMOClient::OnProcess() {
         VxVector current_cam_pos;
         spect_cam_->GetPosition(&current_cam_pos);
         auto delta = m_bml->GetTimeManager()->GetLastDeltaTime();
-        current_cam_pos = Interpolate(0.006f * delta, current_cam_pos, spect_player_pos_ + spect_pos_diff_) - VxVector(0, 0.0046f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0);
+        current_cam_pos = Interpolate(0.006f * delta, current_cam_pos, spect_player_pos_ + spect_pos_diff_)
+                - VxVector(0, 0.0046f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0);
         spect_cam_->SetPosition(VT21_REF(current_cam_pos));
         spect_target_pos_ = Interpolate(0.011f * delta, spect_target_pos_, spect_player_pos_);
         spect_cam_->LookAt(VT21_REF(spect_target_pos_));
@@ -1006,8 +1007,8 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("spectate", [&] {
         HSteamNetConnection id = k_HSteamNetConnection_Invalid;
         std::string extra_info;
-        int rank = std::atoi(console_.get_next_word().c_str());
         if (console_.get_command_name() == "rankspectate") {
+            int rank = std::atoi(console_.get_next_word().c_str());
             std::lock_guard lk(player_status_list_mtx_);
             if (rank > 0 && rank <= player_status_list_.size()) {
                 std::string current_map_name = current_map_.get_display_name();
@@ -1026,15 +1027,28 @@ void BallanceMMOClient::init_commands() {
             }
         }
         else {
-            auto spect_name = spect_bindings_[rank];
-            if (spect_name[0] == '#')
-                id = (HSteamNetConnection)atoll(spect_name.substr(1).c_str());
+            auto next_word = console_.get_next_word();
+            if (next_word.starts_with('##') && next_word.length() > 2) {
+                int index = std::atoi(next_word.substr(2).c_str());
+                if (index >= spect_bindings_.size())
+                    index = 0;
+                next_word = spect_bindings_[index];
+                extra_info = std::format("binded as #{}", index);
+            }
+            if (next_word.starts_with('#'))
+                id = (HSteamNetConnection)atoll(next_word.substr(1).c_str());
             else
-                id = (spect_name == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(spect_name);
-            extra_info = std::format("binded as #{}", rank);
+                id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
         }
+        if (id == objects_.get_spectated_id()) {
+            if (id == k_HSteamNetConnection_Invalid)
+                SendIngameMessage("Already not spectating.");
+            else
+                SendIngameMessage("Already spectating the same player.");
+            return;
+        }
+        objects_.set_spectated_id(id);
         if (id == k_HSteamNetConnection_Invalid) {
-            objects_.set_spectated_id(id);
             m_bml->GetRenderContext()->AttachViewpointToCamera(last_cam_ ? last_cam_ : m_bml->GetTargetCameraByName("InGameCam"));
             spectating_first_person_ = false;
             m_bml->GetGroupByName("HUD_sprites")->Show();
@@ -1047,6 +1061,8 @@ void BallanceMMOClient::init_commands() {
             SendIngameMessage("Error: player not found.");
             return;
         }
+        VxVector spect_cam_pos;
+        spect_cam_->GetPosition(&spect_cam_pos);
         CKCamera* cam = m_bml->GetTargetCameraByName("InGameCam");
         spect_cam_->SetWorldMatrix(cam->GetWorldMatrix());
         int width, height;
@@ -1057,14 +1073,21 @@ void BallanceMMOClient::init_commands() {
         cam->GetPosition(&cam_pos);
         player_ball_->GetPosition(&ball_pos);
         spect_pos_diff_ = cam_pos - ball_pos;
-        last_cam_ = m_bml->GetRenderContext()->GetAttachedCamera();
+        if (auto attached = m_bml->GetRenderContext()->GetAttachedCamera(); attached != spect_cam_)
+            last_cam_ = attached; // save last camera if we weren't spectating
+        VxVector dest_pos = state.value().ball_state.front().position + spect_pos_diff_,
+            dest_diff = dest_pos - spect_cam_pos;
+        if (auto sq_dist = dest_diff.SquareMagnitude(); sq_dist > 24.0f * 24.0f)
+            spect_cam_pos += (1.0f - 24 / std::sqrt(sq_dist)) * dest_diff;
+        spect_cam_->SetPosition(VT21_REF(spect_cam_pos));
         m_bml->GetRenderContext()->AttachViewpointToCamera(spect_cam_);
-        objects_.set_spectated_id(id);
         spectating_first_person_ = true;
         spect_target_pos_ = objects_.get_spectated_ball_state().first;
         m_bml->GetGroupByName("HUD_sprites")->Show(CKHIDE);
         m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
-        SendIngameMessage(std::format("Spectating {} [{}].", state.value().name, extra_info));
+        objects_.update(SteamNetworkingUtils()->GetLocalTimestamp(), true); // update ping info
+        SendIngameMessage(std::format("Spectating {}{}.", state.value().name,
+                          extra_info.empty() ? "" : std::format(" [{}]", extra_info)));
     });
     console_.register_aliases("spectate", {"rankspectate"});
     console_.register_command("bindspectation", [&] {
@@ -1076,7 +1099,9 @@ void BallanceMMOClient::init_commands() {
             names_text.append(std::format("[{}] {}, ", i, spect_bindings_[i]));
         }
         names_text.erase(names_text.length() - std::strlen(", "));
-        SendIngameMessage("Spectator hotkeys bound to " + names_text);
+        SendIngameMessage("Spectator hotkeys bound to " + names_text + ".");
+        SendIngameMessage("You can either press Alt + number");
+        SendIngameMessage("Or run \"/mmo spectate ##number\" to activate spectation.");
     });
 #endif
 }

@@ -629,8 +629,10 @@ private:
 			for (size_t i = 0; i < sizeof(keys) / sizeof(CKKEYBOARD); ++i) {
 				if (!input_manager_->IsKeyPressed(keys[i]) && !input_manager_->IsKeyPressed(numpad_keys[i]))
 					continue;
-				if (rank_spectation || i < spect_bindings_.size())
-					OnCommand(m_bml, { "mmo", rank_spectation ? "rankspectate" : "spectate", std::to_string(i)});
+				if (rank_spectation)
+					OnCommand(m_bml, { "mmo", "rankspectate", std::to_string(i) });
+				else if (i < spect_bindings_.size())
+					OnCommand(m_bml, { "mmo", "spectate", "##" + std::to_string(i)});
 				break;
 			}
 			return;
