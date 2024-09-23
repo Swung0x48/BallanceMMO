@@ -395,6 +395,12 @@ void BallanceMMOClient::OnProcess() {
         spect_cam_->SetPosition(VT21_REF(current_cam_pos));
         spect_target_pos_ = Interpolate(0.011f * delta, spect_target_pos_, spect_player_pos_);
         spect_cam_->LookAt(VT21_REF(spect_target_pos_));
+        VxVector dir, up;
+        spect_cam_->GetOrientation(&dir, &up);
+        if (up.y < 0) { // happens when the camera is upside-down
+            up = -up;
+            spect_cam_->SetOrientation(VT21_REF(dir), VT21_REF(up));
+        }
     }
 #endif
 }
@@ -1075,10 +1081,6 @@ void BallanceMMOClient::init_commands() {
         spect_pos_diff_ = cam_pos - ball_pos;
         if (auto attached = m_bml->GetRenderContext()->GetAttachedCamera(); attached != spect_cam_)
             last_cam_ = attached; // save last camera if we weren't spectating
-        VxVector dest_pos = state.value().ball_state.front().position + spect_pos_diff_,
-            dest_diff = dest_pos - spect_cam_pos;
-        if (auto sq_dist = dest_diff.SquareMagnitude(); sq_dist > 24.0f * 24.0f)
-            spect_cam_pos += (1.0f - 24 / std::sqrt(sq_dist)) * dest_diff;
         spect_cam_->SetPosition(VT21_REF(spect_cam_pos));
         m_bml->GetRenderContext()->AttachViewpointToCamera(spect_cam_);
         spectating_first_person_ = true;
