@@ -1033,7 +1033,7 @@ void BallanceMMOClient::init_commands() {
                 if (index >= spect_bindings_.size())
                     index = 0;
                 next_word = spect_bindings_[index];
-                extra_info = std::format("binded as #{}", index);
+                extra_info = std::format("bound as #{}", index);
             }
             if (next_word.starts_with('#'))
                 id = (HSteamNetConnection)atoll(next_word.substr(1).c_str());
@@ -1100,7 +1100,7 @@ void BallanceMMOClient::init_commands() {
         }
         names_text.erase(names_text.length() - std::strlen(", "));
         SendIngameMessage("Spectator hotkeys bound to " + names_text + ".");
-        SendIngameMessage("You can either press Alt + number");
+        SendIngameMessage("You can either press Alt + , + number (or Alt + . + number)");
         SendIngameMessage("Or run \"/mmo spectate ##number\" to activate spectation.");
     });
 #endif

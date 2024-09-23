@@ -616,7 +616,7 @@ private:
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 		if (input_manager_->IsKeyDown(CKKEY_RMENU)) {
-			const bool rank_spectation = input_manager_->IsKeyDown(CKKEY_COMMA) || input_manager_->IsKeyDown(CKKEY_PERIOD);
+			const bool rank_spectation = !(input_manager_->IsKeyDown(CKKEY_COMMA) || input_manager_->IsKeyDown(CKKEY_PERIOD));
 			static constexpr CKKEYBOARD keys[] = {
 				CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5, CKKEY_6, CKKEY_7, CKKEY_8, CKKEY_9
 			};
