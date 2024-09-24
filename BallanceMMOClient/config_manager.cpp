@@ -89,9 +89,13 @@ void config_manager::init_config() {
     tmp_prop->SetDefaultBoolean(true);
     props_["dynamic_opacity"] = tmp_prop;
     tmp_prop = config->GetProperty("Gameplay", "SoundNotification");
-    tmp_prop->SetComment("Whether to play beep sounds in addition to chat notifications on important server events.");
+    tmp_prop->SetComment("Whether to play sounds in addition to chat notifications on server events. Note that important events still play sounds even when this is disabled.");
     tmp_prop->SetDefaultBoolean(true);
     props_["sound_notification"] = tmp_prop;
+    tmp_prop = config->GetProperty("Gameplay", "MuteEverything");
+    tmp_prop->SetComment("Disable all sound events. Not recommended but still here just in case this is needed.");
+    tmp_prop->SetDefaultBoolean(false);
+    props_["mute_everything"] = tmp_prop;
 }
 
 void config_manager::load_external_config() {

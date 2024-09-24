@@ -32,7 +32,7 @@ public:
     config_manager(log_manager* log_manager, std::function<IConfig*()> config_getter):
         log_manager_(log_manager), config_getter_(config_getter) {}
 
-    inline boost::uuids::uuid& get_uuid() { return uuid_; }
+    inline const boost::uuids::uuid& get_uuid() { return uuid_; }
 
     // we have to migrate our config before using bml's config manager
     // thus the getter instead of directly asking for IConfig* in our constructor
@@ -53,5 +53,5 @@ public:
     void check_and_save_name_change_time();
     void validate_nickname();
 
-    inline std::string get_config_directory_path() { return config_directory_path; };
+    inline std::string get_config_directory_path() const { return config_directory_path; };
 };

@@ -149,6 +149,7 @@ void BallanceMMOClient::OnLoad()
     parse_and_set_player_list_color(config_manager_["player_list_color"]);
     objects_.toggle_dynamic_opacity(config_manager_["dynamic_opacity"]->GetBoolean());
     sound_enabled_ = config_manager_["sound_notification"]->GetBoolean();
+    ignore_forced_sounds_ = config_manager_["mute_everything"]->GetBoolean();
 
     init_commands();
     //client_ = std::make_unique<client>(logger_, m_bml);
@@ -580,6 +581,10 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
     }
     else if (prop == config_manager_["sound_notification"]) {
         sound_enabled_ = prop->GetBoolean();
+        return;
+    }
+    else if (prop == config_manager_["mute_everything"]) {
+        ignore_forced_sounds_ = prop->GetBoolean();
         return;
     }
     if (connected() || connecting()) {
@@ -1102,7 +1107,7 @@ void BallanceMMOClient::init_commands() {
         }
         names_text.erase(names_text.length() - std::strlen(", "));
         SendIngameMessage("Spectator hotkeys bound to " + names_text + ".");
-        SendIngameMessage("You can either press Alt + , + number (or Alt + . + number)");
+        SendIngameMessage("You can either press RightAlt + , (or .) + number");
         SendIngameMessage("Or run \"/mmo spectate ##number\" to activate spectation.");
     });
 #endif

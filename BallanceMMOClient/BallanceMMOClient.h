@@ -288,6 +288,7 @@ private:
 #endif
 
 	bool sound_enabled_ = true;
+	bool ignore_forced_sounds_ = false;
 	CKWaveSound* sound_countdown_{}, * sound_go_{},
 		* sound_level_finish_{}, * sound_level_finish_cheat_{}, * sound_dnf_{},
 		* sound_notification_{}, * sound_bubble_{}, * sound_knock_{};
@@ -297,7 +298,7 @@ private:
 		Beep(frequency, duration);
 	};
 	void play_wave_sound(CKWaveSound* sound, bool forced = false) const {
-		if (!sound_enabled_ && !forced)
+		if ((!sound_enabled_ && !forced) || ignore_forced_sounds_)
 			return;
 		if (sound->IsPlaying())
 			sound->Stop();
