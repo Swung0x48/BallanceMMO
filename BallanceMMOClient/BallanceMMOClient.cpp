@@ -392,7 +392,7 @@ void BallanceMMOClient::OnProcess() {
         spect_cam_->GetPosition(&current_cam_pos);
         auto delta = m_bml->GetTimeManager()->GetLastDeltaTime();
         current_cam_pos = Interpolate(0.006f * delta, current_cam_pos, spect_player_pos_ + spect_pos_diff_)
-                - VxVector(0, 0.0046f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0);
+                - VxVector(0, 0.00492f * delta * (spect_player_pos_.y + spect_pos_diff_.y - current_cam_pos.y), 0);
         spect_cam_->SetPosition(VT21_REF(current_cam_pos));
         spect_target_pos_ = Interpolate(0.011f * delta, spect_target_pos_, spect_player_pos_);
         spect_cam_->LookAt(VT21_REF(spect_target_pos_));
