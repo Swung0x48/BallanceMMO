@@ -9,7 +9,7 @@ class config_manager {
 private:
     YAML::Node config_;
     bool save_player_status_to_file_ = false;
-    std::unordered_map<std::string, std::string> forced_names_;
+    std::unordered_map<std::string, std::string> forced_names_, reserved_names_;
     std::unordered_map<std::string, bool> forced_cheat_modes_;
 
 public:
@@ -28,6 +28,7 @@ public:
 
     bool has_forced_name(const std::string& uuid_string);
     const std::string& get_forced_name(const std::string& uuid_string);
+    bool is_name_reserved(const std::string& name, const std::string& uuid_string);
 
     // @returns `true` if the client's cheat mode should be forced
     bool get_forced_cheat_mode(const std::string& uuid_string, bool& cheat_mode);

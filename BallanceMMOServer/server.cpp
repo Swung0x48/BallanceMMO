@@ -624,6 +624,11 @@ protected:
                     << invalid_pos << "; nicknames can only contain alphanumeric characters and underscores.";
             nReason = bmmo::connection_end::InvalidNameCharacter;
         }
+        // check if name is reserved for another player
+        else if (config_.is_name_reserved(real_nickname, get_uuid_string(msg.uuid))) {
+            reason << "The name \"" << real_nickname << "\" is reserved for another player.";
+            nReason = bmmo::connection_end::ReservedName;
+        }
 
         if (nReason != k_ESteamNetConnectionEnd_Invalid) {
             bmmo::simple_action_msg new_msg{.content = bmmo::simple_action::LoginDenied};

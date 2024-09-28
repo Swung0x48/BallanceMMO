@@ -75,6 +75,8 @@ bool config_manager::load() {
             decltype(forced_cheat_modes_){{"00000001-0002-0003-0004-000000000005", false}});
     op_players = yaml_load_value(config_, "op_list",
             decltype(op_players){{"example_player", "00000001-0002-0003-0004-000000000005"}});
+    reserved_names_ = yaml_load_value(config_, "reserved_names",
+            decltype(reserved_names_){{"example_player", "00000001-0002-0003-0004-000000000005"}});
     banned_players = yaml_load_value(config_, "ban_list",
             decltype(banned_players){{"00000001-0002-0003-0004-000000000005", "You're banned from this server."}});
     std::vector<std::string> mute_list_vector = yaml_load_value(config_, "mute_list",
@@ -120,6 +122,13 @@ const std::string& config_manager::get_forced_name(const std::string& uuid_strin
     return forced_names_[uuid_string];
 };
 
+bool config_manager::is_name_reserved(const std::string& name, const std::string& uuid_string) {
+    auto it = reserved_names_.find(name);
+    if (it == reserved_names_.end())
+        return false;
+    return it->second != uuid_string;
+};
+
 bool config_manager::get_forced_cheat_mode(const std::string& uuid_string, bool& cheat_mode) {
     auto it = forced_cheat_modes_.find(uuid_string);
     if (it == forced_cheat_modes_.end())
@@ -150,7 +159,7 @@ void config_manager::save(bool reload_values) {
                 << "# - Auto flush log: whether to automatically flush the log file after each output.\n"
                 << "# - Map name list style: \"md5_hash: name\".\n"
                 << "# - Life count list style: \"md5_hash: count\".\n"
-                << "# - Op list player data style: \"playername: uuid\".\n"
+                << "# - Op list / reserved names data style: \"playername: uuid\".\n"
                 << "# - Ban list style: \"uuid: reason\".\n"
                 << "# - Mute list style: \"- uuid\".\n"
                 << std::endl;

@@ -27,7 +27,8 @@ namespace bmmo {
             None = 0,
 
             LoginDenied_Min = k_ESteamNetConnectionEnd_App_Min,
-            OutdatedClient, ExistingName, InvalidNameLength, InvalidNameCharacter,
+            OutdatedClient, ExistingName, InvalidNameLength,
+            InvalidNameCharacter, ReservedName,
 
             Banned_Min = LoginDenied_Min + 50,
             Banned = Banned_Min,
