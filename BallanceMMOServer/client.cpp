@@ -353,7 +353,7 @@ private:
                            pInfo->m_info.m_szEndDebug);
                 } else {
                     // NOTE: We could check the reason code for a normal disconnection
-                    Printf("The host hath bidden us farewell.  (%s)", pInfo->m_info.m_szEndDebug);
+                    Printf("The host hath bidden us farewell.  (%d: %s)", pInfo->m_info.m_eEndReason, pInfo->m_info.m_szEndDebug);
                 }
 
                 // Clean up the connection.  This is important!
