@@ -1029,7 +1029,7 @@ void BallanceMMOClient::init_commands() {
             auto cmd = console_.get_rest_of_line();
             if (cmd.starts_with("/"))
                 cmd.erase(0, 1);
-            if (!cmd.starts_with("mmo ") || !cmd.starts_with("ballancemmo "))
+            if (cmd.starts_with("mmo ") || cmd.starts_with("ballancemmo "))
                 cmd.erase(0, cmd.find(' ') + 1);
             cmd = std::format("{:g} {}", timeout, cmd);
             scheduled_commands.insert(cmd);
