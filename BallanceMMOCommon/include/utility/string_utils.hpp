@@ -54,8 +54,8 @@ namespace bmmo::string_utils {
 #endif
 
     inline std::string to_lower(std::string data) {
-        std::transform(data.begin(), data.end(), data.begin(),
-            [](unsigned char c){ return std::tolower(c); });
+        std::ranges::transform(data, data.begin(),
+                               [](unsigned char c){ return std::tolower(c); });
         return data;
     }
 
@@ -64,8 +64,7 @@ namespace bmmo::string_utils {
         static constexpr const size_t MAX_LENGTH = UINT16_MAX;
         std::string str = strings[start];
         start++;
-        size_t length = strings.size();
-        if (length > start) {
+        if (size_t length = strings.size(); length > start) {
             for (size_t i = start; i < length; i++)
                 str.append(delim + strings[i]);
         }
@@ -86,7 +85,7 @@ namespace bmmo::string_utils {
     inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
         for (unsigned int i = 0; i < src.length(); i += 2) {
             std::string byte_string = src.substr(i, 2);
-            uint8_t byte = (uint8_t) strtol(byte_string.c_str(), NULL, 16);
+            auto byte = (uint8_t) strtol(byte_string.c_str(), NULL, 16);
             dest[i / 2] = byte;
         }
     }
@@ -101,8 +100,7 @@ namespace bmmo::string_utils {
 
     // sanitize chat message (remove control characters)
     inline void sanitize_string(std::string& str) {
-        std::replace_if(str.begin(), str.end(),
-            [](char c) { return std::iscntrl(c); }, ' ');
+        std::ranges::replace_if(str, [](char c) { return std::iscntrl(c); }, ' ');
     }
 
     inline static std::string get_build_time_string() {
@@ -164,6 +162,23 @@ namespace bmmo::string_utils {
             files.emplace_back(entry_path.string());
         }
         return files;
+    }
+
+    inline std::string get_uuid_string(uint8_t* uuid) {
+        // std::stringstream ss;
+        // for (int i = 0; i < 16; i++) {
+        //     ss << std::hex << std::setfill('0') << std::setw(2) << (int)uuid[i];
+        //     if (i == 3 || i == 5 || i == 7 || i == 9)
+        //         ss << '-';
+        // }
+        // return ss.str();
+        char str[37] = {};
+        sprintf(str,
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+            uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+            uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
+        );
+        return {str};
     }
 }
 

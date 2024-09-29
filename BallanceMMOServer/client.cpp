@@ -197,7 +197,7 @@ public:
                 spectators.insert(i);
                 continue;
             }
-            players.push_back(i);
+            players.emplace_back(i);
         }
         std::sort(players.begin(), players.end(), [](const auto& i1, const auto& i2)
             { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
@@ -211,7 +211,7 @@ public:
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
         players.reserve(clients_.size());
         for (const auto& i: clients_)
-            players.push_back(i);
+            players.emplace_back(i);
         std::sort(players.begin(), players.end(), [](const auto& i1, const auto& i2)
             { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
         for (const auto& [id, data]: players)
@@ -235,7 +235,7 @@ public:
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
         players.reserve(clients_.size());
         for (const auto& i: clients_)
-            players.push_back(i);
+            players.emplace_back(i);
         std::sort(players.begin(), players.end(), [](const auto& i1, const auto& i2)
             { return bmmo::message_utils::to_lower(i1.second.name) < bmmo::message_utils::to_lower(i2.second.name); });
         for (const auto& [id, data]: players) {
@@ -1059,9 +1059,9 @@ int main(int argc, char** argv) {
     };
     console.register_command("countdown", [&] {
         if (console.empty()) {
-            Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
+            Printf(R"(Error: please specify the map to countdown (hint: use "getmap" and "listmap").)");
             Printf("Usage: \"countdown level|<hash> <level number> [mode] [type]\".");
-            Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
+            Printf(R"(<type>: {"4": "Get ready", "5": "Confirm ready", "": "auto countdown"})");
             return;
         }
         bmmo::countdown_msg msg{.content = {.map = get_map_from_input()}};
@@ -1110,7 +1110,7 @@ int main(int argc, char** argv) {
     console.register_command("getpos", [&] { client.print_positions(); });
     console.register_command("setmap", [&] {
         if (console.empty()) {
-            Printf("Usage: \"setmap level <level number>\", \"setmap <hash> [<level number> <name>]\".");
+            Printf(R"(Usage: "setmap level <level number>", "setmap <hash> [<level number> <name>]".)");
             return;
         }
         auto input_map = get_map_from_input(true);

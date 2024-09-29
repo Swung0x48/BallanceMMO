@@ -110,10 +110,10 @@ public:
         player_state_t state{};
     };
 
-    SteamNetworkingMicroseconds get_current_record_time() { return current_record_time_; }
-    time_t get_record_start_world_time() { return record_start_world_time_; }
+    SteamNetworkingMicroseconds get_current_record_time() const { return current_record_time_; }
+    time_t get_record_start_world_time() const { return record_start_world_time_; }
 
-    int get_segment_index(SteamNetworkingMicroseconds time) {
+    static int get_segment_index(SteamNetworkingMicroseconds time) {
         return time / (int)1e7;
     }
 
@@ -263,7 +263,7 @@ public:
     };
     // record byte position every 10 seconds
     std::vector<segment_info_t> segments_;
-    SteamNetworkingMicroseconds duration_;
+    SteamNetworkingMicroseconds duration_{};
 #pragma endregion
 
     bool setup() override {
@@ -494,12 +494,12 @@ public:
         }
     }
 
-    void print_current_record_time() {
+    void print_current_record_time() const {
         Printf("Current record is played to %.3lfs.", current_record_time_ / 1e6);
         print_current_world_time();
     }
 
-    void print_current_world_time() {
+    void print_current_world_time() const {
         auto current_world_time = time_t(current_record_time_ / 1e6 + record_start_world_time_);
         char time_str[32];
         std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&current_world_time));
@@ -854,7 +854,7 @@ private:
             }
             case bmmo::CurrentMap: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::current_map_msg>(entry.data, entry.size);
-                if (msg.content.type != msg.content.EnteringMap) break;
+                if (msg.content.type != bmmo::current_map_state::EnteringMap) break;
                 record_clients_[msg.content.player_id].map = msg.content.map;
                 record_clients_[msg.content.player_id].sector = msg.content.sector;
                 break;
@@ -884,8 +884,8 @@ private:
 
     bmmo::version_t record_version_;
     std::ifstream record_stream_;
-    SteamNetworkingMicroseconds record_start_time_;
-    time_t record_start_world_time_;
+    SteamNetworkingMicroseconds record_start_time_{};
+    time_t record_start_world_time_{};
     std::chrono::steady_clock::time_point time_zero_, time_pause_;
 
     uint16_t port_ = 0;
@@ -918,7 +918,7 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& filename) {
     while ((opt = getopt_long(argc, argv, "p:hv", long_options, &opt_index)) != -1) {
         switch (opt) {
             case 'p':
-                port = atoi(optarg);
+                port = std::atoi(optarg);
                 break;
             case 'h':
                 printf("Usage: %s [RECORD_FILE] [OPTION]...\n", argv[0]);
@@ -998,11 +998,11 @@ int main(int argc, char** argv) {
         switch (std::count(time_string.begin(), time_string.end(), ':')) {
             default:
             case 0: // precise time point measured in seconds
-                time_value = atof(time_string.c_str());
+                time_value = std::atof(time_string.c_str());
                 break;
             case 1: // [sign]<minute>:<second>
                 double minutes, seconds;
-                if (sscanf(time_string.c_str(), "%lf:%lf", &minutes, &seconds) != 2) {
+                if (std::sscanf(time_string.c_str(), "%lf:%lf", &minutes, &seconds) != 2) {
                     print_hint(); return;
                 };
                 time_value = minutes * 60 + seconds * (minutes < 0 ? -1 : 1);
@@ -1019,7 +1019,7 @@ int main(int argc, char** argv) {
         replayer.seek(time_value);
     });
     console.register_command("seek-legacy", [&]() {
-        replayer.seek_legacy(atof(console.get_next_word().c_str()));
+        replayer.seek_legacy(std::atof(console.get_next_word().c_str()));
     });
     console.register_command("say", [&]() {
         bmmo::plain_text_msg text_msg;

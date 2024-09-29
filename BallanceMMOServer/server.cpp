@@ -56,7 +56,7 @@ public:
         }
     }
 
-    EResult send(const HSteamNetConnection destination, const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
+    EResult send(const HSteamNetConnection destination, const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) const {
         return interface_->SendMessageToConnection(destination,
                                                    buffer,
                                                    size,
@@ -104,9 +104,9 @@ public:
 
     auto& get_bulletin() { return permanent_notification_; }
 
-    HSteamNetConnection get_client_id(std::string username, bool suppress_error = false) const {
+    HSteamNetConnection get_client_id(const std::string& username, bool suppress_error = false) const {
         if (username.empty()) return k_HSteamNetConnection_Invalid;
-        std::string begin_name(bmmo::message_utils::to_lower(username));
+        const std::string begin_name(bmmo::message_utils::to_lower(username));
         std::string end_name(begin_name);
         ++end_name[end_name.length() - 1];
         auto username_it = username_.lower_bound(begin_name);
@@ -138,7 +138,7 @@ public:
     inline int get_client_count() const noexcept { return clients_.size(); }
 
     inline config_manager get_config() { return config_; }
-    inline const bmmo::map& get_last_countdown_map() { return last_countdown_map_; }
+    inline const bmmo::map& get_last_countdown_map() const { return last_countdown_map_; }
 
     const bmmo::ranking_entry::player_rankings* get_map_rankings(const bmmo::map& map) {
         auto map_it = maps_.find(map.get_hash_bytes_string());
@@ -226,7 +226,7 @@ public:
                 Sprintf(quality_str, "  %5.2f%% quality", 100 * status.m_flConnectionQualityLocal);
             Printf("%10u  %*s%s  %4dms%s %s%s%s",
                     id, -max_name_length, data.name,
-                    print_uuid ? ("  " + get_uuid_string(data.uuid)) : "",
+                    print_uuid ? ("  " + bmmo::string_utils::get_uuid_string(data.uuid)) : "",
                     status.m_nPing, quality_str,
                     data.cheated ? " [CHEAT]" : "", is_op(id) ? " [OP]" : "",
                     is_muted(data.uuid) ? " [Muted]" : "");
@@ -288,7 +288,7 @@ public:
             Printf(line.c_str());
     }
 
-    void print_version_info() const {
+    static void print_version_info() {
         Printf("Server version: %s; minimum accepted client version: %s.",
                         bmmo::current_version.to_string(),
                         bmmo::minimum_client_version.to_string());
@@ -326,7 +326,7 @@ public:
     void set_ban(HSteamNetConnection client, const std::string& reason) {
         if (!client_exists(client))
             return;
-        const std::string uuid_string = get_uuid_string(clients_[client].uuid);
+        const std::string uuid_string = bmmo::string_utils::get_uuid_string(clients_[client].uuid);
         config_.banned_players[uuid_string] = reason;
         Printf(bmmo::color_code(bmmo::OpState), "Banned %s (%s)%s.",
                 clients_[client].name, uuid_string, reason.empty() ? "" : ": " + reason);
@@ -337,7 +337,7 @@ public:
     void set_mute(HSteamNetConnection client, bool action) {
         if (!client_exists(client))
             return;
-        const std::string uuid_string = get_uuid_string(clients_[client].uuid);
+        const std::string uuid_string = bmmo::string_utils::get_uuid_string(clients_[client].uuid);
         if (action) {
             Printf(bmmo::color_code(bmmo::OpState), "Muted %s (%s)%s.",
                 clients_[client].name, uuid_string,
@@ -358,12 +358,12 @@ public:
         std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
         if (action) {
             if (auto it = config_.op_players.find(name); it != config_.op_players.end()) {
-                if (it->second == get_uuid_string(clients_[client].uuid)) {
+                if (it->second == bmmo::string_utils::get_uuid_string(clients_[client].uuid)) {
                     Printf("Error: client \"%s\" already has OP privileges.", name);
                     return;
                 }
             }
-            config_.op_players[name] = get_uuid_string(clients_[client].uuid);
+            config_.op_players[name] = bmmo::string_utils::get_uuid_string(clients_[client].uuid);
             Printf(bmmo::color_code(bmmo::OpState), "%s is now an operator.", name);
         } else {
             if (!config_.op_players.erase(name))
@@ -376,7 +376,7 @@ public:
         send(client, msg, k_nSteamNetworkingSend_Reliable);
     }
 
-    void set_unban(std::string uuid_string) {
+    void set_unban(const std::string& uuid_string) {
         auto it = config_.banned_players.find(uuid_string);
         if (it == config_.banned_players.end()) {
             Printf("Error: %s is not banned.", uuid_string);
@@ -473,7 +473,8 @@ protected:
     void save_login_data(HSteamNetConnection client) {
         SteamNetConnectionInfo_t pInfo;
         interface_->GetConnectionInfo(client, &pInfo);
-        config_.save_login_data(pInfo.m_addrRemote, get_uuid_string(clients_[client].uuid), clients_[client].name);
+        config_.save_login_data(pInfo.m_addrRemote, bmmo::string_utils::get_uuid_string(clients_[client].uuid),
+                                clients_[client].name);
     }
 
     // Fail silently if the client doesn't exist.
@@ -533,26 +534,9 @@ protected:
         return false;
     }
 
-    std::string get_uuid_string(uint8_t* uuid) const {
-        // std::stringstream ss;
-        // for (int i = 0; i < 16; i++) {
-        //     ss << std::hex << std::setfill('0') << std::setw(2) << (int)uuid[i];
-        //     if (i == 3 || i == 5 || i == 7 || i == 9)
-        //         ss << '-';
-        // }
-        // return ss.str();
-        char str[37] = {};
-        sprintf(str,
-        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-            uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
-            uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
-        );
-        return {str};
-    }
-
     inline bool is_muted(HSteamNetConnection client) { return is_muted(clients_[client].uuid); }
     inline bool is_muted(uint8_t* uuid) const {
-        return config_.muted_players.contains(get_uuid_string(uuid));
+        return config_.muted_players.contains(bmmo::string_utils::get_uuid_string(uuid));
     }
 
     bool is_op(HSteamNetConnection client) {
@@ -562,22 +546,18 @@ protected:
         auto op_it = config_.op_players.find(name);
         if (op_it == config_.op_players.end())
             return false;
-        if (op_it->second == get_uuid_string(clients_[client].uuid))
+        if (op_it->second == bmmo::string_utils::get_uuid_string(clients_[client].uuid))
             return true;
         return false;
     }
 
     bool op_online() {
-        for (auto& client : clients_) {
-            if (is_op(client.first))
-                return true;
-        }
-        return false;
+        return std::ranges::any_of(clients_, [&](auto& client) { return is_op(client.first); });
     }
 
     bool process_forced_cheat_mode(std::pair<const HSteamNetConnection, client_data>& data, bool new_cheat_mode) {
         bool forced_cheat;
-        if (!config_.get_forced_cheat_mode(get_uuid_string(data.second.uuid), forced_cheat)
+        if (!config_.get_forced_cheat_mode(bmmo::string_utils::get_uuid_string(data.second.uuid), forced_cheat)
                 || forced_cheat == new_cheat_mode)
             return false;
         send(data.first, bmmo::cheat_toggle_msg{.content = {.cheated = forced_cheat, .notify = false}},
@@ -590,10 +570,11 @@ protected:
     bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
-        std::string real_nickname = bmmo::name_validator::get_real_nickname(msg.nickname);
+        const std::string real_nickname = bmmo::name_validator::get_real_nickname(msg.nickname);
 
         // check if client is banned
-        if (auto it = config_.banned_players.find(get_uuid_string(msg.uuid)); it != config_.banned_players.end()) {
+        if (auto it = config_.banned_players.find(bmmo::string_utils::get_uuid_string(msg.uuid));
+                it != config_.banned_players.end()) {
             reason << "You are banned from this server";
             if (!it->second.empty())
                 reason << ": " << it->second;
@@ -625,7 +606,7 @@ protected:
             nReason = bmmo::connection_end::InvalidNameCharacter;
         }
         // check if name is reserved for another player
-        else if (config_.is_name_reserved(real_nickname, get_uuid_string(msg.uuid))) {
+        else if (config_.is_name_reserved(real_nickname, bmmo::string_utils::get_uuid_string(msg.uuid))) {
             reason << "The name \"" << real_nickname << "\" is reserved for another player.";
             nReason = bmmo::connection_end::ReservedName;
         }
@@ -788,7 +769,7 @@ protected:
                 if (!validate_client(networking_msg->m_conn, msg))
                     break;
 
-                std::string uuid_string = get_uuid_string(msg.uuid);
+                std::string uuid_string = bmmo::string_utils::get_uuid_string(msg.uuid);
                 if (config_.has_forced_name(uuid_string)) {
                     std::string new_name = config_.get_forced_name(uuid_string);
                     bmmo::name_update_msg nu_msg;
@@ -797,7 +778,7 @@ protected:
                     send(networking_msg->m_conn, nu_msg.raw.str().data(), nu_msg.size(), k_nSteamNetworkingSend_Reliable);
                     if (bmmo::name_validator::is_spectator(msg.nickname))
                         new_name = bmmo::name_validator::get_spectator_nickname(new_name);
-                    Printf("Forced name change - #%u: \"%s\" -> \"%s\"",
+                    Printf(R"(Forced name change - #%u: "%s" -> "%s")",
                             networking_msg->m_conn, msg.nickname, new_name);
                     interface_->SetConnectionName(networking_msg->m_conn, new_name.c_str());
                     msg.nickname = new_name;
@@ -871,11 +852,8 @@ protected:
                 break;
             }
             case bmmo::LoginAccepted:
-                break;
             case bmmo::PlayerDisconnected:
-                break;
             case bmmo::PlayerConnected:
-                break;
             case bmmo::Ping:
                 break;
             case bmmo::BallState: {
@@ -1009,8 +987,8 @@ protected:
                 auto* msg = reinterpret_cast<bmmo::player_ready_msg*>(networking_msg->m_pData);
                 msg->content.player_id = networking_msg->m_conn;
                 client_it->second.ready = msg->content.ready;
-                msg->content.count = std::count_if(clients_.begin(), clients_.end(),
-                    [](const auto& i) { return i.second.ready; });
+                msg->content.count = std::ranges::count_if(clients_,
+                                                           [](const auto& i) { return i.second.ready; });
                 Printf("(#%u, %s) is%s ready to start (%u player%s ready).",
                     networking_msg->m_conn, client_it->second.name,
                     msg->content.ready ? "" : " not",
@@ -1428,7 +1406,7 @@ protected:
     }
 
     int poll_incoming_messages() override {
-        int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, incoming_messages_, ONCE_RECV_MSG_COUNT);
+        const int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, incoming_messages_, ONCE_RECV_MSG_COUNT);
         if (msg_count == 0)
             return 0;
         else if (msg_count < 0)
@@ -1520,7 +1498,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
     while ((opt = getopt_long(argc, argv, "p:l:hv", long_options, &opt_index)) != -1) {
         switch (opt) {
             case 'p':
-                port = atoi(optarg);
+                port = std::atoi(optarg);
                 break;
             case 'l':
                 log_path = optarg;
@@ -1597,7 +1575,7 @@ int main(int argc, char** argv) {
     auto get_client_id_from_console = [&]() -> HSteamNetConnection {
         std::string client_input = console.get_next_word();
         HSteamNetConnection client = (client_input.length() > 0 && client_input[0] == '#')
-                ? atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
+                ? std::atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
         if (client == 0)
             Printf("Error: invalid connection id.");
         return client;
@@ -1735,12 +1713,12 @@ int main(int argc, char** argv) {
     console.register_command("listmap", [&] { server.print_maps(); });
     console.register_command("countdown", [&] {
         auto print_hint = [] {
-            Printf("Error: please specify the map to countdown (hint: use \"getmap\" and \"listmap\").");
+            Printf(R"(Error: please specify the map to countdown (hint: use "getmap" and "listmap").)");
             Printf("Usage: \"countdown <client id> level|<hash> <level number> [mode] [type]\".");
-            Printf("<type>: {\"4\": \"Get ready\", \"5\": \"Confirm ready\", \"\": \"auto countdown\"}");
+            Printf(R"(<type>: {"4": "Get ready", "5": "Confirm ready", "": "auto countdown"})");
         };
         if (console.empty()) { print_hint(); return; }
-        auto client = get_client_id_from_console();
+        const auto client = get_client_id_from_console();
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word(true);
         if (console.empty()) { print_hint(); return; }
