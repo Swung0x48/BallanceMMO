@@ -141,6 +141,7 @@ private:
 	void OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key, IProperty* prop) override;
 	// Custom
 	void OnCommand(IBML* bml, const std::vector<std::string>& args);
+	void OnFullCommand(const std::string& full_command);
 	void OnAsyncCommand(IBML* bml, const std::vector<std::string>& args);
 	std::vector<std::string> OnTabComplete(IBML* bml, const std::vector<std::string>& args);
 	void OnTrafo(int from, int to);

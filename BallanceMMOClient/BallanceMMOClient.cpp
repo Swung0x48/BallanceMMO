@@ -624,6 +624,12 @@ inline void BallanceMMOClient::on_fatal_error(char* extra_text) {
 
 void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& args)
 {
+    const std::string full_command = bmmo::string_utils::join_strings(args, 1);
+    OnFullCommand(full_command);
+}
+
+void BallanceMMOClient::OnFullCommand(const std::string& full_command)
+{
     auto help = [this](IBML* bml) {
         std::lock_guard<std::mutex> lk(bml_mtx_);
         SendIngameMessage("BallanceMMO Help", bmmo::ansi::Bold);
@@ -643,11 +649,10 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
         }
     };
 
-    const std::string full_command = bmmo::string_utils::join_strings(args, 1);
     if (console_.execute(full_command))
         return;
     if (console_.get_command_name().empty())
-        help(bml);
+        help(m_bml);
     else {
         std::string extra_text;
         if (auto hints = console_.get_command_hints(true); !hints.empty())
@@ -1014,6 +1019,57 @@ void BallanceMMOClient::init_commands() {
             SendIngameMessage(std::format("Local level mode set to {}.", mode_name));
         }
     });
+    console_.register_command("schedule", [&] {
+        static std::set<std::string> scheduled_commands;
+        auto next_word = console_.get_next_word(true);
+        if (next_word == "add") {
+            auto timeout = atof(console_.get_next_word().c_str());
+            if (console_.empty())
+                return;
+            auto cmd = console_.get_rest_of_line();
+            if (cmd.starts_with("/"))
+                cmd.erase(0, 1);
+            if (!cmd.starts_with("mmo ") || !cmd.starts_with("ballancemmo "))
+                cmd.erase(0, cmd.find(' ') + 1);
+            cmd = std::format("{:g} {}", timeout, cmd);
+            scheduled_commands.insert(cmd);
+            SendIngameMessage(std::format("Scheduled command \"{}\" successfully.", cmd));
+            m_bml->AddTimer(float(timeout * 1000), [this, cmd = std::move(cmd)] {
+                const auto it = scheduled_commands.find(cmd);
+                if (it == scheduled_commands.end())
+                    return;
+                SendIngameMessage(std::format("Executing scheduled command: {}", cmd));
+                OnFullCommand(cmd.substr(cmd.find(' ') + 1));
+                scheduled_commands.erase(it);
+            });
+        }
+        else if (next_word == "list") {
+            int i = 0;
+            for (const auto& cmd : scheduled_commands) {
+                ++i;
+                SendIngameMessage(std::format("[{}] {}", i, cmd));
+            }
+        }
+        else if (next_word == "delete") {
+            auto index = std::atoi(console_.get_next_word().c_str());
+            if (index <= 0 || index > scheduled_commands.size()) {
+                SendIngameMessage("Error: invalid index.");
+                return;
+            }
+            scheduled_commands.erase(std::next(scheduled_commands.begin(), index - 1));
+            SendIngameMessage(std::format("Deleted schedule at position {} successfully.", index));
+        }
+        else if (next_word == "clear") {
+            scheduled_commands.clear();
+            SendIngameMessage("Cleared all scheduled commands.");
+        }
+        else {
+            SendIngameMessage("schedule add <timeout> <cmd>: add a command to the scheduler.");
+            SendIngameMessage("schedule list: list all currently scheduled commands.");
+            SendIngameMessage("schedule delete <index>: delete a scheduled command by its index (from schedule list).");
+            SendIngameMessage("schedule clear: remove all scheduled commands.");
+        }
+    });
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     console_.register_command("spectate", [&] {
         HSteamNetConnection id = k_HSteamNetConnection_Invalid;
@@ -1155,6 +1211,12 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                 return {"hs", "sr"};
             else if (lower1 == "scores")
                 return {"hs", "sr", "local"};
+            else if (lower1 == "schedule") {
+                if (length == 3)
+                    return {"add", "list", "delete", "clear"};
+                if (length > 4)
+                    return OnTabComplete(bml, std::vector<std::string>(args.begin() + 3, args.end()));
+            }
             break;
         }
     }
