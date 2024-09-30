@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: Fetch git submodules
       run: git submodule update --init --recursive
@@ -73,7 +73,7 @@ jobs:
         chmod +x $server_binary && ./$server_binary --dry-run
 
     - name: Release Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: server-linux-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
         path: build/BallanceMMOServer/artifacts
@@ -83,7 +83,7 @@ jobs:
     env:
       VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - uses: lukka/get-cmake@latest
 
@@ -94,7 +94,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Restore artifacts, setup vcpkg
-        uses: lukka/run-vcpkg@v10
+        uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: 861c33057553ee836e7061ffbdabc25ea343145d
           vcpkgDirectory: '${{env.VCPKG_ROOT}}'
@@ -134,7 +134,7 @@ jobs:
         run: ${{env.BUILD_TYPE}}/BallanceMMOServer.exe --dry-run
 
       - name: Release Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: server-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
           path: build/BallanceMMOServer/${{env.BUILD_TYPE}}

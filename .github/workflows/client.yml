@@ -29,7 +29,7 @@ jobs:
     env:
       VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - uses: lukka/get-cmake@latest
 
@@ -64,7 +64,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Restore artifacts, setup vcpkg
-        uses: lukka/run-vcpkg@v10
+        uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: 861c33057553ee836e7061ffbdabc25ea343145d
           vcpkgDirectory: '${{env.VCPKG_ROOT}}'
@@ -99,7 +99,7 @@ jobs:
         run: ctest -C ${{env.BUILD_TYPE}}
 
       - name: Release artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: client-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
           path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
@@ -112,7 +112,7 @@ jobs:
           rm BallanceMMOClient.exp, BallanceMMOClient.lib
 
       - name: Release artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: client-spectator-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
           path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
