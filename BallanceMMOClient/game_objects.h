@@ -179,7 +179,7 @@ public:
 
 			// Update username label
 			if (update_extra_info) {
-                username_label->update(get_username_label_text(item.second.name, item.second.cheated, item.second.ping));
+				username_label->update(get_username_label_text(item.second.name, item.second.cheated, item.second.ping));
 			}
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (isnan(extent.left) || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight

@@ -175,7 +175,7 @@ void BallanceMMOClient::OnLoad()
     }
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-    spect_cam_ = static_cast<CKCamera*>(m_bml->GetCKContext()->CreateObject(CKCID_CAMERA, "SpectatorCam"));
+    spect_cam_ = static_cast<CKCamera*>(m_bml->GetCKContext()->CreateObject(CKCID_CAMERA, "Spectator_Cam"));
 #endif
 }
 
@@ -270,6 +270,7 @@ void BallanceMMOClient::OnPostExitLevel() {
         compensation_lives_label_.reset();
     }
     on_sector_changed();
+    if (spectator_label_) spectator_label_->update("[Spectator Mode]");
 }
 
 void BallanceMMOClient::OnCounterActive() {
@@ -688,7 +689,7 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("say", [&] {
         bmmo::chat_msg msg{};
         msg.chat_content = console_.get_rest_of_line();
-        
+
         const char* new_text = nullptr;
         bool canceled = false;
         for (const auto& i : listeners_)
@@ -697,7 +698,7 @@ void BallanceMMOClient::init_commands() {
 
         if (new_text && std::strlen(new_text) < UINT16_MAX)
             msg.chat_content.assign(new_text);
-        
+
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         return;
@@ -1120,6 +1121,7 @@ void BallanceMMOClient::init_commands() {
             spectating_first_person_ = false;
             m_bml->GetGroupByName("HUD_sprites")->Show();
             m_bml->GetGroupByName("LifeBalls")->Show();
+            if (spectator_label_) spectator_label_->update("[Spectator Mode]");
             SendIngameMessage("Exited spectation.");
             return;
         }
@@ -1148,6 +1150,7 @@ void BallanceMMOClient::init_commands() {
         spect_target_pos_ = objects_.get_spectated_ball_state().first;
         m_bml->GetGroupByName("HUD_sprites")->Show(CKHIDE);
         m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
+        if (spectator_label_) spectator_label_->update(std::format("[Spectating: {}]", state.value().name));
         objects_.update(SteamNetworkingUtils()->GetLocalTimestamp(), true); // update ping info
         SendIngameMessage(std::format("Spectating {}{}.", state.value().name,
                           extra_info.empty() ? "" : std::format(" [{}]", extra_info)));

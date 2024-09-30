@@ -560,7 +560,7 @@ private:
 		if (!connected())
 			return;
 		if (input_manager_->IsKeyDown(CKKEY_LCONTROL)) {
-		  if (m_bml->IsIngame()) {
+			if (m_bml->IsIngame()) {
 				for (int i = 0; i < sizeof(KEYS_TO_CHECK) / sizeof(CKKEYBOARD); ++i) {
 					if (input_manager_->IsKeyPressed(KEYS_TO_CHECK[i])) {
 						// std::vector<std::string> args(init_args);
@@ -640,7 +640,6 @@ private:
 			return;
 		}
 #endif
-			
 
 #ifdef DEBUG
 		if (input_manager->IsKeyPressed(CKKEY_5)) {
