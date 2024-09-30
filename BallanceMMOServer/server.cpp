@@ -284,8 +284,8 @@ public:
         bmmo::ranking_entry::sort_rankings(ranks, hs_mode);
         auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
                 ranks, map.get_display_name(map_names_), hs_mode);
-        for (const auto& line: formatted_texts)
-            Printf(line.c_str());
+        for (const auto& [line, color]: formatted_texts)
+            Printf(color, line.c_str());
     }
 
     static void print_version_info() {
@@ -1053,6 +1053,7 @@ protected:
                 msg->content.player_id = networking_msg->m_conn;
                 std::string& player_name = client_it->second.name;
                 Printf(
+                    bmmo::color_code(msg->code),
                     "%s(#%u, %s) did not finish %s (furthest reach: sector %d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
@@ -1089,7 +1090,8 @@ protected:
 
                 // Prepare message
                 msg->content.rank = ++current_map.rank;
-                Printf("%s(#%u, %s) finished %s%s in %d%s place (score: %s; real time: %s).",
+                Printf(bmmo::color_code(msg->code),
+                    "%s(#%u, %s) finished %s%s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_), get_level_mode_label(msg->content.mode),

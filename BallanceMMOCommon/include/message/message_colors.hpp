@@ -39,6 +39,10 @@ namespace bmmo {
                 return a::Italic;
             case Countdown:
                 return a::BrightGreen | a::Bold;
+            case LevelFinishV2:
+				return a::Xterm256 | 106;
+            case DidNotFinish:
+				return a::Xterm256 | 138;
             default:
                 break;
         }

@@ -1863,7 +1863,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             player_name,
             msg->content.map.get_display_name(map_names_),
             msg->content.sector
-        ).c_str());
+        ), bmmo::color_code(msg->code));
         if (msg->content.player_id == db_.get_client_id())
             did_not_finish_ = true;
 
@@ -1922,7 +1922,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             msg->content.cheated ? "[CHEAT] " : "", player_name,
             map_name, get_level_mode_label(msg->content.mode),
             msg->content.rank, bmmo::string_utils::get_ordinal_suffix(msg->content.rank),
-            formatted_score, msg->content.get_formatted_time()));
+            formatted_score, msg->content.get_formatted_time()),
+            bmmo::color_code(msg->code));
 
         std::lock_guard lk(client_mtx_);
         maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
@@ -2173,9 +2174,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     msg.rankings, msg.map.get_display_name(map_names_), hs_mode);
             size_t size = msg.rankings.first.size() + msg.rankings.second.size() + 1;
             std::string text; text.reserve(size * 64);
-            for (const auto& line : formatted_texts) {
+            for (const auto& [line, color] : formatted_texts) {
                 text += line + '\n';
-                console_window_.print_text(line.c_str());
+
+                console_window_.print_text(line.c_str(), color);
                 logger_->Info("%s", line.c_str());
             }
             utils_.display_important_notification(text, 16.7f - 0.25f * std::clamp(size, 7u, 36u), size + 1, 400);

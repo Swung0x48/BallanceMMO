@@ -566,8 +566,8 @@ private:
                 bmmo::ranking_entry::sort_rankings(msg.rankings, hs_mode);
                 auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
                         msg.rankings, msg.map.get_display_name(map_names_), hs_mode);
-                for (const auto& line: formatted_texts)
-                    Printf(line.c_str());
+                for (const auto& [line, color]: formatted_texts)
+                    Printf(color, line.c_str());
                 break;
             }
             case bmmo::SoundData: {
@@ -646,6 +646,7 @@ private:
                 auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
                 std::string player_name = get_player_name(msg->content.player_id);
                 Printf(
+                    bmmo::color_code(msg->code),
                     "%s(#%u, %s) did not finish %s (furthest reach: sector %d).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
@@ -668,7 +669,8 @@ private:
 
                 std::string player_name = get_player_name(msg->content.player_id),
                     formatted_score = msg->content.get_formatted_score();
-                Printf("%s(#%u, %s) finished %s%s in %d%s place (score: %s; real time: %s).",
+                Printf(bmmo::color_code(msg->code),
+                    "%s(#%u, %s) finished %s%s in %d%s place (score: %s; real time: %s).",
                     msg->content.cheated ? "[CHEAT] " : "",
                     msg->content.player_id, player_name,
                     msg->content.map.get_display_name(map_names_), get_level_mode_label(msg->content.mode),

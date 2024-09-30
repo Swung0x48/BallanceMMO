@@ -48,7 +48,8 @@ namespace bmmo::ranking_entry {
 
     void sort_rankings(player_rankings& rankings, bool hs_mode = false);
 
-    std::vector<std::string> get_formatted_rankings(
+    // std::pair<text, color>
+    std::vector<std::pair<std::string, int>> get_formatted_rankings(
             const player_rankings& rankings, const std::string& map_name, bool hs_mode = false);
 }
 
