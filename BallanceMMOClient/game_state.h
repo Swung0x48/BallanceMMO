@@ -319,7 +319,7 @@ public:
 
 	HSteamNetConnection get_client_id(std::string name) {
 		auto it = std::find_if(states_.begin(), states_.end(),
-													 [&name](const auto& s) { return boost::iequals(s.second.name, name); });
+								[&name](const auto& s) { return boost::iequals(s.second.name, name); });
 		if (it == states_.end())
 			return k_HSteamNetConnection_Invalid;
 		return it->first;
@@ -341,8 +341,12 @@ public:
 		return (SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1000;
 	}
 
-	bool is_nametag_visible() {
+	bool is_nametag_visible() const {
 		return nametag_visible_;
+	}
+
+	bool is_ping_visible() const {
+		return ping_visible_;
 	}
 
 	void set_nametag_visible(bool visible) {
@@ -351,6 +355,8 @@ public:
 
 	void toggle_nametag_visible() {
 		nametag_visible_ = !nametag_visible_;
+		if (nametag_visible_)
+			ping_visible_ = !ping_visible_;
 	}
 
 	void set_pending_flush(bool flag) {
@@ -372,7 +378,7 @@ private:
 	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
 	std::string nickname_;
 	HSteamNetConnection assigned_id_ = k_HSteamNetConnection_Invalid;
-	std::atomic_bool nametag_visible_ = true;
+	std::atomic_bool nametag_visible_ = true, ping_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
 	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15, PREV_VARIANCE_WEIGHT = 31;
 	static const inline auto INIT_TIMESTAMP = SteamNetworkingUtils()->GetLocalTimestamp();

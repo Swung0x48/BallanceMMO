@@ -179,7 +179,7 @@ public:
 
 			// Update username label
 			if (update_extra_info) {
-				username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + std::format(" [{}ms]", item.second.ping));
+                username_label->update(get_username_label_text(item.second.name, item.second.cheated, item.second.ping));
 			}
 			VxRect extent; current_ball->GetRenderExtents(extent);
 			if (isnan(extent.left) || !current_ball->IsInViewFrustrum(rc)) { // This player goes out of sight
@@ -189,8 +189,11 @@ public:
 			// Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			if (!ball_type_changed)
 				username_label->set_position({ extent.GetCenter() / viewport.GetBottomRight() });
-			if (username_label->visible_ != db_.is_nametag_visible())
+			if (username_label->visible_ != db_.is_nametag_visible()) {
 				username_label->set_visible(db_.is_nametag_visible());
+				if (db_.is_nametag_visible())
+					username_label->update(get_username_label_text(item.second.name, item.second.cheated, item.second.ping));
+			}
 			username_label->process();
 			return true;
 		});
@@ -376,6 +379,13 @@ public:
 			bml_->GetCKContext()->DestroyObject(obj);
 		}
 	}
+
+	std::string get_username_label_text(const std::string& name, bool cheated, uint16_t ping) const {
+		std::string label_text = name + (cheated ? " [C]" : "");
+		if (db_.is_ping_visible())
+			label_text += std::format(" [{}ms]", ping);
+		return label_text;
+	};
 
 	void reload() {
 		destroy_all_objects();
