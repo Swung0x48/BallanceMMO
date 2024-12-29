@@ -338,15 +338,14 @@ public:
 		}
 	}
 
-	inline const std::pair<VxVector, VxQuaternion> get_spectated_ball_state() {
-		if (!db_.exists(spectated_id_))
+	inline const VxVector get_ball_pos(HSteamNetConnection id) {
+		if (!db_.exists(id))
 			return {};
 		auto* player_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(
-			objects_[spectated_id_].balls[db_.get(spectated_id_).value().ball_state.front().type]));
-		VxVector pos; VxQuaternion rot;
+			objects_[id].balls[db_.get(id).value().ball_state.front().type]));
+		VxVector pos;
 		player_ball->GetPosition(&pos);
-		player_ball->GetQuaternion(&rot);
-		return {pos, rot};
+		return pos;
 	}
 #endif
 

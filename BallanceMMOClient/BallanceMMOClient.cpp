@@ -378,7 +378,7 @@ void BallanceMMOClient::OnProcess() {
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     if (spectating_first_person_) {
-        spect_player_pos_ = objects_.get_spectated_ball_state().first;
+        spect_player_pos_ = objects_.get_ball_pos(objects_.get_spectated_id());
         if (input_manager_->IsKeyDown(CKKEY_LSHIFT)) {
             CKCamera* cam = m_bml->GetTargetCameraByName("InGameCam");
             VxVector cam_pos, ball_pos;
@@ -1147,7 +1147,7 @@ void BallanceMMOClient::init_commands() {
         spect_cam_->SetPosition(VT21_REF(spect_cam_pos));
         m_bml->GetRenderContext()->AttachViewpointToCamera(spect_cam_);
         spectating_first_person_ = true;
-        spect_target_pos_ = objects_.get_spectated_ball_state().first;
+        spect_target_pos_ = objects_.get_ball_pos(objects_.get_spectated_id());
         m_bml->GetGroupByName("HUD_sprites")->Show(CKHIDE);
         m_bml->GetGroupByName("LifeBalls")->Show(CKHIDE);
         if (spectator_label_) spectator_label_->update(std::format("[Spectating: {}]", state.value().name));
