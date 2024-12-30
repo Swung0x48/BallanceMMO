@@ -163,18 +163,21 @@ public:
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 				&& spectated_id_ != item.first
 #endif
-				&& timestamp - player.last_opacity_timestamp > 131072
+				&& (timestamp - player.last_opacity_timestamp >= 114688 || ball_type_changed) // 7 * 2^14
 			) {
 				auto new_opacity = std::clamp(std::sqrt(square_ball_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				float dilation_factor = 1.0f;
 				db_.for_each([&, this](const std::pair<const HSteamNetConnection, PlayerState>& item2) {
-					if (item2.first == db_.get_client_id() || item2.first == item.first || bmmo::name_validator::is_spectator(item2.second.name)) return true;
+					if (item2.first == db_.get_client_id() || item2.first == item.first
+							|| bmmo::name_validator::is_spectator(item2.second.name))
+						return true;
 					const auto square_distance = (state_it->position - item2.second.ball_state.front().position).SquareMagnitude();
-					if (square_distance < DILATION_MAX_SQUARE_DISTANCE) dilation_factor += 1.0f - square_distance / DILATION_MAX_SQUARE_DISTANCE;
+					if (square_distance < DILATION_MAX_SQUARE_DISTANCE)
+						dilation_factor += 1.0f - square_distance / DILATION_MAX_SQUARE_DISTANCE;
 					return true;
 				});
 				new_opacity = std::clamp(new_opacity * 3 / dilation_factor, 0.1f, new_opacity);
-				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f) {
+				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f || ball_type_changed) {
 					player.last_opacity = new_opacity;
 					auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
 					VxColor color = current_material->GetDiffuse();
@@ -417,7 +420,7 @@ private:
 	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
 	static constexpr int64_t MAX_EXTRAPOLATION_TIME_VARIANCE = 268435456ll;
-	static constexpr float DILATION_MAX_SQUARE_DISTANCE = 16.0f,
+	static constexpr float DILATION_MAX_SQUARE_DISTANCE = 14.0f,
 		ALPHA_DEFAULT = 0.5f, ALPHA_DISTANCE_RATE = 0.0144f,
 		ALPHA_BEGIN = 0.2f, ALPHA_MIN = 0.28f, ALPHA_MAX = 0.7f;
 };
