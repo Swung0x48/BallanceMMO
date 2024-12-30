@@ -757,11 +757,25 @@ private:
                 auto msg = bmmo::message_utils::deserialize<bmmo::login_request_v3_msg>(networking_msg);
 
                 interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
-                // only major and minor is required to be the same
-                if (std::memcmp(&msg.version, &record_version_, sizeof(msg.version.major) + sizeof(msg.version.minor)) != 0) {
+                if (msg.version < record_version_) {
                     interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1,
-                        Sprintf("Incorrect version; please use BMMO v%s", record_version_.to_string()).c_str(), true);
+                        Sprintf("Outdated client; please use BMMO >= v%s", record_version_.to_string()).c_str(), true);
                     break;
+                }
+                // ignore stage/build versions
+                else if (std::memcmp(&msg.version, &record_version_, sizeof(msg.version.major) + sizeof(msg.version.minor) + sizeof (msg.version.subminor)) != 0) {
+                    bmmo::public_notification_msg warning_msg;
+                    warning_msg.type = bmmo::public_notification_type::Warning;
+                    warning_msg.text_content.resize(128);
+                    bmmo::Sprintf(warning_msg.text_content, "Incompatible %s version (server: %s; client: %s).",
+                            (msg.version.minor == record_version_.minor ? "subminor" : "minor"),
+                            record_version_.to_string(), msg.version.to_string());
+                    warning_msg.serialize();
+                    send(networking_msg->m_conn, warning_msg.raw.str().data(), warning_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    warning_msg.text_content = "Proceed at your own risk.";
+                    warning_msg.clear();
+                    warning_msg.serialize();
+                    send(networking_msg->m_conn, warning_msg.raw.str().data(), warning_msg.size(), k_nSteamNetworkingSend_Reliable);
                 }
                 if (seeking_) {
                     interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 150 + 2,
