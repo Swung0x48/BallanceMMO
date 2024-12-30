@@ -182,7 +182,7 @@ public:
 						dilation_factor += 1.0f - square_distance / DILATION_MAX_SQUARE_DISTANCE;
 					return true;
 				});
-				new_opacity = std::clamp(new_opacity * 3 / dilation_factor, 0.1f, new_opacity);
+				new_opacity = std::clamp(new_opacity * 3 / dilation_factor, 0.09375f, new_opacity);
 				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f || ball_type_changed) {
 					player.last_opacity = new_opacity;
 					auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
