@@ -1,8 +1,9 @@
 #pragma once
+#include <mutex>
+#include <unordered_map>
 #include "bml_includes.h"
 #include "label_sprite.h"
 #include "game_state.h"
-#include <unordered_map>
 
 struct PlayerObjects {
 	static inline IBML* bml;
@@ -33,6 +34,7 @@ public:
 	}
 
 	void init_player(const HSteamNetConnection id, const std::string& name, bool cheat) {
+		std::lock_guard lk(mutex_);
 		auto& obj = objects_[id];
 		for (size_t i = 0; i < template_balls_.size(); ++i) {
 			auto* ball = init_spirit_ball(i, id);
@@ -61,6 +63,7 @@ public:
 	}
 
 	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
+		std::lock_guard lk(mutex_);
 		auto* old_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[from]);
 		auto* new_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[to]);
 
@@ -118,6 +121,9 @@ public:
 				on_trafo(item.first, player.visible_ball_type, current_ball_type);
 				player.visible_ball_type = current_ball_type;
 			}
+
+			std::unique_lock lk(mutex_, std::try_to_lock); // lock after init/trafo to avoid deadlock
+			if (!lk) return true;
 
 			/*bml_->SendIngameMessage(std::to_string(item.first).c_str());
 			bml_->SendIngameMessage(std::to_string(current_ball_type).c_str());*/
@@ -196,9 +202,8 @@ public:
 				username_label->set_visible(false);
 				return true;
 			}
-			// Vx2DVector pos((extent.left + extent.right) / 2.0f / viewport.right, (extent.top + extent.bottom) / 2.0f / viewport.bottom);
 			if (!ball_type_changed)
-				username_label->set_position({ extent.GetCenter() / viewport.GetBottomRight() });
+				username_label->set_position(extent.GetCenter() / viewport.GetBottomRight());
 			if (username_label->visible_ != db_.is_nametag_visible()) {
 				username_label->set_visible(db_.is_nametag_visible());
 				if (db_.is_nametag_visible())
@@ -228,10 +233,12 @@ public:
 	}
 
 	void remove(HSteamNetConnection id) {
+		std::lock_guard lk(mutex_);
 		objects_.erase(id);
 	}
 
 	void purge_dead() {
+		std::lock_guard lk(mutex_);
 		std::erase_if(objects_, [this](const auto& item) {
 			auto const& [key, value] = item;
 			return !db_.exists(key);
@@ -239,6 +246,7 @@ public:
 	}
 
 	void init_template_balls() {
+		std::lock_guard lk(mutex_);
 		CKDataArray* physicalized_ball = bml_->GetArrayByName("Physicalize_GameBall");
 
 		template_balls_.reserve(physicalized_ball->GetRowCount());
@@ -341,6 +349,7 @@ public:
 			spectated_id_ = k_HSteamNetConnection_Invalid;
 			return;
 		}
+		std::lock_guard lk(mutex_);
 		spectated_id_ = id;
 		for (auto& mat_id : objects_[spectated_id_].materials) {
 			auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
@@ -378,10 +387,12 @@ public:
 	}
 
 	void destroy_all_objects() {
+		std::lock_guard lk(mutex_);
 		objects_.clear();
 	}
 
 	void destroy_templates() {
+		std::lock_guard lk(mutex_);
 		auto* ctx = bml_->GetCKContext();
 		for (auto i : template_balls_) {
 			auto* obj = ctx->GetObject(i);
@@ -415,6 +426,7 @@ private:
 	IBML* bml_ = nullptr;
 	std::function<CK3dObject* ()> get_own_ball_fn_;
 	game_state& db_;
+	std::mutex mutex_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false, dynamic_opacity_ = true;
 	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
