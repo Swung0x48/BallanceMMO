@@ -87,14 +87,8 @@ public:
 			return;
 		VxRect viewport; rc->GetViewRect(viewport);
 
-		VxVector camera_target_pos{};
-		auto* camera = rc->GetAttachedCamera();
-		if (camera) {
-			camera->GetPosition(&camera_target_pos);
-			VxVector orientation;
-			camera->GetOrientation(&orientation, nullptr);
-			camera_target_pos += orientation * CAMERA_TARGET_DISTANCE;
-		}
+    VxVector own_ball_pos;
+    get_own_ball()->GetPosition(&own_ball_pos);
 
 #if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
 		static SteamNetworkingMicroseconds last_time_variance_update = 0;
@@ -134,7 +128,7 @@ public:
 			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
 				return true;
 
-			float square_camera_distance = 0;
+			float square_ball_distance = 0;
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!player.physicalized) {
@@ -156,12 +150,12 @@ public:
 						: PlayerState::get_linear_extrapolated_state(tc, state_it[1], state_it[0]);
 					current_ball->SetPosition(VT21_REF(position));
 					current_ball->SetQuaternion(VT21_REF(rotation));
-					square_camera_distance = (position - camera_target_pos).SquareMagnitude();
+					square_ball_distance = (position - own_ball_pos).SquareMagnitude();
 				}
 				else {
 					current_ball->SetPosition(VT21_REF(state_it->position));
 					current_ball->SetQuaternion(VT21_REF(state_it->rotation));
-					square_camera_distance = (state_it->position - camera_target_pos).SquareMagnitude();
+					square_ball_distance = (state_it->position - own_ball_pos).SquareMagnitude();
 				}
 			}
 
@@ -170,7 +164,7 @@ public:
 				&& spectated_id_ != item.first
 #endif
 			) {
-				auto new_opacity = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
+				auto new_opacity = std::clamp(std::sqrt(square_ball_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f || player.opacity_counter > 256) {
 					// TODO: count if any of other balls are within the range of 2.0f
 					int counter = 0;
@@ -180,6 +174,7 @@ public:
 						if (square_distance < 16.0f) ++counter;
 						return true;
 					});
+          bmmo::Printf("Name: %s, Counter: %d\n", item.second.name, counter);
 					new_opacity /= std::max(1, counter);
 					player.last_opacity = new_opacity;
 					auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
@@ -425,7 +420,7 @@ private:
 	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
 	static constexpr int64_t MAX_EXTRAPOLATION_TIME_VARIANCE = 268435456ll;
-	static constexpr float CAMERA_TARGET_DISTANCE = 40.0f,
+	static constexpr float
 		ALPHA_DEFAULT = 0.5f, ALPHA_DISTANCE_RATE = 0.0144f,
 		ALPHA_BEGIN = 0.2f, ALPHA_MIN = 0.28f, ALPHA_MAX = 0.7f;
 };
