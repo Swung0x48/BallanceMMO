@@ -47,9 +47,6 @@ struct PlayerState {
 	boost::circular_buffer<TimedBallState> ball_state = decltype(ball_state)(3, TimedBallState());
 	SteamNetworkingMicroseconds time_diff = std::numeric_limits<decltype(time_diff)>::min();
 	int64_t time_variance = 0;
-#if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
-	int counter = 0;
-#endif
 	bmmo::map current_map;
 	int32_t current_sector = 0;
 	int64_t current_sector_timestamp = 0;

@@ -38,7 +38,7 @@ class BallanceMMOClient : public IMod, public bmmo::exported::client {
 public:
 	BallanceMMOClient(IBML* bml):
 		IMod(bml),
-		objects_(bml, db_),
+		objects_(bml, db_, [this] { return get_current_ball(); }),
 		log_manager_(GetLogger(), [this](std::string msg, int ansi_color) { SendIngameMessage(msg, ansi_color); }),
 		logger_(log_manager_.get_logger()),
 		utils_(bml),

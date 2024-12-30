@@ -27,7 +27,8 @@ struct PlayerObjects {
 
 class game_objects {
 public:
-	game_objects(IBML* bml, game_state& db): bml_(bml), db_(db) {
+	game_objects(IBML* bml, game_state& db, std::function<CK3dObject*()> get_own_ball_fn):
+			bml_(bml), db_(db), get_own_ball_fn_(get_own_ball_fn) {
 		PlayerObjects::bml = bml;
 	}
 
@@ -95,7 +96,16 @@ public:
 			camera_target_pos += orientation * CAMERA_TARGET_DISTANCE;
 		}
 
-		db_.for_each([=, this, &viewport, &rc](std::pair<const HSteamNetConnection, PlayerState>& item) {
+#if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
+		static SteamNetworkingMicroseconds last_time_variance_update = 0;
+		static bool update_time_variance = false;
+		if (timestamp - last_time_variance_update >= 1000000) {
+			last_time_variance_update = timestamp;
+			update_time_variance = true;
+		}
+#endif
+
+		db_.for_each([=, this, &viewport, &rc](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -129,19 +139,15 @@ public:
 			// Update ball states with togglable quadratic extrapolation
 			if (!player.physicalized) {
 #if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
-				item.second.counter++;
-				if (item.second.counter % 66 == 0) {
+				if (update_time_variance) {
 					username_label->update(item.second.name + (item.second.cheated ? " [C]" : "") + " " + std::to_string(item.second.time_variance / 100000));
 				}
 #endif
-				if (extrapolation_ && [=, this]() mutable {
-					if ((state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
-							&& item.second.time_variance < MAX_EXTRAPOLATION_TIME_VARIANCE)
-						return true;
-					item.second.ball_state.push_front(state_it[0]);
-					item.second.ball_state.push_front(state_it[0]);
-					return false;
-				}()) {
+				if (extrapolation_
+						&& item.second.time_variance < MAX_EXTRAPOLATION_TIME_VARIANCE
+						&& (state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
+						&& (state_it[1].position - state_it[2].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
+				) {
 					SteamNetworkingMicroseconds tc = timestamp;
 					if (state_it->timestamp + MAX_EXTRAPOLATION_TIME < timestamp)
 						tc = state_it->timestamp + MAX_EXTRAPOLATION_TIME;
@@ -164,8 +170,17 @@ public:
 				&& spectated_id_ != item.first
 #endif
 			) {
-				const auto new_opacity = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
+				auto new_opacity = std::clamp(std::sqrt(square_camera_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				if (std::fabsf(new_opacity - player.last_opacity) > 0.015625f || player.opacity_counter > 256) {
+					// TODO: count if any of other balls are within the range of 2.0f
+					int counter = 0;
+					db_.for_each([&, this](const std::pair<const HSteamNetConnection, PlayerState>& item2) {
+						if (item2.first == db_.get_client_id()) return true;
+						const auto square_distance = (state_it->position).SquareMagnitude();
+						if (square_distance < 16.0f) ++counter;
+						return true;
+					});
+					new_opacity /= std::max(1, counter);
 					player.last_opacity = new_opacity;
 					auto* current_material = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(player.materials[current_ball_type]));
 					VxColor color = current_material->GetDiffuse();
@@ -386,6 +401,10 @@ public:
 		return label_text;
 	};
 
+	CK3dObject* get_own_ball() {
+		return get_own_ball_fn_();
+	}
+
 	void reload() {
 		destroy_all_objects();
 		init_players();
@@ -399,6 +418,7 @@ private:
 	bool template_init_ = false;
 	std::vector<CK_ID> template_balls_;
 	IBML* bml_ = nullptr;
+	std::function<CK3dObject* ()> get_own_ball_fn_;
 	game_state& db_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false, dynamic_opacity_ = true;
