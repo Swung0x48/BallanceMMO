@@ -95,7 +95,7 @@ public:
 
 #if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
 		static SteamNetworkingMicroseconds last_time_variance_update = 0;
-		static bool update_time_variance = false;
+		bool update_time_variance = false;
 		if (timestamp - last_time_variance_update >= 1000000) {
 			last_time_variance_update = timestamp;
 			update_time_variance = true;
@@ -156,12 +156,20 @@ public:
 						: PlayerState::get_linear_extrapolated_state(tc, state_it[1], state_it[0]);
 					current_ball->SetPosition(VT21_REF(position));
 					current_ball->SetQuaternion(VT21_REF(rotation));
-					square_ball_distance = (position - own_ball_pos).SquareMagnitude();
+					square_ball_distance = (position - (
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(item.first) :
+#endif
+						own_ball_pos)).SquareMagnitude();
 				}
 				else {
 					current_ball->SetPosition(VT21_REF(state_it->position));
 					current_ball->SetQuaternion(VT21_REF(state_it->rotation));
-					square_ball_distance = (state_it->position - own_ball_pos).SquareMagnitude();
+					square_ball_distance = (state_it->position - (
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(item.first) :
+#endif
+						own_ball_pos)).SquareMagnitude();
 				}
 			}
 
