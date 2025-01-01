@@ -158,7 +158,7 @@ public:
 					current_ball->SetQuaternion(VT21_REF(rotation));
 					square_ball_distance = (position - (
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(item.first) :
+						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(spectated_id_) :
 #endif
 						own_ball_pos)).SquareMagnitude();
 				}
@@ -167,7 +167,7 @@ public:
 					current_ball->SetQuaternion(VT21_REF(state_it->rotation));
 					square_ball_distance = (state_it->position - (
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(item.first) :
+						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(spectated_id_) :
 #endif
 						own_ball_pos)).SquareMagnitude();
 				}
