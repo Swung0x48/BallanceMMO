@@ -378,6 +378,10 @@ void BallanceMMOClient::OnProcess() {
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     if (spectating_first_person_) {
+        if (!db_.exists(objects_.get_spectated_id())) {
+            OnFullCommand("spectate"); // just exit spectation
+            return;
+        }
         spect_player_pos_ = objects_.get_ball_pos(objects_.get_spectated_id());
         if (input_manager_->IsKeyDown(CKKEY_LSHIFT)) {
             CKCamera* cam = m_bml->GetTargetCameraByName("InGameCam");
@@ -625,6 +629,7 @@ inline void BallanceMMOClient::on_fatal_error(char* extra_text) {
 
 void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& args)
 {
+    // discard the first "mmo" argument
     const std::string full_command = bmmo::string_utils::join_strings(args, 1);
     OnFullCommand(full_command);
 }
@@ -1596,6 +1601,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         if (logged_in_) {
             logger_->Info("New LoginAccepted message received. Resetting current data.");
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+            if (objects_.get_spectated_id() != k_HSteamNetConnection_Invalid)
+                OnFullCommand("spectate"); // exit spectation properly
+#endif // BMMO_WITH_PLAYER_SPECTATION
             db_.clear();
             objects_.destroy_all_objects();
         }
