@@ -4,6 +4,7 @@
 #include "bml_includes.h"
 #include "label_sprite.h"
 #include "game_state.h"
+#include "utils.h"
 
 struct PlayerObjects {
 	static inline IBML* bml;
@@ -93,6 +94,10 @@ public:
 		VxVector own_ball_pos;
 		get_own_ball()->GetPosition(&own_ball_pos);
 
+		const auto* camera = rc->GetAttachedCamera();
+		VxVector camera_pos = own_ball_pos;
+		if (camera) camera->GetPosition(&camera_pos);
+
 #if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
 		static SteamNetworkingMicroseconds last_time_variance_update = 0;
 		bool update_time_variance = false;
@@ -102,7 +107,7 @@ public:
 		}
 #endif
 
-		db_.for_each([=, this, &viewport, &rc](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		db_.for_each([=, this, &viewport, &rc, &own_ball_pos, &camera_pos](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -134,7 +139,7 @@ public:
 			if (current_ball == nullptr || username_label == nullptr) // Maybe a client quit unexpectedly.
 				return true;
 
-			float square_ball_distance = 0;
+			float lateral_distance = 0;
 
 			// Update ball states with togglable quadratic extrapolation
 			if (!player.physicalized) {
@@ -156,20 +161,20 @@ public:
 						: PlayerState::get_linear_extrapolated_state(tc, state_it[1], state_it[0]);
 					current_ball->SetPosition(VT21_REF(position));
 					current_ball->SetQuaternion(VT21_REF(rotation));
-					square_ball_distance = (position - (
+					lateral_distance = utils::distance_to_line_segment((
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(spectated_id_) :
 #endif
-						own_ball_pos)).SquareMagnitude();
+						own_ball_pos), camera_pos, position);
 				}
 				else {
 					current_ball->SetPosition(VT21_REF(state_it->position));
 					current_ball->SetQuaternion(VT21_REF(state_it->rotation));
-					square_ball_distance = (state_it->position - (
+					lateral_distance = utils::distance_to_line_segment((
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(spectated_id_) :
 #endif
-						own_ball_pos)).SquareMagnitude();
+						own_ball_pos), camera_pos, state_it->position);
 				}
 			}
 
@@ -179,7 +184,7 @@ public:
 #endif
 				&& (timestamp - player.last_opacity_timestamp >= 114688 || ball_type_changed) // 7 * 2^14
 			) {
-				auto new_opacity = std::clamp(std::sqrt(square_ball_distance) * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
+				auto new_opacity = std::clamp(lateral_distance * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				float dilation_factor = 1.0f;
 				db_.for_each([&, this](const std::pair<const HSteamNetConnection, PlayerState>& item2) {
 					if (item2.first == db_.get_client_id() || item2.first == item.first

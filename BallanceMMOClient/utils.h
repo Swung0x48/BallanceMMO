@@ -39,4 +39,6 @@ public:
     inline void call_sync_method(std::function<void()>&& func) {
         bml_->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });
     }
+
+    static float distance_to_line_segment(const VxVector& begin, const VxVector& end, const VxVector& point);
 };

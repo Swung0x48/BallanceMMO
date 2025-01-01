@@ -161,3 +161,14 @@ std::string utils::pretty_status(const SteamNetConnectionRealTimeStatus_t& statu
     s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
     return s;
 }
+
+float utils::distance_to_line_segment(const VxVector& begin, const VxVector& end, const VxVector& point) {
+    const auto line = end - begin;
+    const auto l2 = line.SquareMagnitude();
+    if (l2 == 0.0f)
+        return (point - begin).Magnitude();
+
+    const auto t = std::clamp((point - begin).Dot(line) / l2, 0.0f, 1.0f);
+
+    return (point - (begin + t * line)).Magnitude();
+}
