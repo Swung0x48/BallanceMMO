@@ -56,7 +56,7 @@ jobs:
         # yes we know this is for linux, but we only need its headers so it's fine
         run: |
           $BOOST_VER_UNDERSCORES = "${{env.BOOST_VER}}".Replace('.', '_')
-          curl -o boost.tar.gz -L "https://boostorg.jfrog.io/artifactory/main/release/${{env.BOOST_VER}}/source/boost_$BOOST_VER_UNDERSCORES.tar.gz"
+          curl -o boost.tar.gz -L "https://archives.boost.io/release/${{env.BOOST_VER}}/source/boost_$BOOST_VER_UNDERSCORES.tar.gz"
           tar -xzf boost.tar.gz boost_$BOOST_VER_UNDERSCORES/boost
           New-Item -ItemType Junction -Path include/boost -Target (Get-Item boost_$BOOST_VER_UNDERSCORES/boost).FullName
 
