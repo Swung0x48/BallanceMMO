@@ -22,6 +22,9 @@ namespace bmmo {
         int64_t operator-(const int64_t t) const {
             return ((int64_t)v[0] << 32 | v[1]) - t;
         }
+        void operator+=(const int64_t t) {
+            *this = *this + t;
+        }
         bool operator<(const timestamp_t& t) const {
             return ((int64_t)v[0] << 32 | v[1]) < ((int64_t)t.v[0] << 32 | t.v[1]);
         }

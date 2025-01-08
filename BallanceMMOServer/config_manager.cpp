@@ -39,6 +39,7 @@ bool config_manager::load() {
     log_installed_mods = yaml_load_value(config_, "log_installed_mods", log_installed_mods);
     log_ball_offs = yaml_load_value(config_, "log_ball_offs", log_ball_offs);
     serious_warning_as_dnf = yaml_load_value(config_, "serious_warning_as_dnf", serious_warning_as_dnf);
+    ghost_mode = yaml_load_value(config_, "ghost_mode", ghost_mode);
 
     std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
     if (logging_level_string == "msg")
@@ -152,16 +153,17 @@ void config_manager::save(bool reload_values) {
     config_file << "# Config file for Ballance MMO Server v" << bmmo::current_version.to_string() << " - "
                     << std::put_time(std::localtime(&current_time), "%F %T") << "\n"
                 << "# Notes:\n"
-                << "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
-                << "# - Log ball-offs: whether to write player ball-off events to the log file.\n"
-                << "# - Serious warning as DNF: mark the client's status as Did-Not-Finish upon receiving a serious warning.\n"
-                << "# - Options for log levels: important, warning, msg.\n"
-                << "# - Auto flush log: whether to automatically flush the log file after each output.\n"
-                << "# - Map name list style: \"md5_hash: name\".\n"
-                << "# - Life count list style: \"md5_hash: count\".\n"
-                << "# - Op list / reserved names data style: \"playername: uuid\".\n"
-                << "# - Ban list style: \"uuid: reason\".\n"
-                << "# - Mute list style: \"- uuid\".\n"
+                   "# - Level restart: whether to restart on clients' sides after \"Go!\". If not forced, only for clients on the same map.\n"
+                   "# - Log ball-offs: whether to write player ball-off events to the log file.\n"
+                   "# - Serious warning as DNF: mark the client's status as Did-Not-Finish upon receiving a serious warning.\n"
+                   "# - Ghost mode: whether to enable ghost mode, where players are invisible to each other except spectators and operators.\n"
+                   "# - Options for log levels: important, warning, msg.\n"
+                   "# - Auto flush log: whether to automatically flush the log file after each output.\n"
+                   "# - Map name list style: \"md5_hash: name\".\n"
+                   "# - Life count list style: \"md5_hash: count\".\n"
+                   "# - Op list / reserved names data style: \"playername: uuid\".\n"
+                   "# - Ban list style: \"uuid: reason\".\n"
+                   "# - Mute list style: \"- uuid\".\n"
                 << std::endl;
     config_file << config_;
     config_file << std::endl;

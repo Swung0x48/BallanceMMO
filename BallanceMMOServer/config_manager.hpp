@@ -18,6 +18,7 @@ public:
     std::unordered_set<std::string> muted_players;
     bool op_mode = true, restart_level = true, force_restart_level = false;
     bool log_installed_mods = false, log_ball_offs = false, serious_warning_as_dnf = false;
+    bool ghost_mode = false;
     ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
 
     bool load();

@@ -207,6 +207,21 @@ public:
             life_msg.life_count_goals = config_.initial_life_counts;
             life_msg.serialize();
             broadcast_message(life_msg.raw.str().data(), life_msg.size());
+            if (config_.ghost_mode) {
+                // send everyone except ghost spectators a message that sets parts of
+                // other players' positions to infinity, effectively hiding them
+                bmmo::owned_compressed_ball_state_msg ball_msg{};
+                pull_ball_states(ball_msg.balls);
+                for (auto& state: ball_msg.balls) {
+                    state.state.position.y = std::numeric_limits<float>::infinity();
+                    state.state.timestamp += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+                }
+                ball_msg.serialize();
+                for (const auto& [client, _]: clients_) {
+                    if (!ghost_spectator_clients_.contains(client))
+                        send(client, ball_msg.raw.str().data(), ball_msg.size());
+                }
+            }
         }
         return true;
     }
@@ -495,6 +510,7 @@ protected:
             std::lock_guard lk(client_data_mutex_);
             username_.erase(bmmo::message_utils::to_lower(name));
             clients_.erase(itClient);
+            ghost_spectator_clients_.erase(client);
         }
         Printf(bmmo::color_code(msg.code), "%s (#%u) disconnected.", name, client);
 
@@ -785,13 +801,17 @@ protected:
                 }
 
                 // accepting client and adding it to the client list
+                bool is_ghost_spectator = false;
                 {
                     std::lock_guard lk(client_data_mutex_);
                     client_it = clients_.insert({networking_msg->m_conn, {msg.nickname, (bool)msg.cheated}}).first;
+                    memcpy(client_it->second.uuid, msg.uuid, sizeof(msg.uuid));
+                    client_it->second.login_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;
+                    is_ghost_spectator = bmmo::name_validator::is_spectator(msg.nickname) || is_op(networking_msg->m_conn);
+                    if (is_ghost_spectator)
+                        ghost_spectator_clients_.insert(networking_msg->m_conn);
                 }
-                memcpy(client_it->second.uuid, msg.uuid, sizeof(msg.uuid));
-                client_it->second.login_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                username_[bmmo::message_utils::to_lower(msg.nickname)] = networking_msg->m_conn;
                 Printf(bmmo::color_code(bmmo::LoginAcceptedV3),
                         "%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
@@ -828,10 +848,12 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
 
-                bmmo::owned_compressed_ball_state_msg state_msg{};
-                pull_ball_states(state_msg.balls);
-                state_msg.serialize();
-                send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+                if (config_.ghost_mode && is_ghost_spectator) {
+                    bmmo::owned_compressed_ball_state_msg state_msg{};
+                    pull_ball_states(state_msg.balls);
+                    state_msg.serialize();
+                    send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+                }
 
                 if (!permanent_notification_.second.empty()) {
                     bmmo::permanent_notification_msg bulletin_msg{};
@@ -1429,7 +1451,12 @@ protected:
         if (ball_msg.balls.empty() && ball_msg.unchanged_balls.empty())
             return;
         ball_msg.serialize();
-        broadcast_message(ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+        if (config_.ghost_mode) {
+            for (const auto& i: ghost_spectator_clients_)
+                send(i, ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+        } else {
+            broadcast_message(ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+        }
 
         ++ping_data_counter_;
         if (ping_data_counter_ >= bmmo::PING_INTERVAL_TICKS) {
@@ -1468,6 +1495,7 @@ protected:
 //    std::thread server_thread_;
     client_data_collection clients_;
     std::map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
+    std::unordered_set<HSteamNetConnection> ghost_spectator_clients_; // ghost mode - only operators and spectators can see other players
     std::mutex client_data_mutex_;
     std::pair<std::string, std::string> permanent_notification_; // <username (title), text>
 

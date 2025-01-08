@@ -64,18 +64,18 @@ public:
 		BMLVersion compiled_ver{}, loader_ver{};
 		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 4 };
 		// Mod #0 is usually BML but we are just going to be sure here
-    const int length = m_bml->GetModCount();
-    for (int i = 0; i < length; ++i) {
+		const int length = m_bml->GetModCount();
+		for (int i = 0; i < length; ++i) {
 			if (std::strcmp(m_bml->GetMod(i)->GetID(), "BML") != 0) continue;
-      std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d", &loader_ver.major, &loader_ver.minor, &loader_ver.build);
-      break;
-    }
+			std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d", &loader_ver.major, &loader_ver.minor, &loader_ver.build);
+			break;
+		}
 		if (loader_ver < lower_bound || loader_ver >= upper_bound) return compiled_ver;
 		// wreck BMLPlus 0.3.0 - 0.3.3
 		MessageBoxA(NULL,
 			std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
 				"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
-        upper_bound.major, upper_bound.minor, upper_bound.build,
+				upper_bound.major, upper_bound.minor, upper_bound.build,
 				loader_ver.major, loader_ver.minor, loader_ver.build).c_str(),
 			"Incompatible BMLPlus version",
 			MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
