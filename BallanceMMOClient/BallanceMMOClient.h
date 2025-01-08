@@ -49,6 +49,29 @@ public:
 	{
 		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this, std::placeholders::_1));
 		this_instance_ = this;
+
+		// Mod #0 is usually BML but we are just going to be sure here
+		const int length = m_bml->GetModCount();
+		for (int i = 0; i < length; ++i) {
+			if (std::strcmp(m_bml->GetMod(i)->GetID(), "BML") != 0) continue;
+			int count = std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d",
+				&loader_version_.major, &loader_version_.minor, &loader_version_.build);
+			assert(count == 3);
+			break;
+		}
+#ifdef BMMO_USE_BML_PLUS
+		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 4 };
+		if (loader_version_ < lower_bound || loader_version_ >= upper_bound) return;
+		// wreck BMLPlus 0.3.0 - 0.3.3
+		MessageBoxA(NULL,
+			std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
+				"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
+				upper_bound.major, upper_bound.minor, upper_bound.build,
+				loader_version_.major, loader_version_.minor, loader_version_.build).c_str(),
+			"Incompatible BMLPlus version",
+			MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
+		source_version_ = upper_bound;
+#endif
 	}
 
 	const std::string version_string = bmmo::current_version.to_string();
@@ -57,31 +80,8 @@ public:
 	virtual BMMO_CKSTRING GetName() override { return "BallanceMMOClient"; }
 	virtual BMMO_CKSTRING GetAuthor() override { return "Swung0x48 & BallanceBug"; }
 	virtual BMMO_CKSTRING GetDescription() override { return "The client to connect your game to the universe."; }
-#ifndef BMMO_USE_BML_PLUS
-	DECLARE_BML_VERSION;
-#else
-	virtual BMLVersion GetBMLVersion() override {
-		BMLVersion compiled_ver{}, loader_ver{};
-		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 4 };
-		// Mod #0 is usually BML but we are just going to be sure here
-		const int length = m_bml->GetModCount();
-		for (int i = 0; i < length; ++i) {
-			if (std::strcmp(m_bml->GetMod(i)->GetID(), "BML") != 0) continue;
-			std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d", &loader_ver.major, &loader_ver.minor, &loader_ver.build);
-			break;
-		}
-		if (loader_ver < lower_bound || loader_ver >= upper_bound) return compiled_ver;
-		// wreck BMLPlus 0.3.0 - 0.3.3
-		MessageBoxA(NULL,
-			std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
-				"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
-				upper_bound.major, upper_bound.minor, upper_bound.build,
-				loader_ver.major, loader_ver.minor, loader_ver.build).c_str(),
-			"Incompatible BMLPlus version",
-			MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
-		return upper_bound;
-	}
-#endif
+	// DECLARE_BML_VERSION;
+	virtual BMLVersion GetBMLVersion() override { return source_version_; }
 
 	static void init_socket() {
 #ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
@@ -241,6 +241,8 @@ private:
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
 	std::shared_ptr<text_sprite> spectator_label_, permanent_notification_;
+
+	BMLVersion loader_version_{}, source_version_{};
 
 	game_state db_;
 	game_objects objects_;
