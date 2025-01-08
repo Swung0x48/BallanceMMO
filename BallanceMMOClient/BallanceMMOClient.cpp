@@ -188,7 +188,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         std::string path(filename);
         boost::smatch matched;
         if (boost::regex_search(path, matched, name_pattern)) {
-            current_map_.name = bmmo::string_utils::ansi_to_utf8(matched[2].str());
+            current_map_.name = matched[2].str();
             if (boost::iequals(matched[1].str(), "Maps")) {
                 current_map_.type = bmmo::map_type::CustomMap;
                 if (auto slash_pos = current_map_.name.rfind('\\'); slash_pos != std::string::npos)
@@ -199,8 +199,17 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
                 path = "..\\" + path;
             }
         } else {
-            current_map_.name = bmmo::string_utils::ansi_to_utf8(filename);
+            current_map_.name = filename;
             current_map_.type = bmmo::map_type::Unknown;
+        }
+#ifdef BMMO_USE_BML_PLUS // BMLPlus >= 0.3.4 uses UTF-8 for paths but our hash function requires ANSI
+        if (loader_version_ >= BMLVersion{ 0, 3, 4 }) {
+            path = bmmo::string_utils::utf8_to_ansi(path);
+        }
+        else
+#endif
+        {
+            current_map_.name = bmmo::string_utils::ansi_to_utf8(current_map_.name);
         }
         utils::md5_from_file(path, current_map_.md5);
         static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementValue(0, 0, &current_map_.level);
