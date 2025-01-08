@@ -654,7 +654,7 @@ private:
                     msg->content.sector
                 );
                 local_rankings_[msg->content.map.get_hash_bytes_string()].second.push_back({
-                    (bool)msg->content.cheated, player_name, msg->content.sector});
+                    {(bool)msg->content.cheated, player_name}, msg->content.sector});
                 break;
             }
             case bmmo::LatencyData: {
@@ -677,7 +677,7 @@ private:
                     msg->content.rank, bmmo::string_utils::get_ordinal_suffix(msg->content.rank),
                     formatted_score, msg->content.get_formatted_time());
                 local_rankings_[msg->content.map.get_hash_bytes_string()].first.push_back({
-                    (bool)msg->content.cheated, player_name, msg->content.mode,
+                    {(bool)msg->content.cheated, player_name}, msg->content.mode,
                     msg->content.rank, msg->content.timeElapsed, formatted_score});
                 break;
             }
@@ -1014,7 +1014,7 @@ int main(int argc, char** argv) {
             return;
         }
 
-        client_thread = std::move(std::thread([&client]() { client.run(); }));
+        client_thread = std::thread([&client]() { client.run(); });
         client.wait_till_started();
     });
     console.register_command("cheat", [&] {

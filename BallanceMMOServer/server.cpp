@@ -848,7 +848,7 @@ protected:
                 connected_msg.serialize();
                 broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
 
-                if (config_.ghost_mode && is_ghost_spectator) {
+                if (!config_.ghost_mode || is_ghost_spectator) {
                     bmmo::owned_compressed_ball_state_msg state_msg{};
                     pull_ball_states(state_msg.balls);
                     state_msg.serialize();
@@ -1085,7 +1085,7 @@ protected:
                 client_it->second.dnf = true;
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
                 maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
-                    (bool)msg->content.cheated, player_name, msg->content.sector});
+                    {(bool)msg->content.cheated, player_name}, msg->content.sector});
                 break;
             }
             case bmmo::LevelFinish:
@@ -1123,7 +1123,7 @@ protected:
                 broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
 
                 current_map.rankings.first.push_back({
-                    (bool)msg->content.cheated, player_name, msg->content.mode,
+                    {(bool)msg->content.cheated, player_name}, msg->content.mode,
                     current_map.rank, msg->content.timeElapsed, formatted_score});
 
                 break;

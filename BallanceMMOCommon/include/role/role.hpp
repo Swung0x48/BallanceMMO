@@ -116,7 +116,7 @@ protected:
 
     // triggers an actual segmentation fault; I was too lazy to fake one
     static void trigger_fatal_error() {
-        *(int*)0 = 0;
+        *(volatile int*) 0 = 0;
     }
 
 public:
