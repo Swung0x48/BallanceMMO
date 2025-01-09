@@ -16,6 +16,7 @@
 #include <mutex>
 #include <list>
 #include <fstream>
+#include <filesystem>
 #include <condition_variable>
 #include <random>
 
@@ -41,7 +42,7 @@ struct client_data {
 static struct option_t {
     std::string server_addr = "127.0.0.1:26676", username = "MockClient",
                 uuid = "00010002-0003-0004-0005-000600070008", log_path;
-    bool print_states = false, recorder_mode = false, save_sound_files = true;
+    bool print_states = false, recorder_mode = false, individual_packets = false, save_sound_files = true;
     ESteamNetworkingSocketsDebugOutputType detail = k_ESteamNetworkingSocketsDebugOutputType_Important;
 } options;
 
@@ -74,9 +75,14 @@ public:
     bool setup_recorder() {
         recorder_mode_ = true;
         auto current_time = std::time(nullptr);
-        char record_name[32];
-        std::strftime(record_name, 32, "record_%Y%m%d%H%M.bin", std::localtime(&current_time));
-        Printf("Flight recorder started.", record_name);
+        char record_name[40];
+        std::strftime(record_name, sizeof(record_name), "records/record_%Y%m%d%H%M.bin", std::localtime(&current_time));
+        std::filesystem::create_directory("records");
+        Printf("Flight recorder started (saving at \"%s\").", record_name);
+        if (options.individual_packets) {
+            std::filesystem::create_directories(packet_save_path);
+            Printf("Individual packets will be saved at \"%s\".", packet_save_path);
+        }
         record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
         if (!record_stream_.is_open())
             return false;
@@ -316,6 +322,7 @@ public:
     }
 
     void write_record() {
+        static uint32_t counter = 0;
         std::unique_lock<std::mutex> available_lk(message_available_mutex_);
         while (message_queue_.empty() && running())
             message_available_cv_.wait(available_lk);
@@ -323,6 +330,13 @@ public:
 
         while (!message_queue_.empty()) {
             bmmo::record_entry entry = std::move(message_queue_.front());
+            if (options.individual_packets) {
+                FILE* entry_record_file = std::fopen((packet_save_path + std::to_string(counter++) + ".entry").c_str(), "ab");
+                if (entry_record_file) {
+                    std::fwrite(entry.data, 1, entry.size, entry_record_file);
+                    std::fclose(entry_record_file);
+                }
+            }
             record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
             message_queue_.pop_front();
         }
@@ -805,6 +819,12 @@ private:
     std::condition_variable message_available_cv_;
     std::list<bmmo::record_entry> message_queue_;
     std::ofstream record_stream_;
+    const std::string packet_save_path = []() -> std::string {
+        std::time_t t = std::time(nullptr);
+        char path[32];
+        std::strftime(path, sizeof(path), "packets/%Y%m%d%H%M/", std::localtime(&t));
+        return path;
+    }();
 
     void poll_connection_state_changes() override {
         this_instance_ = this;
@@ -841,7 +861,7 @@ private:
 
 // parse command line arguments (server/name/uuid/help/version) with getopt
 int parse_args(int argc, char** argv) {
-    enum option_values { NoSoundFiles = UINT8_MAX + 1, AutoFlush };
+    enum option_values { NoSoundFiles = UINT8_MAX + 1, AutoFlush, IndividualPackets };
     static struct option long_options[] = {
         {"recorder-mode", required_argument, 0, 'r'},
         {"server", required_argument, 0, 's'},
@@ -854,6 +874,7 @@ int parse_args(int argc, char** argv) {
         {"version", no_argument, 0, 'v'},
         {"no-sound-files", no_argument, 0, NoSoundFiles},
         {"auto-flush", no_argument, 0, AutoFlush},
+        {"individual-packets", no_argument, 0, IndividualPackets},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
@@ -881,6 +902,8 @@ int parse_args(int argc, char** argv) {
                 options.save_sound_files = false; break;
             case AutoFlush:
                 bmmo::set_auto_flush_log(true); break;
+            case IndividualPackets:
+                options.individual_packets = true; break;
             case 'h':
                 printf("Usage: %s [OPTION]...\n", argv[0]);
                 puts("Options:");
@@ -891,6 +914,8 @@ int parse_args(int argc, char** argv) {
                 puts("      --auto-flush\t Automatically flush the log file after each output.");
                 puts("  -d, --detail=LEVEL\t Set the detail level (0 to 2, from low to high) of output (default: 0).");
                 puts("  -r, --recorder-mode\t Record data received from the server and save them to a binary file.");
+                puts("      --individual-packets  Record and save each packet individually. Requires --recorder-mode.");
+                puts("                            Use carefully as it may generate a large number of files.");
                 puts("      --no-sound-files\t Discard sound files sent by the server.");
                 puts("  -p, --print\t\t Print player state changes.");
                 puts("  -h, --help\t\t Display this help and exit.");
