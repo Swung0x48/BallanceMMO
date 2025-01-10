@@ -55,7 +55,7 @@ namespace bmmo {
             for (int i = 0; i < int(sizeof(EXTRA_MODIFIERS) / sizeof(const char*)); ++i) {
                 v >>= 1;
                 if (!(v & 1)) continue;
-                std::strcpy(modifiers + pos, EXTRA_MODIFIERS[i]);
+                std::strncpy(modifiers + pos, EXTRA_MODIFIERS[i], sizeof(modifiers) - pos);
                 pos += 3;
             }
             modifiers[pos] = '\0';

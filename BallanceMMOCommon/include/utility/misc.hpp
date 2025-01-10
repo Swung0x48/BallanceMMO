@@ -40,7 +40,7 @@ namespace bmmo {
     template <typename ... Args>
     inline void Printf(const char* fmt, Args&& ... args) {
         char text[2048]{};
-        snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
+        std::snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
         // va_list ap;
         // va_start(ap, fmt);
         // vsprintf(text, fmt, ap);
@@ -52,14 +52,14 @@ namespace bmmo {
     template<typename ... Args>
     inline void Printf(int ansiColor, const char* fmt, Args&& ... args) {
         char text[2048]{};
-        snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
+        std::snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
         RightTrim(text);
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text, ansiColor);
     }
 
     inline void Printf(const char* fmt) {
-        char text[2048];
-        strcpy(text, fmt);
+        char text[2048]{};
+        std::strncpy(text, fmt, sizeof(text) - 1);
         RightTrim(text);
         DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
     }

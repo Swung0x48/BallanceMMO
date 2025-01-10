@@ -57,16 +57,17 @@ namespace bmmo {
     }
 
     void RightTrim(char* text) {
-        char* el = strchr(text, '\0');
+        char* el = std::strchr(text, '\0');
         if (el > text && el[-1] == '\n')
             text[el - text - 1] = '\0';
     }
  
     void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor) {
+        using namespace std;
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
-        auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        auto time = chrono::system_clock::to_time_t(chrono::system_clock::now());
         char timeStr[15];
-        std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
+        strftime(timeStr, sizeof(timeStr), "%m-%d %T", localtime(&time));
 
         if (log_file) {
             fprintf(log_file, "[%s] %s\n", timeStr, pszMsg);
