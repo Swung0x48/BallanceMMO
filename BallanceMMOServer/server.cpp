@@ -192,6 +192,7 @@ public:
     }
 
     bool load_config() {
+        const bool prev_ghost_mode = config_.ghost_mode;
         if (!config_.load())
             return false;
         if (get_client_count() < 1) map_names_.clear();
@@ -207,14 +208,16 @@ public:
             life_msg.life_count_goals = config_.initial_life_counts;
             life_msg.serialize();
             broadcast_message(life_msg.raw.str().data(), life_msg.size());
-            if (config_.ghost_mode) {
+            if (config_.ghost_mode != prev_ghost_mode) {
                 // send everyone except ghost spectators a message that sets parts of
                 // other players' positions to infinity, effectively hiding them
                 bmmo::owned_compressed_ball_state_msg ball_msg{};
                 pull_ball_states(ball_msg.balls);
-                for (auto& state: ball_msg.balls) {
-                    state.state.position.y = std::numeric_limits<float>::infinity();
-                    state.state.timestamp += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+                if (config_.ghost_mode) {
+                    for (auto& state: ball_msg.balls) {
+                        state.state.position.y = std::numeric_limits<float>::infinity();
+                        state.state.timestamp += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+                    }
                 }
                 ball_msg.serialize();
                 for (const auto& [client, _]: clients_) {
@@ -391,6 +394,10 @@ public:
         bmmo::op_state_msg msg{};
         msg.content.op = action;
         send(client, msg, k_nSteamNetworkingSend_Reliable);
+        // just kick them and let them autoreconnect
+        if (config_.ghost_mode) {
+            interface_->CloseConnection(client, bmmo::connection_end::AutoReconnection_Min, "Operator status changed", true);
+        }
     }
 
     void set_unban(const std::string& uuid_string) {
