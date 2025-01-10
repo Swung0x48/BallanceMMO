@@ -379,10 +379,12 @@ public:
                 }
             }
             config_.op_players[name] = bmmo::string_utils::get_uuid_string(clients_[client].uuid);
+            ghost_spectator_clients_.insert(client);
             Printf(bmmo::color_code(bmmo::OpState), "%s is now an operator.", name);
         } else {
             if (!config_.op_players.erase(name))
                 return;
+            ghost_spectator_clients_.erase(client);
             Printf(bmmo::color_code(bmmo::OpState), "%s is no longer an operator.", name);
         }
         config_.save();
