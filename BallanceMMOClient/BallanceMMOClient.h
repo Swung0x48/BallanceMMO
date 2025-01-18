@@ -60,9 +60,9 @@ public:
 			break;
 		}
 #ifdef BMMO_USE_BML_PLUS
-		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 4 };
+		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 5 };
 		if (loader_version_ < lower_bound || loader_version_ >= upper_bound) return;
-		// wreck BMLPlus 0.3.0 - 0.3.3
+		// wreck BMLPlus 0.3.0 - 0.3.4
 		MessageBoxA(NULL,
 			std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
 				"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
