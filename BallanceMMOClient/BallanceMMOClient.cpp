@@ -1647,6 +1647,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         status_->paint(0xff00ff00);
         SendIngameMessage("Logged in.", bmmo::color_code(msg.code));
 
+        auto t = std::time(nullptr);
+        char utc_time_str[32];
+        std::strftime(utc_time_str, sizeof(utc_time_str), "%Y-%m-%d %H:%M:%S", std::gmtime(&t));
+        SendIngameMessage(std::format("BMMO version: {} at {}; local time: {} UTC",
+            bmmo::current_version.to_string(), bmmo::string_utils::get_build_time_string(), utc_time_str
+        ).c_str());
+
         // post-connection actions
         player_ball_ = get_current_ball();
         if (m_bml->IsIngame() && player_ball_ != nullptr)
