@@ -1,5 +1,6 @@
 #include <iostream>
 #include <algorithm>
+#include <thread>
 #include <replxx.hxx>
 #ifdef _WIN32
 #include <io.h>
@@ -155,6 +156,10 @@ bool console::execute(const std::string &cmd) {
         return true;
     };
     return false;
+};
+
+void console::execute_async(const std::string &cmd) {
+    std::thread([this, cmd] { execute(cmd); }).detach();
 };
 
 bool console::register_command(const std::string &name, const std::function<void()> &handler) {

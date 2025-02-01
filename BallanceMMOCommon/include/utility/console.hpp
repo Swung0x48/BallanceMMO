@@ -32,6 +32,10 @@ public:
     static void end_input();
     bool execute(const std::string &cmd);
 
+    // execute a command asynchonously.
+    // keeps in mind that this means you won't be able to get the return value.
+    void execute_async(const std::string &cmd);
+
     bool register_command(const std::string &name, const std::function<void()> &handler);
     bool register_aliases(const std::string &name, const std::vector<std::string> &aliases);
     bool unregister_command(const std::string &name);
