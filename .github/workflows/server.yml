@@ -37,9 +37,15 @@ jobs:
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
       run: |
+<<<<<<< HEAD
+        echo -e "\nfile(WRITE ${{github.workspace}}/version.txt \${BMMO_VER})" >> CMakeLists.txt
+        cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SERVER_APPIMAGE=ON
+        echo "BMMO_VER=$(cat ${{github.workspace}}/version.txt)" >> "$GITHUB_ENV"
+=======
         echo -e "\nfile(WRITE version.txt \${BMMO_VER})" >> CMakeLists.txt
         cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SERVER_APPIMAGE=ON
         echo "BMMO_VER=$(cat version.txt)" >> "$GITHUB_ENV"
+>>>>>>> 311621b404d4d6fb65fc24526ba0c15a229d0d6e
         echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> "$GITHUB_ENV"
 
     - name: Build and install
@@ -107,9 +113,9 @@ jobs:
 
       - name: Configure CMake
         run: |
-          echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
+          echo "`nfile(WRITE ${{github.workspace}}/version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
           cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
-          echo "BMMO_VER=$(cat version.txt)" >> $env:GITHUB_ENV
+          echo "BMMO_VER=$(cat ${{github.workspace}}/version.txt)" >> $env:GITHUB_ENV
           echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
 
       - name: Build
@@ -130,11 +136,11 @@ jobs:
 
       # by setting a different working directory we avoid releasing the config file
       - name: Dry run
-        working-directory: ${{github.workspace}}/build/BallanceMMOServer
-        run: ${{env.BUILD_TYPE}}/BallanceMMOServer.exe --dry-run
+        working-directory: ${{github.workspace}}/build
+        run: BallanceMMOServer/BallanceMMOServer.exe --dry-run
 
       - name: Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: server-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
-          path: build/BallanceMMOServer/${{env.BUILD_TYPE}}
+          path: build/BallanceMMOServer
