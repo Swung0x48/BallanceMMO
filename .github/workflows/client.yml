@@ -78,7 +78,7 @@ jobs:
       - name: Configure CMake
         run: |
           echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
-          cmake -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON -A Win32
+          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON -A Win32
           echo "BMMO_VER=$(cat version.txt)" >> $env:GITHUB_ENV
           echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
 
