@@ -124,7 +124,7 @@ target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             ${REPLXX_INCLUDE_DIR}
                             ${ASIO_INCLUDE_DIR}
                             ${GNS_EXT_INCLUDE_DIR})
-target_link_directories(BallanceMMOClient PRIVATE
+target_link_directories(BallanceMMOClient-BMLPlus PRIVATE
                             ${BMLPLUS_LIB_DIR})
 target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE
                         replxx

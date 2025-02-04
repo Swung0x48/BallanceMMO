@@ -129,9 +129,11 @@ jobs:
         run: ctest -C ${{env.BUILD_TYPE}}
 
       # by setting a different working directory we avoid releasing the config file
-      - name: Dry run
-        working-directory: ${{github.workspace}}/build
-        run: BallanceMMOServer/BallanceMMOServer.exe --dry-run
+      - name: Dry run and prepare for release
+        working-directory: ${{github.workspace}}/build/BallanceMMOServer
+        run: |
+          .\BallanceMMOServer.exe --dry-run
+          Copy-Item -Path *.dll, *.exe -Destination ${{env.BUILD_TYPE}} -Force
 
       - name: Release Artifact
         uses: actions/upload-artifact@v4
