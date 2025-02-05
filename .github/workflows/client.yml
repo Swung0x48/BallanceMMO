@@ -96,7 +96,7 @@ jobs:
         working-directory: ${{github.workspace}}/build/BallanceMMOClient
         run: |
           mkdir ${{env.BUILD_TYPE}}
-          Get-ChildItem -Path . -Include *.dll, *.bmod* | Copy-Item -Destination ${{env.BUILD_TYPE}} -Force
+          Copy-Item -Path *.dll, *.bmod, *.bmodp -Destination ${{env.BUILD_TYPE}} -Force
 
       - name: Test
         working-directory: ${{github.workspace}}
@@ -113,7 +113,7 @@ jobs:
           echo "`n#define BMMO_WITH_PLAYER_SPECTATION" | Out-File "BallanceMMOClient/bml_includes.h" -Encoding "UTF8" -Append
           cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
           cd ${{github.workspace}}/build/BallanceMMOClient
-          Get-ChildItem -Path . -Include *.dll, *.bmod* | Copy-Item -Destination ${{env.BUILD_TYPE}} -Force
+          Copy-Item -Path *.dll, *.bmod, *.bmodp -Destination ${{env.BUILD_TYPE}} -Force
 
       - name: Release artifact
         uses: actions/upload-artifact@v4
