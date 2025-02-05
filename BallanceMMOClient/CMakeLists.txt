@@ -99,8 +99,11 @@ set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
 add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC})
-set_target_properties(BallanceMMOClient PROPERTIES OUTPUT_NAME "BallanceMMOClient")
-set_target_properties(BallanceMMOClient PROPERTIES SUFFIX ".bmod")
+set_target_properties(BallanceMMOClient PROPERTIES
+                      OUTPUT_NAME "BallanceMMOClient"
+                      SUFFIX ".bmod"
+                      ARCHIVE_OUTPUT_NAME "BallanceMMOClient"
+)
 target_include_directories(BallanceMMOClient PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
                             ${REPLXX_INCLUDE_DIR}
@@ -117,8 +120,11 @@ add_library(BallanceMMOClient-BMLPlus SHARED
             ${BMMO_CLIENT_HDR}
             ${BMMO_CLIENT_SRC}
             ${BMMO_COMMON_SRC})
-set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES OUTPUT_NAME "BallanceMMOClient")
-set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES SUFFIX ".bmodp")
+set_target_properties(BallanceMMOClient-BMLPlus PROPERTIES
+                      OUTPUT_NAME "BallanceMMOClient"
+                      SUFFIX ".bmodp"
+                      ARCHIVE_OUTPUT_NAME "BallanceMMOClient+"
+)
 target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
                             ${REPLXX_INCLUDE_DIR}

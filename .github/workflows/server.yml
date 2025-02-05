@@ -139,4 +139,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: server-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
-          path: build/BallanceMMOServer
+          path: build/BallanceMMOServer/${{env.BUILD_TYPE}}
