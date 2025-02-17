@@ -2089,7 +2089,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               bmmo::color_code(msg->code));
         }
         else {
-            int64_t timestamp = db_.get_timestamp_ms();
+            int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
             std::lock_guard<std::mutex> lk(client_mtx_);
             db_.update_map(msg->content.player_id, msg->content.map, msg->content.sector, timestamp);
             maps_.try_emplace(msg->content.map.get_hash_bytes_string());
@@ -2100,7 +2100,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::CurrentSector: {
         auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(network_msg->m_pData);
-        int64_t timestamp = db_.get_timestamp_ms();
+        int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
         std::unique_lock<std::mutex> lk(client_mtx_);
         db_.update_sector(msg->content.player_id, msg->content.sector, timestamp);
         auto client_map = db_.get_client_map(msg->content.player_id);

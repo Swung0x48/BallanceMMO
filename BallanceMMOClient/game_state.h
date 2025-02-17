@@ -334,8 +334,8 @@ public:
 		return INIT_TIMESTAMP;
 	}
 
-	static inline auto get_timestamp_ms() {
-		return (SteamNetworkingUtils()->GetLocalTimestamp() - INIT_TIMESTAMP) / 1000;
+	static inline auto get_timestamp_ms(SteamNetworkingMicroseconds timestamp = 0) {
+		return ((timestamp ? timestamp : SteamNetworkingUtils()->GetLocalTimestamp()) - INIT_TIMESTAMP) / 1000;
 	}
 
 	bool is_nametag_visible() const {

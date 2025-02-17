@@ -414,7 +414,11 @@ private:
 		if (sector == 0) return;
 		auto map_it = maps_.find(map.get_hash_bytes_string());
 		if (map_it == maps_.end()) return;
-		map_it->second.sector_timestamps.try_emplace(sector, timestamp);
+		auto ts_it = map_it->second.sector_timestamps.find(sector);
+		if (ts_it != map_it->second.sector_timestamps.end() && ts_it->second > timestamp)
+			ts_it->second = timestamp;
+		else
+			map_it->second.sector_timestamps.try_emplace(sector, timestamp);
 	}
 
 	void resume_counter() {
