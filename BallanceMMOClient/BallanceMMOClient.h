@@ -394,6 +394,7 @@ private:
 	}
 
 	bool update_current_sector() { // true if changed
+		std::unique_lock<std::mutex> lk(client_mtx_);
 		int sector = 0;
 		if (ingame_parameter_array_ != 0) {
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
@@ -401,7 +402,11 @@ private:
 		} else if (current_sector_ == 0) return false;
 		current_sector_ = sector;
 		current_sector_timestamp_ = db_.get_timestamp_ms();
-		if (connected()) current_sector_timestamp_ += get_status().m_nPing;
+		if (connected()) {
+			current_sector_timestamp_ += get_status().m_nPing;
+			if (!spectator_mode_)
+				update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
+		}
 		return true;
 	}
 
