@@ -32,7 +32,7 @@ public:
     static void end_input();
     bool execute(const std::string &cmd);
 
-    // execute a command asynchonously.
+    // execute a command asynchronously.
     // keeps in mind that this means you won't be able to get the return value.
     void execute_async(const std::string &cmd);
 

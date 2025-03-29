@@ -1,5 +1,5 @@
-#ifndef BALLANCEMMO_SERVER_MAP_NAMES_MSG_HPP
-#define BALLANCEMMO_SERVER_MAP_NAMES_MSG_HPP
+#ifndef BALLANCEMMOSERVER_MAP_NAMES_MSG_HPP
+#define BALLANCEMMOSERVER_MAP_NAMES_MSG_HPP
 #include "message.hpp"
 #include "../entity/map.hpp"
 #include <unordered_map>
@@ -54,4 +54,4 @@ namespace bmmo {
     };
 };
 
-#endif // BALLANCEMMO_SERVER_MAP_NAMES_MSG_HPP
+#endif // BALLANCEMMOSERVER_MAP_NAMES_MSG_HPP

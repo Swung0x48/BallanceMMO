@@ -959,7 +959,7 @@ protected:
                     break;
                 }
 
-                // Broatcast chat message to other player
+                // Broadcast chat message to other player
                 msg.player_id = current_player_id;
                 msg.clear();
                 msg.serialize();

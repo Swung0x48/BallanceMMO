@@ -37,7 +37,7 @@ namespace bmmo {
         }
     }
 
-    // compatibilty
+    // compatiblity
     using string_utils::hex_chars_from_string;
     using string_utils::string_from_hex_chars;
 
