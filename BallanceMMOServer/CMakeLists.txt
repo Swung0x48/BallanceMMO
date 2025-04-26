@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.12)
+set(BMMO_CMAKE_MINIMUM_VERSION 3.12)
+cmake_minimum_required(VERSION ${BMMO_CMAKE_MINIMUM_VERSION})
 
 # set (CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 # set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -52,7 +53,10 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/jbeder/yaml-cpp
     GIT_TAG 190ad502b5bc91b01fd2e73f5343cf7b40cfdc70
 )
+# temporary yaml-cpp cmake version workaround
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_MakeAvailable(yaml-cpp)
+set(CMAKE_POLICY_VERSION_MINIMUM ${BMMO_CMAKE_MINIMUM_VERSION})
 
 set(YA_GETOPT_SRC "../submodule/ya_getopt/ya_getopt.c")
 
