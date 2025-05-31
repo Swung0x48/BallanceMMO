@@ -51,7 +51,7 @@ include(FetchContent)
 FetchContent_Declare(
     yaml-cpp
     GIT_REPOSITORY https://github.com/jbeder/yaml-cpp
-    GIT_TAG 190ad502b5bc91b01fd2e73f5343cf7b40cfdc70
+    GIT_TAG 2f86d13775d119edbb69af52e5f566fd65c6953b
 )
 # temporary yaml-cpp cmake version workaround
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
