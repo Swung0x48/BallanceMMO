@@ -10,6 +10,7 @@
 #include "bml_includes.h"
 #include "log_manager.h"
 #include "game_state.h"
+#include "common.hpp"
 
 class config_manager {
 private:
@@ -17,10 +18,8 @@ private:
     std::function<IConfig*()> config_getter_;
 
     std::string config_directory_path = "..\\ModLoader\\Config";
-    std::wstring get_local_appdata_path();
-    const std::wstring LOCAL_APPDATA_PATH = get_local_appdata_path();
-    const std::wstring LEGACY_UUID_FILE_PATH = LOCAL_APPDATA_PATH + L"\\BallanceMMOClient_UUID.cfg";
-    const std::wstring EXTERNAL_CONFIG_PATH = LOCAL_APPDATA_PATH + L"\\BallanceMMOClient_external.json";
+    const std::wstring LEGACY_UUID_FILE_PATH = bmmo::SHARED_CONFIG_PATH + L"\\BallanceMMOClient_UUID.cfg";
+    const std::wstring EXTERNAL_CONFIG_PATH = bmmo::SHARED_CONFIG_PATH + L"\\" + bmmo::CLIENT_EXTERNAL_CONFIG_NAME;
 
     std::unordered_map<std::string, IProperty*> props_;
     boost::uuids::uuid uuid_{};

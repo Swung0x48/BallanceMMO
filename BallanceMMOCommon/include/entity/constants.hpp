@@ -2,6 +2,7 @@
 #define BALLANCEMMOSERVER_CONSTANTS_HPP
 #include <steam/steamnetworkingtypes.h>
 #include <chrono>
+#include "globals.hpp"
 
 namespace bmmo {
     constexpr std::chrono::nanoseconds SERVER_TICK_DELAY{(int)1e9 / 198},
@@ -15,6 +16,8 @@ namespace bmmo {
     constexpr const uint16_t DEFAULT_PORT = 26676;
 
     constexpr const int PING_INTERVAL_TICKS = 768;
+
+    const PATH_STRING CLIENT_EXTERNAL_CONFIG_NAME = BMMO_PATH_LITERAL("BallanceMMOClient_external.json");
 
     // - 0~99: denied at joining
     // -- 0~49: denied from incorrect configuration

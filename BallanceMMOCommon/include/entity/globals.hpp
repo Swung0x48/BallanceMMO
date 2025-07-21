@@ -6,7 +6,16 @@
 
 namespace bmmo {
 
+#ifdef _WIN32
+    typedef std::wstring PATH_STRING;
+    #define BMMO_PATH_LITERAL(x) L##x
+#else
+    typedef std::string PATH_STRING;
+    #define BMMO_PATH_LITERAL(x) x
+#endif
+
     extern const bool LOWER_THAN_WIN10;
+    extern const PATH_STRING SHARED_CONFIG_PATH;
 
 #ifdef BMMO_INCLUDE_INTERNAL
     extern replxx::Replxx replxx_instance;

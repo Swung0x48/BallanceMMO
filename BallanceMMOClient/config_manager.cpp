@@ -1,20 +1,8 @@
 #define PICOJSON_USE_INT64
 #include <picojson/picojson.h>
 
-#include <ShlObj.h>
-
 #include "utility/string_utils.hpp"
 #include "config_manager.h"
-
-std::wstring config_manager::get_local_appdata_path() { // local appdata
-    std::wstring path_str = L".";
-    wchar_t* path_pchar{};
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path_pchar))) {
-        path_str = path_pchar;
-        CoTaskMemFree(path_pchar);
-    }
-    return path_str;
-}
 
 void config_manager::migrate_config() {
     constexpr const char* const config_name = "\\BallanceMMOClient.cfg";

@@ -23,6 +23,7 @@
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <ya_getopt.h>
+#include <picojson/picojson.h>
 
 #include "common.hpp"
 #include "entity/record_entry.hpp"
@@ -39,9 +40,41 @@ struct client_data {
     int32_t current_sector = 0;
 };
 
+std::string get_mock_uuid() {
+    auto path = bmmo::SHARED_CONFIG_PATH + BMMO_PATH_LITERAL("/") + bmmo::CLIENT_EXTERNAL_CONFIG_NAME;
+    constexpr auto mockclient_uuid_path = "mock_uuid.cfg";
+    try {
+        std::ifstream ifile(path);
+        if (!ifile.is_open()) {
+            ifile.open(mockclient_uuid_path);
+            // read whatever is in the file as plain text
+            if (!ifile.is_open()) throw std::runtime_error("Failed to open UUID file.");
+            std::string uuid_str; ifile >> uuid_str;
+            return uuid_str;
+        }
+        picojson::value external_config_v;
+        ifile >> external_config_v;
+        auto& external_config = external_config_v.get<picojson::object>();
+        return external_config["uuid"].get<std::string>();
+    }
+    catch (...) {
+        std::puts("Failed to read UUID from external config, generating a new one.");
+    }
+    // generate a new pseudo-random UUID
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<uint32_t> dis32;
+    std::uniform_int_distribution<uint16_t> dis16;
+    char buffer[37]; // 36 chars + null terminator
+    std::sprintf(buffer, "%08x-%04x-%04x-%04x-%04x%08x",
+        dis32(gen), dis16(gen), dis16(gen), dis16(gen), dis16(gen), dis32(gen));
+    std::ofstream ofile(mockclient_uuid_path);
+    ofile << buffer;
+    return std::string(buffer);
+};
+
 static struct option_t {
     std::string server_addr = "127.0.0.1:26676", username = "MockClient",
-                uuid = "00010002-0003-0004-0005-000600070008", log_path;
+                uuid, log_path;
     bool print_states = false, recorder_mode = false, individual_packets = false, save_sound_files = true;
     ESteamNetworkingSocketsDebugOutputType detail = k_ESteamNetworkingSocketsDebugOutputType_Important;
 } options;
@@ -894,7 +927,6 @@ int parse_args(int argc, char** argv) {
             case 'r':
                 options.recorder_mode = true;
                 if (options.username == option_t{}.username) options.username = "*FlightRecorder";
-                if (options.uuid == option_t{}.uuid) options.uuid = "01020304-0506-0708-090a-0b0c0d0e0f00";
                 break;
             case 'p':
                 options.print_states = true; break;
@@ -950,6 +982,8 @@ int main(int argc, char** argv) {
     std::cout << "Creating client instance..." << std::endl;
     client client;
     client.set_nickname(options.username);
+    if (options.uuid.empty())
+        options.uuid = get_mock_uuid();
     client.set_uuid(options.uuid);
     client.set_print_states(options.print_states);
     client.set_logging_level(options.detail);

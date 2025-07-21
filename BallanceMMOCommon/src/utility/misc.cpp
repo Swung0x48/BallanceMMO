@@ -9,6 +9,7 @@
 #include <Windows.h>
 #include <io.h>
 #include <fcntl.h>
+#include <ShlObj.h>
 #else
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -38,6 +39,22 @@ namespace bmmo {
 #else
     false;
 #endif
+
+    const PATH_STRING SHARED_CONFIG_PATH =
+#ifdef _WIN32 // local appdata
+    [] {
+        std::wstring path_str = L".";
+        wchar_t* path_pchar{};
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path_pchar))) {
+            path_str = path_pchar;
+            CoTaskMemFree(path_pchar);
+        }
+        return path_str;
+    }();
+#else
+    ".";
+#endif
+
 
     namespace {
         FILE* log_file = nullptr;
