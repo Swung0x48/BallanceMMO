@@ -90,7 +90,6 @@ BallanceMMO is a project which brings online experiences to Ballance.
         - Ninja
 
             ```commandline
-            chmod +x build_server.sh
             ./build_server.sh
             cd build
             ninja
@@ -99,7 +98,6 @@ BallanceMMO is a project which brings online experiences to Ballance.
         - GNU Make
 
             ```commandline
-            chmod +x build_server.sh
             ./build_server.sh -G
             cd build
             make
