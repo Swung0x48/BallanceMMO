@@ -186,6 +186,17 @@ public:
         networking_msg->Release();
     }
 
+    HSteamNetConnection get_client_id(const std::string& username) const {
+        if (username.empty())
+            return Printf("Error: invalid connection id."), k_HSteamNetConnection_Invalid;
+        const auto lower_name = bmmo::string_utils::to_lower(username);
+        auto it = std::find_if(clients_.begin(), clients_.end(),
+            [&lower_name](const auto& i) { return bmmo::message_utils::to_lower(i.second.name) == lower_name; });
+        if (it == clients_.end())
+            return Printf("Error: client \"%s\" not found.", username), k_HSteamNetConnection_Invalid;
+        return it->first;
+    }
+
     std::string get_detailed_info() {
         char info[2048];
         interface_->GetDetailedConnectionStatus(connection_, info, 2048);
@@ -1000,6 +1011,12 @@ int main(int argc, char** argv) {
     bmmo::console console;
     console.register_command("help", [&] { Printf(console.get_help_string().c_str()); });
     console.register_command("stop", [&] { client.shutdown(); });
+    auto get_client_id_from_console = [&]() -> HSteamNetConnection {
+        std::string client_input = console.get_next_word();
+        HSteamNetConnection client_id = (client_input.length() > 0 && client_input[0] == '#')
+                ? std::atoll(client_input.substr(1).c_str()) : client.get_client_id(client_input);
+        return client_id;
+    };
     auto pos_function = [&](bool translate = false) {
         std::mt19937 random_gen(std::random_device{}());
         std::uniform_real_distribution<float> pos_dist(-10, 10), rot_dist(-1, 1);
@@ -1096,14 +1113,14 @@ int main(int argc, char** argv) {
         options.print_states = !options.print_states;
         client.set_print_states(options.print_states);
     });
-    console.register_command("teleport", [&] { client.teleport_to(console.get_next_client_id()); });
+    console.register_command("teleport", [&] { client.teleport_to(get_client_id_from_console()); });
     console.register_command("balltype", [&] {
         auto& msg = client.get_local_state_msg();
         msg.content.type = console.get_next_int();
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("whisper", [&] {
-        HSteamNetConnection dest = console.get_next_client_id();
+        HSteamNetConnection dest = get_client_id_from_console();
         client.whisper_to(dest, console.get_rest_of_line());
     });
     console.register_command("getmap", [&] { client.print_player_maps(); });
@@ -1234,7 +1251,7 @@ int main(int argc, char** argv) {
         client.receive(msg.raw.str().data(), msg.size());
     });
     console.register_command("restartlevel", [&] {
-        bmmo::restart_request_msg msg{.content = {.victim = console.get_next_client_id()}};
+        bmmo::restart_request_msg msg{.content = {.victim = get_client_id_from_console()}};
         client.send(msg, k_nSteamNetworkingSend_Reliable);
     });
     console.register_command("flushlog", bmmo::flush_log);
