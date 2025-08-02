@@ -2,6 +2,7 @@
 #define BALLANCEMMOSERVER_SOUND_STREAM_MSG_HPP
 #include <sstream>
 #include <fstream>
+#include <filesystem>
 #include "message.hpp"
 #include "message_utils.hpp"
 
@@ -74,7 +75,8 @@ namespace bmmo {
                 return false;
 
             path = "BMMO_" + std::to_string(SteamNetworkingUtils()->GetLocalTimestamp()) + get_extension();
-            if (!save_to_pwd) path = "..\\ModLoader\\Cache\\" + path;
+            if (!save_to_pwd) path = (std::filesystem::temp_directory_path() / path).string();
+            while (std::filesystem::exists(path)) path += get_extension();
             if (save_sound_file) {
                 std::ofstream ofile(path, std::ios::binary);
                 ofile << raw.rdbuf();
