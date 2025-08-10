@@ -370,7 +370,8 @@ void BallanceMMOClient::OnProcess() {
 
     objects_.update(current_timestamp, db_.flush());
 
-    if (current_timestamp >= next_update_timestamp_) {
+    if (std::unique_lock client_lk(client_mtx_, std::try_to_lock);
+            current_timestamp >= next_update_timestamp_ && client_lk) {
         if (current_timestamp - next_update_timestamp_ > 1048576)
             next_update_timestamp_ = current_timestamp;
         next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
@@ -782,15 +783,17 @@ void BallanceMMOClient::init_commands() {
                 send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 return;
             }
-            std::unique_lock lk(client_mtx_);
-            auto map_it = maps_.find(rank_map.get_hash_bytes_string());
-            if (map_it == maps_.end() ||
-                    (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
-                SendIngameMessage("Error: ranking info not found for the specified map.",
-                                  bmmo::ansi::BrightRed);
-                return;
+            {
+                std::lock_guard lk(client_mtx_);
+                auto map_it = maps_.find(rank_map.get_hash_bytes_string());
+                if (map_it == maps_.end() ||
+                        (map_it->second.rankings.first.empty() && map_it->second.rankings.second.empty())) {
+                    SendIngameMessage("Error: ranking info not found for the specified map.",
+                                      bmmo::ansi::BrightRed);
+                    return;
+                }
+                msg.serialize(map_it->second.rankings);
             }
-            msg.serialize(map_it->second.rankings);
             receive(msg.raw.str().data(), msg.size());
         });
     });
@@ -1561,7 +1564,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::unique_lock bml_lk(bml_mtx_, std::try_to_lock);
+        std::unique_lock client_lk(client_mtx_, std::try_to_lock);
+        if (!bml_lk || !client_lk)
+            break;
         for (const auto& i : msg.balls) {
             //static char t[128];
             /*snprintf(t, 128, "%u: %d, (%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f), %lld",
@@ -1895,9 +1901,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (msg->content.player_id == db_.get_client_id())
             did_not_finish_ = true;
 
-        std::lock_guard lk(client_mtx_);
-        maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
-            (bool)msg->content.cheated, player_name, msg->content.sector});
+        {
+            std::lock_guard lk(client_mtx_);
+            maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
+                (bool)msg->content.cheated, player_name, msg->content.sector });
+        }
         play_wave_sound(sound_dnf_);
         utils_.flash_window();
         break;
@@ -1953,10 +1961,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             formatted_score, msg->content.get_formatted_time()),
             bmmo::color_code(msg->code));
 
-        std::lock_guard lk(client_mtx_);
-        maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
-            (bool)msg->content.cheated, player_name, msg->content.mode,
-            msg->content.rank, msg->content.timeElapsed, formatted_score});
+        {
+            std::lock_guard lk(client_mtx_);
+            maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
+                (bool)msg->content.cheated, player_name, msg->content.mode,
+                msg->content.rank, msg->content.timeElapsed, formatted_score});
+        }
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);
@@ -2090,8 +2100,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         else {
             int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
-            std::lock_guard<std::mutex> lk(client_mtx_);
             db_.update_map(msg->content.player_id, msg->content.map, msg->content.sector, timestamp);
+            std::unique_lock<std::mutex> lk(client_mtx_);
             maps_.try_emplace(msg->content.map.get_hash_bytes_string());
             if (!bmmo::name_validator::is_spectator(get_username(msg->content.player_id)))
                 update_sector_timestamp(msg->content.map, msg->content.sector, timestamp);
@@ -2101,8 +2111,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::CurrentSector: {
         auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(network_msg->m_pData);
         int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
-        std::unique_lock<std::mutex> lk(client_mtx_);
         db_.update_sector(msg->content.player_id, msg->content.sector, timestamp);
+        std::unique_lock<std::mutex> lk(client_mtx_);
         auto client_map = db_.get_client_map(msg->content.player_id);
         if (client_map.has_value() && !bmmo::name_validator::is_spectator(get_username(msg->content.player_id)))
             update_sector_timestamp(client_map.value(), msg->content.sector, timestamp);

@@ -491,7 +491,6 @@ private:
 
 		return CKKEY_AX;
 	}*/
-	CKBehavior* script = nullptr;
 	CKBehavior* m_dynamicPos = nullptr;
 	CKBehavior* m_phyNewBall = nullptr;
 	//CKContext* ctx = m_bml->GetCKContext();
