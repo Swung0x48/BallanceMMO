@@ -61,7 +61,6 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     player_status_list_.clear();
     player_status_list_.reserve(db_.player_count() + !spectator_mode_);
     auto push_entry = [&, this](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
-        std::lock_guard lk(client_mtx_);
         const auto& times = maps_[map.get_hash_bytes_string()].sector_timestamps;
         auto time_it = times.find(sector);
         auto map_name = map.get_display_name(map_names_);
@@ -261,7 +260,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
 
 void BallanceMMOClient::on_sector_changed() {
     if (!update_current_sector()) return;
-    max_sector_ = std::max(current_sector_, max_sector_);
+    max_sector_ = std::max(current_sector_.load(), max_sector_.load());
     if (connected()) send_current_sector();
     if (current_level_mode_ != bmmo::level_mode::Highscore) return;
     extra_life_received_ = false;
@@ -362,7 +361,7 @@ void BallanceMMOClient::OnProcess() {
     if (!connected())
         return;
 
-    std::unique_lock<std::mutex> bml_lk(bml_mtx_, std::try_to_lock);
+    std::unique_lock bml_lk(bml_mtx_, std::try_to_lock);
 
     if (!(m_bml->IsIngame() && bml_lk))
         return;
@@ -370,8 +369,7 @@ void BallanceMMOClient::OnProcess() {
 
     objects_.update(current_timestamp, db_.flush());
 
-    if (std::unique_lock client_lk(client_mtx_, std::try_to_lock);
-            current_timestamp >= next_update_timestamp_ && client_lk) {
+    if (current_timestamp >= next_update_timestamp_) {
         if (current_timestamp - next_update_timestamp_ > 1048576)
             next_update_timestamp_ = current_timestamp;
         next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
@@ -647,7 +645,7 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 void BallanceMMOClient::OnFullCommand(const std::string& full_command)
 {
     auto help = [this](IBML* bml) {
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
         SendIngameMessage("BallanceMMO Help", bmmo::ansi::Bold);
         SendIngameMessage(std::format("Version: {}; build time: {}.",
                                       version_string, bmmo::string_utils::get_build_time_string()));
@@ -1274,12 +1272,12 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
 
     if (std::strcmp(server_addr_.c_str(), address) == 0) {
         if (connected()) {
-            std::lock_guard<std::mutex> lk(bml_mtx_);
+            std::lock_guard lk(bml_mtx_);
             SendIngameMessage("Already connected.");
             return;
         }
         else if (connecting()) {
-            std::lock_guard<std::mutex> lk(bml_mtx_);
+            std::lock_guard lk(bml_mtx_);
             SendIngameMessage("Connecting in process, please wait...");
             return;
         }
@@ -1311,7 +1309,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
     resolver_ = std::make_unique<asio::ip::udp::resolver>(io_ctx_);
     resolver_->async_resolve(host, port, [this](asio::error_code ec, asio::ip::udp::resolver::results_type results) {
         resolving_endpoint_ = false;
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
         // If address correctly resolved...
         if (!ec) {
             SendIngameMessage("Server address resolved.");
@@ -1348,7 +1346,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
 
 void BallanceMMOClient::disconnect_from_server() {
     if (!connecting() && !connected()) {
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
         SendIngameMessage("Already disconnected.");
     }
     else {
@@ -1461,7 +1459,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         break;
 
     case k_ESteamNetworkingConnectionState_Connected: {
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
         status_->update("Connected (Login requested)");
         //status_->paint(0xff00ff00);
         SendIngameMessage("Connected to server.");
@@ -1565,8 +1563,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
 
         std::unique_lock bml_lk(bml_mtx_, std::try_to_lock);
-        std::unique_lock client_lk(client_mtx_, std::try_to_lock);
-        if (!bml_lk || !client_lk)
+        if (!bml_lk)
             break;
         for (const auto& i : msg.balls) {
             //static char t[128];
@@ -1612,7 +1609,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::LoginAcceptedV3: {
         auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(network_msg);
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
 
         if (logged_in_) {
             logger_->Info("New LoginAccepted message received. Resetting current data.");
@@ -1634,7 +1631,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 db_.update_map(id, data.map, data.sector, timestamp);
                 maps_.try_emplace(data.map.get_hash_bytes_string());
                 if (!bmmo::name_validator::is_spectator(data.name))
-                    update_sector_timestamp(data.map, data.sector, timestamp);
+                    update_sector_timestamp(data.map, data.sector, timestamp); // recursive locking of bml_mtx_
             }
             logger_->Info(data.name.c_str());
         }
@@ -1718,7 +1715,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerConnectedV2: {
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
         bmmo::player_connected_v2_msg msg;
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
@@ -1742,7 +1739,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerDisconnected: {
-        std::lock_guard<std::mutex> lk(bml_mtx_);
+        std::lock_guard lk(bml_mtx_);
         auto* msg = reinterpret_cast<bmmo::player_disconnected_msg *>(network_msg->m_pData);
         auto state = db_.get(msg->content.connection_id);
         //assert(state.has_value());
@@ -2101,7 +2098,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         else {
             int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
             db_.update_map(msg->content.player_id, msg->content.map, msg->content.sector, timestamp);
-            std::unique_lock<std::mutex> lk(client_mtx_);
             maps_.try_emplace(msg->content.map.get_hash_bytes_string());
             if (!bmmo::name_validator::is_spectator(get_username(msg->content.player_id)))
                 update_sector_timestamp(msg->content.map, msg->content.sector, timestamp);
@@ -2112,7 +2108,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(network_msg->m_pData);
         int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
         db_.update_sector(msg->content.player_id, msg->content.sector, timestamp);
-        std::unique_lock<std::mutex> lk(client_mtx_);
         auto client_map = db_.get_client_map(msg->content.player_id);
         if (client_map.has_value() && !bmmo::name_validator::is_spectator(get_username(msg->content.player_id)))
             update_sector_timestamp(client_map.value(), msg->content.sector, timestamp);
@@ -2269,7 +2264,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 duration = sound->GetSoundLength() + 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
             utils_.call_sync_method([=] {
-                std::lock_guard<std::mutex> lk(bml_mtx_);
+                std::lock_guard lk(bml_mtx_);
                 if (!received_wave_sounds_.contains(sound))
                     return;
                 destroy_wave_sound(sound, true);

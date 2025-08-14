@@ -216,7 +216,7 @@ private:
 		LoggingOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
 	}
 
-	std::mutex bml_mtx_;
+	std::recursive_mutex bml_mtx_;
 	std::mutex client_mtx_;
 	std::condition_variable client_cv_;
 
@@ -267,8 +267,8 @@ private:
 	bmmo::map last_countdown_map_{};
 	bmmo::level_mode current_level_mode_ = bmmo::level_mode::Speedrun, countdown_mode_{};
 	float counter_start_timestamp_ = 0;
-	int32_t current_sector_ = 0, max_sector_ = 0;
-	int64_t current_sector_timestamp_ = 0;
+	std::atomic_int32_t current_sector_ = 0, max_sector_ = 0;
+	std::atomic_int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	std::unordered_map<std::string, std::array<uint8_t, 16>> md5_data_;
 	SteamNetworkingMicroseconds map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
@@ -394,7 +394,6 @@ private:
 	}
 
 	bool update_current_sector() { // true if changed
-		std::unique_lock<std::mutex> lk(client_mtx_);
 		int sector = 0;
 		if (ingame_parameter_array_ != 0) {
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
@@ -411,6 +410,7 @@ private:
 	}
 
 	void update_sector_timestamp(const bmmo::map& map, int sector, int64_t timestamp) {
+		std::unique_lock lk(bml_mtx_);
 		if (sector == 0) return;
 		auto map_it = maps_.find(map.get_hash_bytes_string());
 		if (map_it == maps_.end()) return;
@@ -585,7 +585,7 @@ private:
 				if (!connected())
 					return;
 			} else if (input_manager_->IsKeyPressed(CKKEY_F3)) {
-				std::lock_guard<std::mutex> lk(bml_mtx_);
+				std::lock_guard lk(bml_mtx_);
 				ping_->toggle();
 				status_->toggle();
 			}
@@ -603,7 +603,7 @@ private:
 					}
 				}
 				if (input_manager_->IsKeyPressed(CKKEY_GRAVE)) {
-					std::lock_guard<std::mutex> lk(bml_mtx_);
+					std::lock_guard lk(bml_mtx_);
 					// toggle own ball
 					toggle_own_spirit_ball(!own_ball_visible_, true);
 				}
@@ -646,7 +646,7 @@ private:
 
 		// Toggle nametag
 		if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
-			std::lock_guard<std::mutex> lk(bml_mtx_);
+			std::lock_guard lk(bml_mtx_);
 			db_.toggle_nametag_visible();
 		}
 
@@ -796,7 +796,7 @@ private:
 	}
 
 	void cleanup(bool down = false, bool linger = true) {
-		std::lock_guard<std::mutex> lk(bml_mtx_);
+		std::lock_guard lk(bml_mtx_);
 		client_cv_.notify_all();
 		if (player_list_visible_) {
 			player_list_visible_ = false;
@@ -955,7 +955,6 @@ private:
 
 	void send_current_sector() {
 		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_Reliable);
-		std::lock_guard<std::mutex> lk(client_mtx_);
 		if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
 	}
 
