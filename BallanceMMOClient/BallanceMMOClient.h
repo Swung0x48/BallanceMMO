@@ -410,7 +410,7 @@ private:
 	}
 
 	void update_sector_timestamp(const bmmo::map& map, int sector, int64_t timestamp) {
-		std::unique_lock lk(bml_mtx_);
+		//std::unique_lock lk(bml_mtx_);
 		if (sector == 0) return;
 		auto map_it = maps_.find(map.get_hash_bytes_string());
 		if (map_it == maps_.end()) return;
