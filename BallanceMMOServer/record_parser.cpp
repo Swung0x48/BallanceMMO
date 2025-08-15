@@ -1025,6 +1025,7 @@ int main(int argc, char** argv) {
                 std::stringstream time_stream(time_string); std::tm time_struct{};
                 time_stream >> std::get_time(&time_struct, "%Y-%m-%d %H:%M:%S");
                 if (time_stream.fail()) { print_hint(); return; };
+                time_struct.tm_isdst = -1; // let std::mktime figure out DST
                 time_value = double(std::mktime(&time_struct) - replayer.get_record_start_world_time());
                 break;
         }
