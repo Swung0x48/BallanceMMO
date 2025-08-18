@@ -7,7 +7,7 @@ namespace bmmo {
         inline constexpr const char *valid_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+=.~()";
         inline constexpr const char spectator_prefix = '*';
 
-        inline constexpr std::size_t max_length = 20, min_length = 3;
+        inline constexpr std::size_t max_length = 20, min_length = 2;
 
         std::size_t get_invalid_char_pos(const std::string& name);
 

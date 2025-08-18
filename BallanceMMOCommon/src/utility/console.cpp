@@ -72,7 +72,12 @@ void console::set_completion_callback(std::function<std::vector<std::string>(con
     replxx_instance.set_completion_callback([func](std::string const& input, int& contextLen)
                                             -> replxx::Replxx::completions_t {
         const auto words = string_utils::split_strings(input);
-        const auto& last_word = words[words.size() - 1];
+        auto last_word = words[words.size() - 1];
+        // contextLen: either length of the last word, or the length from symbols such as `;` or `,`
+        // no need to check for whitespace tho as split_strings already did that
+        auto last_separator = last_word.find_last_of(valid_nonspace_delims);
+        if (last_separator != std::string::npos)
+            last_word.erase(0, last_separator + 1);
         contextLen = last_word.length();
         replxx::Replxx::completions_t completions;
         for (const auto& hint: func(words))

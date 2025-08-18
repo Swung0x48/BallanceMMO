@@ -471,7 +471,11 @@ public:
                 std::lock_guard lk(client_data_mutex_);
                 std::vector<std::string> player_hints;
                 player_hints.reserve(clients_.size());
-                bool hint_client_id = args[args.size() - 1].starts_with('#');
+                auto last_word = args[args.size() - 1];
+                auto last_separator = last_word.find_last_of(bmmo::console::valid_nonspace_delims);
+                if (last_separator != std::string::npos)
+                    last_word.erase(0, last_separator + 1);
+                bool hint_client_id = last_word.starts_with('#');
                 for (const auto& [id, data]: clients_) {
                     if (hint_client_id)
                         player_hints.emplace_back('#' + std::to_string(id));
@@ -1611,33 +1615,54 @@ int main(int argc, char** argv) {
         server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         Printf("([Server]): %s", msg.chat_content);
     });
+    auto parse_client_id = [&](const std::string& client_input) -> HSteamNetConnection {
+        return (client_input.length() > 0 && client_input[0] == '#')
+                ? std::atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
+    };
     auto get_client_id_from_console = [&]() -> HSteamNetConnection {
         std::string client_input = console.get_next_word();
-        HSteamNetConnection client = (client_input.length() > 0 && client_input[0] == '#')
-                ? std::atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
+        HSteamNetConnection client = parse_client_id(client_input);
         if (client == 0)
-            Printf("Error: invalid connection id.");
+            Printf("Error: invalid connection id \"%s\".", client_input.c_str());
         return client;
     };
+    using client_list_t = std::unordered_set<HSteamNetConnection>;
+    // separated by `,` without spaces
+    auto get_multiple_client_ids_from_console = [&]() -> client_list_t {
+        std::string client_input = console.get_next_word();
+        client_list_t clients;
+        for (const auto& client_str: bmmo::string_utils::split_strings(client_input, ',')) {
+            HSteamNetConnection client = parse_client_id(client_str);
+            if (client != 0)
+                clients.insert(client);
+            else
+                Printf("Error: invalid connection id \"%s\".", client_str.c_str());
+        }
+        return clients;
+    };
+    auto get_multiple_client_names = [&](const client_list_t& clients) -> std::string {
+        std::vector<std::string> names; names.reserve(clients.size());
+        for (const auto& client : clients) names.push_back(server.get_client_name(client));
+        return bmmo::string_utils::join_strings(names, 0, ", ");
+    };
     auto send_plain_text_msg = [&](bool broadcast = true) {
-        HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
-        if (!broadcast && client == k_HSteamNetConnection_Invalid) return;
+        client_list_t clients = broadcast ? client_list_t{} : get_multiple_client_ids_from_console();
+        if (!broadcast && clients.empty()) return;
         bmmo::plain_text_msg msg{};
         msg.text_content = console.get_rest_of_line();
         msg.serialize();
-        if (broadcast) {
+        if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            Printf("[Plain]: %s", msg.text_content);
-        } else {
+        else for (const auto& client: clients)
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            Printf("[Plain -> %s]: %s", server.get_client_name(client), msg.text_content);
-        }
+        Printf("[Plain%s]: %s",
+            broadcast ? "" : " -> " + get_multiple_client_names(clients), msg.text_content);
     };
     console.register_command("plaintext", send_plain_text_msg);
     console.register_command("plaintext#", std::bind(send_plain_text_msg, false));
     auto send_popup_msg = [&](bool broadcast = true) {
-        HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
-        if (!broadcast && client == k_HSteamNetConnection_Invalid) return;
+        client_list_t clients = broadcast ? client_list_t{} : get_multiple_client_ids_from_console();
+        if (!broadcast && clients.empty()) return;
         bmmo::popup_box_msg msg{};
         msg.title = "BallanceMMO - Message";
         msg.text_content = console.get_rest_of_line();
@@ -1662,10 +1687,10 @@ int main(int argc, char** argv) {
         msg.serialize();
         if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        else
+        else for (const auto& client: clients)
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        Printf(bmmo::color_code(msg.code), "[Popup -> %s] {%s}: %s",
-                client == k_HSteamNetConnection_Invalid ? "[all]" : server.get_client_name(client),
+        Printf(bmmo::color_code(msg.code), "[Popup%s] {%s}: %s",
+                broadcast ? "" : " -> " + get_multiple_client_names(clients),
                 msg.title, msg.text_content);
     };
     console.register_command("popup", send_popup_msg);
@@ -1673,17 +1698,17 @@ int main(int argc, char** argv) {
     using in_msg = bmmo::important_notification_msg;
     auto send_important_notification = [&](bool broadcast = true, in_msg::notification_type type = in_msg::Announcement) {
         bmmo::important_notification_msg msg{};
-        HSteamNetConnection client = broadcast ? k_HSteamNetConnection_Invalid : get_client_id_from_console();
-        if (!broadcast && client == k_HSteamNetConnection_Invalid) return;
+        client_list_t clients = broadcast ? client_list_t{} : get_multiple_client_ids_from_console();
+        if (!broadcast && clients.empty()) return;
         msg.chat_content = console.get_rest_of_line();
         msg.type = type;
         msg.serialize();
         if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        else
+        else for (const auto& client: clients)
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s",
-                msg.get_type_name(), broadcast ? "" : " -> " + server.get_client_name(client),
+                msg.get_type_name(), broadcast ? "" : " -> " + get_multiple_client_names(clients),
                 msg.chat_content);
     };
     console.register_command("announce", send_important_notification);
@@ -1717,14 +1742,16 @@ int main(int argc, char** argv) {
     });
     console.register_aliases("kick", {"crash", "fatalerror", "kick#"});
     console.register_command("whisper", [&] {
-        auto client = get_client_id_from_console();
-        if (client == k_HSteamNetConnection_Invalid) return;
+        client_list_t clients = get_multiple_client_ids_from_console();
+        if (clients.empty()) return;
         std::string text = console.get_rest_of_line();
         bmmo::private_chat_msg msg{};
         msg.chat_content = text;
         msg.serialize();
-        server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        Printf(bmmo::color_code(msg.code), "([Server]) -> %s: %s", server.get_client_name(client), msg.chat_content);
+        for (const auto& client: clients)
+            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        Printf(bmmo::color_code(msg.code), "([Server]) -> %s: %s",
+                get_multiple_client_names(clients), msg.chat_content);
     });
     console.register_command("ban", [&] {
         auto client = get_client_id_from_console();
@@ -1829,12 +1856,9 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) { Printf(e.what()); return; }
     });
     console.register_command("playstream", [&] {
-        auto client = k_HSteamNetConnection_Invalid;
-        if (console.get_command_name() == "playstream#") {
-            client = get_client_id_from_console();
-            if (client == k_HSteamNetConnection_Invalid) return;
-        }
-        const bool broadcast = (client == k_HSteamNetConnection_Invalid);
+        const bool broadcast = (console.get_command_name() == "playstream");
+        client_list_t clients = broadcast ? client_list_t{} : get_multiple_client_ids_from_console();
+        if (!broadcast && clients.empty()) return;
         try {
             auto idata = YAML::Load(console.get_rest_of_line());
             bmmo::sound_stream_msg msg{};
@@ -1861,10 +1885,11 @@ int main(int argc, char** argv) {
                 Printf("Error serializing message.");
                 return;
             }
-            Printf(bmmo::ansi::WhiteInverse, "Sound <%s> (size: %d) sent to %s",
-                    msg.path, (uint32_t) msg.size(), broadcast ? "[all]" : std::to_string(client));
             if (broadcast) server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-            else server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            else for (const auto& client: clients)
+                server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            Printf(bmmo::ansi::WhiteInverse, "Sound <%s> (size: %d) sent to %s",
+                    msg.path, (uint32_t) msg.size(), broadcast ? "[all]" : get_multiple_client_names(clients));
         } catch (const std::exception& e) { Printf(e.what()); return; }
     });
     console.register_aliases("playstream", {"playstream#"});
@@ -1874,11 +1899,9 @@ int main(int argc, char** argv) {
         server.print_scores(hs_mode, console.empty() ? server.get_last_countdown_map() : static_cast<bmmo::map>(console.get_next_map()));
     });
     console.register_command("sendscores", [&] {
-        HSteamNetConnection client{};
-        if (console.get_command_name() == "sendscores#") {
-            client = get_client_id_from_console();
-            if (client == k_HSteamNetConnection_Invalid) return;
-        }
+        const bool broadcast = (console.get_command_name() == "sendscores");
+        client_list_t clients = broadcast ? client_list_t{} : get_multiple_client_ids_from_console();
+        if (!broadcast && clients.empty()) return;
         bmmo::score_list_msg msg{};
         msg.mode = (console.get_next_word(true) == "hs") ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
         msg.map = console.empty() ? server.get_last_countdown_map() : static_cast<bmmo::map>(console.get_next_map());
@@ -1888,20 +1911,23 @@ int main(int argc, char** argv) {
             return;
         }
         msg.serialize(*rankings);
-        if (client == 0)
+        if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        else
+        else for (const auto& client: clients)
             server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        Printf(bmmo::color_code(msg.code), "Score list data sent to #%u.", client);
+        Printf(bmmo::color_code(msg.code), "Score list data sent to %s.",
+                broadcast ? "[all]" : get_multiple_client_names(clients));
     });
     console.register_aliases("sendscores", {"sendscores#"});
     console.register_command("restartlevel", [&] {
         if (console.empty()) return Printf("Usage: \"restartlevel <player>\".");
-        auto client = get_client_id_from_console();
-        if (client == k_HSteamNetConnection_Invalid) return;
-        bmmo::restart_request_msg msg{.content = {.victim = client}};
-        server.broadcast_message(msg);
-        Printf(bmmo::color_code(msg.code), "Requested to restart #%u's current level.", client);
+        auto clients = get_multiple_client_ids_from_console();
+        if (clients.empty()) return;
+        for (const auto& client: clients) {
+            bmmo::restart_request_msg msg{.content = {.victim = client}};
+            server.broadcast_message(msg);
+            Printf(bmmo::color_code(msg.code), "Requested to restart %s's current level.", server.get_client_name(client));
+        }
     });
     console.register_command("flushlog", bmmo::flush_log);
     console.register_command("help", [&] { Printf(console.get_help_string().c_str()); });

@@ -19,6 +19,8 @@ public:
 
     static inline console *instance;
 
+    static constexpr const char *valid_nonspace_delims = ";,";
+
     const std::string get_help_string() const;
     const std::vector<std::string> get_command_list() const;
     // @param cmd - current command name/prefix, `nullptr` -> local command name.

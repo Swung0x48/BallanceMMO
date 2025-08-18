@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <ranges>
 #include <sstream>
 #include <iomanip>
 #include <cstdint>
@@ -71,15 +72,12 @@ namespace bmmo::string_utils {
         return str.substr(0, MAX_LENGTH);
     }
 
-    inline std::vector<std::string> split_strings(const std::string& str) {
-        std::stringstream ss { str };
-        std::vector<std::string> words;
-        while (!ss.eof()) {
-            std::string s;
-            ss >> s;
-            words.push_back(s);
-        }
-        return words;
+    inline std::vector<std::string> split_strings(const std::string& str, char delim = ' ') {
+        std::vector<std::string> parts;
+        auto split_view = str | std::views::split(delim);
+        for (const auto& part: split_view)
+            parts.emplace_back(part.begin(), part.end());
+        return parts;
     }
 
     inline void hex_chars_from_string(uint8_t* dest, const std::string& src) {
