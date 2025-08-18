@@ -485,6 +485,48 @@ public:
             player_thread_.join();
     }
 
+    HSteamNetConnection get_client_id(const std::string& username) const {
+        if (username.empty())
+            return Printf("Error: invalid connection id."), k_HSteamNetConnection_Invalid;
+        const auto lower_name = bmmo::string_utils::to_lower(username);
+        auto it = std::find_if(clients_.begin(), clients_.end(),
+            [&lower_name](const auto& i) { return bmmo::message_utils::to_lower(i.second.name) == lower_name; });
+        if (it == clients_.end())
+            return Printf("Error: client \"%s\" not found.", username), k_HSteamNetConnection_Invalid;
+        return it->first;
+    }
+
+    bool kick_client(HSteamNetConnection client, std::string reason = "",
+            HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
+            bmmo::connection_end::code type = bmmo::connection_end::Kicked) {
+        if (client == k_HSteamNetConnection_Invalid || !clients_.contains(client))
+            return false;
+        bmmo::player_kicked_msg msg{};
+        msg.kicked_player_name = clients_[client].name;
+        std::string kick_notice = "Kicked by ";
+
+        if (executor != k_HSteamNetConnection_Invalid) {
+            kick_notice += clients_[executor].name;
+            msg.executor_name = clients_[executor].name;
+        } else {
+            kick_notice += "the server";
+        }
+
+        if (!reason.empty()) {
+            kick_notice.append(" (" + reason + ")");
+            msg.reason = reason;
+        }
+        kick_notice.append(".");
+
+        msg.crashed = (type >= bmmo::connection_end::Crash && type < bmmo::connection_end::PlayerKicked_Max);
+
+        interface_->CloseConnection(client, type, kick_notice.c_str(), true);
+        msg.serialize();
+        broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+
+        return true;
+    }
+
     void print_clients() {
         Printf("%d client(s) online:", clients_.size());
         for (auto& i: clients_) {
@@ -824,6 +866,22 @@ private:
                 broadcast_message(text_msg.raw.str().data(), text_msg.size(), k_nSteamNetworkingSend_Reliable);
                 break;
             }
+            case bmmo::ImportantNotification: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::important_notification_msg>(networking_msg);
+                bmmo::string_utils::sanitize_string(msg.chat_content);
+                msg.player_id = k_HSteamNetConnection_Invalid;
+
+                Printf(msg.get_ansi_color(), "[%s] (%u, %s): %s",
+                    msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.chat_content);
+                std::string old_content = msg.chat_content;
+                msg.chat_content.resize(2048);
+                Sprintf(msg.chat_content, "[Reality] [%s]\n%s", client_it->second.name, old_content);
+                msg.type = static_cast<decltype(msg.type)>(msg.type + bmmo::important_notification_msg::PLAIN_MSG_SHIFT);
+                msg.clear();
+                msg.serialize();
+                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                break;
+            }
             default:
                 break;
         }
@@ -1054,6 +1112,53 @@ int main(int argc, char** argv) {
         server_thread = std::thread([&replayer]() { replayer.run(); });
         replayer.wait_till_started();
     });
+
+    auto parse_client_id = [&](const std::string& client_input) -> HSteamNetConnection {
+        return (client_input.length() > 0 && client_input[0] == '#')
+                ? std::atoll(client_input.substr(1).c_str()) : replayer.get_client_id(client_input);
+    };
+    auto get_client_id_from_console = [&]() -> HSteamNetConnection {
+        std::string client_input = console.get_next_word();
+        HSteamNetConnection client = parse_client_id(client_input);
+        if (client == 0)
+            Printf("Error: invalid connection id \"%s\".", client_input.c_str());
+        return client;
+    };
+    console.register_command("kick", [&] {
+        if (console.empty() && console.get_command_name() == "kick#") {
+            Printf("Usage: \"kick# <code> <player> <reason>\".");
+            return;
+        }
+        bmmo::connection_end::code end_code = bmmo::connection_end::Kicked;
+        if (console.get_command_name() == "kick#")
+            end_code = static_cast<decltype(end_code)>(console.get_next_int());
+        else if (console.get_command_name() == "crash")
+            end_code = bmmo::connection_end::Crash;
+        auto client = get_client_id_from_console();
+        if (client == k_HSteamNetConnection_Invalid) return;
+        std::string text = console.get_rest_of_line();
+        replayer.kick_client(client, text, k_HSteamNetConnection_Invalid, end_code);
+    });
+    console.register_aliases("kick", {"crash", "kick#"});
+    console.register_command("announce", [&]() {
+        const auto broadcast = !console.get_command_name().ends_with("#");
+        HSteamNetConnection client = broadcast ? 0 : get_client_id_from_console();
+        if (!broadcast && client == 0) return;
+        using in_msg = bmmo::important_notification_msg;
+        in_msg msg{};
+        msg.chat_content = console.get_rest_of_line();
+        msg.type = console.get_command_name().starts_with("announce") ?
+                in_msg::notification_type::PlainAnnouncement : in_msg::notification_type::PlainNotice;
+        Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s", msg.get_type_name(),
+                broadcast ? "" : " -> #" + std::to_string(client), msg.chat_content);
+        msg.chat_content = "[Reality] [[Server]]\n\n" + msg.chat_content;
+        msg.serialize();
+        if (broadcast)
+            replayer.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        else
+            replayer.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_aliases("announce", {"notice", "announce#", "notice#"});
 
     Printf("To see all available commands, type \"help\".");
 

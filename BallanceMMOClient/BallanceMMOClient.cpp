@@ -1776,7 +1776,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         bmmo::important_notification_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        std::string name = get_username(msg.player_id);
+        std::string name = msg.type >= bmmo::important_notification_msg::PLAIN_MSG_SHIFT ? "" : get_username(msg.player_id);
         SendIngameMessage(std::format("[{}] {}: {}", msg.get_type_name(), name, msg.chat_content),
                           msg.get_ansi_color());
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
@@ -1794,7 +1794,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 msg.chat_content += '\n';
                 ++line_count;
             }
-            msg.chat_content += "[" + name + "]";
+            if (msg.type < bmmo::important_notification_msg::PLAIN_MSG_SHIFT)
+                msg.chat_content += "[" + name + "]";
             utils_.display_important_notification(msg.chat_content, font_size, line_count, font_weight, y_pos);
         });
         break;

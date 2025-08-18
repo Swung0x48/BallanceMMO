@@ -6,18 +6,22 @@
 
 namespace bmmo {
     struct important_notification_msg: public chat_msg {
-        enum notification_type: uint8_t { Announcement, Notice };
+        constexpr static const uint8_t PLAIN_MSG_SHIFT = 1 << 6; // 64
+        enum notification_type: uint8_t {
+            Announcement, Notice,
+            PlainAnnouncement = Announcement + PLAIN_MSG_SHIFT, PlainNotice,
+        } ;
         notification_type type = Announcement;
 
         constexpr const char* get_type_name() {
-            switch (type) {
+            switch (type >= PlainAnnouncement ? type - PLAIN_MSG_SHIFT : type) {
                 case Announcement: return "Announcement";
                 default: return "Notice";
             }
         }
         
         constexpr int get_ansi_color() {
-            switch (type) {
+            switch (type >= PlainAnnouncement ? type - PLAIN_MSG_SHIFT : type) {
                 case Announcement: return bmmo::ansi::BrightCyan | bmmo::ansi::Bold;
                 default: return bmmo::ansi::BrightCyan;
             }

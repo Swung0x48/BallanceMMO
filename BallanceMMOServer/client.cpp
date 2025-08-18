@@ -589,8 +589,10 @@ private:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 msg.deserialize();
 
-                Printf(msg.get_ansi_color(), "[%s] (%u, %s): %s",
-                        msg.get_type_name(), msg.player_id, get_player_name(msg.player_id), msg.chat_content);
+                Printf(msg.get_ansi_color(), "[%s] %s%s",
+                        msg.get_type_name(), msg.type >= bmmo::important_notification_msg::PLAIN_MSG_SHIFT ?
+                        "" : Sprintf("(%u, %s): ", msg.player_id, get_player_name(msg.player_id)),
+                        msg.chat_content);
                 break;
             }
             case bmmo::PermanentNotification: {
