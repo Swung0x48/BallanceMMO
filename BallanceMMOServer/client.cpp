@@ -31,6 +31,8 @@
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
 bool cheat = false;
+std::atomic_int64_t server_realworld_timestamp_us = 0;
+std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp = 0;
 struct client_data {
     std::string name;
     bool cheated;
@@ -605,6 +607,12 @@ private:
             case bmmo::PopupBox: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(networking_msg);
                 Printf(bmmo::color_code(msg.code), "[Popup] {%s}: %s", msg.title, msg.text_content);
+                break;
+            }
+            case bmmo::RealWorldTimestamp: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::real_world_timestamp_msg>(networking_msg);
+                server_realworld_timestamp_us = msg.content + int64_t(get_info().m_nPing) * 1000LL;
+                server_realworld_timestamp_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
                 break;
             }
             case bmmo::RestartRequest: {
@@ -1251,6 +1259,19 @@ int main(int argc, char** argv) {
         }
         msg.serialize(ranks_it->second);
         client.receive(msg.raw.str().data(), msg.size());
+    });
+    console.register_command("realtime", [&] {
+        if (!server_realworld_timestamp_us) {
+            Printf(bmmo::ansi::BrightRed, "Error: real world time not yet received.");
+            return;
+        }
+        using namespace std::chrono;
+        const auto real_timestamp = server_realworld_timestamp_us +
+                (SteamNetworkingUtils()->GetLocalTimestamp() - server_realworld_timestamp_timestamp);
+        const auto real_time = system_clock::to_time_t(system_clock::time_point{microseconds{real_timestamp}});
+        char time_str[32];
+        std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&real_time));
+        Printf("Current server-side real-world time: %s", time_str);
     });
     console.register_command("restartlevel", [&] {
         bmmo::restart_request_msg msg{.content = {.victim = get_client_id_from_console()}};

@@ -1407,6 +1407,7 @@ protected:
                     config_.log_mod_list(msg.mods);
                 break;
             }
+            case bmmo::RealWorldTimestamp:
             case bmmo::SoundData:
             case bmmo::SoundStream:
             case bmmo::OwnedBallState:
@@ -1484,6 +1485,9 @@ protected:
             ping_msg.serialize();
             ping_data_counter_ = 0;
             broadcast_message(ping_msg.raw.str().data(), ping_msg.size(), k_nSteamNetworkingSend_Reliable);
+            using namespace std::chrono;
+            const int64_t now_micros = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+            broadcast_message(bmmo::real_world_timestamp_msg{.content = now_micros}, k_nSteamNetworkingSend_Reliable);
         }
     };
 

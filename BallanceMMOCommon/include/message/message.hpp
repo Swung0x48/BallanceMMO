@@ -77,6 +77,7 @@ namespace bmmo {
         RestartRequest,
         ExtraLife,
         LatencyData,
+        RealWorldTimestamp,
     };
 
     template<typename T, opcode C = None>

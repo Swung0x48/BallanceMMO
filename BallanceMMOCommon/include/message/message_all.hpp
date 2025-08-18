@@ -54,5 +54,6 @@
 #include "restart_request_msg.hpp"
 #include "extra_life_msg.hpp"
 #include "latency_data_msg.hpp"
+#include "real_world_timestamp_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

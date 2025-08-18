@@ -300,6 +300,8 @@ private:
 	bool logged_in_ = false;
 	SteamNetworkingMicroseconds next_update_timestamp_ = 0,
 		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
+	std::atomic_int64_t server_realworld_timestamp_us_ = 0;
+	std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true;
 	bool reset_rank_ = false, reset_timer_ = true;

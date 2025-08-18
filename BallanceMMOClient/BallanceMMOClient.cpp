@@ -756,6 +756,21 @@ void BallanceMMOClient::init_commands() {
         msg.content.victim = get_client_id_from_console();
         send(msg);
     });
+    console_.register_command("realtime", [&] {
+        if (!server_realworld_timestamp_us_) {
+            SendIngameMessage("Error: real world time not yet received.", bmmo::ansi::BrightRed);
+            return;
+        }
+        const auto real_timestamp = server_realworld_timestamp_us_ +
+                (SteamNetworkingUtils()->GetLocalTimestamp() - server_realworld_timestamp_timestamp_);
+        using namespace std::chrono;
+        const auto real_time = system_clock::to_time_t(system_clock::time_point{microseconds{real_timestamp}});
+        // too much stupidity and compiler shenanigans going on here
+        // SendIngameMessage(std::format("Current server-side real-world time: {:%F %T}", floor<seconds>(current_zone()->to_local(real_time))));
+        char output[64]; std::tm buf; localtime_s(&buf, &real_time);
+        std::strftime(output, sizeof(output), "Current server-side real-world time: %F %T", &buf);
+        SendIngameMessage(output);
+    });
     console_.register_command("scores", [&] {
         bmmo::map rank_map;
         auto mode = console_.get_next_word(true);
@@ -1470,8 +1485,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             nickname = bmmo::name_validator::get_spectator_nickname(nickname);
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
             local_state_handler_ = std::make_unique<spectator_state_handler>(thread_pool_, this, GetLogger());
-            spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.96f);
-            spectator_label_->sprite_->SetFont("Arial", utils_.get_display_font_size(12), 500, false, false);
+            spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.9625f);
+            spectator_label_->sprite_->SetFont("Arial", utils_.get_display_font_size(11.72f), 500, false, false);
             spectator_label_->set_visible(true);
         }
         else {
@@ -1773,10 +1788,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::ImportantNotification: {
-        bmmo::important_notification_msg msg{};
+        using in_msg = bmmo::important_notification_msg; in_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
-        std::string name = msg.type >= bmmo::important_notification_msg::PLAIN_MSG_SHIFT ? "" : get_username(msg.player_id);
+        std::string name = msg.type >= in_msg::PLAIN_MSG_SHIFT ? "" : get_username(msg.player_id);
         SendIngameMessage(std::format("[{}] {}: {}", msg.get_type_name(), name, msg.chat_content),
                           msg.get_ansi_color());
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
@@ -1784,17 +1799,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             play_wave_sound(sound_notification_, !utils_.is_foreground_window());
             float font_size = 16.0f, y_pos = 0.684f;
             int font_weight = 400;
-            if (msg.type == bmmo::important_notification_msg::Announcement) {
+            if (msg.type % in_msg::PLAIN_MSG_SHIFT == in_msg::Announcement) {
                 font_size = 19.0f;
                 font_weight = 700;
                 y_pos = 0.4f;
             }
             auto line_count = utils_.split_lines(msg.chat_content, 0.7f, font_size, font_weight);
-            if (msg.type == bmmo::important_notification_msg::Announcement) {
+            if (msg.type % in_msg::PLAIN_MSG_SHIFT == in_msg::Announcement) {
                 msg.chat_content += '\n';
                 ++line_count;
             }
-            if (msg.type < bmmo::important_notification_msg::PLAIN_MSG_SHIFT)
+            if (msg.type < in_msg::PLAIN_MSG_SHIFT)
                 msg.chat_content += "[" + name + "]";
             utils_.display_important_notification(msg.chat_content, font_size, line_count, font_weight, y_pos);
         });
@@ -2178,6 +2193,26 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage("[BMMO/" + msg.get_type_name() + "] " + msg.text_content, msg.get_ansi_color_code());
         utils_.flash_window();
         play_wave_sound(sound_knock_);
+        break;
+    }
+    case bmmo::RealWorldTimestamp: {
+        auto msg = bmmo::message_utils::deserialize<bmmo::real_world_timestamp_msg>(network_msg);
+        server_realworld_timestamp_us_ = msg.content + int64_t(get_status().m_nPing) * 1000LL;
+        server_realworld_timestamp_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
+        if (!spectator_label_) break;
+        using namespace std::chrono;
+        const auto real_time = system_clock::to_time_t(system_clock::time_point{microseconds{server_realworld_timestamp_us_}});
+        char output[32]; std::tm buf; localtime_s(&buf, &real_time);
+        std::strftime(output, sizeof(output), "%F %T", &buf);
+        std::string text = spectator_label_->sprite_->GetText();
+        // "[Spectator Mode]" -> "[Real time: %s | Spectator Mode]"
+        const auto left_bracket_pos = text.find('['), pipe_pos = text.find(" | ");
+        if (left_bracket_pos == text.npos) break;
+        if (pipe_pos == text.npos)
+            text.insert(left_bracket_pos + 1, "Real time: " + std::string(output) + " | ");
+        else
+            text.replace(left_bracket_pos + 1, pipe_pos - (left_bracket_pos + 1), "Real time: " + std::string(output));
+        spectator_label_->update(bmmo::string_utils::utf8_to_ansi(text));
         break;
     }
     case bmmo::RestartRequest: {

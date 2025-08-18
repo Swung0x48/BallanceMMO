@@ -422,6 +422,7 @@ public:
         msg.online_players = record_clients_;
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        broadcast_record_realworld_timestamp();
 
         if (!permanent_notification_timeline_.empty()) {
             record_permanent_notification_ =
@@ -578,6 +579,7 @@ public:
     }
 
 private:
+    SteamNetworkingMicroseconds last_realworld_timestamp_ = 0;
     void play_record() {
         if (player_thread_.joinable())
             player_thread_.join();
@@ -602,6 +604,12 @@ private:
 
                 // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
                 // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
+
+                const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+                if (current_timestamp - last_realworld_timestamp_ > 4194304) { // 4.194304 seconds
+                    broadcast_record_realworld_timestamp();
+                    last_realworld_timestamp_ = current_timestamp;
+                }
                 switch (parse_message(entry)) {
                     case message_action_t::BroadcastNoDelay:
                         broadcast_message(entry.data, size, k_nSteamNetworkingSend_UnreliableNoDelay);
@@ -652,6 +660,11 @@ private:
             started_ = true;
         }
         forward_seek(dest_time);
+    }
+
+    void broadcast_record_realworld_timestamp() {
+        const auto timestamp = int64_t(current_record_time_ + int64_t(1e6) * record_start_world_time_);
+        broadcast_message(bmmo::real_world_timestamp_msg{.content = timestamp}, k_nSteamNetworkingSend_Reliable);
     }
 
     void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
