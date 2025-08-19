@@ -216,7 +216,7 @@ public:
                 if (config_.ghost_mode) {
                     for (auto& state: ball_msg.balls) {
                         state.state.position.y = std::numeric_limits<float>::infinity();
-                        state.state.timestamp += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+                        state.state.timestamp += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_US;
                     }
                 }
                 ball_msg.serialize();

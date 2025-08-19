@@ -139,7 +139,7 @@ public:
 		const bool no_recalibration = (state.time_diff == std::numeric_limits<decltype(state.time_diff)>::min());
 		state.time_diff = no_recalibration ? new_diff
 			: state.time_diff + (new_diff - state.time_diff) / (PREV_DIFF_WEIGHT + 1);
-		const auto delta_time = timestamp + state.time_diff - state.ball_state.front().timestamp - bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+		const auto delta_time = timestamp + state.time_diff - state.ball_state.front().timestamp - bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_US;
 		state.time_variance += no_recalibration ? 0 : (delta_time * delta_time - state.time_variance) / (PREV_VARIANCE_WEIGHT + 1);
 		// Weighted average - more weight on the previous value means more resistance
 		// to random lag spikes, which in turn results in overall smoother movement;

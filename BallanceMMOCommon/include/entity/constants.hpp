@@ -9,7 +9,7 @@ namespace bmmo {
                                        SERVER_RECEIVE_INTERVAL{(int)1e9 / 66},
                                        CLIENT_RECEIVE_INTERVAL{(int)1e9 / 66};
 
-	constexpr SteamNetworkingMicroseconds CLIENT_MINIMUM_UPDATE_INTERVAL_MS = (int64_t)1e6 / 66;
+	constexpr SteamNetworkingMicroseconds CLIENT_MINIMUM_UPDATE_INTERVAL_US = (int64_t)1e6 / 66;
 
     constexpr const char* RECORD_HEADER = "BallanceMMO FlightRecorder";
 

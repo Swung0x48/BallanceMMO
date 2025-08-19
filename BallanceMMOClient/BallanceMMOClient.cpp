@@ -356,7 +356,7 @@ void BallanceMMOClient::OnProcess() {
     //poll_status_toggle();
     poll_local_input();
     if (init_)
-      server_list_->process();
+        server_list_->process();
 
     if (!connected())
         return;
@@ -372,7 +372,7 @@ void BallanceMMOClient::OnProcess() {
     if (current_timestamp >= next_update_timestamp_) {
         if (current_timestamp - next_update_timestamp_ > 1048576)
             next_update_timestamp_ = current_timestamp;
-        next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_MS;
+        next_update_timestamp_ += bmmo::CLIENT_MINIMUM_UPDATE_INTERVAL_US;
 
         auto ball = get_current_ball();
         if (player_ball_ == nullptr)
