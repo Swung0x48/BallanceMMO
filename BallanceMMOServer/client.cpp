@@ -697,6 +697,8 @@ private:
                     }[msg->content.type]);
                 if (msg->content.type == ct::Go)
                     local_rankings_[last_countdown_map_.get_hash_bytes_string()] = {};
+                else
+                    local_rankings_.clear();
                 break;
             }
             case bmmo::CurrentMap: {

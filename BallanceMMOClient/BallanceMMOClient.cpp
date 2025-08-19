@@ -1849,9 +1849,21 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   bmmo::color_code(msg->code));
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
-                auto& last_map_data = maps_[last_countdown_map_.get_hash_bytes_string()];
-                last_map_data.rankings = {};
-                last_map_data.sector_timestamps = {};
+                if (msg->content.force_restart) {
+                    const auto start_timestamp = m_bml->GetTimeManager()->GetTime();
+                    for (auto& [_, map]: maps_) {
+                        map.rankings = {};
+                        map.sector_timestamps = {};
+                        map.level_start_timestamp = start_timestamp;
+                    }
+                }
+                else {
+                    auto& last_map_data = maps_[last_countdown_map_.get_hash_bytes_string()];
+                    last_map_data.rankings = {};
+                    last_map_data.sector_timestamps = {};
+                    last_map_data.level_start_timestamp = m_bml->GetTimeManager()->GetTime();
+                }
+
                 if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
                     break;
                 did_not_finish_ = false;
@@ -1867,7 +1879,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     array_energy->SetElementValue(0, 1, &initial_lives_);
                     counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
                 }
-                last_map_data.level_start_timestamp = m_bml->GetTimeManager()->GetTime();
                 break;
             }
             case ct::Countdown_1:
