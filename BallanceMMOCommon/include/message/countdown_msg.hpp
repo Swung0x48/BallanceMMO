@@ -24,8 +24,8 @@ namespace bmmo {
         uint8_t restart_level = 0;
         uint8_t force_restart = 0;
 
-        inline auto get_level_mode_label() {
-            return bmmo::get_level_mode_label(mode);
+        inline auto get_level_mode_label() const {
+            return std::string{force_restart ? "*" : ""} + bmmo::get_level_mode_label(mode);
         }
     };
 

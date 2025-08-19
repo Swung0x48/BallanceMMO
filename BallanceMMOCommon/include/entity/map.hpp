@@ -121,7 +121,7 @@ namespace bmmo {
             return map::get_display_name(name);
         }
 
-        void serialize(std::stringstream& raw) {
+        void serialize(std::stringstream& raw) const {
             message_utils::write_string(name, raw);
             raw.write(reinterpret_cast<const char*>(&type), sizeof(type));
             raw.write(reinterpret_cast<const char*>(md5), sizeof(md5));

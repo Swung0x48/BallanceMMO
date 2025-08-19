@@ -12,7 +12,6 @@
 #include <cassert>
 #include <cstdarg>
 #include <sstream>
-#include <chrono>
 #include <mutex>
 #include <list>
 #include <fstream>
@@ -31,6 +30,7 @@
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
 bool cheat = false;
+bool force_next_restart = false;
 std::atomic_int64_t server_realworld_timestamp_us = 0;
 std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp = 0;
 struct client_data {
@@ -1152,7 +1152,7 @@ int main(int argc, char** argv) {
             Printf(R"(<type>: {"4": "Get ready", "5": "Confirm ready", "": "auto countdown"})");
             return;
         }
-        bmmo::countdown_msg msg{.content = {.map = get_map_from_input()}};
+        bmmo::countdown_msg msg{.content = {.map = get_map_from_input(), .force_restart = force_next_restart}};
         if (!console.empty() && console.get_next_word(true) == "hs")
             msg.content.mode = bmmo::level_mode::Highscore;
         if (console.empty()) {
@@ -1165,8 +1165,16 @@ int main(int argc, char** argv) {
             msg.content.type = static_cast<bmmo::countdown_type>(console.get_next_int());
             client.send(msg, k_nSteamNetworkingSend_Reliable);
         }
+        if (msg.content.type == bmmo::countdown_type::Go) force_next_restart = false;
     });
     console.register_aliases("countdown", {"cd"});
+    console.register_command("forcenextrestart", [&] {
+        force_next_restart = !force_next_restart;
+        if (force_next_restart)
+            Printf(bmmo::ansi::WhiteInverse, "ALL players will be restarted with ALL rankings cleared after the next \"Go!\".");
+        else
+            Printf(bmmo::ansi::WhiteInverse, "Cleared forced restart status.");
+    });
     console.register_command("announce", [&] {
         using in_msg = bmmo::important_notification_msg;
         in_msg msg{};

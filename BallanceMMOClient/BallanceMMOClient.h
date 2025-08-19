@@ -304,7 +304,7 @@ private:
 	std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true;
-	bool reset_rank_ = false, reset_timer_ = true;
+	bool force_next_restart_ = false, reset_timer_ = true;
 	bool countdown_restart_ = false, did_not_finish_ = false;
 
 	std::set<bmmo::exported::listener*> listeners_;
@@ -922,8 +922,8 @@ private:
 		msg.content.type = type;
 		msg.content.mode = mode;
 		msg.content.map = current_map_;
-		msg.content.force_restart = reset_rank_;
-		reset_rank_ = false;
+		msg.content.force_restart = force_next_restart_;
+		if (type == bmmo::countdown_type::Go) force_next_restart_ = false;
 		send(msg, k_nSteamNetworkingSend_Reliable);
 	}
 

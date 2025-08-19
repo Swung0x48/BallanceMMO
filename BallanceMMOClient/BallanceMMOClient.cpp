@@ -983,7 +983,13 @@ void BallanceMMOClient::init_commands() {
         msg.content.cheated = (console_.get_next_word(true) == "on");
         send(msg, k_nSteamNetworkingSend_Reliable);
     });
-    console_.register_command("rankreset", [&] { reset_rank_ = true; });
+    console_.register_command("forcenextrestart", [&] {
+        force_next_restart_ = !force_next_restart_;
+        if (force_next_restart_)
+            SendIngameMessage("ALL players will be restarted with ALL rankings cleared after the next \"Go!\".", bmmo::ansi::WhiteInverse);
+        else
+            SendIngameMessage("Cleared forced restart status.", bmmo::ansi::WhiteInverse);
+    });
     console_.register_command("teleport", [&] {
         if (!(connected() && m_bml->IsIngame() && m_bml->IsCheatEnabled()))
             return;

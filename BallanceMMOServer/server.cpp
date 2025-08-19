@@ -471,7 +471,7 @@ public:
                 std::lock_guard lk(client_data_mutex_);
                 std::vector<std::string> player_hints;
                 player_hints.reserve(clients_.size());
-                auto last_word = args[args.size() - 1];
+                std::string last_word = args[args.size() - 1];
                 auto last_separator = last_word.find_last_of(bmmo::console::valid_nonspace_delims);
                 if (last_separator != std::string::npos)
                     last_word.erase(0, last_separator + 1);
@@ -1041,10 +1041,6 @@ protected:
                 switch (msg->content.type) {
                     using ct = bmmo::countdown_type;
                     case ct::Go: {
-                        Printf(bmmo::color_code(msg->code), "[%u, %s]: %s%s - Go!%s",
-                            networking_msg->m_conn, client_it->second.name, map_name,
-                            msg->content.get_level_mode_label(),
-                            msg->content.force_restart ? " (rank reset)" : "");
                         if (config_.force_restart_level || msg->content.force_restart) {
                             maps_.clear();
                             for (const auto& map: map_names_)
@@ -1053,10 +1049,13 @@ protected:
                             maps_[msg->content.map.get_hash_bytes_string()] = {0, networking_msg->m_usecTimeReceived, msg->content.mode, {}};
                         }
                         msg->content.restart_level = config_.restart_level;
-                        msg->content.force_restart = config_.force_restart_level;
+                        msg->content.force_restart |= config_.force_restart_level;
                         for (auto& i: clients_) {
                             i.second.ready = i.second.dnf = false;
                         }
+                        Printf(bmmo::color_code(msg->code), "[%u, %s]: %s%s - Go!",
+                            networking_msg->m_conn, client_it->second.name, map_name,
+                            msg->content.get_level_mode_label());
                         break;
                     }
                     case ct::Countdown_1:
@@ -1765,7 +1764,7 @@ int main(int argc, char** argv) {
     console.register_command("op", [&] {
         auto client = get_client_id_from_console();
         if (client == k_HSteamNetConnection_Invalid) return;
-        auto cmd = console.get_command_name();
+        const auto& cmd = console.get_command_name();
         bool action = (cmd == "op" || cmd == "mute");
         if (cmd == "op" || cmd == "deop")
             server.set_op(client, action);
