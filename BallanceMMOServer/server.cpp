@@ -116,7 +116,7 @@ public:
                 Printf("Error: client \"%s\" not found.", username);
             return k_HSteamNetConnection_Invalid;
         }
-        else if (std::next(username_it) == username_it_end || username_it->first == username) {
+        else if (std::next(username_it) == username_it_end || username_it->first == begin_name) {
             return username_it->second;
         }
         std::string names;
