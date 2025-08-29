@@ -183,7 +183,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
     if (isMap) {
         logger_->Info("Initializing peer objects...");
         objects_.init_players();
-        boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).nmo$", boost::regex::icase);
+        boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).[cn]mo$", boost::regex::icase);
         std::string path(filename);
         boost::smatch matched;
         if (boost::regex_search(path, matched, name_pattern)) {
