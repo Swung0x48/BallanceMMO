@@ -962,12 +962,16 @@ private:
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		console_window_.print_text(msg.c_str(), ansi_color);
-		utils_.call_sync_method([this, msg] {
-			m_bml->SendIngameMessage(
-#ifndef BMMO_USE_BML_PLUS
-				bmmo::string_utils::utf8_to_ansi
-#endif // !BMMO_USE_BML_PLUS
-				(msg).c_str());
+		utils_.call_sync_method([this, msg, ansi_color] {
+#ifdef BMMO_USE_BML_PLUS // BMLPlus >= 0.3.9 allows ANSI escape sequences
+			if (loader_version_ >= BMLVersion{ 0, 3, 9 } && ansi_color != bmmo::ansi::Reset)
+				m_bml->SendIngameMessage(std::format("{}{}\033[m",
+																						 bmmo::ansi::get_escape_code(ansi_color), msg).c_str());
+			else
+				m_bml->SendIngameMessage(msg.c_str());
+#else
+			m_bml->SendIngameMessage(bmmo::string_utils::utf8_to_ansi(msg).c_str());
+#endif // BMMO_USE_BML_PLUS
 		});
 	}
 
