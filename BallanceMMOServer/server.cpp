@@ -1653,6 +1653,19 @@ int main(int argc, char** argv) {
         if (!broadcast && clients.empty()) return;
         bmmo::plain_text_msg msg{};
         msg.text_content = console.get_rest_of_line();
+        if (msg.text_content.front() == '"' && msg.text_content.back() == '"') {
+            try { // we are using YAML to handle escape sequences and unicode properly
+                YAML::Node idata = YAML::Load(msg.text_content);
+                if (idata.Type() == YAML::NodeType::Scalar)
+                    msg.text_content = idata.as<std::string>();
+                else throw std::runtime_error("Error: Invalid YAML content (not a scalar string).");
+            } catch (const std::exception& e) {
+                Printf(e.what());
+                return;
+            }
+        }
+        if (msg.text_content.find("\033[") != std::string::npos) 
+            msg.text_content += "\033[0m"; // reset formatting
         msg.serialize();
         if (broadcast)
             server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
