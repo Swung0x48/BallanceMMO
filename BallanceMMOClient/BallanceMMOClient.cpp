@@ -285,7 +285,7 @@ void BallanceMMOClient::OnCounterActive() {
     on_sector_changed();
     bool reset_counter = true;
     if (map_enter_timestamp_ != 0) {
-        std::lock_guard lk(bml_mtx_);
+        // std::lock_guard lk(bml_mtx_);
         if (force_hs_calibration_ && !hs_calibrated_) {
             int points;
             auto* energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
@@ -1089,7 +1089,7 @@ void BallanceMMOClient::init_commands() {
         }
         else if (next_word == "delete") {
             auto index = std::atoi(console_.get_next_word().c_str());
-            if (index <= 0 || index > scheduled_commands.size()) {
+            if (index <= 0 || index > (int) scheduled_commands.size()) {
                 SendIngameMessage("Error: invalid index.");
                 return;
             }
@@ -1517,7 +1517,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
                 std::unique_lock client_lk(client_mtx_);
                 client_cv_.wait(client_lk);
             }
-            average_ping_ = get_ping();
+            average_ping_ = (float) get_ping();
             while (connected()) {
                 auto status = get_status();
                 average_ping_ = (average_ping_ * 3 + status.m_nPing) / 4;
@@ -1931,11 +1931,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (msg->content.player_id == db_.get_client_id())
             did_not_finish_ = true;
 
-        {
-            std::lock_guard lk(client_mtx_);
-            maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
-                (bool)msg->content.cheated, player_name, msg->content.sector });
-        }
+        maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
+            (bool)msg->content.cheated, player_name, msg->content.sector });
         play_wave_sound(sound_dnf_);
         utils_.flash_window();
         break;
@@ -1991,12 +1988,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             formatted_score, msg->content.get_formatted_time()),
             bmmo::color_code(msg->code));
 
-        {
-            std::lock_guard lk(client_mtx_);
-            maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
-                (bool)msg->content.cheated, player_name, msg->content.mode,
-                msg->content.rank, msg->content.timeElapsed, formatted_score});
-        }
+        maps_[msg->content.map.get_hash_bytes_string()].rankings.first.push_back({
+            (bool)msg->content.cheated, player_name, msg->content.mode,
+            msg->content.rank, msg->content.timeElapsed, formatted_score});
         // TODO: Stop displaying objects on finish
         if (msg->content.player_id != db_.get_client_id())
             play_wave_sound(msg->content.cheated ? sound_level_finish_cheat_ : sound_level_finish_);

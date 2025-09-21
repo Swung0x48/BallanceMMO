@@ -28,6 +28,7 @@
 #include <boost/regex.hpp>
 // #include <openssl/sha.h>
 #include <fstream>
+#include "parallel_hashmap/phmap.h"
 // #include <filesystem>
 
 extern "C" {
@@ -61,6 +62,7 @@ public:
 		}
 #ifdef BMMO_USE_BML_PLUS
 		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 5 };
+		log_manager_.set_utf8_mode(loader_version_ >= BMLVersion{ 0, 3, 4 });
 		if (loader_version_ < lower_bound || loader_version_ >= upper_bound) return;
 		// wreck BMLPlus 0.3.0 - 0.3.4
 		MessageBoxA(NULL,
@@ -217,8 +219,8 @@ private:
 	}
 
 	std::recursive_mutex bml_mtx_;
-	std::mutex client_mtx_;
-	std::condition_variable client_cv_;
+	std::recursive_mutex client_mtx_;
+	std::condition_variable_any client_cv_;
 
 	asio::io_context io_ctx_;
 	std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work_guard_;
@@ -249,7 +251,7 @@ private:
 
 	log_manager log_manager_;
 	logger_wrapper* logger_;
-	utils utils_;
+	const utils utils_;
 	config_manager config_manager_;
 	std::unique_ptr<server_list> server_list_;
 	console_window console_window_;
@@ -271,7 +273,7 @@ private:
 	std::atomic_int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	std::unordered_map<std::string, std::array<uint8_t, 16>> md5_data_;
-	SteamNetworkingMicroseconds map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
+	std::atomic<SteamNetworkingMicroseconds> map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
 
 	struct map_data {
@@ -281,7 +283,12 @@ private:
 		std::map<int, int64_t> sector_timestamps{};
 		bmmo::ranking_entry::player_rankings rankings{};
 	};
-	std::unordered_map<std::string, map_data> maps_;
+	template<typename K, typename V>
+	using safe_node_hash_map = phmap::parallel_node_hash_map<K, V,
+		std::hash<K>, std::equal_to<K>, std::allocator<std::pair<const K, V>>, 2,
+		std::mutex>;
+	safe_node_hash_map<std::string, map_data> maps_;
+	//std::shared_mutex map_data_mtx_;
 
 	int32_t initial_points_{}, initial_lives_{};
 	float point_decrease_interval_{};
@@ -303,9 +310,8 @@ private:
 	std::atomic_int64_t server_realworld_timestamp_us_ = 0;
 	std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp_ = 0;
 
-	bool notify_cheat_toggle_ = true;
-	bool force_next_restart_ = false, reset_timer_ = true;
-	bool countdown_restart_ = false, did_not_finish_ = false;
+	bool notify_cheat_toggle_ = true, did_not_finish_ = false;
+	std::atomic_bool force_next_restart_ = false, reset_timer_ = true, countdown_restart_ = false;
 
 	std::set<bmmo::exported::listener*> listeners_;
 

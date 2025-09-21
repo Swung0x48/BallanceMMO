@@ -47,15 +47,15 @@ uint32_t utils::get_system_dpi() {
     return 96;
 }
 
-bool utils::is_foreground_window() {
+bool utils::is_foreground_window() const {
     return GetForegroundWindow() == get_main_window();
 }
 
-void utils::flash_window() {
+void utils::flash_window() const {
     FlashWindow(get_main_window(), false);
 }
 
-int utils::split_lines(std::string& text, float max_width, float font_size, int font_weight) {
+int utils::split_lines(std::string& text, float max_width, float font_size, int font_weight) const {
     std::wstringstream ws {bmmo::string_utils::ConvertUtf8ToWide(bmmo::string_utils::get_parsed_string(text))};
     text.clear();
     auto hdc = GetDC(get_main_window());
@@ -86,11 +86,11 @@ const char* utils::get_system_font() {
     return system_font_struct_.lfFaceName;
 }
 
-int utils::get_display_font_size(float size) {
+int utils::get_display_font_size(float size) const {
     return (int)std::round(bml_->GetRenderContext()->GetHeight() / (768.0f / 119) * size / utils::get_system_dpi());
 }
 
-void utils::display_important_notification(std::string text, float font_size, int line_count, int weight, float y_pos) {
+void utils::display_important_notification(std::string text, float font_size, int line_count, int weight, float y_pos) const {
     using namespace std::chrono;
     auto current_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
     text = bmmo::string_utils::utf8_to_ansi(text);

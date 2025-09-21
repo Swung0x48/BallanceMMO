@@ -63,8 +63,10 @@ public:
 		});
 	}
 
+	// no lock here: we lock it within the caller function
+	// we can use recursive_mutex here, but that's really only a dirty hack
+	// it's better not to overly rely on that
 	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
-		std::lock_guard lk(mutex_);
 		auto* old_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[from]);
 		auto* new_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[to]);
 
@@ -116,6 +118,9 @@ public:
 				init_player(item.first, item.second.name, item.second.cheated);
 			}
 
+			std::unique_lock lk(mutex_, std::try_to_lock); // lock after init to avoid deadlock
+			if (!lk) return true;
+
 			auto& player = objects_[item.first];
 			const auto& state_it = item.second.ball_state.begin();
 
@@ -126,9 +131,6 @@ public:
 				on_trafo(item.first, player.visible_ball_type, current_ball_type);
 				player.visible_ball_type = current_ball_type;
 			}
-
-			std::unique_lock lk(mutex_, std::try_to_lock); // lock after init/trafo to avoid deadlock
-			if (!lk) return true;
 
 			/*bml_->SendIngameMessage(std::to_string(item.first).c_str());
 			bml_->SendIngameMessage(std::to_string(current_ball_type).c_str());*/
@@ -439,7 +441,7 @@ private:
 	IBML* bml_ = nullptr;
 	std::function<CK3dObject* ()> get_own_ball_fn_;
 	game_state& db_;
-	std::mutex mutex_;
+	std::recursive_mutex mutex_;
 	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
 	bool extrapolation_ = false, dynamic_opacity_ = true;
 	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;

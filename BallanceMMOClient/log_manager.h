@@ -8,6 +8,7 @@
 class logger_wrapper {
 private:
     ILogger* logger_;
+    [[maybe_unused]] bool utf8_mode_ = false;
     // we just need somewhere that guarantees to never move our data
     // to store our converted strings temporarily
     std::forward_list<std::string> converted_strings_;
@@ -16,7 +17,12 @@ private:
     // @returns converted pointer, stored in `converted_strings_`.
     // must be freed manually.
     const char* ConvertArgument(const std::string& str) noexcept {
-        return converted_strings_.emplace_front(bmmo::string_utils::utf8_to_ansi(str)).c_str();
+        return converted_strings_.emplace_front(
+#ifdef BMMO_USE_BML_PLUS
+            utf8_mode_ ? str :
+#endif
+            bmmo::string_utils::utf8_to_ansi(str)
+        ).c_str();
     }
 
     inline const char* ConvertArgument(const char* cstr) noexcept {
@@ -30,6 +36,8 @@ private:
 
 public:
     logger_wrapper(ILogger* logger): logger_(logger) {}
+
+    void set_utf8_mode(bool mode) { utf8_mode_ = mode; }
 
     template <typename ... Args>
     void Info(const char* fmt, Args&& ... args) {
@@ -61,6 +69,12 @@ private:
 public:
     log_manager(ILogger* logger, decltype(ingame_msg_callback_) ingame_msg_callback):
         logger_wrapper_(logger), ingame_msg_callback_(ingame_msg_callback) {}
+
+    // UTF-8 support:
+    // - BML: false
+    // - BMLPlus: { "v < 0.3.4": false, "else": true }
+    // Internal default: false
+    void set_utf8_mode(bool mode) { logger_wrapper_.set_utf8_mode(mode); }
 
     inline logger_wrapper* get_logger() { return &logger_wrapper_; }
 

@@ -21,7 +21,7 @@ env:
   BUILD_TYPE: Release
   BML_VER: '0.3.43'
   BMLP_VER: '0.2.3'
-  BOOST_VER: '1.80.0'
+  BOOST_VER: '1.89.0'
 
 jobs:
   build-client:

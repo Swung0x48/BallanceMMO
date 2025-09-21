@@ -13,3 +13,6 @@
 [submodule "submodule/replxx"]
 	path = submodule/replxx
 	url = https://github.com/AmokHuginnsson/replxx.git
+[submodule "submodule/parallel-hashmap"]
+	path = submodule/parallel-hashmap
+	url = https://github.com/greg7mdp/parallel-hashmap

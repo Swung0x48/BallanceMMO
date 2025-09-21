@@ -69,6 +69,7 @@ find_package(VirtoolsSDK REQUIRED HINTS ${VIRTOOLS_SDK_PATH})
 
 set(ASIO_INCLUDE_DIR ../submodule/asio/asio/include)
 set(GNS_EXT_INCLUDE_DIR ../submodule/GameNetworkingSockets/src/external)
+set(PARALLEL_HASHMAP_INCLUDE_DIR ../submodule/parallel-hashmap)
 set(REPLXX_INCLUDE_DIR ../submodule/replxx/include)
 set(BML_LIB_DIR lib/BML)
 set(BMLPLUS_LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/BMLPlus)
@@ -108,7 +109,8 @@ target_include_directories(BallanceMMOClient PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
                             ${REPLXX_INCLUDE_DIR}
                             ${ASIO_INCLUDE_DIR}
-                            ${GNS_EXT_INCLUDE_DIR})
+                            ${GNS_EXT_INCLUDE_DIR}
+                            ${PARALLEL_HASHMAP_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient PRIVATE
                             ${BML_LIB_DIR})
 target_link_libraries(BallanceMMOClient PRIVATE
@@ -129,7 +131,8 @@ target_include_directories(BallanceMMOClient-BMLPlus PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}/include/"
                             ${REPLXX_INCLUDE_DIR}
                             ${ASIO_INCLUDE_DIR}
-                            ${GNS_EXT_INCLUDE_DIR})
+                            ${GNS_EXT_INCLUDE_DIR}
+                            ${PARALLEL_HASHMAP_INCLUDE_DIR})
 target_link_directories(BallanceMMOClient-BMLPlus PRIVATE
                             ${BMLPLUS_LIB_DIR})
 target_link_libraries(BallanceMMOClient-BMLPlus PRIVATE

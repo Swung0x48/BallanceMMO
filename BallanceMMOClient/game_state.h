@@ -315,6 +315,7 @@ public:
 	}
 
 	HSteamNetConnection get_client_id(std::string name) {
+		std::shared_lock lk(mutex_);
 		auto it = std::find_if(states_.begin(), states_.end(),
 								[&name](const auto& s) { return boost::iequals(s.second.name, name); });
 		if (it == states_.end())
@@ -365,7 +366,7 @@ public:
 	}
 
 	bool flush() {
-		bool f = pending_cheat_flush_;
+		const bool f = pending_cheat_flush_;
 		pending_cheat_flush_ = false;
 		return f;
 	}
