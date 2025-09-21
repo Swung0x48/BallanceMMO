@@ -1798,8 +1798,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
         std::string name = msg.type >= in_msg::PLAIN_MSG_SHIFT ? "" : get_username(msg.player_id);
-        SendIngameMessage(std::format("[{}] {}: {}", msg.get_type_name(), name, msg.chat_content),
-                          msg.get_ansi_color());
+        SendIngameMessage(std::format("[{}] {}: {}", msg.get_type_name(), name,
+#ifdef BMMO_USE_BML_PLUS
+                          (loader_version_ >= BMLVersion{ 0, 3, 9 }) ?
+                          bmmo::string_utils::get_parsed_string(msg.chat_content) :
+#endif // BMMO_USE_BML_PLUS
+                          msg.chat_content), msg.get_ansi_color());
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
             utils_.flash_window();
             play_wave_sound(sound_notification_, !utils_.is_foreground_window());
@@ -2185,8 +2189,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         }
         else
             utils_.call_sync_method([=] { permanent_notification_->update(bmmo::string_utils::utf8_to_ansi(parsed_text).c_str()); });
-        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, msg.text_content),
-                          bmmo::color_code(msg.code));
+        SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, 
+#ifdef BMMO_USE_BML_PLUS
+                          (loader_version_ >= BMLVersion{ 0, 3, 9 }) ? parsed_text :
+#endif // BMMO_USE_BML_PLUS
+                          msg.text_content), bmmo::color_code(msg.code));
         utils_.flash_window();
         play_wave_sound(sound_notification_, !utils_.is_foreground_window());
         break;
@@ -2323,8 +2330,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::PopupBox: {
         auto msg = bmmo::message_utils::deserialize<bmmo::popup_box_msg>(network_msg);
         SendIngameMessage("[Popup] {" + msg.title + "}: " + msg.text_content, bmmo::color_code(msg.code));
-        std::thread([msg = std::move(msg)] {
-            std::ignore = MessageBoxW(NULL,
+        std::thread([this, msg = std::move(msg)] {
+            std::ignore = MessageBoxW(utils_.get_main_window(),
                                       bmmo::string_utils::ConvertUtf8ToWide(msg.text_content).c_str(),
                                       bmmo::string_utils::ConvertUtf8ToWide(msg.title).c_str(),
                                       MB_OK | MB_ICONINFORMATION);
