@@ -105,7 +105,7 @@ void config_manager::print_mutes() {
             muted_players.size() == 1 ? "" : "s");
 }
 
-void config_manager::log_mod_list(const std::unordered_map<std::string, std::string>& mod_list) {
+void config_manager::log_mod_list(const std::map<std::string, std::string>& mod_list) {
     std::string output;
     for (const auto& [mod, ver]: mod_list) {
         output += "; " + mod + ", " + ver;

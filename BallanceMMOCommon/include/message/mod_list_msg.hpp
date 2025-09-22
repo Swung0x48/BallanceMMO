@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct mod_list_msg: public serializable_message {
-        std::unordered_map<std::string, std::string> mods;
+        std::map<std::string, std::string> mods;
 
         mod_list_msg(): serializable_message(bmmo::ModList) {};
 
@@ -27,7 +27,6 @@ namespace bmmo {
 
             uint32_t size = 0;
             raw.read(reinterpret_cast<char*>(&size), sizeof(size));
-            mods.reserve(size);
 
             for (uint32_t i = 0; i < size; i++) {
                 if (!raw.good())

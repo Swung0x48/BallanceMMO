@@ -1702,11 +1702,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         const auto count = m_bml->GetModCount();
         bmmo::mod_list_msg mod_msg{};
-        mod_msg.mods.reserve(count);
         for (auto i = 0; i < count; ++i) {
             auto* mod = m_bml->GetMod(i);
             if (mod == this) continue; // ignore bmmo itself
-            mod_msg.mods.try_emplace(bmmo::string_utils::ansi_to_utf8(mod->GetID()), bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
+            std::string mod_id = bmmo::string_utils::ansi_to_utf8(mod->GetID());
+#ifdef BMMO_USE_BML_PLUS
+            if (mod_id == "BML") mod_id = "BML+"; // rename BML to BML+ for mod list
+#endif // BMMO_USE_BML_PLUS
+            mod_msg.mods.try_emplace(mod_id, bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
         }
         mod_msg.serialize();
         send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);

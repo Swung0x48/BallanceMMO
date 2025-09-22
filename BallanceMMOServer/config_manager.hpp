@@ -25,7 +25,7 @@ public:
 
     void print_bans();
     void print_mutes();
-    void log_mod_list(const std::unordered_map<std::string, std::string>& mod_list);
+    void log_mod_list(const std::map<std::string, std::string>& mod_list);
 
     bool has_forced_name(const std::string& uuid_string);
     const std::string& get_forced_name(const std::string& uuid_string);
