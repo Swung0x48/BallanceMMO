@@ -56,7 +56,7 @@ void utils::flash_window() const {
 }
 
 int utils::split_lines(std::string& text, float max_width, float font_size, int font_weight) const {
-    std::wstringstream ws {bmmo::string_utils::ConvertUtf8ToWide(bmmo::string_utils::get_parsed_string(text))};
+    std::wstringstream ws {bmmo::string_utils::ConvertUtf8ToWide(bmmo::string_utils::parse_line_breaks(text))};
     text.clear();
     auto hdc = GetDC(get_main_window());
     LOGFONT font_struct = system_font_struct_;

@@ -110,7 +110,7 @@ namespace bmmo::string_utils {
     }
 
     // parse line breaks
-    inline std::string get_parsed_string(const std::string& text) {
+    inline std::string parse_line_breaks(const std::string& text, const std::string& newline_indicator = "") {
         std::string parsed_text;
         const auto text_length = text.length();
         for (size_t i = 0; i < text_length; ++i) {
@@ -127,6 +127,7 @@ namespace bmmo::string_utils {
                     continue;
                 case 'n':
                     parsed_text += '\n';
+                    parsed_text += newline_indicator;
                     i += 1;
                     continue;
             }

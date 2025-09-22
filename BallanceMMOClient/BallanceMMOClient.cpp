@@ -1804,7 +1804,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage(std::format("[{}] {}: {}", msg.get_type_name(), name,
 #ifdef BMMO_USE_BML_PLUS
                           (loader_version_ >= BMLVersion{ 0, 3, 9 }) ?
-                          bmmo::string_utils::get_parsed_string(msg.chat_content) :
+                          bmmo::string_utils::parse_line_breaks(msg.chat_content, " ↳ ") :
 #endif // BMMO_USE_BML_PLUS
                           msg.chat_content), msg.get_ansi_color());
         asio::post(thread_pool_, [this, name, msg = std::move(msg)]() mutable {
@@ -2177,7 +2177,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               bmmo::color_code(msg.code));
             break;
         }
-        std::string parsed_text = bmmo::string_utils::get_parsed_string(msg.text_content);
+        std::string parsed_text = bmmo::string_utils::parse_line_breaks(msg.text_content);
         if (!permanent_notification_) {
             utils_.call_sync_method([=] {
                 permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", bmmo::string_utils::utf8_to_ansi(parsed_text).c_str(), 0.2f, 0.036f);
@@ -2194,7 +2194,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             utils_.call_sync_method([=] { permanent_notification_->update(bmmo::string_utils::utf8_to_ansi(parsed_text).c_str()); });
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, 
 #ifdef BMMO_USE_BML_PLUS
-                          (loader_version_ >= BMLVersion{ 0, 3, 9 }) ? parsed_text :
+                          (loader_version_ >= BMLVersion{ 0, 3, 9 }) ?
+                          bmmo::string_utils::parse_line_breaks(msg.text_content, " ↳ ") :
 #endif // BMMO_USE_BML_PLUS
                           msg.text_content), bmmo::color_code(msg.code));
         utils_.flash_window();
