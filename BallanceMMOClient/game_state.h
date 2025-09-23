@@ -8,7 +8,7 @@
 #include "entity/map.hpp"
 
 #include <unordered_map>
-#include <shared_mutex>
+#include <mutex>
 #include <atomic>
 #include <boost/circular_buffer.hpp>
 #include <boost/algorithm/string.hpp>
@@ -258,36 +258,28 @@ public:
 	}
 
 	size_t player_count() {
-		std::shared_lock lk(mutex_);
+		std::unique_lock lk(mutex_);
 		return states_.size();
 	}
 
-	template <class Fn>
-	void for_each(const Fn& fn) {
-		using pair_type = std::pair<const HSteamNetConnection, PlayerState>;
-		constexpr bool is_arg_const = std::is_invocable_v<Fn, const pair_type&>;
-		using argument_type = std::conditional_t<is_arg_const, const pair_type, pair_type>&;
+	void for_each(const std::function<bool(std::pair<const HSteamNetConnection, PlayerState>)> fn) {
+		std::unique_lock lk(mutex_);
 
-		// lock
-		if constexpr (is_arg_const) {
-			mutex_.lock_shared();
-		} else {
-			mutex_.lock();
-		}
-
-		// looping
-		for (argument_type i : states_) {
+		for (auto& i : states_) {
 			if (!fn(i))
 				break;
 		}
+	}
 
-		// unlock
-		if constexpr (is_arg_const) {
-			mutex_.unlock_shared();
+	bool try_for_each_const(const std::function<bool(const std::pair<const HSteamNetConnection, PlayerState>)> fn) {
+		std::unique_lock lk(mutex_, std::try_to_lock);
+		if (!lk)
+			return false;
+		for (const std::pair<const HSteamNetConnection, PlayerState> i : states_) {
+			if (!fn(i))
+				break;
 		}
-		else {
-			mutex_.unlock();
-		}
+		return true;
 	}
 
 	void clear() {
@@ -301,7 +293,7 @@ public:
 	}
 
 	std::string get_nickname() {
-		std::shared_lock lk(mutex_);
+		std::unique_lock lk(mutex_);
 		return nickname_;
 	}
 
@@ -315,7 +307,7 @@ public:
 	}
 
 	HSteamNetConnection get_client_id(std::string name) {
-		std::shared_lock lk(mutex_);
+		std::unique_lock lk(mutex_);
 		auto it = std::find_if(states_.begin(), states_.end(),
 								[&name](const auto& s) { return boost::iequals(s.second.name, name); });
 		if (it == states_.end())
@@ -371,7 +363,7 @@ public:
 		return f;
 	}
 private:
-	std::shared_mutex mutex_;
+	std::recursive_mutex mutex_; // no more shared_mutexes; we use recursive_mutex to avoid deadlocks
 	std::unordered_map<HSteamNetConnection, PlayerState> states_;
 	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
 	std::string nickname_;

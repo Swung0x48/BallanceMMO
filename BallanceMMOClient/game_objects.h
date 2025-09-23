@@ -67,18 +67,20 @@ public:
 	// we can use recursive_mutex here, but that's really only a dirty hack
 	// it's better not to overly rely on that
 	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
-		auto* old_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[from]);
+		if (from != std::numeric_limits<decltype(from)>::max()) {
+			auto* old_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[from]);
+			if (old_ball)
+				old_ball->Show(CKHIDE);
+			assert(old_ball);
+		}
+
 		auto* new_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[to]);
-
-		assert(old_ball && new_ball);
-		if (old_ball)
-			old_ball->Show(CKHIDE);
-
 		if (new_ball)
 			new_ball->Show(CKSHOW);
+		assert(new_ball);
 	}
 
-	void update(SteamNetworkingMicroseconds timestamp, bool update_extra_info = false) {
+	bool update(SteamNetworkingMicroseconds timestamp, bool update_extra_info = false) {
 		// Can be costly
 		//cleanup();
 
@@ -90,7 +92,7 @@ public:
 
 		auto* rc = bml_->GetRenderContext();
 		if (!rc)
-			return;
+			return false;
 		VxRect viewport; rc->GetViewRect(viewport);
 
 		VxVector own_ball_pos;
@@ -109,7 +111,8 @@ public:
 		}
 #endif
 
-		db_.for_each([=, this, &viewport, &rc, &own_ball_pos, &camera_pos](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		return db_.try_for_each_const([=, this, &viewport, &rc, &own_ball_pos, &camera_pos]
+				(const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -188,7 +191,7 @@ public:
 			) {
 				auto new_opacity = std::clamp(lateral_distance * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				float dilation_factor = 1.0f;
-				db_.for_each([&, this](const std::pair<const HSteamNetConnection, PlayerState>& item2) {
+				db_.try_for_each_const([&, this](const std::pair<const HSteamNetConnection, PlayerState>& item2) {
 					if (item2.first == db_.get_client_id() || item2.first == item.first
 							|| bmmo::name_validator::is_spectator(item2.second.name))
 						return true;

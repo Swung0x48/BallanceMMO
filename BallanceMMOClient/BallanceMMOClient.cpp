@@ -27,6 +27,7 @@ void BallanceMMOClient::show_player_list() {
             // player_list_display_->paint_background(0x44444444);
             player_list_display_->set_visible(true);
             player_list_thread_ = std::thread([this] {
+                SetThreadDescription(GetCurrentThread(), L"BMMO_PlayerList");
                 player_list_visible_ = true;
                 int last_player_count = -1, last_font_size = -1;
                 while (player_list_visible_) {
@@ -367,7 +368,9 @@ void BallanceMMOClient::OnProcess() {
         return;
     const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 
-    objects_.update(current_timestamp, db_.flush());
+    const bool flush = db_.flush();
+    if (!objects_.update(current_timestamp, flush) && flush)
+        db_.set_pending_flush(true);
 
     if (current_timestamp >= next_update_timestamp_) {
         if (current_timestamp - next_update_timestamp_ > 1048576)
@@ -1343,7 +1346,10 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
                     SendIngameMessage("Connecting...");
                     if (network_thread_.joinable())
                         network_thread_.join();
-                    network_thread_ = std::thread([this]() { run(); });
+                    network_thread_ = std::thread([this]() {
+                        SetThreadDescription(GetCurrentThread(), L"BMMO_Networking");
+                        run();
+                    });
                     work_guard_.reset();
                     io_ctx_.stop();
                     resolver_.reset();
@@ -1517,6 +1523,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
                 std::unique_lock client_lk(client_mtx_);
                 client_cv_.wait(client_lk);
             }
+            SetThreadDescription(GetCurrentThread(), L"BMMO_Ping");
             average_ping_ = (float) get_ping();
             while (connected()) {
                 auto status = get_status();

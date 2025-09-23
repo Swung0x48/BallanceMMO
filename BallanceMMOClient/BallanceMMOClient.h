@@ -56,7 +56,7 @@ public:
 		for (int i = 0; i < length; ++i) {
 			if (std::strcmp(m_bml->GetMod(i)->GetID(), "BML") != 0) continue;
 			int count = std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d",
-				&loader_version_.major, &loader_version_.minor, &loader_version_.build);
+				&loader_version_.major, &loader_version_.minor, &BMMO_BML_BUILD_VERSION(loader_version_));
 			assert(count == 3);
 			break;
 		}
@@ -68,8 +68,8 @@ public:
 		MessageBoxA(NULL,
 			std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
 				"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
-				upper_bound.major, upper_bound.minor, upper_bound.build,
-				loader_version_.major, loader_version_.minor, loader_version_.build).c_str(),
+				upper_bound.major, upper_bound.minor, BMMO_BML_BUILD_VERSION(upper_bound),
+				loader_version_.major, loader_version_.minor, BMMO_BML_BUILD_VERSION(loader_version_)).c_str(),
 			"Incompatible BMLPlus version",
 			MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
 		source_version_ = upper_bound;
