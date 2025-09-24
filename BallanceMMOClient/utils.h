@@ -36,9 +36,12 @@ public:
 		static std::string pretty_bytes(float bytes);
 		static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status);
 
-    inline void call_sync_method(std::function<void()>&& func) const {
+    inline void schedule_sync_call(std::function<void()>&& func) const {
         bml_->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });
     }
 
     static float distance_to_line_segment(const VxVector& begin, const VxVector& end, const VxVector& point);
+
+    // only creates the thread on windows < 10
+    static std::thread create_named_thread(const std::wstring& name, std::function<void()>&& func);
 };

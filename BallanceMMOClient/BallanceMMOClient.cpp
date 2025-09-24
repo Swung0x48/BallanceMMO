@@ -18,7 +18,7 @@ void BallanceMMOClient::show_player_list() {
         player_list_visible_ = false;
         if (player_list_thread_.joinable())
             player_list_thread_.join();
-        utils_.call_sync_method([this] {
+        utils_.schedule_sync_call([this] {
             player_list_display_ = std::make_unique<decltype(player_list_display_)::element_type>("PlayerList", "", RIGHT_MOST, 0.412f);
             player_list_display_->sprite_->SetPosition({0.596f, 0.412f});
             player_list_display_->sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
@@ -26,8 +26,7 @@ void BallanceMMOClient::show_player_list() {
             player_list_display_->paint(player_list_color_);
             // player_list_display_->paint_background(0x44444444);
             player_list_display_->set_visible(true);
-            player_list_thread_ = std::thread([this] {
-                SetThreadDescription(GetCurrentThread(), L"BMMO_PlayerList");
+            player_list_thread_ = utils::create_named_thread(L"BMMO_PlayerList", [this] {
                 player_list_visible_ = true;
                 int last_player_count = -1, last_font_size = -1;
                 while (player_list_visible_) {
@@ -111,8 +110,12 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
                 show_rankings ? std::format("({}) ", ranking) : "",
                 i.cheated ? "[C] " : "", i.name, map_display_name, i.sector, time_diff_str));
     }
+    if (text == last_player_list_text_) return; // only update if changed
+    last_player_list_text_ = text;
+    lk.unlock();
 
-    utils_.call_sync_method([&, this, text = bmmo::string_utils::utf8_to_ansi(text), size] {
+    utils_.schedule_sync_call([&, this, size] {
+        std::unique_lock lk(player_status_list_mtx_);
         if (size != last_player_count) {
             last_player_count = size;
             auto font_size = utils_.get_display_font_size(10.9f - (1.0f / 6) * std::clamp(size, 7, 29));
@@ -123,7 +126,7 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
             }
         }
         if (player_list_display_)
-            player_list_display_->update(text);
+            player_list_display_->update(bmmo::string_utils::utf8_to_ansi(last_player_list_text_));
     });
 }
 
@@ -1307,7 +1310,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
         }
     }
     if (std::strlen(address) == 0) {
-        utils_.call_sync_method([this] { server_list_->enter_gui(); });
+        utils_.schedule_sync_call([this] { server_list_->enter_gui(); });
         return;
     }
     if (connected() || connecting()) {
@@ -1346,10 +1349,7 @@ void BallanceMMOClient::connect_to_server(const char* address, const char* name)
                     SendIngameMessage("Connecting...");
                     if (network_thread_.joinable())
                         network_thread_.join();
-                    network_thread_ = std::thread([this]() {
-                        SetThreadDescription(GetCurrentThread(), L"BMMO_Networking");
-                        run();
-                    });
+                    network_thread_ = utils::create_named_thread(L"BMMO_Networking", [this]() { run(); });
                     work_guard_.reset();
                     io_ctx_.stop();
                     resolver_.reset();
@@ -1518,12 +1518,11 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         if (ping_thread_.joinable())
             ping_thread_.join();
-        ping_thread_ = std::thread([this]() {
+        ping_thread_ = utils::create_named_thread(L"BMMO_Ping", [this]() {
             { // race condition mitigation
                 std::unique_lock client_lk(client_mtx_);
                 client_cv_.wait(client_lk);
             }
-            SetThreadDescription(GetCurrentThread(), L"BMMO_Ping");
             average_ping_ = (float) get_ping();
             while (connected()) {
                 auto status = get_status();
@@ -1752,10 +1751,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.deserialize();
         SendIngameMessage(std::format("{} joined the game with cheat [{}].", msg.name, msg.cheated ? "on" : "off"),
                           bmmo::color_code(msg.code));
-        if (m_bml->IsIngame()) {
-            logger_->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
-            objects_.init_player(msg.connection_id, msg.name, msg.cheated);
-        }
+        //if (m_bml->IsIngame()) {
+        //    logger_->Info("Creating game objects for %u, %s", msg.connection_id, msg.name.c_str());
+        //    objects_.init_player(msg.connection_id, msg.name, msg.cheated);
+        //}
+        // don't init objects outside of main thread; we'll use objects_.update() to auto-init them
 
         logger_->Info("Creating state entry for %u, %s", msg.connection_id, msg.name.c_str());
         db_.create(msg.connection_id, msg.name, msg.cheated);
@@ -1776,12 +1776,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         //assert(state.has_value());
         if (state.has_value()) {
             SendIngameMessage(state->name + " left the game.", bmmo::color_code(msg->code));
-            db_.remove(msg->content.connection_id);
-            objects_.remove(msg->content.connection_id);
             play_wave_sound(sound_knock_);
             utils_.flash_window();
-            for (const auto& i : listeners_)
-                i->on_player_logout(msg->content.connection_id);
+            db_.remove(msg->content.connection_id);
+            utils_.schedule_sync_call([this, id = msg->content.connection_id] {
+                objects_.remove(id);
+                for (const auto& i : listeners_)
+                    i->on_player_logout(id);
+            });
         }
         break;
     }
@@ -2179,14 +2181,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::PermanentNotification: {
         auto msg = bmmo::message_utils::deserialize<bmmo::permanent_notification_msg>(network_msg);
         if (msg.text_content.empty()) {
-            utils_.call_sync_method([=] { permanent_notification_.reset(); });
+            utils_.schedule_sync_call([=] { permanent_notification_.reset(); });
             SendIngameMessage(std::format("[Bulletin] {} - Content cleared.", msg.title),
                               bmmo::color_code(msg.code));
             break;
         }
         std::string parsed_text = bmmo::string_utils::parse_line_breaks(msg.text_content);
         if (!permanent_notification_) {
-            utils_.call_sync_method([=] {
+            utils_.schedule_sync_call([=] {
                 permanent_notification_ = std::make_shared<decltype(permanent_notification_)::element_type>("Bulletin", bmmo::string_utils::utf8_to_ansi(parsed_text).c_str(), 0.2f, 0.036f);
                 permanent_notification_->sprite_->SetSize({0.6f, 0.12f});
                 permanent_notification_->sprite_->SetPosition({0.2f, 0.036f});
@@ -2198,7 +2200,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             });
         }
         else
-            utils_.call_sync_method([=] { permanent_notification_->update(bmmo::string_utils::utf8_to_ansi(parsed_text).c_str()); });
+            utils_.schedule_sync_call([=] { permanent_notification_->update(bmmo::string_utils::utf8_to_ansi(parsed_text).c_str()); });
         SendIngameMessage(std::format("[Bulletin] {}: {}", msg.title, 
 #ifdef BMMO_USE_BML_PLUS
                           (loader_version_ >= BMLVersion{ 0, 3, 9 }) ?
@@ -2323,12 +2325,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 duration = sound->GetSoundLength();
             logger_->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
                               duration, msg.pitch, duration / msg.pitch, msg.gain, msg.pitch);
-            utils_.call_sync_method([=] { sound->Play(); });
+            utils_.schedule_sync_call([=] { sound->Play(); });
 
             if (duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength() + 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
-            utils_.call_sync_method([=] {
+            utils_.schedule_sync_call([=] {
                 std::lock_guard lk(bml_mtx_);
                 if (!received_wave_sounds_.contains(sound))
                     return;

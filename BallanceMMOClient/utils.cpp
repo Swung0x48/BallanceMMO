@@ -2,6 +2,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <thread>
+#include <sstream>
 #include <openssl/md5.h>
 #include "utility/string_utils.hpp"
 #include "utils.h"
@@ -171,4 +173,19 @@ float utils::distance_to_line_segment(const VxVector& begin, const VxVector& end
     const auto t = std::clamp((point - begin).Dot(line) / l2, 0.0f, 1.0f);
 
     return (point - (begin + t * line)).Magnitude();
+}
+
+std::thread utils::create_named_thread(const std::wstring& name, std::function<void()>&& func) {
+    // Windows: set thread name using SetThreadDescription if available (Windows 10+)
+    return std::thread([name, func = std::move(func)]() {
+        typedef HRESULT(WINAPI* SetThreadDescriptionFunc)(HANDLE, PCWSTR);
+        HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+        if (hKernel32) {
+            auto setThreadDescription = (SetThreadDescriptionFunc)GetProcAddress(hKernel32, "SetThreadDescription");
+            if (setThreadDescription) {
+                setThreadDescription(GetCurrentThread(), name.c_str());
+            }
+        }
+        func();
+    });
 }

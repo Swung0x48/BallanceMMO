@@ -194,6 +194,7 @@ private:
 	struct player_status_list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
 	std::vector<player_status_list_entry> player_status_list_;
 	std::mutex player_status_list_mtx_;
+  std::string last_player_list_text_;
 	void show_player_list();
 	inline void update_player_list(int& last_player_count, int& last_font_size);
 
@@ -968,7 +969,7 @@ private:
 
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		console_window_.print_text(msg.c_str(), ansi_color);
-		utils_.call_sync_method([this, msg, ansi_color] {
+		utils_.schedule_sync_call([this, msg, ansi_color] {
 #ifdef BMMO_USE_BML_PLUS // BMLPlus >= 0.3.9 allows ANSI escape sequences
 			if (loader_version_ >= BMLVersion{ 0, 3, 9 } && ansi_color != bmmo::ansi::Reset)
 				m_bml->SendIngameMessage(std::format("{}{}\033[m",
