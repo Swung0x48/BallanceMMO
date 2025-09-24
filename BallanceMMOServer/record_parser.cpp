@@ -354,6 +354,7 @@ public:
         time_pause_ = std::chrono::steady_clock::now();
         Printf("Playing paused at %.3lfs.", current_record_time_ / 1e6);
         print_current_world_time();
+        pause_cv_.notify_all();
     }
 
     void seek(double seconds) {
@@ -369,8 +370,9 @@ public:
                 std::unique_lock lk(pause_mutex_);
                 pause();
             }
-            pause_cv_.wait(cv_lk);
+            pause_cv_.wait(cv_lk, [this] { return !playing_; });
             was_playing = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         SteamNetworkingMicroseconds dest_time = seconds * 1e6;
         if (dest_time > duration_) {
