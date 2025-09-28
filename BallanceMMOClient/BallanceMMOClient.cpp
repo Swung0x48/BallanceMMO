@@ -757,6 +757,15 @@ void BallanceMMOClient::init_commands() {
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     });
     console_.register_aliases("kick", {"crash"});
+    console_.register_command("remotecommand", [&] {
+        bmmo::remote_command_msg msg{};
+        msg.text_content = console_.get_rest_of_line();
+        if (msg.text_content.empty()) return;
+        SendIngameMessage(std::format("Sent remote command: {}", msg.text_content), bmmo::ansi::WhiteInverse);
+        msg.serialize();
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console_.register_aliases("remotecommand", {"rc"});
     console_.register_command("restartlevel", [&] {
         bmmo::restart_request_msg msg{};
         msg.content.victim = get_client_id_from_console();

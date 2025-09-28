@@ -22,18 +22,26 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <unordered_set>
 
 #include <ya_getopt.h>
 
 using bmmo::message_utils::read_variable;
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
-enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
+namespace {
+    enum class message_action_t: uint8_t { None, Broadcast, BroadcastNoDelay };
 
-struct client_data {
-    std::string name;
-    uint8_t uuid[16]{};
-};
+    struct client_data {
+        std::string name;
+        uint8_t uuid[16]{};
+    };
+
+    bmmo::console console;
+
+    std::unordered_set<std::string> superuser_uuids; // byte strings
+    std::unordered_set<std::string> superuser_names;
+}
 
 class record_replayer: public role {
 public:
@@ -703,7 +711,8 @@ private:
 
                     cleanup_disconnected_client(pInfo->m_hConn);
                 } else {
-                    assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting);
+                    assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting
+                           || pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_None);
                 }
 
                 // Clean up the connection.  This is important!
@@ -843,9 +852,10 @@ private:
                 clients_[networking_msg->m_conn] = {msg.nickname, {}};  // add the client here
                 memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
                 username_[msg.nickname] = networking_msg->m_conn;
-                Printf(bmmo::color_code(bmmo::LoginAcceptedV3), "%s (v%s) logged in!\n",
-                        msg.nickname,
-                        msg.version.to_string());
+                std::string uuid_str(16, '\0');
+                bmmo::string_utils::string_from_hex_chars(uuid_str, msg.uuid, sizeof(msg.uuid));
+                Printf(bmmo::color_code(bmmo::LoginAcceptedV3), "%s (%s; v%s) logged in!\n",
+                        msg.nickname, uuid_str.substr(0, 8), msg.version.to_string());
 
                 bmmo::map_names_msg names_msg;
                 names_msg.maps = record_map_names_;
@@ -895,6 +905,26 @@ private:
                 msg.clear();
                 msg.serialize();
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                break;
+            }
+            case bmmo::RemoteCommand: { // superusers only, can be dangerous
+                auto msg = bmmo::message_utils::deserialize<bmmo::remote_command_msg>(networking_msg);
+                bmmo::string_utils::sanitize_string(msg.text_content);
+
+                std::string uuid(reinterpret_cast<const char *>(client_it->second.uuid), sizeof(client_data::uuid));
+                if (!superuser_names.contains(bmmo::name_validator::get_real_nickname(client_it->second.name))
+                        && !superuser_uuids.contains(uuid)) {
+                    Printf(bmmo::ansi::Italic,
+                        "Warning: non-superuser (#%u, %s) attempted to use remote command: %s",
+                        networking_msg->m_conn, client_it->second.name, msg.text_content);
+                    send(networking_msg->m_conn,
+                        bmmo::action_denied_msg{.content = {bmmo::deny_reason::NoPermission}},
+                        k_nSteamNetworkingSend_Reliable);
+                    break;
+                }
+                Printf(bmmo::ansi::WhiteInverse, "[Remote Command] (%u, %s): %s",
+                    networking_msg->m_conn, client_it->second.name, msg.text_content);
+                console.execute_async(msg.text_content);
                 break;
             }
             default:
@@ -999,10 +1029,12 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& filename) {
         {"port", required_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
+        {"superuser-uuids", required_argument, 0, 'u'},
+        {"superuser-names", required_argument, 0, 'n'},
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
-    while ((opt = getopt_long(argc, argv, "p:hv", long_options, &opt_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:hvu:n:", long_options, &opt_index)) != -1) {
         switch (opt) {
             case 'p':
                 port = std::atoi(optarg);
@@ -1011,6 +1043,8 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& filename) {
                 printf("Usage: %s [RECORD_FILE] [OPTION]...\n", argv[0]);
                 puts("Options:");
                 puts("  -p, --port=PORT\t Use PORT as the server port instead (default: 26677).");
+                puts("  -u, --superuser-uuids=UUID[,UUID...]\t Comma-separated list of superuser UUIDs.");
+                puts("  -n, --superuser-names=NAME[,NAME...]\t Comma-separated list of superuser names.");
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
                 return -1;
@@ -1020,6 +1054,26 @@ int parse_args(int argc, char** argv, uint16_t& port, std::string& filename) {
                 printf("Version: \t%s.\n", bmmo::current_version.to_string().c_str());
                 puts("GitHub repository: https://github.com/Swung0x48/BallanceMMO");
                 return -1;
+            case 'u': {
+                auto uuid_list = bmmo::string_utils::split_strings(optarg, ',');
+                for (auto& uuid_str: uuid_list) {
+                    std::string uuid(sizeof(client_data::uuid), '\0');
+                    size_t pos;
+                    while ((pos = uuid_str.find('-')) != std::string::npos)
+                        uuid_str.erase(pos, 1);
+                    bmmo::hex_chars_from_string(reinterpret_cast<uint8_t*>(uuid.data()), uuid_str);
+                    if (superuser_uuids.insert(uuid).second == true) { // `== true` explicitly here
+                        bmmo::string_from_hex_chars(uuid_str, reinterpret_cast<uint8_t*>(uuid.data()), uuid.size());
+                        printf("Added superuser UUID: %s\n", uuid_str.c_str());
+                    }
+                }
+                break;
+            }
+            case 'n':
+                for (const auto& name: bmmo::string_utils::split_strings(optarg, ','))
+                    if (!name.empty() && superuser_names.insert(name).second == true)
+                        printf("Added superuser name: %s\n", name.c_str());
+                break;
         }
     }
     if (optind != argc) {
@@ -1051,7 +1105,6 @@ int main(int argc, char** argv) {
         FatalError("Fake server failed on setup.");
     std::thread server_thread([&replayer]() { replayer.run(); });
 
-    bmmo::console console;
     console.register_command("help", [&]() { Printf(console.get_help_string().c_str()); });
     console.register_command("play", [&]() {
         if (replayer.playing()) {

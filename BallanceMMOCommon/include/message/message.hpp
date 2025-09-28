@@ -78,6 +78,7 @@ namespace bmmo {
         ExtraLife,
         LatencyData,
         RealWorldTimestamp,
+        RemoteCommand,
     };
 
     template<typename T, opcode C = None>
