@@ -871,7 +871,7 @@ void BallanceMMOClient::init_commands() {
             line.append(name + (cheated ? " [CHEAT]" : "") + std::format(" [{}ms]", ping)
                         + (show_id ? std::format(": {}", id) : ""));
             if (i != player_count - 1) line.append(", ");
-            if (line.length() > 80) {
+            if (line.length() > 70) {
                 SendIngameMessage(line);
                 line.clear();
             }
@@ -1850,8 +1850,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 120 - (int)average_ping_)));
         std::string sender_name = get_username(msg->content.sender),
                     map_name = msg->content.map.get_display_name(map_names_);
-        if (msg->content.map == current_map_ || msg->content.force_restart)
-            current_level_mode_ = msg->content.mode;
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
 
         for (const auto& i : listeners_)
@@ -1863,6 +1861,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 SendIngameMessage(std::format("[{}]: {}{} - Go!",
                                   sender_name, map_name, msg->content.get_level_mode_label()),
                                   bmmo::color_code(msg->code));
+                if (msg->content.map == current_map_ || msg->content.force_restart)
+                    current_level_mode_ = msg->content.mode;
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
                 if (msg->content.force_restart) {
