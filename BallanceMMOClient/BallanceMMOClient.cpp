@@ -29,6 +29,7 @@ void BallanceMMOClient::show_player_list() {
             player_list_thread_ = utils::create_named_thread(L"BMMO_PlayerList", [this] {
                 player_list_visible_ = true;
                 int last_player_count = -1, last_font_size = -1;
+                last_player_list_text_.clear();
                 while (player_list_visible_) {
                     update_player_list(last_player_count, last_font_size);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
