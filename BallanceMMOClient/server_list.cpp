@@ -1,12 +1,4 @@
-#include <fstream>
 #include "server_list.h"
-
-namespace {
-    inline static const picojson::object DEFAULT_CONFIG {
-        {"servers", picojson::value{picojson::array{}}},
-        {"selected_server", picojson::value{0ll}},
-    };
-}
 
 void server_list::select_server(size_t index, bool save_to_config) {
     std::lock_guard lk(mtx_);
@@ -123,16 +115,7 @@ void server_list::enter_server_edit() {
 }
 
 void server_list::save_config() {
-    std::ofstream extra_config(get_extra_config_path());
-    if (!extra_config.is_open()) return;
-    // we can use (picojson::) value::set<array> but using value::set(array)
-    // gives value::set<array&> and linker error somehow
-    // also there doesn't seem to be value::set<int64_t> for some reason
-    picojson::object o(DEFAULT_CONFIG);
-    o["servers"].set<decltype(servers_)>(servers_);
-    o["selected_server"] = picojson::value{int64_t(server_index_)};
-    extra_config << picojson::value{o}.serialize(true);
-    extra_config.close();
+    config_manager_->set_server_data(servers_, server_index_);
     config_modified_ = false;
 }
 
@@ -185,18 +168,7 @@ server_list::server_list(IBML* bml, log_manager* log_manager, config_manager* co
                          decltype(connect_callback_) connect_callback) :
         bml_(bml), log_manager_(log_manager), config_manager_(config_manager),
         connect_callback_(connect_callback) {
-    picojson::value v;
-    std::ifstream extra_config(get_extra_config_path());
-    if (extra_config.is_open()) extra_config >> v;
-    else v = picojson::value{ DEFAULT_CONFIG };
-    extra_config.close();
-    try {
-        servers_ = v.get<picojson::object>()["servers"].get<picojson::array>();
-        server_index_ = (size_t)v.get<picojson::object>()["selected_server"].get<int64_t>();
-    }
-    catch (const std::exception& e) {
-        log_manager_->get_logger()->Info("Error parsing %s: %s", get_extra_config_path(), e.what());
-    }
+    config_manager_->get_server_data(servers_, server_index_);
 }
 
 void server_list::init_gui() {

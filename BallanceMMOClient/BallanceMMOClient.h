@@ -194,7 +194,7 @@ private:
 	struct player_status_list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
 	std::vector<player_status_list_entry> player_status_list_;
 	std::mutex player_status_list_mtx_;
-  std::string last_player_list_text_;
+	std::string last_player_list_text_;
 	void show_player_list();
 	inline void update_player_list(int& last_player_count, int& last_font_size);
 
@@ -645,10 +645,14 @@ private:
 				}
 			}
 			if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
-				if (player_list_visible_)
+				if (player_list_visible_) {
 					player_list_visible_ = false;
-				else
+					config_manager_.set_player_list_visible(false);
+				}
+				else {
+					config_manager_.set_player_list_visible(true);
 					show_player_list();
+				}
 				return;
 			}
 		}

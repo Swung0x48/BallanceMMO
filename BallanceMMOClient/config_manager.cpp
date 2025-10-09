@@ -1,8 +1,39 @@
-#define PICOJSON_USE_INT64
-#include <picojson/picojson.h>
-
+#include <fstream>
 #include "utility/string_utils.hpp"
 #include "config_manager.h"
+
+namespace {
+    inline static const picojson::object DEFAULT_EXTRA_CONFIG {
+        {"servers", picojson::value{picojson::array{}}},
+        {"selected_server", picojson::value{0ll}},
+        {"player_list_visible", picojson::value{false}},
+    };
+}
+
+void config_manager::init_extra_config() {
+    picojson::value v;
+    std::ifstream ifile(get_extra_config_path());
+    if (ifile.is_open()) ifile >> v;
+    else v = picojson::value{DEFAULT_EXTRA_CONFIG};
+    ifile.close();
+    try { // just to validate the structure
+        extra_config_ = v.get<picojson::object>();
+        for (const auto& [key, val]: DEFAULT_EXTRA_CONFIG) {
+            if (extra_config_.find(key) == extra_config_.end())
+                extra_config_[key] = val;
+        }
+    }
+    catch (const std::exception& e) {
+        log_manager_->get_logger()->Info("Error parsing %s: %s", get_extra_config_path(), e.what());
+        extra_config_ = DEFAULT_EXTRA_CONFIG;
+    }
+}
+
+void config_manager::save_extra_config() const {
+    std::ofstream ofile(get_extra_config_path());
+    if (!ofile.is_open()) return;
+    ofile << picojson::value{extra_config_}.serialize(true);
+}
 
 void config_manager::migrate_config() {
     constexpr const char* const config_name = "\\BallanceMMOClient.cfg";
@@ -50,6 +81,7 @@ void config_manager::migrate_config() {
 
 void config_manager::init_config() {
     migrate_config();
+    init_extra_config();
     auto* config = get_config();
     config->SetCategoryComment("Player", "Who are you?");
     auto* tmp_prop = config->GetProperty("Player", "Playername");
@@ -160,4 +192,27 @@ void config_manager::validate_nickname() {
         bypass_name_check_ = true;
         name_prop->SetString(valid_name.c_str());
     }
+}
+
+void config_manager::get_server_data(picojson::array& servers, size_t& server_index) {
+    servers = extra_config_["servers"].get<picojson::array>();
+    server_index = (size_t)extra_config_["selected_server"].get<int64_t>();
+}
+
+void config_manager::set_server_data(const picojson::array& servers, size_t server_index) {
+    // we can use (picojson::) value::set<array> but using value::set(array)
+    // gives value::set<array&> and linker error somehow
+    // also there doesn't seem to be value::set<int64_t> for some reason
+    extra_config_["servers"] = picojson::value{servers};
+    extra_config_["selected_server"] = picojson::value{int64_t(server_index)};
+    save_extra_config();
+}
+
+bool config_manager::get_player_list_visible() {
+    return extra_config_["player_list_visible"].get<bool>();
+}
+
+void config_manager::set_player_list_visible(bool visible) {
+    extra_config_["player_list_visible"] = picojson::value{visible};
+    save_extra_config();
 }

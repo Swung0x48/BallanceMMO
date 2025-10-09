@@ -36,10 +36,6 @@ private:
     enum screen_state { None, ServerList, ServerEditor, ConnectionScreen };
     screen_state screen_ = None;
 
-    inline std::string get_extra_config_path() {
-        return config_manager_->get_config_directory_path() + "\\" + "BallanceMMOClient_extra.json";
-    }
-
     void select_server(size_t index, bool save_to_config = true);
     void delete_selected_server();
 

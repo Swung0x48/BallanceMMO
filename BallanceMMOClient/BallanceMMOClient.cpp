@@ -1713,6 +1713,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 i->on_login(server_addr_.c_str(), server_name_.c_str());
         }
 
+        if (config_manager_.get_player_list_visible())
+            show_player_list();
+
         if (spectator_mode_)
             break;
 
