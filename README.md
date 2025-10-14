@@ -26,7 +26,7 @@ BallanceMMO is a project which brings online experiences to Ballance.
 
 1. Download your desired [server builds from GitHub Actions](https://github.com/Swung0x48/BallanceMMO/actions/workflows/server.yml), as currently we don't have a release page for it (maybe we'll make one in the future?).
 
-2. Extract the archive and run `start_ballancemmo_loop.bat` (Windows) or `start_ballancemmo_loop.sh` (Linux/macOS), which is our helper script to take care of logging and server crashes.
+2. Extract the archive and run `start_ballancemmo_loop.bat` (Windows) or `start_ballancemmo_loop.sh` (Linux/macOS), which is our helper script to take care of logging and server crashes; you should not run `BallanceMMOServer` directly unless you know what you're doing.
 
 3. Modify the generated `config.yml` according to your needs; you may also run `./BallanceMMOServer --help` to see if there are any configurable command line arguments (you can also supply them through our helper script!).
 

@@ -4,11 +4,16 @@ function archive_logs () {
     mkdir -p logs
     mv $log_name.gz logs/
 }
-function ctrlc_exit () {
+function cleanup () {
     archive_logs
+    if stty "$original_settings" 2>/dev/null; then
+        stty sane 2>/dev/null # Hard reset if not able to restore
+    fi
     exit 0
 }
-trap "ctrlc_exit" 2
+trap "cleanup" SIGINT SIGTERM SIGHUP
+
+original_settings=$(stty -g)
 for (( ; ; ))
 do
     log_name=$(date +"log_%Y%m%d%H%M.log")
