@@ -27,11 +27,19 @@ protected:
 	ILogger* logger_;
 	TimedBallState local_ball_state_{};
 	std::atomic_bool local_ball_state_changed_ = true;
+	int force_send_counter_ = 0;
+	constexpr static int FORCE_SEND_COUNTER_MAX = 100; // approx 1.5 seconds at 66 Hz
 
 	void assemble_and_send_state() {
 		static_assert(sizeof(VxVector) == sizeof(bmmo::vec3));
 		static_assert(sizeof(VxQuaternion) == sizeof(bmmo::quaternion));
-		if (local_ball_state_changed_) {
+		++force_send_counter_;
+		if (force_send_counter_ >= FORCE_SEND_COUNTER_MAX) {
+			assemble_and_send_state_forced();
+			force_send_counter_ = 0;
+			local_ball_state_changed_ = false;
+		}
+		else if (local_ball_state_changed_) {
 			bmmo::timed_ball_state_msg msg{};
 			std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
 			msg.content.timestamp = local_ball_state_.timestamp;
