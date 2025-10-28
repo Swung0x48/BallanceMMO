@@ -1283,6 +1283,15 @@ int main(int argc, char** argv) {
         std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&real_time));
         Printf("Current server-side real-world time: %s", time_str);
     });
+    console.register_command("remotecommand", [&] {
+        bmmo::remote_command_msg msg{};
+        msg.text_content = console.get_rest_of_line();
+        if (msg.text_content.empty()) return;
+        Printf(bmmo::ansi::WhiteInverse, "Sent remote command: %s", msg.text_content);
+        msg.serialize();
+        client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
+    console.register_aliases("remotecommand", {"rc"});
     console.register_command("restartlevel", [&] {
         bmmo::restart_request_msg msg{.content = {.victim = get_client_id_from_console()}};
         client.send(msg, k_nSteamNetworkingSend_Reliable);

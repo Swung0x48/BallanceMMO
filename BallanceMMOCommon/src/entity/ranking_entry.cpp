@@ -54,7 +54,7 @@ namespace bmmo::ranking_entry {
                 --rank;
             texts.emplace_back(entry.to_string(rank + 1 + rankings.first.size()), dnf_color);
         }
-        char footer[32];
+        char footer[64];
         std::snprintf(footer, sizeof(footer), "%zu Completion(s), %zu DNF(s).", rankings.first.size(), rankings.second.size());
         texts.emplace_back(footer, bmmo::ansi::Reset);
         return texts;
