@@ -34,17 +34,14 @@ protected:
 		static_assert(sizeof(VxVector) == sizeof(bmmo::vec3));
 		static_assert(sizeof(VxQuaternion) == sizeof(bmmo::quaternion));
 		++force_send_counter_;
-		if (force_send_counter_ >= FORCE_SEND_COUNTER_MAX) {
-			assemble_and_send_state_forced();
-			force_send_counter_ = 0;
-			local_ball_state_changed_ = false;
-		}
-		else if (local_ball_state_changed_) {
+		const bool force_send = (force_send_counter_ >= FORCE_SEND_COUNTER_MAX);
+		if (local_ball_state_changed_ || force_send) {
 			bmmo::timed_ball_state_msg msg{};
 			std::memcpy(&(msg.content), &local_ball_state_, sizeof(BallState));
 			msg.content.timestamp = local_ball_state_.timestamp;
 			client_->send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
 			local_ball_state_changed_ = false;
+			if (force_send) force_send_counter_ = 0;
 		}
 		else {
 			bmmo::timestamp_msg msg{};
