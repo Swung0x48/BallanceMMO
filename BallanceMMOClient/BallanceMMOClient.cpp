@@ -1870,6 +1870,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         switch (msg->content.type) {
             using ct = bmmo::countdown_type;
+            case ct::Unknown:
+                return;
             case ct::Go: {
                 SendIngameMessage(std::format("[{}]: {}{} - Go!",
                                   sender_name, map_name, msg->content.get_level_mode_label()),
@@ -1910,17 +1912,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 }
                 break;
             }
-            case ct::Countdown_1:
-            case ct::Countdown_2:
-            case ct::Countdown_3:
-                SendIngameMessage(std::format("[{}]: {}{} - {}",
-                                  sender_name, map_name, msg->content.get_level_mode_label(),
-                                  (int)msg->content.type).c_str());
-                // asio::post(thread_pool_, [this] { play_beep(440, 500); });
-                sound_countdown_->SetPitch(0.875f);
-                play_wave_sound(sound_countdown_, true);
-
-                break;
             case ct::Ready:
             case ct::ConfirmReady:
                 SendIngameMessage(std::format("[{}]: {}{} - {}",
@@ -1940,9 +1931,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     // for (const auto i: std::vector<double>{220, 220 * std::powf(2.0f, 3.0f / 12), 220 * std::powf(2.0f, 7.0f / 12), 440}) play_beep(int(i), 220);
                 });
                 break;
-            case ct::Unknown:
+            case ct::Countdown_1:
+            case ct::Countdown_2:
+            case ct::Countdown_3:
             default:
-                return;
+                SendIngameMessage(std::format("[{}]: {}{} - {}",
+                                  sender_name, map_name, msg->content.get_level_mode_label(),
+                                  (int)msg->content.type).c_str());
+                // asio::post(thread_pool_, [this] { play_beep(440, 500); });
+                sound_countdown_->SetPitch(0.875f);
+                play_wave_sound(sound_countdown_, true);
+
+                break;
         }
         utils_.flash_window();
         break;

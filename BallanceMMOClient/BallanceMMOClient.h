@@ -580,8 +580,7 @@ private:
 	}
 
 	InputHook* input_manager_ = nullptr;
-	static constexpr CKKEYBOARD KEYS_TO_CHECK[] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5 };
-	// const std::vector<std::string> init_args{ "mmo", "s" };
+	static constexpr CKKEYBOARD KEYS_TO_CHECK[] = { CKKEY_0, CKKEY_1, CKKEY_2, CKKEY_3, CKKEY_4, CKKEY_5, CKKEY_6 };
 	void poll_local_input() {
 		// Toggle status
 		if (input_manager_->IsKeyDown(CKKEY_F3)) {

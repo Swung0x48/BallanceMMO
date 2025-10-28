@@ -1040,6 +1040,8 @@ protected:
                 last_countdown_map_ = msg->content.map;
                 switch (msg->content.type) {
                     using ct = bmmo::countdown_type;
+                    case ct::Unknown:
+                        return;
                     case ct::Go: {
                         if (config_.force_restart_level || msg->content.force_restart) {
                             maps_.clear();
@@ -1063,19 +1065,16 @@ protected:
                     case ct::Countdown_3:
                     case ct::Ready:
                     case ct::ConfirmReady:
+                    default:
                         Printf("[%u, %s]: %s%s - %s",
                             networking_msg->m_conn, client_it->second.name, map_name,
                             msg->content.get_level_mode_label(),
                             std::map<ct, std::string>{
                                 {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"},
-                                {ct::Ready, "Get ready"},
+                                {ct::Countdown_6, "6"}, {ct::Ready, "Get ready"},
                                 {ct::ConfirmReady, "Please use \"/mmo ready\" to confirm if you are ready"},
                             }[msg->content.type]);
-                        maps_[msg->content.map.get_hash_bytes_string()].mode = msg->content.mode;
                         break;
-                    case ct::Unknown:
-                    default:
-                        return;
                 }
 
                 msg->content.sender = networking_msg->m_conn;

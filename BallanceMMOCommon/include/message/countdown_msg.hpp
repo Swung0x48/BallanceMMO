@@ -13,6 +13,7 @@ namespace bmmo {
         Countdown_3 = 3,
         Ready = 4,
         ConfirmReady = 5,
+        Countdown_6 = 6, // easter egg
         Unknown = std::numeric_limits<std::underlying_type_t<countdown_type>>::max(),
     };
 

@@ -692,7 +692,7 @@ private:
                     msg->content.map.get_display_name(map_names_),
                     msg->content.get_level_mode_label(),
                     std::map<ct, const char*>{
-                        {ct::Ready, "Get Ready"}, {ct::ConfirmReady, "Confirm if you're ready"},
+                        {ct::Ready, "Get Ready"}, {ct::ConfirmReady, "Confirm if you're ready"}, {ct::Countdown_6, "6"},
                         {ct::Go, "Go!"}, {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"}
                     }[msg->content.type]);
                 if (msg->content.type == ct::Go)
