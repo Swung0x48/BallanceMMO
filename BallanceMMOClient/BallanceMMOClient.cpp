@@ -970,7 +970,11 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("countdown", [&] {
         if (!connected() || !m_bml->IsIngame())
             return;
-        asio::post(thread_pool_, [this]() {
+        asio::post(thread_pool_, [this, type = console_.empty() ? -1 : console_.get_next_int()]() {
+            if (type != -1) {
+                send_countdown_message(static_cast<bmmo::countdown_type>(std::clamp(type, 0, 255)), countdown_mode_);
+                return;
+            }
             for (int i = 3; i >= 0; --i) {
                 send_countdown_message(static_cast<bmmo::countdown_type>(i), countdown_mode_);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -1916,10 +1920,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             case ct::ConfirmReady:
                 SendIngameMessage(std::format("[{}]: {}{} - {}",
                                   sender_name, map_name, msg->content.get_level_mode_label(),
-                                  std::map<ct, std::string>{
-                                      {ct::Ready, "Get ready"},
-                                      {ct::ConfirmReady, "Please use \"/mmo ready\" to confirm if you are ready"}
-                                  }[msg->content.type]
+                                  msg->content.get_type_label()
                 ).c_str());
                 asio::post(thread_pool_, [this] {
                     static constexpr float base = 0.4375f;// 1.29f;
@@ -1937,7 +1938,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             default:
                 SendIngameMessage(std::format("[{}]: {}{} - {}",
                                   sender_name, map_name, msg->content.get_level_mode_label(),
-                                  (int)msg->content.type).c_str());
+                                  msg->content.get_type_label()).c_str());
                 // asio::post(thread_pool_, [this] { play_beep(440, 500); });
                 sound_countdown_->SetPitch(0.875f);
                 play_wave_sound(sound_countdown_, true);

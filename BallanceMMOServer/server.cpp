@@ -1055,9 +1055,9 @@ protected:
                         for (auto& i: clients_) {
                             i.second.ready = i.second.dnf = false;
                         }
-                        Printf(bmmo::color_code(msg->code), "[%u, %s]: %s%s - Go!",
+                        Printf(bmmo::color_code(msg->code), "[%u, %s]: %s%s - %s",
                             networking_msg->m_conn, client_it->second.name, map_name,
-                            msg->content.get_level_mode_label());
+                            msg->content.get_level_mode_label(), msg->content.get_type_label());
                         break;
                     }
                     case ct::Countdown_1:
@@ -1068,12 +1068,7 @@ protected:
                     default:
                         Printf("[%u, %s]: %s%s - %s",
                             networking_msg->m_conn, client_it->second.name, map_name,
-                            msg->content.get_level_mode_label(),
-                            std::map<ct, std::string>{
-                                {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"},
-                                {ct::Countdown_6, "6"}, {ct::Ready, "Get ready"},
-                                {ct::ConfirmReady, "Please use \"/mmo ready\" to confirm if you are ready"},
-                            }[msg->content.type]);
+                            msg->content.get_level_mode_label(), msg->content.get_type_label());
                         break;
                 }
 
@@ -1818,7 +1813,7 @@ int main(int argc, char** argv) {
                 if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } else {
-            msg.content.type = static_cast<bmmo::countdown_type>(console.get_next_int());
+            msg.content.type = static_cast<bmmo::countdown_type>(std::clamp(console.get_next_int(), 0, 255));
             server.receive(&msg, sizeof(msg), client);
         }
     });

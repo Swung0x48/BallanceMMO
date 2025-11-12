@@ -28,6 +28,17 @@ namespace bmmo {
         inline auto get_level_mode_label() const {
             return std::string{force_restart ? "*" : ""} + bmmo::get_level_mode_label(mode);
         }
+
+        std::string get_type_label() const {
+            using ct = countdown_type;
+            switch (type) {
+                case ct::Go: return "Go!";
+                case ct::Ready: return "Get ready";
+                case ct::ConfirmReady: return "Please use \"/mmo ready\" to confirm if you are ready";
+                case ct::Unknown: return "N/A";
+                default: return std::to_string(static_cast<std::underlying_type_t<countdown_type>>(type));
+            }
+        }
     };
 
     typedef struct message<countdown, Countdown> countdown_msg;

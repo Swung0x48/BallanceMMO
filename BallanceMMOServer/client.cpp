@@ -691,10 +691,7 @@ private:
                     clients_[msg->content.sender].name,
                     msg->content.map.get_display_name(map_names_),
                     msg->content.get_level_mode_label(),
-                    std::map<ct, const char*>{
-                        {ct::Ready, "Get Ready"}, {ct::ConfirmReady, "Confirm if you're ready"}, {ct::Countdown_6, "6"},
-                        {ct::Go, "Go!"}, {ct::Countdown_1, "1"}, {ct::Countdown_2, "2"}, {ct::Countdown_3, "3"}
-                    }[msg->content.type]);
+                    msg->content.get_type_label());
                 if (msg->content.type == ct::Go)
                     local_rankings_[last_countdown_map_.get_hash_bytes_string()] = {};
                 else
@@ -1164,7 +1161,7 @@ int main(int argc, char** argv) {
                 if (i != 0) std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } else {
-            msg.content.type = static_cast<bmmo::countdown_type>(console.get_next_int());
+            msg.content.type = static_cast<bmmo::countdown_type>(std::clamp(console.get_next_int(), 0, 255));
             client.send(msg, k_nSteamNetworkingSend_Reliable);
         }
         if (msg.content.type == bmmo::countdown_type::Go) force_next_restart = false;
