@@ -1,3 +1,4 @@
+#include <boost/regex.hpp>
 #include "BallanceMMOClient.h"
 
 IMod* BMLEntry(IBML* bml) {
@@ -362,6 +363,14 @@ void BallanceMMOClient::OnProcess() {
     poll_local_input();
     if (init_)
         server_list_->process();
+
+    {
+        std::lock_guard lk(ingame_msg_mtx_);
+        while (!ingame_msg_queue_.empty()) {
+            m_bml->SendIngameMessage(ingame_msg_queue_.front().c_str());
+            ingame_msg_queue_.pop();
+        }
+    }
 
     if (!connected())
         return;

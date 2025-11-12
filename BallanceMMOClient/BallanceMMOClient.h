@@ -23,13 +23,11 @@
 #include <memory>
 #include <format>
 #include <ranges>
-#include <filesystem>
+#include <queue>
 #include <asio.hpp>
-#include <boost/regex.hpp>
 // #include <openssl/sha.h>
 #include <fstream>
 #include <parallel_hashmap/phmap.h>
-// #include <filesystem>
 
 extern "C" {
 	__declspec(dllexport) IMod* BMLEntry(IBML* bml);
@@ -970,19 +968,19 @@ private:
 		if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
 	}
 
+	std::mutex ingame_msg_mtx_;
+  std::queue<std::string> ingame_msg_queue_; // processed in the main thread (OnProcess)
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
+		std::lock_guard lk(ingame_msg_mtx_);
 		console_window_.print_text(msg.c_str(), ansi_color);
-		utils_.schedule_sync_call([this, msg, ansi_color] {
 #ifdef BMMO_USE_BML_PLUS // BMLPlus >= 0.3.9 allows ANSI escape sequences
-			if (loader_version_ >= BMLVersion{ 0, 3, 9 } && ansi_color != bmmo::ansi::Reset)
-				m_bml->SendIngameMessage(std::format("{}{}\033[m",
-																						 bmmo::ansi::get_escape_code(ansi_color), msg).c_str());
-			else
-				m_bml->SendIngameMessage(msg.c_str());
+		if (loader_version_ >= BMLVersion{ 0, 3, 9 } && ansi_color != bmmo::ansi::Reset)
+			ingame_msg_queue_.emplace(bmmo::ansi::get_escape_code(ansi_color) + msg + "\033[m");
+		else
+      ingame_msg_queue_.emplace(msg);
 #else
-			m_bml->SendIngameMessage(bmmo::string_utils::utf8_to_ansi(msg).c_str());
+    ingame_msg_queue_.emplace(bmmo::string_utils::utf8_to_ansi(msg));
 #endif // BMMO_USE_BML_PLUS
-		});
 	}
 
 	/*CKBehavior* bbSetForce = nullptr;
