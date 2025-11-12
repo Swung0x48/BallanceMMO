@@ -381,6 +381,14 @@ void BallanceMMOClient::OnProcess() {
         return;
     const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
 
+    {
+        std::lock_guard lk(frame_times_mtx_);
+        frame_timestamps_in_last_45s_.push(current_timestamp);
+        while (!frame_timestamps_in_last_45s_.empty()
+                && current_timestamp - frame_timestamps_in_last_45s_.front() > 45 * (SteamNetworkingMicroseconds)1e6)
+            frame_timestamps_in_last_45s_.pop();
+    }
+
     const bool flush = db_.flush();
     if (!objects_.update(current_timestamp, flush) && flush)
         db_.set_pending_flush(true);
@@ -1873,7 +1881,23 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::Countdown: {
         auto* msg = reinterpret_cast<bmmo::countdown_msg*>(network_msg->m_pData);
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 120 - (int)average_ping_)));
+
+        int time_for_14_frames_ms = 0;
+        {
+            std::lock_guard lk(frame_times_mtx_);
+            if (frame_timestamps_in_last_45s_.size() < 1024) {
+                // not enough data - assume 240 fps
+                time_for_14_frames_ms = 14 * 1000 / 240;
+            }
+            else {
+                time_for_14_frames_ms = (int)(
+                    (frame_timestamps_in_last_45s_.back() - frame_timestamps_in_last_45s_.front()) /
+                    ((int64_t)frame_timestamps_in_last_45s_.size() - 1) * 14 / 1000
+                );
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 160 - (int)average_ping_)));
         std::string sender_name = get_username(msg->content.sender),
                     map_name = msg->content.map.get_display_name(map_names_);
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;

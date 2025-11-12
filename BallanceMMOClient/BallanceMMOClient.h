@@ -275,6 +275,9 @@ private:
 	std::atomic<SteamNetworkingMicroseconds> map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
 
+	std::queue<SteamNetworkingMicroseconds> frame_timestamps_in_last_45s_;
+	std::mutex frame_times_mtx_;
+
 	struct map_data {
 		int initial_life_count = 3;
 		float level_start_timestamp{};
@@ -969,7 +972,7 @@ private:
 	}
 
 	std::mutex ingame_msg_mtx_;
-  std::queue<std::string> ingame_msg_queue_; // processed in the main thread (OnProcess)
+	std::queue<std::string> ingame_msg_queue_; // processed in the main thread (OnProcess)
 	void SendIngameMessage(const std::string& msg, int ansi_color = bmmo::ansi::Reset) {
 		std::lock_guard lk(ingame_msg_mtx_);
 		console_window_.print_text(msg.c_str(), ansi_color);
@@ -977,9 +980,9 @@ private:
 		if (loader_version_ >= BMLVersion{ 0, 3, 9 } && ansi_color != bmmo::ansi::Reset)
 			ingame_msg_queue_.emplace(bmmo::ansi::get_escape_code(ansi_color) + msg + "\033[m");
 		else
-      ingame_msg_queue_.emplace(msg);
+			ingame_msg_queue_.emplace(msg);
 #else
-    ingame_msg_queue_.emplace(bmmo::string_utils::utf8_to_ansi(msg));
+		ingame_msg_queue_.emplace(bmmo::string_utils::utf8_to_ansi(msg));
 #endif // BMMO_USE_BML_PLUS
 	}
 
