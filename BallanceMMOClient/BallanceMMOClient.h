@@ -3,7 +3,6 @@
 //#define BMMO_WITH_PLAYER_SPECTATION
 //#define BMMO_NAME_LABEL_WITH_EXTRA_INFO
 #include "bml_includes.h"
-#include "CommandMMO.h"
 #include "text_sprite.h"
 #include "label_sprite.h"
 #include "exported_client.h"
@@ -22,11 +21,8 @@
 #include <mutex>
 #include <memory>
 #include <format>
-#include <ranges>
 #include <queue>
 #include <asio.hpp>
-// #include <openssl/sha.h>
-#include <fstream>
 #include <parallel_hashmap/phmap.h>
 
 extern "C" {
@@ -38,7 +34,7 @@ public:
 	BallanceMMOClient(IBML* bml):
 		IMod(bml),
 		objects_(bml, db_, [this] { return get_current_ball(); }),
-		log_manager_(GetLogger(), [this](std::string msg, int ansi_color) { SendIngameMessage(msg, ansi_color); }),
+		log_manager_(GetLogger(), [this](const std::string& msg, int ansi_color) { SendIngameMessage(msg, ansi_color); }),
 		logger_(log_manager_.get_logger()),
 		utils_(bml),
 		config_manager_(&log_manager_, [this] { return GetConfig(); }),
@@ -53,7 +49,7 @@ public:
 		const int length = m_bml->GetModCount();
 		for (int i = 0; i < length; ++i) {
 			if (std::strcmp(m_bml->GetMod(i)->GetID(), "BML") != 0) continue;
-			int count = std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d",
+			[[maybe_unused]] int count = std::sscanf(m_bml->GetMod(i)->GetVersion(), "%d.%d.%d",
 				&loader_version_.major, &loader_version_.minor, &BMMO_BML_BUILD_VERSION(loader_version_));
 			assert(count == 3);
 			break;
@@ -907,7 +903,7 @@ private:
 		auto* esc = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(esc_event_));
 		esc->Activate();
 
-		m_bml->AddTimer(CKDWORD(3), [this]() {
+		m_bml->AddTimer(CKDWORD{3}, [this] {
 			CKMessageManager* mm = m_bml->GetMessageManager();
 
 			CKMessageType reset_level_msg = mm->AddMessageType("Reset Level");

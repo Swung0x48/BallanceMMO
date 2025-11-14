@@ -1,4 +1,8 @@
 #include <boost/regex.hpp>
+#include <ranges>
+// #include <openssl/sha.h>
+// #include <fstream>
+#include "CommandMMO.h"
 #include "BallanceMMOClient.h"
 
 IMod* BMLEntry(IBML* bml) {
@@ -83,7 +87,7 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     if (!spectator_mode_)
         push_entry(current_map_, get_display_nickname(), current_sector_,
                     current_sector_timestamp_, m_bml->IsCheatEnabled());
-    std::sort(player_status_list_.begin(), player_status_list_.end(), list_sorter);
+    std::ranges::sort(player_status_list_, list_sorter);
     auto size = int(player_status_list_.size());
 
     std::string text = std::to_string(size) + " player" + ((size == 1) ? "" : "s") + " online:\n";
@@ -1269,7 +1273,7 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                 std::vector<std::string> options;
                 options.reserve(db_.player_count() + 1);
                 bool hint_client_id = (args[args.size() - 1]).starts_with('#');
-                db_.for_each([=, this, &options, &args](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                db_.for_each([=, this, &options](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
                     if (pair.first == db_.get_client_id()) return true;
                     if (hint_client_id)
                         options.push_back('#' + std::to_string(pair.first));
@@ -1919,7 +1923,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 play_wave_sound(sound_go_, true);
                 if (msg->content.force_restart) {
                     const auto start_timestamp = m_bml->GetTimeManager()->GetTime();
-                    for (auto& [_, map]: maps_) {
+                    for (auto& map: maps_ | std::views::values) {
                         map.rankings = {};
                         map.sector_timestamps = {};
                         map.level_start_timestamp = start_timestamp;
@@ -2205,7 +2209,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::ExtraLife: {
         auto msg = bmmo::message_utils::deserialize<bmmo::extra_life_msg>(network_msg);
-        for (auto& [_, data] : maps_)
+        for (auto& data: maps_ | std::views::values)
             data.initial_life_count = 3;
         for (const auto& [hash, goal] : msg.life_count_goals)
             maps_[hash].initial_life_count = goal;

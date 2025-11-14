@@ -29,3 +29,4 @@
 /include/BMLPlus/BMLPlus
 /include
 /BallanceMMOCommon/include/config/version_config.h
+/CMakePresets.json*
