@@ -1901,7 +1901,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 160 - (int)average_ping_)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 160 - (int)average_ping_ - time_for_14_frames_ms)));
         std::string sender_name = get_username(msg->content.sender),
                     map_name = msg->content.map.get_display_name(map_names_);
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
