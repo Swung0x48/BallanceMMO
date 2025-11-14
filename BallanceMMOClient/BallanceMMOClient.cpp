@@ -27,7 +27,7 @@ void BallanceMMOClient::show_player_list() {
             player_list_display_ = std::make_unique<decltype(player_list_display_)::element_type>("PlayerList", "", RIGHT_MOST, 0.412f);
             player_list_display_->sprite_->SetPosition({0.596f, 0.412f});
             player_list_display_->sprite_->SetSize({RIGHT_MOST - 0.596f, 0.588f});
-            player_list_display_->sprite_->SetZOrder(128);
+            player_list_display_->sprite_->SetZOrder(96);
             player_list_display_->paint(player_list_color_);
             // player_list_display_->paint_background(0x44444444);
             player_list_display_->set_visible(true);
