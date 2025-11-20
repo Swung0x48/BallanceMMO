@@ -150,6 +150,7 @@ private:
 	void OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	void OnPostCheckpointReached() override;
 	void OnPostExitLevel() override;
+	void OnPreResetLevel() override;
 	void OnCounterActive() override;
 	void OnPauseLevel() override;
 	void OnBallOff() override;

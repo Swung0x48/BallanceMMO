@@ -11,6 +11,7 @@ namespace bmmo {
         FatalError, // client encountered a fatal error; end connection from server
         TriggerFatalError, // produce a fatal error just for fun
         BallOff, // we already have map/sector info so it's as simple as this
+        LevelRestarted, // notify server that level was restarted; note that we don't log forced restarts immediately after countdowns
     };
 
     // struct simple_action {

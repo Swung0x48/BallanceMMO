@@ -291,6 +291,16 @@ void BallanceMMOClient::OnPostExitLevel() {
     if (spectator_label_) spectator_label_->update("[Spectator Mode]");
 }
 
+void BallanceMMOClient::OnPreResetLevel() {
+    if (spectator_mode_) return;
+    const auto it = maps_.find(last_countdown_map_.get_hash_bytes_string());
+    if (it == maps_.end()) return;
+    if (m_bml->GetTimeManager()->GetTime() - it->second.level_start_timestamp
+            < bmmo::LEVEL_RESTART_IGNORE_TIMEFRAME_MS)
+        return;
+    send(bmmo::simple_action_msg{.content = bmmo::simple_action::LevelRestarted}, k_nSteamNetworkingSend_Reliable);
+}
+
 void BallanceMMOClient::OnCounterActive() {
     on_sector_changed();
     bool reset_counter = true;

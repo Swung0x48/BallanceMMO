@@ -11,6 +11,8 @@ namespace bmmo {
 
 	constexpr SteamNetworkingMicroseconds CLIENT_MINIMUM_UPDATE_INTERVAL_US = (int64_t)1e6 / 66;
 
+    constexpr float LEVEL_RESTART_IGNORE_TIMEFRAME_MS = 15e3f;
+
     constexpr const char* RECORD_HEADER = "BallanceMMO FlightRecorder";
 
     constexpr const uint16_t DEFAULT_PORT = 26676;

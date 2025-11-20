@@ -38,6 +38,7 @@ bool config_manager::load() {
     save_player_status_to_file_ = yaml_load_value(config_, "save_player_status_to_file", save_player_status_to_file_);
     log_installed_mods = yaml_load_value(config_, "log_installed_mods", log_installed_mods);
     log_ball_offs = yaml_load_value(config_, "log_ball_offs", log_ball_offs);
+    log_level_restarts = yaml_load_value(config_, "log_level_restarts", log_level_restarts);
     serious_warning_as_dnf = yaml_load_value(config_, "serious_warning_as_dnf", serious_warning_as_dnf);
     ghost_mode = yaml_load_value(config_, "ghost_mode", ghost_mode);
 

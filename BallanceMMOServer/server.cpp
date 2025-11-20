@@ -1269,6 +1269,17 @@ protected:
                         LogFileOutput(text);
                         break;
                     }
+                    case sa::LevelRestarted: {
+                        if (!config_.log_level_restarts)
+                            break;
+                        char text[256];
+                        std::snprintf(text, sizeof(text), "(#%u, %s) restarted at sector %d of %s.",
+                                networking_msg->m_conn, client_it->second.name.c_str(),
+                                client_it->second.current_sector,
+                                client_it->second.current_map.get_display_name(map_names_).c_str());
+                        LogFileOutput(text);
+                        break;
+                    }
                     default:
                         break;
                 }
