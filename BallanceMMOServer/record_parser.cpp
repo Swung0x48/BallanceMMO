@@ -235,6 +235,13 @@ public:
                     permanent_notification_timeline_.try_emplace(current_record_time_, msg.title, msg.text_content);
                     break;
                 }
+                case bmmo::Countdown: {
+                    auto msg = bmmo::message_utils::deserialize<bmmo::countdown_msg>(entry.data, entry.size);
+                    const auto name = msg.content.sender == k_HSteamNetConnection_Invalid ?
+                                        "[Server]" : record_clients_[msg.content.sender].name;
+                    countdown_timeline_.emplace_back(current_record_time_, name, msg.content);
+                    break;
+                }
                 default: {
                     break;
                 }
@@ -262,6 +269,9 @@ public:
     // begin_time, <username (title), text>
     std::map<SteamNetworkingMicroseconds, std::pair<std::string, std::string>> permanent_notification_timeline_{{0, {}}};
     std::pair<std::string, std::string> record_permanent_notification_;
+    // only for console references, so we don't need a map
+    // timestamp, username, countdown - we store names because ids may be reused or disconnected
+    std::vector<std::tuple<SteamNetworkingMicroseconds, std::string, bmmo::countdown>> countdown_timeline_;
 
     // username - time_period
     std::unordered_map<std::string, std::vector<time_period_t>> timeline_;
@@ -538,12 +548,29 @@ public:
         return true;
     }
 
-    void print_clients() {
+    void print_clients() const {
         Printf("%d client(s) online:", clients_.size());
-        for (auto& i: clients_) {
+        for (const auto& i: clients_) {
             Printf("%u: %s",
                     i.first,
                     i.second.name);
+        }
+    }
+
+    void print_countdowns(bmmo::countdown_type filter = bmmo::countdown_type::Unknown) const {
+        for (const auto& [timestamp, name, countdown]: countdown_timeline_) {
+            if (filter != bmmo::countdown_type::Unknown && countdown.type != filter)
+                continue;
+            auto world_time = record_start_world_time_ + time_t(timestamp / 1e6);
+            char time_str[32];
+            std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&world_time));
+            const int color = countdown.type == bmmo::countdown_type::Go ?
+                    (bmmo::color_code(bmmo::Countdown) & ~bmmo::ansi::Bold) : bmmo::ansi::Default;
+            Printf(color, "%s (%.3lfs) [%s]: %s%s - %s",
+                    time_str, timestamp / 1e6, name,
+                    countdown.map.get_display_name(record_map_names_),
+                    countdown.get_level_mode_label(),
+                    countdown.get_type_label());
         }
     }
 
@@ -559,7 +586,7 @@ public:
         Printf("Real world time: %s.", time_str);
     }
 
-    void print_permanent_notifications() {
+    void print_permanent_notifications() const {
         for (const auto& [timestamp, notification]: permanent_notification_timeline_) {
             if (timestamp == 0) continue;
             auto world_time = record_start_world_time_ + time_t(timestamp / 1e6);
@@ -1119,6 +1146,13 @@ int main(int argc, char** argv) {
     console.register_command("list", std::bind(&record_replayer::print_clients, &replayer));
     console.register_command("time", std::bind(&record_replayer::print_current_record_time, &replayer));
     console.register_command("bulletins", std::bind(&record_replayer::print_permanent_notifications, &replayer));
+    console.register_command("countdowns", [&]() {
+        if (console.empty()) {
+            replayer.print_countdowns();
+            return;
+        }
+        replayer.print_countdowns(static_cast<bmmo::countdown_type>(console.get_next_int()));
+    });
     console.register_command("pause", [&]() {
         if (!replayer.playing()) {
             Printf("Already not playing.");
