@@ -582,7 +582,7 @@ void BallanceMMOClient::OnLevelFinish() {
         msg.content.map = current_map_;
         logger_->Info("Sending level finish message...");
 
-        send(msg, k_nSteamNetworkingSend_Reliable);
+        send(msg, k_nSteamNetworkingSend_ReliableNoNagle);
     });
 }
 

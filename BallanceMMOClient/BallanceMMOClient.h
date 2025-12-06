@@ -944,7 +944,7 @@ private:
 		msg.content.sector = max_sector_;
 		msg.content.map = current_map_;
 		msg.content.cheated = m_bml->IsCheatEnabled();
-		send(msg, k_nSteamNetworkingSend_Reliable);
+		send(msg, k_nSteamNetworkingSend_ReliableNoNagle);
 		did_not_finish_ = true;
 	}
 
@@ -960,11 +960,11 @@ private:
 		msg.content.map = current_map_;
 		msg.content.type = type;
 		msg.content.sector = current_sector_;
-		send(msg, k_nSteamNetworkingSend_Reliable);
+		send(msg, k_nSteamNetworkingSend_ReliableNoNagle);
 	}
 
 	void send_current_sector() {
-		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_Reliable);
+		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_ReliableNoNagle);
 		if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
 	}
 

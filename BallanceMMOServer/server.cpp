@@ -1073,7 +1073,7 @@ protected:
                 }
 
                 msg->content.sender = networking_msg->m_conn;
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle);
                 break;
             }
             case bmmo::DidNotFinish: {
@@ -1089,7 +1089,7 @@ protected:
                     msg->content.sector
                 );
                 client_it->second.dnf = true;
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle);
                 maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
                     {(bool)msg->content.cheated, player_name}, msg->content.sector});
                 break;
@@ -1126,7 +1126,7 @@ protected:
                     current_map.rank, bmmo::string_utils::get_ordinal_suffix(current_map.rank),
                     formatted_score, msg->content.get_formatted_time());
 
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle);
 
                 current_map.rankings.first.push_back({
                     {(bool)msg->content.cheated, player_name}, msg->content.mode,
@@ -1223,14 +1223,14 @@ protected:
                                 .map = msg->content.map,
                                 .time_diff_microseconds = SteamNetworkingUtils()->GetLocalTimestamp() - client_map_it->second.start_time,
                             }};
-                            send(networking_msg->m_conn, hs_msg, k_nSteamNetworkingSend_Reliable);
+                            send(networking_msg->m_conn, hs_msg, k_nSteamNetworkingSend_ReliableNoNagle);
                         }
                         [[fallthrough]];
                     }
                     case bmmo::current_map_state::NameChange: {
                         client_it->second.current_map = msg->content.map;
                         client_it->second.current_sector = msg->content.sector;
-                        broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
+                        broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle, networking_msg->m_conn);
                         break;
                     }
                     default: break;
@@ -1241,7 +1241,7 @@ protected:
                 auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(networking_msg->m_pData);
                 msg->content.player_id = networking_msg->m_conn;
                 client_it->second.current_sector = msg->content.sector;
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
+                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle, networking_msg->m_conn);
                 break;
             }
             case bmmo::SimpleAction: {
@@ -1491,7 +1491,7 @@ protected:
             broadcast_message(ping_msg.raw.str().data(), ping_msg.size(), k_nSteamNetworkingSend_Reliable);
             using namespace std::chrono;
             const int64_t now_micros = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
-            broadcast_message(bmmo::real_world_timestamp_msg{.content = now_micros}, k_nSteamNetworkingSend_Reliable);
+            broadcast_message(bmmo::real_world_timestamp_msg{.content = now_micros}, k_nSteamNetworkingSend_ReliableNoNagle);
         }
     };
 
