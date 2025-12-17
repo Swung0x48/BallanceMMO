@@ -91,6 +91,7 @@ set(BMMO_CLIENT_HDR
         local_state_handler_impl.h
         log_manager.h
         server_list.h
+        sprite_base.h
         text_sprite.h
         utils.h
 )

@@ -1,20 +1,16 @@
 #pragma once
-#include <memory>
-#include <mutex>
+#include "sprite_base.h"
 #include "bml_includes.h"
-struct text_sprite {
-	class sprite : public BGui::Text {
-	public:
-		using BGui::Text::Text;
-		void SetBackgroundColor(CKDWORD col) {
-			m_sprite->SetBackgroundColor(col);
-		}
-	};
 
-	std::unique_ptr<sprite> sprite_;
-	std::mutex mtx_;
-	bool visible_ = false;
+class _text_sprite_wrapper : public BGui::Text {
+public:
+	using BGui::Text::Text;
+	void SetBackgroundColor(CKDWORD col) {
+		m_sprite->SetBackgroundColor(col);
+	}
+};
 
+struct text_sprite : public sprite_base<_text_sprite_wrapper> {
 	text_sprite() = delete;
 	text_sprite(const text_sprite&) = delete;
 
@@ -24,7 +20,7 @@ struct text_sprite {
 		float y_pos = 0.0f) {
 		std::unique_lock lk(mtx_);
 
-		sprite_ = std::make_unique<sprite>(("T_Sprite_" + name).c_str());
+		sprite_ = std::make_unique<_text_sprite_wrapper>(("MMO_SpriteText_" + name).c_str());
 		sprite_->SetAlignment(CKSPRITETEXT_RIGHT);
 		sprite_->SetSize(Vx2DVector(x_pos, 0.1f));
 		sprite_->SetPosition(Vx2DVector(0.0f, y_pos)); // Yeah that's right
@@ -33,38 +29,33 @@ struct text_sprite {
 		sprite_->SetTextColor(0xFFFFFFFF);
 		sprite_->SetVisible(false);
 		sprite_->SetZOrder(20);
-	};
-	bool update(const std::string& text, bool preemptive = true) {
+	}
+
+	bool update(const std::string& text, bool preemptive = true) override {
 		if (!preemptive) {
 			std::unique_lock lk(mtx_, std::try_to_lock);
 			if (lk) {
-				sprite_->SetText(text.c_str());
+				if (sprite_) sprite_->SetText(text.c_str());
 				return true;
 			}
 			return false;
 		}
 		else {
 			std::unique_lock lk(mtx_);
-			sprite_->SetText(text.c_str());
+			if (sprite_) sprite_->SetText(text.c_str());
 		}
 		return true;
 	}
+
 	void paint(CKDWORD color) {
 		std::unique_lock lk(mtx_);
-		sprite_->SetTextColor(color);
+		if (sprite_) sprite_->SetTextColor(color);
 	}
+
 	void paint_background(CKDWORD color) {
 		std::unique_lock lk(mtx_);
-		sprite_->SetBackgroundColor(color);
+		if (sprite_) sprite_->SetBackgroundColor(color);
 	}
-	void set_visible(bool visible) {
-		std::unique_lock lk(mtx_);
-		if (visible_ == visible)
-			return;
-		visible_ = visible;
-		sprite_->SetVisible(visible_);
-	}
-	void toggle() {
-		set_visible(!visible_);
-	}
+
+	void process() override {} // no-op
 };
