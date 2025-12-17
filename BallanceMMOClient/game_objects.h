@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include "bml_includes.h"
 #include "label_sprite.h"
+#include "text_sprite.h"
 #include "game_state.h"
 #include "utils.h"
 
@@ -10,7 +11,7 @@ struct PlayerObjects {
 	static inline IBML* bml;
 	std::vector<CK_ID> balls;
 	std::vector<CK_ID> materials;
-	std::unique_ptr<label_sprite> username_label;
+	std::unique_ptr<sprite_interface> username_label;
 	uint32_t visible_ball_type = std::numeric_limits<decltype(visible_ball_type)>::max();
 	float last_opacity = 0.5;
 	SteamNetworkingMicroseconds last_opacity_timestamp = 0;
@@ -29,8 +30,8 @@ struct PlayerObjects {
 
 class game_objects {
 public:
-	game_objects(IBML* bml, game_state& db, std::function<CK3dObject*()> get_own_ball_fn):
-			bml_(bml), db_(db), get_own_ball_fn_(get_own_ball_fn) {
+	game_objects(IBML* bml, game_state& db, std::function<CK3dObject*()> get_own_ball_fn, const utils* utils):
+			bml_(bml), db_(db), get_own_ball_fn_(get_own_ball_fn), utils_(utils) {
 		PlayerObjects::bml = bml;
 	}
 
@@ -49,10 +50,30 @@ public:
 				bml_->SendIngameMessage(msg.c_str());
 			}
 		}
-		obj.username_label = std::make_unique<label_sprite>(
-			"Name_" + name,
-			name + (cheat ? " [C]" : ""),
-			0.5f, 0.5f);
+		if ([&name] { // test if not ascii
+					for (const auto& c : name) {
+						if (static_cast<unsigned char>(c) > 127)
+							return true;
+					}
+					return false;
+				}() || name.length() > 20) {
+			// use text sprite for non-ascii or too long names
+			auto username_label = std::make_unique<text_sprite>(
+				"Name_" + name,
+				name + (cheat ? " [C]" : ""),
+				0.5f, 0.5f);
+			username_label->sprite_->SetSize(Vx2DVector(0.3f, 0.03f));
+			username_label->sprite_->SetAlignment(static_cast<CKSPRITETEXT_ALIGNMENT>(CKSPRITETEXT_LEFT | CKSPRITETEXT_VCENTER));
+			username_label->sprite_->SetFont(utils::get_system_font(), utils_->get_display_font_size(9.1f), 500, false, false);
+			username_label->paint(0xF9F9F9F9);
+			obj.username_label = std::move(username_label);
+		}
+		else {
+			obj.username_label = std::make_unique<label_sprite>(
+				"Name_" + name,
+				name + (cheat ? " [C]" : ""),
+				0.5f, 0.5f);
+		}
 	}
 
 	void init_players() {
@@ -419,7 +440,7 @@ public:
 	}
 
 	std::string get_username_label_text(const std::string& name, bool cheated, uint16_t ping) const {
-		std::string label_text = name + (cheated ? " [C]" : "");
+		std::string label_text = bmmo::string_utils::utf8_to_ansi(name) + (cheated ? " [C]" : "");
 		if (db_.is_ping_visible())
 			label_text += std::format(" [{}ms]", ping);
 		return label_text;
@@ -453,4 +474,5 @@ private:
 	static constexpr float DILATION_MAX_SQUARE_DISTANCE = 14.0f,
 		ALPHA_DEFAULT = 0.5f, ALPHA_DISTANCE_RATE = 0.0144f,
 		ALPHA_BEGIN = 0.2f, ALPHA_MIN = 0.28f, ALPHA_MAX = 0.7f;
+	const utils* utils_;
 };
