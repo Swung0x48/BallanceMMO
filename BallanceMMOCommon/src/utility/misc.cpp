@@ -4,15 +4,15 @@
 #include <chrono>
 #ifdef _WIN32
 # ifndef WIN32_LEAN_AND_MEAN
-# define WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
 # endif
-#include <Windows.h>
-#include <io.h>
-#include <fcntl.h>
-#include <ShlObj.h>
+# include <Windows.h>
+# include <io.h>
+# include <fcntl.h>
+# include <ShlObj.h>
 #else
-#include <sys/ioctl.h>
-#include <unistd.h>
+# include <sys/ioctl.h>
+# include <unistd.h>
 #endif
 #include <replxx.hxx>
 #include "entity/globals.hpp"

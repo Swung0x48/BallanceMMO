@@ -195,11 +195,11 @@ bool console_window::cleanup() {
 }
 
 bool console_window::hide() {
-  if (!running_ || !owned_console_)
-    return false;
-  if (bmmo::LOWER_THAN_WIN10) return cleanup();
-  bmmo::console::end_input();
-  return true;
+    if (!running_ || !owned_console_)
+        return false;
+    if (bmmo::LOWER_THAN_WIN10) return cleanup();
+    bmmo::console::end_input();
+    return true;
 }
 
 void console_window::free_thread() {

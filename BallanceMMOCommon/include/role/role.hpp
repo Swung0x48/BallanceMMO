@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <cassert>
+#include <csignal>
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
@@ -55,6 +56,15 @@ public:
 
     role() {
         interface_ = SteamNetworkingSockets();
+
+        auto close_log_and_exit = [](int) { // signal handler
+            bmmo::Printf("External interrupt received, closing log file and exiting...");
+            bmmo::close_log();
+            std::exit(0);
+        };
+        std::signal(SIGABRT, close_log_and_exit);
+        std::signal(SIGTERM, close_log_and_exit);
+        std::signal(SIGINT, close_log_and_exit);
     }
 
     virtual bool setup() { return true; };
