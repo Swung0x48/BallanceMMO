@@ -986,18 +986,26 @@ protected:
                 msg.deserialize();
 
                 bmmo::string_utils::sanitize_string(msg.chat_content);
+                const bool muted = is_muted(client_it->second.uuid);
                 const HSteamNetConnection receiver = msg.player_id;
                 msg.player_id = networking_msg->m_conn;
 
                 if (client_exists(receiver, true)) {
-                    Printf(bmmo::color_code(msg.code), "(%u, %s) -> (%u, %s): %s",
-                        msg.player_id, client_it->second.name, receiver, clients_[receiver].name, msg.chat_content);
+                    Printf((muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset) | bmmo::color_code(msg.code),
+                        "%s(%u, %s) -> (%u, %s): %s",
+                        muted ? "[Muted] " : "", msg.player_id, client_it->second.name, receiver, clients_[receiver].name, msg.chat_content);
+                    if (muted) {
+                        bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::PlayerMuted}};
+                        send(networking_msg->m_conn, denied_msg, k_nSteamNetworkingSend_Reliable);
+                        break;
+                    }
                     msg.clear();
                     msg.serialize();
                     send(receiver, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
                 } else {
-                    Printf(bmmo::color_code(msg.code), "(%u, %s) -> (%u, %s): %s",
-                        msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
+                    Printf((muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset) | bmmo::color_code(msg.code),
+                        "%s(%u, %s) -> (%u, %s): %s",
+                        muted ? "[Muted] " : "", msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
                     if (receiver != k_HSteamNetConnection_Invalid) {
                         bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::TargetNotFound}};
                         send(msg.player_id, denied_msg, k_nSteamNetworkingSend_Reliable);
