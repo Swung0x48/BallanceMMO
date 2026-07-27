@@ -335,12 +335,16 @@ private:
 			return;
 		Beep(frequency, duration);
 	};
+	// Most callers are message handlers on the network thread, and a CKWaveSound
+	// is an engine object like any other, so playing goes through the game thread.
 	void play_wave_sound(CKWaveSound* sound, bool forced = false) const {
-		if ((!sound_enabled_ && !forced) || ignore_forced_sounds_)
+		if ((!sound_enabled_ && !forced) || ignore_forced_sounds_ || sound == nullptr)
 			return;
-		if (sound->IsPlaying())
-			sound->Stop();
-		sound->Play();
+		utils_.run_on_game_thread([sound] {
+			if (sound->IsPlaying())
+				sound->Stop();
+			sound->Play();
+		});
 	}
 	void load_wave_sound(CKWaveSound** sound, CKSTRING name, CKSTRING path, float gain = 1.0f, float pitch = 1.0f, bool streaming = false) {
 		sound[0] = static_cast<CKWaveSound*>(m_bml->GetCKContext()->CreateObject(CKCID_WAVESOUND, name));
@@ -838,12 +842,8 @@ private:
 			//network_thread_.join();
 
 		//thread_pool_.stop();
-		toggle_own_spirit_ball(false);
 		map_names_.clear();
 		db_.clear();
-		objects_.destroy_all_objects();
-		local_state_handler_.reset();
-		cleanup_received_sounds();
 
 		{
 			std::lock_guard client_lk(client_mtx_);
@@ -857,19 +857,35 @@ private:
 		resolving_endpoint_ = false;
 		logged_in_ = false;
 
-		if (down) // Since the game's going down, we don't care about text shown.
+		// Destroying spirit balls, sprites and sounds means destroying CK
+		// objects; when cleanup() is reached from the network thread (a lost
+		// connection) that has to happen on the game thread instead.
+		// `down` means the game itself is going away, and we are already on
+		// the game thread, so run_on_game_thread() executes this inline.
+		utils_.run_on_game_thread([this, down] {
+			toggle_own_spirit_ball(false);
+			objects_.destroy_all_objects();
+			local_state_handler_.reset();
+			cleanup_received_sounds();
+
+			if (down) // Since the game's going down, we don't care about text shown.
+				return;
+
+			if (ping_)
+				ping_->update("");
+
+			if (status_) {
+				status_->update("Disconnected");
+				status_->paint(0xffff0000);
+			}
+
+			spectator_label_.reset();
+			permanent_notification_.reset();
+		});
+
+		if (down)
 			return;
 
-		if (ping_)
-			ping_->update("");
-
-		if (status_) {
-			status_->update("Disconnected");
-			status_->paint(0xffff0000);
-		}
-
-		spectator_label_.reset();
-		permanent_notification_.reset();
 		db_.set_nickname(config_manager_["playername"]->GetString());
 		db_.set_client_id(k_HSteamNetConnection_Invalid + ((rand() << 16) | rand())); // invalid id indicates server
 	}

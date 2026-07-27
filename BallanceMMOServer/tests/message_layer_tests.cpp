@@ -7,12 +7,10 @@
 #include <string>
 #include <vector>
 
-#include <message/message.hpp>
+// the individual message headers are not self-contained (they rely on the
+// include order in message_all.hpp), so pull in the aggregate
+#include <message/message_all.hpp>
 #include <message/message_utils.hpp>
-#include <message/chat_msg.hpp>
-#include <message/login_request_v3_msg.hpp>
-#include <message/countdown_msg.hpp>
-#include <message/player_disconnected_msg.hpp>
 
 namespace {
 
@@ -222,6 +220,80 @@ TEST(LoginRequestV3Msg, DeserializeRejectsEveryTruncation) {
         parsed.raw.write(payload.data(), static_cast<std::streamsize>(len));
         EXPECT_FALSE(parsed.deserialize()) << "accepted a payload truncated to " << len << " bytes";
     }
+}
+
+TEST(MapNamesMsg, SerializeDeserializeRoundTrip) {
+    bmmo::map_names_msg msg{};
+    msg.maps[std::string(bmmo::map_names_msg::HASH_SIZE, '\x01')] = "Level 1";
+    msg.maps[std::string(bmmo::map_names_msg::HASH_SIZE, '\x02')] = "Some Custom Map";
+    ASSERT_TRUE(msg.serialize());
+
+    bmmo::map_names_msg parsed{};
+    parsed.raw.write(stream_payload(msg.raw).data(), static_cast<std::streamsize>(msg.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    EXPECT_EQ(msg.maps, parsed.maps);
+}
+
+TEST(MapNamesMsg, DeserializeRejectsForgedElementCount) {
+    // a count the remaining payload cannot possibly hold must be refused
+    // before reserve() is asked to allocate for it
+    std::stringstream stream;
+    const auto code = static_cast<uint32_t>(bmmo::MapNames);
+    stream.write(reinterpret_cast<const char*>(&code), sizeof(code));
+    const uint32_t forged_count = 0xfffffff0;
+    stream.write(reinterpret_cast<const char*>(&forged_count), sizeof(forged_count));
+
+    bmmo::map_names_msg parsed{};
+    const auto payload = stream.str();
+    parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    EXPECT_FALSE(parsed.deserialize());
+    EXPECT_TRUE(parsed.maps.empty());
+}
+
+TEST(MapNamesMsg, DeserializeRejectsEveryTruncation) {
+    bmmo::map_names_msg msg{};
+    msg.maps[std::string(bmmo::map_names_msg::HASH_SIZE, '\x03')] = "Level 3";
+    ASSERT_TRUE(msg.serialize());
+    const std::string payload = stream_payload(msg.raw);
+
+    for (size_t len = 0; len < payload.size(); ++len) {
+        bmmo::map_names_msg parsed{};
+        parsed.raw.write(payload.data(), static_cast<std::streamsize>(len));
+        EXPECT_FALSE(parsed.deserialize()) << "accepted a payload truncated to " << len << " bytes";
+    }
+}
+
+TEST(OwnedBallStateV2Msg, SerializeDeserializeRoundTrip) {
+    bmmo::owned_ball_state_v2_msg msg{};
+    msg.balls.resize(2);
+    msg.balls[0].player_id = 11;
+    msg.balls[0].state.type = 1;
+    msg.balls[1].player_id = 22;
+    msg.balls[1].state.position.x = 3.5f;
+    ASSERT_TRUE(msg.serialize());
+
+    bmmo::owned_ball_state_v2_msg parsed{};
+    parsed.raw.write(stream_payload(msg.raw).data(), static_cast<std::streamsize>(msg.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    ASSERT_EQ(2u, parsed.balls.size());
+    EXPECT_EQ(11u, parsed.balls[0].player_id);
+    EXPECT_EQ(1u, parsed.balls[0].state.type);
+    EXPECT_EQ(22u, parsed.balls[1].player_id);
+    EXPECT_FLOAT_EQ(3.5f, parsed.balls[1].state.position.x);
+}
+
+TEST(OwnedBallStateV2Msg, DeserializeRejectsForgedElementCount) {
+    std::stringstream stream;
+    const auto code = static_cast<uint32_t>(bmmo::OwnedBallStateV2);
+    stream.write(reinterpret_cast<const char*>(&code), sizeof(code));
+    const uint32_t forged_count = 0xfffffff0; // would resize() to gigabytes
+    stream.write(reinterpret_cast<const char*>(&forged_count), sizeof(forged_count));
+
+    bmmo::owned_ball_state_v2_msg parsed{};
+    const auto payload = stream.str();
+    parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    EXPECT_FALSE(parsed.deserialize());
+    EXPECT_TRUE(parsed.balls.empty());
 }
 
 TEST(LoginRequestV3Msg, DeserializeRejectsForgedNicknameLength) {

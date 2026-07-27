@@ -1,12 +1,16 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <thread>
 #include <steam/steamnetworkingtypes.h>
 #include "bml_includes.h"
 
 class utils {
 private:
     IBML* bml_;
+    // written once from the game thread, read from every other thread
+    mutable std::atomic<std::thread::id> game_thread_id_{};
 
 public:
     utils(IBML* bml);
@@ -38,6 +42,24 @@ public:
 
     inline void schedule_sync_call(std::function<void()>&& func) const {
         bml_->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });
+    }
+
+    // Call once from a BML callback (OnLoad) to record which thread the game
+    // engine runs its callbacks on; run_on_game_thread() needs it to tell
+    // "already there" from "must be scheduled".
+    inline void set_game_thread() const { game_thread_id_ = std::this_thread::get_id(); }
+    inline bool on_game_thread() const { return std::this_thread::get_id() == game_thread_id_.load(); }
+
+    // Runs func on the game thread: inline when we are already on it, through
+    // the timer queue otherwise. CK objects, sprites and BML gameplay state
+    // must only be touched there - the network thread would race the renderer.
+    // Scheduled calls keep their relative order, so a create queued before a
+    // destroy still happens first.
+    inline void run_on_game_thread(std::function<void()>&& func) const {
+        if (on_game_thread())
+            func();
+        else
+            schedule_sync_call(std::move(func));
     }
 
     static float distance_to_line_segment(const VxVector& begin, const VxVector& end, const VxVector& point);

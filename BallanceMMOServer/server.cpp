@@ -865,6 +865,16 @@ protected:
                 break;
             }
             case bmmo::LoginRequestV3: {
+                // A second login on a live connection would insert nothing
+                // (the connection is already a key in clients_) but still add
+                // a second username_ entry pointing at it; cleanup only erases
+                // the one matching the current name, leaving the other behind
+                // to resolve forever to a disconnected client.
+                if (client_it != clients_.end()) {
+                    Printf("Error: ignoring duplicate login request from (#%u, %s).",
+                            networking_msg->m_conn, client_it->second.name);
+                    break;
+                }
                 bmmo::login_request_v3_msg msg;
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 if (!msg.deserialize()) {
@@ -1200,8 +1210,23 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 if (!msg.deserialize()) break;
 
-                map_names_.insert(msg.maps.begin(), msg.maps.end());
+                // Client-supplied names are kept for the whole session and
+                // resent to every player who joins, so they need bounding and
+                // sanitizing: without a cap a single client can grow this map
+                // (and every future login packet) without limit.
+                decltype(msg.maps) accepted_maps;
+                for (auto& [hash, name]: msg.maps) {
+                    if (map_names_.size() >= MAX_MAP_NAMES && !map_names_.contains(hash))
+                        continue;
+                    if (name.length() > MAX_MAP_NAME_LENGTH)
+                        name.erase(MAX_MAP_NAME_LENGTH);
+                    bmmo::string_utils::sanitize_string(name);
+                    if (map_names_.try_emplace(hash, name).second)
+                        accepted_maps.emplace(hash, name);
+                }
+                if (accepted_maps.empty()) break;
 
+                msg.maps = std::move(accepted_maps);
                 msg.clear();
                 msg.serialize();
                 broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
@@ -1604,6 +1629,9 @@ protected:
     config_manager config_;
 
     std::unordered_map<std::string, std::string> map_names_;
+    // Bounds on what clients may add to map_names_; the whole map is sent to
+    // every joining client, so it must not be allowed to grow without limit.
+    static constexpr size_t MAX_MAP_NAMES = 4096, MAX_MAP_NAME_LENGTH = 512;
 };
 
 // parse arguments (optional port and help/version/log) with getopt
