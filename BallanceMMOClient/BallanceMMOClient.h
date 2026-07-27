@@ -416,6 +416,9 @@ private:
 	std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true, did_not_finish_ = false;
+	// Mirrors IsCheatEnabled() for the network thread, which must not call it;
+	// updated from OnCheatEnabled and whenever we read the real value.
+	std::atomic_bool own_cheat_enabled_ = false;
 	std::atomic_bool force_next_restart_ = false, reset_timer_ = true, countdown_restart_ = false;
 
 	std::set<bmmo::exported::listener*> listeners_;

@@ -407,6 +407,7 @@ void BallanceMMOClient::OnProcess() {
 
     // refresh the values worker threads read instead of querying the engine
     utils_.refresh_engine_cache();
+    own_cheat_enabled_ = m_bml->IsCheatEnabled();
 
     if (!connected())
         return;
@@ -639,6 +640,7 @@ void BallanceMMOClient::OnLoadScript(BMMO_CKSTRING filename, CKBehavior* script)
 }
 
 void BallanceMMOClient::OnCheatEnabled(bool enable) {
+    own_cheat_enabled_ = enable; // keep the network thread's mirror current
     if (!connected() || spectator_mode_)
         return;
     bmmo::cheat_state_msg msg{};
@@ -1600,7 +1602,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         bmmo::login_request_v3_msg msg{};
         msg.nickname = nickname;
         msg.version = bmmo::current_version;
-        msg.cheated = m_bml->IsCheatEnabled() && !spectator_mode_; // always false in spectator mode
+        // the mirror, not IsCheatEnabled(): this runs on the network thread
+        msg.cheated = own_cheat_enabled_.load() && !spectator_mode_; // always false in spectator mode
         memcpy(msg.uuid, &(config_manager_.get_uuid()), sizeof(config_manager_.get_uuid()));
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -2281,7 +2284,9 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             // saw connect (e.g. one who left between the two messages)
             const auto player_state = db_.get(msg->content.player_id);
             SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
-                              (db_.get_client_id() == msg->content.player_id ? m_bml->IsCheatEnabled()
+                              // own_cheat_enabled_ rather than IsCheatEnabled():
+                              // this runs on the network thread
+                              (db_.get_client_id() == msg->content.player_id ? own_cheat_enabled_.load()
                               : (player_state && player_state->cheated)) ? "[CHEAT] " : "",
                               get_username(msg->content.player_id), msg->content.sector,
                               bmmo::string_utils::get_ordinal_suffix(msg->content.sector),
