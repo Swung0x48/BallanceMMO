@@ -242,6 +242,29 @@ private:
 	};
 	player_list_snapshot player_list_snapshot_;
 	std::mutex player_list_snapshot_mtx_;
+	// Stopping the player-list thread has to be prompt and deterministic: it
+	// calls back into BML (AddTimer) with a captured `this`, so it must not
+	// outlive the mod. The cv replaces a 500 ms sleep that made shutdown race.
+	std::condition_variable player_list_cv_;
+	std::mutex player_list_cv_mtx_, player_list_thread_mtx_;
+	std::atomic_bool shutting_down_ = false;
+	void stop_player_list(bool join_now) {
+		{
+			std::lock_guard lk(player_list_cv_mtx_);
+			player_list_visible_ = false;
+		}
+		player_list_cv_.notify_all();
+		std::lock_guard thread_lk(player_list_thread_mtx_);
+		if (!player_list_thread_.joinable())
+			return;
+		if (join_now) // the game is going down; the thread must not outlive BML
+			player_list_thread_.join();
+		else
+			asio::post(thread_pool_, [this] {
+				std::lock_guard lk(player_list_thread_mtx_);
+				if (player_list_thread_.joinable()) player_list_thread_.join();
+			});
+	}
 	// game thread only
 	void refresh_player_list_snapshot() {
 		player_list_snapshot snapshot;
@@ -406,7 +429,9 @@ private:
 	void update_compensation_lives_label();
 
 	std::unique_ptr<local_state_handler_base> local_state_handler_;
-	bool spectator_mode_ = false;
+	// mirrors the "spectator" BML property; written by the game thread each
+	// frame, read from the network and player-list threads
+	std::atomic_bool spectator_mode_ = false;
 	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
@@ -562,7 +587,7 @@ private:
 		player_list_color_ = color | 0xFF000000;
 		prop->SetString(std::format("{:06X}", color & 0x00FFFFFF).data());
 		if (player_list_visible_) {
-			player_list_visible_ = false;
+			stop_player_list(false); // show_player_list joins before restarting
 			show_player_list();
 		}
 		if (permanent_notification_) permanent_notification_->paint(player_list_color_);
@@ -759,7 +784,7 @@ private:
 			}
 			if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
 				if (player_list_visible_) {
-					player_list_visible_ = false;
+					stop_player_list(false);
 					config_manager_.set_player_list_visible(false);
 				}
 				else {
@@ -924,12 +949,9 @@ private:
 	void cleanup(bool down = false, bool linger = true) {
 		std::lock_guard lk(bml_mtx_);
 		client_cv_.notify_all();
-		if (player_list_visible_) {
-			player_list_visible_ = false;
-			asio::post(thread_pool_, [this] {
-				if (player_list_thread_.joinable()) player_list_thread_.join();
-			});
-		}
+		if (down)
+			shutting_down_ = true;
+		stop_player_list(down);
 		if (down) {
 			console_window_.hide();
 			asio::post(thread_pool_, [this] {
@@ -953,7 +975,11 @@ private:
 		clear_map_names();
 		db_.clear();
 
-		notify_listeners([](const auto& i) { i->on_logout(); });
+		// listener callbacks are other mods' code and will call BML APIs, so
+		// they belong on the game thread
+		utils_.run_on_game_thread([this] {
+			notify_listeners([](const auto& i) { i->on_logout(); });
+		});
 
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();
@@ -985,12 +1011,13 @@ private:
 
 			spectator_label_.reset();
 			permanent_notification_.reset();
+			// the player name is a BML property owned by the game thread
+			db_.set_nickname(config_manager_["playername"]->GetString());
 		});
 
 		if (down)
 			return;
 
-		db_.set_nickname(config_manager_["playername"]->GetString());
 		db_.set_client_id(k_HSteamNetConnection_Invalid + ((rand() << 16) | rand())); // invalid id indicates server
 	}
 

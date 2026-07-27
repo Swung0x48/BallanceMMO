@@ -20,9 +20,8 @@ static VOID CALLBACK WinEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwE
 void BallanceMMOClient::show_player_list() {
     // player_list_thread has a sleep_for and may freeze the game if joined synchronously
     asio::post(thread_pool_, [this] {
-        player_list_visible_ = false;
-        if (player_list_thread_.joinable())
-            player_list_thread_.join();
+        stop_player_list(true); // we are on a pool thread, so joining here is fine
+        if (shutting_down_) return;
         utils_.schedule_sync_call([this] {
             player_list_display_ = std::make_unique<decltype(player_list_display_)::element_type>("PlayerList", "", RIGHT_MOST, 0.412f);
             player_list_display_->sprite_->SetPosition({0.596f, 0.412f});
@@ -31,6 +30,7 @@ void BallanceMMOClient::show_player_list() {
             player_list_display_->paint(player_list_color_);
             // player_list_display_->paint_background(0x44444444);
             player_list_display_->set_visible(true);
+            std::lock_guard thread_lk(player_list_thread_mtx_);
             player_list_thread_ = utils::create_named_thread(L"BMMO_PlayerList", [this] {
                 player_list_visible_ = true;
                 player_list_last_count_ = -1;
@@ -38,9 +38,16 @@ void BallanceMMOClient::show_player_list() {
                 last_player_list_text_.clear();
                 while (player_list_visible_) {
                     update_player_list();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    // wait on the cv instead of sleeping: stopping this thread
+                    // must not take up to half a second while BML tears down
+                    std::unique_lock lk(player_list_cv_mtx_);
+                    player_list_cv_.wait_for(lk, std::chrono::milliseconds(500),
+                                             [this] { return !player_list_visible_; });
                 }
-                utils_.schedule_sync_call([this] { player_list_display_.reset(); });
+                // BML is already going away; scheduling a call into it now would
+                // run against a destroyed mod
+                if (!shutting_down_)
+                    utils_.schedule_sync_call([this] { player_list_display_.reset(); });
             });
         });
     });
@@ -408,6 +415,7 @@ void BallanceMMOClient::OnProcess() {
     // refresh the values worker threads read instead of querying the engine
     utils_.refresh_engine_cache();
     own_cheat_enabled_ = m_bml->IsCheatEnabled();
+    spectator_mode_ = config_manager_["spectator"]->GetBoolean();
 
     if (!connected())
         return;
@@ -1575,8 +1583,12 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         set_status_text("Connected (Login requested)");
         SendIngameMessage("Connected to server.");
         std::string nickname = db_.get_nickname();
-        config_manager_.check_and_save_name_change_time();
-        spectator_mode_ = config_manager_["spectator"]->GetBoolean();
+        // check_and_save_name_change_time() writes the external config file and
+        // read-modify-writes config_manager_'s name-change bookkeeping, which
+        // the game thread also touches; keep it off the network thread.
+        utils_.run_on_game_thread([this] { config_manager_.check_and_save_name_change_time(); });
+        // spectator_mode_ mirrors a BML property; the game thread refreshes it
+        // every frame in OnProcess, so just read it here
         if (spectator_mode_) {
             nickname = bmmo::name_validator::get_spectator_nickname(nickname);
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
@@ -1866,7 +1878,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         play_wave_sound(sound_bubble_);
         utils_.flash_window();
 
-        notify_listeners([&](const auto& i) { i->on_player_login(msg.connection_id); });
+        // other mods' callbacks will call BML APIs: run them on the game thread
+        utils_.run_on_game_thread([this, id = msg.connection_id] {
+            notify_listeners([id](const auto& i) { i->on_player_login(id); });
+        });
         // TODO: call this when the player enters a map
 
         break;
@@ -2127,7 +2142,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = bmmo::message_utils::view_as<bmmo::level_finish_v2_msg>(network_msg);
         if (!msg) break;
 
-        notify_listeners([msg](const auto& i) { i->on_level_finish(msg); });
+        // the message points into the receive buffer, so copy it for the
+        // deferred call; the callbacks are other mods' code and touch BML
+        utils_.run_on_game_thread([this, finish = *msg] {
+            auto copy = finish;
+            notify_listeners([&copy](const auto& i) { i->on_level_finish(&copy); });
+        });
 
         // Prepare message
         std::string map_name = get_map_name(msg->content.map),
