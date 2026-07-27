@@ -28,10 +28,19 @@ namespace bmmo {
         };
 
         bool deserialize() {
-            serializable_message::deserialize();
+            if (!serializable_message::deserialize())
+                return false;
 
             uint32_t size = 0;
-            raw.read(reinterpret_cast<char*>(&size), sizeof(size));
+            if (!message_utils::read_variable(raw, &size))
+                return false;
+            // each entry costs at least the hash plus a length prefix, so a
+            // count larger than that can never be honest - reserving it would
+            // let a forged packet allocate gigabytes
+            constexpr size_t MIN_ENTRY_SIZE = HASH_SIZE + sizeof(uint32_t);
+            if (static_cast<size_t>(size) * MIN_ENTRY_SIZE
+                    > static_cast<size_t>(message_utils::bytes_remaining(raw)))
+                return false;
             maps.reserve(size);
 
             for (uint32_t i = 0; i < size; i++) {

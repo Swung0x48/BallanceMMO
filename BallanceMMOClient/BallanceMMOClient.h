@@ -190,8 +190,12 @@ private:
 	std::vector<player_status_list_entry> player_status_list_;
 	std::mutex player_status_list_mtx_;
 	std::string last_player_list_text_;
+	// Members rather than locals of the player-list thread: update_player_list
+	// hands them to a sync call that runs later on the game thread, so
+	// references to that thread's stack would dangle once it exits.
+	int player_list_last_count_ = -1, player_list_last_font_size_ = -1;
 	void show_player_list();
-	inline void update_player_list(int& last_player_count, int& last_font_size);
+	inline void update_player_list();
 
 	void connect_to_server(const char* address, const char* name = "") override;
 	void disconnect_from_server() override;

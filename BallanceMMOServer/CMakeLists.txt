@@ -115,6 +115,27 @@ else()
     install(TARGETS GameNetworkingSockets yaml-cpp DESTINATION lib)
 endif()
 
+option(BUILD_SERVER_TESTS "Build BallanceMMO server unit tests" OFF)
+
+if (BUILD_SERVER_TESTS)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest
+        GIT_TAG v1.14.0
+    )
+    # match the /MD runtime used by the rest of the build
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+    enable_testing()
+    add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp)
+    target_link_libraries(BallanceMMOMessageTests PRIVATE GTest::gtest_main GameNetworkingSockets::shared)
+    if (WIN32)
+        target_compile_definitions(BallanceMMOMessageTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    include(GoogleTest)
+    gtest_discover_tests(BallanceMMOMessageTests DISCOVERY_MODE PRE_TEST)
+endif()
+
 option(BUILD_SERVER_APPIMAGE "Build BallanceMMO Server AppImage" OFF)
 
 if (BUILD_SERVER_APPIMAGE)

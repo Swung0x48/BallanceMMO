@@ -1,5 +1,6 @@
 #ifndef BALLANCEMMOSERVER_RECORD_ENTRY_HPP
 #define BALLANCEMMOSERVER_RECORD_ENTRY_HPP
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <cstddef>
@@ -11,9 +12,9 @@ namespace bmmo {
         record_entry(): size(0), data(nullptr) {}
 
         explicit record_entry(int32_t s) {
-            assert(size >= 0);
-            size = s;
-            if (s > 0)
+            assert(s >= 0);
+            size = (s > 0) ? s : 0;
+            if (size > 0)
                 data = new std::byte[size];
         }
 

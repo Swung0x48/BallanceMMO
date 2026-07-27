@@ -163,7 +163,7 @@ namespace bmmo::string_utils {
         return files;
     }
 
-    inline std::string get_uuid_string(uint8_t* uuid) {
+    inline std::string get_uuid_string(const uint8_t* uuid) {
         // std::stringstream ss;
         // for (int i = 0; i < 16; i++) {
         //     ss << std::hex << std::setfill('0') << std::setw(2) << (int)uuid[i];

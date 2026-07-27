@@ -5,8 +5,10 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <cassert>
 #include <csignal>
+#include <cstdlib>
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 #ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
@@ -58,9 +60,12 @@ public:
         interface_ = SteamNetworkingSockets();
 
         auto close_log_and_exit = [](int) { // signal handler
-            bmmo::Printf("External interrupt received, closing log file and exiting...");
-            bmmo::close_log();
-            std::exit(0);
+            // Keep this minimal: most functions (printf, locks, exit with
+            // atexit handlers) are not async-signal-safe. Flushing the log is
+            // the one thing we must attempt before dying - closing it would
+            // pull the FILE out from under a thread still writing to it.
+            bmmo::flush_log_on_exit();
+            std::_Exit(0);
         };
         std::signal(SIGABRT, close_log_and_exit);
         std::signal(SIGTERM, close_log_and_exit);
@@ -74,6 +79,12 @@ public:
         return running_;
     }
 
+    // Blocks until mark_running() has been called on another thread.
+    void wait_till_started() {
+        std::unique_lock<std::mutex> lk(startup_mutex_);
+        startup_cv_.wait(lk, [this] { return running_.load(); });
+    }
+
     static SteamNetworkingConfigValue_t generate_opt() {
         SteamNetworkingConfigValue_t opt{};
         SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected, 7200);
@@ -85,11 +96,8 @@ public:
     virtual bool update() {
         int msg_count = poll_incoming_messages();
         poll_connection_state_changes();
-//        poll_local_state_changes();
         return msg_count > 0;
     }
-
-    virtual void poll_local_state_changes() = 0;
 
     static void destroy() {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -102,11 +110,24 @@ public:
     }
 
 protected:
+    // Sets running_ and wakes up any wait_till_started() callers.
+    // The store happens under startup_mutex_ so the waiting thread cannot
+    // miss the notification between its predicate check and the wait.
+    void mark_running() {
+        {
+            std::lock_guard<std::mutex> lk(startup_mutex_);
+            running_ = true;
+        }
+        startup_cv_.notify_all();
+    }
+
     ISteamNetworkingSockets* interface_ = nullptr;
     static inline role* this_instance_ = nullptr;
     static inline SteamNetworkingMicroseconds init_timestamp_;
     static inline time_t init_time_t_;
     std::atomic_bool running_ = false;
+    std::mutex startup_mutex_;
+    std::condition_variable startup_cv_;
     ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
 
     virtual int poll_incoming_messages() = 0;
