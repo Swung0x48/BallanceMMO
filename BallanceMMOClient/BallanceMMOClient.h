@@ -229,6 +229,36 @@ private:
 	std::vector<player_status_list_entry> player_status_list_;
 	std::mutex player_status_list_mtx_;
 	std::string last_player_list_text_;
+	// The player-list thread must not call BML APIs or read game-thread state,
+	// so the game thread publishes everything it needs here once per frame.
+	struct player_list_snapshot {
+		bmmo::named_map current_map{};
+		std::string own_map_display_name;
+		int sector = 0;
+		int64_t sector_timestamp = 0;
+		bool cheated = false;
+		bool show_rankings = false; // right alt held
+		bool spectator = false;
+	};
+	player_list_snapshot player_list_snapshot_;
+	std::mutex player_list_snapshot_mtx_;
+	// game thread only
+	void refresh_player_list_snapshot() {
+		player_list_snapshot snapshot;
+		snapshot.current_map = current_map_;
+		snapshot.own_map_display_name = current_map_.get_display_name();
+		snapshot.sector = current_sector_;
+		snapshot.sector_timestamp = current_sector_timestamp_;
+		snapshot.cheated = m_bml->IsCheatEnabled();
+		snapshot.show_rankings = input_manager_ && input_manager_->IsKeyDown(CKKEY_RMENU);
+		snapshot.spectator = spectator_mode_;
+		std::lock_guard lk(player_list_snapshot_mtx_);
+		player_list_snapshot_ = std::move(snapshot);
+	}
+	player_list_snapshot get_player_list_snapshot() {
+		std::lock_guard lk(player_list_snapshot_mtx_);
+		return player_list_snapshot_;
+	}
 	// Members rather than locals of the player-list thread: update_player_list
 	// hands them to a sync call that runs later on the game thread, so
 	// references to that thread's stack would dangle once it exits.
@@ -282,6 +312,38 @@ private:
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
 	std::shared_ptr<text_sprite> spectator_label_, permanent_notification_;
+	// The ping thread publishes its text here instead of writing the sprite;
+	// OnProcess applies it on the game thread.
+	std::string ping_text_;
+	bool ping_text_pending_ = false;
+	std::mutex ping_text_mtx_;
+	// The status/ping sprites are engine objects but the connection callbacks
+	// that update them run on the network thread, so go through the game thread.
+	void set_status_text(const std::string& text, int color = 0) {
+		utils_.run_on_game_thread([this, text, color] {
+			if (!status_) return;
+			status_->update(text);
+			if (color != 0) status_->paint(color);
+		});
+	}
+	void clear_ping_text() {
+		{
+			std::lock_guard lk(ping_text_mtx_);
+			ping_text_.clear();
+			ping_text_pending_ = false;
+		}
+		utils_.run_on_game_thread([this] { if (ping_) ping_->update(""); });
+	}
+	void apply_pending_ping_text() { // game thread only
+		std::string text;
+		{
+			std::lock_guard lk(ping_text_mtx_);
+			if (!ping_text_pending_) return;
+			ping_text_pending_ = false;
+			text = ping_text_;
+		}
+		if (ping_) ping_->update(text, false);
+	}
 
 	BMLVersion loader_version_{}, source_version_{};
 
