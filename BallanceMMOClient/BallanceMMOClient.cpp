@@ -70,7 +70,7 @@ inline void BallanceMMOClient::update_player_list() {
     auto push_entry = [&, this](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
         const auto& times = maps_[map.get_hash_bytes_string()].sector_timestamps;
         auto time_it = times.find(sector);
-        auto map_name = map.get_display_name(map_names_);
+        auto map_name = get_map_name(map);
         if (time_it != times.end()) {
             timestamp -= time_it->second;
             timestamp_display[map_name][sector] |= (timestamp == 0 ? TdsZero : TdsNonZero);
@@ -232,12 +232,12 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         did_not_finish_ = false;
         max_sector_ = 0;
         if (connected()) {
-            const auto name_it = map_names_.find(current_map_.get_hash_bytes_string());
-            if (name_it == map_names_.end()) {
-                map_names_.try_emplace(current_map_.get_hash_bytes_string(), current_map_.name);
+            const auto hash = current_map_.get_hash_bytes_string();
+            if (!has_map_name(hash)) {
+                add_map_name(hash, current_map_.name);
                 send_current_map_name();
             } else
-                current_map_.name = name_it->second;
+                current_map_.name = get_raw_map_name(hash);
             player_ball_ = get_current_ball();
             if (player_ball_ != nullptr) {
                 local_state_handler_->poll_and_send_state_forced(player_ball_);
@@ -749,8 +749,7 @@ void BallanceMMOClient::init_commands() {
 
         const char* new_text = nullptr;
         bool canceled = false;
-        for (const auto& i : listeners_)
-            canceled |= !i->on_pre_chat(msg.chat_content.c_str(), &new_text);
+        notify_listeners([&](const auto& i) { canceled |= !i->on_pre_chat(msg.chat_content.c_str(), &new_text); });
         if (canceled) return;
 
         if (new_text && std::strlen(new_text) < UINT16_MAX)
@@ -978,7 +977,7 @@ void BallanceMMOClient::init_commands() {
                               pair.second.cheated ? "[CHEAT] " : "",
                               pair.second.name, pair.second.current_sector,
                               bmmo::string_utils::get_ordinal_suffix(pair.second.current_sector),
-                              pair.second.current_map.get_display_name(map_names_)));
+                              get_map_name(pair.second.current_map)));
             return true;
         });
     });
@@ -1344,8 +1343,7 @@ void BallanceMMOClient::terminate(long delay) {
 
 void BallanceMMOClient::connect_to_server(const char* address, const char* name) {
     bool canceled = false;
-    for (const auto& i : listeners_)
-        canceled |= !i->on_pre_login(address, name);
+    notify_listeners([&](const auto& i) { canceled |= !i->on_pre_login(address, name); });
     if (canceled) return;
 
     if (std::strcmp(server_addr_.c_str(), address) == 0) {
@@ -1747,18 +1745,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (m_bml->IsIngame() && player_ball_ != nullptr)
             local_state_handler_->poll_and_send_state_forced(player_ball_);
         if (!current_map_.name.empty()) {
-            if (const auto name_it = map_names_.find(current_map_.get_hash_bytes_string()); name_it == map_names_.end()) {
+            const auto hash = current_map_.get_hash_bytes_string();
+            if (!has_map_name(hash)) {
                 send_current_map_name();
-                map_names_.try_emplace(current_map_.get_hash_bytes_string(), current_map_.name);
+                add_map_name(hash, current_map_.name);
             } else
-                current_map_.name = name_it->second;
+                current_map_.name = get_raw_map_name(hash);
         }
         send_current_map();
 
         {
-            std::lock_guard client_lk(client_mtx_);
-            for (const auto& i : listeners_)
-                i->on_login(server_addr_.c_str(), server_name_.c_str());
+            notify_listeners([this](const auto& i) { i->on_login(server_addr_.c_str(), server_name_.c_str()); });
         }
 
         if (config_manager_.get_player_list_visible())
@@ -1824,8 +1821,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         play_wave_sound(sound_bubble_);
         utils_.flash_window();
 
-        for (const auto& i : listeners_)
-            i->on_player_login(msg.connection_id);
+        notify_listeners([&](const auto& i) { i->on_player_login(msg.connection_id); });
         // TODO: call this when the player enters a map
 
         break;
@@ -1842,8 +1838,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             db_.remove(msg->content.connection_id);
             utils_.schedule_sync_call([this, id = msg->content.connection_id] {
                 objects_.remove(id);
-                for (const auto& i : listeners_)
-                    i->on_player_logout(id);
+                notify_listeners([id](const auto& i) { i->on_player_logout(id); });
             });
         }
         break;
@@ -1928,11 +1923,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 160 - (int)average_ping_ - time_for_14_frames_ms)));
         std::string sender_name = get_username(msg->content.sender),
-                    map_name = msg->content.map.get_display_name(map_names_);
+                    map_name = get_map_name(msg->content.map);
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
 
-        for (const auto& i : listeners_)
-            i->on_countdown(msg);
+        notify_listeners([msg](const auto& i) { i->on_countdown(msg); });
 
         switch (msg->content.type) {
             using ct = bmmo::countdown_type;
@@ -2027,7 +2021,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             "{}{} did not finish {} (furthest reach: sector {}).",
             msg->content.cheated ? "[CHEAT] " : "",
             player_name,
-            msg->content.map.get_display_name(map_names_),
+            get_map_name(msg->content.map),
             msg->content.sector
         ), bmmo::color_code(msg->code));
         if (msg->content.player_id == db_.get_client_id())
@@ -2075,11 +2069,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         auto* msg = bmmo::message_utils::view_as<bmmo::level_finish_v2_msg>(network_msg);
         if (!msg) break;
 
-        for (const auto& i : listeners_)
-            i->on_level_finish(msg);
+        notify_listeners([msg](const auto& i) { i->on_level_finish(msg); });
 
         // Prepare message
-        std::string map_name = msg->content.map.get_display_name(map_names_),
+        std::string map_name = get_map_name(msg->content.map),
             player_name = get_username(msg->content.player_id),
             formatted_score = msg->content.get_formatted_score();
         //auto state = db_.get(msg->content.player_id);
@@ -2108,8 +2101,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
-        std::lock_guard lk(bml_mtx_);
-        map_names_.insert(msg.maps.begin(), msg.maps.end());
+        merge_map_names(msg.maps);
         break;
     }
     case bmmo::OwnedCheatState: {
@@ -2233,7 +2225,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                               : (player_state && player_state->cheated)) ? "[CHEAT] " : "",
                               get_username(msg->content.player_id), msg->content.sector,
                               bmmo::string_utils::get_ordinal_suffix(msg->content.sector),
-                              msg->content.map.get_display_name(map_names_)),
+                              get_map_name(msg->content.map)),
                               bmmo::color_code(msg->code));
         }
         else {
@@ -2376,7 +2368,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             bool hs_mode = (msg.mode == bmmo::level_mode::Highscore);
             bmmo::ranking_entry::sort_rankings(msg.rankings, hs_mode);
             auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
-                    msg.rankings, msg.map.get_display_name(map_names_), hs_mode);
+                    msg.rankings, get_map_name(msg.map), hs_mode);
             size_t size = msg.rankings.first.size() + msg.rankings.second.size() + 1;
             std::string text; text.reserve(size * 64);
             for (const auto& [line, color] : formatted_texts) {

@@ -60,11 +60,16 @@ void utils::flash_window() const {
 int utils::split_lines(std::string& text, float max_width, float font_size, int font_weight) const {
     std::wstringstream ws {bmmo::string_utils::ConvertUtf8ToWide(bmmo::string_utils::parse_line_breaks(text))};
     text.clear();
-    auto hdc = GetDC(get_main_window());
+    auto window = get_main_window();
+    auto hdc = GetDC(window);
+    if (!hdc) return 0;
     LOGFONT font_struct = system_font_struct_;
     font_struct.lfWeight = font_weight;
     HFONT font = CreateFontIndirect(&font_struct);
-    SelectObject(hdc, font);
+    // keep the previous font so it can be restored: deleting a font while it
+    // is still selected into the DC leaks it, and the DC itself was never
+    // released, so every call leaked one of each
+    HGDIOBJ old_font = SelectObject(hdc, font);
     SIZE sz;
     int max_length{}, line_length, line_count = 0;
     while (!ws.eof()) {
@@ -80,7 +85,9 @@ int utils::split_lines(std::string& text, float max_width, float font_size, int 
         } while (max_length < line_length);
     }
     // GetTextExtentPoint32W(hdc, wtext.c_str(), wtext.length(), &sz);
+    SelectObject(hdc, old_font);
     DeleteObject(font);
+    ReleaseDC(window, hdc);
     return line_count;
 }
 

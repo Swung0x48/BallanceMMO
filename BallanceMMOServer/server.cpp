@@ -180,7 +180,17 @@ public:
         return static_cast<int>(clients_.size());
     }
 
-    inline config_manager& get_config() { return config_; }
+    // Narrow, locked accessors instead of handing out a mutable reference to
+    // config_: the network thread mutates it (bans, mutes) under state_mutex_,
+    // so console commands must not read it unsynchronized.
+    void print_bans() {
+        std::lock_guard lk(state_mutex_);
+        config_.print_bans();
+    }
+    void print_mutes() {
+        std::lock_guard lk(state_mutex_);
+        config_.print_mutes();
+    }
     inline bmmo::map get_last_countdown_map() {
         std::lock_guard lk(state_mutex_);
         return last_countdown_map_;
@@ -630,12 +640,6 @@ protected:
         return false;
     }
 
-    inline bool is_muted(HSteamNetConnection client) {
-        // find() instead of operator[]: the latter would insert a
-        // default-constructed entry for unknown connection ids
-        auto it = clients_.find(client);
-        return it != clients_.end() && is_muted(it->second.uuid);
-    }
     inline bool is_muted(const uint8_t* uuid) const {
         return config_.muted_players.contains(bmmo::string_utils::get_uuid_string(uuid));
     }
@@ -851,7 +855,9 @@ protected:
                 bmmo::login_request_v2_msg msg;
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 if (!msg.deserialize()) {
-                    interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::None, "Malformed login message", true);
+                    // not connection_end::None: GNS turns a reason of 0 into
+                    // App_Generic, which lands on LoginDenied_Min by accident
+                    interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::MalformedLogin, "Malformed login message", true);
                     break;
                 }
 
@@ -878,7 +884,9 @@ protected:
                 bmmo::login_request_v3_msg msg;
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 if (!msg.deserialize()) {
-                    interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::None, "Malformed login message", true);
+                    // not connection_end::None: GNS turns a reason of 0 into
+                    // App_Generic, which lands on LoginDenied_Min by accident
+                    interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::MalformedLogin, "Malformed login message", true);
                     break;
                 }
 
@@ -1891,8 +1899,8 @@ int main(int argc, char** argv) {
             server.set_mute(client, action);
     });
     console.register_aliases("op", {"deop", "mute", "unmute"});
-    console.register_command("listban", [&] { server.get_config().print_bans(); });
-    console.register_command("listmute", [&] { server.get_config().print_mutes(); });
+    console.register_command("listban", [&] { server.print_bans(); });
+    console.register_command("listmute", [&] { server.print_mutes(); });
     console.register_command("unban", [&] { server.set_unban(console.get_next_word()); });
     console.register_command("reload", [&] {
         if (!server.load_config())
@@ -1907,6 +1915,9 @@ int main(int argc, char** argv) {
         };
         if (console.empty()) { print_hint(); return; }
         const auto client = get_client_id_from_console();
+        // receive() treats an invalid id as "pick a random online player", so
+        // without this a mistyped id sends the countdown as someone else
+        if (client == k_HSteamNetConnection_Invalid) return;
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word(true);
         if (console.empty()) { print_hint(); return; }

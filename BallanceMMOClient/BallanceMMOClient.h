@@ -129,6 +129,20 @@ public:
 		std::lock_guard lk(client_mtx_);
 		return listeners_.erase(listener) > 0;
 	};
+	// Iterating listeners_ directly races register/remove_listener, which other
+	// mods may call at any time from the game thread. Copy under the lock and
+	// invoke outside it: the callbacks run other mods' code, which we should
+	// not hold our lock across.
+	template<typename F>
+	void notify_listeners(F&& fn) {
+		decltype(listeners_) listeners;
+		{
+			std::lock_guard lk(client_mtx_);
+			listeners = listeners_;
+		}
+		for (const auto& i : listeners)
+			fn(i);
+	};
 	std::string get_username(HSteamNetConnection client_id) override {
 		if (client_id == k_HSteamNetConnection_Invalid)
 			return { "[Server]" };
@@ -136,8 +150,33 @@ public:
 		assert(state.has_value() || (db_.get_client_id() == client_id));
 		return state.has_value() ? state->name : get_display_nickname();
 	}
+	// map_names_ is filled from the network thread (MapNames messages) and from
+	// the game thread (entering a level), so every access goes through these.
 	std::string get_map_name(const bmmo::map& map) override {
+		std::lock_guard lk(map_names_mtx_);
 		return map.get_display_name(map_names_);
+	}
+	void add_map_name(const std::string& hash, const std::string& name) {
+		std::lock_guard lk(map_names_mtx_);
+		map_names_.try_emplace(hash, name);
+	}
+	bool has_map_name(const std::string& hash) {
+		std::lock_guard lk(map_names_mtx_);
+		return map_names_.contains(hash);
+	}
+	// the stored name, unformatted; empty if we don't know this map
+	std::string get_raw_map_name(const std::string& hash) {
+		std::lock_guard lk(map_names_mtx_);
+		auto it = map_names_.find(hash);
+		return (it == map_names_.end()) ? std::string{} : it->second;
+	}
+	void merge_map_names(const std::unordered_map<std::string, std::string>& names) {
+		std::lock_guard lk(map_names_mtx_);
+		map_names_.insert(names.begin(), names.end());
+	}
+	void clear_map_names() {
+		std::lock_guard lk(map_names_mtx_);
+		map_names_.clear();
 	}
 
 private:
@@ -272,6 +311,7 @@ private:
 	std::atomic_int32_t current_sector_ = 0, max_sector_ = 0;
 	std::atomic_int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
+	std::mutex map_names_mtx_;
 	std::unordered_map<std::string, std::array<uint8_t, 16>> md5_data_;
 	std::atomic<SteamNetworkingMicroseconds> map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
@@ -425,15 +465,18 @@ private:
 	}
 
 	void update_sector_timestamp(const bmmo::map& map, int sector, int64_t timestamp) {
-		//std::unique_lock lk(bml_mtx_);
 		if (sector == 0) return;
-		auto map_it = maps_.find(map.get_hash_bytes_string());
-		if (map_it == maps_.end()) return;
-		auto ts_it = map_it->second.sector_timestamps.find(sector);
-		if (ts_it != map_it->second.sector_timestamps.end() && ts_it->second > timestamp)
-			ts_it->second = timestamp;
-		else
-			map_it->second.sector_timestamps.try_emplace(sector, timestamp);
+		// modify_if holds the submap's lock across the callback; find() hands
+		// back an iterator and leaves us mutating the value with nothing held,
+		// while the network thread may be touching the same map entry
+		maps_.modify_if(map.get_hash_bytes_string(), [&](auto& entry) {
+			auto& timestamps = entry.second.sector_timestamps;
+			auto ts_it = timestamps.find(sector);
+			if (ts_it != timestamps.end() && ts_it->second > timestamp)
+				ts_it->second = timestamp;
+			else
+				timestamps.try_emplace(sector, timestamp);
+		});
 	}
 
 	void resume_counter() {
@@ -842,14 +885,10 @@ private:
 			//network_thread_.join();
 
 		//thread_pool_.stop();
-		map_names_.clear();
+		clear_map_names();
 		db_.clear();
 
-		{
-			std::lock_guard client_lk(client_mtx_);
-			for (const auto& i : listeners_)
-				i->on_logout();
-		}
+		notify_listeners([](const auto& i) { i->on_logout(); });
 
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();

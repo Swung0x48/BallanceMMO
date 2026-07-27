@@ -111,19 +111,30 @@ public:
     }
 
     bool setup_recorder() {
-        recorder_mode_ = true;
         auto current_time = std::time(nullptr);
         char record_name[40];
-        std::strftime(record_name, sizeof(record_name), "records/record_%Y%m%d%H%M.bin", std::localtime(&current_time));
+        std::tm tm_buf{}; // std::localtime hands back a shared static tm
+#ifdef _WIN32
+        localtime_s(&tm_buf, &current_time);
+#else
+        localtime_r(&current_time, &tm_buf);
+#endif
+        std::strftime(record_name, sizeof(record_name), "records/record_%Y%m%d%H%M.bin", &tm_buf);
         std::filesystem::create_directory("records");
+        record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
+        // report success only once the file is actually open, and leave
+        // recorder_mode_ off on failure so nothing queues messages for a
+        // recorder thread that has nowhere to write them
+        if (!record_stream_.is_open()) {
+            Printf("Error: failed to open the record file \"%s\".", record_name);
+            return false;
+        }
+        recorder_mode_ = true;
         Printf("Flight recorder started (saving at \"%s\").", record_name);
         if (options.individual_packets) {
             std::filesystem::create_directories(packet_save_path);
             Printf("Individual packets will be saved at \"%s\".", packet_save_path);
         }
-        record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
-        if (!record_stream_.is_open())
-            return false;
         record_stream_ << bmmo::RECORD_HEADER;
         record_stream_.put('\0');
         int64_t init_time = init_time_t_; // be specific about time_t type
@@ -185,8 +196,13 @@ public:
         auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
         networking_msg->m_conn = connection_;
         networking_msg->m_pData = data;
-        networking_msg->m_cbSize = size;
+        networking_msg->m_cbSize = static_cast<int>(size); // m_cbSize is an int
+        networking_msg->m_usecTimeReceived = SteamNetworkingUtils()->GetLocalTimestamp();
         on_message(networking_msg);
+        // AllocateMessage(0) leaves m_pfnFreeData null, so Release() will not
+        // free the caller's buffer - clear it anyway to be explicit
+        networking_msg->m_pData = nullptr;
+        networking_msg->m_cbSize = 0;
         networking_msg->Release();
     }
 
@@ -375,16 +391,25 @@ public:
     }
 
     void whisper_to(const HSteamNetConnection player_id, const std::string& message) {
-        std::unique_lock lk(state_mutex_);
-        if (auto it = clients_.find(player_id); it != clients_.end() || player_id == k_HSteamNetConnection_Invalid) {
-            lk.unlock();
+        // resolve the target under the lock, then send and log without it:
+        // both send() and get_player_name() take their own locks as needed
+        std::string player_name;
+        {
+            std::lock_guard lk(state_mutex_);
+            auto it = clients_.find(player_id);
+            if (it != clients_.end())
+                player_name = it->second.name;
+            else if (player_id == k_HSteamNetConnection_Invalid)
+                player_name = "[Server]";
+        }
+        if (!player_name.empty()) {
             bmmo::private_chat_msg msg{};
             msg.player_id = player_id;
             msg.chat_content = message;
             msg.serialize();
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             Printf(bmmo::color_code(msg.code), "Whispered to (%u, %s): %s",
-                    player_id, get_player_name(player_id), message);
+                    player_id, player_name, message);
         }
         else {
             Printf("Player not found.");
@@ -1058,7 +1083,10 @@ int main(int argc, char** argv) {
     client.set_uuid(options.uuid);
     client.set_print_states(options.print_states);
     client.set_logging_level(options.detail);
-    if (options.recorder_mode) client.setup_recorder();
+    if (options.recorder_mode && !client.setup_recorder()) {
+        std::cerr << "Cannot start the flight recorder." << std::endl;
+        return 1;
+    }
 
     std::cout << "Connecting to server..." << std::endl;
     if (!client.connect(options.server_addr)) {
