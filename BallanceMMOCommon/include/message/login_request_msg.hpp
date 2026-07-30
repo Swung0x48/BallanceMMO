@@ -10,14 +10,14 @@ namespace bmmo {
         std::string nickname;
 
         bool serialize() override {
-            if (serializable_message::serialize()) return false;
+            if (!serializable_message::serialize()) return false;
 
             message_utils::write_string(nickname, raw);
             return (raw.good());
         }
 
         bool deserialize() override {
-            if (serializable_message::deserialize())
+            if (!serializable_message::deserialize())
                 return false;
 
             if (!message_utils::read_string(raw, nickname))

@@ -107,11 +107,12 @@ const std::vector<std::string> console::get_command_hints(bool fuzzy_matching, c
         return {"help"};
     if (fuzzy_matching && start_name.length() > 1)
         start_name.erase((start_name.length() - 1) * 2 / 3 + 1);
-    std::string end_name(start_name);
-    ++end_name[end_name.length() - 1];
-    auto end = commands_.lower_bound(end_name);
+    // Walk the prefix range directly. Deriving an upper bound by incrementing
+    // the last byte breaks on 0xFF (it wraps to 0x00, so "end" sorts before
+    // "begin" and the loop runs off the end of the map).
     std::vector<std::string> hints;
-    for (auto it = commands_.lower_bound(start_name); it != end; it++) {
+    for (auto it = commands_.lower_bound(start_name);
+            it != commands_.end() && it->first.starts_with(start_name); ++it) {
         hints.push_back(it->first);
     };
     return hints;

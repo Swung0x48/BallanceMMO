@@ -49,7 +49,12 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &map)) return false;
             if (!message_utils::read_variable(raw, &mode)) return false;
 
-            auto size = message_utils::read_variable<uint16_t>(raw);
+            uint16_t size = 0;
+            if (!message_utils::read_variable(raw, &size)) return false;
+            // one entry is at least a few bytes; refuse counts the rest of the
+            // payload cannot hold rather than resizing on a forged number
+            if (static_cast<size_t>(size) > static_cast<size_t>(message_utils::bytes_remaining(raw)))
+                return false;
             rankings.first.resize(size);
             for (auto& entry: rankings.first) {
                 if (!message_utils::read_variable(raw, &entry.cheated)) return false;
@@ -59,7 +64,9 @@ namespace bmmo {
                 if (!message_utils::read_variable(raw, &entry.sr_time)) return false;
                 if (!message_utils::read_string<uint8_t>(raw, entry.formatted_hs_score)) return false;
             }
-            size = message_utils::read_variable<uint16_t>(raw);
+            if (!message_utils::read_variable(raw, &size)) return false;
+            if (static_cast<size_t>(size) > static_cast<size_t>(message_utils::bytes_remaining(raw)))
+                return false;
             rankings.second.resize(size);
             for (auto& entry: rankings.second) {
                 if (!message_utils::read_variable(raw, &entry.cheated)) return false;

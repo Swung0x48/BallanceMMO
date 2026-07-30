@@ -60,11 +60,16 @@ void utils::flash_window() const {
 int utils::split_lines(std::string& text, float max_width, float font_size, int font_weight) const {
     std::wstringstream ws {bmmo::string_utils::ConvertUtf8ToWide(bmmo::string_utils::parse_line_breaks(text))};
     text.clear();
-    auto hdc = GetDC(get_main_window());
+    auto window = get_main_window();
+    auto hdc = GetDC(window);
+    if (!hdc) return 0;
     LOGFONT font_struct = system_font_struct_;
     font_struct.lfWeight = font_weight;
     HFONT font = CreateFontIndirect(&font_struct);
-    SelectObject(hdc, font);
+    // keep the previous font so it can be restored: deleting a font while it
+    // is still selected into the DC leaks it, and the DC itself was never
+    // released, so every call leaked one of each
+    HGDIOBJ old_font = SelectObject(hdc, font);
     SIZE sz;
     int max_length{}, line_length, line_count = 0;
     while (!ws.eof()) {
@@ -72,7 +77,7 @@ int utils::split_lines(std::string& text, float max_width, float font_size, int 
         do {
             line_length = wline.length();
             GetTextExtentExPointW(hdc, wline.c_str(), line_length,
-                                  int(max_width * bml_->GetRenderContext()->GetWidth() / 1.44f * 12 / font_size),
+                                  int(max_width * render_width_.load() / 1.44f * 12 / font_size),
                                   &max_length, NULL, &sz);
             text += bmmo::string_utils::ConvertWideToUtf8(wline.substr(0, max_length)) + '\n';
             wline.erase(0, max_length);
@@ -80,7 +85,9 @@ int utils::split_lines(std::string& text, float max_width, float font_size, int 
         } while (max_length < line_length);
     }
     // GetTextExtentPoint32W(hdc, wtext.c_str(), wtext.length(), &sz);
+    SelectObject(hdc, old_font);
     DeleteObject(font);
+    ReleaseDC(window, hdc);
     return line_count;
 }
 
@@ -89,29 +96,42 @@ const char* utils::get_system_font() {
 }
 
 int utils::get_display_font_size(float size) const {
-    return (int)std::round(bml_->GetRenderContext()->GetHeight() / (768.0f / 119) * size / utils::get_system_dpi());
+    // uses the cached render height: this is reached from worker threads
+    return (int)std::round(render_height_.load() / (768.0f / 119) * size / utils::get_system_dpi());
 }
 
 void utils::display_important_notification(std::string text, float font_size, int line_count, int weight, float y_pos) const {
     using namespace std::chrono;
     auto current_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
     text = bmmo::string_utils::utf8_to_ansi(text);
-    text_sprite notification(std::format("Notification{}", current_ms),
-                              text, 0.0f, y_pos - 0.001053f * font_size * line_count);
-    notification.sprite_->SetAlignment(CKSPRITETEXT_CENTER);
-    notification.sprite_->SetZOrder(65536 + static_cast<int>(current_ms));
-    notification.sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });
-    notification.sprite_->SetFont(get_system_font(), get_display_font_size(font_size), weight, false, false);
-    notification.set_visible(true);
-    for (int i = 0; i < 15; i += 2) {
-        notification.paint(0x11FF1190 + i * 0x11001001);
-        std::this_thread::sleep_for(72ms);
-    }
-    std::this_thread::sleep_for(9s);
-    for (int i = 1; i <= 15; i += 2) {
-        notification.paint(0xFFFFF19E - i * 0x11100000);
-        std::this_thread::sleep_for(120ms);
-    }
+    // The notification is a sprite, so it is created, repainted and destroyed
+    // on the game thread. Callers reach this from worker threads; the fade used
+    // to run there with sleep_for, which both touched the engine off-thread and
+    // parked a pool thread for eleven seconds. BML's float timers count real
+    // milliseconds, so the animation keeps its timing without either problem.
+    run_on_game_thread([=, this] {
+        auto notification = std::make_shared<text_sprite>(
+                std::format("Notification{}", current_ms),
+                text, 0.0f, y_pos - 0.001053f * font_size * line_count);
+        notification->sprite_->SetAlignment(CKSPRITETEXT_CENTER);
+        notification->sprite_->SetZOrder(65536 + static_cast<int>(current_ms));
+        notification->sprite_->SetSize({ 1.0f, 0.2f + 0.00421f * font_size * line_count });
+        notification->sprite_->SetFont(get_system_font(), get_display_font_size(font_size), weight, false, false);
+        notification->set_visible(true);
+
+        float delay = 0.0f;
+        for (int i = 0; i < 15; i += 2) {
+            bml_->AddTimer(delay, [notification, i] { notification->paint(0x11FF1190 + i * 0x11001001); });
+            delay += 72.0f;
+        }
+        delay += 9000.0f;
+        for (int i = 1; i <= 15; i += 2) {
+            bml_->AddTimer(delay, [notification, i] { notification->paint(0xFFFFF19E - i * 0x11100000); });
+            delay += 120.0f;
+        }
+        // the last reference drops here, destroying the sprite on the game thread
+        bml_->AddTimer(delay, [notification] {});
+    });
 }
 
 void utils::cleanup_old_crash_dumps() {

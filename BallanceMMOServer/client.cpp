@@ -29,8 +29,10 @@
 
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
-bool cheat = false;
-bool force_next_restart = false;
+// written by the network thread (cheat toggle messages) and read/written by
+// the console thread, so both need to be atomic
+std::atomic_bool cheat = false;
+std::atomic_bool force_next_restart = false;
 std::atomic_int64_t server_realworld_timestamp_us = 0;
 std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp = 0;
 struct client_data {
@@ -85,42 +87,54 @@ class client: public role {
 public:
     bool connect(const std::string& connection_string) {
         bmmo::hostname_parser hp(connection_string);
-        using asio::ip::tcp; // tired of writing it out
-        asio::io_context io_context;
+        using asio::ip::tcp;
+        asio::io_context io_context; // only needed to construct the resolver
         tcp::resolver resolver(io_context);
-        tcp::resolver::query query(hp.get_address(), hp.get_port());
-        for (tcp::resolver::iterator iter = resolver.resolve(query), end; iter != end; iter++) {
-            tcp::endpoint ep = *iter;
-            std::string resolved_addr = ep.address().to_string() + ":" + std::to_string(ep.port());
-            Printf("Trying %s...", resolved_addr);
-            SteamNetworkingIPAddr server_address{};
-            if (!server_address.ParseString(resolved_addr.c_str())) {
-                return false;
+        try {
+            for (const auto& entry: resolver.resolve(hp.get_address(), hp.get_port())) {
+                tcp::endpoint ep = entry.endpoint();
+                std::string resolved_addr = ep.address().to_string() + ":" + std::to_string(ep.port());
+                Printf("Trying %s...", resolved_addr);
+                SteamNetworkingIPAddr server_address{};
+                if (!server_address.ParseString(resolved_addr.c_str()))
+                    continue;
+                SteamNetworkingConfigValue_t opt = generate_opt();
+                connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
+                if (connection_ == k_HSteamNetConnection_Invalid)
+                    continue;
+                return true;
             }
-            SteamNetworkingConfigValue_t opt = generate_opt();
-            connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
-            if (connection_ == k_HSteamNetConnection_Invalid)
-                continue;
-            io_context.stop();
-            return true;
+        } catch (const std::exception& e) { // resolver throws on failure
+            Printf("Failed to resolve hostname: %s", e.what());
         }
         return false;
     }
 
     bool setup_recorder() {
-        recorder_mode_ = true;
         auto current_time = std::time(nullptr);
         char record_name[40];
-        std::strftime(record_name, sizeof(record_name), "records/record_%Y%m%d%H%M.bin", std::localtime(&current_time));
+        std::tm tm_buf{}; // std::localtime hands back a shared static tm
+#ifdef _WIN32
+        localtime_s(&tm_buf, &current_time);
+#else
+        localtime_r(&current_time, &tm_buf);
+#endif
+        std::strftime(record_name, sizeof(record_name), "records/record_%Y%m%d%H%M.bin", &tm_buf);
         std::filesystem::create_directory("records");
+        record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
+        // report success only once the file is actually open, and leave
+        // recorder_mode_ off on failure so nothing queues messages for a
+        // recorder thread that has nowhere to write them
+        if (!record_stream_.is_open()) {
+            Printf("Error: failed to open the record file \"%s\".", record_name);
+            return false;
+        }
+        recorder_mode_ = true;
         Printf("Flight recorder started (saving at \"%s\").", record_name);
         if (options.individual_packets) {
             std::filesystem::create_directories(packet_save_path);
             Printf("Individual packets will be saved at \"%s\".", packet_save_path);
         }
-        record_stream_.open(record_name, std::ios::binary | std::ios::out | std::ios::trunc);
-        if (!record_stream_.is_open())
-            return false;
         record_stream_ << bmmo::RECORD_HEADER;
         record_stream_.put('\0');
         int64_t init_time = init_time_t_; // be specific about time_t type
@@ -130,12 +144,16 @@ public:
         return true;
     }
 
+    // Main network loop: drains incoming messages and runs connection
+    // callbacks once per CLIENT_RECEIVE_INTERVAL. Console commands run on
+    // the main thread and synchronize with this loop through state_mutex_.
     void run() override {
         bmmo::console::set_completion_callback([this](const std::vector<std::string>& args) -> std::vector<std::string> {
             switch (args.size()) {
                 case 0: return {};
                 case 1: return bmmo::console::instance->get_command_hints(false, args[0].c_str());
             }
+            std::lock_guard lk(state_mutex_);
             std::vector<std::string> player_hints;
             player_hints.reserve(clients_.size());
             bool hint_client_id = (args[args.size() - 1].starts_with('#'));
@@ -148,17 +166,12 @@ public:
             return player_hints;
         });
 
-        running_ = true;
-        startup_cv_.notify_all();
+        mark_running();
         while (running_) {
             auto update_begin = std::chrono::steady_clock::now();
             update();
             std::this_thread::sleep_until(update_begin + bmmo::CLIENT_RECEIVE_INTERVAL);
         }
-
-//        while (running_) {
-//            poll_local_state_changes();
-//        }
     }
 
     EResult send(void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
@@ -183,14 +196,20 @@ public:
         auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
         networking_msg->m_conn = connection_;
         networking_msg->m_pData = data;
-        networking_msg->m_cbSize = size;
+        networking_msg->m_cbSize = static_cast<int>(size); // m_cbSize is an int
+        networking_msg->m_usecTimeReceived = SteamNetworkingUtils()->GetLocalTimestamp();
         on_message(networking_msg);
+        // AllocateMessage(0) leaves m_pfnFreeData null, so Release() will not
+        // free the caller's buffer - clear it anyway to be explicit
+        networking_msg->m_pData = nullptr;
+        networking_msg->m_cbSize = 0;
         networking_msg->Release();
     }
 
-    HSteamNetConnection get_client_id(const std::string& username) const {
+    HSteamNetConnection get_client_id(const std::string& username) {
         if (username.empty())
             return Printf("Error: invalid connection id."), k_HSteamNetConnection_Invalid;
+        std::lock_guard lk(state_mutex_);
         const auto lower_name = bmmo::string_utils::to_lower(username);
         auto it = std::find_if(clients_.begin(), clients_.end(),
             [&lower_name](const auto& i) { return bmmo::message_utils::to_lower(i.second.name) == lower_name; });
@@ -217,15 +236,23 @@ public:
         return status;
     }
 
-    const bmmo::map& get_last_countdown_map() { return last_countdown_map_; }
-    const bmmo::ranking_entry::map_rankings& get_local_rankings() { return local_rankings_; }
+    bmmo::map get_last_countdown_map() {
+        std::lock_guard lk(state_mutex_);
+        return last_countdown_map_;
+    }
+    bmmo::ranking_entry::map_rankings get_local_rankings() {
+        std::lock_guard lk(state_mutex_);
+        return local_rankings_;
+    }
 
+    // note: only accessed from the console thread
     bmmo::timed_ball_state_msg& get_local_state_msg() {
         return local_state_msg_;
     }
 
-    std::string get_player_name(HSteamNetConnection player_id) const {
+    std::string get_player_name(HSteamNetConnection player_id) {
         if (player_id == k_HSteamNetConnection_Invalid) return "[Server]";
+        std::lock_guard lk(state_mutex_);
         if (auto it = clients_.find(player_id); it != clients_.end())
             return it->second.name;
         else
@@ -233,10 +260,12 @@ public:
     }
 
     void print_bulletin() {
+        std::lock_guard lk(state_mutex_);
         Printf(bmmo::color_code(bmmo::PermanentNotification), "[Bulletin] %s", permanent_notification_text_);
     }
 
     void print_clients() {
+        std::lock_guard lk(state_mutex_);
         decltype(clients_) spectators;
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
         players.reserve(clients_.size());
@@ -260,6 +289,7 @@ public:
     }
 
     void print_player_maps() {
+        std::lock_guard lk(state_mutex_);
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
         players.reserve(clients_.size());
         for (const auto& i: clients_)
@@ -274,6 +304,7 @@ public:
     }
 
     void print_maps() {
+        std::lock_guard lk(state_mutex_);
         std::multimap<decltype(map_names_)::mapped_type, decltype(map_names_)::key_type> map_names_inverted;
         for (const auto& [hash, name]: map_names_) map_names_inverted.emplace(name, hash);
         for (const auto& [name, hash]: map_names_inverted) {
@@ -284,6 +315,7 @@ public:
     }
 
     void print_positions() {
+        std::lock_guard lk(state_mutex_);
         std::vector<std::pair<HSteamNetConnection, client_data>> players;
         players.reserve(clients_.size());
         for (const auto& i: clients_)
@@ -299,13 +331,20 @@ public:
         }
     }
 
-    void set_nickname(const std::string& name) { nickname_ = name; };
+    void set_nickname(const std::string& name) {
+        std::lock_guard lk(state_mutex_);
+        nickname_ = name;
+    };
     void set_own_map(const bmmo::map& current_map, const std::string& map_name = "") {
+        std::lock_guard lk(state_mutex_);
         clients_[own_id_].current_map = current_map;
         if (!map_name.empty()) map_names_.try_emplace(current_map.get_hash_bytes_string(), map_name);
     }
     void set_print_states(bool print_states) { print_states_ = print_states; }
-    void set_own_sector(const int32_t sector) { clients_[own_id_].current_sector = sector; }
+    void set_own_sector(const int32_t sector) {
+        std::lock_guard lk(state_mutex_);
+        clients_[own_id_].current_sector = sector;
+    }
 
     void set_uuid(std::string uuid) {
         size_t pos;
@@ -317,19 +356,25 @@ public:
     void shutdown() {
         running_ = false;
         interface_->CloseConnection(connection_, 0, "Goodbye", true);
+        // give the close packet a moment to flush before the loops exit
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        if (!recorder_mode_)
-            return;
-        while (!message_queue_.empty()) {
-            Printf("Waiting for %d messages to be processed...", message_queue_.size());
-            bmmo::record_entry entry = std::move(message_queue_.front());
-            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
-            message_queue_.pop_front();
+        stop_running();
+    }
+
+    // Clears running_ and wakes the recorder thread, which would otherwise
+    // stay parked on message_available_cv_ forever. Safe to call repeatedly.
+    void stop_running() {
+        // the store happens under the queue mutex so the recorder cannot
+        // evaluate its predicate and go to sleep between our store and notify
+        {
+            std::lock_guard<std::mutex> lk(message_queue_mutex_);
+            running_ = false;
         }
         message_available_cv_.notify_all();
     }
 
     void teleport_to(const HSteamNetConnection player_id) {
+        std::lock_guard lk(state_mutex_);
         if (auto it = clients_.find(player_id); it != clients_.end()) {
             auto& client = it->second;
             local_state_msg_.content.position = client.state.position;
@@ -345,54 +390,61 @@ public:
         }
     }
 
-    void wait_till_started() {
-        while (!running()) {
-            std::unique_lock<std::mutex> lk(startup_mutex_);
-            startup_cv_.wait(lk);
-        }
-    }
-
     void whisper_to(const HSteamNetConnection player_id, const std::string& message) {
-        if (auto it = clients_.find(player_id); it != clients_.end() || player_id == k_HSteamNetConnection_Invalid) {
+        // resolve the target under the lock, then send and log without it:
+        // both send() and get_player_name() take their own locks as needed
+        std::string player_name;
+        {
+            std::lock_guard lk(state_mutex_);
+            auto it = clients_.find(player_id);
+            if (it != clients_.end())
+                player_name = it->second.name;
+            else if (player_id == k_HSteamNetConnection_Invalid)
+                player_name = "[Server]";
+        }
+        if (!player_name.empty()) {
             bmmo::private_chat_msg msg{};
             msg.player_id = player_id;
             msg.chat_content = message;
             msg.serialize();
             send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             Printf(bmmo::color_code(msg.code), "Whispered to (%u, %s): %s",
-                    player_id, get_player_name(player_id), message);
+                    player_id, player_name, message);
         }
         else {
             Printf("Player not found.");
         }
     }
 
-    void write_record() {
-        static uint32_t counter = 0;
-        std::unique_lock<std::mutex> available_lk(message_available_mutex_);
-        while (message_queue_.empty() && running())
-            message_available_cv_.wait(available_lk);
-        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+    // Looks up a client without creating one. operator[] on clients_ would
+    // insert a blank entry for every id the server mentions that we have not
+    // seen a PlayerConnected for, permanently polluting the player list.
+    // Caller must hold state_mutex_.
+    client_data* find_client(HSteamNetConnection id) {
+        auto it = clients_.find(id);
+        return (it == clients_.end()) ? nullptr : &it->second;
+    }
 
-        while (!message_queue_.empty()) {
-            bmmo::record_entry entry = std::move(message_queue_.front());
-            if (options.individual_packets) {
-                FILE* entry_record_file = std::fopen((packet_save_path + std::to_string(counter++) + ".entry").c_str(), "ab");
-                if (entry_record_file) {
-                    std::fwrite(entry.data, 1, entry.size, entry_record_file);
-                    std::fclose(entry_record_file);
-                }
-            }
-            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
-            message_queue_.pop_front();
-        }
-        lk.unlock();
-        record_stream_.flush();
+    // Runs on the recorder thread: waits for queued messages and writes them
+    // out. The condition variable now shares message_queue_mutex_ with the
+    // producer - the old two-mutex scheme could miss notifications (checking
+    // the queue without holding the mutex it's modified under).
+    void write_record() {
+        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+        message_available_cv_.wait(lk, [this] { return !message_queue_.empty() || !running_; });
+        drain_record_queue(lk);
+    }
+
+    // Writes out any remaining queued messages; call from the recorder
+    // thread after the main loop stopped.
+    void drain_record_queue() {
+        std::unique_lock<std::mutex> lk(message_queue_mutex_);
+        drain_record_queue(lk);
     }
 
 private:
     void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
-        // What's the state of the connection?
+        std::lock_guard lk(state_mutex_);
         switch (pInfo->m_info.m_eState) {
             case k_ESteamNetworkingConnectionState_None:
                 // NOTE: We will get callbacks here when we destroy connections.  You can ignore these.
@@ -400,7 +452,11 @@ private:
 
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
-                running_ = false;
+                // stop_running(), not a bare store: the recorder thread would
+                // stay parked on the queue condition variable forever, and the
+                // console thread is blocked inside replxx waiting for a line
+                stop_running();
+                bmmo::console::end_input();
 
                 // Print an appropriate message
                 if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
@@ -454,12 +510,7 @@ private:
     }
 
     void on_message(ISteamNetworkingMessage* networking_msg) override {
-//        printf("\b");
-//        fwrite(msg->m_pData, 1, msg->m_cbSize, stdout);
-//        fputc('\n', stdout);
-
-//        printf("\b> ");
-//        Printf(reinterpret_cast<const char*>(msg->m_pData));
+        std::lock_guard lk(state_mutex_);
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
         if (networking_msg->m_cbSize < static_cast<decltype(networking_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
             Printf("Error: invalid message with size %d received.", networking_msg->m_cbSize);
@@ -494,7 +545,8 @@ private:
                 break;
             }
             case bmmo::PlayerDisconnected: {
-                auto* msg = reinterpret_cast<bmmo::player_disconnected_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::player_disconnected_msg>(networking_msg);
+                if (!msg) break;
                 if (auto it = clients_.find(msg->content.connection_id); it != clients_.end()) {
                     Printf(bmmo::color_code(msg->code), "%s (#%u) disconnected.", it->second.name, it->first);
                     clients_.erase(it);
@@ -504,8 +556,8 @@ private:
             case bmmo::OwnedBallState: {
                 if (!print_states_)
                     break;
-                assert(networking_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
-                auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(networking_msg->m_pData);
+                auto* obs = bmmo::message_utils::view_as<bmmo::owned_ball_state_msg>(networking_msg);
+                if (!obs) break;
                 const auto& state = obs->content.state;
                 Printf("#%u: %d, (%.2lf, %.2lf, %.2lf), (%.2lf, %.2lf, %.2lf, %.2lf)",
                        obs->content.player_id,
@@ -526,7 +578,7 @@ private:
                             ball.state.type,
                             ball.state.position.x, ball.state.position.y, ball.state.position.z,
                             ball.state.rotation.x, ball.state.rotation.y, ball.state.rotation.z, ball.state.rotation.w);
-                    clients_[ball.player_id].state = ball.state;
+                    if (auto* client = find_client(ball.player_id)) client->state = ball.state;
                 }
 
                 break;
@@ -546,17 +598,19 @@ private:
                             ball.state.position.x, ball.state.position.y, ball.state.position.z,
                             ball.state.rotation.x, ball.state.rotation.y, ball.state.rotation.z, ball.state.rotation.w,
                             int64_t(ball.state.timestamp));
-                    clients_[ball.player_id].state = ball.state;
+                    if (auto* client = find_client(ball.player_id)) client->state = ball.state;
                 }
 
                 break;
             }
             case bmmo::OwnedCheatState: {
-                assert(networking_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
-                auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(networking_msg->m_pData);
+                auto* ocs = bmmo::message_utils::view_as<bmmo::owned_cheat_state_msg>(networking_msg);
+                if (!ocs) break;
+                auto* client = find_client(ocs->content.player_id);
+                if (!client) break;
                 if (ocs->content.state.notify)
-                    Printf("(%u, %s) turned cheat %s.", ocs->content.player_id, clients_[ocs->content.player_id].name, ocs->content.state.cheated ? "on" : "off");
-                clients_[ocs->content.player_id].cheated = ocs->content.state.cheated;
+                    Printf("(%u, %s) turned cheat %s.", ocs->content.player_id, client->name, ocs->content.state.cheated ? "on" : "off");
+                client->cheated = ocs->content.state.cheated;
                 break;
             }
             case bmmo::Chat: {
@@ -662,12 +716,14 @@ private:
                 break;
             }
             case bmmo::ActionDenied: {
-                auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::action_denied_msg>(networking_msg);
+                if (!msg) break;
                 Printf(bmmo::color_code(msg->code), "Action failed: %s", msg->content.to_string());
                 break;
             }
             case bmmo::CheatToggle: {
-                auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::cheat_toggle_msg>(networking_msg);
+                if (!msg) break;
                 Printf(bmmo::color_code(msg->code), "[Server] toggled%s cheat %s%s!",
                     msg->content.notify ? "" : " your",
                     msg->content.cheated ? "on" : "off",
@@ -682,13 +738,14 @@ private:
                 break;
             }
             case bmmo::Countdown: {
-                auto* msg = reinterpret_cast<bmmo::countdown_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::countdown_msg>(networking_msg);
+                if (!msg) break;
                 last_countdown_map_ = msg->content.map;
                 using ct = bmmo::countdown_type;
                 Printf(msg->content.type == ct::Go ? bmmo::color_code(msg->code) : bmmo::ansi::Default,
                     "[%u, %s]: %s%s - %s",
                     msg->content.sender,
-                    clients_[msg->content.sender].name,
+                    get_player_name(msg->content.sender),
                     msg->content.map.get_display_name(map_names_),
                     msg->content.get_level_mode_label(),
                     msg->content.get_type_label());
@@ -699,18 +756,24 @@ private:
                 break;
             }
             case bmmo::CurrentMap: {
-                auto* msg = reinterpret_cast<bmmo::current_map_msg*>(networking_msg->m_pData);
-                clients_[msg->content.player_id].current_map = msg->content.map;
-                clients_[msg->content.player_id].current_sector = msg->content.sector;
+                auto* msg = bmmo::message_utils::view_as<bmmo::current_map_msg>(networking_msg);
+                if (!msg) break;
+                if (auto* client = find_client(msg->content.player_id)) {
+                    client->current_map = msg->content.map;
+                    client->current_sector = msg->content.sector;
+                }
                 break;
             }
             case bmmo::CurrentSector: {
-                auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(networking_msg->m_pData);
-                clients_[msg->content.player_id].current_sector = msg->content.sector;
+                auto* msg = bmmo::message_utils::view_as<bmmo::current_sector_msg>(networking_msg);
+                if (!msg) break;
+                if (auto* client = find_client(msg->content.player_id))
+                    client->current_sector = msg->content.sector;
                 break;
             }
             case bmmo::DidNotFinish: {
-                auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::did_not_finish_msg>(networking_msg);
+                if (!msg) break;
                 std::string player_name = get_player_name(msg->content.player_id);
                 Printf(
                     bmmo::color_code(msg->code),
@@ -727,12 +790,13 @@ private:
             case bmmo::LatencyData: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::latency_data_msg>(networking_msg);
                 for (const auto& [id, ping]: msg.data) {
-                    clients_[id].ping = ping;
+                    if (auto* client = find_client(id)) client->ping = ping;
                 }
                 break;
             }
             case bmmo::LevelFinishV2: {
-                auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::level_finish_v2_msg>(networking_msg);
+                if (!msg) break;
 
                 std::string player_name = get_player_name(msg->content.player_id),
                     formatted_score = msg->content.get_formatted_score();
@@ -765,15 +829,18 @@ private:
                 break;
             }
             case bmmo::OpState: {
-                auto* msg = reinterpret_cast<bmmo::op_state_msg*>(networking_msg->m_pData);
-                Printf("You have been %s Operator permission.", msg->content.op ? "granted" : "removed from",
-                        bmmo::color_code(msg->code));
+                auto* msg = bmmo::message_utils::view_as<bmmo::op_state_msg>(networking_msg);
+                if (!msg) break;
+                Printf(bmmo::color_code(msg->code), "You have been %s Operator permission.",
+                        msg->content.op ? "granted" : "removed from");
                 break;
             }
             case bmmo::OwnedCheatToggle: {
-                auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::owned_cheat_toggle_msg>(networking_msg);
+                if (!msg) break;
                 Printf(bmmo::color_code(msg->code), "(#%u, %s) toggled cheat %s globally!",
-                    msg->content.player_id, clients_[msg->content.player_id].name, msg->content.state.cheated ? "on" : "off");
+                    msg->content.player_id, get_player_name(msg->content.player_id),
+                    msg->content.state.cheated ? "on" : "off");
                 if (cheat == msg->content.state.cheated)
                     return;
                 cheat = msg->content.state.cheated;
@@ -797,7 +864,8 @@ private:
                 break;
             }
             case bmmo::SimpleAction: {
-                auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::simple_action_msg>(networking_msg);
+                if (!msg) break;
                 switch (msg->content) {
                     using sa = bmmo::simple_action;
                     case sa::LoginDenied: {
@@ -823,7 +891,8 @@ private:
                 break;
             }
             case bmmo::OwnedSimpleAction: {
-                auto* msg = reinterpret_cast<bmmo::owned_simple_action_msg*>(networking_msg->m_pData);
+                auto* msg = bmmo::message_utils::view_as<bmmo::owned_simple_action_msg>(networking_msg);
+                if (!msg) break;
                 switch (msg->content.type) {
                     using osa = bmmo::owned_simple_action_type;
                     case osa::RestartRequestFailed: {
@@ -867,11 +936,34 @@ private:
         message_available_cv_.notify_one();
     }
 
+    // Expects lk to hold message_queue_mutex_; writes queued entries to disk.
+    void drain_record_queue(std::unique_lock<std::mutex>& lk) {
+        while (!message_queue_.empty()) {
+            bmmo::record_entry entry = std::move(message_queue_.front());
+            message_queue_.pop_front();
+            // release the lock during file IO so the network thread
+            // never blocks on disk writes
+            lk.unlock();
+            if (options.individual_packets) {
+                FILE* entry_record_file = std::fopen((packet_save_path + std::to_string(packet_counter_++) + ".entry").c_str(), "ab");
+                if (entry_record_file) {
+                    std::fwrite(entry.data, 1, entry.size, entry_record_file);
+                    std::fclose(entry_record_file);
+                }
+            }
+            record_stream_.write(reinterpret_cast<const char*>(entry.data), entry.size);
+            lk.lock();
+        }
+        lk.unlock();
+        record_stream_.flush();
+        lk.lock();
+    }
+
     std::mutex message_queue_mutex_;
-    std::mutex message_available_mutex_;
     std::condition_variable message_available_cv_;
     std::list<bmmo::record_entry> message_queue_;
     std::ofstream record_stream_;
+    uint32_t packet_counter_ = 0; // recorder thread only
     const std::string packet_save_path = []() -> std::string {
         std::time_t t = std::time(nullptr);
         char path[32];
@@ -879,26 +971,10 @@ private:
         return path;
     }();
 
-    void poll_connection_state_changes() override {
-        this_instance_ = this;
-        interface_->RunCallbacks();
-    }
-
-    void poll_local_state_changes() override {
-        std::string input;
-        std::cin >> input;
-        if (input == "stop") {
-            shutdown();
-        } else if (input == "1") {
-            bmmo::ball_state_msg msg;
-            msg.content.position.x = 1;
-            msg.content.rotation.y = 2;
-            send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
-        }
-    }
-
-    std::mutex startup_mutex_;
-    std::condition_variable startup_cv_;
+    // Guards all client state shared between the network thread and the
+    // console thread (clients_, map_names_, nickname_, own_id_,
+    // last_countdown_map_, local_rankings_, permanent_notification_text_).
+    std::recursive_mutex state_mutex_;
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
     HSteamNetConnection own_id_{};
     std::string nickname_;
@@ -1007,7 +1083,10 @@ int main(int argc, char** argv) {
     client.set_uuid(options.uuid);
     client.set_print_states(options.print_states);
     client.set_logging_level(options.detail);
-    if (options.recorder_mode) client.setup_recorder();
+    if (options.recorder_mode && !client.setup_recorder()) {
+        std::cerr << "Cannot start the flight recorder." << std::endl;
+        return 1;
+    }
 
     std::cout << "Connecting to server..." << std::endl;
     if (!client.connect(options.server_addr)) {
@@ -1046,7 +1125,7 @@ int main(int argc, char** argv) {
                 rot[i] = rot_dist(random_gen) + ((translate) ? rot[i] : 0.0f);
             if (i != 3) last_squared -= rot[i] * rot[i];
         }
-        rot[3] = std::sqrt(last_squared);
+        rot[3] = std::sqrt(std::max(last_squared, 0.0f)); // avoid NaN when x^2+y^2+z^2 > 1
         msg.content.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
         Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.3f, %.3f, %.3f, %.3f)",
             pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
@@ -1072,10 +1151,10 @@ int main(int argc, char** argv) {
         });
         while (running) {
             std::string in;
-            std::cin >> in;
-            if (in == "q") {
+            // a failed extraction (EOF/closed stdin) leaves `in` unchanged;
+            // without this check the loop would spin at 100% CPU forever
+            if (!(std::cin >> in) || in == "q")
                 running = false;
-            }
         }
         if (output_thread.joinable())
             output_thread.join();
@@ -1088,6 +1167,10 @@ int main(int argc, char** argv) {
         Printf("PendingReliable: %d", l_status.m_cbPendingReliable);
     });
     console.register_command("reconnect", [&] {
+        // the network thread only leaves run() once running_ is cleared;
+        // joining it while it is still looping would hang the console forever
+        if (client.running())
+            client.shutdown();
         if (client_thread.joinable())
             client_thread.join();
 
@@ -1185,10 +1268,13 @@ int main(int argc, char** argv) {
     console.register_aliases("announce", {"notice"});
     console.register_command("kick", [&] {
         auto name = console.get_next_word();
+        if (name.empty()) return;
         bmmo::kick_request_msg msg{};
         if (console.get_command_name() == "crash")
             msg.crash = true;
-        if (name[0] == '#') msg.player_id = console.get_next_client_id();
+        // parse the id from the word we already consumed; calling
+        // get_next_client_id() here would eat the first word of the reason
+        if (name[0] == '#') msg.player_id = (HSteamNetConnection) std::atoll(name.substr(1).c_str());
         else msg.player_name = name;
         msg.reason = console.get_rest_of_line();
         msg.serialize();
@@ -1258,7 +1344,7 @@ int main(int argc, char** argv) {
             client.send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
             return;
         }
-        auto& rankings = client.get_local_rankings();
+        const auto rankings = client.get_local_rankings();
         auto ranks_it = rankings.find(msg.map.get_hash_bytes_string());
         if (ranks_it == rankings.end() || (ranks_it->second.first.empty() && ranks_it->second.second.empty())) {
             Printf(bmmo::ansi::BrightRed, "Error: ranking info not found for the specified map.");
@@ -1301,6 +1387,8 @@ int main(int argc, char** argv) {
         record_thread = std::thread([&client]() {
             while (client.running())
                 client.write_record();
+            // flush whatever arrived after the loop condition turned false
+            client.drain_record_queue();
         });
     }
     while (client.running()) {

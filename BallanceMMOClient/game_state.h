@@ -85,46 +85,58 @@ struct PlayerState {
 class game_state
 {
 public:
+	// Every accessor below takes mutex_: states_ is written by the network
+	// thread (on_message) and read by the game thread (OnProcess) plus the
+	// console and player-list threads. Lookups also go through find() rather
+	// than operator[], which would resurrect entries for players who left.
 	bool create(HSteamNetConnection id, const std::string& name = "", bool cheated = false) {
-		if (exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		states_.insert({id, {.name = name, .cheated = cheated}});
-		return true;
+		return states_.insert({id, {.name = name, .cheated = cheated}}).second;
 	}
 
 	std::optional<const PlayerState> get(HSteamNetConnection id) {
-		if (!exists(id))
+		std::unique_lock lk(mutex_);
+		auto it = states_.find(id);
+		if (it == states_.end())
 			return {};
-		return states_[id];
+		return it->second;
 	}
 
 	std::optional<const PlayerState> get_from_nickname(std::string name) {
+		std::unique_lock lk(mutex_);
 		auto id = get_client_id(name);
 		if (id == k_HSteamNetConnection_Invalid)
 			return {};
-		return states_[id];
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return {};
+		return it->second;
 	}
 
 	std::optional<const bmmo::map> get_client_map(HSteamNetConnection id) {
-		if (!exists(id))
+		std::unique_lock lk(mutex_);
+		auto it = states_.find(id);
+		if (it == states_.end())
 			return {};
-		return states_[id].current_map;
+		return it->second.current_map;
 	}
 
-	bool exists(HSteamNetConnection id) const {
-		// std::shared_lock lk(mutex_);
-
+	bool exists(HSteamNetConnection id) {
+		std::unique_lock lk(mutex_);
 		return states_.contains(id);
 	}
 
 	void remove_earlier_states(HSteamNetConnection id) {
-		auto& state = states_[id].ball_state;
+		std::unique_lock lk(mutex_);
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return;
+		auto& state = it->second.ball_state;
 		state.push_front(state.front());
 		state.push_front(state.front());
 	}
 
+	// Caller must hold mutex_ and must have verified that `id` exists.
 	inline SteamNetworkingMicroseconds get_updated_timestamp(
 			const HSteamNetConnection id,
 			const SteamNetworkingMicroseconds timestamp) {
@@ -150,75 +162,76 @@ public:
 	};
 
 	bool update(HSteamNetConnection id, const std::string& name) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		states_[id].name = name;
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		it->second.name = name;
 		set_pending_flush(true);
 		return true;
 	}
 
 	bool update(HSteamNetConnection id, const PlayerState& state) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		states_[id] = state;
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		it->second = state;
 		return true;
 	}
 
 	bool update(HSteamNetConnection id, TimedBallState&& state) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
 		state.timestamp = get_updated_timestamp(id, state.timestamp);
-		if (state.timestamp <= states_[id].ball_state.front().timestamp)
+		if (state.timestamp <= it->second.ball_state.front().timestamp)
 			return true;
-		states_[id].ball_state.push_front(state);
+		it->second.ball_state.push_front(state);
 		return true;
 	}
 
 	bool update(HSteamNetConnection id, SteamNetworkingMicroseconds timestamp) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		TimedBallState last_state_copy(states_[id].ball_state.front());
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		TimedBallState last_state_copy(it->second.ball_state.front());
 		timestamp = get_updated_timestamp(id, timestamp);
 		if (timestamp <= last_state_copy.timestamp)
 			return true;
 		last_state_copy.timestamp = timestamp;
-		states_[id].ball_state.push_front(last_state_copy);
+		it->second.ball_state.push_front(last_state_copy);
 		return true;
 	}
 
 	bool update(HSteamNetConnection id, bool cheated) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		states_[id].cheated = cheated;
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		it->second.cheated = cheated;
 		set_pending_flush(true);
 		return true;
 	}
 
 	bool update(HSteamNetConnection id, uint16_t ping) {
-		if (!exists(id))
-			return false;
-
 		std::unique_lock lk(mutex_);
-		states_[id].ping = ping;
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		it->second.ping = ping;
 		set_pending_flush(true);
 		return true;
 	}
 
 	bool update_map(HSteamNetConnection id, const bmmo::map& map, const int32_t sector, int64_t timestamp) {
-		if (!exists(id))
-			return false;
 		std::unique_lock lk(mutex_);
-		auto& state = states_[id];
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		auto& state = it->second;
 		state.current_map = map;
 		state.current_sector = sector;
 		state.current_sector_timestamp = timestamp;
@@ -226,19 +239,21 @@ public:
 	}
 
 	bool update_sector(HSteamNetConnection id, const int32_t sector, int64_t timestamp) {
-		if (!exists(id))
-			return false;
 		std::unique_lock lk(mutex_);
-		states_[id].current_sector = sector;
-		states_[id].current_sector_timestamp = timestamp;
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		it->second.current_sector = sector;
+		it->second.current_sector_timestamp = timestamp;
 		return true;
 	}
 
 	bool update_sector_timestamp(HSteamNetConnection id, const int32_t sector_timestamp) {
-		if (!exists(id))
-			return false;
 		std::unique_lock lk(mutex_);
-		states_[id].current_sector_timestamp = sector_timestamp;
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		it->second.current_sector_timestamp = sector_timestamp;
 		return true;
 	}
 
@@ -262,7 +277,11 @@ public:
 		return states_.size();
 	}
 
-	void for_each(const std::function<bool(std::pair<const HSteamNetConnection, PlayerState>)> fn) {
+	// The callbacks take their element by reference: passing PlayerState by
+	// value copied a name, a map and three ball states per player, and
+	// try_for_each_const additionally copied each element into a local - that
+	// is two full copies per player per call, on the render path.
+	void for_each(const std::function<bool(const std::pair<const HSteamNetConnection, PlayerState>&)>& fn) {
 		std::unique_lock lk(mutex_);
 
 		for (auto& i : states_) {
@@ -271,11 +290,11 @@ public:
 		}
 	}
 
-	bool try_for_each_const(const std::function<bool(const std::pair<const HSteamNetConnection, PlayerState>)> fn) {
+	bool try_for_each_const(const std::function<bool(const std::pair<const HSteamNetConnection, PlayerState>&)>& fn) {
 		std::unique_lock lk(mutex_, std::try_to_lock);
 		if (!lk)
 			return false;
-		for (const std::pair<const HSteamNetConnection, PlayerState> i : states_) {
+		for (const auto& i : states_) {
 			if (!fn(i))
 				break;
 		}
@@ -316,11 +335,16 @@ public:
 	}
 
 	void set_ball_id(const std::string& name, const uint32_t id) {
+		std::unique_lock lk(mutex_);
 		ball_name_to_id_[name] = id;
 	}
 
+	// find(), not operator[]: this is called on the game thread and would
+	// otherwise insert an entry (and rehash) while another thread reads
 	uint32_t get_ball_id(const std::string& name) {
-		return ball_name_to_id_[name];
+		std::unique_lock lk(mutex_);
+		auto it = ball_name_to_id_.find(name);
+		return (it == ball_name_to_id_.end()) ? 0 : it->second;
 	}
 
 	static constexpr inline auto get_init_timestamp() {

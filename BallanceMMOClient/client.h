@@ -27,7 +27,7 @@ public:
     }
 
     void run() override {
-        running_ = true;
+        mark_running();
         while (running_) {
             auto next_update = std::chrono::steady_clock::now() + bmmo::CLIENT_RECEIVE_INTERVAL;
             if (!update())
@@ -119,15 +119,6 @@ protected:
             incoming_message[i]->Release();
         }
         return msg_count;
-    }
-
-    void poll_connection_state_changes() override {
-        this_instance_ = this;
-        interface_->RunCallbacks();
-    }
-
-    void poll_local_state_changes() override {
-        
     }
 
     HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;

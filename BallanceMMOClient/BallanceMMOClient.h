@@ -129,6 +129,20 @@ public:
 		std::lock_guard lk(client_mtx_);
 		return listeners_.erase(listener) > 0;
 	};
+	// Iterating listeners_ directly races register/remove_listener, which other
+	// mods may call at any time from the game thread. Copy under the lock and
+	// invoke outside it: the callbacks run other mods' code, which we should
+	// not hold our lock across.
+	template<typename F>
+	void notify_listeners(F&& fn) {
+		decltype(listeners_) listeners;
+		{
+			std::lock_guard lk(client_mtx_);
+			listeners = listeners_;
+		}
+		for (const auto& i : listeners)
+			fn(i);
+	};
 	std::string get_username(HSteamNetConnection client_id) override {
 		if (client_id == k_HSteamNetConnection_Invalid)
 			return { "[Server]" };
@@ -136,8 +150,33 @@ public:
 		assert(state.has_value() || (db_.get_client_id() == client_id));
 		return state.has_value() ? state->name : get_display_nickname();
 	}
+	// map_names_ is filled from the network thread (MapNames messages) and from
+	// the game thread (entering a level), so every access goes through these.
 	std::string get_map_name(const bmmo::map& map) override {
+		std::lock_guard lk(map_names_mtx_);
 		return map.get_display_name(map_names_);
+	}
+	void add_map_name(const std::string& hash, const std::string& name) {
+		std::lock_guard lk(map_names_mtx_);
+		map_names_.try_emplace(hash, name);
+	}
+	bool has_map_name(const std::string& hash) {
+		std::lock_guard lk(map_names_mtx_);
+		return map_names_.contains(hash);
+	}
+	// the stored name, unformatted; empty if we don't know this map
+	std::string get_raw_map_name(const std::string& hash) {
+		std::lock_guard lk(map_names_mtx_);
+		auto it = map_names_.find(hash);
+		return (it == map_names_.end()) ? std::string{} : it->second;
+	}
+	void merge_map_names(const std::unordered_map<std::string, std::string>& names) {
+		std::lock_guard lk(map_names_mtx_);
+		map_names_.insert(names.begin(), names.end());
+	}
+	void clear_map_names() {
+		std::lock_guard lk(map_names_mtx_);
+		map_names_.clear();
 	}
 
 private:
@@ -190,8 +229,65 @@ private:
 	std::vector<player_status_list_entry> player_status_list_;
 	std::mutex player_status_list_mtx_;
 	std::string last_player_list_text_;
+	// The player-list thread must not call BML APIs or read game-thread state,
+	// so the game thread publishes everything it needs here once per frame.
+	struct player_list_snapshot {
+		bmmo::named_map current_map{};
+		std::string own_map_display_name;
+		int sector = 0;
+		int64_t sector_timestamp = 0;
+		bool cheated = false;
+		bool show_rankings = false; // right alt held
+		bool spectator = false;
+	};
+	player_list_snapshot player_list_snapshot_;
+	std::mutex player_list_snapshot_mtx_;
+	// Stopping the player-list thread has to be prompt and deterministic: it
+	// calls back into BML (AddTimer) with a captured `this`, so it must not
+	// outlive the mod. The cv replaces a 500 ms sleep that made shutdown race.
+	std::condition_variable player_list_cv_;
+	std::mutex player_list_cv_mtx_, player_list_thread_mtx_;
+	std::atomic_bool shutting_down_ = false;
+	void stop_player_list(bool join_now) {
+		{
+			std::lock_guard lk(player_list_cv_mtx_);
+			player_list_visible_ = false;
+		}
+		player_list_cv_.notify_all();
+		std::lock_guard thread_lk(player_list_thread_mtx_);
+		if (!player_list_thread_.joinable())
+			return;
+		if (join_now) // the game is going down; the thread must not outlive BML
+			player_list_thread_.join();
+		else
+			asio::post(thread_pool_, [this] {
+				std::lock_guard lk(player_list_thread_mtx_);
+				if (player_list_thread_.joinable()) player_list_thread_.join();
+			});
+	}
+	// game thread only
+	void refresh_player_list_snapshot() {
+		player_list_snapshot snapshot;
+		snapshot.current_map = current_map_;
+		snapshot.own_map_display_name = current_map_.get_display_name();
+		snapshot.sector = current_sector_;
+		snapshot.sector_timestamp = current_sector_timestamp_;
+		snapshot.cheated = m_bml->IsCheatEnabled();
+		snapshot.show_rankings = input_manager_ && input_manager_->IsKeyDown(CKKEY_RMENU);
+		snapshot.spectator = spectator_mode_;
+		std::lock_guard lk(player_list_snapshot_mtx_);
+		player_list_snapshot_ = std::move(snapshot);
+	}
+	player_list_snapshot get_player_list_snapshot() {
+		std::lock_guard lk(player_list_snapshot_mtx_);
+		return player_list_snapshot_;
+	}
+	// Members rather than locals of the player-list thread: update_player_list
+	// hands them to a sync call that runs later on the game thread, so
+	// references to that thread's stack would dangle once it exits.
+	int player_list_last_count_ = -1, player_list_last_font_size_ = -1;
 	void show_player_list();
-	inline void update_player_list(int& last_player_count, int& last_font_size);
+	inline void update_player_list();
 
 	void connect_to_server(const char* address, const char* name = "") override;
 	void disconnect_from_server() override;
@@ -239,6 +335,38 @@ private:
 	std::shared_ptr<text_sprite> ping_;
 	std::shared_ptr<text_sprite> status_;
 	std::shared_ptr<text_sprite> spectator_label_, permanent_notification_;
+	// The ping thread publishes its text here instead of writing the sprite;
+	// OnProcess applies it on the game thread.
+	std::string ping_text_;
+	bool ping_text_pending_ = false;
+	std::mutex ping_text_mtx_;
+	// The status/ping sprites are engine objects but the connection callbacks
+	// that update them run on the network thread, so go through the game thread.
+	void set_status_text(const std::string& text, int color = 0) {
+		utils_.run_on_game_thread([this, text, color] {
+			if (!status_) return;
+			status_->update(text);
+			if (color != 0) status_->paint(color);
+		});
+	}
+	void clear_ping_text() {
+		{
+			std::lock_guard lk(ping_text_mtx_);
+			ping_text_.clear();
+			ping_text_pending_ = false;
+		}
+		utils_.run_on_game_thread([this] { if (ping_) ping_->update(""); });
+	}
+	void apply_pending_ping_text() { // game thread only
+		std::string text;
+		{
+			std::lock_guard lk(ping_text_mtx_);
+			if (!ping_text_pending_) return;
+			ping_text_pending_ = false;
+			text = ping_text_;
+		}
+		if (ping_) ping_->update(text, false);
+	}
 
 	BMLVersion loader_version_{}, source_version_{};
 
@@ -268,6 +396,7 @@ private:
 	std::atomic_int32_t current_sector_ = 0, max_sector_ = 0;
 	std::atomic_int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
+	std::mutex map_names_mtx_;
 	std::unordered_map<std::string, std::array<uint8_t, 16>> md5_data_;
 	std::atomic<SteamNetworkingMicroseconds> map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
@@ -300,7 +429,9 @@ private:
 	void update_compensation_lives_label();
 
 	std::unique_ptr<local_state_handler_base> local_state_handler_;
-	bool spectator_mode_ = false;
+	// mirrors the "spectator" BML property; written by the game thread each
+	// frame, read from the network and player-list threads
+	std::atomic_bool spectator_mode_ = false;
 	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
@@ -310,6 +441,9 @@ private:
 	std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true, did_not_finish_ = false;
+	// Mirrors IsCheatEnabled() for the network thread, which must not call it;
+	// updated from OnCheatEnabled and whenever we read the real value.
+	std::atomic_bool own_cheat_enabled_ = false;
 	std::atomic_bool force_next_restart_ = false, reset_timer_ = true, countdown_restart_ = false;
 
 	std::set<bmmo::exported::listener*> listeners_;
@@ -331,12 +465,16 @@ private:
 			return;
 		Beep(frequency, duration);
 	};
+	// Most callers are message handlers on the network thread, and a CKWaveSound
+	// is an engine object like any other, so playing goes through the game thread.
 	void play_wave_sound(CKWaveSound* sound, bool forced = false) const {
-		if ((!sound_enabled_ && !forced) || ignore_forced_sounds_)
+		if ((!sound_enabled_ && !forced) || ignore_forced_sounds_ || sound == nullptr)
 			return;
-		if (sound->IsPlaying())
-			sound->Stop();
-		sound->Play();
+		utils_.run_on_game_thread([sound] {
+			if (sound->IsPlaying())
+				sound->Stop();
+			sound->Play();
+		});
 	}
 	void load_wave_sound(CKWaveSound** sound, CKSTRING name, CKSTRING path, float gain = 1.0f, float pitch = 1.0f, bool streaming = false) {
 		sound[0] = static_cast<CKWaveSound*>(m_bml->GetCKContext()->CreateObject(CKCID_WAVESOUND, name));
@@ -417,15 +555,18 @@ private:
 	}
 
 	void update_sector_timestamp(const bmmo::map& map, int sector, int64_t timestamp) {
-		//std::unique_lock lk(bml_mtx_);
 		if (sector == 0) return;
-		auto map_it = maps_.find(map.get_hash_bytes_string());
-		if (map_it == maps_.end()) return;
-		auto ts_it = map_it->second.sector_timestamps.find(sector);
-		if (ts_it != map_it->second.sector_timestamps.end() && ts_it->second > timestamp)
-			ts_it->second = timestamp;
-		else
-			map_it->second.sector_timestamps.try_emplace(sector, timestamp);
+		// modify_if holds the submap's lock across the callback; find() hands
+		// back an iterator and leaves us mutating the value with nothing held,
+		// while the network thread may be touching the same map entry
+		maps_.modify_if(map.get_hash_bytes_string(), [&](auto& entry) {
+			auto& timestamps = entry.second.sector_timestamps;
+			auto ts_it = timestamps.find(sector);
+			if (ts_it != timestamps.end() && ts_it->second > timestamp)
+				ts_it->second = timestamp;
+			else
+				timestamps.try_emplace(sector, timestamp);
+		});
 	}
 
 	void resume_counter() {
@@ -446,7 +587,7 @@ private:
 		player_list_color_ = color | 0xFF000000;
 		prop->SetString(std::format("{:06X}", color & 0x00FFFFFF).data());
 		if (player_list_visible_) {
-			player_list_visible_ = false;
+			stop_player_list(false); // show_player_list joins before restarting
 			show_player_list();
 		}
 		if (permanent_notification_) permanent_notification_->paint(player_list_color_);
@@ -643,7 +784,7 @@ private:
 			}
 			if (input_manager_->IsKeyPressed(CKKEY_TAB)) {
 				if (player_list_visible_) {
-					player_list_visible_ = false;
+					stop_player_list(false);
 					config_manager_.set_player_list_visible(false);
 				}
 				else {
@@ -808,12 +949,9 @@ private:
 	void cleanup(bool down = false, bool linger = true) {
 		std::lock_guard lk(bml_mtx_);
 		client_cv_.notify_all();
-		if (player_list_visible_) {
-			player_list_visible_ = false;
-			asio::post(thread_pool_, [this] {
-				if (player_list_thread_.joinable()) player_list_thread_.join();
-			});
-		}
+		if (down)
+			shutting_down_ = true;
+		stop_player_list(down);
 		if (down) {
 			console_window_.hide();
 			asio::post(thread_pool_, [this] {
@@ -834,18 +972,14 @@ private:
 			//network_thread_.join();
 
 		//thread_pool_.stop();
-		toggle_own_spirit_ball(false);
-		map_names_.clear();
+		clear_map_names();
 		db_.clear();
-		objects_.destroy_all_objects();
-		local_state_handler_.reset();
-		cleanup_received_sounds();
 
-		{
-			std::lock_guard client_lk(client_mtx_);
-			for (const auto& i : listeners_)
-				i->on_logout();
-		}
+		// listener callbacks are other mods' code and will call BML APIs, so
+		// they belong on the game thread
+		utils_.run_on_game_thread([this] {
+			notify_listeners([](const auto& i) { i->on_logout(); });
+		});
 
 		if (!io_ctx_.stopped())
 			io_ctx_.stop();
@@ -853,20 +987,37 @@ private:
 		resolving_endpoint_ = false;
 		logged_in_ = false;
 
-		if (down) // Since the game's going down, we don't care about text shown.
+		// Destroying spirit balls, sprites and sounds means destroying CK
+		// objects; when cleanup() is reached from the network thread (a lost
+		// connection) that has to happen on the game thread instead.
+		// `down` means the game itself is going away, and we are already on
+		// the game thread, so run_on_game_thread() executes this inline.
+		utils_.run_on_game_thread([this, down] {
+			toggle_own_spirit_ball(false);
+			objects_.destroy_all_objects();
+			local_state_handler_.reset();
+			cleanup_received_sounds();
+
+			if (down) // Since the game's going down, we don't care about text shown.
+				return;
+
+			if (ping_)
+				ping_->update("");
+
+			if (status_) {
+				status_->update("Disconnected");
+				status_->paint(0xffff0000);
+			}
+
+			spectator_label_.reset();
+			permanent_notification_.reset();
+			// the player name is a BML property owned by the game thread
+			db_.set_nickname(config_manager_["playername"]->GetString());
+		});
+
+		if (down)
 			return;
 
-		if (ping_)
-			ping_->update("");
-
-		if (status_) {
-			status_->update("Disconnected");
-			status_->paint(0xffff0000);
-		}
-
-		spectator_label_.reset();
-		permanent_notification_.reset();
-		db_.set_nickname(config_manager_["playername"]->GetString());
 		db_.set_client_id(k_HSteamNetConnection_Invalid + ((rand() << 16) | rand())); // invalid id indicates server
 	}
 

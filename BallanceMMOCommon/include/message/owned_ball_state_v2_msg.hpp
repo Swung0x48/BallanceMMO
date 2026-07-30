@@ -1,6 +1,7 @@
 #ifndef BALLANCEMMOSERVER_MESSAGE_OWNED_BALL_STATE_V2_MSG_HPP
 #define BALLANCEMMOSERVER_MESSAGE_OWNED_BALL_STATE_V2_MSG_HPP
 #include "message.hpp"
+#include "message_utils.hpp"
 
 namespace bmmo {
     struct owned_ball_state_v2_msg: public serializable_message {
@@ -20,10 +21,17 @@ namespace bmmo {
         }
 
         bool deserialize() override {
-            serializable_message::deserialize();
+            if (!serializable_message::deserialize())
+                return false;
 
             uint32_t size = 0;
-            raw.read(reinterpret_cast<char*>(&size), sizeof(size));
+            if (!message_utils::read_variable(raw, &size))
+                return false;
+            // refuse counts the payload cannot possibly contain, so a forged
+            // length can't make us allocate an arbitrary amount of memory
+            if (static_cast<size_t>(size) * sizeof(owned_ball_state)
+                    > static_cast<size_t>(message_utils::bytes_remaining(raw)))
+                return false;
             balls.resize(size);
             for (uint32_t i = 0; i < size; ++i) {
                 if (!raw.good())

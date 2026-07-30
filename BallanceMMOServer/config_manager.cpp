@@ -174,31 +174,76 @@ void config_manager::save(bool reload_values) {
 void config_manager::save_login_data(const SteamNetworkingIPAddr& ip, const std::string& uuid_str, const std::string& name) {
     char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
     ip.ToString(ip_str, sizeof(ip_str), false);
-    YAML::Node login_data;
-    std::ifstream ifile("login_data.yml");
-    if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
-        try {
-            login_data = YAML::Load(ifile);
-        } catch (const std::exception& e) {
-            Printf("Error: failed to parse config: %s", e.what());
-            return;
+
+    // format the timestamp here, where we still know when the login happened
+    auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &time); // the shared static tm is not thread-safe
+#else
+    localtime_r(&time, &tm_buf);
+#endif
+    std::string time_str(20, 0);
+    time_str.resize(std::strftime(time_str.data(), time_str.size(), "%F %X", &tm_buf));
+
+    std::unique_lock lk(login_data_mutex_);
+    pending_logins_.push_back({uuid_str, name, std::move(time_str), ip_str});
+    if (!login_writer_.joinable())
+        login_writer_ = std::thread([this] { run_login_writer(); });
+    lk.unlock();
+    login_data_cv_.notify_one();
+}
+
+void config_manager::run_login_writer() {
+    std::unique_lock lk(login_data_mutex_);
+    while (!login_writer_stopping_) {
+        login_data_cv_.wait(lk, [this] { return !pending_logins_.empty() || login_writer_stopping_; });
+        flush_pending_logins(lk);
+    }
+}
+
+void config_manager::flush_pending_logins(std::unique_lock<std::mutex>& lk) {
+    if (pending_logins_.empty())
+        return;
+    auto entries = std::move(pending_logins_);
+    pending_logins_.clear();
+    lk.unlock();
+
+    if (!login_data_loaded_) { // parse the existing history once per run
+        login_data_loaded_ = true;
+        std::ifstream ifile("login_data.yml");
+        if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
+            try {
+                login_data_ = YAML::Load(ifile);
+            } catch (const std::exception& e) {
+                Printf("Error: failed to parse login data: %s", e.what());
+                login_data_ = YAML::Node(YAML::NodeType::Map);
+            }
         }
     }
-    ifile.close();
-    auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::string time_str(20, 0);
-    time_str.resize(std::strftime(&time_str[0], time_str.size(),
-        "%F %X", std::localtime(&time)));
-    if (!login_data[uuid_str])
-        login_data[uuid_str] = YAML::Node(YAML::NodeType::Map);
-    if (!login_data[uuid_str][name])
-        login_data[uuid_str][name] = YAML::Node(YAML::NodeType::Map);
-    login_data[uuid_str][name][time_str] = ip_str;
-    std::ofstream ofile("login_data.yml");
-    if (ofile.is_open()) {
-        ofile << login_data;
-        ofile.close();
+
+    for (const auto& entry: entries) {
+        if (!login_data_[entry.uuid])
+            login_data_[entry.uuid] = YAML::Node(YAML::NodeType::Map);
+        if (!login_data_[entry.uuid][entry.name])
+            login_data_[entry.uuid][entry.name] = YAML::Node(YAML::NodeType::Map);
+        login_data_[entry.uuid][entry.name][entry.time] = entry.ip;
     }
+    std::ofstream ofile("login_data.yml");
+    if (ofile.is_open())
+        ofile << login_data_;
+
+    lk.lock();
+}
+
+config_manager::~config_manager() {
+    std::unique_lock lk(login_data_mutex_);
+    login_writer_stopping_ = true;
+    flush_pending_logins(lk); // don't lose logins recorded just before exit
+    lk.unlock();
+    login_data_cv_.notify_all();
+    if (login_writer_.joinable())
+        login_writer_.join();
 }
 
 void config_manager::save_player_status(const client_data_collection& clients) {

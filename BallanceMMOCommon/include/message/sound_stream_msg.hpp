@@ -3,6 +3,7 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
+#include <steam/isteamnetworkingutils.h> // SteamNetworkingUtils(), used below
 #include "message.hpp"
 #include "message_utils.hpp"
 

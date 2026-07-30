@@ -24,16 +24,26 @@ namespace bmmo {
     }
 
 
+    // Formats into buf, growing it when the result doesn't fit.
+    // snprintf returns the length the output *would* have had, so resizing
+    // to it blindly would leave the tail filled with uninitialized bytes.
     template <typename ... Args>
     inline void Sprintf(std::string& buf, const char* fmt, Args&& ... args) {
-        buf.resize(snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...));
+        if (buf.empty()) buf.resize(256);
+        const int needed = snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...);
+        if (needed < 0) { buf.clear(); return; }
+        if (static_cast<size_t>(needed) >= buf.size()) {
+            buf.resize(static_cast<size_t>(needed) + 1);
+            snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...);
+        }
+        buf.resize(static_cast<size_t>(needed));
     }
 
     // create a new string and format it
     template <typename ... Args>
     inline std::string Sprintf(const char* fmt, Args&& ... args) {
-        std::string buf(2048, 0);
-        buf.resize(snprintf(buf.data(), buf.size(), fmt, ConvertArgument(args)...));
+        std::string buf;
+        Sprintf(buf, fmt, ConvertArgument(args)...);
         return buf;
     }
 
@@ -81,6 +91,8 @@ namespace bmmo {
     void set_auto_flush_log(bool flush);
     void flush_log();
     void close_log();
+    // signal-handler safe(r) counterpart of close_log(); see misc.cpp
+    void flush_log_on_exit();
 }
 
 #endif //BALLANCEMMOSERVER_INTERNAL_HPP

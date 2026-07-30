@@ -119,8 +119,9 @@ namespace bmmo {
 
         // raw -> entity
         virtual bool deserialize() {
-            opcode c;
-            raw.read(reinterpret_cast<char*>(&c), sizeof(opcode));
+            opcode c{}; // a failed read would otherwise compare uninitialized bytes
+            if (!raw.read(reinterpret_cast<char*>(&c), sizeof(opcode)))
+                return false;
             return c == code;
         }
     };

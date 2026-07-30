@@ -59,6 +59,18 @@ namespace bmmo {
     namespace {
         FILE* log_file = nullptr;
         bool auto_flush = false;
+
+        // std::localtime returns a pointer to a shared static tm, so two
+        // threads formatting a timestamp at once would corrupt each other's.
+        void format_local_time(char* buf, size_t size, std::time_t time) {
+            std::tm tm_buf{};
+#ifdef _WIN32
+            if (localtime_s(&tm_buf, &time) != 0) { buf[0] = '\0'; return; }
+#else
+            if (!localtime_r(&time, &tm_buf)) { buf[0] = '\0'; return; }
+#endif
+            std::strftime(buf, size, "%m-%d %T", &tm_buf);
+        }
     }
 
     void set_log_file(FILE* file) { log_file = file; }
@@ -68,7 +80,7 @@ namespace bmmo {
             return;
         auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         char timeStr[15];
-        std::strftime(timeStr, sizeof(timeStr), "%m-%d %T", std::localtime(&time));
+        format_local_time(timeStr, sizeof(timeStr), time);
         fprintf(log_file, "[%s] %s\n", timeStr, pMsg);
         // fflush(log);
     }
@@ -84,7 +96,7 @@ namespace bmmo {
         // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = chrono::system_clock::to_time_t(chrono::system_clock::now());
         char timeStr[15];
-        strftime(timeStr, sizeof(timeStr), "%m-%d %T", localtime(&time));
+        format_local_time(timeStr, sizeof(timeStr), time);
 
         if (log_file) {
             fprintf(log_file, "[%s] %s\n", timeStr, pszMsg);
@@ -137,5 +149,12 @@ namespace bmmo {
         if (!log_file) return;
         fclose(log_file);
         log_file = nullptr;
+    }
+
+    // For signal handlers: another thread may be inside fprintf on this FILE,
+    // so closing it would free a stream out from under it. Flushing is the
+    // most we can safely attempt before the process dies.
+    void flush_log_on_exit() {
+        if (log_file) fflush(log_file);
     }
 }

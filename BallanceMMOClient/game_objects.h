@@ -84,18 +84,27 @@ public:
 		});
 	}
 
+	// Ball types arrive over the network, so they must never be used as an
+	// index without checking: the ball list only has one entry per template.
+	static bool is_valid_ball_type(const PlayerObjects& player, uint32_t type) {
+		return type < player.balls.size();
+	}
+
 	// no lock here: we lock it within the caller function
 	// we can use recursive_mutex here, but that's really only a dirty hack
 	// it's better not to overly rely on that
 	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
-		if (from != std::numeric_limits<decltype(from)>::max()) {
-			auto* old_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[from]);
+		auto& player = objects_[id];
+		if (from != std::numeric_limits<decltype(from)>::max() && is_valid_ball_type(player, from)) {
+			auto* old_ball = bml_->GetCKContext()->GetObject(player.balls[from]);
 			if (old_ball)
 				old_ball->Show(CKHIDE);
 			assert(old_ball);
 		}
 
-		auto* new_ball = bml_->GetCKContext()->GetObject(objects_[id].balls[to]);
+		if (!is_valid_ball_type(player, to))
+			return;
+		auto* new_ball = bml_->GetCKContext()->GetObject(player.balls[to]);
 		if (new_ball)
 			new_ball->Show(CKSHOW);
 		assert(new_ball);
@@ -117,7 +126,10 @@ public:
 		VxRect viewport; rc->GetViewRect(viewport);
 
 		VxVector own_ball_pos;
-		get_own_ball()->GetPosition(&own_ball_pos);
+		auto* own_ball = get_own_ball();
+		if (!own_ball) // null between levels / during teardown
+			return false;
+		own_ball->GetPosition(&own_ball_pos);
 
 		const auto* camera = rc->GetAttachedCamera();
 		VxVector camera_pos = own_ball_pos;
@@ -149,6 +161,10 @@ public:
 			const auto& state_it = item.second.ball_state.begin();
 
 			const uint32_t current_ball_type = state_it->type;
+			// a peer (or a forged packet) can claim any ball type; skip this
+			// player rather than indexing past the end of its ball list
+			if (!is_valid_ball_type(player, current_ball_type))
+				return true;
 			const bool ball_type_changed = (current_ball_type != player.visible_ball_type);
 
 			if (ball_type_changed) {
@@ -255,10 +271,15 @@ public:
 
 	void physicalize(HSteamNetConnection id) {
 		CKDataArray* physBall = bml_->GetArrayByName("Physicalize_GameBall");
+		if (!physBall) return;
 
-		uint32_t current_ball_type = db_.get(id)->ball_state.front().type;
-		auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(objects_[id].balls[current_ball_type]));
-		objects_[id].physicalized = true;
+		auto state = db_.get(id);
+		if (!state) return;
+		uint32_t current_ball_type = state->ball_state.front().type;
+		auto& player = objects_[id];
+		if (!is_valid_ball_type(player, current_ball_type)) return;
+		auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(player.balls[current_ball_type]));
+		player.physicalized = true;
 		std::string ballName(physBall->GetElementStringValue(current_ball_type, 0, nullptr), '\0');
 		physBall->GetElementStringValue(current_ball_type, 0, ballName.data());
 		ballName += "_Mesh";
@@ -397,10 +418,19 @@ public:
 	}
 
 	inline const VxVector get_ball_pos(HSteamNetConnection id) {
-		if (!db_.exists(id))
+		auto state = db_.get(id);
+		if (!state)
+			return {};
+		auto player_it = objects_.find(id);
+		if (player_it == objects_.end())
+			return {};
+		const uint32_t ball_type = state->ball_state.front().type;
+		if (!is_valid_ball_type(player_it->second, ball_type))
 			return {};
 		auto* player_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(
-			objects_[id].balls[db_.get(id).value().ball_state.front().type]));
+			player_it->second.balls[ball_type]));
+		if (!player_ball)
+			return {};
 		VxVector pos;
 		player_ball->GetPosition(&pos);
 		return pos;

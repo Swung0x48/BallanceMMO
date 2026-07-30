@@ -70,11 +70,10 @@ public:
     }
 
     void broadcast_message(void* buffer, size_t size, int send_flags, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
-        for (auto& i: clients_)
+        std::lock_guard lk(state_mutex_);
+        for (const auto& i: clients_)
             if (ignored_client != i.first)
-                send(i.first, buffer, size,
-                                                    send_flags,
-                                                    nullptr);
+                send(i.first, buffer, size, send_flags, nullptr);
     }
 
     template<bmmo::trivially_copyable_msg T>
@@ -121,6 +120,20 @@ public:
     SteamNetworkingMicroseconds get_current_record_time() const { return current_record_time_; }
     time_t get_record_start_world_time() const { return record_start_world_time_; }
 
+    // Resolves the timeline entry a state-change message applies to.
+    // Returns nullptr when the record never announced that player (a record
+    // that starts mid-session, or a corrupt one) - indexing blindly would
+    // default-insert an empty vector and then call back() on it.
+    std::pair<std::string, time_period_t*> get_last_time_period(HSteamNetConnection id) {
+        auto client_it = record_clients_.find(id);
+        if (client_it == record_clients_.end())
+            return {{}, nullptr};
+        auto timeline_it = timeline_.find(client_it->second.name);
+        if (timeline_it == timeline_.end() || timeline_it->second.empty())
+            return {client_it->second.name, nullptr};
+        return {client_it->second.name, &timeline_it->second.back()};
+    }
+
     static int get_segment_index(SteamNetworkingMicroseconds time) {
         return time / (int)1e7;
     }
@@ -155,8 +168,15 @@ public:
                 pending_print_status = true;
             }
             auto size = read_variable<int32_t>(record_stream_);
+            // a truncated or corrupt record can carry a bogus length; entry.data
+            // is null for size <= 0, and anything shorter than an opcode cannot
+            // be interpreted at all
+            if (size < static_cast<int32_t>(sizeof(bmmo::opcode)))
+                break;
             bmmo::record_entry entry(size);
             record_stream_.read(reinterpret_cast<char*>(entry.data), size);
+            if (record_stream_.gcount() != size)
+                break;
             auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
             switch (raw_msg->code) {
                 case bmmo::LoginAcceptedV3: {
@@ -174,12 +194,11 @@ public:
                 }
                 case bmmo::PlayerDisconnected: {
                     auto msg = bmmo::message_utils::deserialize<bmmo::player_disconnected_msg>(entry.data, entry.size);
-                    auto it = record_clients_.find(msg.content.connection_id);
-                    if (it != record_clients_.end()) {
-                        auto& time_period = timeline_[it->second.name].back(); // it should exist ahead of time
-                        time_period.end = current_record_time_; // end this period
+                    auto [username, last_period] = get_last_time_period(msg.content.connection_id);
+                    if (last_period)
+                        last_period->end = current_record_time_; // end this period
+                    if (!username.empty())
                         record_clients_.erase(msg.content.connection_id);
-                    }
                     break;
                 }
                 case bmmo::PlayerConnectedV2: {
@@ -191,11 +210,11 @@ public:
                 }
                 case bmmo::OwnedCheatState: {
                     auto msg = bmmo::message_utils::deserialize<bmmo::owned_cheat_state_msg>(entry.data, entry.size);
-                    auto username = record_clients_[msg.content.player_id].name;
-                    auto& last_time_period = timeline_[username].back();
-                    last_time_period.end = current_record_time_;
+                    auto [username, last_period] = get_last_time_period(msg.content.player_id);
+                    if (!last_period) break;
+                    last_period->end = current_record_time_;
 
-                    auto state(last_time_period.state);
+                    auto state(last_period->state);
                     state.mode = static_cast<player_mode_t>(Online | ((msg.content.state.cheated) ? Cheating : None));
                     timeline_[username].emplace_back(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
                     record_clients_[msg.content.player_id].cheated = msg.content.state.cheated;
@@ -204,11 +223,11 @@ public:
                 case bmmo::CurrentMap: {
                     auto msg = bmmo::message_utils::deserialize<bmmo::current_map_msg>(entry.data, entry.size);
                     if (msg.content.type == bmmo::current_map_state::Announcement) break;
-                    auto username = record_clients_[msg.content.player_id].name;
-                    auto& last_time_period = timeline_[username].back();
-                    last_time_period.end = current_record_time_;
+                    auto [username, last_period] = get_last_time_period(msg.content.player_id);
+                    if (!last_period) break;
+                    last_period->end = current_record_time_;
 
-                    auto state(last_time_period.state);
+                    auto state(last_period->state);
                     state.map = msg.content.map;
                     state.sector = msg.content.sector;
                     timeline_[username].emplace_back(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
@@ -216,11 +235,11 @@ public:
                 }
                 case bmmo::CurrentSector: {
                     auto msg = bmmo::message_utils::deserialize<bmmo::current_sector_msg>(entry.data, entry.size);
-                    auto username = record_clients_[msg.content.player_id].name;
-                    auto& last_time_period = timeline_[username].back();
-                    last_time_period.end = current_record_time_;
+                    auto [username, last_period] = get_last_time_period(msg.content.player_id);
+                    if (!last_period) break;
+                    last_period->end = current_record_time_;
 
-                    auto state(last_time_period.state);
+                    auto state(last_period->state);
                     state.sector = msg.content.sector;
                     timeline_[username].emplace_back(current_record_time_ + 1, std::numeric_limits<int64_t>::max(), msg.content.player_id, state);
                     break;
@@ -335,9 +354,8 @@ public:
             init_ = true;
         }
 
-        running_ = true;
         Printf("Record file loaded successfully.");
-        startup_cv_.notify_all();
+        mark_running();
         Printf("Fake server started at port %u.", port_);
 
         return true;
@@ -382,13 +400,14 @@ public:
         }
         bool was_playing = false;
         if (playing_) {
-            std::mutex pause_cv_mutex;
-            std::unique_lock cv_lk(pause_cv_mutex);
-            {
-                std::unique_lock lk(pause_mutex_);
-                pause();
-            }
-            pause_cv_.wait(cv_lk, [this] { return !playing_; });
+            // wait on pause_mutex_ itself: the old code waited on a
+            // stack-local mutex while the player thread notified under
+            // pause_mutex_, so a notification landing between the predicate
+            // check and the wait was lost and this thread hung forever
+            std::unique_lock lk(pause_mutex_);
+            pause();
+            pause_cv_.wait(lk, [this] { return !playing_; });
+            lk.unlock();
             was_playing = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -413,6 +432,7 @@ public:
         forward_seek(dest_time, false);
 
         // figure out states at that timepoint and rebuild it
+        std::unique_lock state_lk(state_mutex_);
         record_clients_.clear();
         for (auto& [username, periods]: timeline_) {
             auto it = std::lower_bound(periods.begin(), periods.end(), dest_time,
@@ -440,6 +460,7 @@ public:
         // broadcast LoginAccepted message for client to rebuild states
         bmmo::login_accepted_v3_msg msg;
         msg.online_players = record_clients_;
+        state_lk.unlock();
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         broadcast_record_realworld_timestamp();
@@ -471,8 +492,10 @@ public:
             was_playing = true;
         }
         SteamNetworkingMicroseconds dest_time = seconds * 1e6;
-        for (auto& i: clients_) {
-            interface_->CloseConnection(i.first, k_ESteamNetConnectionEnd_App_Min + 150 + 3, "Seeking data, please wait", true);
+        {
+            std::lock_guard lk(state_mutex_);
+            for (const auto& i: clients_)
+                interface_->CloseConnection(i.first, k_ESteamNetConnectionEnd_App_Min + 150 + 3, "Seeking data, please wait", true);
         }
         seeking_ = true;
         if (dest_time <= current_record_time_) {
@@ -487,28 +510,28 @@ public:
             play();
     }
 
-    void wait_till_started() {
-        while (!running()) {
-            std::unique_lock<std::mutex> lk(startup_mutex_);
-            startup_cv_.wait(lk);
-        }
-    }
-
     void shutdown(int reconnection_delay = 0) {
         Printf("Shutting down...");
         int nReason = reconnection_delay == 0 ? 0 : k_ESteamNetConnectionEnd_App_Min + 150 + reconnection_delay;
-        for (auto& i: clients_) {
-            interface_->CloseConnection(i.first, nReason, "Server closed", true);
+        {
+            std::lock_guard lk(state_mutex_);
+            for (const auto& i: clients_)
+                interface_->CloseConnection(i.first, nReason, "Server closed", true);
         }
         running_ = false;
+        playing_ = false; // let the player thread fall out of its loop
+        pause_cv_.notify_all();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (player_thread_.joinable())
             player_thread_.join();
+        // the console thread is parked inside replxx waiting for a line
+        bmmo::console::end_input();
     }
 
-    HSteamNetConnection get_client_id(const std::string& username) const {
+    HSteamNetConnection get_client_id(const std::string& username) {
         if (username.empty())
             return Printf("Error: invalid connection id."), k_HSteamNetConnection_Invalid;
+        std::lock_guard lk(state_mutex_);
         const auto lower_name = bmmo::string_utils::to_lower(username);
         auto it = std::find_if(clients_.begin(), clients_.end(),
             [&lower_name](const auto& i) { return bmmo::message_utils::to_lower(i.second.name) == lower_name; });
@@ -520,15 +543,18 @@ public:
     bool kick_client(HSteamNetConnection client, std::string reason = "",
             HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
             bmmo::connection_end::code type = bmmo::connection_end::Kicked) {
-        if (client == k_HSteamNetConnection_Invalid || !clients_.contains(client))
+        std::lock_guard lk(state_mutex_);
+        auto client_it = clients_.find(client);
+        if (client == k_HSteamNetConnection_Invalid || client_it == clients_.end())
             return false;
         bmmo::player_kicked_msg msg{};
-        msg.kicked_player_name = clients_[client].name;
+        msg.kicked_player_name = client_it->second.name;
         std::string kick_notice = "Kicked by ";
 
-        if (executor != k_HSteamNetConnection_Invalid) {
-            kick_notice += clients_[executor].name;
-            msg.executor_name = clients_[executor].name;
+        if (auto executor_it = clients_.find(executor);
+                executor != k_HSteamNetConnection_Invalid && executor_it != clients_.end()) {
+            kick_notice += executor_it->second.name;
+            msg.executor_name = executor_it->second.name;
         } else {
             kick_notice += "the server";
         }
@@ -548,7 +574,8 @@ public:
         return true;
     }
 
-    void print_clients() const {
+    void print_clients() {
+        std::lock_guard lk(state_mutex_);
         Printf("%d client(s) online:", clients_.size());
         for (const auto& i: clients_) {
             Printf("%u: %s",
@@ -597,7 +624,6 @@ public:
         }
     }
 
-    void poll_local_state_changes() override {}
 
     int poll_incoming_messages() override {
         int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, incoming_messages_, ONCE_RECV_MSG_COUNT);
@@ -688,6 +714,7 @@ private:
     void backward_seek(SteamNetworkingMicroseconds dest_time) {
         {
             std::unique_lock lk(record_data_mutex_);
+            std::lock_guard state_lk(state_mutex_);
             record_stream_.seekg(strlen(bmmo::RECORD_HEADER) + 1 + sizeof(bmmo::version_t) + sizeof(int64_t) + sizeof(SteamNetworkingMicroseconds));
             started_ = false;
             record_clients_.clear();
@@ -705,7 +732,7 @@ private:
     }
 
     void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
-        // Printf("Connection status changed: %d", pInfo->m_info.m_eState);
+        std::lock_guard lk(state_mutex_);
         switch (pInfo->m_info.m_eState) {
             case k_ESteamNetworkingConnectionState_None:
                 // NOTE: We will get callbacks here when we destroy connections.  You can ignore these.
@@ -832,6 +859,7 @@ private:
     }
 
     void on_message(ISteamNetworkingMessage* networking_msg) override {
+        std::lock_guard lk(state_mutex_);
         auto client_it = clients_.find(networking_msg->m_conn);
         auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
 
@@ -960,10 +988,13 @@ private:
     }
 
     message_action_t parse_message(bmmo::record_entry& entry /*, SteamNetworkingMicroseconds time*/) {
-        auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
-        if (entry.size < static_cast<decltype(entry.size)>(sizeof(bmmo::opcode)))
+        // entry.data is null when size is 0, so check before dereferencing
+        if (!entry.data || entry.size < static_cast<decltype(entry.size)>(sizeof(bmmo::opcode)))
             return message_action_t::None;
-        // std::unique_lock<std::mutex> lk(record_data_mutex_);
+        auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
+        // runs on the player thread; record_clients_ below is also read by the
+        // network thread when it builds LoginAcceptedV3 for a joining client
+        std::lock_guard lk(state_mutex_);
         // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", time / 1e6, raw_msg->code, entry.size);
         switch (raw_msg->code) {
             case bmmo::LoginAcceptedV3: {
@@ -1033,8 +1064,14 @@ private:
     std::chrono::steady_clock::time_point time_zero_, time_pause_;
 
     uint16_t port_ = 0;
-    std::mutex startup_mutex_, record_data_mutex_, pause_mutex_;
-    std::condition_variable startup_cv_, pause_cv_;
+    std::mutex record_data_mutex_, pause_mutex_;
+    std::condition_variable pause_cv_;
+    // Guards the live connection list and the replayed record state, which
+    // the network thread (on_message / connection callbacks), the player
+    // thread (parse_message, broadcast) and the console thread all touch.
+    // Recursive because locked entry points call each other; lock ordering is
+    // always record_data_mutex_ -> state_mutex_, never the reverse.
+    std::recursive_mutex state_mutex_;
     // bool print_states = true;
     std::atomic_bool playing_ = false, started_ = false, seeking_ = false, init_ = false;
     std::thread player_thread_;

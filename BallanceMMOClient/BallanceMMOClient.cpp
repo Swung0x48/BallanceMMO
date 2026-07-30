@@ -20,9 +20,8 @@ static VOID CALLBACK WinEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwE
 void BallanceMMOClient::show_player_list() {
     // player_list_thread has a sleep_for and may freeze the game if joined synchronously
     asio::post(thread_pool_, [this] {
-        player_list_visible_ = false;
-        if (player_list_thread_.joinable())
-            player_list_thread_.join();
+        stop_player_list(true); // we are on a pool thread, so joining here is fine
+        if (shutting_down_) return;
         utils_.schedule_sync_call([this] {
             player_list_display_ = std::make_unique<decltype(player_list_display_)::element_type>("PlayerList", "", RIGHT_MOST, 0.412f);
             player_list_display_->sprite_->SetPosition({0.596f, 0.412f});
@@ -31,21 +30,30 @@ void BallanceMMOClient::show_player_list() {
             player_list_display_->paint(player_list_color_);
             // player_list_display_->paint_background(0x44444444);
             player_list_display_->set_visible(true);
+            std::lock_guard thread_lk(player_list_thread_mtx_);
             player_list_thread_ = utils::create_named_thread(L"BMMO_PlayerList", [this] {
                 player_list_visible_ = true;
-                int last_player_count = -1, last_font_size = -1;
+                player_list_last_count_ = -1;
+                player_list_last_font_size_ = -1;
                 last_player_list_text_.clear();
                 while (player_list_visible_) {
-                    update_player_list(last_player_count, last_font_size);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    update_player_list();
+                    // wait on the cv instead of sleeping: stopping this thread
+                    // must not take up to half a second while BML tears down
+                    std::unique_lock lk(player_list_cv_mtx_);
+                    player_list_cv_.wait_for(lk, std::chrono::milliseconds(500),
+                                             [this] { return !player_list_visible_; });
                 }
-                utils_.schedule_sync_call([this] { player_list_display_.reset(); });
+                // BML is already going away; scheduling a call into it now would
+                // run against a destroyed mod
+                if (!shutting_down_)
+                    utils_.schedule_sync_call([this] { player_list_display_.reset(); });
             });
         });
     });
 }
 
-inline void BallanceMMOClient::update_player_list(int& last_player_count, int& last_font_size) {
+inline void BallanceMMOClient::update_player_list() {
     auto list_sorter = [](const player_status_list_entry& i1, const player_status_list_entry& i2) {
         const int map_cmp = boost::to_lower_copy(i1.map_name).compare(boost::to_lower_copy(i2.map_name));
         if (map_cmp > 0) return true;
@@ -63,15 +71,28 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     enum timestamp_diff_status { TdsNone = 0, TdsZero = 0b01, TdsNonZero = 0b10, TdsDisplay = 0b11 };
 
     std::unordered_map<std::string, std::map<int, int>> timestamp_display; // std::map<int, tds>
+    // This runs on the player-list thread, which may not call BML APIs or read
+    // game-thread state; everything engine-owned comes from the snapshot the
+    // game thread publishes each frame.
+    const auto snapshot = get_player_list_snapshot();
     std::unique_lock lk(player_status_list_mtx_);
     player_status_list_.clear();
-    player_status_list_.reserve(db_.player_count() + !spectator_mode_);
+    player_status_list_.reserve(db_.player_count() + !snapshot.spectator);
     auto push_entry = [&, this](const bmmo::map& map, const std::string& name, int sector, int64_t timestamp, bool cheated) {
-        const auto& times = maps_[map.get_hash_bytes_string()].sector_timestamps;
-        auto time_it = times.find(sector);
-        auto map_name = map.get_display_name(map_names_);
-        if (time_it != times.end()) {
-            timestamp -= time_it->second;
+        // if_contains holds the submap lock for the lookup, and unlike
+        // operator[] it does not insert a map entry from this thread
+        int64_t sector_timestamp = 0;
+        bool has_timestamp = false;
+        maps_.if_contains(map.get_hash_bytes_string(), [&](const auto& entry) {
+            const auto& times = entry.second.sector_timestamps;
+            if (auto time_it = times.find(sector); time_it != times.end()) {
+                sector_timestamp = time_it->second;
+                has_timestamp = true;
+            }
+        });
+        auto map_name = get_map_name(map);
+        if (has_timestamp) {
+            timestamp -= sector_timestamp;
             timestamp_display[map_name][sector] |= (timestamp == 0 ? TdsZero : TdsNonZero);
         }
         player_status_list_.push_back({ map_name, name, sector, timestamp, cheated });
@@ -84,9 +105,9 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
                     pair.second.current_sector_timestamp, pair.second.cheated);
         return true;
     });
-    if (!spectator_mode_)
-        push_entry(current_map_, get_display_nickname(), current_sector_,
-                    current_sector_timestamp_, m_bml->IsCheatEnabled());
+    if (!snapshot.spectator)
+        push_entry(snapshot.current_map, get_display_nickname(), snapshot.sector,
+                    snapshot.sector_timestamp, snapshot.cheated);
     std::ranges::sort(player_status_list_, list_sorter);
     auto size = int(player_status_list_.size());
 
@@ -94,14 +115,14 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     text.reserve(1024);
     std::string last_map_name;
     int ranking = 0;
-    const auto own_map_name = current_map_.get_display_name();
+    const auto& own_map_name = snapshot.own_map_display_name;
     for (const auto& i: player_status_list_ /* | std::views::reverse */) {
         std::string map_display_name;
         if (last_map_name != i.map_name)
             last_map_name = map_display_name = i.map_name;
         else
             map_display_name = "~";
-        bool show_rankings = input_manager_->IsKeyDown(CKKEY_RMENU) && i.map_name == own_map_name;
+        bool show_rankings = snapshot.show_rankings && i.map_name == own_map_name;
         if (show_rankings)
             ++ranking;
         std::string time_diff_str;
@@ -120,13 +141,15 @@ inline void BallanceMMOClient::update_player_list(int& last_player_count, int& l
     last_player_list_text_ = text;
     lk.unlock();
 
-    utils_.schedule_sync_call([&, this, size] {
+    // capture by value + members only: this runs later on the game thread,
+    // possibly after the player-list thread that called us has exited
+    utils_.schedule_sync_call([this, size] {
         std::unique_lock lk(player_status_list_mtx_);
-        if (size != last_player_count) {
-            last_player_count = size;
+        if (size != player_list_last_count_) {
+            player_list_last_count_ = size;
             auto font_size = utils_.get_display_font_size(10.9f - (1.0f / 6) * std::clamp(size, 7, 29));
-            if (last_font_size != font_size) {
-                last_font_size = font_size;
+            if (player_list_last_font_size_ != font_size) {
+                player_list_last_font_size_ = font_size;
                 if (player_list_display_)
                     player_list_display_->sprite_->SetFont(utils::get_system_font(), font_size, 400, false, false);
             }
@@ -153,6 +176,9 @@ inline void BallanceMMOClient::exit_size_move() {
 
 void BallanceMMOClient::OnLoad()
 {
+    // BML callbacks all run on the game thread; remember it so code reached
+    // from the network thread can tell when it must defer to run_on_game_thread
+    utils_.set_game_thread();
     config_manager_.init_config();
     objects_.toggle_extrapolation(config_manager_["extrapolation"]->GetBoolean());
     parse_and_set_player_list_color(config_manager_["player_list_color"]);
@@ -226,12 +252,12 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         did_not_finish_ = false;
         max_sector_ = 0;
         if (connected()) {
-            const auto name_it = map_names_.find(current_map_.get_hash_bytes_string());
-            if (name_it == map_names_.end()) {
-                map_names_.try_emplace(current_map_.get_hash_bytes_string(), current_map_.name);
+            const auto hash = current_map_.get_hash_bytes_string();
+            if (!has_map_name(hash)) {
+                add_map_name(hash, current_map_.name);
                 send_current_map_name();
             } else
-                current_map_.name = name_it->second;
+                current_map_.name = get_raw_map_name(hash);
             player_ball_ = get_current_ball();
             if (player_ball_ != nullptr) {
                 local_state_handler_->poll_and_send_state_forced(player_ball_);
@@ -386,8 +412,19 @@ void BallanceMMOClient::OnProcess() {
         }
     }
 
+    // refresh the values worker threads read instead of querying the engine
+    utils_.refresh_engine_cache();
+    own_cheat_enabled_ = m_bml->IsCheatEnabled();
+    spectator_mode_ = config_manager_["spectator"]->GetBoolean();
+
     if (!connected())
         return;
+
+    apply_pending_ping_text();
+    // publish engine-owned state for the player-list thread, which runs on its
+    // own thread and must not call BML APIs itself
+    if (player_list_visible_)
+        refresh_player_list_snapshot();
 
     std::unique_lock bml_lk(bml_mtx_, std::try_to_lock);
 
@@ -565,16 +602,22 @@ void BallanceMMOClient::OnLevelFinish() {
 
     // Sending level finish messages immediately may get us wrong values of
     // extra points. We have to wait for some time.
-    // IBML::AddTimer is based on frames; this may be unfair to players with
-    // low framerates, so we use our thread pool with this_thread::sleep_for.
-    asio::post(thread_pool_, [this, array_energy]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // The float overload of AddTimer counts real milliseconds rather than
+    // frames, so this is not unfair to players with low framerates - and
+    // unlike the sleeping thread-pool task it used to be, it reads the energy
+    // and level arrays on the game thread.
+    m_bml->AddTimer(100.0f, [this]() {
+        auto* array_energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
+        auto* array_level = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_));
+        auto* all_levels = m_bml->GetArrayByName("AllLevel");
+        if (!array_energy || !array_level || !all_levels)
+            return;
         bmmo::level_finish_v2_msg msg{};
         array_energy->GetElementValue(0, 0, &msg.content.points);
         array_energy->GetElementValue(0, 1, &msg.content.lives);
         array_energy->GetElementValue(0, 5, &msg.content.lifeBonus);
-        static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementValue(0, 0, &current_map_.level);
-        m_bml->GetArrayByName("AllLevel")->GetElementValue(current_map_.level - 1, 6, &msg.content.levelBonus);
+        array_level->GetElementValue(0, 0, &current_map_.level);
+        all_levels->GetElementValue(current_map_.level - 1, 6, &msg.content.levelBonus);
         msg.content.timeElapsed = (m_bml->GetTimeManager()->GetTime() - maps_[current_map_.get_hash_bytes_string()].level_start_timestamp) / 1e3f;
         reset_timer_ = true;
         msg.content.cheated = m_bml->IsCheatEnabled();
@@ -605,6 +648,7 @@ void BallanceMMOClient::OnLoadScript(BMMO_CKSTRING filename, CKBehavior* script)
 }
 
 void BallanceMMOClient::OnCheatEnabled(bool enable) {
+    own_cheat_enabled_ = enable; // keep the network thread's mirror current
     if (!connected() || spectator_mode_)
         return;
     bmmo::cheat_state_msg msg{};
@@ -682,6 +726,16 @@ void BallanceMMOClient::OnCommand(IBML* bml, const std::vector<std::string>& arg
 
 void BallanceMMOClient::OnFullCommand(const std::string& full_command)
 {
+    // Commands arrive from the in-game command bar (game thread), the console
+    // window's input thread and OnAsyncCommand's pool task. Many of them touch
+    // the engine (spawning spirit balls, sending CK messages, reading cheat
+    // state), so run the whole dispatch on the game thread; when we are already
+    // there this is a plain call.
+    if (!utils_.on_game_thread()) {
+        utils_.schedule_sync_call([this, full_command] { OnFullCommand(full_command); });
+        return;
+    }
+
     auto help = [this](IBML* bml) {
         std::lock_guard lk(bml_mtx_);
         SendIngameMessage("BallanceMMO Help", bmmo::ansi::Bold);
@@ -743,8 +797,7 @@ void BallanceMMOClient::init_commands() {
 
         const char* new_text = nullptr;
         bool canceled = false;
-        for (const auto& i : listeners_)
-            canceled |= !i->on_pre_chat(msg.chat_content.c_str(), &new_text);
+        notify_listeners([&](const auto& i) { canceled |= !i->on_pre_chat(msg.chat_content.c_str(), &new_text); });
         if (canceled) return;
 
         if (new_text && std::strlen(new_text) < UINT16_MAX)
@@ -972,7 +1025,7 @@ void BallanceMMOClient::init_commands() {
                               pair.second.cheated ? "[CHEAT] " : "",
                               pair.second.name, pair.second.current_sector,
                               bmmo::string_utils::get_ordinal_suffix(pair.second.current_sector),
-                              pair.second.current_map.get_display_name(map_names_)));
+                              get_map_name(pair.second.current_map)));
             return true;
         });
     });
@@ -1338,8 +1391,7 @@ void BallanceMMOClient::terminate(long delay) {
 
 void BallanceMMOClient::connect_to_server(const char* address, const char* name) {
     bool canceled = false;
-    for (const auto& i : listeners_)
-        canceled |= !i->on_pre_login(address, name);
+    notify_listeners([&](const auto& i) { canceled |= !i->on_pre_login(address, name); });
     if (canceled) return;
 
     if (std::strcmp(server_addr_.c_str(), address) == 0) {
@@ -1429,9 +1481,8 @@ void BallanceMMOClient::disconnect_from_server() {
         cleanup();
         SendIngameMessage("Disconnected.");
 
-        ping_->update("");
-        status_->update("Disconnected");
-        status_->paint(0xffff0000);
+        clear_ping_text();
+        set_status_text("Disconnected", 0xffff0000);
     }
 }
 
@@ -1459,9 +1510,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_None:
-        ping_->update("");
-        status_->update("Disconnected");
-        status_->paint(0xffff0000);
+        clear_ping_text();
+        set_status_text("Disconnected", 0xffff0000);
         break;
     case k_ESteamNetworkingConnectionState_ClosedByPeer: {
         std::string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
@@ -1492,9 +1542,8 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
     case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
     {
         std::string s = std::format("Reason: {} ({})", pInfo->m_info.m_szEndDebug, pInfo->m_info.m_eEndReason);
-        ping_->update("");
-        status_->update("Disconnected");
-        status_->paint(0xffff0000);
+        clear_ping_text();
+        set_status_text("Disconnected", 0xffff0000);
         // Print an appropriate message
         if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
             // Note: we could distinguish between a timeout, a rejected connection,
@@ -1526,38 +1575,47 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 
     case k_ESteamNetworkingConnectionState_Connecting:
         // We will get this callback when we start connecting.
-        status_->update("Connecting");
-        status_->paint(0xFFF6A71B);
+        set_status_text("Connecting", 0xFFF6A71B);
         break;
 
     case k_ESteamNetworkingConnectionState_Connected: {
         std::lock_guard lk(bml_mtx_);
-        status_->update("Connected (Login requested)");
-        //status_->paint(0xff00ff00);
+        set_status_text("Connected (Login requested)");
         SendIngameMessage("Connected to server.");
         std::string nickname = db_.get_nickname();
-        config_manager_.check_and_save_name_change_time();
-        spectator_mode_ = config_manager_["spectator"]->GetBoolean();
+        // check_and_save_name_change_time() writes the external config file and
+        // read-modify-writes config_manager_'s name-change bookkeeping, which
+        // the game thread also touches; keep it off the network thread.
+        utils_.run_on_game_thread([this] { config_manager_.check_and_save_name_change_time(); });
+        // spectator_mode_ mirrors a BML property; the game thread refreshes it
+        // every frame in OnProcess, so just read it here
         if (spectator_mode_) {
             nickname = bmmo::name_validator::get_spectator_nickname(nickname);
             SendIngameMessage("Note: Spectator Mode is enabled. Your actions will be invisible to other players.");
             local_state_handler_ = std::make_unique<spectator_state_handler>(thread_pool_, this, GetLogger());
-            spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.9625f);
-            spectator_label_->sprite_->SetFont("Arial", utils_.get_display_font_size(11.72f), 500, false, false);
-            spectator_label_->set_visible(true);
         }
         else {
             local_state_handler_ = std::make_unique<player_state_handler>(thread_pool_, this, GetLogger());
         }
-        player_ball_ = get_current_ball();
-        if (player_ball_)
-            local_state_handler_->set_ball_type(db_.get_ball_id(player_ball_->GetName()));
+        // sprites and the current ball are engine objects: creating or reading
+        // them here would race the renderer, so hand that part to the game thread
+        utils_.run_on_game_thread([this] {
+            if (spectator_mode_) {
+                spectator_label_ = std::make_shared<text_sprite>("Spectator_Label", "[Spectator Mode]", RIGHT_MOST, 0.9625f);
+                spectator_label_->sprite_->SetFont("Arial", utils_.get_display_font_size(11.72f), 500, false, false);
+                spectator_label_->set_visible(true);
+            }
+            player_ball_ = get_current_ball();
+            if (player_ball_ && local_state_handler_)
+                local_state_handler_->set_ball_type(db_.get_ball_id(player_ball_->GetName()));
+        });
 
         SendIngameMessage(("Logging in as \"" + nickname + "\"...").c_str());
         bmmo::login_request_v3_msg msg{};
         msg.nickname = nickname;
         msg.version = bmmo::current_version;
-        msg.cheated = m_bml->IsCheatEnabled() && !spectator_mode_; // always false in spectator mode
+        // the mirror, not IsCheatEnabled(): this runs on the network thread
+        msg.cheated = own_cheat_enabled_.load() && !spectator_mode_; // always false in spectator mode
         memcpy(msg.uuid, &(config_manager_.get_uuid()), sizeof(config_manager_.get_uuid()));
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -1572,8 +1630,13 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
             while (connected()) {
                 auto status = get_status();
                 average_ping_ = (average_ping_ * 3 + status.m_nPing) / 4;
-                std::string str = utils::pretty_status(status);
-                ping_->update(str, false);
+                // publish the text; the ping sprite itself is only ever
+                // touched on the game thread, in OnProcess
+                {
+                    std::lock_guard lk(ping_text_mtx_);
+                    ping_text_ = utils::pretty_status(status);
+                    ping_text_pending_ = true;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             };
         });
@@ -1586,17 +1649,18 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 }
 
 void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
-    auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
-
+    // general_message is a max-sized view used only to read the opcode, so it
+    // is checked against sizeof(opcode) rather than its own (huge) size
     if (network_msg->m_cbSize < static_cast<decltype(network_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
         logger_->Error("Invalid message with size %d received.", network_msg->m_cbSize);
         return;
     }
+    auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
 
     switch (raw_msg->code) {
     case bmmo::OwnedBallState: {
-        assert(network_msg->m_cbSize == sizeof(bmmo::owned_ball_state_msg));
-        auto* obs = reinterpret_cast<bmmo::owned_ball_state_msg*>(network_msg->m_pData);
+        auto* obs = bmmo::message_utils::view_as<bmmo::owned_ball_state_msg>(network_msg);
+        if (!obs) break;
         bool success = db_.update(obs->content.player_id, TimedBallState(obs->content.state));
         //assert(success);
         if (!success) {
@@ -1690,7 +1754,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 OnFullCommand("spectate"); // exit spectation properly
 #endif // BMMO_WITH_PLAYER_SPECTATION
             db_.clear();
-            objects_.destroy_all_objects();
+            // destroying the spirit balls destroys CK objects
+            utils_.run_on_game_thread([this] { objects_.destroy_all_objects(); });
         }
         logger_->Info("%d player(s) online: ", msg.online_players.size());
         auto nickname = get_display_nickname();
@@ -1718,8 +1783,6 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         logged_in_ = true;
         client_cv_.notify_all();
         reconnection_count_ = 0;
-        status_->update("Connected");
-        status_->paint(0xff00ff00);
         SendIngameMessage("Logged in.", bmmo::color_code(msg.code));
 
         auto t = std::time(nullptr);
@@ -1729,49 +1792,53 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             bmmo::current_version.to_string(), bmmo::string_utils::get_build_time_string(), utc_time_str
         ).c_str());
 
-        // post-connection actions
-        player_ball_ = get_current_ball();
-        if (m_bml->IsIngame() && player_ball_ != nullptr)
-            local_state_handler_->poll_and_send_state_forced(player_ball_);
-        if (!current_map_.name.empty()) {
-            if (const auto name_it = map_names_.find(current_map_.get_hash_bytes_string()); name_it == map_names_.end()) {
-                send_current_map_name();
-                map_names_.try_emplace(current_map_.get_hash_bytes_string(), current_map_.name);
-            } else
-                current_map_.name = name_it->second;
-        }
-        send_current_map();
+        // The rest of the login sequence reads the status sprite, the current
+        // ball and the mod list - all engine state. Hand it to the game thread
+        // and send the resulting messages from there.
+        utils_.run_on_game_thread([this] {
+            set_status_text("Connected", 0xff00ff00);
 
-        {
-            std::lock_guard client_lk(client_mtx_);
-            for (const auto& i : listeners_)
-                i->on_login(server_addr_.c_str(), server_name_.c_str());
-        }
+            // post-connection actions
+            player_ball_ = get_current_ball();
+            if (m_bml->IsIngame() && player_ball_ != nullptr && local_state_handler_)
+                local_state_handler_->poll_and_send_state_forced(player_ball_);
+            if (!current_map_.name.empty()) {
+                const auto hash = current_map_.get_hash_bytes_string();
+                if (!has_map_name(hash)) {
+                    send_current_map_name();
+                    add_map_name(hash, current_map_.name);
+                } else
+                    current_map_.name = get_raw_map_name(hash);
+            }
+            send_current_map();
 
-        if (config_manager_.get_player_list_visible())
-            show_player_list();
+            notify_listeners([this](const auto& i) { i->on_login(server_addr_.c_str(), server_name_.c_str()); });
 
-        if (spectator_mode_)
-            break;
+            if (config_manager_.get_player_list_visible())
+                show_player_list();
 
-        const auto count = m_bml->GetModCount();
-        bmmo::mod_list_msg mod_msg{};
-        for (auto i = 0; i < count; ++i) {
-            auto* mod = m_bml->GetMod(i);
-            if (mod == this) continue; // ignore bmmo itself
-            std::string mod_id = bmmo::string_utils::ansi_to_utf8(mod->GetID());
+            if (spectator_mode_)
+                return;
+
+            const auto count = m_bml->GetModCount();
+            bmmo::mod_list_msg mod_msg{};
+            for (auto i = 0; i < count; ++i) {
+                auto* mod = m_bml->GetMod(i);
+                if (mod == this) continue; // ignore bmmo itself
+                std::string mod_id = bmmo::string_utils::ansi_to_utf8(mod->GetID());
 #ifdef BMMO_USE_BML_PLUS
-            if (mod_id == "BML") mod_id = "BML+"; // rename BML to BML+ for mod list
+                if (mod_id == "BML") mod_id = "BML+"; // rename BML to BML+ for mod list
 #endif // BMMO_USE_BML_PLUS
-            mod_msg.mods.try_emplace(mod_id, bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
-        }
-        mod_msg.serialize();
-        send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
+                mod_msg.mods.try_emplace(mod_id, bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
+            }
+            mod_msg.serialize();
+            send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
 
-        bmmo::hash_data_msg hash_msg{};
-        hash_msg.data = md5_data_;
-        hash_msg.serialize();
-        send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
+            bmmo::hash_data_msg hash_msg{};
+            hash_msg.data = md5_data_;
+            hash_msg.serialize();
+            send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
+        });
         break;
     }
     case bmmo::PlayerConnected: {
@@ -1811,8 +1878,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         play_wave_sound(sound_bubble_);
         utils_.flash_window();
 
-        for (const auto& i : listeners_)
-            i->on_player_login(msg.connection_id);
+        // other mods' callbacks will call BML APIs: run them on the game thread
+        utils_.run_on_game_thread([this, id = msg.connection_id] {
+            notify_listeners([id](const auto& i) { i->on_player_login(id); });
+        });
         // TODO: call this when the player enters a map
 
         break;
@@ -1829,8 +1898,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             db_.remove(msg->content.connection_id);
             utils_.schedule_sync_call([this, id = msg->content.connection_id] {
                 objects_.remove(id);
-                for (const auto& i : listeners_)
-                    i->on_player_logout(id);
+                notify_listeners([id](const auto& i) { i->on_player_logout(id); });
             });
         }
         break;
@@ -1886,7 +1954,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::PlayerReady: {
-        auto* msg = reinterpret_cast<bmmo::player_ready_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::player_ready_msg>(network_msg);
+        if (!msg) break;
         SendIngameMessage(std::format("{} is{} ready to start ({} player{} ready).",
                           get_username(msg->content.player_id),
                           msg->content.ready ? "" : " not",
@@ -1894,7 +1963,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::Countdown: {
-        auto* msg = reinterpret_cast<bmmo::countdown_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::countdown_msg>(network_msg);
+        if (!msg) break;
 
         int time_for_14_frames_ms = 0;
         {
@@ -1913,11 +1983,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 160 - (int)average_ping_ - time_for_14_frames_ms)));
         std::string sender_name = get_username(msg->content.sender),
-                    map_name = msg->content.map.get_display_name(map_names_);
+                    map_name = get_map_name(msg->content.map);
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
 
-        for (const auto& i : listeners_)
-            i->on_countdown(msg);
+        notify_listeners([msg](const auto& i) { i->on_countdown(msg); });
 
         switch (msg->content.type) {
             using ct = bmmo::countdown_type;
@@ -1931,36 +2000,45 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                     current_level_mode_ = msg->content.mode;
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
                 play_wave_sound(sound_go_, true);
-                if (msg->content.force_restart) {
+                // Everything below drives gameplay: it resets level timers,
+                // restarts the level through the engine's behavior graph and
+                // writes the energy array. That belongs on the game thread, so
+                // copy what it needs (the receive buffer dies with this call)
+                // and hand it over.
+                utils_.run_on_game_thread([this,
+                        force_restart = bool(msg->content.force_restart),
+                        restart_level = bool(msg->content.restart_level),
+                        map_matches = (msg->content.map == current_map_)] {
                     const auto start_timestamp = m_bml->GetTimeManager()->GetTime();
-                    for (auto& map: maps_ | std::views::values) {
-                        map.rankings = {};
-                        map.sector_timestamps = {};
-                        map.level_start_timestamp = start_timestamp;
+                    if (force_restart) {
+                        for (auto& map: maps_ | std::views::values) {
+                            map.rankings = {};
+                            map.sector_timestamps = {};
+                            map.level_start_timestamp = start_timestamp;
+                        }
                     }
-                }
-                else {
-                    auto& last_map_data = maps_[last_countdown_map_.get_hash_bytes_string()];
-                    last_map_data.rankings = {};
-                    last_map_data.sector_timestamps = {};
-                    last_map_data.level_start_timestamp = m_bml->GetTimeManager()->GetTime();
-                }
+                    else {
+                        auto& last_map_data = maps_[last_countdown_map_.get_hash_bytes_string()];
+                        last_map_data.rankings = {};
+                        last_map_data.sector_timestamps = {};
+                        last_map_data.level_start_timestamp = start_timestamp;
+                    }
 
-                if ((!msg->content.force_restart && msg->content.map != current_map_) || !m_bml->IsIngame() || spectator_mode_)
-                    break;
-                did_not_finish_ = false;
-                max_sector_ = 1;
-                if (msg->content.restart_level) {
-                    countdown_restart_ = true;
-                    restart_current_level();
-                }
-                else {
-                    auto* array_energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
-                    int points = (current_map_.level == 1) ? initial_points_ : initial_points_ - 1;
-                    array_energy->SetElementValue(0, 0, &points);
-                    array_energy->SetElementValue(0, 1, &initial_lives_);
-                    counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime();
-                }
+                    if ((!force_restart && !map_matches) || !m_bml->IsIngame() || spectator_mode_)
+                        return;
+                    did_not_finish_ = false;
+                    max_sector_ = 1;
+                    if (restart_level) {
+                        countdown_restart_ = true;
+                        restart_current_level();
+                    }
+                    else if (auto* array_energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_))) {
+                        int points = (current_map_.level == 1) ? initial_points_ : initial_points_ - 1;
+                        array_energy->SetElementValue(0, 0, &points);
+                        array_energy->SetElementValue(0, 1, &initial_lives_);
+                        counter_start_timestamp_ = start_timestamp;
+                    }
+                });
                 break;
             }
             case ct::Ready:
@@ -1969,14 +2047,19 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   sender_name, map_name, msg->content.get_level_mode_label(),
                                   msg->content.get_type_label()
                 ).c_str());
-                asio::post(thread_pool_, [this] {
+                // one timer per note on the game thread: CKWaveSound::SetPitch is
+                // an engine call, and the old pool task slept between the notes
+                utils_.run_on_game_thread([this] {
                     static constexpr float base = 0.4375f;// 1.29f;
+                    float delay = 0.0f;
                     for (const auto pitch: {base, base * std::powf(2.0f, 3.0f / 12), base * std::powf(2.0f, 7.0f / 12), base * 2.0f}) {
-                        sound_countdown_->SetPitch(pitch);
-                        play_wave_sound(sound_countdown_, true);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        m_bml->AddTimer(delay, [this, pitch] {
+                            if (!sound_countdown_) return;
+                            sound_countdown_->SetPitch(pitch);
+                            play_wave_sound(sound_countdown_, true);
+                        });
+                        delay += 500.0f;
                     }
-                    // for (const auto i: std::vector<double>{220, 220 * std::powf(2.0f, 3.0f / 12), 220 * std::powf(2.0f, 7.0f / 12), 440}) play_beep(int(i), 220);
                 });
                 break;
             case ct::Countdown_1:
@@ -1987,8 +2070,11 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   sender_name, map_name, msg->content.get_level_mode_label(),
                                   msg->content.get_type_label()).c_str());
                 // asio::post(thread_pool_, [this] { play_beep(440, 500); });
-                sound_countdown_->SetPitch(0.875f);
-                play_wave_sound(sound_countdown_, true);
+                utils_.run_on_game_thread([this] {
+                    if (!sound_countdown_) return;
+                    sound_countdown_->SetPitch(0.875f);
+                    play_wave_sound(sound_countdown_, true);
+                });
 
                 break;
         }
@@ -1996,13 +2082,14 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::DidNotFinish: {
-        auto* msg = reinterpret_cast<bmmo::did_not_finish_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::did_not_finish_msg>(network_msg);
+        if (!msg) break;
         auto player_name = get_username(msg->content.player_id);
         SendIngameMessage(std::format(
             "{}{} did not finish {} (furthest reach: sector {}).",
             msg->content.cheated ? "[CHEAT] " : "",
             player_name,
-            msg->content.map.get_display_name(map_names_),
+            get_map_name(msg->content.map),
             msg->content.sector
         ), bmmo::color_code(msg->code));
         if (msg->content.player_id == db_.get_client_id())
@@ -2015,7 +2102,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::HighscoreTimerCalibration: {
-        auto* msg = reinterpret_cast<bmmo::highscore_timer_calibration_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::highscore_timer_calibration_msg>(network_msg);
+        if (!msg) break;
         if (current_map_ != msg->content.map) break;
         current_level_mode_ = bmmo::level_mode::Highscore;
         hs_begin_delay_ += msg->content.time_diff_microseconds;
@@ -2027,13 +2115,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         else if (hs_calibrated_) {
             break;
         }
-        int points;
-        auto* energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
-        energy->GetElementValue(0, 0, &points);
-        points -= (int)std::ceilf((hs_begin_delay_ / 1e3f + counter_start_timestamp_ - m_bml->GetTimeManager()->GetTime()) / point_decrease_interval_);
-        energy->SetElementValue(0, 0, &points);
-        counter_start_timestamp_ = m_bml->GetTimeManager()->GetTime() - (hs_begin_delay_ / 1e3f);
-        move_size_time_length_ = 0;
+        // the energy array and the time manager are engine state
+        utils_.run_on_game_thread([this] {
+            auto* energy = static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(energy_array_));
+            if (!energy) return;
+            int points;
+            energy->GetElementValue(0, 0, &points);
+            const auto now = m_bml->GetTimeManager()->GetTime();
+            points -= (int)std::ceilf((hs_begin_delay_ / 1e3f + counter_start_timestamp_ - now) / point_decrease_interval_);
+            energy->SetElementValue(0, 0, &points);
+            counter_start_timestamp_ = now - (hs_begin_delay_ / 1e3f);
+            move_size_time_length_ = 0;
+        });
         break;
     }
     case bmmo::LatencyData: {
@@ -2046,13 +2139,18 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::LevelFinishV2: {
-        auto* msg = reinterpret_cast<bmmo::level_finish_v2_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::level_finish_v2_msg>(network_msg);
+        if (!msg) break;
 
-        for (const auto& i : listeners_)
-            i->on_level_finish(msg);
+        // the message points into the receive buffer, so copy it for the
+        // deferred call; the callbacks are other mods' code and touch BML
+        utils_.run_on_game_thread([this, finish = *msg] {
+            auto copy = finish;
+            notify_listeners([&copy](const auto& i) { i->on_level_finish(&copy); });
+        });
 
         // Prepare message
-        std::string map_name = msg->content.map.get_display_name(map_names_),
+        std::string map_name = get_map_name(msg->content.map),
             player_name = get_username(msg->content.player_id),
             formatted_score = msg->content.get_formatted_score();
         //auto state = db_.get(msg->content.player_id);
@@ -2081,13 +2179,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         msg.deserialize();
 
-        std::lock_guard lk(bml_mtx_);
-        map_names_.insert(msg.maps.begin(), msg.maps.end());
+        merge_map_names(msg.maps);
         break;
     }
     case bmmo::OwnedCheatState: {
         assert(network_msg->m_cbSize == sizeof(bmmo::owned_cheat_state_msg));
-        auto* ocs = reinterpret_cast<bmmo::owned_cheat_state_msg*>(network_msg->m_pData);
+        auto* ocs = bmmo::message_utils::view_as<bmmo::owned_cheat_state_msg>(network_msg);
+        if (!ocs) break;
         auto state = db_.get(ocs->content.player_id);
         assert(state.has_value() || (db_.get_client_id() == ocs->content.player_id));
         if (state.has_value()) {
@@ -2101,15 +2199,19 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::CheatToggle: {
-        auto* msg = reinterpret_cast<bmmo::cheat_toggle_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::cheat_toggle_msg>(network_msg);
+        if (!msg) break;
         bool cheat = msg->content.cheated;
-        if (cheat != m_bml->IsCheatEnabled() && !spectator_mode_) {
-            notify_cheat_toggle_ = false;
-            m_bml->EnableCheat(cheat);
-            notify_cheat_toggle_ = true;
-            play_wave_sound(sound_knock_);
-            utils_.flash_window();
-        }
+        // EnableCheat drives gameplay scripts; do it on the game thread
+        utils_.run_on_game_thread([this, cheat] {
+            if (cheat != m_bml->IsCheatEnabled() && !spectator_mode_) {
+                notify_cheat_toggle_ = false;
+                m_bml->EnableCheat(cheat);
+                notify_cheat_toggle_ = true;
+                play_wave_sound(sound_knock_);
+                utils_.flash_window();
+            }
+        });
         std::string str = std::format("[Server] toggled{} cheat [{}]{}!",
                                       msg->content.notify ? "" : " your",
                                       cheat ? "on" : "off",
@@ -2118,18 +2220,21 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::OwnedCheatToggle: {
-        auto* msg = reinterpret_cast<bmmo::owned_cheat_toggle_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::owned_cheat_toggle_msg>(network_msg);
+        if (!msg) break;
         std::string player_name = get_username(msg->content.player_id);
         if (player_name != "") {
             bool cheat = msg->content.state.cheated;
             std::string str = std::format("{} toggled cheat [{}] globally!", player_name, cheat ? "on" : "off");
-            if (cheat != m_bml->IsCheatEnabled() && !spectator_mode_) {
-                notify_cheat_toggle_ = false;
-                m_bml->EnableCheat(cheat);
-                notify_cheat_toggle_ = true;
-                play_wave_sound(sound_knock_);
-                utils_.flash_window();
-            }
+            utils_.run_on_game_thread([this, cheat] {
+                if (cheat != m_bml->IsCheatEnabled() && !spectator_mode_) {
+                    notify_cheat_toggle_ = false;
+                    m_bml->EnableCheat(cheat);
+                    notify_cheat_toggle_ = true;
+                    play_wave_sound(sound_knock_);
+                    utils_.flash_window();
+                }
+            });
             SendIngameMessage(str.c_str(), bmmo::color_code(msg->code));
         }
         break;
@@ -2149,7 +2254,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::SimpleAction: {
-        auto* msg = reinterpret_cast<bmmo::simple_action_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::simple_action_msg>(network_msg);
+        if (!msg) break;
         switch (msg->content) {
             using sa = bmmo::simple_action;
             case sa::LoginDenied:
@@ -2168,7 +2274,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::OwnedSimpleAction: {
-        auto* msg = reinterpret_cast<bmmo::owned_simple_action_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::owned_simple_action_msg>(network_msg);
+        if (!msg) break;
         switch (msg->content.type) {
             using osa = bmmo::owned_simple_action_type;
             case osa::RestartRequestFailed: {
@@ -2184,19 +2291,26 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::ActionDenied: {
-        auto* msg = reinterpret_cast<bmmo::action_denied_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::action_denied_msg>(network_msg);
+        if (!msg) break;
         SendIngameMessage(("Action failed: " + msg->content.to_string()).c_str(), bmmo::color_code(msg->code));
         break;
     }
     case bmmo::CurrentMap: {
-        auto* msg = reinterpret_cast<bmmo::current_map_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::current_map_msg>(network_msg);
+        if (!msg) break;
         if (msg->content.type == bmmo::current_map_state::Announcement) {
+            // .value() would throw out of on_message for a player we never
+            // saw connect (e.g. one who left between the two messages)
+            const auto player_state = db_.get(msg->content.player_id);
             SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
-                              (db_.get_client_id() == msg->content.player_id ? m_bml->IsCheatEnabled()
-                              : db_.get(msg->content.player_id).value().cheated) ? "[CHEAT] " : "",
+                              // own_cheat_enabled_ rather than IsCheatEnabled():
+                              // this runs on the network thread
+                              (db_.get_client_id() == msg->content.player_id ? own_cheat_enabled_.load()
+                              : (player_state && player_state->cheated)) ? "[CHEAT] " : "",
                               get_username(msg->content.player_id), msg->content.sector,
                               bmmo::string_utils::get_ordinal_suffix(msg->content.sector),
-                              msg->content.map.get_display_name(map_names_)),
+                              get_map_name(msg->content.map)),
                               bmmo::color_code(msg->code));
         }
         else {
@@ -2209,7 +2323,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::CurrentSector: {
-        auto* msg = reinterpret_cast<bmmo::current_sector_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::current_sector_msg>(network_msg);
+        if (!msg) break;
         int64_t timestamp = db_.get_timestamp_ms(network_msg->GetTimeReceived());
         db_.update_sector(msg->content.player_id, msg->content.sector, timestamp);
         auto client_map = db_.get_client_map(msg->content.player_id);
@@ -2234,7 +2349,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         break;
     }
     case bmmo::OpState: {
-        auto* msg = reinterpret_cast<bmmo::op_state_msg*>(network_msg->m_pData);
+        auto* msg = bmmo::message_utils::view_as<bmmo::op_state_msg>(network_msg);
+        if (!msg) break;
         SendIngameMessage(std::format("You have been {} Operator permission.",
                 msg->content.op ? "granted" : "removed from"), bmmo::color_code(msg->code));
         break;
@@ -2296,15 +2412,20 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         const auto real_time = system_clock::to_time_t(system_clock::time_point{microseconds{server_realworld_timestamp_us_}});
         char output[32]; std::tm buf; localtime_s(&buf, &real_time);
         std::strftime(output, sizeof(output), "%F %T", &buf);
-        std::string text = spectator_label_->sprite_->GetText();
-        // "[Spectator Mode]" -> "[Real time: %s | Spectator Mode]"
-        const auto left_bracket_pos = text.find('['), pipe_pos = text.find(" | ");
-        if (left_bracket_pos == text.npos) break;
-        if (pipe_pos == text.npos)
-            text.insert(left_bracket_pos + 1, "Real time: " + std::string(output) + " | ");
-        else
-            text.replace(left_bracket_pos + 1, pipe_pos - (left_bracket_pos + 1), "Real time: " + std::string(output));
-        spectator_label_->update(bmmo::string_utils::utf8_to_ansi(text));
+        // the label is a sprite: read and update it on the game thread, where
+        // cleanup() cannot free it from under us mid-update
+        utils_.run_on_game_thread([this, time_str = std::string(output)] {
+            if (!spectator_label_) return;
+            std::string text = spectator_label_->sprite_->GetText();
+            // "[Spectator Mode]" -> "[Real time: %s | Spectator Mode]"
+            const auto left_bracket_pos = text.find('['), pipe_pos = text.find(" | ");
+            if (left_bracket_pos == text.npos) return;
+            if (pipe_pos == text.npos)
+                text.insert(left_bracket_pos + 1, "Real time: " + time_str + " | ");
+            else
+                text.replace(left_bracket_pos + 1, pipe_pos - (left_bracket_pos + 1), "Real time: " + time_str);
+            spectator_label_->update(bmmo::string_utils::utf8_to_ansi(text));
+        });
         break;
     }
     case bmmo::RestartRequest: {
@@ -2315,14 +2436,19 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                           restart ? "your" : get_username(msg.content.victim) + "'s"),
                           bmmo::color_code(msg.code));
         if (restart) {
-            if (m_bml->IsIngame() && !spectator_mode_)
-                restart_current_level();
-            else {
-                send(bmmo::owned_simple_action_msg{.content = {
-                    .type = bmmo::owned_simple_action_type::RestartRequestFailed,
-                    .player_id = msg.content.requester,
-                }});
-            }
+            // restart_current_level() activates a behavior IO in the engine's
+            // script graph, and IsIngame() is engine state - both belong on the
+            // game thread, like the identical call in the Countdown handler
+            utils_.run_on_game_thread([this, requester = msg.content.requester] {
+                if (m_bml->IsIngame() && !spectator_mode_)
+                    restart_current_level();
+                else {
+                    send(bmmo::owned_simple_action_msg{.content = {
+                        .type = bmmo::owned_simple_action_type::RestartRequestFailed,
+                        .player_id = requester,
+                    }});
+                }
+            });
         }
         break;
     }
@@ -2332,7 +2458,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             bool hs_mode = (msg.mode == bmmo::level_mode::Highscore);
             bmmo::ranking_entry::sort_rankings(msg.rankings, hs_mode);
             auto formatted_texts = bmmo::ranking_entry::get_formatted_rankings(
-                    msg.rankings, msg.map.get_display_name(map_names_), hs_mode);
+                    msg.rankings, get_map_name(msg.map), hs_mode);
             size_t size = msg.rankings.first.size() + msg.rankings.second.size() + 1;
             std::string text; text.reserve(size * 64);
             for (const auto& [line, color] : formatted_texts) {
@@ -2368,37 +2494,54 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             SendIngameMessage("Error receiving sound!");
             break;
         }
-        std::thread([this, msg = std::move(msg)] {
-            if (!msg.caption.empty())
-                SendIngameMessage("Now playing: " + msg.caption);
-            utils_.flash_window();
-            std::string path = msg.path;
-            std::string sound_name = "MMO_Sound" + path.substr(path.find_last_of("BMMO_"));
+        if (!msg.caption.empty())
+            SendIngameMessage("Now playing: " + msg.caption);
+        utils_.flash_window();
+        // Creating and playing a CKWaveSound is engine work, and
+        // received_wave_sounds_ is shared with the game thread, so all of it
+        // runs there. The lifetime is handled by a BML timer rather than a
+        // detached sleeping thread: the old code spawned one unbounded thread
+        // per message and created CK objects on it.
+        // copy the fields out: the message holds a stringstream, so a lambda
+        // capturing it would not be copy-constructible (std::function needs it)
+        utils_.run_on_game_thread([this, path = msg.path, caption = msg.caption,
+                                   gain = msg.gain, pitch = msg.pitch,
+                                   duration_ms = msg.duration_ms] {
+            // rfind, not find_last_of: the latter matches any one of those
+            // characters anywhere, and returns npos for a path containing none
+            // of them, which then throws out of substr
+            auto name_pos = path.rfind("BMMO_");
+            std::string sound_name = "MMO_Sound" + (name_pos == std::string::npos ? path : path.substr(name_pos));
             /* WIP: if (msg.type == bmmo::sound_stream_msg::sound_type::Wave) {} */
-            CKWaveSound* sound;
-            load_wave_sound(&sound, sound_name.data(), path.data(), msg.gain, msg.pitch, false);
-            received_wave_sounds_.insert(sound);
+            CKWaveSound* sound = nullptr;
+            std::string sound_path = path;
+            load_wave_sound(&sound, sound_name.data(), sound_path.data(), gain, pitch, false);
+            if (!sound) {
+                logger_->Warn("Failed to load sound <%s> from server.", sound_name.c_str());
+                return;
+            }
+            {
+                std::lock_guard lk(bml_mtx_);
+                received_wave_sounds_.insert(sound);
+            }
             logger_->Info("Playing sound <%s> from server%s",
                               sound_name.c_str(),
-                              msg.caption.empty() ? "" : (": " + msg.caption).c_str());
-            int duration = int(msg.duration_ms);
+                              caption.empty() ? "" : (": " + caption).c_str());
+            int duration = int(duration_ms);
             if (duration <= 0 || duration >= sound->GetSoundLength())
-                duration = sound->GetSoundLength();
-            logger_->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
-                              duration, msg.pitch, duration / msg.pitch, msg.gain, msg.pitch);
-            utils_.schedule_sync_call([=] { sound->Play(); });
-
-            if (duration >= sound->GetSoundLength())
                 duration = sound->GetSoundLength() + 1000;
-            std::this_thread::sleep_for(std::chrono::milliseconds(int(duration / msg.pitch)));
-            utils_.schedule_sync_call([=] {
+            logger_->Info("Sound length: %d / %.2f = %.0f milliseconds; Gain: %.2f; Pitch: %.2f",
+                              duration, pitch, duration / pitch, gain, pitch);
+            sound->Play();
+
+            m_bml->AddTimer(float(duration / pitch), [this, sound] {
                 std::lock_guard lk(bml_mtx_);
                 if (!received_wave_sounds_.contains(sound))
                     return;
                 destroy_wave_sound(sound, true);
                 received_wave_sounds_.erase(sound);
             });
-        }).detach();
+        });
         break;
     }
     case bmmo::PopupBox: {
