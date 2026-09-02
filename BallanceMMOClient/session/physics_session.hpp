@@ -117,6 +117,16 @@ namespace bmmo::session {
         uint64_t remote_inputs_received = 0;
         static constexpr size_t kMaxQueuedSnapshots = 64;
 
+        // Resync (design 9.2): after a re-assignment the next full snapshot
+        // rebuilds every body; triggers are a tick-driver rebase (pause, long
+        // stall), 3 hard corrections in a row, or 30 unmatched snapshots.
+        bool resync_pending = false;
+        uint64_t last_rebases = 0;
+        int consecutive_hard = 0, consecutive_unmatched = 0;
+        uint64_t last_unmatched = 0;
+        std::chrono::steady_clock::time_point last_resync_request{};
+        uint64_t resyncs_sent = 0, resyncs_done = 0;
+
         std::string last_error;
         bool trace = false;         // per-tick diagnostics (automation: session trace on|off); not reset per session
         int exact_log_frames = 0;   // debug: exact core dumps after our Physicalize
@@ -150,6 +160,12 @@ namespace bmmo::session {
             snapshots_received = snapshots_applied = snapshots_stale = 0;
             body_writes = body_write_errors = mechanism_matches = 0;
             events_sent = events_received = 0;
+            resync_pending = false;
+            last_rebases = 0;
+            consecutive_hard = consecutive_unmatched = 0;
+            last_unmatched = 0;
+            last_resync_request = {};
+            resyncs_sent = resyncs_done = 0;
             remote_inputs_received = 0;
             ball_forces.clear();
             rng_last_seed = 0;

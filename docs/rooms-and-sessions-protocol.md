@@ -111,7 +111,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 `session_snapshot_msg`（server → client，unreliable；full 版本 reliable）：session u32、tick u32、full u8、acked_input_tick u32、bodies u16 count，每项：kind u8（`Ball=0, Mechanism=1`）、owner u32（球：玩家 id；机关：字典索引）、name string ≤ 64（仅 full 且 kind=Mechanism，其余为空串）、position f64×3、rotation f64×4、linear f32×3、angular f32×3、flags u8（bit0 simulated、bit1 collision enabled）。位置与四元数用双精度，因为 IVP core 的位置/四元数本身是双精度（速度是单精度），镜像/修正要按位写回。
 
-`session_assign_msg`（server → client，reliable；会话开始时在场的成员在全员 `session_ready_msg` 到齐后一起收到，迟到加入者即时收到）：session u32、first_tick u32——客户端锚点帧对应的服务端 tick 编号：会话开始时在场的成员为 0，迟到加入者为服务端收到 Ready 时的当前 tick。客户端收到前不发送输入（缓存），收到后按 `first_tick + 锚点后经过的帧数` 编号并补发缓存。
+`session_assign_msg`（server → client，reliable；会话开始时在场的成员在全员 `session_ready_msg` 到齐后一起收到 `first_tick = 0`，迟到加入者与重同步者即时收到 `first_tick = 服务端当前 tick + input_delay + 2`，从而与其他成员一样领先服务端；`session_resync_msg{session, last_full_tick}`（client → server，reliable）由客户端在节拍原点重设、连续 3 次硬置或连续 30 个快照对不上历史时发出，服务端按迟到加入处理：重新分配编号、重发各成员最近的 Physicalize、强制一次全量快照；客户端收到新分配后清空历史，用下一个全量快照一次写入全部刚体）：session u32、first_tick u32——客户端锚点帧对应的服务端 tick 编号：会话开始时在场的成员为 0，迟到加入者为服务端收到 Ready 时的当前 tick。客户端收到前不发送输入（缓存），收到后按 `first_tick + 锚点后经过的帧数` 编号并补发缓存。
 
 `session_remote_input_msg`（server → client，unreliable no-delay，每模拟一个 tick 发一条，M4 设计 9.1）：session u32、tick u32、count u8、count × {player u32、input_frame（与 `session_input_msg` 的帧布局相同：keys u8、cam_right/cam_up/cam_dir f32×3、ball_type u8、flags u8）}。内容是服务端在该 tick **实际采用**的每个其他成员的输入帧（新鲜的或沿用上一 tick 的），去掉了收件成员自己；客户端用它驱动远端球的本地导航复制（桥接 API v3 `navigation_*`），快照只做校正。晚到的帧不回放，客户端在没有新帧时沿用最近一帧预测。
 

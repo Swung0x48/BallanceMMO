@@ -256,6 +256,10 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - **暂停**（ESC、失焦）：客户端本地物理停摆，服务端不停。恢复后固定节拍驱动器最多快进 33 tick，超过则重设节拍原点——此时客户端的 tick 编号与服务端脱节。M4 规定：驱动器重设原点时客户端向服务端发 `SessionResync{session, last_full_tick}`，服务端回 `SessionAssign{first_tick = 当前 tick}` 并强制一次全量快照；客户端收到后把 `tick_base` 改为新值、`frames_since_anchor` 归零重排（后续帧号从新基数计）、清空所有修正历史，并在下一次全量快照时对所有刚体（自己的球、远端球、机关）硬置一次。输入历史里旧编号的帧丢弃。
 - **反复硬置**：自己球连续 3 次快照落入硬置档，或 `unmatched` 连续超过 30 个快照（历史里找不到快照 tick，即编号已错位），同样触发 `SessionResync`。
 - 服务端对 `SessionResync` 的处理与迟到加入相同（`late` 集合 + 当前 tick 编号 + 全量快照），因此迟到加入路径与重同步路径共用一套代码和测试。
+- **编号要领先**：迟到加入与重同步分配的不是服务端"当前 tick"，而是 `当前 tick + input_delay + 2`。客户端从收到分配那一刻起按这个编号推进，才能像会话开始时的成员一样领先服务端；按当前 tick 分配时客户端反而落后半个 RTT，每个快照到达时本地还没有那个 tick 的历史，全部 `unmatched`（首次联调正是如此，1380/1380）。
+- 客户端触发重同步后继续按旧编号推进（原版客户端停不了帧），旧编号的输入被服务端的输入缓冲丢弃；收到新的 `SessionAssign` 才归零重排。
+
+**结果（2026-09-02，无头客户端 `--pause-at 4200 --pause-ms 5000`）**：暂停后节拍原点重设 → `SessionResync` → 服务端 `resynced at tick 4532` → 客户端 `resynced: tick base 4532` → 全量快照 10 个刚体一次写入；之后自己球 `compared=1679 ignored=705 blended=185 hard=0 max_err=0.14`（另一方在它暂停期间一直在推它，误差来自接触）。
 
 ### 9.3 路径验证（无头会话客户端脚本）
 
@@ -267,7 +271,13 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 | 房主重开 | 房主再次 `start physics` | 旧会话 `SessionEnd("restarted by the host")`，新会话全员重锚 |
 | 暂停恢复 | 原版客户端 ESC 5 s 后恢复 | 触发 9.2 的重同步，之后 `blended=0` |
 
-服务端在成员离开时代发该玩家的 `Unphysicalize`（目前只在世界里去刚体，其他客户端的镜像会留下），这是 M3 遗漏的一条。
+服务端在成员离开时代发该玩家的 `Unphysicalize`（目前只在世界里去刚体，其他客户端的镜像会留下），这是 M3 遗漏的一条。已补：`physics_session_member_left` 用离开者的 id 向其余成员发 `SessionEvent{Unphysicalize}`。
+
+**结果（2026-09-02，原版房主 + 无头客户端）**：
+- 迟到加入：会话跑到 tick ~2300 时无头客户端加入房间（Running 状态的房间可加入），锚点后收到 `SessionAssign(first_tick=2329)`、房主球的 Physicalize 与全量快照；房主球先按镜像方式出现，导航图在锚点后第 3 tick 可读时自动升级为预测（`remote ... now predicted`）。
+- 断线/离开：房主 `mmo room leave` 后无头客户端收到代发的 `Unphysicalize`（`remote player ... unphysicalized`），会话为剩下的成员继续；最后一人离开时 `everyone left`。
+- host 迁移：由房间系统处理，会话不中断（同上）。
+- 房主重开：无头客户端在 `SessionStart` 时若关卡仍加载着则重启引擎回到主菜单再加载（约 5 s），原版客户端走 `restart_current_level`。
 
 ### 9.4 服务端校验客户端事件
 

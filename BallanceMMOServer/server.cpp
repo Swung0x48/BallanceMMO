@@ -767,10 +767,25 @@ public:
         s.ready.erase(c);
         s.assigned.erase(c);
         s.late.erase(c);
-        s.last_physicalize.erase(c);
+        if (s.last_physicalize.erase(c) && runner_) {
+            // The others still mirror this ball: relay an Unphysicalize on the
+            // leaver's behalf (design 9.3).
+            bmmo::session_event_msg gone;
+            gone.session = session;
+            gone.player = c;
+            gone.tick = runner_->current_tick(session);
+            gone.type = bmmo::session::event_type::Unphysicalize;
+            gone.serialize();
+            for (const auto m: s.members)
+                send(m, gone.raw.str().data(), gone.size(), k_nSteamNetworkingSend_Reliable);
+        }
         if (runner_) runner_->remove_player(session, c);
         if (s.members.empty()) end_physics_session(session, "everyone left");
         else assign_start_members(s);   // the leaver may have been the one everybody waited for
+    }
+
+    uint32_t late_tick_base(const physics_session_state& s) const {
+        return runner_->current_tick(s.id) + std::max<uint32_t>(1, config_.physics_input_delay) + 2;
     }
 
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick) {
@@ -809,7 +824,10 @@ public:
         s.ready.insert(c);
         // Late joiners are numbered from the server's current tick; members
         // present at the start from 0 (protocol 2.2, session_assign_msg).
-        const uint32_t assigned = s.late.count(c) ? runner_->current_tick(s.id) : 0;
+        // A late joiner starts input_delay ahead of the server like everybody
+        // else (the server simulates tick T only after the inputs for T), so
+        // every snapshot refers to a tick the client has already recorded.
+        const uint32_t assigned = s.late.count(c) ? late_tick_base(s) : 0;
         runner_->player_ready(msg.session, c, assigned);
         if (s.late.count(c)) send_session_assign(s, c, assigned);
         else assign_start_members(s);
@@ -821,6 +839,28 @@ public:
                 if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
             runner_->request_full_snapshot(s.id);
         }
+    }
+
+    // Resync (design 9.2): the client's tick numbering broke (pause, long
+    // stall, repeated hard corrections).  Same path as a late join: current
+    // tick as the new base, everyone's ball, then a full snapshot.
+    void handle_session_resync(HSteamNetConnection c, const bmmo::session_resync_msg& msg) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
+        auto it = physics_sessions_.find(msg.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        if (!runner_->running(s.id)) return;
+        const uint32_t assigned = late_tick_base(s);
+        s.late.insert(c);
+        s.ready.insert(c);
+        runner_->player_ready(s.id, c, assigned);
+        send_session_assign(s, c, assigned);
+        for (const auto& [member, bytes]: s.last_physicalize)
+            if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+        runner_->request_full_snapshot(s.id);
+        Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u).", s.id, get_client_name(c),
+               assigned, msg.last_full_tick);
     }
 
     void handle_session_input(HSteamNetConnection c, const bmmo::session_input_msg& msg) {
@@ -977,8 +1017,12 @@ public:
                         send_room_event(c, event_type::RequestDenied, mods, room);
                         break;
                     }
-                    if (auto existing = room_session_.find(room); existing != room_session_.end())
+                    if (auto existing = room_session_.find(room); existing != room_session_.end()) {
                         end_physics_session(existing->second, "restarted by the host");
+                        // reset_session() un-readied everyone; the restart was
+                        // validated against the ready set a moment ago, keep it.
+                        for (auto& m: r->members) m.ready = true;
+                    }
                     if (physics_sessions_.size() >= config_.maximum_physics_rooms) {
                         send_room_event(c, event_type::RequestDenied, error_code::ServerBusy, room, c, 0,
                                 "no free physics world");
@@ -2186,9 +2230,7 @@ protected:
             }
             case bmmo::SessionResync: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::session_resync_msg>(networking_msg);
-                auto it = client_session_.find(networking_msg->m_conn);
-                if (it != client_session_.end() && it->second == msg.session && runner_)
-                    runner_->request_full_snapshot(msg.session);
+                handle_session_resync(networking_msg->m_conn, msg);
                 break;
             }
 #endif

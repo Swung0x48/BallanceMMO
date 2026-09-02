@@ -457,6 +457,9 @@ private:
 	void physics_session_apply_event(const bmmo::session_event_msg& event);
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
 	void physics_session_drive_remotes();
+	void physics_session_attach_remote_navigation(uint32_t player);
+	void physics_session_request_resync(const char* reason);
+	void physics_session_apply_resync(const bmmo::session_snapshot_msg& snapshot);
 	float physics_session_ball_force(uint8_t ball_type) const;
 	void physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action);
 	void physics_session_on_sector(int sector);

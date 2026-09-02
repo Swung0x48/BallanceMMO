@@ -58,12 +58,14 @@ namespace {
         bool correct = true;
         int boot_ticks = 400;
         int anchor_timeout = 3000;
+        int64_t pause_at = -1;        // test knob: stop ticking at this tick ...
+        int pause_ms = 0;             // ... for this long (design 9.2 resync path)
     };
 
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--join-first | --room <id> | --host --expect N]\n"
-                  "       [--seconds S] [--trace] [--no-correct]");
+                  "       [--seconds S] [--trace] [--no-correct] [--pause-at TICK --pause-ms MS]");
     }
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -84,6 +86,8 @@ namespace {
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
+            else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
+            else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
             else return false;
         }
         if (out.root.empty()) return false;
@@ -145,17 +149,27 @@ namespace {
     public:
         explicit session_client(arguments args) : args_(std::move(args)) {}
 
-        bool boot() {
+        // A fresh engine at the main menu.  Also used when a session starts
+        // while the previous level is still loaded (host restart): the menu
+        // driver needs the main menu, so the whole composition is rebooted.
+        bool boot_engine() {
             bmmo::sim::engine_options eo;
             eo.game_root = args_.root;
             eo.log = [](const std::string& text) { logf("[engine] %s", text.c_str()); };
             std::string error;
+            engine_.reset();
             engine_ = bmmo::sim::headless_engine::create(eo, error);
             if (!engine_) { logf("engine: %s", error.c_str()); return false; }
             if (!engine_->load_composition(error)) { logf("composition: %s", error.c_str()); return false; }
             for (int i = 0; i < args_.boot_ticks; ++i)
                 if (!engine_->tick(error)) { logf("boot tick: %s", error.c_str()); return false; }
             bmmo::physics::drain_event_log(engine_->physics());
+            return true;
+        }
+
+        bool boot() {
+            std::string error;
+            if (!boot_engine()) return false;
             if (!args_.record.empty()) {
                 if (!record_.load(args_.record, error)) { logf("record: %s", error.c_str()); return false; }
                 logf("record: level=%d frames=%zu", record_.header.level, record_.frames.size());
@@ -289,6 +303,21 @@ namespace {
                 bmmo::session_assign_msg msg;
                 if (!fill(msg)) return;
                 if (msg.session != session_ || phase_ != phase::running) return;
+                if (assigned_) {
+                    // Resync (design 9.2): numbering restarts from the server's
+                    // current tick; the next full snapshot rebuilds every body.
+                    tick_base_ = msg.first_tick;
+                    frames_since_anchor_ = 0;
+                    input_history_.clear();
+                    corrector_.clear();
+                    for (auto& [name, corrector]: mechanism_correctors_) corrector.clear();
+                    for (auto& [id, remote]: remotes_) remote.corrector.clear();
+                    resync_pending_ = true;
+                    have_snapshot_ = false;
+                    origin_ = clock_type::now();
+                    logf("resynced: tick base %u", tick_base_);
+                    break;
+                }
                 assigned_ = true;
                 tick_base_ = msg.first_tick;
                 // The schedule restarts from the assignment: frames simulated so
@@ -334,7 +363,7 @@ namespace {
                 bmmo::session_end_msg msg;
                 if (!fill(msg)) return;
                 logf("session %u ended: %s", msg.session, msg.reason.c_str());
-                if (msg.session == session_) ended_ = true;
+                if (msg.session == session_) end_session();
                 break;
             }
             case bmmo::PlainText: {
@@ -392,9 +421,10 @@ namespace {
             if (!in_room_) {
                 if (args_.host || join_sent_) return;
                 uint32_t target = args_.room;
-                if (target == 0)
+                if (target == 0)   // prefer a lobby; a running room means a late join (design 9.3)
                     for (const auto& r: msg.rooms)
                         if (r.phase == bmmo::room::phase::Lobby) { target = r.id; break; }
+                if (target == 0 && !msg.rooms.empty()) target = msg.rooms.front().id;
                 if (target == 0) {
                     if (!msg.rooms.empty() || list_retries_++ % 20 == 0) logf("no lobby room to join yet (%zu rooms)", msg.rooms.size());
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -407,10 +437,19 @@ namespace {
                 return;
             }
             room_id_ = msg.own_room;
-            if (!ready_sent_) {
-                ready_sent_ = true;
-                logf("in room %u with %zu members; ready", room_id_, msg.members.size());
-                room_request(bmmo::room::action::Ready, room_id_);
+            bool own_ready = true;
+            for (const auto& m: msg.members)
+                if (m.id == own_id_) own_ready = m.ready;
+            if (!own_ready) {
+                // First time, or the room went back to the lobby (session ended
+                // by the server, host restart): ready again, at most once a second.
+                const auto now = clock_type::now();
+                if (!ready_sent_ || now - last_ready_sent_ > std::chrono::seconds(1)) {
+                    ready_sent_ = true;
+                    last_ready_sent_ = now;
+                    logf("in room %u with %zu members; ready", room_id_, msg.members.size());
+                    room_request(bmmo::room::action::Ready, room_id_);
+                }
                 return;
             }
             if (args_.host && !start_sent_ && static_cast<int>(msg.members.size()) >= args_.expect) {
@@ -458,6 +497,15 @@ namespace {
             own_physicalized_ = false;
             last_sector_ = 0;
             std::string error;
+            if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
+                // Restart (host started the room again): reboot to the menu.
+                logf("session %u: level still loaded, rebooting the engine", session_);
+                for (auto& [id, remote]: remotes_) {
+                    if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
+                }
+                remotes_.clear();
+                if (!boot_engine()) { ended_ = true; return; }
+            }
             engine_->clear_keys();
             engine_->request_level(level_);
             load_waited_ = 0;
@@ -593,12 +641,18 @@ namespace {
                 return;
             }
             const uint64_t next_frame = static_cast<uint64_t>(frames_since_anchor_ + 1);
+            if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
+                paused_once_ = true;
+                logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
+                std::this_thread::sleep_for(std::chrono::milliseconds(args_.pause_ms));
+            }
             const double expected = std::chrono::duration<double>(clock_type::now() - origin_).count() * bmmo::sim::kTickRate;
             if (static_cast<double>(next_frame) + 33.0 < expected) {
                 // far behind (a long pause): restart the schedule instead of fast-forwarding
                 origin_ = clock_type::now() - std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
                 ++rebases_;
+                request_resync("tick schedule rebased");
             } else if (static_cast<double>(next_frame) > expected) {
                 const auto due = origin_ + std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
@@ -636,6 +690,7 @@ namespace {
                     navigation_ = graph;
                     navigation_known_ = true;
                     logf("navigation keys known at tick %u (%zu leaves)", tick, graph.leaves.size());
+                    for (auto& [id, remote]: remotes_) attach_remote_navigation(id, remote);
                 }
             }
 
@@ -875,13 +930,44 @@ namespace {
 
         void apply_snapshot(const bmmo::session_snapshot_msg& snapshot) {
             if (have_snapshot_ && snapshot.tick <= last_snapshot_tick_ && !snapshot.full) { ++snapshots_stale_; return; }
-            have_snapshot_ = true;
-            last_snapshot_tick_ = snapshot.tick;
-            ++snapshots_applied_;
             std::string error;
             CKIpionManager* physics = engine_->physics();
             CK3dEntity* ball = current_ball();
             const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
+            if (resync_pending_) {
+                if (!snapshot.full) return;
+                have_snapshot_ = true;
+                last_snapshot_tick_ = snapshot.tick;
+                ++snapshots_applied_;
+                for (const auto& body: snapshot.bodies) {
+                    const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
+                    const char* target = nullptr;
+                    if (body.kind == bmmo::session::body_kind::Ball) {
+                        if (body.owner == own_id_) {
+                            if (!own_physicalized_ || ball_name.empty()) continue;
+                            target = ball_name.c_str();
+                        } else {
+                            auto it = remotes_.find(body.owner);
+                            if (it == remotes_.end() || !it->second.physicalized) continue;
+                            target = it->second.entity.c_str();
+                        }
+                    } else {
+                        if (!body.name.empty()) mechanism_names_[body.owner] = body.name;
+                        auto name = mechanism_names_.find(body.owner);
+                        if (name == mechanism_names_.end()) continue;
+                        target = name->second.c_str();
+                    }
+                    bmmo::physics::set_body_state(physics, target, body.position, body.rotation, body.linear, body.angular,
+                                                  body.owner == own_id_ ? true : wake, error);
+                }
+                resync_pending_ = false;
+                ++resyncs_done_;
+                logf("resync applied from the full snapshot of tick %u (%zu bodies)", snapshot.tick, snapshot.bodies.size());
+                return;
+            }
+            have_snapshot_ = true;
+            last_snapshot_tick_ = snapshot.tick;
+            ++snapshots_applied_;
             for (const auto& body: snapshot.bodies) {
                 if (body.kind == bmmo::session::body_kind::Ball) {
                     if (body.owner == own_id_) {
@@ -893,11 +979,13 @@ namespace {
                         const auto step = corrector_.compare(pose);
                         const double err = corrector_.stats().last_error;
                         if (step.action == bmmo::session::correction_step::kind::hard) {
+                            if (++consecutive_hard_ >= 3) request_resync("3 hard corrections in a row");
                             logf("hard correction of own ball for tick %u (error %.4f m, local tick %u)", snapshot.tick, err, current_tick());
                             if (args_.correct && !bmmo::physics::set_body_state(physics, ball_name.c_str(), step.target.position,
                                     step.target.rotation, step.target.linear, step.target.angular, true, error))
                                 logf("hard set: %s", error.c_str());
                         } else if (step.action == bmmo::session::correction_step::kind::blend) {
+                            consecutive_hard_ = 0;
                             logf("blend correction of own ball for tick %u (error %.4f m, local tick %u)", snapshot.tick, err, current_tick());
                         } else if (args_.trace && err > 0.002) {
                             logf("own ball error %.4f m at tick %u", err, snapshot.tick);
@@ -1001,23 +1089,7 @@ namespace {
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
                 remote.corrector.clear();
-                if (navigation_known_ && navigation_.valid()) {
-                    float directions[8][3] = {};
-                    int count = 0;
-                    for (const auto& leaf: navigation_.leaves) {
-                        if (leaf.index < 0 || leaf.index >= 8) continue;
-                        directions[leaf.index][0] = leaf.direction.x;
-                        directions[leaf.index][1] = leaf.direction.y;
-                        directions[leaf.index][2] = leaf.direction.z;
-                        count = std::max(count, leaf.index + 1);
-                    }
-                    const std::string cam_ref = "CamRef_BMMO_" + std::to_string(event.player);
-                    const float force = event.ball_type < ball_rows_.size() ? ball_rows_[event.ball_type].force : 0.0f;
-                    if (bmmo::physics::navigation_create(engine_->physics(), remote.entity.c_str(), cam_ref.c_str(),
-                                                         navigation_.ball_navigation, directions, count, force, error))
-                        remote.navigation = true;
-                    else logf("remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
-                }
+                attach_remote_navigation(event.player, remote);
                 logf("remote player %u physicalized (%s) at tick %u%s", event.player, remote.entity.c_str(), event.tick,
                      remote.navigation ? ", predicted" : ", mirrored");
                 break;
@@ -1037,6 +1109,61 @@ namespace {
             }
         }
 
+        void attach_remote_navigation(uint32_t player, remote_ball& remote) {
+            if (!remote.physicalized || remote.navigation || !navigation_known_ || !navigation_.valid()) return;
+            std::string error;
+            float directions[8][3] = {};
+            int count = 0;
+            for (const auto& leaf: navigation_.leaves) {
+                if (leaf.index < 0 || leaf.index >= 8) continue;
+                directions[leaf.index][0] = leaf.direction.x;
+                directions[leaf.index][1] = leaf.direction.y;
+                directions[leaf.index][2] = leaf.direction.z;
+                count = std::max(count, leaf.index + 1);
+            }
+            const std::string cam_ref = "CamRef_BMMO_" + std::to_string(player);
+            const float force = remote.ball_type < ball_rows_.size() ? ball_rows_[remote.ball_type].force : 0.0f;
+            if (bmmo::physics::navigation_create(engine_->physics(), remote.entity.c_str(), cam_ref.c_str(),
+                                                 navigation_.ball_navigation, directions, count, force, error)) {
+                remote.navigation = true;
+                remote.corrector.clear();
+                logf("remote %s now predicted", remote.entity.c_str());
+            } else {
+                logf("remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
+            }
+        }
+
+        void request_resync(const char* reason) {
+            if (phase_ != phase::running || !assigned_) return;
+            const auto now = clock_type::now();
+            if (resyncs_sent_ > 0 && now - last_resync_request_ < std::chrono::seconds(2)) return;
+            last_resync_request_ = now;
+            consecutive_hard_ = 0;
+            bmmo::session_resync_msg msg;
+            msg.session = session_;
+            msg.last_full_tick = last_snapshot_tick_;
+            msg.serialize();
+            send_bytes(msg.raw.str(), k_nSteamNetworkingSend_Reliable);
+            ++resyncs_sent_;
+            logf("resync requested (%s) at tick %u", reason, current_tick());
+        }
+
+        // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
+        // same room reloads the level (host restart) through begin_session().
+        void end_session() {
+            std::string error;
+            for (auto& [id, remote]: remotes_) {
+                if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
+                if (remote.physicalized) bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
+            }
+            remotes_.clear();
+            report();
+            phase_ = phase::idle;
+            session_ = 0;
+            assigned_ = false;
+            ++sessions_ended_;
+        }
+
         void report() {
             const auto& st = corrector_.stats();
             uint64_t rc = 0, ri = 0, rb = 0, rh = 0;
@@ -1047,7 +1174,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
-                 "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d "
+                 "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d resyncs=%llu/%llu "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
@@ -1058,6 +1185,7 @@ namespace {
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
                  mechanism_names_.size(),
                  static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max, rebases_,
+                 static_cast<unsigned long long>(resyncs_sent_), static_cast<unsigned long long>(resyncs_done_),
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
                  static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error);
@@ -1071,6 +1199,7 @@ namespace {
         uint32_t own_id_ = 0;
         bool in_room_ = false, join_sent_ = false, ready_sent_ = false, start_sent_ = false;
         int list_retries_ = 0;
+        clock_type::time_point last_ready_sent_{};
         uint32_t room_id_ = 0;
         bool ended_ = false;
         clock_type::time_point last_report_ = clock_type::now();
@@ -1116,6 +1245,11 @@ namespace {
         uint64_t snapshots_received_ = 0, snapshots_applied_ = 0, snapshots_stale_ = 0;
         uint64_t remote_writes_ = 0, mechanism_blends_ = 0, mechanism_hard_ = 0;
         uint64_t remote_inputs_received_ = 0;
+        bool resync_pending_ = false;
+        bool paused_once_ = false;
+        int consecutive_hard_ = 0;
+        clock_type::time_point last_resync_request_{};
+        uint64_t resyncs_sent_ = 0, resyncs_done_ = 0, sessions_ended_ = 0;
     };
 }
 
