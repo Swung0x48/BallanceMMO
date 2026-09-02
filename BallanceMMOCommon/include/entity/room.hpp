@@ -96,8 +96,11 @@ namespace bmmo::room {
         uint32_t host = 0;
         uint16_t member_count = 0;
         uint16_t capacity = 0;
-        phase phase = phase::Lobby;
-        mode mode = mode::Shadow;
+        // Named room_phase/room_mode, not phase/mode: a member named exactly
+        // like its own enum type builds fine but some compilers (GCC 16)
+        // reject it as a hard error under -Wchanges-meaning.
+        phase room_phase = phase::Lobby;
+        mode room_mode = mode::Shadow;
     };
 
     // One member of the caller's own room.

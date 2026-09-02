@@ -432,7 +432,7 @@ namespace {
                 uint32_t target = args_.room;
                 if (target == 0)   // prefer a lobby; a running room means a late join (design 9.3)
                     for (const auto& r: msg.rooms)
-                        if (r.phase == bmmo::room::phase::Lobby) { target = r.id; break; }
+                        if (r.room_phase == bmmo::room::phase::Lobby) { target = r.id; break; }
                 if (target == 0 && !msg.rooms.empty()) target = msg.rooms.front().id;
                 if (target == 0) {
                     if (!msg.rooms.empty() || list_retries_++ % 20 == 0) logf("no lobby room to join yet (%zu rooms)", msg.rooms.size());

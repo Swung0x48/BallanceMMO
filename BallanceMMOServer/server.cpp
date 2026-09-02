@@ -453,7 +453,7 @@ public:
             bmmo::room::room_info info;
             info.id = r.id; info.name = r.name; info.host = r.host;
             info.member_count = static_cast<uint16_t>(r.members.size());
-            info.capacity = r.capacity; info.phase = r.phase; info.mode = r.mode;
+            info.capacity = r.capacity; info.room_phase = r.phase; info.room_mode = r.mode;
             st.rooms.push_back(std::move(info));
         }
         if (st.own_room != 0) {

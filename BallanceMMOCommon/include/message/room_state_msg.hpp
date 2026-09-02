@@ -42,8 +42,8 @@ namespace bmmo {
                 raw.write(reinterpret_cast<const char*>(&r.host), sizeof(r.host));
                 raw.write(reinterpret_cast<const char*>(&r.member_count), sizeof(r.member_count));
                 raw.write(reinterpret_cast<const char*>(&r.capacity), sizeof(r.capacity));
-                const auto ph = static_cast<uint8_t>(r.phase);
-                const auto md = static_cast<uint8_t>(r.mode);
+                const auto ph = static_cast<uint8_t>(r.room_phase);
+                const auto md = static_cast<uint8_t>(r.room_mode);
                 raw.write(reinterpret_cast<const char*>(&ph), sizeof(ph));
                 raw.write(reinterpret_cast<const char*>(&md), sizeof(md));
             }
@@ -84,8 +84,8 @@ namespace bmmo {
                 if (!message_utils::read_variable(raw, &r.capacity)) return false;
                 if (!message_utils::read_variable(raw, &ph)) return false;
                 if (!message_utils::read_variable(raw, &md)) return false;
-                r.phase = static_cast<room::phase>(ph);
-                r.mode = static_cast<room::mode>(md);
+                r.room_phase = static_cast<room::phase>(ph);
+                r.room_mode = static_cast<room::mode>(md);
                 rooms.push_back(std::move(r));
             }
 

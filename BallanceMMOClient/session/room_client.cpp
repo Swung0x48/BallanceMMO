@@ -31,8 +31,8 @@ void BallanceMMOClient::print_room_list() {
     }
     SendIngameMessage(std::format("{} room{} open:", rooms.size(), rooms.size() == 1 ? "" : "s"));
     for (const auto& r : rooms) {
-        const char* mode = (r.mode == bmmo::room::mode::Physics) ? "physics" : "shadow";
-        const char* phase = (r.phase == bmmo::room::phase::Running) ? "running" : "lobby";
+        const char* mode = (r.room_mode == bmmo::room::mode::Physics) ? "physics" : "shadow";
+        const char* phase = (r.room_phase == bmmo::room::phase::Running) ? "running" : "lobby";
         SendIngameMessage(std::format("  #{} \"{}\" - {}/{} [{}, {}] host: {}",
                 r.id, r.name, r.member_count, r.capacity, mode, phase, get_username(r.host)));
     }
