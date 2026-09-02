@@ -698,7 +698,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "usage: BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N] "
             "[--report-every N] [--list-bodies-at N] [--verbose]\n"
-            "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n");
+            "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
+            "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {

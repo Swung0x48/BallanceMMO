@@ -541,6 +541,19 @@ public:
         // last Physicalize event of each member (serialized, player set) so a
         // late joiner can build the bodies that already exist
         std::map<HSteamNetConnection, std::string> last_physicalize;
+        // Event validation (design 9.4): rate limit rejects, the rest is
+        // logged and counted in M4 (no rejection: the retail scripts decide
+        // respawn poses per player, the server only knows the union).
+        struct member_guard {
+            int sector = 1;
+            uint32_t events_in_window = 0;
+            std::chrono::steady_clock::time_point window_start{};
+            double last_position[3] = {};
+            bool have_position = false;
+        };
+        std::map<HSteamNetConnection, member_guard> guards;
+        std::map<HSteamNetConnection, std::array<float, 3>> spawns;   // ring slot per member
+        uint64_t rejected_events = 0, flagged_events = 0;
     };
 
     void init_physics_runner() {
@@ -636,7 +649,7 @@ public:
         Printf("Physics session %u (room %u) ended: %s", session, s.room, reason);
     }
 
-    void send_session_start(const physics_session_state& s, HSteamNetConnection to, uint32_t first_tick) {
+    void send_session_start(physics_session_state& s, HSteamNetConnection to, uint32_t first_tick) {
         bmmo::session_start_msg msg;
         msg.room = s.room;
         msg.session = s.id;
@@ -661,6 +674,7 @@ public:
             entry.spawn_position[1] = s.spawn_position[1];
             entry.spawn_position[2] = s.spawn_position[2] + radius * static_cast<float>(std::sin(angle));
             for (int k = 0; k < 4; ++k) entry.spawn_rotation[k] = s.spawn_rotation[k];
+            for (int k = 0; k < 3; ++k) s.spawns[entry.id][k] = entry.spawn_position[k];
             msg.players.push_back(entry);
         }
         msg.serialize();
@@ -721,6 +735,12 @@ public:
         if (!s.ticking) {
             s.ticking = true;
             Printf("Physics session %u: ticking (first snapshot at tick %u).", s.id, snapshot.tick);
+        }
+        for (const auto& body: snapshot.bodies) {
+            if (body.kind != bmmo::session::body_kind::Ball) continue;
+            auto& guard = s.guards[body.owner];
+            for (int k = 0; k < 3; ++k) guard.last_position[k] = body.position[k];
+            guard.have_position = true;
         }
         for (const auto m: s.members) {
             bmmo::session_snapshot_msg msg;
@@ -813,6 +833,12 @@ public:
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
+        if (!config_.physics_require_sha.empty() && msg.physics_sha256 != config_.physics_require_sha
+                && msg.physics_sha256.rfind("headless-", 0) != 0) {
+            end_physics_session(msg.session, Sprintf("%s runs physics_RT %s, this server requires %s",
+                    client_it->second.name, msg.physics_sha256.substr(0, 12), config_.physics_require_sha.substr(0, 12)));
+            return;
+        }
         if (!s.late.count(c) && s.world_ready
                 && (msg.anchor_hash != s.anchor_hash || msg.anchor_surfaces != s.anchor_surfaces)) {
             end_physics_session(msg.session, Sprintf("world mismatch for %s (client %016llx/%016llx, server %016llx/%016llx)",
@@ -904,6 +930,62 @@ public:
             p.concave_count = static_cast<int32_t>(std::min<size_t>(r.concave_meshes.size(), BMMO_PHYSICS_MAX_CONCAVE));
             for (int i = 0; i < p.concave_count; ++i) copy_name(p.concave[i], sizeof(p.concave[i]), r.concave_meshes[i]);
         }
+        {
+            // Design 9.4.  Rate limit: hard reject.  Everything else: log + count.
+            auto& guard = s.guards[c];
+            const auto now = std::chrono::steady_clock::now();
+            if (now - guard.window_start > std::chrono::seconds(1)) {
+                guard.window_start = now;
+                guard.events_in_window = 0;
+            }
+            if (++guard.events_in_window > 20) {
+                if (guard.events_in_window == 21) {
+                    ++s.rejected_events;
+                    Printf("Physics session %u: %s sends more than 20 events per second; dropping the excess.",
+                           s.id, client_it->second.name);
+                }
+                return;
+            }
+            auto flag = [&](const std::string& why) {
+                ++s.flagged_events;
+                if (s.flagged_events <= 50)
+                    Printf("Physics session %u: suspicious event from %s at tick %u: %s.", s.id,
+                           client_it->second.name, msg.tick, why);
+            };
+            if (msg.type == bmmo::session::event_type::Physicalize) {
+                const auto& r = msg.recipe;
+                const bool numbers_ok = r.mass > 0.0f && r.mass <= 100.0f && r.friction >= 0.0f && r.friction <= 10.0f
+                    && r.elasticity >= 0.0f && r.elasticity <= 10.0f && r.linear_damp >= 0.0f && r.linear_damp <= 1.0f
+                    && r.rot_damp >= 0.0f && r.rot_damp <= 1.0f && r.balls.size() + r.convex_meshes.size() > 0;
+                if (msg.ball_type > 2 || !numbers_ok) {
+                    ++s.rejected_events;
+                    Printf("Physics session %u: rejected Physicalize from %s (ball type %u, malformed recipe).", s.id,
+                           client_it->second.name, msg.ball_type);
+                    return;
+                }
+                auto distance = [&](const double* a, const float* b) {
+                    double d = 0.0;
+                    for (int k = 0; k < 3; ++k) d += (a[k] - b[k]) * (a[k] - b[k]);
+                    return std::sqrt(d);
+                };
+                const double pos[3] = {msg.position[0], msg.position[1], msg.position[2]};
+                bool near_spawn = false;
+                for (const auto& [member, slot]: s.spawns) near_spawn = near_spawn || distance(pos, slot.data()) <= 2.5;
+                bool near_last = false;
+                if (guard.have_position) {
+                    const float last[3] = {static_cast<float>(guard.last_position[0]),
+                                           static_cast<float>(guard.last_position[1]),
+                                           static_cast<float>(guard.last_position[2])};
+                    near_last = distance(pos, last) <= 5.0;
+                }
+                if (!near_spawn && !near_last)
+                    flag("Physicalize pose far from every spawn slot and from the player's last known position");
+            } else if (msg.type == bmmo::session::event_type::Sector) {
+                if (msg.sector < 1 || msg.sector > guard.sector + 1)
+                    flag("sector " + std::to_string(msg.sector) + " after sector " + std::to_string(guard.sector));
+                guard.sector = std::max(guard.sector, msg.sector);
+            }
+        }
         runner_->submit_event(msg.session, c, msg.tick, std::move(event));
         // relay to the other members with the origin filled in
         msg.player = c;
@@ -921,9 +1003,11 @@ public:
         if (!runner_) { Printf("Physics sessions are unavailable."); return; }
         if (physics_sessions_.empty()) Printf("No physics session is running.");
         for (const auto& [id, s]: physics_sessions_) {
-            Printf("Session %u: room %u, level %d, %zu members, %zu ready, world %s, ticking %s, tick %u.",
+            Printf("Session %u: room %u, level %d, %zu members, %zu ready, world %s, ticking %s, tick %u, "
+                   "events flagged %llu / rejected %llu.",
                     id, s.room, s.map.level, s.members.size(), s.ready.size(), s.world_ready ? "ready" : "booting",
-                    s.ticking ? "yes" : "no", runner_->current_tick(id));
+                    s.ticking ? "yes" : "no", runner_->current_tick(id),
+                    static_cast<unsigned long long>(s.flagged_events), static_cast<unsigned long long>(s.rejected_events));
             runner_->describe(id);
         }
     }

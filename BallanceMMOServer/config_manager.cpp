@@ -69,6 +69,7 @@ bool config_manager::load() {
         physics_input_delay = yaml_load_value(physics, "input_delay", physics_input_delay);
         maximum_physics_rooms = yaml_load_value(physics, "maximum_physics_rooms", maximum_physics_rooms);
         physics_debug_trace = yaml_load_value(physics, "debug_trace", physics_debug_trace);
+        physics_require_sha = yaml_load_value(physics, "require_physics_sha", physics_require_sha);
         physics_allowed_mods = yaml_load_value(physics, "allowed_mods", decltype(physics_allowed_mods){});
         if (physics_snapshot_interval == 0) physics_snapshot_interval = 1;
     }
@@ -198,7 +199,8 @@ void config_manager::save(bool reload_values) {
                    "# - Mute list style: \"- uuid\".\n"
                    "# - Physics sessions (collision-overhaul): enabled, game_root (directory containing base.cmo),\n"
                    "#   snapshot_interval / input_delay (ticks), maximum_physics_rooms, allowed_mods (\"mod id: version\"),\n"
-                   "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\").\n"
+                   "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\"),\n"
+                   "#   require_physics_sha (sha256 of the only physics_RT.dll allowed in; empty = any).\n"
                 << std::endl;
     config_file << config_;
     config_file << std::endl;

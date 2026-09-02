@@ -132,6 +132,14 @@ physics:
   input_delay: 6                      # tick；服务端最多等待这么久再用上一 tick 的输入
   maximum_physics_rooms: 1            # M3 只验证过单房间
   debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
+  require_physics_sha: ""             # 非空时只接受该 sha256 的 physics_RT.dll（SessionReady 上报；无头会话客户端不受限）
   allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）；为空则不检查
     BallanceMMOClient: "3.6.8-beta18"
 ```
+
+### 3.1 部署
+
+- 服务端需要一份完整的游戏数据目录（`physics.game_root`，含 `base.cmo`、`3D Entities`、`Textures`、`Sounds` 等），Windows 与 Linux 都可以；一个物理房间的世界大约占一个核心，`maximum_physics_rooms` 默认 1。
+- 客户端需要与服务端同一提交构建的 physics_RT.dll 与 Mod（桥接 API 版本一致；`SessionReady` 上报 DLL 的 sha256 与构建 id）。`require_physics_sha` 非空时只接受该 sha；以 `headless-` 开头的（无头会话客户端）不受此限。
+- 安装目标：`BallanceMMOServer`、`BallanceMMOSimTool`（离线回放/诊断）、`BallanceMMOSessionClient`（无头会话客户端，用于联调与压测）。
+- 服务端校验客户端事件（设计 9.4）：每玩家每秒超过 20 条事件的部分直接丢弃；球型超范围或配方数值不合理的 Physicalize 直接拒绝；位姿远离所有出生环槽位且远离该玩家最近快照位置的 Physicalize、非单调的 Sector 只记日志并计数（控制台 `sessions` 显示 flagged/rejected）。

@@ -103,7 +103,10 @@ namespace bmmo::sim {
             if (!engine) return CK_OK;
             if (data.Reason == CKUIM_OUTTOCONSOLE || data.Reason == CKUIM_OUTTOINFOBAR
                     || data.Reason == CKUIM_DEBUGMESSAGESEND) {
-                if (data.ConsoleString) engine->log(std::string("[CK] ") + data.ConsoleString);
+                // The retail navigation blocks complain every frame about the
+                // parked retail ball (design 8.3); everything else is worth a line.
+                if (data.ConsoleString && std::strncmp(data.ConsoleString, "You must Physicalize Ball_", 26) != 0)
+                    engine->log(std::string("[CK] ") + data.ConsoleString);
             }
             return CK_OK;
         }
