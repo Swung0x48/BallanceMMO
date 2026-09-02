@@ -288,6 +288,71 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::navigation_create(const char* ball_entity, const char* direction_ref_entity, uint32_t behavior_id,
+                                         const float (*directions)[3], int leaf_count, float force_value,
+                                         std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_create) {
+            error = "the physics_RT bridge lacks navigation_create";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_create(manager_, ball_entity, direction_ref_entity, behavior_id, directions, leaf_count,
+                                     force_value, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::navigation_input(const char* ball_entity, uint8_t keys, const float right[3], const float up[3],
+                                        const float dir[3], bool active, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_input) {
+            error = "the physics_RT bridge lacks navigation_input";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_input(manager_, ball_entity, keys, right, up, dir, active ? 1 : 0, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::navigation_set_ball(const char* ball_entity, const char* new_ball_entity, float force_value,
+                                           std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_set_ball) {
+            error = "the physics_RT bridge lacks navigation_set_ball";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_set_ball(manager_, ball_entity, new_ball_entity, force_value, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::navigation_destroy(const char* ball_entity, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_destroy) {
+            error = "the physics_RT bridge lacks navigation_destroy";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_destroy(manager_, ball_entity, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
     bool physics_view::unphysicalize(const char* entity_name, std::string& error) const {
         error.clear();
         if (!available()) {

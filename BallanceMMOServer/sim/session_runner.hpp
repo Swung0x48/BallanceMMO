@@ -64,6 +64,12 @@ namespace bmmo::sim {
     struct session_callbacks {
         std::function<void(const world_ready_info&)> on_world_ready;
         std::function<void(const session_snapshot&)> on_snapshot;
+        // Every simulated tick: the input frame the world applied for each
+        // player (fresh or repeated); the server relays them to the other
+        // members so clients predict remote balls with the same input
+        // (design 9.1).
+        std::function<void(uint32_t session, uint32_t tick,
+                           const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied)> on_inputs;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
         std::function<void(const std::string&)> log;

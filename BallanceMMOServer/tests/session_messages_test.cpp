@@ -635,3 +635,55 @@ TEST(SessionResyncMsg, DeserializeRejectsEveryTruncation) {
     msg.last_full_tick = 660;
     expect_rejects_every_truncation(msg);
 }
+
+// ---------------------------------------------------------------------
+// session_remote_input_msg (design 9.1)
+// ---------------------------------------------------------------------
+
+TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTrip) {
+    bmmo::session_remote_input_msg msg{};
+    msg.session = 4;
+    msg.tick = 1234;
+    bmmo::session_remote_input_msg::entry e;
+    e.player = 77;
+    e.frame.keys = 5;
+    e.frame.cam_right[0] = 0.5f;
+    e.frame.cam_up[1] = 1.0f;
+    e.frame.cam_dir[2] = -1.0f;
+    e.frame.ball_type = 2;
+    e.frame.flags = 5;
+    msg.entries.push_back(e);
+    e.player = 78;
+    e.frame.keys = 0;
+    msg.entries.push_back(e);
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(parsed.session, 4u);
+    EXPECT_EQ(parsed.tick, 1234u);
+    ASSERT_EQ(parsed.entries.size(), 2u);
+    EXPECT_EQ(parsed.entries[0].player, 77u);
+    EXPECT_EQ(parsed.entries[0].frame.keys, 5);
+    EXPECT_FLOAT_EQ(parsed.entries[0].frame.cam_right[0], 0.5f);
+    EXPECT_FLOAT_EQ(parsed.entries[0].frame.cam_dir[2], -1.0f);
+    EXPECT_EQ(parsed.entries[0].frame.ball_type, 2);
+    EXPECT_EQ(parsed.entries[0].frame.flags, 5);
+    EXPECT_EQ(parsed.entries[1].player, 78u);
+    EXPECT_EQ(parsed.entries[1].frame.keys, 0);
+}
+
+TEST(SessionRemoteInputMsg, RejectsTruncationAndOversizedCount) {
+    bmmo::session_remote_input_msg msg{};
+    msg.session = 1;
+    msg.tick = 2;
+    bmmo::session_remote_input_msg::entry e;
+    e.player = 9;
+    msg.entries.push_back(e);
+    expect_rejects_every_truncation(msg);
+    ASSERT_TRUE(msg.serialize());
+    std::string payload = stream_payload(msg.raw);
+    // count byte follows opcode + session + tick
+    const size_t count_offset = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2;
+    payload[count_offset] = static_cast<char>(bmmo::session::MAX_PLAYERS_PER_SESSION + 1);
+    bmmo::session_remote_input_msg parsed{};
+    parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    EXPECT_FALSE(parsed.deserialize());
+}

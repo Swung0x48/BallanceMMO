@@ -82,8 +82,23 @@ namespace bmmo::session {
         uint64_t corrections_logged = 0;
 
         // Remote balls: player -> mirrored entity.
-        struct remote_body { std::string entity; uint8_t ball_type = 0; bool physicalized = false; };
+        // Remote balls (design 9.1): mirrored entity driven by the bridge
+        // navigation from the last relayed input; snapshots correct it through
+        // the same ladder as the own ball.  Without navigation (no graph yet)
+        // the body is written from every snapshot like in M3.
+        struct remote_body {
+            std::string entity;
+            uint8_t ball_type = 0;
+            bool physicalized = false;
+            bool navigation = false;
+            bool have_input = false;
+            uint32_t input_tick = 0;
+            input_frame input{};
+            body_corrector corrector;
+            uint64_t blends = 0, hard_sets = 0;
+        };
         std::map<uint32_t, remote_body> remotes;
+        std::vector<float> ball_forces;      // Physicalize_GameBall "Force" per ball type (row order)
 
         // Mechanism dictionary from full snapshots.
         std::map<uint32_t, std::string> mechanism_names;
@@ -98,6 +113,8 @@ namespace bmmo::session {
         std::mutex queue_mutex;
         std::deque<session_snapshot_msg> snapshot_queue;
         std::deque<session_event_msg> event_queue;
+        std::deque<session_remote_input_msg> remote_input_queue;
+        uint64_t remote_inputs_received = 0;
         static constexpr size_t kMaxQueuedSnapshots = 64;
 
         std::string last_error;
@@ -133,6 +150,8 @@ namespace bmmo::session {
             snapshots_received = snapshots_applied = snapshots_stale = 0;
             body_writes = body_write_errors = mechanism_matches = 0;
             events_sent = events_received = 0;
+            remote_inputs_received = 0;
+            ball_forces.clear();
             rng_last_seed = 0;
             rng_last_cores = -1;
             rng_last_pdelta = -1.0f;
@@ -141,6 +160,7 @@ namespace bmmo::session {
             std::lock_guard lk(queue_mutex);
             snapshot_queue.clear();
             event_queue.clear();
+            remote_input_queue.clear();
         }
     };
 }

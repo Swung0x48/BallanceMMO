@@ -96,6 +96,14 @@ void BallanceMMOClient::handle_session_event(bmmo::session_event_msg msg) {
     s.event_queue.push_back(std::move(msg));
 }
 
+void BallanceMMOClient::handle_session_remote_input(bmmo::session_remote_input_msg msg) {
+    auto& s = physics_session_;
+    std::lock_guard lk(s.queue_mutex);
+    ++s.remote_inputs_received;
+    if (s.remote_input_queue.size() >= physics_session_state::kMaxQueuedSnapshots) s.remote_input_queue.pop_front();
+    s.remote_input_queue.push_back(std::move(msg));
+}
+
 void BallanceMMOClient::handle_session_end(const bmmo::session_end_msg& msg) {
     utils_.run_on_game_thread([this, session = msg.session, reason = msg.reason] {
         if (physics_session_.session != session && physics_session_.session != 0) return;
@@ -158,6 +166,7 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     if (s.phase == phase_type::idle) return;
     std::string error;
     for (auto& [id, remote]: s.remotes) {
+        if (remote.navigation && physics_view_.available()) physics_view_.navigation_destroy(remote.entity.c_str(), error);
         if (remote.physicalized && physics_view_.available()) physics_view_.unphysicalize(remote.entity.c_str(), error);
         objects_.set_physicalized(id, false);
     }
@@ -224,6 +233,15 @@ void BallanceMMOClient::physics_session_anchor() {
     s.phase = phase_type::running;
     s.corrector.clear();
     physics_view_.drain_event_log();   // install the listener, discard history
+    s.ball_forces.clear();
+    if (CKDataArray* balls = m_bml->GetArrayByName("Physicalize_GameBall")) {
+        const int rows = balls->GetRowCount();
+        for (int row = 0; row < rows; ++row) {
+            float force = 0.0f;
+            balls->GetElementValue(row, 7, &force);
+            s.ball_forces.push_back(force);
+        }
+    }
     if (CKDataArray* level = current_level_array()) {
         VxMatrix reset;
         if (level->GetElementValue(0, 3, &reset) && s.spawn_known) {
@@ -344,6 +362,23 @@ void BallanceMMOClient::physics_session_frame() {
         }
         for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
         s.mechanism_correctors[name].record(pose);
+    }
+
+    // Remote balls after this tick (design 9.1): the snapshot for tick T is
+    // compared with the state recorded at T.
+    for (auto& [id, remote]: s.remotes) {
+        if (!remote.physicalized || !remote.navigation) continue;
+        bmmo_physics_body_state local{};
+        if (!physics_view_.get_body_state(remote.entity.c_str(), local, error)) continue;
+        bmmo::session::ball_pose pose;
+        pose.tick = tick;
+        for (int k = 0; k < 3; ++k) {
+            pose.position[k] = local.position[k];
+            pose.linear[k] = local.linear[k];
+            pose.angular[k] = local.angular[k];
+        }
+        for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
+        remote.corrector.record(pose);
     }
 
     // Input for this tick: keys polled at this frame's PreProcess, camera
@@ -478,6 +513,9 @@ void BallanceMMOClient::physics_session_frame() {
     };
     if (s.own_physicalized) apply_blend(ball_name, s.corrector);
     for (auto& [name, corrector]: s.mechanism_correctors) apply_blend(name, corrector);
+    for (auto& [id, remote]: s.remotes)
+        if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
+    physics_session_drive_remotes();
 }
 
 void BallanceMMOClient::physics_session_send_event(bmmo::session_event_msg& event) {
@@ -493,12 +531,26 @@ void BallanceMMOClient::physics_session_apply_queues() {
     auto& s = physics_session_;
     std::deque<bmmo::session_snapshot_msg> snapshots;
     std::deque<bmmo::session_event_msg> events;
+    std::deque<bmmo::session_remote_input_msg> inputs;
     {
         std::lock_guard lk(s.queue_mutex);
         snapshots.swap(s.snapshot_queue);
         events.swap(s.event_queue);
+        inputs.swap(s.remote_input_queue);
     }
     for (auto& event: events) physics_session_apply_event(event);
+    for (const auto& msg: inputs) {
+        if (msg.session != s.session) continue;
+        for (const auto& entry: msg.entries) {
+            auto it = s.remotes.find(entry.player);
+            if (it == s.remotes.end()) continue;
+            auto& remote = it->second;
+            if (remote.have_input && msg.tick < remote.input_tick) continue;   // out of order
+            remote.input = entry.frame;
+            remote.input_tick = msg.tick;
+            remote.have_input = true;
+        }
+    }
     for (auto& snapshot: snapshots) physics_session_apply_snapshot(snapshot);
 }
 
@@ -516,8 +568,13 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
             return;
         }
         auto& remote = s.remotes[event.player];
-        if (remote.physicalized && remote.entity != entity->GetName())
+        if (remote.physicalized && remote.entity != entity->GetName()) {
+            if (remote.navigation) physics_view_.navigation_destroy(remote.entity.c_str(), error);
             physics_view_.unphysicalize(remote.entity.c_str(), error);
+        } else if (remote.navigation) {
+            physics_view_.navigation_destroy(remote.entity.c_str(), error);
+        }
+        remote.navigation = false;
         entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
         const auto recipe = to_bridge_recipe(event.recipe);
         int join_order = 63;
@@ -531,13 +588,35 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         remote.entity = entity->GetName();
         remote.ball_type = event.ball_type;
         remote.physicalized = true;
+        remote.corrector.clear();
         objects_.set_physicalized(event.player, true);
         objects_.on_trafo(event.player, std::numeric_limits<uint32_t>::max(), event.ball_type);
+        // Design 9.1: drive the mirror with the retail navigation replica from
+        // the relayed inputs; the snapshots then only correct it.
+        if (s.navigation_keys_known && s.navigation.valid()) {
+            float directions[8][3] = {};
+            int count = 0;
+            for (const auto& leaf: s.navigation.leaves) {
+                if (leaf.index < 0 || leaf.index >= 8) continue;
+                directions[leaf.index][0] = leaf.direction.x;
+                directions[leaf.index][1] = leaf.direction.y;
+                directions[leaf.index][2] = leaf.direction.z;
+                count = std::max(count, leaf.index + 1);
+            }
+            const std::string cam_ref = "CamRef_BMMO_" + std::to_string(event.player);
+            if (physics_view_.navigation_create(remote.entity.c_str(), cam_ref.c_str(), s.navigation.ball_navigation,
+                                                directions, count, physics_session_ball_force(event.ball_type), error))
+                remote.navigation = true;
+            else
+                logger_->Warn("Physics session: remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
+        }
         break;
     }
     case bmmo::session::event_type::Unphysicalize: {
         auto it = s.remotes.find(event.player);
         if (it == s.remotes.end()) return;
+        if (it->second.navigation) physics_view_.navigation_destroy(it->second.entity.c_str(), error);
+        it->second.navigation = false;
         if (it->second.physicalized) physics_view_.unphysicalize(it->second.entity.c_str(), error);
         it->second.physicalized = false;
         objects_.set_physicalized(event.player, false);
@@ -598,7 +677,31 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
             auto it = s.remotes.find(body.owner);
             if (it == s.remotes.end() || !it->second.physicalized) continue;
             const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
-            if (physics_view_.set_body_state(it->second.entity.c_str(), body.position, body.rotation, body.linear,
+            auto& remote = it->second;
+            if (remote.navigation) {
+                bmmo::session::ball_pose pose;
+                pose.tick = snapshot.tick;
+                for (int k = 0; k < 3; ++k) {
+                    pose.position[k] = body.position[k];
+                    pose.linear[k] = body.linear[k];
+                    pose.angular[k] = body.angular[k];
+                }
+                for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
+                const auto step = remote.corrector.compare(pose);
+                if (step.action == bmmo::session::correction_step::kind::hard) {
+                    ++remote.hard_sets;
+                    physics_session_log_correction(remote.entity, snapshot.tick, remote.corrector.stats().last_error, "hard");
+                    if (physics_view_.set_body_state(remote.entity.c_str(), step.target.position, step.target.rotation,
+                                                     step.target.linear, step.target.angular, wake, error))
+                        ++s.body_writes;
+                    else { ++s.body_write_errors; s.last_error = error; }
+                } else if (step.action == bmmo::session::correction_step::kind::blend) {
+                    ++remote.blends;
+                    physics_session_log_correction(remote.entity, snapshot.tick, remote.corrector.stats().last_error, "blend");
+                }
+                continue;
+            }
+            if (physics_view_.set_body_state(remote.entity.c_str(), body.position, body.rotation, body.linear,
                                              body.angular, wake, error))
                 ++s.body_writes;
             else { ++s.body_write_errors; s.last_error = error; }
@@ -730,6 +833,28 @@ void BallanceMMOClient::physics_session_log_correction(const std::string& name, 
                   action, name.c_str(), tick, error, s.current_tick());
 }
 
+// Next tick's input for every predicted remote ball: the last relayed frame
+// (the relay is ~input_delay + latency behind, so key edges show up late and
+// the corrector absorbs the difference).
+void BallanceMMOClient::physics_session_drive_remotes() {
+    auto& s = physics_session_;
+    std::string error;
+    for (auto& [id, remote]: s.remotes) {
+        if (!remote.physicalized || !remote.navigation) continue;
+        const uint8_t keys = remote.have_input ? remote.input.keys : 0;
+        const bool active = remote.have_input && (remote.input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+        if (!physics_view_.navigation_input(remote.entity.c_str(), keys, remote.input.cam_right, remote.input.cam_up,
+                                            remote.input.cam_dir, active, error))
+            s.last_error = error;
+    }
+}
+
+float BallanceMMOClient::physics_session_ball_force(uint8_t ball_type) const {
+    const auto& s = physics_session_;
+    if (ball_type < s.ball_forces.size()) return s.ball_forces[ball_type];
+    return s.navigation.leaves.empty() ? 0.0f : s.navigation.leaves.front().force_value;
+}
+
 std::string BallanceMMOClient::physics_session_status_text() {
     auto& s = physics_session_;
     const char* phase = "idle";
@@ -740,17 +865,26 @@ std::string BallanceMMOClient::physics_session_status_text() {
     default: break;
     }
     const auto& st = s.corrector.stats();
+    uint64_t remote_compared = 0, remote_ignored = 0, remote_blended = 0, remote_hard = 0;
+    for (const auto& [id, remote]: s.remotes) {
+        const auto& rs = remote.corrector.stats();
+        remote_compared += rs.compared;
+        remote_ignored += rs.ignored;
+        remote_blended += rs.blended;
+        remote_hard += rs.hard;
+    }
     double mechanism_max_error = 0.0;
     for (const auto& [name, corrector]: s.mechanism_correctors)
         if (corrector.stats().max_error > mechanism_max_error) mechanism_max_error = corrector.stats().max_error;
     return std::format(
         "session={} phase={} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
-        "snapshots={}/{}/{} last_snapshot={} remotes={} mechanisms={} writes={}/{} mech_same={} mech_blend={} mech_hard={} "
+        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={} writes={}/{} mech_same={} mech_blend={} mech_hard={} "
         "mech_max_err={:.4f} events={}/{} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         s.session, phase, s.current_tick(), s.tick_base, s.assigned ? 1 : 0, static_cast<long long>(s.frames_since_anchor),
         s.inputs_sent, s.navigation_keys_known ? 1 : 0, s.own_physicalized ? 1 : 0, s.own_group_set ? 1 : 0,
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
+        s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,
         s.mechanism_names.size(), s.body_writes, s.body_write_errors, s.mechanism_matches, s.mechanism_blends, s.mechanism_hard,
         mechanism_max_error, s.events_sent, s.events_received,
         st.compared, st.ignored, st.blended, st.hard, st.unmatched, st.last_error, st.max_error, s.last_error);

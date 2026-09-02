@@ -94,6 +94,7 @@ namespace bmmo {
         SessionResync,
         SessionEvent,
         SessionAssign,
+        SessionRemoteInput,
     };
 
     template<typename T, opcode C = None>

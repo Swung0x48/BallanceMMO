@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 2u
+#define BMMO_PHYSICS_API_VERSION 3u   /* v3: navigation entry points (design 9.1) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -163,6 +163,30 @@ typedef struct bmmo_physics_api_v2 {
      * group so the player filter lets it hit the mirrored remote balls. */
     int32_t (*set_body_group)(void* ipion_manager, const char* entity_name, const char* collision_group,
                               char* error, uint32_t error_size);
+
+    /* ---- v3 (design 9.1): the retail Ball Navigation replica for a ball
+     * driven from network input (a mirrored remote ball).  The same code
+     * drives the server's clones, so a remote ball predicted this way
+     * integrates exactly like the authoritative one while its input holds. */
+
+    /* Register navigation for `ball_entity`.  `direction_ref_entity` is the
+     * per-ball camera reference frame (created when missing); `behavior_id`
+     * is the CK_ID of the level's "Ball Navigation" script, which anchors
+     * the PreSimulate callback; `directions[i]` is leaf i's force direction
+     * (leaf order = key order of the graph); `force_value` the ball type's
+     * Physicalize_GameBall force. */
+    int32_t (*navigation_create)(void* ipion_manager, const char* ball_entity, const char* direction_ref_entity,
+                                 uint32_t behavior_id, const float (*directions)[3], int32_t leaf_count,
+                                 float force_value, char* error, uint32_t error_size);
+    /* Input of the next tick: leaf key bits, camera basis rows, BallNav
+     * active flag.  Applied in the manager's next PreSimulate pass. */
+    int32_t (*navigation_input)(void* ipion_manager, const char* ball_entity, uint8_t keys, const float right[3],
+                                const float up[3], const float dir[3], int32_t active,
+                                char* error, uint32_t error_size);
+    /* The ball changed entity (transformation). */
+    int32_t (*navigation_set_ball)(void* ipion_manager, const char* ball_entity, const char* new_ball_entity,
+                                   float force_value, char* error, uint32_t error_size);
+    int32_t (*navigation_destroy)(void* ipion_manager, const char* ball_entity, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

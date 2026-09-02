@@ -4,6 +4,7 @@
 
 #include <physics/physics_rt_api.h>
 #include <physics/physics_state.hpp>
+#include <physics/ball_navigation.hpp>
 
 #include "CKIpionManager.h"
 
@@ -212,6 +213,66 @@ namespace {
         return 1;
     }
 
+    int32_t api_navigation_create(void* manager, const char* ball_entity, const char* direction_ref_entity,
+                                  uint32_t behavior_id, const float (*directions)[3], int32_t leaf_count,
+                                  float force_value, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_create(static_cast<CKIpionManager*>(manager), ball_entity, direction_ref_entity,
+                                              behavior_id, directions, leaf_count, force_value, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_navigation_input(void* manager, const char* ball_entity, uint8_t keys, const float right[3],
+                                 const float up[3], const float dir[3], int32_t active,
+                                 char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_input(static_cast<CKIpionManager*>(manager), ball_entity, keys, right, up, dir,
+                                             active != 0, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_navigation_set_ball(void* manager, const char* ball_entity, const char* new_ball_entity,
+                                    float force_value, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_set_ball(static_cast<CKIpionManager*>(manager), ball_entity, new_ball_entity,
+                                                force_value, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_navigation_destroy(void* manager, const char* ball_entity, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_destroy(static_cast<CKIpionManager*>(manager), ball_entity, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     const bmmo_physics_api_v2 kApi = {
         sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
@@ -231,6 +292,10 @@ namespace {
         api_unphysicalize,
         api_install_player_collision_filter,
         api_set_body_group,
+        api_navigation_create,
+        api_navigation_input,
+        api_navigation_set_ball,
+        api_navigation_destroy,
     };
 }
 

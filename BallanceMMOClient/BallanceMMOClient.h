@@ -444,6 +444,7 @@ private:
 	void handle_session_assign(const bmmo::session_assign_msg& msg);
 	void handle_session_snapshot(bmmo::session_snapshot_msg msg);
 	void handle_session_event(bmmo::session_event_msg msg);
+	void handle_session_remote_input(bmmo::session_remote_input_msg msg);
 	void handle_session_end(const bmmo::session_end_msg& msg);
 	void physics_session_begin(const bmmo::session_start_msg& msg);
 	void physics_session_end_local(const std::string& reason);
@@ -455,6 +456,8 @@ private:
 	void physics_session_apply_queues();
 	void physics_session_apply_event(const bmmo::session_event_msg& event);
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
+	void physics_session_drive_remotes();
+	float physics_session_ball_force(uint8_t ball_type) const;
 	void physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action);
 	void physics_session_on_sector(int sector);
 	void physics_session_on_finish();

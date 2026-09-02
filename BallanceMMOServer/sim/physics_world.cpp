@@ -339,8 +339,8 @@ namespace bmmo::sim {
         // The direction reference is the player's own camera frame, fed from
         // the input of every tick (the previous tick's Cam_OrientRef), exactly
         // like a networked player.
-        p.navigation = std::make_unique<player_navigation>(engine_->context(), physics(), ball, p.cam_ref, navigation_);
-        p.navigation->set_force_value(force_value(p.ball_type));
+        p.navigation = std::make_unique<bmmo::physics::player_navigation>(engine_->context(), physics(), ball, p.cam_ref,
+                                                                          navigation_.leaves, force_value(p.ball_type));
         return true;
     }
 
@@ -456,7 +456,9 @@ namespace bmmo::sim {
         }
         if (CK3dEntity* direction_ref = CK3dEntity::Cast(context->GetObject(navigation_.direction_ref)))
             p.cam_ref->SetWorldMatrix(direction_ref->GetWorldMatrix());
-        p.navigation = std::make_unique<player_navigation>(context, physics(), nullptr, p.cam_ref, navigation_);
+        p.navigation = std::make_unique<bmmo::physics::player_navigation>(
+            context, physics(), nullptr, p.cam_ref, navigation_.leaves,
+            navigation_.leaves.empty() ? 0.0f : navigation_.leaves.front().force_value);
         used_slots_.insert(slot);
         players_.emplace(id, std::move(p));
         log("world: player " + std::to_string(id) + " added");

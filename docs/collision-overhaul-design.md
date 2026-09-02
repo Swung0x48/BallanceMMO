@@ -82,8 +82,8 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 1. M0：分支、构建、设计文档、命令通道。
 2. M1（已完成）：确定性校验台（客户端固定 tick + 录制；无头世界回放；逐 tick 比对）。结论：四个平台对同一段 Level 1 录制（2345 帧，含开场碎块、键盘操控、死亡重置）全部位级一致，见第 6 节。
 3. M2（已完成）：房间系统与影子球会话。房间协议（`room_request`/`room_state`/`room_event`）落地，服务端 `BallanceMMOServer/room/room_manager.hpp` + `server.cpp`，客户端 `/mmo room ...` 命令与 `session/room_client.cpp`；球状态按房间过滤。详见第 7 节。
-4. M3（进行中）：物理会话（多球、tick 协议、预测与修正、机关镜像、分节、死亡、迟到加入、重开）。实施设计见第 8 节。
-5. M4：打磨（host 迁移、重同步、清理、打包）。
+4. M3（已完成，提交 f7e1060）：物理会话（多球、tick 协议、预测与修正、机关镜像、分节、死亡）。实施设计与联调结果见第 8 节。
+5. M4（进行中）：远端球本地预测、重同步与暂停、迟到加入/断线/host 迁移的路径验证、服务端校验客户端事件、清理与打包。实施设计见第 9 节。
 
 ## 5. 目录约定
 
@@ -216,3 +216,65 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 - 分节反激活；远端球的本地预测（设计 3.3 第二阶段）；暂停语义；积分/生命同步。
 - 客户端死亡时本地分节重置带来的机关跳变（8.5 第 9 条）。
 - 球-球接触时的一致性：远端球是快照镜像，两球顶住/相撞后各端都要靠修正（8.6 双人结果）；远端球本地预测（3.3 第二阶段）与出生环/起点碟的几何问题留给 M4。
+
+## 9. M4 实施设计
+
+M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 依次做：
+
+1. **远端球本地预测**（3.3 第二阶段）——双人联调里唯一的非一致来源是球-球接触时对方的球只是滞后镜像；做完之后接触也走本地物理。
+2. **重同步与暂停语义**——客户端暂停、长时间掉帧、硬修正反复出现时能回到一致状态，而不是永远靠渐变追。
+3. **路径验证**：迟到加入、断线、host 迁移、房主重开，用无头会话客户端做成可重复的脚本。
+4. **服务端校验客户端事件**：Physicalize 位姿/配方、分节单调、事件频率。
+5. **清理与打包**：诊断模式收口、原版球停放后的控制台刷屏、安装目标、配置与部署说明。
+6. 视时间：死亡时本地分节重置的机关跳变；多房间（全局状态隔离）；积分/生命同步。
+
+### 9.1 远端球本地预测
+
+**现状**：客户端里对方的球是"镜像刚体"，每个快照 `set_body_state` 直接写服务端状态；快照落后客户端 8 到 38 tick，所以自己球与对方球接触时本地算出来的结果必然与服务端不同，随后靠修正拉回（8.6 双人结果）。
+
+**目标**：客户端对每个远端球运行与服务端**完全相同**的导航复制（同一段代码、同一顺序的 IVP 调用），输入来自服务端转发的"该 tick 实际采用的输入"；快照只用来校正，不再逐快照覆盖。对方按住方向键匀速滚动时远端球位级一致，接触结果一致；对方按键沿变化时，本地在收到转发前只能沿用上一帧输入，误差由 `body_corrector` 按球的阶梯（忽略 <1 cm、8 tick 渐变、≥1 m 硬置）拉回。
+
+**共享导航模块**：把 `BallanceMMOServer/sim/player_navigation` 移到 `BallanceMMOCommon/src/physics/ball_navigation.cpp`（头文件 `include/physics/ball_navigation.hpp`），像 `physics_state.cpp` 一样同时编进客户端的 physics_RT.dll 与服务端的 BallanceMMOSim，服务端 `physics_world` 直接改用它（离线 `--nav clone` 回放必须仍然 4169/4169，作为搬迁没有改变任何一次 IVP 调用的证据）。方向参照仍是一个 CK3dEntity（`CamRef_BMMO_<id>`，每 tick 由三条基向量写旋转部分，再 `TransformVector`），两端走同一条 CK 路径，不自己实现矩阵乘法。
+
+**桥接 API v3**（`physics_rt_api.h`，追加在 v2 表末尾，版本号 3）：
+- `nav_create(manager, ball_entity, direction_ref_entity, leaf_directions[4][3], leaf_count, force_value)`：为一个远端球建立导航状态机（按球实体名索引）；`direction_ref_entity` 不存在时由桥接创建。
+- `nav_input(manager, ball_entity, keys, cam_right, cam_up, cam_dir, active)`：登记下一次物理步之前要施加的输入；桥接把它排进 `CKIpionManager::m_PreSimulateCallbacks`（与服务端 `tick_callback` 相同的时机：在该 tick 的 `simulate_dtime` 之前、原版脚本之后），回调里先写相机参照矩阵再 `apply(keys, active)`。
+- `nav_set_ball(manager, ball_entity, new_entity)`（变球）、`nav_destroy(manager, ball_entity)`。
+
+**输入转发**：新增 opcode `SessionRemoteInput`（追加在 `SessionAssign` 之后）与消息 `session_remote_input_msg{session, tick, entries[]: {player, input_frame}}`。服务端每模拟一个 tick，把这一 tick 各玩家**实际采用**的输入帧（新鲜的或沿用的）打包成一条消息发给每个成员（去掉成员自己的那项），不可靠、不延迟。带宽为每 tick 每成员 (N−1)×~50 B。客户端为每个远端玩家保存最近的输入帧；模拟 tick T 时若已有 T 的转发就用它，否则沿用最近一帧（预测）；转发晚到不回放。
+
+**客户端**（`physics_session_client.cpp`）：远端 `Physicalize` 事件仍按配方物理化镜像实体，随后 `nav_create`（叶子方向来自本地 `navigation_graph`，力值来自 `Physicalize_GameBall` 行，球型来自事件）；每帧末为每个远端球 `nav_input`（下一 tick 的预测输入）；每帧记录远端球状态到各自的 `body_corrector` 历史；快照里对方的球改为 `compare`，只在阶梯判定时写刚体。`Unphysicalize` → `nav_destroy` + 去刚体。诊断：`/mmo room session` 增加 `remote_compared/ignored/blended/hard`。
+
+**验收**：双人（原版 + 无头，或两个无头）在起点碟里顶住之后，双方球的修正统计保持 `blended=0 hard=0`（对方按键沿变化的 tick 附近允许 ≤1 cm 的忽略级误差）；单人回归不变。
+
+**开始对齐**：`SessionAssign` 对会话开始时在场的成员改为**全员准备好后一起发**（迟到者仍即时发）；无头会话客户端在收到分配前不推进帧。原因：锚点早的客户端会在等待别人期间领先服务端几十 tick，转发输入对它就滞后同样多（联调里无头客户端领先 38 tick，远端预测几乎失效）。原版客户端仍按锚点起跑（BML 的 OnProcess 不能停帧），两台原版客户端同时重开关卡时锚点相差不到一秒。
+
+**结果（2026-09-02，原版房主 + 无头客户端，Level 1，两球在起点碟里顶住并互相驱动）**：共享导航搬迁后离线 `--nav clone` 回放仍 4169/4169；原版客户端自己球 `compared=1594 ignored=1216 blended=85 hard=0 max_err=0.045`，对无头球的预测 `1599/1112/105/0`；无头客户端自己球 `1551/1350/46/0 max_err=0.023`，对原版球的预测 `1546/1392/36/0`。改动前同一场景是每 4-11 cm 持续误差、无头侧最大 24 m。剩下的 1-2 cm 渐变集中在对方按键沿之后的约 10 tick（转发滞后 = input_delay + 网络）以及远端球刚 Physicalize 的头几个快照（事件比快照晚 2-3 tick 到达，镜像从事件位姿起步）。
+
+### 9.2 重同步与暂停
+
+- **暂停**（ESC、失焦）：客户端本地物理停摆，服务端不停。恢复后固定节拍驱动器最多快进 33 tick，超过则重设节拍原点——此时客户端的 tick 编号与服务端脱节。M4 规定：驱动器重设原点时客户端向服务端发 `SessionResync{session, last_full_tick}`，服务端回 `SessionAssign{first_tick = 当前 tick}` 并强制一次全量快照；客户端收到后把 `tick_base` 改为新值、`frames_since_anchor` 归零重排（后续帧号从新基数计）、清空所有修正历史，并在下一次全量快照时对所有刚体（自己的球、远端球、机关）硬置一次。输入历史里旧编号的帧丢弃。
+- **反复硬置**：自己球连续 3 次快照落入硬置档，或 `unmatched` 连续超过 30 个快照（历史里找不到快照 tick，即编号已错位），同样触发 `SessionResync`。
+- 服务端对 `SessionResync` 的处理与迟到加入相同（`late` 集合 + 当前 tick 编号 + 全量快照），因此迟到加入路径与重同步路径共用一套代码和测试。
+
+### 9.3 路径验证（无头会话客户端脚本）
+
+| 场景 | 步骤 | 通过标准 |
+|---|---|---|
+| 迟到加入 | 会话跑到 ≥1000 tick 后无头客户端加入 | 收到 `SessionAssign(first_tick=当前)` 与全量快照；锚点后 60 tick 内自己球修正 `hard≤1`、之后 `blended=0`；对方球出现在本地 |
+| 断线 | 无头客户端进程被杀 | 服务端 `member_left`，克隆球去刚体，其余成员收到 `Unphysicalize`（服务端代发）；会话继续 |
+| host 迁移 | 房主（原版客户端）离开 | 房间 host 变更，会话不中断，新 host 能 `/mmo room close` 结束会话 |
+| 房主重开 | 房主再次 `start physics` | 旧会话 `SessionEnd("restarted by the host")`，新会话全员重锚 |
+| 暂停恢复 | 原版客户端 ESC 5 s 后恢复 | 触发 9.2 的重同步，之后 `blended=0` |
+
+服务端在成员离开时代发该玩家的 `Unphysicalize`（目前只在世界里去刚体，其他客户端的镜像会留下），这是 M3 遗漏的一条。
+
+### 9.4 服务端校验客户端事件
+
+只做拒绝明显不合理的事件，不做物理层面的重演：Physicalize 位姿必须在复活点环 2 m 内或距该玩家上一快照位置 5 m 内（变球）；配方的球型必须在 `Physicalize_GameBall` 行内且数值与行一致；`Sector` 只能等于当前或 +1（并集里已有的直接忽略）；每玩家每秒事件数上限 20。被拒绝的事件记日志并向该客户端回 `SessionEvent`（type 不变，`player = 0`，`name = "rejected"`）——M4 先记日志不回包。
+
+### 9.5 清理与打包
+
+- 原版球停放后每次 Physicalize 有 21 行 `[CK] You must Physicalize Ball_Wood ...`：在服务端的 CK 控制台接收器里过滤以 `You must Physicalize ` 开头且实体名为停放球的行。
+- `--nav retail-cxx` 诊断模式与 `mirror_clone_to_retail` 保留但在 `--help` 里标注为诊断。
+- 安装目标加入 `BallanceMMOSessionClient`；`docs/rooms-and-sessions-protocol.md` §3 增加服务端部署一节：需要完整游戏数据目录（`game_root`）、Windows/Linux 都可，一个物理房间约占一个核心；客户端侧需要 physics_RT.dll 与 Mod 同版本（`physics_sha256` 仅记录不校验，M4 增加 `physics.require_physics_sha` 配置：非空时只接受该 sha）。

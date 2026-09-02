@@ -34,7 +34,7 @@
 #include <physics/physics_rt_api.h>
 
 #include "headless_engine.hpp"
-#include "player_navigation.hpp"
+#include <physics/ball_navigation.hpp>
 
 class CK3dEntity;
 class CKBehavior;
@@ -177,7 +177,7 @@ namespace bmmo::sim {
             std::map<uint8_t, CK3dEntity*> balls;     // clone entity per ball type
             CK3dEntity* ball = nullptr;               // the physicalized one (or null)
             CK3dEntity* cam_ref = nullptr;
-            std::unique_ptr<player_navigation> navigation;
+            std::unique_ptr<bmmo::physics::player_navigation> navigation;
             bmmo::session::input_frame input{};
             bool have_input = false;
             bool physicalized = false;

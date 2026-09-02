@@ -305,12 +305,16 @@ namespace bmmo::sim {
     // snapshot.
     void session_runner::step(session_state& s) {
         const uint32_t tick = s.world->tick_index();
+        std::vector<std::pair<uint32_t, bmmo::session::input_frame>> applied;
+        applied.reserve(s.inputs.size());
         for (auto& [player, buffer]: s.inputs) {
             bool fresh = false;
             const auto& frame = buffer.take(tick, fresh);
             if (fresh) s.acked[player] = tick;
             s.world->set_input(player, frame);
+            applied.emplace_back(player, frame);
         }
+        if (callbacks_.on_inputs && applied.size() > 1) callbacks_.on_inputs(s.id, tick, applied);
         while (!s.events.empty() && s.events.front().tick <= tick) {
             pending_event e = std::move(s.events.front());
             s.events.erase(s.events.begin());

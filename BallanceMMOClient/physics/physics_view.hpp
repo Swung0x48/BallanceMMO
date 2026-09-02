@@ -53,6 +53,15 @@ namespace bmmo::physics {
                                              std::string& error) const;
         bool set_body_group(const char* entity_name, const char* collision_group, std::string& error) const;
 
+        // ---- bridge API v3 (design 9.1): navigation for mirrored remote balls ----
+        bool navigation_create(const char* ball_entity, const char* direction_ref_entity, uint32_t behavior_id,
+                               const float (*directions)[3], int leaf_count, float force_value, std::string& error) const;
+        bool navigation_input(const char* ball_entity, uint8_t keys, const float right[3], const float up[3],
+                              const float dir[3], bool active, std::string& error) const;
+        bool navigation_set_ball(const char* ball_entity, const char* new_ball_entity, float force_value,
+                                 std::string& error) const;
+        bool navigation_destroy(const char* ball_entity, std::string& error) const;
+
         // Identification of the loaded physics module (filled even when the
         // bridge is missing, so the retail DLL can be reported).
         const std::string& dll_sha256() const { return dll_sha256_; }

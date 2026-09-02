@@ -21,6 +21,7 @@
 #include <game/menu_driver.hpp>
 #include <game/navigation_graph.hpp>
 #include <message/message_all.hpp>
+#include <physics/ball_navigation.hpp>
 #include <physics/physics_state.hpp>
 #include <physics/tick_record.hpp>
 #include <role/role.hpp>
@@ -290,6 +291,11 @@ namespace {
                 if (msg.session != session_ || phase_ != phase::running) return;
                 assigned_ = true;
                 tick_base_ = msg.first_tick;
+                // The schedule restarts from the assignment: frames simulated so
+                // far (none for a start member) keep their slots.
+                origin_ = clock_type::now() - std::chrono::duration_cast<clock_type::duration>(
+                    std::chrono::duration<double>(static_cast<double>(std::max<int64_t>(frames_since_anchor_, 0))
+                                                  / bmmo::sim::kTickRate));
                 logf("tick base %u assigned (%lld frames since anchor)", tick_base_, static_cast<long long>(frames_since_anchor_));
                 flush_inputs();
                 break;
@@ -306,6 +312,22 @@ namespace {
                 if (!fill(msg)) return;
                 ++events_received_;
                 if (msg.session == session_ && phase_ == phase::running) apply_event(msg);
+                break;
+            }
+            case bmmo::SessionRemoteInput: {
+                bmmo::session_remote_input_msg msg;
+                if (!fill(msg)) return;
+                ++remote_inputs_received_;
+                if (msg.session != session_) return;
+                for (const auto& entry: msg.entries) {
+                    auto it = remotes_.find(entry.player);
+                    if (it == remotes_.end()) continue;
+                    auto& remote = it->second;
+                    if (remote.have_input && msg.tick < remote.input_tick) continue;
+                    remote.input = entry.frame;
+                    remote.input_tick = msg.tick;
+                    remote.have_input = true;
+                }
                 break;
             }
             case bmmo::SessionEnd: {
@@ -332,6 +354,12 @@ namespace {
             std::string entity;
             uint8_t ball_type = 0;
             bool physicalized = false;
+            bool navigation = false;        // driven by the shared navigation (design 9.1)
+            bool have_input = false;
+            uint32_t input_tick = 0;
+            bmmo::session::input_frame input{};
+            bmmo::session::body_corrector corrector;
+            uint64_t blends = 0, hard_sets = 0;
         };
 
         // ------------------------------------------------------ networking
@@ -558,6 +586,12 @@ namespace {
         }
 
         void pace_and_frame() {
+            if (!assigned_) {
+                // Hold frame 1 until the server assigns the tick base: everybody
+                // starts together instead of an early anchor running ahead.
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                return;
+            }
             const uint64_t next_frame = static_cast<uint64_t>(frames_since_anchor_ + 1);
             const double expected = std::chrono::duration<double>(clock_type::now() - origin_).count() * bmmo::sim::kTickRate;
             if (static_cast<double>(next_frame) + 33.0 < expected) {
@@ -646,6 +680,16 @@ namespace {
                 for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
                 for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
                 mechanism_correctors_[name].record(pose);
+            }
+            for (auto& [id, remote]: remotes_) {
+                if (!remote.physicalized || !remote.navigation) continue;
+                bmmo_physics_body_state local{};
+                if (!bmmo::physics::get_body_state(physics, remote.entity.c_str(), local, error)) continue;
+                bmmo::session::ball_pose pose;
+                pose.tick = tick;
+                for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
+                for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
+                remote.corrector.record(pose);
             }
 
             // Input for this tick.
@@ -737,6 +781,17 @@ namespace {
             if (args_.correct) {
                 if (physicalized) apply_blend(ball_name, corrector_);
                 for (auto& [name, corrector]: mechanism_correctors_) apply_blend(name, corrector);
+                for (auto& [id, remote]: remotes_)
+                    if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
+            }
+            // Next tick's input of every predicted remote ball: the last relayed frame.
+            for (auto& [id, remote]: remotes_) {
+                if (!remote.physicalized || !remote.navigation) continue;
+                const uint8_t keys = remote.have_input ? remote.input.keys : 0;
+                const bool active = remote.have_input && (remote.input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+                if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), keys, remote.input.cam_right,
+                                                     remote.input.cam_up, remote.input.cam_dir, active, error))
+                    logf("remote navigation input %s: %s", remote.entity.c_str(), error.c_str());
             }
             if (args_.trace && trace_frames_ > 0) {
                 --trace_frames_;
@@ -852,6 +907,26 @@ namespace {
                     auto it = remotes_.find(body.owner);
                     if (it == remotes_.end() || !it->second.physicalized) continue;
                     const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
+                    auto& remote = it->second;
+                    if (remote.navigation) {
+                        bmmo::session::ball_pose pose;
+                        pose.tick = snapshot.tick;
+                        for (int k = 0; k < 3; ++k) { pose.position[k] = body.position[k]; pose.linear[k] = body.linear[k]; pose.angular[k] = body.angular[k]; }
+                        for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
+                        const auto step = remote.corrector.compare(pose);
+                        if (step.action == bmmo::session::correction_step::kind::hard) {
+                            ++remote.hard_sets;
+                            logf("hard correction of remote %s for tick %u (error %.4f m)", remote.entity.c_str(), snapshot.tick,
+                                 remote.corrector.stats().last_error);
+                            if (args_.correct) bmmo::physics::set_body_state(physics, remote.entity.c_str(), step.target.position,
+                                                                             step.target.rotation, step.target.linear, step.target.angular, wake, error);
+                        } else if (step.action == bmmo::session::correction_step::kind::blend) {
+                            ++remote.blends;
+                            logf("blend correction of remote %s for tick %u (error %.4f m)", remote.entity.c_str(), snapshot.tick,
+                                 remote.corrector.stats().last_error);
+                        }
+                        continue;
+                    }
                     if (!bmmo::physics::set_body_state(physics, it->second.entity.c_str(), body.position, body.rotation,
                                                        body.linear, body.angular, wake, error))
                         logf("remote %u: %s", body.owner, error.c_str());
@@ -909,6 +984,8 @@ namespace {
                 CK3dEntity* entity = remote_entity(event.player, event.ball_type, error);
                 if (!entity) { logf("remote physicalize: %s", error.c_str()); return; }
                 auto& remote = remotes_[event.player];
+                if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
+                remote.navigation = false;
                 if (remote.physicalized && remote.entity != entity->GetName())
                     bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
                 entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
@@ -923,12 +1000,33 @@ namespace {
                 remote.entity = entity->GetName();
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
-                logf("remote player %u physicalized (%s) at tick %u", event.player, remote.entity.c_str(), event.tick);
+                remote.corrector.clear();
+                if (navigation_known_ && navigation_.valid()) {
+                    float directions[8][3] = {};
+                    int count = 0;
+                    for (const auto& leaf: navigation_.leaves) {
+                        if (leaf.index < 0 || leaf.index >= 8) continue;
+                        directions[leaf.index][0] = leaf.direction.x;
+                        directions[leaf.index][1] = leaf.direction.y;
+                        directions[leaf.index][2] = leaf.direction.z;
+                        count = std::max(count, leaf.index + 1);
+                    }
+                    const std::string cam_ref = "CamRef_BMMO_" + std::to_string(event.player);
+                    const float force = event.ball_type < ball_rows_.size() ? ball_rows_[event.ball_type].force : 0.0f;
+                    if (bmmo::physics::navigation_create(engine_->physics(), remote.entity.c_str(), cam_ref.c_str(),
+                                                         navigation_.ball_navigation, directions, count, force, error))
+                        remote.navigation = true;
+                    else logf("remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
+                }
+                logf("remote player %u physicalized (%s) at tick %u%s", event.player, remote.entity.c_str(), event.tick,
+                     remote.navigation ? ", predicted" : ", mirrored");
                 break;
             }
             case bmmo::session::event_type::Unphysicalize: {
                 auto it = remotes_.find(event.player);
                 if (it == remotes_.end()) return;
+                if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
+                it->second.navigation = false;
                 if (it->second.physicalized) bmmo::physics::unphysicalize(engine_->physics(), it->second.entity.c_str(), error);
                 it->second.physicalized = false;
                 logf("remote player %u unphysicalized at tick %u", event.player, event.tick);
@@ -941,16 +1039,24 @@ namespace {
 
         void report() {
             const auto& st = corrector_.stats();
+            uint64_t rc = 0, ri = 0, rb = 0, rh = 0;
+            for (const auto& [id, remote]: remotes_) {
+                const auto& rs = remote.corrector.stats();
+                rc += rs.compared; ri += rs.ignored; rb += rs.blended; rh += rs.hard;
+            }
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
-                 "own_phys=%d remotes=%zu remote_writes=%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d "
+                 "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
                  static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(snapshots_received_),
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
-                 own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_writes_), mechanism_names_.size(),
+                 own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
+                 static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
+                 static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
+                 mechanism_names_.size(),
                  static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max, rebases_,
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
@@ -1009,6 +1115,7 @@ namespace {
         uint64_t inputs_sent_ = 0, events_sent_ = 0, events_received_ = 0;
         uint64_t snapshots_received_ = 0, snapshots_applied_ = 0, snapshots_stale_ = 0;
         uint64_t remote_writes_ = 0, mechanism_blends_ = 0, mechanism_hard_ = 0;
+        uint64_t remote_inputs_received_ = 0;
     };
 }
 

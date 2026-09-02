@@ -106,7 +106,7 @@ if (BMMO_BUILD_SIM)
     add_library(BallanceMMOSim STATIC
             sim/headless_engine.cpp sim/headless_engine.hpp
             sim/null_managers.cpp sim/null_managers.hpp
-            sim/player_navigation.cpp sim/player_navigation.hpp
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/ball_navigation.cpp"
             sim/physics_world.cpp sim/physics_world.hpp
             sim/session_runner.cpp sim/session_runner.hpp
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_state.cpp"

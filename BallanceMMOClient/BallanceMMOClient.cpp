@@ -2271,6 +2271,13 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             handle_session_snapshot(std::move(msg));
         break;
     }
+    case bmmo::SessionRemoteInput: {
+        bmmo::session_remote_input_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_session_remote_input(std::move(msg));
+        break;
+    }
     case bmmo::SessionEvent: {
         bmmo::session_event_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);

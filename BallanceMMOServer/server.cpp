@@ -533,6 +533,7 @@ public:
         bmmo::map map{};
         std::vector<HSteamNetConnection> members;           // join order
         std::set<HSteamNetConnection> ready;
+        std::set<HSteamNetConnection> assigned;             // got their SessionAssign
         std::set<HSteamNetConnection> late;                 // joined a running session: no hash check
         bool world_ready = false, ticking = false;
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
@@ -564,6 +565,10 @@ public:
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
         callbacks.on_snapshot = [this](const bmmo::sim::session_snapshot& snapshot) { on_session_snapshot(snapshot); };
+        callbacks.on_inputs = [this](uint32_t session, uint32_t tick,
+                                     const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied) {
+            on_session_inputs(session, tick, applied);
+        };
         callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
             std::lock_guard lk(state_mutex_);
             end_physics_session(session, "simulation failed: " + reason);
@@ -683,6 +688,31 @@ public:
     }
 
     // Simulation thread: fan a snapshot out to the room.
+    // Relay of the inputs the world applied at `tick` (design 9.1): every
+    // member gets the other members' frames, unreliable, one message per tick.
+    void on_session_inputs(uint32_t session, uint32_t tick,
+                           const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end() || applied.size() < 2) return;
+        auto& s = it->second;
+        for (const auto m: s.members) {
+            bmmo::session_remote_input_msg msg;
+            msg.session = session;
+            msg.tick = tick;
+            for (const auto& [player, frame]: applied) {
+                if (player == m) continue;
+                bmmo::session_remote_input_msg::entry e;
+                e.player = player;
+                e.frame = frame;
+                msg.entries.push_back(e);
+            }
+            if (msg.entries.empty()) continue;
+            msg.serialize();
+            send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+        }
+    }
+
     void on_session_snapshot(const bmmo::sim::session_snapshot& snapshot) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(snapshot.session);
@@ -735,10 +765,32 @@ public:
         auto& s = it->second;
         s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
         s.ready.erase(c);
+        s.assigned.erase(c);
         s.late.erase(c);
         s.last_physicalize.erase(c);
         if (runner_) runner_->remove_player(session, c);
         if (s.members.empty()) end_physics_session(session, "everyone left");
+        else assign_start_members(s);   // the leaver may have been the one everybody waited for
+    }
+
+    void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick) {
+        bmmo::session_assign_msg assign;
+        assign.session = s.id;
+        assign.first_tick = first_tick;
+        assign.serialize();
+        send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_Reliable);
+        s.assigned.insert(c);
+    }
+
+    // Tick 0 for every start member, sent together once the last of them is
+    // ready: a client that anchored early would otherwise run ahead of the
+    // server by the time it spent waiting, and the relay lag (design 9.1)
+    // grows by the same amount.
+    void assign_start_members(physics_session_state& s) {
+        for (const auto m: s.members)
+            if (!s.late.count(m) && !s.ready.count(m)) return;
+        for (const auto m: s.members)
+            if (!s.late.count(m) && !s.assigned.count(m)) send_session_assign(s, m, 0);
     }
 
     void handle_session_ready(client_data_collection::iterator client_it, const bmmo::session_ready_msg& msg) {
@@ -759,13 +811,8 @@ public:
         // present at the start from 0 (protocol 2.2, session_assign_msg).
         const uint32_t assigned = s.late.count(c) ? runner_->current_tick(s.id) : 0;
         runner_->player_ready(msg.session, c, assigned);
-        {
-            bmmo::session_assign_msg assign;
-            assign.session = s.id;
-            assign.first_tick = assigned;
-            assign.serialize();
-            send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_Reliable);
-        }
+        if (s.late.count(c)) send_session_assign(s, c, assigned);
+        else assign_start_members(s);
         Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s).", s.id, client_it->second.name,
                 assigned, msg.physics_sha256.substr(0, 12), msg.build_id);
         if (s.late.count(c)) {

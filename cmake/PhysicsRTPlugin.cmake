@@ -51,6 +51,7 @@ list(FILTER _bmmo_ivp_dirs EXCLUDE REGEX "\\.(cxx|hxx|txt|md)$")
 
 target_sources(physics_RT PRIVATE
         "${_bmmo_root}/BallanceMMOCommon/src/physics/physics_state.cpp"
+        "${_bmmo_root}/BallanceMMOCommon/src/physics/ball_navigation.cpp"
         "${_bmmo_root}/BallanceMMOCommon/src/physics/physics_rt_bridge.cpp")
 target_include_directories(physics_RT PRIVATE
         "${_bmmo_root}/BallanceMMOCommon/include"
