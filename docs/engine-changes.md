@@ -62,6 +62,38 @@ into that target (`bmmo_apply_deterministic_sort` in
 `cmake/PhysicsFloatingPoint.cmake`), which maps `qsort` to
 `XDeterministicQSort` for both the client plugin and the headless server.
 
+## 3. Explicit transcendental math entry points (physics_RT / IVP)
+
+Files: `Source/BuildingBlocks/physics_RT/ivp/ivp_utility/ivu_libm.hxx` (new);
+call sites in `ivu_linear.hxx` (the `IVP_Inline_Math` wrappers),
+`ivu_linear_macros.hxx`, `ivu_quat.cxx`, `ivp_car_system.cxx`,
+`ivp_calc_next_psi_solver.cxx`, `ivp_environment.cxx`, and geompack
+(`geompack_cutfac.cxx`, `geompack_dsphdc.cxx`, `geompack_resedg.cxx`).
+
+Every C library computes sin, cos, tan, asin, acos, atan, atan2, exp, log
+and pow with its own polynomials and tables, so the same IVP source gives
+different last bits on MSVC, glibc and bionic. The physics now calls these
+functions only through `ivp_libm::` wrappers. By default they forward to
+the C library (upstream behaviour). When the build defines
+`IVP_PORTABLE_LIBM`, the wrappers call `ivp_libm_*` symbols that the build
+must provide; BallanceMMO provides them from the vendored OpenLibm subset
+(`BallanceMMOCommon/src/physics/ivp_libm_portable.cpp`). sqrt, fabs, floor,
+ceil and fmod are exact operations and stay on the C library.
+
+The double-named wrappers take double even for float arguments and the
+float-named ones take float, which is the mapping the earlier force-included
+rename shim used, so the results are unchanged: after the change all four
+platforms still replay the recording bit-exact (2026-09-02). This replaces
+the build-level shim (option A) with an explicit contract in the engine
+(option B), so an engine built without BallanceMMO's CMake is not silently
+non-deterministic: the entry points are visible in the source, and a plain
+build simply uses the C library.
+
+The 44 rerouted call sites were found with a word-boundary regex over the
+IVP sources (qhull has no transcendental calls; havana and 3dsimport are not
+compiled). The grep in `scripts/check_ivp_libm.sh` verifies that no raw
+call remains.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
@@ -69,9 +101,9 @@ into that target (`bmmo_apply_deterministic_sort` in
   across x86, x64 and ARM64 (probe in the harness); `/fp:strict` on x86
   crashed the collision code and changed nothing.
 - Transcendental functions: every C runtime differs (x86 vs x64 UCRT on
-  ~5% of inputs, Android bionic on far more), so the physics is built against
-  the vendored OpenLibm subset (`BallanceMMOCommon/third_party/openlibm`)
-  through a force-included rename header; no engine source is touched.
+  ~5% of inputs, Android bionic on far more). First handled by a
+  force-included rename header (no engine change); now handled by change #3
+  above, which makes the entry points explicit in the engine.
 - Heap addresses: perturbing allocation between body creations does not
   change results; IVP's containers iterate in insertion order.
 - The event scheduler's tie-breaking (`SORT_MINDIST_ELEMENTS`) is already

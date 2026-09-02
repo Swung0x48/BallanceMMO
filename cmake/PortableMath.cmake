@@ -1,7 +1,9 @@
 # Deterministic libm for the physics code (see
-# BallanceMMOCommon/third_party/openlibm/bmmo_portable_math.c).  When
-# BMMO_PHYSICS_PORTABLE_MATH is on, every IVP / physics_RT translation unit
-# gets physics/portable_math_shim.h force-included and links the library.
+# BallanceMMOCommon/third_party/openlibm/bmmo_portable_math.c).  The IVP
+# sources call their transcendental functions through ivp_libm
+# (ivu_libm.hxx in the engine); with BMMO_PHYSICS_PORTABLE_MATH on, the IVP
+# targets are compiled with IVP_PORTABLE_LIBM and the ivp_libm_* symbols are
+# provided by this library (ivp_libm_portable.cpp -> OpenLibm subset).
 
 # The IVP targets live in the submodule's directory scope.
 cmake_policy(SET CMP0079 NEW)
@@ -26,7 +28,8 @@ function(bmmo_ensure_portable_math_target)
     add_library(bmmo_portable_math STATIC
             "${_olm}/bmmo_portable_math.c"
             ${_olm_sources}
-            "${_bmmo_pm_root}/src/physics/portable_math_support.cpp")
+            "${_bmmo_pm_root}/src/physics/portable_math_support.cpp"
+            "${_bmmo_pm_root}/src/physics/ivp_libm_portable.cpp")
     set(_olm_rename "${_olm}/compat/bmmo_olm_rename.h")
     if (MSVC)
         set_source_files_properties(${_olm_sources} PROPERTIES COMPILE_OPTIONS "/FI${_olm_rename}")
@@ -59,13 +62,7 @@ function(bmmo_apply_portable_math target)
         return()
     endif ()
     bmmo_ensure_portable_math_target()
-    set(_shim "${_bmmo_pm_root}/include/physics/portable_math_shim.h")
-    if (MSVC)
-        target_compile_options(${target} PRIVATE "/FI${_shim}")
-    else ()
-        target_compile_options(${target} PRIVATE "-include" "${_shim}")
-    endif ()
-    target_include_directories(${target} PRIVATE "${_bmmo_pm_root}/include")
+    target_compile_definitions(${target} PRIVATE IVP_PORTABLE_LIBM)
 endfunction()
 
 # The IVP static libraries are exported by their own CMake tree, so they
