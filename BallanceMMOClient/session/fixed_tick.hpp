@@ -35,6 +35,10 @@ namespace bmmo::session {
         float last_delta_ms() const { return last_delta_ms_; }
         uint64_t skipped_renders() const { return skipped_renders_; }
         uint64_t waited_frames() const { return waited_frames_; }
+        uint64_t rebases() const { return rebases_; }
+        // Ticks the game may fall behind before pacing gives up catching up
+        // (a level load) and restarts the schedule from the current frame.
+        static constexpr double kMaxCatchUpTicks = 33.0;
 
     private:
         bool enabled_ = false;
@@ -43,5 +47,6 @@ namespace bmmo::session {
         float last_delta_ms_ = 0.0f;
         uint64_t skipped_renders_ = 0;
         uint64_t waited_frames_ = 0;
+        uint64_t rebases_ = 0;
     };
 }

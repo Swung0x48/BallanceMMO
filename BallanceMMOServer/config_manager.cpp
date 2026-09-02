@@ -19,8 +19,21 @@ namespace {
     }
 }
 
+const std::string& config_manager::base_directory() {
+    static const std::string directory = [] {
+        std::error_code ec;
+        auto path = std::filesystem::current_path(ec);
+        return ec ? std::string(".") : path.string();
+    }();
+    return directory;
+}
+
+std::string config_manager::resolve_path(const char* file_name) {
+    return (std::filesystem::path(base_directory()) / file_name).string();
+}
+
 bool config_manager::load() {
-    std::ifstream ifile("config.yml");
+    std::ifstream ifile(resolve_path("config.yml"));
     if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
         try {
             config_ = YAML::Load(ifile);
@@ -44,6 +57,21 @@ bool config_manager::load() {
     rooms_enabled = yaml_load_value(config_, "rooms_enabled", rooms_enabled);
     maximum_rooms = yaml_load_value(config_, "maximum_rooms", maximum_rooms);
     maximum_members = yaml_load_value(config_, "maximum_members", maximum_members);
+    {
+        // physics sessions (collision-overhaul M3); nested map so the game
+        // path and the mod whitelist stay together in the file
+        if (!config_["physics"] || !config_["physics"].IsMap())
+            config_["physics"] = YAML::Node(YAML::NodeType::Map);
+        YAML::Node physics = config_["physics"];
+        physics_enabled = yaml_load_value(physics, "enabled", physics_enabled);
+        physics_game_root = yaml_load_value(physics, "game_root", physics_game_root);
+        physics_snapshot_interval = yaml_load_value(physics, "snapshot_interval", physics_snapshot_interval);
+        physics_input_delay = yaml_load_value(physics, "input_delay", physics_input_delay);
+        maximum_physics_rooms = yaml_load_value(physics, "maximum_physics_rooms", maximum_physics_rooms);
+        physics_debug_trace = yaml_load_value(physics, "debug_trace", physics_debug_trace);
+        physics_allowed_mods = yaml_load_value(physics, "allowed_mods", decltype(physics_allowed_mods){});
+        if (physics_snapshot_interval == 0) physics_snapshot_interval = 1;
+    }
 
     std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
     if (logging_level_string == "msg")
@@ -148,7 +176,7 @@ void config_manager::save(bool reload_values) {
         config_["ban_list"] = banned_players;
         config_["mute_list"] = std::vector<std::string>(muted_players.begin(), muted_players.end());
     }
-    std::ofstream config_file("config.yml");
+    std::ofstream config_file(resolve_path("config.yml"));
     if (!config_file.is_open()) {
         Printf("Error: failed to open config file for writing.");
         return;
@@ -168,6 +196,9 @@ void config_manager::save(bool reload_values) {
                    "# - Op list / reserved names data style: \"playername: uuid\".\n"
                    "# - Ban list style: \"uuid: reason\".\n"
                    "# - Mute list style: \"- uuid\".\n"
+                   "# - Physics sessions (collision-overhaul): enabled, game_root (directory containing base.cmo),\n"
+                   "#   snapshot_interval / input_delay (ticks), maximum_physics_rooms, allowed_mods (\"mod id: version\"),\n"
+                   "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\").\n"
                 << std::endl;
     config_file << config_;
     config_file << std::endl;
@@ -214,7 +245,7 @@ void config_manager::flush_pending_logins(std::unique_lock<std::mutex>& lk) {
 
     if (!login_data_loaded_) { // parse the existing history once per run
         login_data_loaded_ = true;
-        std::ifstream ifile("login_data.yml");
+        std::ifstream ifile(resolve_path("login_data.yml"));
         if (ifile.is_open() && ifile.peek() != std::ifstream::traits_type::eof()) {
             try {
                 login_data_ = YAML::Load(ifile);
@@ -232,7 +263,7 @@ void config_manager::flush_pending_logins(std::unique_lock<std::mutex>& lk) {
             login_data_[entry.uuid][entry.name] = YAML::Node(YAML::NodeType::Map);
         login_data_[entry.uuid][entry.name][entry.time] = entry.ip;
     }
-    std::ofstream ofile("login_data.yml");
+    std::ofstream ofile(resolve_path("login_data.yml"));
     if (ofile.is_open())
         ofile << login_data_;
 
@@ -261,7 +292,7 @@ void config_manager::save_player_status(const client_data_collection& clients) {
             {"login_time", value{data.login_time}},
         });
     }
-    std::ofstream player_status_file("player_status.json");
+    std::ofstream player_status_file(resolve_path("player_status.json"));
     if (player_status_file.is_open()) {
         player_status_file << value{player_list};
     }

@@ -106,6 +106,9 @@ if (BMMO_BUILD_SIM)
     add_library(BallanceMMOSim STATIC
             sim/headless_engine.cpp sim/headless_engine.hpp
             sim/null_managers.cpp sim/null_managers.hpp
+            sim/player_navigation.cpp sim/player_navigation.hpp
+            sim/physics_world.cpp sim/physics_world.hpp
+            sim/session_runner.cpp sim/session_runner.hpp
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_state.cpp"
             "${BMMO_PLAYER_SRC_DIR}/Hotfix.cpp"
             "${BMMO_PLAYER_SRC_DIR}/GameConfig.cpp"
@@ -133,8 +136,30 @@ if (BMMO_BUILD_SIM)
         target_link_libraries(BallanceMMOSimTool PRIVATE android log)
     endif ()
     if (NOT BMMO_BUILD_SIM_ONLY)
-        target_sources(BallanceMMOServer PRIVATE sim/rasterizer_stub.cpp)
+        # Headless physics-session client (design 8.6 item 3): headless engine
+        # + GNS client that plays a session from a recorded keyboard.
+        add_executable(BallanceMMOSessionClient sim/session_client.cpp sim/rasterizer_stub.cpp sim/crash_report.cpp
+                ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
+        target_link_libraries(BallanceMMOSessionClient PRIVATE BallanceMMOSim GameNetworkingSockets::shared replxx)
+        target_compile_definitions(BallanceMMOSessionClient PRIVATE BMMO_INCLUDE_INTERNAL)
+        if (WIN32)
+            target_link_libraries(BallanceMMOSessionClient PRIVATE dbghelp)
+            target_compile_definitions(BallanceMMOSessionClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        endif ()
+    endif ()
+    if (NOT BMMO_BUILD_SIM_ONLY)
+        target_sources(BallanceMMOServer PRIVATE sim/rasterizer_stub.cpp sim/crash_report.cpp)
         target_link_libraries(BallanceMMOServer BallanceMMOSim)
+        if (WIN32)
+            target_link_libraries(BallanceMMOServer dbghelp)
+        endif ()
+        if (MSVC)
+            # Symbols for the crash reporter's backtraces (Release builds).
+            target_compile_options(BallanceMMOServer PRIVATE /Zi)
+            target_compile_options(BallanceMMOSim PRIVATE /Zi)
+            target_link_options(BallanceMMOServer PRIVATE /DEBUG)
+            target_link_options(BallanceMMOSimTool PRIVATE /DEBUG)
+        endif ()
         target_compile_definitions(BallanceMMOServer PRIVATE BMMO_BUILD_SIM=1)
     endif ()
 endif ()
@@ -194,7 +219,7 @@ if (BUILD_SERVER_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
     enable_testing()
-    add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp tests/room_manager_test.cpp)
+    add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp tests/room_manager_test.cpp tests/session_messages_test.cpp tests/session_logic_test.cpp)
     target_link_libraries(BallanceMMOMessageTests PRIVATE GTest::gtest_main GameNetworkingSockets::shared)
     if (WIN32)
         target_compile_definitions(BallanceMMOMessageTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

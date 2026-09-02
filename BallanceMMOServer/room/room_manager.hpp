@@ -137,6 +137,15 @@ namespace bmmo {
             return room::error_code::None;
         }
 
+        // The running session ended for a reason other than a host request
+        // (server failure, world mismatch): back to the lobby, ready cleared.
+        void reset_session(uint32_t id) {
+            auto* r = find(id);
+            if (!r) return;
+            r->phase = room::phase::Lobby;
+            for (auto& m : r->members) m.ready = false;
+        }
+
         room::error_code kick(HSteamNetConnection host, HSteamNetConnection target,
                               removal_result& out) {
             const uint32_t id = room_of(host);

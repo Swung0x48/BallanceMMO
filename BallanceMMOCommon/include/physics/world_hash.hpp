@@ -34,6 +34,8 @@ namespace bmmo::physics {
         float probe_rot_speed[3] = {};
         double ivp_time = 0.0;
         int ivp_seed = 0;
+        short next_movement_check = 0;  // environment movement-check countdown
+        double time_of_last_psi = 0.0, time_of_next_psi = 0.0;
         float delta_time_ms = 0.0f;
         float physics_delta_time = 0.0f;
         float time_factor = 0.0f;

@@ -8,7 +8,11 @@
 # The IVP targets live in the submodule's directory scope.
 cmake_policy(SET CMP0079 NEW)
 
-option(BMMO_PHYSICS_PORTABLE_MATH "Route the physics code's sin/cos/... through the vendored OpenLibm subset" OFF)
+# Default ON: every build that takes part in a physics session (server,
+# client physics_RT, headless tools) must use the same transcendental
+# functions; a server tree configured with it off drifted from the client by
+# 2 ulp in the ball's quaternion from the first tick with navigation force.
+option(BMMO_PHYSICS_PORTABLE_MATH "Route the physics code's sin/cos/... through the vendored OpenLibm subset" ON)
 
 set(_bmmo_pm_root "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon")
 

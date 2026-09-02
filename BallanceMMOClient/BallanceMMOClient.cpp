@@ -300,6 +300,7 @@ void BallanceMMOClient::on_sector_changed() {
     if (!update_current_sector()) return;
     max_sector_ = std::max(current_sector_.load(), max_sector_.load());
     if (connected()) send_current_sector();
+    physics_session_on_sector(current_sector_);
     if (current_level_mode_ != bmmo::level_mode::Highscore) return;
     extra_life_received_ = false;
 }
@@ -307,6 +308,7 @@ void BallanceMMOClient::on_sector_changed() {
 void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
 
 void BallanceMMOClient::OnPostExitLevel() {
+    physics_session_end_local("left the level");
     ball_nav_active_ = false;
     countdown_restart_ = false;
     force_hs_calibration_ = false;
@@ -401,6 +403,7 @@ void BallanceMMOClient::OnPostStartMenu()
 void BallanceMMOClient::OnProcess() {
     process_command_file();
     fixed_tick_.on_process(m_bml);
+    process_physics_session();
     process_command_pipe();
     process_level_request();
     process_tick_record();
@@ -591,6 +594,7 @@ void BallanceMMOClient::update_compensation_lives_label() {
 
 // may give wrong values of extra points
 void BallanceMMOClient::OnLevelFinish() {
+    physics_session_on_finish();
     if (!connected() || spectator_mode_)
         return;
 
@@ -1012,6 +1016,7 @@ void BallanceMMOClient::init_commands() {
             if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w)); return; }
         }
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
+        else if (sub == "session") { SendIngameMessage(physics_session_status_text()); return; }
         else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close.", sub)); return; }
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
@@ -2243,6 +2248,41 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
         if (msg.deserialize())
             handle_room_event(msg);
+        break;
+    }
+    case bmmo::SessionStart: {
+        bmmo::session_start_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_session_start(std::move(msg));
+        break;
+    }
+    case bmmo::SessionAssign: {
+        bmmo::session_assign_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_session_assign(msg);
+        break;
+    }
+    case bmmo::SessionSnapshot: {
+        bmmo::session_snapshot_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_session_snapshot(std::move(msg));
+        break;
+    }
+    case bmmo::SessionEvent: {
+        bmmo::session_event_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_session_event(std::move(msg));
+        break;
+    }
+    case bmmo::SessionEnd: {
+        bmmo::session_end_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_session_end(msg);
         break;
     }
     case bmmo::MapNames: {

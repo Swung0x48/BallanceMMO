@@ -292,6 +292,26 @@ public:
 		}
 	}
 
+	// Physics sessions: the spirit ball entity of a player's ball type, so the
+	// bridge can give it a body mirrored from the server.
+	CK3dObject* get_ball_entity(HSteamNetConnection id, uint32_t type) {
+		std::lock_guard lk(mutex_);
+		auto it = objects_.find(id);
+		if (it == objects_.end() || !is_valid_ball_type(it->second, type)) return nullptr;
+		return static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(it->second.balls[type]));
+	}
+	void ensure_player(HSteamNetConnection id) {
+		std::lock_guard lk(mutex_);
+		if (objects_.contains(id)) return;
+		if (auto state = db_.get(id)) init_player(id, state->name, state->cheated);
+	}
+	// While set, update() leaves the ball where the physics body put it.
+	void set_physicalized(HSteamNetConnection id, bool physicalized) {
+		std::lock_guard lk(mutex_);
+		auto it = objects_.find(id);
+		if (it != objects_.end()) it->second.physicalized = physicalized;
+	}
+
 	void remove(HSteamNetConnection id) {
 		std::lock_guard lk(mutex_);
 		objects_.erase(id);

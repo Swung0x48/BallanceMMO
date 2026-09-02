@@ -24,6 +24,11 @@
 #include "server_data.hpp"
 #include "config_manager.hpp"
 #include "room/room_manager.hpp"
+#if BMMO_BUILD_SIM
+#include "sim/session_runner.hpp"
+#include "sim/crash_report.hpp"
+#include <cmath>
+#endif
 
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
@@ -496,6 +501,9 @@ public:
     // Removes a client from its room (voluntary Leave or a disconnect) and
     // notifies the remaining members. `ack` sends the leaver a RequestAccepted.
     void room_remove_and_notify(HSteamNetConnection c, bool ack) {
+#if BMMO_BUILD_SIM
+        physics_session_member_left(c);
+#endif
         auto rr = rooms_.leave(c);
         if (!rr.was_member) {
             if (ack) send_room_event(c, bmmo::room::event_type::RequestDenied,
@@ -514,6 +522,325 @@ public:
         }
         broadcast_room_states();
     }
+
+#if BMMO_BUILD_SIM
+    // ---- physics sessions (design section 8.3) ----
+    // All of these run with state_mutex_ held; the runner callbacks take it
+    // themselves because they arrive on the simulation thread.
+
+    struct physics_session_state {
+        uint32_t id = 0, room = 0;
+        bmmo::map map{};
+        std::vector<HSteamNetConnection> members;           // join order
+        std::set<HSteamNetConnection> ready;
+        std::set<HSteamNetConnection> late;                 // joined a running session: no hash check
+        bool world_ready = false, ticking = false;
+        uint64_t anchor_hash = 0, anchor_surfaces = 0;
+        float spawn_position[3] = {}, spawn_rotation[4] = {0, 0, 0, 1};
+        // last Physicalize event of each member (serialized, player set) so a
+        // late joiner can build the bodies that already exist
+        std::map<HSteamNetConnection, std::string> last_physicalize;
+    };
+
+    void init_physics_runner() {
+        if (!config_.physics_enabled) return;
+        if (config_.physics_game_root.empty()) {
+            Printf("Physics sessions: physics.game_root is not set; sessions stay unavailable.");
+            return;
+        }
+        std::error_code ec;
+        const std::filesystem::path root(config_.physics_game_root);
+        if (!std::filesystem::is_regular_file(root / "base.cmo", ec)) {
+            Printf("Physics sessions: %s does not contain base.cmo; sessions stay unavailable.",
+                    config_.physics_game_root);
+            return;
+        }
+        bmmo::sim::runner_config rc;
+        rc.game_root = root;
+        rc.input_delay = config_.physics_input_delay;
+        rc.snapshot_interval = std::max<uint32_t>(1, config_.physics_snapshot_interval);
+        rc.trace = config_.physics_debug_trace;
+        bmmo::sim::session_callbacks callbacks;
+        callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
+        callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
+        callbacks.on_snapshot = [this](const bmmo::sim::session_snapshot& snapshot) { on_session_snapshot(snapshot); };
+        callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
+            std::lock_guard lk(state_mutex_);
+            end_physics_session(session, "simulation failed: " + reason);
+        };
+        runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
+        Printf("Physics sessions enabled (game root %s, input delay %u ticks, snapshot interval %u).",
+                config_.physics_game_root, rc.input_delay, rc.snapshot_interval);
+    }
+
+    bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
+        if (config_.physics_allowed_mods.empty()) return bmmo::room::error_code::None;
+        for (const auto& m: r.members) {
+            auto ci = clients_.find(m.id);
+            if (ci == clients_.end()) continue;
+            for (const auto& [id, version]: ci->second.mods) {
+                auto allowed = config_.physics_allowed_mods.find(id);
+                if (allowed == config_.physics_allowed_mods.end() || allowed->second != version) {
+                    Printf("Physics session denied: %s has %s %s (not whitelisted).", ci->second.name, id, version);
+                    return bmmo::room::error_code::ModMismatch;
+                }
+            }
+        }
+        return bmmo::room::error_code::None;
+    }
+
+    uint32_t start_physics_session(const bmmo::server_room& r, const bmmo::map& map) {
+        physics_session_state s;
+        s.id = next_session_id_++;
+        s.room = r.id;
+        s.map = map;
+        for (const auto& m: r.members) {
+            s.members.push_back(m.id);
+            client_session_[m.id] = s.id;
+        }
+        room_session_[r.id] = s.id;
+        const uint32_t id = s.id;
+        physics_sessions_.emplace(id, std::move(s));
+        runner_->create_session(id, map.level, physics_sessions_[id].members);
+        return id;
+    }
+
+    void send_session_end(uint32_t session, HSteamNetConnection to, const std::string& reason) {
+        bmmo::session_end_msg msg;
+        msg.session = session;
+        msg.reason = reason;
+        msg.serialize();
+        send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    }
+
+    void end_physics_session(uint32_t session, const std::string& reason) {
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end()) return;
+        auto s = std::move(it->second);
+        physics_sessions_.erase(it);
+        for (const auto m: s.members) {
+            client_session_.erase(m);
+            send_session_end(session, m, reason);
+            send_room_event(m, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
+                    k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
+        }
+        room_session_.erase(s.room);
+        rooms_.reset_session(s.room);
+        if (runner_) runner_->destroy_session(session);
+        broadcast_room_states();
+        Printf("Physics session %u (room %u) ended: %s", session, s.room, reason);
+    }
+
+    void send_session_start(const physics_session_state& s, HSteamNetConnection to, uint32_t first_tick) {
+        bmmo::session_start_msg msg;
+        msg.room = s.room;
+        msg.session = s.id;
+        msg.mode = bmmo::room::mode::Physics;
+        msg.map = s.map;
+        msg.tick_rate = 66;
+        msg.snapshot_interval = static_cast<uint8_t>(std::min<uint32_t>(255, std::max<uint32_t>(1, config_.physics_snapshot_interval)));
+        msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, config_.physics_input_delay));
+        msg.first_tick = first_tick;
+        msg.seed = 1;
+        // Spawn ring around the retail spawn (design 3.4): a single player keeps
+        // the retail spot so solo play reproduces the recording exactly.
+        const size_t count = s.members.size();
+        const float radius = count > 1 ? 6.0f : 0.0f;
+        for (size_t i = 0; i < count && i < bmmo::session::MAX_PLAYERS_PER_SESSION; ++i) {
+            bmmo::session::player_entry entry;
+            entry.id = s.members[i];
+            entry.join_order = static_cast<uint8_t>(i);
+            entry.ball_type = 0;
+            const double angle = 2.0 * 3.14159265358979323846 * static_cast<double>(i) / static_cast<double>(count);
+            entry.spawn_position[0] = s.spawn_position[0] + radius * static_cast<float>(std::cos(angle));
+            entry.spawn_position[1] = s.spawn_position[1];
+            entry.spawn_position[2] = s.spawn_position[2] + radius * static_cast<float>(std::sin(angle));
+            for (int k = 0; k < 4; ++k) entry.spawn_rotation[k] = s.spawn_rotation[k];
+            msg.players.push_back(entry);
+        }
+        msg.serialize();
+        send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    }
+
+    // Simulation thread: the world finished booting.
+    void on_world_ready(const bmmo::sim::world_ready_info& info) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(info.session);
+        if (it == physics_sessions_.end()) return;
+        if (!info.ok) {
+            end_physics_session(info.session, "world boot failed: " + info.error);
+            return;
+        }
+        auto& s = it->second;
+        s.world_ready = true;
+        s.anchor_hash = info.anchor_hash;
+        s.anchor_surfaces = info.anchor_surfaces;
+        for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
+        for (int k = 0; k < 4; ++k) s.spawn_rotation[k] = info.spawn_rotation[k];
+        for (const auto m: s.members) send_session_start(s, m, 0);
+        Printf("Physics session %u: world ready (anchor %016llx), SessionStart sent to %zu players.",
+                s.id, static_cast<unsigned long long>(s.anchor_hash), s.members.size());
+    }
+
+    // Simulation thread: fan a snapshot out to the room.
+    void on_session_snapshot(const bmmo::sim::session_snapshot& snapshot) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(snapshot.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        if (!s.ticking) {
+            s.ticking = true;
+            Printf("Physics session %u: ticking (first snapshot at tick %u).", s.id, snapshot.tick);
+        }
+        for (const auto m: s.members) {
+            bmmo::session_snapshot_msg msg;
+            msg.session = snapshot.session;
+            msg.tick = snapshot.tick;
+            msg.full = snapshot.full ? 1 : 0;
+            msg.acked_input_tick = 0;
+            for (const auto& [player, tick]: snapshot.acked_inputs)
+                if (player == m) msg.acked_input_tick = tick;
+            msg.bodies = snapshot.bodies;
+            msg.serialize();
+            send(m, msg.raw.str().data(), msg.size(),
+                    snapshot.full ? k_nSteamNetworkingSend_Reliable : k_nSteamNetworkingSend_UnreliableNoDelay);
+        }
+    }
+
+    void physics_session_member_joined(uint32_t room, HSteamNetConnection c) {
+        auto rs = room_session_.find(room);
+        if (rs == room_session_.end() || !runner_) return;
+        auto it = physics_sessions_.find(rs->second);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        s.members.push_back(c);
+        client_session_[c] = s.id;
+        runner_->add_player(s.id, c);
+        if (runner_->running(s.id)) {
+            s.late.insert(c);
+            send_session_start(s, c, 0);   // the real tick base follows in SessionAssign
+        } else if (s.world_ready) {
+            send_session_start(s, c, 0);
+        }
+        Printf("Physics session %u: %s joined%s.", s.id, get_client_name(c), s.late.count(c) ? " late" : "");
+    }
+
+    void physics_session_member_left(HSteamNetConnection c) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end()) return;
+        const uint32_t session = cs->second;
+        client_session_.erase(cs);
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
+        s.ready.erase(c);
+        s.late.erase(c);
+        s.last_physicalize.erase(c);
+        if (runner_) runner_->remove_player(session, c);
+        if (s.members.empty()) end_physics_session(session, "everyone left");
+    }
+
+    void handle_session_ready(client_data_collection::iterator client_it, const bmmo::session_ready_msg& msg) {
+        const HSteamNetConnection c = client_it->first;
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
+        auto& s = physics_sessions_[msg.session];
+        if (!s.late.count(c) && s.world_ready
+                && (msg.anchor_hash != s.anchor_hash || msg.anchor_surfaces != s.anchor_surfaces)) {
+            end_physics_session(msg.session, Sprintf("world mismatch for %s (client %016llx/%016llx, server %016llx/%016llx)",
+                    client_it->second.name,
+                    static_cast<unsigned long long>(msg.anchor_hash), static_cast<unsigned long long>(msg.anchor_surfaces),
+                    static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_surfaces)));
+            return;
+        }
+        s.ready.insert(c);
+        // Late joiners are numbered from the server's current tick; members
+        // present at the start from 0 (protocol 2.2, session_assign_msg).
+        const uint32_t assigned = s.late.count(c) ? runner_->current_tick(s.id) : 0;
+        runner_->player_ready(msg.session, c, assigned);
+        {
+            bmmo::session_assign_msg assign;
+            assign.session = s.id;
+            assign.first_tick = assigned;
+            assign.serialize();
+            send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_Reliable);
+        }
+        Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s).", s.id, client_it->second.name,
+                assigned, msg.physics_sha256.substr(0, 12), msg.build_id);
+        if (s.late.count(c)) {
+            // catch the late joiner up: everyone's current ball, then a full snapshot
+            for (const auto& [member, bytes]: s.last_physicalize)
+                if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+            runner_->request_full_snapshot(s.id);
+        }
+    }
+
+    void handle_session_input(HSteamNetConnection c, const bmmo::session_input_msg& msg) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
+        runner_->submit_input(msg.session, c, msg.first_tick, msg.frames);
+    }
+
+    static void copy_name(char* out, size_t size, const std::string& text) {
+        std::snprintf(out, size, "%s", text.c_str());
+    }
+
+    void handle_session_event(client_data_collection::iterator client_it, bmmo::session_event_msg& msg) {
+        const HSteamNetConnection c = client_it->first;
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
+        auto& s = physics_sessions_[msg.session];
+        bmmo::sim::lifecycle_event event;
+        event.type = msg.type;
+        event.ball_type = msg.ball_type;
+        for (int k = 0; k < 3; ++k) event.position[k] = msg.position[k];
+        for (int k = 0; k < 9; ++k) event.rotation[k] = msg.rotation[k];
+        event.sector = msg.sector;
+        event.name = msg.name;
+        if (msg.type == bmmo::session::event_type::Physicalize) {
+            const auto& r = msg.recipe;
+            auto& p = event.recipe;
+            p.fixed = r.fixed; p.start_frozen = r.start_frozen; p.enable_collision = r.enable_collision;
+            p.calc_mass_center = r.calc_mass_center;
+            p.friction = r.friction; p.elasticity = r.elasticity; p.mass = r.mass;
+            p.linear_damp = r.linear_damp; p.rot_damp = r.rot_damp;
+            for (int k = 0; k < 3; ++k) p.mass_center[k] = r.mass_center[k];
+            copy_name(p.collision_surface, sizeof(p.collision_surface), r.collision_surface);
+            p.convex_count = static_cast<int32_t>(std::min<size_t>(r.convex_meshes.size(), BMMO_PHYSICS_MAX_CONVEX));
+            for (int i = 0; i < p.convex_count; ++i) copy_name(p.convex[i], sizeof(p.convex[i]), r.convex_meshes[i]);
+            p.ball_count = static_cast<int32_t>(std::min<size_t>(r.balls.size(), BMMO_PHYSICS_MAX_BALLS));
+            for (int i = 0; i < p.ball_count; ++i) {
+                for (int k = 0; k < 3; ++k) p.ball_center[i][k] = r.balls[i].center[k];
+                p.ball_radius[i] = r.balls[i].radius;
+            }
+            p.concave_count = static_cast<int32_t>(std::min<size_t>(r.concave_meshes.size(), BMMO_PHYSICS_MAX_CONCAVE));
+            for (int i = 0; i < p.concave_count; ++i) copy_name(p.concave[i], sizeof(p.concave[i]), r.concave_meshes[i]);
+        }
+        runner_->submit_event(msg.session, c, msg.tick, std::move(event));
+        // relay to the other members with the origin filled in
+        msg.player = c;
+        msg.clear();
+        msg.serialize();
+        const std::string bytes = msg.raw.str();
+        if (msg.type == bmmo::session::event_type::Physicalize) s.last_physicalize[c] = bytes;
+        else if (msg.type == bmmo::session::event_type::Unphysicalize) s.last_physicalize.erase(c);
+        for (const auto m: s.members)
+            if (m != c) send(m, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+    }
+
+    void print_physics_sessions() {
+        std::lock_guard lk(state_mutex_);
+        if (!runner_) { Printf("Physics sessions are unavailable."); return; }
+        if (physics_sessions_.empty()) Printf("No physics session is running.");
+        for (const auto& [id, s]: physics_sessions_) {
+            Printf("Session %u: room %u, level %d, %zu members, %zu ready, world %s, ticking %s, tick %u.",
+                    id, s.room, s.map.level, s.members.size(), s.ready.size(), s.world_ready ? "ready" : "booting",
+                    s.ticking ? "yes" : "no", runner_->current_tick(id));
+            runner_->describe(id);
+        }
+    }
+#endif
 
     void handle_room_request(client_data_collection::iterator client_it,
             const bmmo::room_request_msg& msg) {
@@ -556,6 +883,9 @@ public:
                     break;
                 }
                 send_room_event(c, event_type::RequestAccepted, error_code::None, msg.room, c);
+#if BMMO_BUILD_SIM
+                physics_session_member_joined(msg.room, c);
+#endif
                 if (const auto* r = rooms_.find(msg.room))
                     for (const auto& m: r->members)
                         if (m.id != c)
@@ -588,8 +918,36 @@ public:
                 if (!r->all_ready()) { send_room_event(c, event_type::RequestDenied, error_code::NotReady, room); break; }
                 if (!room_members_same_map(*r)) { send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room); break; }
                 if (msg.mode == bmmo::room::mode::Physics) {
-                    // physics sessions arrive in milestone M3
+#if BMMO_BUILD_SIM
+                    if (!runner_) { send_room_event(c, event_type::RequestDenied, error_code::PhysicsUnavailable, room); break; }
+                    const int level = client_it->second.current_map.level;
+                    if (!client_it->second.current_map.is_original_level() || level < 1 || level > 13) {
+                        send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room, c, 0,
+                                "physics sessions need an original level");
+                        break;
+                    }
+                    if (auto mods = check_physics_mods(*r); mods != error_code::None) {
+                        send_room_event(c, event_type::RequestDenied, mods, room);
+                        break;
+                    }
+                    if (auto existing = room_session_.find(room); existing != room_session_.end())
+                        end_physics_session(existing->second, "restarted by the host");
+                    if (physics_sessions_.size() >= config_.maximum_physics_rooms) {
+                        send_room_event(c, event_type::RequestDenied, error_code::ServerBusy, room, c, 0,
+                                "no free physics world");
+                        break;
+                    }
+                    auto err = rooms_.start(c, msg.mode);
+                    if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                    const uint32_t session = start_physics_session(*r, client_it->second.current_map);
+                    send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
+                    for (const auto& m: r->members)
+                        send_room_event(m.id, event_type::SessionStarting, error_code::None, room, c);
+                    broadcast_room_states();
+                    Printf("Room %u started physics session %u on level %d (world booting).", room, session, level);
+#else
                     send_room_event(c, event_type::RequestDenied, error_code::PhysicsUnavailable, room);
+#endif
                     break;
                 }
                 auto err = rooms_.start(c, msg.mode);
@@ -608,6 +966,9 @@ public:
                     send_room_event(c, event_type::RequestDenied, err, rooms_.room_of(c));
                     break;
                 }
+#if BMMO_BUILD_SIM
+                physics_session_member_left(msg.target);
+#endif
                 send_room_event(msg.target, event_type::Kicked, error_code::None, rr.room, c, msg.target);
                 for (auto m: rr.remaining) {
                     send_room_event(m, event_type::PlayerLeft, error_code::None, rr.room, c, msg.target);
@@ -621,6 +982,11 @@ public:
             case action::Close: {
                 std::vector<HSteamNetConnection> members;
                 uint32_t room = 0;
+#if BMMO_BUILD_SIM
+                if (const uint32_t own = rooms_.room_of(c); own != 0 && rooms_.find(own) && rooms_.find(own)->host == c)
+                    if (auto existing = room_session_.find(own); existing != room_session_.end())
+                        end_physics_session(existing->second, "room closed");
+#endif
                 auto err = rooms_.close(c, members, room);
                 if (err != error_code::None) {
                     send_room_event(c, event_type::RequestDenied, err, rooms_.room_of(c));
@@ -744,6 +1110,9 @@ public:
             Printf("Error: failed to load config. Please try fixing or emptying it first.");
             return false;
         }
+#if BMMO_BUILD_SIM
+        init_physics_runner();
+#endif
 
         SteamNetworkingIPAddr local_address{};
         local_address.Clear();
@@ -1749,8 +2118,33 @@ protected:
                 auto msg = bmmo::message_utils::deserialize<bmmo::mod_list_msg>(networking_msg);
                 if (config_.log_installed_mods)
                     config_.log_mod_list(msg.mods);
+                client_it->second.mods = msg.mods;   // physics-session whitelist check
                 break;
             }
+#if BMMO_BUILD_SIM
+            case bmmo::SessionReady: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_ready_msg>(networking_msg);
+                handle_session_ready(client_it, msg);
+                break;
+            }
+            case bmmo::SessionInput: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_input_msg>(networking_msg);
+                handle_session_input(networking_msg->m_conn, msg);
+                break;
+            }
+            case bmmo::SessionEvent: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_event_msg>(networking_msg);
+                handle_session_event(client_it, msg);
+                break;
+            }
+            case bmmo::SessionResync: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_resync_msg>(networking_msg);
+                auto it = client_session_.find(networking_msg->m_conn);
+                if (it != client_session_.end() && it->second == msg.session && runner_)
+                    runner_->request_full_snapshot(msg.session);
+                break;
+            }
+#endif
             case bmmo::RealWorldTimestamp:
             case bmmo::SoundData:
             case bmmo::SoundStream:
@@ -1859,6 +2253,15 @@ protected:
     std::map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
     std::unordered_set<HSteamNetConnection> ghost_spectator_clients_; // ghost mode - only operators and spectators can see other players
     bmmo::room_manager rooms_; // collision-overhaul room system (guarded by state_mutex_)
+#if BMMO_BUILD_SIM
+    std::map<uint32_t, physics_session_state> physics_sessions_;        // by session id (state_mutex_)
+    std::unordered_map<uint32_t, uint32_t> room_session_;               // room -> session
+    std::unordered_map<HSteamNetConnection, uint32_t> client_session_;  // member -> session
+    uint32_t next_session_id_ = 1;
+    // Declared last so it is destroyed first: its thread calls back into
+    // the members above.
+    std::unique_ptr<bmmo::sim::session_runner> runner_;
+#endif
     // Guards all server state shared between the network thread and the
     // console thread (clients_, username_, maps_, map_names_,
     // ghost_spectator_clients_, permanent_notification_, last_countdown_map_,
@@ -1945,6 +2348,9 @@ int main(int argc, char** argv) {
         bmmo::set_log_file(log_file);
     }
 
+#if BMMO_BUILD_SIM
+    bmmo::sim::install_crash_reporter();   // backtraces from the simulation thread
+#endif
     printf("Initializing sockets...\n");
     server::init_socket();
 
@@ -2145,6 +2551,9 @@ int main(int argc, char** argv) {
             Printf("Error: failed to reload config.");
     });
     console.register_command("listmap", [&] { server.print_maps(); });
+#if BMMO_BUILD_SIM
+    console.register_command("sessions", [&] { server.print_physics_sessions(); });
+#endif
     console.register_command("countdown", [&] {
         auto print_hint = [] {
             Printf(R"(Error: please specify the map to countdown (hint: use "getmap" and "listmap").)");

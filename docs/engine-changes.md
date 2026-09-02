@@ -94,6 +94,58 @@ IVP sources (qhull has no transcendental calls; havana and 3dsimport are not
 compiled). The grep in `scripts/check_ivp_libm.sh` verifies that no raw
 call remains.
 
+## 4. String parameter size in the Player hotfix helper (Player)
+
+File: `Source/Player/src/ScriptUtils.h`, `GenerateInputParameter<const char*>`.
+
+The helper created a local string parameter for a boot-script hotfix
+(`PatchReplacePathRoot` passes the composition directory to `TT_ReplacePath`)
+and called `CKParameter::SetValue(value)` without a size. `SetValue` then
+copies the parameter's current buffer size, 64 bytes for a fresh string
+parameter, out of a C string that is much shorter, reading past its end.
+AddressSanitizer reported the over-read while validating the headless engine
+(recorded below as benign); in the BallanceMMO server process the source
+string ended near a page boundary and the read faulted (access violation in
+`memcpy`, 2026-09-02, first physics-session world boot). The call now passes
+`strlen(value) + 1`, which is how the retail building blocks size string
+parameters (for example `PhysicalizeCallBack` in physics_RT). No gameplay
+effect: the parameter held the same characters before, followed by garbage
+that the string consumer never read.
+
+## 5. Per-simulation-unit movement check (physics_RT / IVP)
+
+Files: `Source/BuildingBlocks/physics_RT/ivp/ivp_intern/ivp_sim_unit.hxx`
+(new member `next_movement_check`, inline `must_perform_movement_check`),
+`ivp_sim_unit.cxx` (constructor initialisation; the two calls in
+`simulate_single_sim_unit_psi` use the unit's counter).
+
+`IVP_Simulation_Unit::simulate_single_sim_unit_psi` decides whether to run
+the "movement check" (the test that puts a calm unit to sleep) by calling
+`IVP_Environment::must_perform_movement_check()`: one counter per
+environment, decremented once per simulated unit per PSI, re-armed with
+`ivp_rand()` to 15..19 when it reaches zero. So the PSI at which any given
+unit is examined depended on how many *other* units were awake since the
+level started, and on the global RNG cursor those re-arms consumed. Two
+worlds that are bit-identical for one ball but differ in unrelated bodies
+therefore freeze that ball a few PSIs apart, and a frozen body stops at a
+slightly different pose.
+
+Evidence (2026-09-02, networked physics session, retail client vs headless
+server): after the player's ball died, the client's retail sector reset
+re-physicalized the eight sector-1 mechanisms while the server (which does
+not reset shared mechanisms on a personal death) only woke its resting
+copies; from that tick the `ivp_srand` cursors of the two worlds diverged
+(logged every change on both sides) and the ball, still driven by identical
+inputs, needed a ~1 cm blend every ~50 ticks afterwards. Before the death
+the two worlds had been identical for 2000 ticks including driving.
+
+Now every unit owns its countdown: first check after 10 PSIs (the retail
+environment also started at 10), then every 17 PSIs (inside the retail
+15..19 range), no RNG. `ivp_rand()` is no longer used by the simulation.
+Merged and split units start a fresh countdown like any new unit, which is
+deterministic because merging follows contacts. Gameplay difference to
+retail: a body may fall asleep up to two PSIs (30 ms) earlier or later.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
@@ -116,8 +168,7 @@ call remains.
   `Play(nullptr, minion)` as its own source object and wrote past the
   64-byte wrapper. Fixed in `BallanceMMOServer/sim/null_managers.cpp`.
 - AddressSanitizer also reported two engine-side issues that do not affect
-  determinism and are left untouched for now: `CKFileObject::CleanData`
-  releases a `new`-allocated `CKStateChunk` through `CKDeletePointer`
-  (`delete[]`), and the Player hotfix `GenerateInputParameter<const char*>`
-  passes a C string to `CKParameter::SetValue`, which copies the parameter's
-  full size (64 bytes) from a shorter string.
+  determinism: `CKFileObject::CleanData` releases a `new`-allocated
+  `CKStateChunk` through `CKDeletePointer` (`delete[]`), left untouched, and
+  the Player hotfix string over-read, since fixed as change #4 above after it
+  crashed the server.

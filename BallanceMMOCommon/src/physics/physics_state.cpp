@@ -121,6 +121,9 @@ namespace bmmo::physics {
         out.cores = static_cast<int>(seen.size());
         out.ivp_time = env.current_time;
         out.ivp_seed = env.ivp_seed;
+        out.next_movement_check = env.next_movement_check;
+        out.time_of_last_psi = env.time_of_last_psi;
+        out.time_of_next_psi = env.time_of_next_psi;
         out.delta_time_ms = env.delta_time_ms;
         out.physics_delta_time = env.physics_delta_time;
         out.time_factor = physics->m_PhysicsTimeFactor;
@@ -301,9 +304,358 @@ namespace bmmo::physics {
         access::time_of_last_psi(*environment) = IVP_Time(0.0);
         access::time_of_next_psi(*environment) = IVP_Time(0.0) + environment->get_delta_PSI_time();
         access::next_movement_check(*environment) = IVP_MOVEMENT_CHECK_COUNT;
+        // Fresh-world time factor (CKIpionManager::Reset): a world that already
+        // ran the level keeps the 2.0 the Gameplay script set, so without this
+        // the first tick after the anchor runs one PSI on one side and two on
+        // the other and the IVP clocks stay 1/66 s apart for the whole session.
+        physics->m_PhysicsTimeFactor = 0.001f;
         physics->m_DeltaTime = 1000.0f / 66.0f;
         physics->m_PhysicsDeltaTime = (1000.0f / 66.0f) * physics->m_PhysicsTimeFactor;
         ivp_srand(seed == 0 ? 1 : seed);
+        return true;
+    }
+
+    // ---- bridge API v2 (design 8.4) ----
+
+    namespace {
+        // Names arrive from the network inside fixed-size fields: never assume
+        // they are terminated.
+        std::string bounded(const char* text, size_t size) {
+            if (!text) return {};
+            const char* end = static_cast<const char*>(std::memchr(text, '\0', size));
+            return std::string(text, end ? static_cast<size_t>(end - text) : size);
+        }
+
+        CK3dEntity* find_entity(CKIpionManager* physics, const std::string& name) {
+            if (!physics || !physics->m_Context || name.empty()) return nullptr;
+            // ParentClass: balls are CK3dObjects, frames plain CK3dEntities.
+            return CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        }
+
+        CKMesh* find_mesh(CKIpionManager* physics, const std::string& name) {
+            if (!physics || !physics->m_Context || name.empty()) return nullptr;
+            return CKMesh::Cast(physics->m_Context->GetObjectByNameAndClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_MESH, nullptr));
+        }
+
+        int clamp_count(int32_t value, int limit) {
+            if (value <= 0) return 0;
+            return value > limit ? limit : static_cast<int>(value);
+        }
+
+        // IVP_U_Point is a double or a float triple depending on the IVP build
+        // flags; write through the member's own type so neither is truncated
+        // by an overload choice.
+        template <class Point>
+        void store3(Point& point, const double* source) {
+            for (int k = 0; k < 3; ++k) point.k[k] = static_cast<decltype(+point.k[0])>(source[k]);
+        }
+
+        void fill_body_state(IVP_Real_Object* real, body_state& out) {
+            out = body_state{};
+            auto* entity = static_cast<CK3dEntity*>(real->client_data);
+            const char* name = entity && entity->GetName() ? entity->GetName()
+                             : (real->get_name() ? real->get_name() : "");
+            std::snprintf(out.name, sizeof(out.name), "%s", name);
+            const IVP_Core* core = real->get_core();
+            out.movable = core && !core->physical_unmoveable;
+            out.simulated = core && IVP_MTIS_SIMULATED(core->movement_state);
+            out.collision_enabled = real->is_collision_detection_enabled() != IVP_FALSE;
+            out.movement_state = core ? static_cast<uint8_t>(core->movement_state) : uint8_t{0};
+            if (IVP_Environment* environment = real->get_environment()) {
+                // After a tick the current time sits on a PSI boundary, so this
+                // is the last-PSI object pose the renderer also sees.
+                IVP_U_Quat rotation;
+                IVP_U_Point position;
+                real->calc_at_quaternion(environment->get_current_time(), &rotation, &position);
+                for (int k = 0; k < 3; ++k) out.position[k] = position.k[k];
+                out.rotation[0] = rotation.x;
+                out.rotation[1] = rotation.y;
+                out.rotation[2] = rotation.z;
+                out.rotation[3] = rotation.w;
+            }
+            if (core) {
+                for (int k = 0; k < 3; ++k) {
+                    out.linear[k] = core->speed.k[k];
+                    out.angular[k] = core->rot_speed.k[k];
+                }
+            }
+        }
+
+        // The BMMO player filter of design 8.2.  Player balls share the level's
+        // collision behaviour against everything except the retail "Ball"
+        // group, which they pass through exactly like the original ball does,
+        // while still colliding with each other.
+        class player_collision_filter : public IVP_Collision_Filter {
+        public:
+            IVP_Environment* environment = nullptr;
+            char prefix[IVP_NO_COLL_GROUP_STRING_LEN] = {};
+
+            bool is_player(const IVP_Real_Object* object) const {
+                const char* ident = object ? object->nocoll_group_ident : nullptr;
+                if (!ident || !ident[0] || !prefix[0]) return false;
+                return std::strncmp(ident, prefix, std::strlen(prefix)) == 0;
+            }
+
+            IVP_BOOL check_objects_for_collision_detection(IVP_Real_Object* object0,
+                                                           IVP_Real_Object* object1) override {
+                const bool player0 = is_player(object0);
+                const bool player1 = is_player(object1);
+                if (player0 && player1) return IVP_TRUE;
+                if (player0 != player1) {
+                    const IVP_Real_Object* other = player0 ? object1 : object0;
+                    if (other && std::strncmp(other->nocoll_group_ident, "Ball",
+                                              IVP_NO_COLL_GROUP_STRING_LEN) == 0)
+                        return IVP_FALSE;
+                }
+                return IVP_TRUE;
+            }
+
+            void environment_will_be_deleted(IVP_Environment* env) override;
+        };
+
+        // Never destroyed: an IVP environment may outlive static storage at
+        // process exit and would then walk a dead registry.
+        std::vector<player_collision_filter*>& installed_filters() {
+            static auto* filters = new std::vector<player_collision_filter*>();
+            return *filters;
+        }
+
+        void player_collision_filter::environment_will_be_deleted(IVP_Environment*) {
+            auto& filters = installed_filters();
+            filters.erase(std::remove(filters.begin(), filters.end(), this), filters.end());
+            // IVP_Meta_Collision_Filter only forgets its sub filters (see
+            // ivp_collision_filter.cxx); every one of them owns itself.
+            delete this;
+        }
+    }
+
+    int list_bodies(CKIpionManager* physics, body_state* out, int max) {
+        if (!physics) return 0;
+        int total = 0;
+        for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
+            IVP_Real_Object* real = (*it).m_RealObject;
+            if (!real) continue;
+            if (out && total < max) fill_body_state(real, out[total]);
+            ++total;
+        }
+        return total;
+    }
+
+    bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
+                        std::string& error) {
+        error.clear();
+        out = body_state{};
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return false;
+        }
+        PhysicsObject* object = physics->GetPhysicsObject(entity);
+        if (!object || !object->m_RealObject) {
+            error = "'" + name + "' is not physicalized";
+            return false;
+        }
+        fill_body_state(object->m_RealObject, out);
+        return true;
+    }
+
+    bool set_body_state(CKIpionManager* physics, const char* entity_name,
+                        const double position[3], const double rotation[4],
+                        const float linear[3], const float angular[3], bool wake,
+                        std::string& error) {
+        error.clear();
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return false;
+        }
+        PhysicsObject* object = physics->GetPhysicsObject(entity);
+        IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+        IVP_Core* core = real ? real->get_core() : nullptr;
+        if (!core) {
+            error = "'" + name + "' is not physicalized";
+            return false;
+        }
+        if (position && rotation) {
+            IVP_U_Quat quaternion;
+            quaternion.x = rotation[0];
+            quaternion.y = rotation[1];
+            quaternion.z = rotation[2];
+            quaternion.w = rotation[3];
+            IVP_U_Point target;
+            store3(target, position);
+            real->beam_object_to_new_position(&quaternion, &target, IVP_TRUE);
+        }
+        if (linear) core->speed.set(linear[0], linear[1], linear[2]);
+        if (angular) core->rot_speed.set(angular[0], angular[1], angular[2]);
+        // A hard set replaces the motion, so pushes queued for the next PSI
+        // must not survive it (design 8.4).
+        core->speed_change.set_to_zero();
+        core->rot_speed_change.set_to_zero();
+        if (wake) real->ensure_in_simulation();
+        else if (IVP_MTIS_SIMULATED(core->movement_state)) real->disable_simulation();
+        // Same refresh the manager does after every step, so the render side
+        // follows a body that was moved between ticks.
+        CKIpionManager::UpdateObjectWorldMatrix(real);
+        return true;
+    }
+
+    bool physicalize(CKIpionManager* physics, const char* entity_name, const ball_recipe& recipe,
+                     const char* collision_group, std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return false;
+        }
+        const std::string group = bounded(collision_group, IVP_NO_COLL_GROUP_STRING_LEN * 4);
+        if (group.size() >= IVP_NO_COLL_GROUP_STRING_LEN) {
+            // IVP_Template_Real_Object::set_nocoll_group_ident traps on longer
+            // names; refuse instead of taking the engine down.
+            error = "collision group '" + group + "' is longer than "
+                  + std::to_string(IVP_NO_COLL_GROUP_STRING_LEN - 1) + " characters";
+            return false;
+        }
+        // Counted before the shortcut, exactly like the retail block.
+        ++physics->m_PhysicalizeCalls;
+        if (physics->GetPhysicsObject(entity)) return true;
+
+        const int convex_count = clamp_count(recipe.convex_count, BMMO_PHYSICS_MAX_CONVEX);
+        const int ball_count = clamp_count(recipe.ball_count, BMMO_PHYSICS_MAX_BALLS);
+        const int concave_count = clamp_count(recipe.concave_count, BMMO_PHYSICS_MAX_CONCAVE);
+
+        CKMesh* convexes[BMMO_PHYSICS_MAX_CONVEX] = {};
+        CKMesh* concaves[BMMO_PHYSICS_MAX_CONCAVE] = {};
+        VxVector ball_positions[BMMO_PHYSICS_MAX_BALLS];
+        float ball_radii[BMMO_PHYSICS_MAX_BALLS];
+        float ball_radius = 1.0f;  // the block's default when no ball is declared
+        for (int i = 0; i < BMMO_PHYSICS_MAX_BALLS; ++i) {
+            ball_positions[i].Set(0.0f, 0.0f, 0.0f);
+            ball_radii[i] = 1.0f;
+        }
+        for (int i = 0; i < convex_count; ++i)
+            convexes[i] = find_mesh(physics, bounded(recipe.convex[i], BMMO_PHYSICS_NAME_SIZE));
+        for (int j = 0; j < ball_count; ++j) {
+            ball_positions[j].Set(recipe.ball_center[j][0], recipe.ball_center[j][1],
+                                  recipe.ball_center[j][2]);
+            ball_radii[j] = recipe.ball_radius[j];
+            if (j == 0) ball_radius = ball_radii[j];
+        }
+        for (int k = 0; k < concave_count; ++k)
+            concaves[k] = find_mesh(physics, bounded(recipe.concave[k], BMMO_PHYSICS_NAME_SIZE));
+
+        VxVector shift_mass_center(recipe.mass_center[0], recipe.mass_center[1], recipe.mass_center[2]);
+        VxVector* shift_mass_center_ptr = recipe.calc_mass_center ? nullptr : &shift_mass_center;
+
+        // CKSTRING is char*: the engine reads them but the type is not const.
+        std::string surface = bounded(recipe.collision_surface, BMMO_PHYSICS_NAME_SIZE);
+        std::vector<char> surface_buffer(surface.begin(), surface.end());
+        surface_buffer.push_back('\0');
+        std::vector<char> group_buffer(group.begin(), group.end());
+        group_buffer.push_back('\0');
+
+        IVP_Material* material = new IVP_Material_Simple(recipe.friction, recipe.elasticity);
+        const int result = physics->CreatePhysicsObjectOnParameters(
+            entity, convex_count, convexes, ball_count, ball_positions, ball_radii,
+            concave_count, concaves, ball_radius, surface_buffer.data(), shift_mass_center_ptr,
+            recipe.fixed, material, recipe.mass, group.empty() ? nullptr : group_buffer.data(),
+            recipe.start_frozen, recipe.enable_collision, recipe.calc_mass_center,
+            recipe.linear_damp, recipe.rot_damp);
+        if (result == CK_OK) {
+            physics->OwnMaterial(entity, material);
+            return true;
+        }
+        delete material;
+        error = "CreatePhysicsObjectOnParameters failed for '" + name + "' ("
+              + std::to_string(result) + ")";
+        return false;
+    }
+
+    bool unphysicalize(CKIpionManager* physics, const char* entity_name, std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return false;
+        }
+        ++physics->m_DePhysicalizeCalls;
+        PhysicsObject* object = physics->GetPhysicsObject(entity);
+        if (object && object->m_RealObject) object->m_RealObject->delete_silently();
+        return true;
+    }
+
+    bool set_body_group(CKIpionManager* physics, const char* entity_name, const char* collision_group,
+                        std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        if (!object || !object->m_RealObject) {
+            error = "no physics body for '" + name + "'";
+            return false;
+        }
+        const std::string group = collision_group ? bounded(collision_group, 64) : std::string();
+        if (group.size() >= IVP_NO_COLL_GROUP_STRING_LEN) {
+            error = "collision group too long: " + group;
+            return false;
+        }
+        object->m_RealObject->change_nocoll_group_ident(group.empty() ? nullptr : group.c_str());
+        return true;
+    }
+
+    bool install_player_collision_filter(CKIpionManager* physics, const char* player_group_prefix,
+                                         std::string& error) {
+        error.clear();
+        IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
+        if (!environment) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        const std::string prefix = bounded(player_group_prefix, IVP_NO_COLL_GROUP_STRING_LEN * 4);
+        if (prefix.empty()) {
+            error = "the player collision group prefix must not be empty";
+            return false;
+        }
+        if (prefix.size() >= IVP_NO_COLL_GROUP_STRING_LEN) {
+            error = "the player collision group prefix must be shorter than "
+                  + std::to_string(IVP_NO_COLL_GROUP_STRING_LEN) + " characters";
+            return false;
+        }
+        for (auto* installed: installed_filters()) {
+            if (installed->environment != environment) continue;
+            std::snprintf(installed->prefix, sizeof(installed->prefix), "%s", prefix.c_str());
+            return true;  // idempotent per environment
+        }
+        // CKIpionManager::CreateEnvironment always builds the environment's
+        // filter as an IVP_Meta_Collision_Filter.
+        auto* meta = static_cast<IVP_Meta_Collision_Filter*>(environment->get_collision_filter());
+        if (!meta) {
+            error = "the environment has no collision filter";
+            return false;
+        }
+        auto* filter = new player_collision_filter();
+        filter->environment = environment;
+        std::snprintf(filter->prefix, sizeof(filter->prefix), "%s", prefix.c_str());
+        meta->add_collision_filter(filter);
+        installed_filters().push_back(filter);
         return true;
     }
 }

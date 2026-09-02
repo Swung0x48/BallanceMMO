@@ -46,7 +46,22 @@ public:
     bool rooms_enabled = true;
     uint32_t maximum_rooms = 64;
     uint32_t maximum_members = 8;
+    // collision-overhaul physics sessions (docs/rooms-and-sessions-protocol.md section 3)
+    bool physics_enabled = false;
+    std::string physics_game_root;                 // directory containing base.cmo
+    uint32_t physics_snapshot_interval = 2;        // ticks between snapshots
+    uint32_t physics_input_delay = 6;              // ticks the server waits for late inputs
+    uint32_t maximum_physics_rooms = 1;
+    bool physics_debug_trace = false;              // per-tick diagnostics in the log (see world_options::trace)
+    std::unordered_map<std::string, std::string> physics_allowed_mods;  // mod id -> version; empty = no check
     ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
+
+    // The headless engine switches the process working directory to the game's
+    // Bin directory (retail scripts use relative paths), so every file this
+    // class reads or writes is resolved against the directory the server was
+    // started from, captured on first use.
+    static const std::string& base_directory();
+    static std::string resolve_path(const char* file_name);
 
     bool load();
 

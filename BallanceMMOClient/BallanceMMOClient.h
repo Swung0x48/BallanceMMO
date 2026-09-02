@@ -19,6 +19,7 @@
 #include "session/fixed_tick.hpp"
 #include "session/input_injector.hpp"
 #include "physics/physics_view.hpp"
+#include "session/physics_session.hpp"
 #include <game/menu_driver.hpp>
 #include <fstream>
 #include <physics/tick_record.hpp>
@@ -436,6 +437,37 @@ private:
 	uint64_t record_frames_ = 0;
 	void process_tick_record();
 	bool gameplay_ingame_script_active();
+
+	// Physics session (design 8.5): session/physics_session_client.cpp.
+	bmmo::session::physics_session_state physics_session_;
+	void handle_session_start(bmmo::session_start_msg msg);
+	void handle_session_assign(const bmmo::session_assign_msg& msg);
+	void handle_session_snapshot(bmmo::session_snapshot_msg msg);
+	void handle_session_event(bmmo::session_event_msg msg);
+	void handle_session_end(const bmmo::session_end_msg& msg);
+	void physics_session_begin(const bmmo::session_start_msg& msg);
+	void physics_session_end_local(const std::string& reason);
+	void process_physics_session();
+	void physics_session_anchor();
+	void physics_session_frame();
+	void physics_session_flush_inputs();
+	void physics_session_send_event(bmmo::session_event_msg& event);
+	void physics_session_apply_queues();
+	void physics_session_apply_event(const bmmo::session_event_msg& event);
+	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
+	void physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action);
+	void physics_session_on_sector(int sector);
+	void physics_session_on_finish();
+	std::string physics_session_status_text();
+	CKDataArray* current_level_array() {
+		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;
+	}
+	void OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
+	                   const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
+	                   float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
+	                   int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter, float* ballRadius,
+	                   int concaveCnt, CKMesh** concaveMesh) override;
+	void OnUnphysicalize(CK3dEntity* target) override;
 
 	game_state db_;
 	game_objects objects_;
@@ -1060,6 +1092,7 @@ private:
 		// `down` means the game itself is going away, and we are already on
 		// the game thread, so run_on_game_thread() executes this inline.
 		utils_.run_on_game_thread([this, down] {
+			physics_session_end_local("disconnected");
 			toggle_own_spirit_ball(false);
 			objects_.destroy_all_objects();
 			local_state_handler_.reset();

@@ -8,6 +8,7 @@
 // physics sessions get reported as unavailable.
 
 #include <string>
+#include <vector>
 
 #include <physics/physics_rt_api.h>
 #include <physics/world_hash.hpp>
@@ -32,6 +33,26 @@ namespace bmmo::physics {
         std::string drain_event_log() const;
         std::string describe_cores_exact() const;
 
+        // ---- bridge API v2 (design 8.4) ----
+
+        // Every physicalized entity of the world, in physics-table order.
+        std::vector<bmmo_physics_body_state> list_bodies() const;
+        bool get_body_state(const char* entity_name, bmmo_physics_body_state& out,
+                            std::string& error) const;
+        // Beam a body and overwrite its core speeds; `wake` wakes it, otherwise
+        // a simulated body is frozen.  Any array may be null to skip that part.
+        bool set_body_state(const char* entity_name, const double position[3],
+                            const double rotation[4], const float linear[3], const float angular[3],
+                            bool wake, std::string& error) const;
+        // The retail Physicalize recipe, applied without a behavior graph.
+        bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
+                         const char* collision_group, std::string& error) const;
+        bool unphysicalize(const char* entity_name, std::string& error) const;
+        // Idempotent; must be re-run whenever the IVP environment is rebuilt.
+        bool install_player_collision_filter(const char* player_group_prefix,
+                                             std::string& error) const;
+        bool set_body_group(const char* entity_name, const char* collision_group, std::string& error) const;
+
         // Identification of the loaded physics module (filled even when the
         // bridge is missing, so the retail DLL can be reported).
         const std::string& dll_sha256() const { return dll_sha256_; }
@@ -41,7 +62,7 @@ namespace bmmo::physics {
     private:
         CKContext* context_ = nullptr;
         void* manager_ = nullptr;
-        const bmmo_physics_api_v1* api_ = nullptr;
+        const bmmo_physics_api_v2* api_ = nullptr;
         std::string dll_sha256_;
         std::string dll_path_;
         std::string build_id_;

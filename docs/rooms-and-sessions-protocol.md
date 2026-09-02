@@ -4,7 +4,7 @@
 
 ```
 RoomRequest, RoomState, RoomEvent,
-SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync
+SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign
 ```
 
 所有新消息都是 `serializable_message`（显式小端编码，`std::stringstream raw`），读取端必须检查长度、数量上限和枚举范围；字符串编码为 `u16 长度 + UTF-8 字节`，上限见各字段。
@@ -63,15 +63,22 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 ## 2. 会话（物理模式）
 
-影子球会话不需要下面的消息：`SessionStarting` 后各客户端继续走旧逻辑。
+影子球会话不需要下面的消息：`SessionStarting` 后各客户端继续走旧逻辑。物理会话的实施设计见 `docs/collision-overhaul-design.md` 第 8 节；本节只定义线上格式。新 opcode 顺序（追加在 `RoomEvent` 之后）：
+
+```
+SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign
+```
 
 ### 2.1 时间线
 
-- `tick` 长度 1/66 s。服务端在 `SessionStart` 中给出 `tick0_server_time`（服务端单调时钟 µs），客户端用旧协议已有的时钟偏移估计把它换算成本地时间，从 tick 0 开始按固定 tick 推进。
-- 客户端每 tick 发送 `SessionInput`；服务端在 `tick + input_delay` 之前未收到该 tick 输入则沿用上一 tick。
-- 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`。
+- `tick` 长度 1/66 s。每个客户端在收到 `SessionStart` 后重开当前关卡，`Gameplay_Ingame` 首次激活的行为帧为锚点，编号为 `first_tick`（首次开始为 0，迟到加入者由服务端指定）。锚点执行会话重置（IVP 时钟归零、`ivp_srand(seed)`），此后每个行为帧一个 tick。
+- 客户端每 tick 发送 `SessionInput`；服务端在收齐所有成员该 tick 的输入、或墙钟超过 `开始时刻 + (tick + input_delay)/66 s` 时模拟该 tick，缺失输入沿用该玩家上一 tick 的输入。
+- 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`（不可靠）；每 66 tick 或刚体集合变化时广播 full 快照（可靠，携带机关名字典）。
+- 生命周期事件（`SessionEvent`）可靠传输，带发生的客户端 tick；服务端在不早于该 tick 的模拟步中应用，并转发给房间其他成员（`player` 字段为来源）。
 
 ### 2.2 消息
+
+所有多字节整数小端，浮点为 IEEE-754 单/双精度按字节原样，向量为 `x,y,z`，四元数为 `x,y,z,w`。
 
 `session_start_msg`（server → client，reliable）
 
@@ -84,15 +91,27 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | tick_rate | u8（66） |
 | snapshot_interval | u8 |
 | input_delay | u8 |
-| tick0_server_time | i64 |
+| first_tick | u32（接收者锚点 tick 的编号） |
 | seed | i32 |
-| players | u8 count，每项：id u32、join_order u8、ball_type u8 |
+| players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度） |
 
-`session_ready_msg`（client → server，reliable）：session u32、load_order_hash u64、mechanism_count u16、physics_sha256 string ≤ 64。服务端把它与无头世界的对应值比较；不一致则 `SessionEnded` 并给出原因。
+`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64。服务端把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。
 
-`session_input_msg`（client → server，unreliable no-delay）：session u32、first_tick u32、count u8（≤ 8，最近 count 个 tick 的输入，冗余抗丢包），每项：keys u8（bit0 上 bit1 下 bit2 左 bit3 右 bit4 Shift bit5 Space）、camera_right f32×3、camera_forward f32×3。
+`session_input_msg`（client → server，unreliable no-delay）：session u32、first_tick u32、count u8（≤ 8，从 first_tick 起连续 count 个 tick，最新的在最后），每项：keys u8（bit0 叶子 0 … bit3 叶子 3，叶子编号按 `Ball Navigation` 图内 `SetPhysicsForce` 的子块顺序；bit4 Shift、bit5 Space 仅作记录）、cam_right f32×3、cam_up f32×3、cam_dir f32×3（`Cam_OrientRef` 世界矩阵的三条基向量）、ball_type u8、flags u8（bit0 physicalized、bit1 paused、bit2 nav_active——客户端 BallNav activate/deactivate 的当前状态，服务端据此复现 Key Event 的 On/Off）。
 
-`session_snapshot_msg`（server → client，unreliable；full 版本 reliable）：session u32、tick u32、full u8、acked_input_tick u32、bodies u16 count，每项：kind u8（`Ball=0, Mechanism=1`）、owner u32（球）或 index u16（机关，按会话开始时两端一致的加载顺序表）、position f32×3、rotation f32×4（x,y,z,w）、linear f32×3、angular f32×3、flags u8（bit0 active、bit1 sleeping、bit2 collision enabled）。
+`session_event_msg`（双向，reliable）：session u32、player u32（服务端转发时为来源，客户端发送时为 0）、tick u32、type u8、按 type 附加：
+
+| type | 附加字段 |
+| --- | --- |
+| Physicalize = 0 | ball_type u8、position f32×3、rotation f32×9（实体世界矩阵的三行旋转部分 right/up/dir，按位传输，服务端用它原样重建矩阵后 Physicalize，避免四元数往返的舍入）、recipe：fixed u8、friction f32、elasticity f32、mass f32、start_frozen u8、enable_collision u8、calc_mass_center u8、linear_damp f32、rot_damp f32、mass_center f32×3、collision_surface string ≤ 64、convex_count u8 + 每项网格名 string ≤ 64、ball_count u8 + 每项 center f32×3、radius f32、concave_count u8 + 每项网格名 string ≤ 64 |
+| Unphysicalize = 1 | 无 |
+| Sector = 2 | sector i32 |
+| Finish = 3 | 无 |
+| BodyRevived = 4 | name string ≤ 64 |
+
+`session_snapshot_msg`（server → client，unreliable；full 版本 reliable）：session u32、tick u32、full u8、acked_input_tick u32、bodies u16 count，每项：kind u8（`Ball=0, Mechanism=1`）、owner u32（球：玩家 id；机关：字典索引）、name string ≤ 64（仅 full 且 kind=Mechanism，其余为空串）、position f64×3、rotation f64×4、linear f32×3、angular f32×3、flags u8（bit0 simulated、bit1 collision enabled）。位置与四元数用双精度，因为 IVP core 的位置/四元数本身是双精度（速度是单精度），镜像/修正要按位写回。
+
+`session_assign_msg`（server → client，reliable，作为 `session_ready_msg` 的回复）：session u32、first_tick u32——客户端锚点帧对应的服务端 tick 编号：会话开始时在场的成员为 0，迟到加入者为服务端收到 Ready 时的当前 tick。客户端收到前不发送输入（缓存），收到后按 `first_tick + 锚点后经过的帧数` 编号并补发缓存。
 
 `session_resync_msg`（client → server，reliable）：session u32、last_full_tick u32。服务端回复一个 full snapshot。
 
@@ -106,9 +125,11 @@ rooms:
   maximum_members: 8
 physics:
   enabled: true
-  game_root: "C:/Ballance"            # base.cmo 所在目录
+  game_root: "C:/Ballance"            # base.cmo 所在目录（含 Bin/、3D Entities/ 等）
   snapshot_interval: 2                # tick
-  input_delay: 2                      # tick
-  allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）
-    BallanceMMOClient: "3.7.0"
+  input_delay: 6                      # tick；服务端最多等待这么久再用上一 tick 的输入
+  maximum_physics_rooms: 1            # M3 只验证过单房间
+  debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
+  allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）；为空则不检查
+    BallanceMMOClient: "3.6.8-beta18"
 ```

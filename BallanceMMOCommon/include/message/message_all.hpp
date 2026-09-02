@@ -59,5 +59,13 @@
 #include "room_request_msg.hpp"
 #include "room_state_msg.hpp"
 #include "room_event_msg.hpp"
+#include "session_start_msg.hpp"
+#include "session_end_msg.hpp"
+#include "session_ready_msg.hpp"
+#include "session_input_msg.hpp"
+#include "session_snapshot_msg.hpp"
+#include "session_resync_msg.hpp"
+#include "session_event_msg.hpp"
+#include "session_assign_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

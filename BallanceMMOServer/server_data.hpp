@@ -3,6 +3,7 @@
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 #include "../BallanceMMOCommon/common.hpp"
+#include <map>
 
 struct client_data {
     std::string name;
@@ -16,6 +17,7 @@ struct client_data {
     int32_t current_sector = 0;
     uint8_t uuid[16]{};
     int64_t login_time{};
+    std::map<std::string, std::string> mods;   // ModList at login (physics session whitelist)
 };
 
 struct map_data {

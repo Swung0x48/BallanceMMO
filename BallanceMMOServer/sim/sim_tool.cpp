@@ -10,6 +10,8 @@
 
 #include "headless_engine.hpp"
 #include "crash_report.hpp"
+#include "physics_world.hpp"
+#include <entity/session.hpp>
 #include <physics/physics_state.hpp>
 
 #include "CKAll.h"
@@ -25,6 +27,7 @@
 #endif
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
     struct arguments {
@@ -55,6 +58,9 @@ namespace {
         std::string list_scripts;      // --list-scripts SUBSTR: every root script whose name or owner matches
         std::string dump_script;       // print this script's whole graph (blocks, parameters, links)
         int dump_at = -1;              // tick at which to dump (-1: after the run)
+        std::string nav_mode;          // --nav retail-cxx|clone: replay through the session navigation (design 8.6)
+        long long nav_frames = -1;     // --nav-frames N: compare only the first N frames
+        int list_bodies_at = -1;       // --list-bodies-at N: bridge v2 list_bodies() at that tick
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -97,6 +103,9 @@ namespace {
             else if (arg == "--list-scripts") { if (!(v = next())) return false; out.list_scripts = v; }
             else if (arg == "--dump-script") { if (!(v = next())) return false; out.dump_script = v; }
             else if (arg == "--dump-at") { if (!(v = next())) return false; out.dump_at = std::atoi(v); }
+            else if (arg == "--nav") { if (!(v = next())) return false; out.nav_mode = v; }
+            else if (arg == "--nav-frames") { if (!(v = next())) return false; out.nav_frames = std::atoll(v); }
+            else if (arg == "--list-bodies-at") { if (!(v = next())) return false; out.list_bodies_at = std::atoi(v); }
             else return false;
         }
         return !out.root.empty();
@@ -319,6 +328,23 @@ namespace {
         std::fflush(stdout);
     }
 
+    // Smoke test for the bridge v2 body list: what the server sees of the
+    // world right now, in physics-table order.
+    void list_bodies(const bmmo::sim::headless_engine& engine) {
+        std::vector<bmmo::physics::body_state> bodies(
+            static_cast<size_t>(bmmo::physics::list_bodies(engine.physics(), nullptr, 0)));
+        const int total = bmmo::physics::list_bodies(engine.physics(), bodies.data(),
+                                                     static_cast<int>(bodies.size()));
+        std::printf("bodies at tick %llu: %d\n",
+                    static_cast<unsigned long long>(engine.ticks()), total);
+        for (const auto& body: bodies)
+            std::printf("  %-28s movable=%d simulated=%d coll=%d state=%d pos=(%.4f,%.4f,%.4f)\n",
+                        body.name, body.movable ? 1 : 0, body.simulated ? 1 : 0,
+                        body.collision_enabled ? 1 : 0, static_cast<int>(body.movement_state),
+                        body.position[0], body.position[1], body.position[2]);
+        std::fflush(stdout);
+    }
+
     int run_free(bmmo::sim::headless_engine& engine, const arguments& args) {
         std::string error;
         for (int i = 0; i < args.ticks; ++i) {
@@ -361,6 +387,7 @@ namespace {
             if (!args.dump_script.empty() && i == args.dump_at) dump_script(engine, args.dump_script);
             if (!args.list_scripts.empty() && i == args.dump_at) list_scripts(engine, args.list_scripts);
             if (!args.dump_array.empty() && i == args.dump_at) dump_array(engine, args.dump_array);
+            if (args.list_bodies_at >= 0 && i == args.list_bodies_at) list_bodies(engine);
             if (args.report_every > 0 && engine.ticks() % static_cast<uint64_t>(args.report_every) == 0)
                 report(engine);
         }
@@ -501,11 +528,12 @@ namespace {
                 std::printf("exact frame%zu ivp_time=%.6f seed=%d\n%s", frame, actual.ivp_time, actual.ivp_seed,
                     bmmo::physics::describe_cores_exact(engine.physics()).c_str());
             if (args.report_every > 0 && (frame % static_cast<size_t>(args.report_every)) == 0)
-                std::printf("frame=%zu %s expected=%016llx actual=%016llx cores=%d/%d ivp_time=%.6f/%.6f"
+                std::printf("frame=%zu %s expected=%016llx actual=%016llx cores=%d/%d ivp_time=%.6f/%.6f seed=%d mc=%d psi=%.6f/%.6f"
                             " pose=%s probe=%s/%s dpos=(%.3g,%.3g,%.3g) dspeed=(%.3g,%.3g,%.3g)\n",
                     frame, same ? "ok" : "MISMATCH", static_cast<unsigned long long>(expected.hash),
                     static_cast<unsigned long long>(actual.hash), expected.cores, actual.cores,
-                    expected.ivp_time, actual.ivp_time,
+                    expected.ivp_time, actual.ivp_time, actual.ivp_seed, static_cast<int>(actual.next_movement_check),
+                    actual.time_of_last_psi, actual.time_of_next_psi,
                     expected.pose == actual.pose ? "same" : "DIFF", expected.probe_name, actual.probe_name,
                     actual.probe_position[0] - expected.probe_position[0],
                     actual.probe_position[1] - expected.probe_position[1],
@@ -516,6 +544,132 @@ namespace {
         }
         std::printf("summary: frames=%zu matched=%zu first_divergence=%lld\n",
             record.frames.size(), matched, first_divergence);
+        std::fflush(stdout);
+        return first_divergence < 0 ? 0 : 3;
+    }
+}
+
+namespace {
+    // Replays a client recording through the physics-session machinery
+    // (physics_world + player_navigation) instead of the retail Ball
+    // Navigation:
+    //   retail-cxx : the retail ball stays live; its navigation leaves are
+    //                forced to zero force and the C++ navigation attached to
+    //                the retail ball pushes it from the recorded keys.
+    //   clone      : the retail ball is parked and a clone is physicalized in
+    //                its place (same tick, pose and recipe); the C++
+    //                navigation drives the clone.
+    // Both feed the full recorded keyboard to the null input manager as well,
+    // so the tutorial and every other key-driven script behave as recorded.
+    // A bit-exact hash match proves the server-side navigation replica.
+    int run_replay_nav(const arguments& args) {
+        bmmo::physics::tick_record record;
+        std::string error;
+        if (!record.load(args.replay, error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        const int level = args.level > 0 ? args.level : record.header.level;
+        if (level <= 0) {
+            std::fprintf(stderr, "the record does not name a level; pass --level N\n");
+            return 1;
+        }
+        const bool clone = args.nav_mode == "clone";
+        if (!clone && args.nav_mode != "retail-cxx") {
+            std::fprintf(stderr, "--nav must be retail-cxx or clone\n");
+            return 2;
+        }
+        bmmo::sim::world_options options;
+        options.game_root = args.root;
+        options.level = level;
+        options.seed = 1;
+        options.boot_ticks = args.boot_ticks;
+        options.anchor_timeout = args.anchor_timeout;
+        options.park_retail_ball = clone;
+        options.auto_clone_players = clone;
+        options.zero_retail_force = !clone;
+        options.retail_nav_from_script = true;
+        options.mirror_clone_to_retail = clone;
+        options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
+        auto world = bmmo::sim::physics_world::create(options, error);
+        if (!world) {
+            std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+            return 1;
+        }
+        if (!world->add_player(1, error)) {
+            std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
+            return 1;
+        }
+        if (!clone && !world->attach_player_to_retail_ball(1, error)) {
+            std::fprintf(stderr, "attach failed: %s\n", error.c_str());
+            return 1;
+        }
+        const auto& graph = world->navigation();
+        for (const auto& leaf: graph.leaves)
+            std::fprintf(stderr, "leaf %d: key=%d direction=(%g,%g,%g) force=%g\n", leaf.index, leaf.key,
+                leaf.direction.x, leaf.direction.y, leaf.direction.z, leaf.force_value);
+        std::fprintf(stderr, "record: level=%d frames=%zu mode=%s anchor_hash=%016llx\n", record.header.level,
+            record.frames.size(), args.nav_mode.c_str(), static_cast<unsigned long long>(world->anchor_hash()));
+
+        size_t matched = 0, pose_matched = 0;
+        long long first_divergence = -1, first_pose_divergence = -1;
+        const size_t frames = args.nav_frames >= 0
+            ? std::min(record.frames.size(), static_cast<size_t>(args.nav_frames)) : record.frames.size();
+        for (size_t frame = 0; frame < frames; ++frame) {
+            const auto& expected = record.frames[frame];
+            world->engine().set_keyboard_state(expected.keys.data());
+            bmmo::session::input_frame input{};
+            input.keys = graph.keys_from_state(expected.keys.data());
+            if (world->retail_navigation_active()) input.flags |= bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+            if (CK3dEntity* ref = world->retail_direction_ref()) {
+                const VxMatrix& m = ref->GetWorldMatrix();
+                for (int k = 0; k < 3; ++k) {
+                    input.cam_right[k] = m[0][k];
+                    input.cam_up[k] = m[1][k];
+                    input.cam_dir[k] = m[2][k];
+                }
+            }
+            world->set_input(1, input);
+            if (!world->tick(error)) {
+                std::fprintf(stderr, "tick failed at frame %zu: %s\n", frame, error.c_str());
+                return 1;
+            }
+            bmmo::physics::world_hash actual;
+            if (!bmmo::physics::capture_world_hash(world->physics(), actual, error)) {
+                std::fprintf(stderr, "hash failed: %s\n", error.c_str());
+                return 1;
+            }
+            const bool same = actual.hash == expected.hash;
+            if (same) ++matched;
+            if (actual.pose == expected.pose) ++pose_matched;
+            else if (first_pose_divergence < 0) first_pose_divergence = static_cast<long long>(frame);
+            if (!same && first_divergence < 0) {
+                first_divergence = static_cast<long long>(frame);
+                std::printf("DIVERGE frame=%zu expected=%016llx actual=%016llx pose=%s cores=%d/%d ivp_time=%.6f/%.6f\n"
+                            "    probe expected %s pos=(%.9g,%.9g,%.9g) speed=(%.9g,%.9g,%.9g)\n"
+                            "    probe actual   %s pos=(%.9g,%.9g,%.9g) speed=(%.9g,%.9g,%.9g)\n    %s\n    bodies: %s\n",
+                    frame, static_cast<unsigned long long>(expected.hash), static_cast<unsigned long long>(actual.hash),
+                    expected.pose == actual.pose ? "same" : "DIFF", expected.cores, actual.cores,
+                    expected.ivp_time, actual.ivp_time, expected.probe_name,
+                    expected.probe_position[0], expected.probe_position[1], expected.probe_position[2],
+                    expected.probe_speed[0], expected.probe_speed[1], expected.probe_speed[2], actual.probe_name,
+                    actual.probe_position[0], actual.probe_position[1], actual.probe_position[2],
+                    actual.probe_speed[0], actual.probe_speed[1], actual.probe_speed[2],
+                    world->describe().c_str(), bmmo::physics::describe_physics_objects(world->physics()).c_str());
+            }
+            if (args.report_every > 0 && (frame % static_cast<size_t>(args.report_every)) == 0)
+                std::printf("frame=%zu %s keys=%02x nav=%d cores=%d/%d ivp_time=%.6f pose=%s seed=%d mc=%d psi=%.6f/%.6f dpos=(%.3g,%.3g,%.3g) %s\n",
+                    frame, same ? "ok" : "MISMATCH", input.keys,
+                    (input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) ? 1 : 0, expected.cores, actual.cores,
+                    actual.ivp_time, expected.pose == actual.pose ? "same" : "DIFF", actual.ivp_seed,
+                    static_cast<int>(actual.next_movement_check), actual.time_of_last_psi, actual.time_of_next_psi,
+                    actual.probe_position[0] - expected.probe_position[0],
+                    actual.probe_position[1] - expected.probe_position[1],
+                    actual.probe_position[2] - expected.probe_position[2],
+                    world->describe().c_str());
+        }
+        std::printf("summary: mode=%s frames=%zu matched=%zu first_divergence=%lld pose_matched=%zu first_pose_divergence=%lld\n",
+            args.nav_mode.c_str(), frames, matched, first_divergence, pose_matched, first_pose_divergence);
         std::fflush(stdout);
         return first_divergence < 0 ? 0 : 3;
     }
@@ -543,9 +697,16 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, args)) {
         std::fprintf(stderr,
             "usage: BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N] "
-            "[--report-every N] [--verbose]\n"
+            "[--report-every N] [--list-bodies-at N] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n");
         return 2;
+    }
+    if (!args.nav_mode.empty()) {
+        if (args.replay.empty()) {
+            std::fprintf(stderr, "--nav needs --replay <record.bmrc>\n");
+            return 2;
+        }
+        return run_replay_nav(args);
     }
     bmmo::sim::engine_options options;
     options.game_root = args.root;

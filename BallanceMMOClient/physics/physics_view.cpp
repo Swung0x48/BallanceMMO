@@ -16,6 +16,7 @@
 
 #include <openssl/evp.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <vector>
@@ -102,8 +103,8 @@ namespace bmmo::physics {
             error = "the loaded physics_RT has no BallanceMMO bridge (retail DLL?): " + module.path;
             return false;
         }
-        const bmmo_physics_api_v1* api = module.entry(BMMO_PHYSICS_API_VERSION);
-        if (!api || api->struct_size < sizeof(bmmo_physics_api_v1)
+        const bmmo_physics_api_v2* api = module.entry(BMMO_PHYSICS_API_VERSION);
+        if (!api || api->struct_size < sizeof(bmmo_physics_api_v2)
                 || api->api_version != BMMO_PHYSICS_API_VERSION) {
             error = "the physics_RT bridge does not provide API version "
                   + std::to_string(BMMO_PHYSICS_API_VERSION);
@@ -151,6 +152,9 @@ namespace bmmo::physics {
             out.probe_speed[k] = raw.probe_speed[k];
             out.probe_rot_speed[k] = raw.probe_rot_speed[k];
         }
+        out.next_movement_check = raw.next_movement_check;
+        out.time_of_last_psi = raw.time_of_last_psi;
+        out.time_of_next_psi = raw.time_of_next_psi;
         return true;
     }
 
@@ -204,6 +208,113 @@ namespace bmmo::physics {
         text.resize(length > 0 && static_cast<size_t>(length) < text.size() ? static_cast<size_t>(length)
                                                                               : text.size() - 1);
         return text;
+    }
+
+    std::vector<bmmo_physics_body_state> physics_view::list_bodies() const {
+        if (!available()) return {};
+        std::vector<bmmo_physics_body_state> bodies(64);
+        int32_t total = api_->list_bodies(manager_, bodies.data(), static_cast<int32_t>(bodies.size()));
+        if (total > static_cast<int32_t>(bodies.size())) {
+            bodies.resize(static_cast<size_t>(total));
+            total = api_->list_bodies(manager_, bodies.data(), static_cast<int32_t>(bodies.size()));
+        }
+        bodies.resize(total > 0 ? std::min(static_cast<size_t>(total), bodies.size()) : 0);
+        return bodies;
+    }
+
+    bool physics_view::get_body_state(const char* entity_name, bmmo_physics_body_state& out,
+                                      std::string& error) const {
+        error.clear();
+        out = {};
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->get_body_state(manager_, entity_name, &out, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::set_body_state(const char* entity_name, const double position[3],
+                                      const double rotation[4], const float linear[3],
+                                      const float angular[3], bool wake, std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_body_state(manager_, entity_name, position, rotation, linear, angular,
+                                  wake ? 1 : 0, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
+                                   const char* collision_group, std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->physicalize(manager_, entity_name, &recipe, collision_group, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::set_body_group(const char* entity_name, const char* collision_group, std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_body_group) {
+            error = "the physics_RT bridge lacks set_body_group";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_body_group(manager_, entity_name, collision_group, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::unphysicalize(const char* entity_name, std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->unphysicalize(manager_, entity_name, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::install_player_collision_filter(const char* player_group_prefix,
+                                                       std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->install_player_collision_filter(manager_, player_group_prefix, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
     }
 
     bool physics_view::reset_random(int seed, std::string& error) const {

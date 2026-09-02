@@ -70,6 +70,9 @@ namespace {
             out->probe_speed[k] = hash.probe_speed[k];
             out->probe_rot_speed[k] = hash.probe_rot_speed[k];
         }
+        out->next_movement_check = hash.next_movement_check;
+        out->time_of_last_psi = hash.time_of_last_psi;
+        out->time_of_next_psi = hash.time_of_next_psi;
         return 1;
     }
 
@@ -113,8 +116,104 @@ namespace {
         return static_cast<int32_t>(text.size());
     }
 
-    const bmmo_physics_api_v1 kApi = {
-        sizeof(bmmo_physics_api_v1),
+    int32_t api_list_bodies(void* manager, bmmo_physics_body_state* out, int32_t max) {
+        return bmmo::physics::list_bodies(static_cast<CKIpionManager*>(manager), out,
+                                          max > 0 ? static_cast<int>(max) : 0);
+    }
+
+    int32_t api_get_body_state(void* manager, const char* entity_name, bmmo_physics_body_state* out,
+                               char* error, uint32_t error_size) {
+        if (!manager || !out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::get_body_state(static_cast<CKIpionManager*>(manager), entity_name,
+                                           *out, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_set_body_state(void* manager, const char* entity_name, const double position[3],
+                               const double rotation[4], const float linear[3],
+                               const float angular[3], int32_t wake,
+                               char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_body_state(static_cast<CKIpionManager*>(manager), entity_name,
+                                           position, rotation, linear, angular, wake != 0, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_physicalize(void* manager, const char* entity_name,
+                            const bmmo_physics_ball_recipe* recipe, const char* collision_group,
+                            char* error, uint32_t error_size) {
+        if (!manager || !recipe) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::physicalize(static_cast<CKIpionManager*>(manager), entity_name,
+                                        *recipe, collision_group, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_unphysicalize(void* manager, const char* entity_name,
+                              char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::unphysicalize(static_cast<CKIpionManager*>(manager), entity_name, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_install_player_collision_filter(void* manager, const char* player_group_prefix,
+                                                char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::install_player_collision_filter(static_cast<CKIpionManager*>(manager),
+                                                            player_group_prefix, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_set_body_group(void* manager, const char* entity_name, const char* collision_group,
+                               char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_body_group(static_cast<CKIpionManager*>(manager), entity_name, collision_group, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    const bmmo_physics_api_v2 kApi = {
+        sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
         BMMO_PHYSICS_BUILD_ID,
         api_capture_world_hash,
@@ -125,10 +224,17 @@ namespace {
         api_describe_physics_objects,
         api_drain_event_log,
         api_describe_cores_exact,
+        api_list_bodies,
+        api_get_body_state,
+        api_set_body_state,
+        api_physicalize,
+        api_unphysicalize,
+        api_install_player_collision_filter,
+        api_set_body_group,
     };
 }
 
-extern "C" BMMO_PHYSICS_EXPORT const bmmo_physics_api_v1* bmmo_physics_api(uint32_t requested_version) {
+extern "C" BMMO_PHYSICS_EXPORT const bmmo_physics_api_v2* bmmo_physics_api(uint32_t requested_version) {
     redirect_stdout_once();
     return requested_version == BMMO_PHYSICS_API_VERSION ? &kApi : nullptr;
 }

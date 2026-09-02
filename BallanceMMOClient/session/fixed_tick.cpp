@@ -48,9 +48,15 @@ namespace bmmo::session {
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - origin_).count();
         const double expected = elapsed * kTickRate;
-        // Behind by more than one tick: skip the next render so the loop
-        // reaches Process again as soon as possible.
-        if (static_cast<double>(ticks_) + 1.0 < expected) {
+        if (static_cast<double>(ticks_) + kMaxCatchUpTicks < expected) {
+            // Far behind (level load, debugger): fast-forwarding would render
+            // nothing for seconds, so restart the schedule from here.
+            origin_ = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
+            ++rebases_;
+        } else if (static_cast<double>(ticks_) + 1.0 < expected) {
+            // Behind by more than one tick: skip the next render so the loop
+            // reaches Process again as soon as possible.
             bml->SkipRenderForNextTick();
             ++skipped_renders_;
         } else if (static_cast<double>(ticks_) > expected) {
