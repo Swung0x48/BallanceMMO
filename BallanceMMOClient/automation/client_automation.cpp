@@ -8,7 +8,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -75,6 +77,51 @@ void BallanceMMOClient::start_command_pipe_from_environment() {
         logger_->Warn("Automation command pipe unavailable: %s", error.c_str());
     else
         logger_->Info("Automation command pipe listening at \\\\.\\pipe\\%s", name);
+}
+
+// Poll a command file once per frame. Present-but-locked or partial writes are
+// tolerated: the file is read whole, then deleted, so a half-written file is
+// simply retried next frame. Every command is dispatched on the game thread
+// exactly like a pipe command, and the outcome is written to the BML log and a
+// "<file>.out" sibling so it can be observed without the pipe.
+void BallanceMMOClient::process_command_file() {
+    static std::string path = [] {
+        const char* env = std::getenv("BMMO_COMMAND_FILE");
+        return std::string(env && *env ? env : "bmmo_command.txt");
+    }();
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec)
+        return;
+    std::string content;
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return;  // being written; try again next frame
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        content = ss.str();
+    }
+    std::filesystem::remove(path, ec);
+
+    std::ostringstream out;
+    std::istringstream lines(content);
+    std::string line;
+    while (std::getline(lines, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+            line.pop_back();
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::string response;
+        try {
+            response = dispatch_automation_command(line);
+        } catch (const std::exception& e) {
+            response = std::string("error ") + e.what();
+        } catch (...) {
+            response = "error unknown exception";
+        }
+        logger_->Info("CommandFile: %s -> %s", line.c_str(), response.substr(0, 300).c_str());
+        out << line << " -> " << response << "\n";
+    }
+    std::ofstream(path + ".out", std::ios::binary | std::ios::trunc) << out.str();
 }
 
 void BallanceMMOClient::process_command_pipe() {

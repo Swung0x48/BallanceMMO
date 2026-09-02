@@ -399,6 +399,7 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
+    process_command_file();
     fixed_tick_.on_process(m_bml);
     process_command_pipe();
     process_level_request();

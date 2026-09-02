@@ -387,6 +387,11 @@ private:
 	std::set<CKDWORD> automation_released_keys_;  // report KS_RELEASED once
 	void start_command_pipe_from_environment();
 	void process_command_pipe();
+	// File command channel (docs/collision-overhaul-design.md 3.6): a fallback
+	// for the named pipe. Each frame, if the command file exists, every line is
+	// dispatched, the results go to "<file>.out" and the BML log, and the file
+	// is deleted. Path: env BMMO_COMMAND_FILE, else Bin/bmmo_command.txt.
+	void process_command_file();
 	std::string dispatch_automation_command(const std::string& line);
 	std::string automation_status_line();
 	std::string automation_dump_script(const std::string& name);
