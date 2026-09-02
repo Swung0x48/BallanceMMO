@@ -199,6 +199,8 @@ void BallanceMMOClient::OnLoad()
     load_wave_sound(&sound_knock_, "MMO_Sound_Knock", "..\\Sounds\\Pieces_Stone.wav", 0.88f, 0.88f);
 
     utils::cleanup_old_crash_dumps();
+    start_command_pipe_from_environment();
+    install_input_hook();
 
     using namespace std::placeholders;
     m_bml->RegisterCommand(new CommandMMO(std::bind(&BallanceMMOClient::OnCommand, this, _1, _2), std::bind(&BallanceMMOClient::OnTabComplete, this, _1, _2)));
@@ -305,6 +307,7 @@ void BallanceMMOClient::on_sector_changed() {
 void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
 
 void BallanceMMOClient::OnPostExitLevel() {
+    ball_nav_active_ = false;
     countdown_restart_ = false;
     force_hs_calibration_ = false;
     if (current_level_mode_ == bmmo::level_mode::Highscore && !spectator_mode_) {
@@ -396,10 +399,9 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
-    //poll_connection_state_changes();
-    //poll_incoming_messages();
-
-    //poll_status_toggle();
+    fixed_tick_.on_process(m_bml);
+    process_command_pipe();
+    process_tick_record();
     poll_local_input();
     if (init_)
         server_list_->process();
@@ -691,6 +693,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
 
 void BallanceMMOClient::OnExitGame()
 {
+    command_pipe_.stop();
     UnhookWinEvent(move_size_hook_);
     config_manager_.check_and_save_name_change_time();
     cleanup(true);

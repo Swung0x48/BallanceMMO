@@ -4,6 +4,11 @@
   "version-string": "1.0",
   "description": "Ballance MMO",
   "dependencies": [
+    "boost-algorithm",
+    "boost-circular-buffer",
+    "boost-lexical-cast",
+    "boost-regex",
+    "boost-uuid",
     "gamenetworkingsockets",
     "openssl"
   ],

@@ -16,3 +16,6 @@
 [submodule "submodule/parallel-hashmap"]
 	path = submodule/parallel-hashmap
 	url = https://github.com/greg7mdp/parallel-hashmap
+[submodule "submodule/Ballanced"]
+	path = submodule/Ballanced
+	url = https://github.com/Swung0x48/Ballanced.git

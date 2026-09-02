@@ -73,6 +73,48 @@ add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ${YA
 target_include_directories(BallanceMMORecordParser PRIVATE)
 target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared replxx)
 
+if (BMMO_BUILD_SIM)
+    include(${CMAKE_CURRENT_LIST_DIR}/../cmake/BallancedHeadless.cmake)
+    bmmo_add_ballanced_headless(${CMAKE_CURRENT_LIST_DIR}/../submodule/Ballanced BMMO_HEADLESS_TARGET)
+    # The Ballanced Player edits the retail boot script at load time
+    # (Hotfix.cpp: language, driver/screen-mode enumeration, opening skip).
+    # The headless engine applies the identical edits with the Player's own
+    # unmodified sources so client and server run the same scripts.
+    set(BMMO_PLAYER_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../submodule/Ballanced/Source/Player/src")
+    set(BMMO_PLAYER_GENERATED_DIR "${CMAKE_BINARY_DIR}/Ballanced/player-generated")
+    set(PROJECT_VERSION_MAJOR 0)
+    set(PROJECT_VERSION_MINOR 3)
+    set(PROJECT_VERSION_PATCH 8)
+    set(PROJECT_VERSION_TWEAK 0)
+    set(PROJECT_VERSION "0.3.8")
+    set(PROJECT_DESCRIPTION "BallanceMMO headless player")
+    set(PLAYER_SCREEN_WIDTH 1024)
+    set(PLAYER_SCREEN_HEIGHT 768)
+    set(PLAYER_SCREEN_BPP 32)
+    configure_file("${BMMO_PLAYER_SRC_DIR}/config.h.in" "${BMMO_PLAYER_GENERATED_DIR}/config.h" @ONLY)
+    add_library(BallanceMMOSim STATIC
+            sim/headless_engine.cpp sim/headless_engine.hpp
+            sim/null_managers.cpp sim/null_managers.hpp
+            sim/physics_state.cpp sim/physics_state.hpp
+            sim/rasterizer_stub.cpp
+            "${BMMO_PLAYER_SRC_DIR}/Hotfix.cpp"
+            "${BMMO_PLAYER_SRC_DIR}/GameConfig.cpp"
+            "${BMMO_PLAYER_SRC_DIR}/IniFile.cpp"
+            "${BMMO_PLAYER_SRC_DIR}/Logger.cpp"
+            "${BMMO_PLAYER_SRC_DIR}/Utils.cpp")
+    target_include_directories(BallanceMMOSim PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+            "${BMMO_PLAYER_SRC_DIR}" "${BMMO_PLAYER_GENERATED_DIR}")
+    target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET})
+    target_compile_features(BallanceMMOSim PUBLIC cxx_std_20)
+    if (WIN32)
+        target_compile_definitions(BallanceMMOSim PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif ()
+    add_executable(BallanceMMOSimTool sim/sim_tool.cpp)
+    target_link_libraries(BallanceMMOSimTool PRIVATE BallanceMMOSim)
+    target_link_libraries(BallanceMMOServer BallanceMMOSim)
+    target_compile_definitions(BallanceMMOServer PRIVATE BMMO_BUILD_SIM=1)
+endif ()
+
 target_compile_definitions(BallanceMMOServer PRIVATE BMMO_INCLUDE_INTERNAL)
 target_compile_definitions(BallanceMMOMockClient PRIVATE BMMO_INCLUDE_INTERNAL)
 target_compile_definitions(BallanceMMORecordParser PRIVATE BMMO_INCLUDE_INTERNAL)

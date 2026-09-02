@@ -15,7 +15,13 @@
 #include "server_list.h"
 #include "config_manager.h"
 #include "console_window.h"
+#include "automation/command_pipe.h"
+#include "session/fixed_tick.hpp"
+#include "session/input_injector.hpp"
+#include "physics/retail_physics_view.hpp"
+#include <physics/tick_record.hpp>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <condition_variable>
 #include <mutex>
@@ -54,20 +60,20 @@ public:
 			assert(count == 3);
 			break;
 		}
-#ifdef BMMO_USE_BML_PLUS
-		const BMLVersion lower_bound{ 0, 3, 0 }, upper_bound{ 0, 3, 5 };
-		log_manager_.set_utf8_mode(loader_version_ >= BMLVersion{ 0, 3, 4 });
-		if (loader_version_ < lower_bound || loader_version_ >= upper_bound) return;
-		// wreck BMLPlus 0.3.0 - 0.3.4
-		MessageBoxA(NULL,
-			std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
-				"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
-				upper_bound.major, upper_bound.minor, BMMO_BML_BUILD_VERSION(upper_bound),
-				loader_version_.major, loader_version_.minor, BMMO_BML_BUILD_VERSION(loader_version_)).c_str(),
-			"Incompatible BMLPlus version",
-			MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
-		source_version_ = upper_bound;
-#endif
+		// Only the BMLPlus SDK this mod was compiled against (or newer) is supported.
+		const BMLVersion required{ BML_MAJOR_VERSION, BML_MINOR_VERSION, BML_PATCH_VERSION };
+		source_version_ = required;
+		log_manager_.set_utf8_mode(true);
+		if (loader_version_ < required) {
+			loader_compatible_ = false;
+			MessageBoxA(NULL,
+				std::format("Incompatible BMLPlus version found!\nBallanceMMO will disable itself automatically.\n"
+					"Please update to version {}.{}.{} or later (you're using {}.{}.{}).",
+					required.major, required.minor, BMMO_BML_BUILD_VERSION(required),
+					loader_version_.major, loader_version_.minor, BMMO_BML_BUILD_VERSION(loader_version_)).c_str(),
+				"Incompatible BMLPlus version",
+				MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND | MB_SERVICE_NOTIFICATION);
+		}
 	}
 
 	const std::string version_string = bmmo::current_version.to_string();
@@ -194,6 +200,8 @@ private:
 	void OnPauseLevel() override;
 	void OnBallOff() override;
 	void OnCamNavActive() override;
+	void OnBallNavActive() override { ball_nav_active_ = true; }
+	void OnBallNavInactive() override { ball_nav_active_ = false; }
 	void OnPreLifeUp() override;
 	void OnLevelFinish() override;
 	void OnLoadScript(BMMO_CKSTRING filename, CKBehavior* script) override;
@@ -369,6 +377,41 @@ private:
 	}
 
 	BMLVersion loader_version_{}, source_version_{};
+	bool loader_compatible_ = true;
+
+	// Test automation (docs/collision-overhaul-design.md section 3.6).
+	bmmo::automation::command_pipe command_pipe_;
+	std::set<CKDWORD> automation_held_keys_;
+	void start_command_pipe_from_environment();
+	void process_command_pipe();
+	std::string dispatch_automation_command(const std::string& line);
+	std::string automation_status_line();
+	std::string automation_dump_script(const std::string& name);
+	std::string automation_load_level(int level);
+
+	// Deterministic session clock and physics state view (design 3.1, M1).
+	bmmo::session::fixed_tick_driver fixed_tick_;
+	bmmo::physics::retail_physics_view physics_view_;
+	bmmo::physics::tick_record_writer record_writer_;
+	bool record_pending_frame_ = false;
+	bool record_anchor_pending_ = false;
+	// Input playback for client-vs-client determinism tests: keys of an
+	// existing record are injected tick by tick while a new record is written.
+	bmmo::physics::tick_record replay_source_;
+	bool replay_active_ = false;
+	size_t replay_index_ = 0;
+	// Keyboard state captured by the input hook for the current behaviour
+	// frame (after injection), plus the CK tick it was polled on.
+	std::array<uint8_t, 256> frame_keys_{};
+	CKDWORD frame_keys_tick_ = 0;
+	bool input_hook_installed_ = false;
+	bool ball_nav_active_ = false;
+	void install_input_hook();
+	void on_input_polled(unsigned char* state);
+	bmmo::physics::tick_record_frame record_frame_{};
+	uint64_t record_frames_ = 0;
+	void process_tick_record();
+	bool gameplay_ingame_script_active();
 
 	game_state db_;
 	game_objects objects_;
