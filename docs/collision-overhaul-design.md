@@ -226,7 +226,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 3. **路径验证**：迟到加入、断线、host 迁移、房主重开，用无头会话客户端做成可重复的脚本。
 4. **服务端校验客户端事件**：Physicalize 位姿/配方、分节单调、事件频率。
 5. **清理与打包**：诊断模式收口、原版球停放后的控制台刷屏、安装目标、配置与部署说明。
-6. 视时间：死亡时本地分节重置的机关跳变；多房间（全局状态隔离）；积分/生命同步。
+6. 视时间：死亡时本地分节重置的机关跳变（已在 9.6 随引擎改动 #6 解决）；多房间（全局状态隔离）；积分/生命同步。
 
 ### 9.1 远端球本地预测
 
@@ -290,3 +290,47 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - 原版球停放后每次 Physicalize 有 21 行 `[CK] You must Physicalize Ball_Wood ...`：在服务端的 CK 控制台接收器里过滤以 `You must Physicalize ` 开头且实体名为停放球的行。
 - `--nav retail-cxx` 诊断模式与 `mirror_clone_to_retail` 保留但在 `--help` 里标注为诊断。
 - 安装目标加入 `BallanceMMOSessionClient`；`docs/rooms-and-sessions-protocol.md` §3 增加服务端部署一节：需要完整游戏数据目录（`game_root`）、Windows/Linux 都可，一个物理房间约占一个核心；客户端侧需要 physics_RT.dll 与 Mod 同版本（`physics_sha256` 仅记录不校验，M4 增加 `physics.require_physics_sha` 配置：非空时只接受该 sha）。——已做：控制台过滤 `You must Physicalize Ball_*`、`install(TARGETS BallanceMMOSimTool BallanceMMOSessionClient)`、SimTool `--help` 标注诊断模式、协议文档 §3.1 部署、`require_physics_sha`。
+
+### 9.6 客户端回滚重模拟（服务端权威的 prediction & reconciliation）
+
+**目标**：客户端始终领先服务端已确认进度若干 tick（现在就是这样：领先 `input_delay` + 网络），对"服务端稍后才会确认的东西"——其他玩家的输入、物理世界的演化——做预测；服务端 tick T 的权威结果回来后，若与本地在 T 的预测不符，就**回到 T 的权威状态、用记录下来的输入重新模拟 T+1 到当前**，而不是把差值渐变地加到刚体上。这是 GGPO 的"预测 + 回滚"，但回滚只发生在客户端、权威在服务端（3.3 原来排除它的理由是 IVP 没有可靠的世界快照恢复；这里不做完整快照，而是用"逐体 beam + 只跑物理和导航的重模拟"逼近，差别见下）。
+
+**为什么可行**：
+- 两端的物理和导航复制是位级一致的同一段代码（M1、9.1），重模拟就是把服务端会做的事在本地再做一遍。
+- 服务端每 2 tick 的快照已经带全部球和清醒机关的完整核心状态（f64 位姿、速度），恢复用 `set_body_state`（beam + 速度 + 清醒/冻结）。
+- 只重跑物理与导航，不重跑 CK 脚本（脚本每帧只在真实帧里跑一次）：窗口只有约 10 tick，脚本驱动的东西（检查点、机关唤醒）在真实帧里照样发生。
+- IVP 的 PSI 时刻由环境里的双精度时钟推进，每 tick 恰好 2 个 PSI 且有整整一个 PSI 的裕度，绝对时间平移 K 个 tick 不改变分组；回滚**不倒拨绝对时钟**，重模拟让本地 IVP 时间比服务端多走 K 个 tick（只影响 mindist 事件表里的 float 相对时刻，产生的罕见差异由下一个快照再次纠正）。
+
+**与 GGPO 的差别**：没有完整存档，恢复后的接触/摩擦内部状态是 IVP 在下一个 PSI 重建的，所以重模拟结果与"从未分叉"的连续模拟不保证位级相同，但每 2 tick 的权威快照会再次拉齐；没有对等方，回滚只在客户端；不做输入延迟协商（服务端的 `input_delay` 固定）。
+
+**需要的新东西**：
+1. **自己的球改由导航复制驱动**（原版 `SetPhysicsForce` 叶子的 Force Value 每帧清零，原版脚本照常跑，只是推力为零）：复制以"轮询模式"工作——在该 tick 的 PreSimulate 里直接读输入管理器的键盘缓冲（与原版脚本在同一帧看到的一样）、Key Event 块的激活状态作为 nav_active、相机基向量用 Mod 传入的上一帧 `Cam_OrientRef` 三行（与发给服务端的一致，这也是 M3 `--nav retail-cxx` 诊断模式偏差的原因：它用了当帧的相机）。只有这样窗口内自己的按键沿才能在重模拟时按记录重放。
+2. **每 tick 世界历史**（最近 64 tick）：每个被跟踪刚体（自己的球、远端球、机关字典里的机关）的核心状态 + 每个导航复制的内部状态（激活、各叶子键状态、各叶子是否有力控制器及其力向量——力向量在 Create 时按当时相机算出并固定，回滚必须恢复而不是重建）。
+3. **桥接 API v4**：`step_physics(delta_ms)`（`CKIpionManager::Simulate`：PreSimulate 回调 → `simulate_dtime` → 接触管理 → PostSimulate → 实体矩阵刷新）、`navigation_poll`（轮询模式）、`navigation_get_state/set_state`。
+4. **回滚引擎**（`BallanceMMOCommon/include/session/rollback.hpp`，纯逻辑 + 世界适配器接口，原版 Mod 与无头客户端共用）：收到 tick T 的快照 → 与历史 T 比较（位置 1 mm、速度 1 cm/s、清醒标志）→ 不符则：写入快照里的刚体、其余被跟踪刚体写回历史 T、恢复导航状态 T → 对 t = T+1..now：喂入 t 的输入（自己：记录的键/相机/激活；远端：转发中 t 的帧，没有则 ≤ t 的最近一帧）→ `step_physics` → 记录历史 t。相符则什么都不做。
+5. 远端输入按 tick 保存（不只是最近一帧），窗口 64。
+
+**验收**：单人（无远端）回滚永不触发（`rollbacks=0`，与现在一样位级一致）；双人在起点碟里顶住并互相驱动时，回滚只发生在对方按键沿之后，回滚后的下一个快照与本地一致（`rollbacks` 计数 ≈ 对方按键沿数，`mismatch after rollback` 接近 0）；原版客户端画面上不再有渐变，只有对方按键沿处一次小跳。
+
+**实施（2026-09-02）**：
+
+- `BallanceMMOCommon/include/session/rollback.hpp`：`rollback_engine`（`record` / `on_snapshot`）+ `rollback_world` 适配器（get/set body、get/set nav、nav_input、nav_poll、step、simulating、log）。Mod 在 `physics_session_frame` 末尾记录每 tick（自己的球、有导航复制的远端球、机关字典里的机关；应用的输入 = 自己的 `input_frame`、远端上次驱动喂入的帧），`physics_session_apply_snapshot` 在 `rollback_enabled`（默认开，自动化 `session rollback on|off` 可切回渐变路径）时走 `physics_session_rollback`；无头客户端同样（`--no-rollback` 切回）。回滚后重新排队下一帧的相机行（重模拟消耗了它）。
+- 桥接 API v5：v4 之外加 `set_body_guard`（引擎改动 #6）和 `get_clock`（时间因子 / 下一步物理 delta）。
+- 引擎改动 #6（`docs/engine-changes.md`）：会话期间原版 Unphysicalize 块只放行当前球，其它刚体保留；Physicalize 块对已有刚体把刚体位姿写回实体。原因：原版死亡分节重置会删掉并重建机关刚体，新刚体从初始位姿落下、接触状态全新，此后每个快照都不符（先 1.5 m，随后 1–10 mm 持续约 1 s）。Mod 每帧对当前球名启用守卫，会话结束关闭。
+- **本地物理时钟停止时的路径**：原版脚本会把物理时间因子设为 0（Level 1 的 `Gameplay_Tutorial` 在关卡开始后停约 26 s；暂停菜单），这段时间本地既不能预测也不能重模拟。引擎通过 `world.simulating()`（`get_clock` 因子 > 0）识别，不符时只写入权威状态、不重模拟、计入 `frozen`。同步开始的会话两端一起进教程、快照一致；迟到加入者在自己的教程期间靠这条路径贴住服务端。
+- 诊断：`session` 状态行里的 `rollback: snaps/ok/mism/rb/resim/unmatched/far/frozen/max_err/last`；前 40 次不符打印逐刚体本地/服务端位姿；`session trace on` 打开重模拟逐步轨迹；`BMMO_TRACE_TIMEFACTOR=1` 让 physics_RT 打印哪个脚本改了时间因子。
+- 单元测试 `BallanceMMOServer/tests/rollback_engine_test.cpp`（假世界：匹配不回滚、不符恢复并按记录输入重模拟、时钟停止只贴齐、超出重模拟窗口只写入、历史有界、未命中计数）。
+
+**联调结果（2026-09-02，原版客户端 × 无头服务端，Level 1）**：
+
+| 场景 | 快照 | 一致 | 不符 / 回滚 | 重模拟 tick | 说明 |
+|---|---|---|---|---|---|
+| 单人，含 3 次死亡（守卫前） | 2040 | 2000 | 40 / 40 | 69 | 全部在死亡分节重置之后：先 1.54 m，随后 1–10 mm |
+| 单人，含 3 次死亡（守卫后） | 2040 | 2040 | 0 / 0 | 0 | 位级一致，死亡不再产生任何修正 |
+| 双人同步开始（原版房主 × 无头回放），房主侧 | 2510 | 2489 | 21 / 21 | 63 | 19 次在对方球（按键沿），2 次自己的球（1 mm 级残差） |
+| 同上，无头侧 | 2510 | 2484 | 26 / 26 | 5 | 无头端与服务端几乎零滞后，恢复后无需重模拟 |
+| 迟到加入（无头），教程期间 | 3135 | 3111 | 16 / 11 | 23 | `frozen=5`（教程里其他人没动就一致），教程结束后按键沿回滚，最大误差 5.48 m 是加入瞬间 |
+
+- 教程期间的发现：迟到加入者本地 IVP 时间不走（因子 0），旧的"回滚"每个快照都恢复 + 重模拟却什么也模拟不了（核心的 `t_env` 不变），表现为远端球总停在服务端上一个快照的位置；`frozen` 路径解决。
+- 自己的球的 1 mm 级残差出现在两球在出生点接触时：恢复只还原位姿/速度，IVP 接触状态在下一 PSI 重建，与"从未分叉"的连续模拟差 1 mm 左右，下一个快照拉齐（设计里预期的 GGPO 差别）。
+- 原版渐变路径（`body_corrector`）保留为 `session rollback off` 的回退。

@@ -260,8 +260,10 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "ping") return "pong";
     if (verb == "status") return automation_status_line();
     if (verb == "session") {
-        if (rest == "trace on") { physics_session_.trace = true; return "ok session trace on"; }
-        if (rest == "trace off") { physics_session_.trace = false; return "ok session trace off"; }
+        if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
+        if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }
+        if (rest == "rollback on") { physics_session_.rollback_enabled = true; return "ok session rollback on"; }
+        if (rest == "rollback off") { physics_session_.rollback_enabled = false; return "ok session rollback off"; }
         return "ok " + physics_session_status_text();
     }
     if (verb == "mmo") {

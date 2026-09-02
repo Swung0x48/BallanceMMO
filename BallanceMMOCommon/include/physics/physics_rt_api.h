@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 3u   /* v3: navigation entry points (design 9.1) */
+#define BMMO_PHYSICS_API_VERSION 5u   /* v5: body guard (engine change #6) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -90,6 +90,17 @@ typedef struct bmmo_physics_ball_recipe {
     int32_t concave_count;
     char concave[BMMO_PHYSICS_MAX_CONCAVE][BMMO_PHYSICS_NAME_SIZE]; /* CKMesh names */
 } bmmo_physics_ball_recipe;
+
+/* Internal state of one navigation replica (design 9.6): what a rollback
+ * has to restore.  Bit i of the masks = leaf i; force[i] is the world-space
+ * force vector the leaf's controller was created with. */
+typedef struct bmmo_physics_nav_state {
+    uint8_t active;                    /* BallNav active */
+    uint8_t key_mask;                  /* leaves whose key was down */
+    uint8_t controller_mask;           /* leaves with a live force controller */
+    uint8_t create_pending_mask;       /* leaves whose Create waits for the body */
+    float force[8][3];
+} bmmo_physics_nav_state;
 
 typedef struct bmmo_physics_api_v2 {
     uint32_t struct_size;
@@ -187,6 +198,41 @@ typedef struct bmmo_physics_api_v2 {
     int32_t (*navigation_set_ball)(void* ipion_manager, const char* ball_entity, const char* new_ball_entity,
                                    float force_value, char* error, uint32_t error_size);
     int32_t (*navigation_destroy)(void* ipion_manager, const char* ball_entity, char* error, uint32_t error_size);
+
+    /* ---- v4 (design 9.6): client-side rollback ---- */
+
+    /* One physics step of delta_ms outside the frame loop, exactly what the
+     * manager does in PostProcess: PreSimulate callbacks (navigation),
+     * simulate_dtime, contacts, PostSimulate, entity matrices. */
+    int32_t (*step_physics)(void* ipion_manager, float delta_ms, char* error, uint32_t error_size);
+    /* Polling mode for the own ball: at PreSimulate the replica reads the
+     * keyboard state itself (key_codes[i] = CKKEY of leaf i) and takes
+     * BallNav active from the Key Event blocks (key_blocks[i] = CK_ID); the
+     * camera rows still come from navigation_input, whose keys/active are
+     * then ignored.  enable = 0 goes back to explicit input. */
+    int32_t (*navigation_poll)(void* ipion_manager, const char* ball_entity, int32_t enable,
+                               const int32_t* key_codes, const uint32_t* key_blocks, int32_t count,
+                               char* error, uint32_t error_size);
+    int32_t (*navigation_get_state)(void* ipion_manager, const char* ball_entity, bmmo_physics_nav_state* out,
+                                    char* error, uint32_t error_size);
+    /* Restores the leaf states and recreates the controllers with the stored
+     * force vectors (the body must exist). */
+    int32_t (*navigation_set_state)(void* ipion_manager, const char* ball_entity, const bmmo_physics_nav_state* state,
+                                    char* error, uint32_t error_size);
+
+    /* ---- v5 (engine change #6): body guard ---- */
+
+    /* While enabled, the retail Unphysicalize block keeps every body except
+     * except_entity (the player's ball, may be NULL/empty): the client-side
+     * sector reset after a death must not delete the shared mechanisms the
+     * server keeps.  Disable at the end of the session. */
+    int32_t (*set_body_guard)(void* ipion_manager, int32_t enable, const char* except_entity,
+                              char* error, uint32_t error_size);
+    /* The manager's clock: time factor (seconds per behaviour millisecond,
+     * 0 while the scripts freeze physics) and the physics delta of the next
+     * step in seconds. */
+    int32_t (*get_clock)(void* ipion_manager, float* time_factor, float* physics_delta, char* error,
+                         uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

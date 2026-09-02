@@ -62,6 +62,17 @@ namespace bmmo::physics {
                                  std::string& error) const;
         bool navigation_destroy(const char* ball_entity, std::string& error) const;
 
+        // ---- bridge API v4 (design 9.6): rollback ----
+        bool step_physics(float delta_ms, std::string& error) const;
+        bool navigation_poll(const char* ball_entity, bool enable, const int* key_codes, const uint32_t* key_blocks,
+                             int count, std::string& error) const;
+        bool navigation_get_state(const char* ball_entity, bmmo_physics_nav_state& out, std::string& error) const;
+        bool navigation_set_state(const char* ball_entity, const bmmo_physics_nav_state& state, std::string& error) const;
+
+        // ---- bridge API v5 (engine change #6): body guard ----
+        bool set_body_guard(bool enable, const char* except_entity, std::string& error) const;
+        bool get_clock(float& time_factor, float& physics_delta, std::string& error) const;
+
         // Identification of the loaded physics module (filled even when the
         // bridge is missing, so the retail DLL can be reported).
         const std::string& dll_sha256() const { return dll_sha256_; }

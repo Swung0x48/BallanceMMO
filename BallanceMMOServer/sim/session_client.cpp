@@ -23,9 +23,12 @@
 #include <message/message_all.hpp>
 #include <physics/ball_navigation.hpp>
 #include <physics/physics_state.hpp>
+#include <cstdlib>
+#include <cstring>
 #include <physics/tick_record.hpp>
 #include <role/role.hpp>
 #include <session/correction.hpp>
+#include <session/rollback.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -56,6 +59,7 @@ namespace {
         double seconds = 180.0;
         bool trace = false;
         bool correct = true;
+        bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
         int anchor_timeout = 3000;
         int64_t pause_at = -1;        // test knob: stop ticking at this tick ...
@@ -65,7 +69,7 @@ namespace {
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--join-first | --room <id> | --host --expect N]\n"
-                  "       [--seconds S] [--trace] [--no-correct] [--pause-at TICK --pause-ms MS]");
+                  "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]");
     }
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -85,6 +89,7 @@ namespace {
             else if (arg == "--seconds") { if (!(v = next())) return false; out.seconds = std::atof(v); }
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--no-correct") out.correct = false;
+            else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
             else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
             else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
@@ -356,6 +361,8 @@ namespace {
                     remote.input = entry.frame;
                     remote.input_tick = msg.tick;
                     remote.have_input = true;
+                    remote.inputs[msg.tick] = entry.frame;
+                    while (remote.inputs.size() > 128) remote.inputs.erase(remote.inputs.begin());
                 }
                 break;
             }
@@ -387,6 +394,8 @@ namespace {
             bool have_input = false;
             uint32_t input_tick = 0;
             bmmo::session::input_frame input{};
+            bmmo::session::input_frame applied{};
+            std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
             bmmo::session::body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
         };
@@ -465,6 +474,7 @@ namespace {
 
         // ---------------------------------------------------------- session
         void begin_session(const bmmo::session_start_msg& msg) {
+            rollback_.set_verbose(args_.trace);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
@@ -698,6 +708,13 @@ namespace {
             CK3dEntity* ball = current_ball();
             const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
             const int ball_type = ball_type_of(ball_name);
+            if (!ball_name.empty() && (!body_guard_ || body_guard_entity_ != ball_name)) {
+                if (bmmo::physics::set_body_guard(physics, true, ball_name.c_str(), error)) {
+                    body_guard_ = true;
+                    body_guard_entity_ = ball_name;
+                } else
+                    logf("body guard: %s", error.c_str());
+            }
             bmmo_physics_body_state own{};
             const bool physicalized = !ball_name.empty() && bmmo::physics::get_body_state(physics, ball_name.c_str(), own, error);
             if (physicalized) {
@@ -705,6 +722,8 @@ namespace {
                     if (bmmo::physics::set_body_group(physics, ball_name.c_str(), own_group_.c_str(), error)) own_group_set_ = true;
                     else logf("own ball group: %s", error.c_str());
                 }
+                if (args_.rollback && navigation_known_ && (!own_navigation_ || own_nav_entity_ != ball_name))
+                    attach_own_navigation(ball_name, ball_type);
                 bmmo::session::ball_pose pose;
                 pose.tick = tick;
                 for (int k = 0; k < 3; ++k) { pose.position[k] = own.position[k]; pose.linear[k] = own.linear[k]; pose.angular[k] = own.angular[k]; }
@@ -769,7 +788,30 @@ namespace {
                 logf("input edge at tick %u keys=%u flags=%u", tick, input.keys, input.flags);
             last_keys_ = input.keys;
             last_nav_active_ = nav_active;
+            if (own_navigation_) {
+                if (!bmmo::physics::navigation_input(physics, own_nav_entity_.c_str(), 0, basis[0], basis[1], basis[2], false, error))
+                    logf("own navigation rows: %s", error.c_str());
+                zero_retail_forces();
+            }
             input_history_.emplace_back(tick, input);
+            if (args_.rollback) {
+                own_inputs_[tick] = input;
+                while (own_inputs_.size() > 128) own_inputs_.erase(own_inputs_.begin());
+                bmmo::session::rollback_tracked tracked;
+                std::map<std::string, bmmo::session::input_frame> applied;
+                if (physicalized && own_navigation_) {
+                    tracked.own_entity = own_nav_entity_;
+                    tracked.own_polls = true;
+                    applied[own_nav_entity_] = input;
+                }
+                for (const auto& [id, remote]: remotes_)
+                    if (remote.physicalized && remote.navigation) {
+                        tracked.remote_entities.push_back(remote.entity);
+                        applied[remote.entity] = remote.applied;
+                    }
+                for (const auto& [index, name]: mechanism_names_) tracked.mechanisms.push_back(name);
+                rollback_.record(rollback_world(), tick, tracked, applied);
+            }
             if (assigned_) {
                 while (input_history_.size() > bmmo::session::MAX_INPUT_FRAMES) input_history_.pop_front();
                 bmmo::session_input_msg msg;
@@ -844,6 +886,9 @@ namespace {
                 if (!remote.physicalized || !remote.navigation) continue;
                 const uint8_t keys = remote.have_input ? remote.input.keys : 0;
                 const bool active = remote.have_input && (remote.input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+                remote.applied = remote.input;
+                remote.applied.keys = keys;
+                if (!active) remote.applied.flags &= static_cast<uint8_t>(~bmmo::session::INPUT_FLAG_NAV_ACTIVE);
                 if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), keys, remote.input.cam_right,
                                                      remote.input.cam_up, remote.input.cam_dir, active, error))
                     logf("remote navigation input %s: %s", remote.entity.c_str(), error.c_str());
@@ -968,6 +1013,42 @@ namespace {
             have_snapshot_ = true;
             last_snapshot_tick_ = snapshot.tick;
             ++snapshots_applied_;
+            if (args_.rollback) {
+                if (snapshot.full)
+                    for (const auto& body: snapshot.bodies)
+                        if (body.kind == bmmo::session::body_kind::Mechanism && !body.name.empty())
+                            mechanism_names_[body.owner] = body.name;
+                auto entity_of = [&](const bmmo::session::body_state& body) -> std::string {
+                    if (body.kind == bmmo::session::body_kind::Ball) {
+                        if (body.owner == own_id_) return own_physicalized_ && own_navigation_ ? own_nav_entity_ : std::string();
+                        auto it = remotes_.find(body.owner);
+                        if (it == remotes_.end() || !it->second.physicalized || !it->second.navigation) return {};
+                        return it->second.entity;
+                    }
+                    auto name = mechanism_names_.find(body.owner);
+                    return name == mechanism_names_.end() ? std::string() : name->second;
+                };
+                auto input_at = [&](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+                    const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
+                    if (entity == own_nav_entity_) inputs = &own_inputs_;
+                    else
+                        for (const auto& [id, remote]: remotes_)
+                            if (remote.entity == entity) inputs = &remote.inputs;
+                    if (!inputs || inputs->empty()) return false;
+                    auto it = inputs->upper_bound(tick);
+                    if (it == inputs->begin()) return false;
+                    --it;
+                    out = it->second;
+                    return true;
+                };
+                const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
+                if (rolled && args_.trace && rollback_diag_++ < 16)
+                    logf("after rollback: movable=%s", bmmo::physics::describe_movable_objects(physics).c_str());
+                if (rolled && own_navigation_ && previous_cam_valid_)
+                    bmmo::physics::navigation_input(physics, own_nav_entity_.c_str(), 0, previous_cam_[0], previous_cam_[1],
+                                                    previous_cam_[2], false, error);
+                return;
+            }
             for (const auto& body: snapshot.bodies) {
                 if (body.kind == bmmo::session::body_kind::Ball) {
                     if (body.owner == own_id_) {
@@ -1133,6 +1214,111 @@ namespace {
             }
         }
 
+        // Design 9.6: own ball driven by the replica in polling mode, retail
+        // force leaves zeroed (see the mod's physics_session_attach_own_navigation).
+        void attach_own_navigation(const std::string& ball_name, int ball_type) {
+            if (!navigation_known_ || !navigation_.valid() || ball_name.empty()) return;
+            std::string error;
+            const float force = ball_type >= 0 && ball_type < static_cast<int>(ball_rows_.size()) ? ball_rows_[ball_type].force : 0.0f;
+            if (own_navigation_ && own_nav_entity_ != ball_name) {
+                if (bmmo::physics::navigation_set_ball(engine_->physics(), own_nav_entity_.c_str(), ball_name.c_str(), force, error)) {
+                    own_nav_entity_ = ball_name;
+                    return;
+                }
+                bmmo::physics::navigation_destroy(engine_->physics(), own_nav_entity_.c_str(), error);
+                own_navigation_ = false;
+            }
+            float directions[8][3] = {};
+            int count = 0;
+            for (const auto& leaf: navigation_.leaves) {
+                if (leaf.index < 0 || leaf.index >= 8) continue;
+                directions[leaf.index][0] = leaf.direction.x;
+                directions[leaf.index][1] = leaf.direction.y;
+                directions[leaf.index][2] = leaf.direction.z;
+                own_key_codes_[leaf.index] = leaf.key;
+                own_key_blocks_[leaf.index] = leaf.key_block;
+                count = std::max(count, leaf.index + 1);
+            }
+            own_key_count_ = count;
+            if (!bmmo::physics::navigation_create(engine_->physics(), ball_name.c_str(), "CamRef_BMMO_self",
+                                                  navigation_.ball_navigation, directions, count, force, error)
+                    || !bmmo::physics::navigation_poll(engine_->physics(), ball_name.c_str(), true, own_key_codes_,
+                                                       own_key_blocks_, count, error)) {
+                logf("own navigation replica: %s", error.c_str());
+                return;
+            }
+            own_navigation_ = true;
+            own_nav_entity_ = ball_name;
+            logf("own ball %s driven by the navigation replica (force %.3f)", ball_name.c_str(), force);
+        }
+
+        void zero_retail_forces() {
+            CKContext* context = engine_->context();
+            const float zero = 0.0f;
+            for (const auto& leaf: navigation_.leaves) {
+                auto* block = CKBehavior::Cast(context->GetObject(leaf.force_block));
+                if (!block) continue;
+                if (CKParameterIn* in = block->GetInputParameter(4))
+                    if (CKParameter* source = in->GetRealSource()) source->SetValue(&zero, sizeof(zero));
+            }
+        }
+
+        bmmo::session::rollback_world rollback_world() {
+            bmmo::session::rollback_world world;
+            CKIpionManager* physics = engine_->physics();
+            world.get_body = [physics](const std::string& entity, bmmo_physics_body_state& out) {
+                std::string error;
+                return bmmo::physics::get_body_state(physics, entity.c_str(), out, error);
+            };
+            world.set_body = [physics](const std::string& entity, const bmmo_physics_body_state& state, bool wake) {
+                std::string error;
+                return bmmo::physics::set_body_state(physics, entity.c_str(), state.position, state.rotation, state.linear,
+                                                     state.angular, wake, error);
+            };
+            world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
+                std::string error;
+                return bmmo::physics::navigation_get_state(physics, entity.c_str(), out, error);
+            };
+            world.set_nav = [physics](const std::string& entity, const bmmo_physics_nav_state& state) {
+                std::string error;
+                return bmmo::physics::navigation_set_state(physics, entity.c_str(), state, error);
+            };
+            world.nav_input = [physics](const std::string& entity, const bmmo::session::input_frame& frame) {
+                std::string error;
+                const bool active = (frame.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+                return bmmo::physics::navigation_input(physics, entity.c_str(), frame.keys, frame.cam_right, frame.cam_up,
+                                                       frame.cam_dir, active, error);
+            };
+            world.nav_poll = [this, physics](const std::string& entity, bool enable) {
+                std::string error;
+                return bmmo::physics::navigation_poll(physics, entity.c_str(), enable, own_key_codes_, own_key_blocks_,
+                                                      own_key_count_, error);
+            };
+            world.step = [this, physics]() {
+                std::string error;
+                const bool diag = args_.trace && step_diag_ < 24;
+                if (diag)
+                    for (const auto& [id, remote]: remotes_)
+                        if (remote.navigation)
+                            logf("core before step: %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
+                const bool ok = bmmo::physics::step_physics(physics, 1000.0f / 66.0f, error);
+                if (diag) {
+                    ++step_diag_;
+                    for (const auto& [id, remote]: remotes_)
+                        if (remote.navigation)
+                            logf("core after step:  %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
+                }
+                return ok;
+            };
+            world.simulating = [physics]() {
+                float factor = 0.0f, delta = 0.0f;
+                std::string error;
+                return !bmmo::physics::get_clock(physics, factor, delta, error) || (factor > 0.0f && delta > 0.0f);
+            };
+            world.log = [](const std::string& text) { logf("%s", text.c_str()); };
+            return world;
+        }
+
         void request_resync(const char* reason) {
             if (phase_ != phase::running || !assigned_) return;
             const auto now = clock_type::now();
@@ -1152,6 +1338,11 @@ namespace {
         // same room reloads the level (host restart) through begin_session().
         void end_session() {
             std::string error;
+            if (body_guard_) {
+                bmmo::physics::set_body_guard(engine_->physics(), false, nullptr, error);
+                body_guard_ = false;
+                body_guard_entity_.clear();
+            }
             for (auto& [id, remote]: remotes_) {
                 if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 if (remote.physicalized) bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
@@ -1166,6 +1357,7 @@ namespace {
 
         void report() {
             const auto& st = corrector_.stats();
+            const auto& rs = rollback_.stats();
             uint64_t rc = 0, ri = 0, rb = 0, rh = 0;
             for (const auto& [id, remote]: remotes_) {
                 const auto& rs = remote.corrector.stats();
@@ -1175,6 +1367,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d resyncs=%llu/%llu "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
@@ -1186,6 +1379,11 @@ namespace {
                  mechanism_names_.size(),
                  static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max, rebases_,
                  static_cast<unsigned long long>(resyncs_sent_), static_cast<unsigned long long>(resyncs_done_),
+                 static_cast<unsigned long long>(rs.snapshots), static_cast<unsigned long long>(rs.matched),
+                 static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
+                 static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
+                 static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen), rs.max_error,
+                 rs.last_mismatch.c_str(),
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
                  static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error);
@@ -1250,6 +1448,17 @@ namespace {
         int consecutive_hard_ = 0;
         clock_type::time_point last_resync_request_{};
         uint64_t resyncs_sent_ = 0, resyncs_done_ = 0, sessions_ended_ = 0;
+        bool own_navigation_ = false;
+        std::string own_nav_entity_;
+        int own_key_codes_[8] = {};
+        uint32_t own_key_blocks_[8] = {};
+        int own_key_count_ = 0;
+        bmmo::session::rollback_engine rollback_;
+        std::map<uint32_t, bmmo::session::input_frame> own_inputs_;
+        bool body_guard_ = false;
+        std::string body_guard_entity_;
+        int rollback_diag_ = 0;
+        int step_diag_ = 0;
     };
 }
 

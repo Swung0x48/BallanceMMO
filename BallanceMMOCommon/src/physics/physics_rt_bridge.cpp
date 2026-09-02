@@ -273,6 +273,89 @@ namespace {
         return 1;
     }
 
+    int32_t api_set_body_guard(void* manager, int32_t enable, const char* except_entity, char* error,
+                               uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_body_guard(static_cast<CKIpionManager*>(manager), enable != 0, except_entity, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_get_clock(void* manager, float* time_factor, float* physics_delta, char* error, uint32_t error_size) {
+        if (!manager || !time_factor || !physics_delta) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::get_clock(static_cast<CKIpionManager*>(manager), *time_factor, *physics_delta, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_step_physics(void* manager, float delta_ms, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::step_physics(static_cast<CKIpionManager*>(manager), delta_ms, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_navigation_poll(void* manager, const char* ball_entity, int32_t enable, const int32_t* key_codes,
+                                const uint32_t* key_blocks, int32_t count, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_poll(static_cast<CKIpionManager*>(manager), ball_entity, enable != 0, key_codes,
+                                            key_blocks, count, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_navigation_get_state(void* manager, const char* ball_entity, bmmo_physics_nav_state* out,
+                                     char* error, uint32_t error_size) {
+        if (!manager || !out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_get_state(static_cast<CKIpionManager*>(manager), ball_entity, *out, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_navigation_set_state(void* manager, const char* ball_entity, const bmmo_physics_nav_state* state,
+                                     char* error, uint32_t error_size) {
+        if (!manager || !state) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::navigation_set_state(static_cast<CKIpionManager*>(manager), ball_entity, *state, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     const bmmo_physics_api_v2 kApi = {
         sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
@@ -296,6 +379,12 @@ namespace {
         api_navigation_input,
         api_navigation_set_ball,
         api_navigation_destroy,
+        api_step_physics,
+        api_navigation_poll,
+        api_navigation_get_state,
+        api_navigation_set_state,
+        api_set_body_guard,
+        api_get_clock,
     };
 }
 

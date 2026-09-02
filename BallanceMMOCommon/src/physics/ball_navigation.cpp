@@ -1,6 +1,7 @@
 #include <physics/ball_navigation.hpp>
 
 #include "CKAll.h"
+#include "CKInputManager.h"
 #include "CKIpionManager.h"
 #include "PhysicsCallback.h"
 
@@ -131,6 +132,53 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool player_navigation::create_with_force(leaf& l, const float force_ws[3]) {
+        CK3dEntity* ball_entity = ball();
+        if (!ball_entity || !physics_ || !physics_->GetEnvironment()) return false;
+        PhysicsObject* object = physics_->GetPhysicsObject(ball_entity);
+        if (!object || !object->m_RealObject) return false;
+        IVP_U_Point force(force_ws[0], force_ws[1], force_ws[2]);
+        IVP_U_Point position(0.0, 0.0, 0.0);
+        l.controller = new force_controller(object->m_RealObject, position, force);
+        return true;
+    }
+
+    void player_navigation::get_state(bmmo_physics_nav_state& out) const {
+        out = {};
+        out.active = active_ ? 1 : 0;
+        for (const auto& l: leaves_) {
+            const int i = l.definition.index;
+            if (i < 0 || i >= 8) continue;
+            if (l.key_state) out.key_mask |= static_cast<uint8_t>(1u << i);
+            if (l.create_pending) out.create_pending_mask |= static_cast<uint8_t>(1u << i);
+            if (l.controller) {
+                out.controller_mask |= static_cast<uint8_t>(1u << i);
+                for (int k = 0; k < 3; ++k) out.force[i][k] = static_cast<float>(l.controller->force_.k[k]);
+            }
+        }
+    }
+
+    bool player_navigation::set_state(const bmmo_physics_nav_state& state) {
+        bool ok = true;
+        for (auto& l: leaves_) {
+            delete l.controller;
+            l.controller = nullptr;
+            const int i = l.definition.index;
+            if (i < 0 || i >= 8) continue;
+            l.key_state = (state.key_mask & (1u << i)) != 0;
+            l.create_pending = (state.create_pending_mask & (1u << i)) != 0;
+            if (state.controller_mask & (1u << i)) {
+                if (!create_with_force(l, state.force[i])) {
+                    l.create_pending = true;
+                    ok = false;
+                }
+            }
+        }
+        active_ = state.active != 0;
+        wake_pending_ = false;
+        return ok;
+    }
+
     // Physics WakeUp: ensure_in_simulation() on the ball's object.  Like the
     // retail callback it is retried until the object exists.
     void player_navigation::wake_up() {
@@ -208,6 +256,12 @@ namespace bmmo::physics {
             uint8_t keys = 0;
             float rows[3][3] = {};
             bool active = false;
+            // polling mode (design 9.6): keys from the input manager, active
+            // from the retail Key Event blocks
+            bool poll = false;
+            int poll_count = 0;
+            int key_codes[8] = {};
+            uint32_t key_blocks[8] = {};
         };
 
         struct world_navs {
@@ -405,7 +459,86 @@ namespace bmmo::physics {
                     for (int k = 0; k < 3; ++k) matrix[r][k] = entry.rows[r][k];
                 ref->SetWorldMatrix(matrix);
             }
-            entry.navigation->apply(static_cast<uint8_t>(entry.keys & 0x0F), entry.active);
+            uint8_t keys = static_cast<uint8_t>(entry.keys & 0x0F);
+            bool active = entry.active;
+            if (entry.poll) {
+                keys = 0;
+                active = false;
+                auto* input = static_cast<CKInputManager*>(physics->m_Context->GetManagerByGuid(INPUT_MANAGER_GUID));
+                const unsigned char* state = input ? input->GetKeyboardState() : nullptr;
+                for (int i = 0; i < entry.poll_count && i < 8; ++i) {
+                    const int code = entry.key_codes[i];
+                    if (state && code > 0 && code < 256 && (state[code] & KS_PRESSED)) keys |= static_cast<uint8_t>(1u << i);
+                    if (auto* block = CKBehavior::Cast(physics->m_Context->GetObject(entry.key_blocks[i])))
+                        if (block->IsActive()) active = true;
+                }
+            }
+            entry.navigation->apply(keys, active);
         }
+    }
+
+    bool navigation_poll(CKIpionManager* physics, const char* ball_entity, bool enable, const int* key_codes,
+                         const uint32_t* key_blocks, int count, std::string& error) {
+        error.clear();
+        if (!physics || !ball_entity || (enable && (!key_codes || !key_blocks || count <= 0 || count > 8))) {
+            error = "invalid navigation arguments";
+            return false;
+        }
+        auto wit = registry().find(physics);
+        if (wit == registry().end()) {
+            error = "no navigation registered for this physics manager";
+            return false;
+        }
+        auto it = wit->second.entries.find(ball_entity);
+        if (it == wit->second.entries.end()) {
+            error = std::string("no navigation for '") + ball_entity + "'";
+            return false;
+        }
+        nav_entry& entry = it->second;
+        entry.poll = enable;
+        entry.poll_count = enable ? count : 0;
+        for (int i = 0; i < 8; ++i) {
+            entry.key_codes[i] = enable && i < count ? key_codes[i] : 0;
+            entry.key_blocks[i] = enable && i < count ? key_blocks[i] : 0;
+        }
+        return true;
+    }
+
+    bool navigation_get_state(CKIpionManager* physics, const char* ball_entity, bmmo_physics_nav_state& out,
+                              std::string& error) {
+        error.clear();
+        out = {};
+        auto wit = physics ? registry().find(physics) : registry().end();
+        if (wit == registry().end() || !ball_entity) {
+            error = "no navigation registered for this physics manager";
+            return false;
+        }
+        auto it = wit->second.entries.find(ball_entity);
+        if (it == wit->second.entries.end() || !it->second.navigation) {
+            error = std::string("no navigation for '") + (ball_entity ? ball_entity : "") + "'";
+            return false;
+        }
+        it->second.navigation->get_state(out);
+        return true;
+    }
+
+    bool navigation_set_state(CKIpionManager* physics, const char* ball_entity, const bmmo_physics_nav_state& state,
+                              std::string& error) {
+        error.clear();
+        auto wit = physics ? registry().find(physics) : registry().end();
+        if (wit == registry().end() || !ball_entity) {
+            error = "no navigation registered for this physics manager";
+            return false;
+        }
+        auto it = wit->second.entries.find(ball_entity);
+        if (it == wit->second.entries.end() || !it->second.navigation) {
+            error = std::string("no navigation for '") + (ball_entity ? ball_entity : "") + "'";
+            return false;
+        }
+        if (!it->second.navigation->set_state(state)) {
+            error = "controllers could not be recreated (no body?)";
+            return false;
+        }
+        return true;
     }
 }

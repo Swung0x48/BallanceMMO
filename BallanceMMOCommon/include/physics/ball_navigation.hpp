@@ -33,6 +33,7 @@
 #include <vector>
 
 #include <game/navigation_graph.hpp>
+#include <physics/physics_rt_api.h>
 
 class CKIpionManager;
 class CK3dEntity;
@@ -68,6 +69,13 @@ namespace bmmo::physics {
         uint8_t held_mask() const;
         int controller_count() const;
 
+        // Rollback support (design 9.6): the internal state a re-simulation
+        // has to start from.  set_state deletes every controller and recreates
+        // the ones in controller_mask with the stored force vectors.
+        void get_state(bmmo_physics_nav_state& out) const;
+        bool set_state(const bmmo_physics_nav_state& state);
+        bool active() const { return active_; }
+
     private:
         struct leaf {
             bmmo::game::navigation_leaf definition;
@@ -80,6 +88,7 @@ namespace bmmo::physics {
         void shutdown(leaf& l);
         void wake_up();
         bool try_create(leaf& l);
+        bool create_with_force(leaf& l, const float force[3]);
 
         CKContext* context_;
         CKIpionManager* physics_;
@@ -113,6 +122,16 @@ namespace bmmo::physics {
     bool navigation_destroy(CKIpionManager* physics, const char* ball_entity, std::string& error);
     // Number of registry entries for the manager (diagnostics).
     int navigation_count(CKIpionManager* physics);
+    // Polling mode (design 9.6, the own ball): at apply time the keys come
+    // from the input manager (key_codes[i] = CKKEY of leaf i) and BallNav
+    // active from the Key Event blocks (key_blocks[i]); navigation_input then
+    // only supplies the camera rows.
+    bool navigation_poll(CKIpionManager* physics, const char* ball_entity, bool enable, const int* key_codes,
+                         const uint32_t* key_blocks, int count, std::string& error);
+    bool navigation_get_state(CKIpionManager* physics, const char* ball_entity, bmmo_physics_nav_state& out,
+                              std::string& error);
+    bool navigation_set_state(CKIpionManager* physics, const char* ball_entity, const bmmo_physics_nav_state& state,
+                              std::string& error);
     // Applies every pending input of the manager now (what the queued
     // PreSimulate callback does); exposed for hosts with their own callback.
     void navigation_apply_pending(CKIpionManager* physics);

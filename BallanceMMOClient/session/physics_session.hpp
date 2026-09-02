@@ -23,6 +23,7 @@
 #include <game/navigation_graph.hpp>
 #include <message/message_all.hpp>
 #include <session/correction.hpp>
+#include <session/rollback.hpp>
 
 namespace bmmo::session {
     struct physics_session_state {
@@ -73,6 +74,24 @@ namespace bmmo::session {
         bool own_physicalized = false;
         own_ball_corrector corrector;
         uint64_t hard_sets = 0, blends = 0;
+        // Design 9.6: the own ball is driven by the shared navigation replica
+        // in polling mode (the retail force leaves push zero), so a rollback
+        // can replay the recorded key edges.
+        bool own_navigation = false;
+        std::string own_nav_entity;
+        int own_key_codes[8] = {};
+        uint32_t own_key_blocks[8] = {};
+        int own_key_count = 0;
+        // engine change #6: the retail Unphysicalize keeps every body but this one
+        bool body_guard = false;
+        std::string body_guard_entity;
+
+        // Design 9.6: rollback instead of blending.  Own inputs per tick and
+        // the relayed remote inputs per tick feed the re-simulation.
+        bool rollback_enabled = true;      // automation: session rollback on|off
+        rollback_engine rollback;
+        std::map<uint32_t, input_frame> own_inputs;
+        static constexpr size_t kInputRing = 128;
 
         // Shared mechanisms: one corrector per dictionary name, same ladder as
         // the own ball (a snapshot for tick T is compared with the local state
@@ -94,6 +113,8 @@ namespace bmmo::session {
             bool have_input = false;
             uint32_t input_tick = 0;
             input_frame input{};
+            input_frame applied{};                 // what the last drive fed for the coming tick
+            std::map<uint32_t, input_frame> inputs; // relayed frames by tick (rollback)
             body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
         };
@@ -148,6 +169,13 @@ namespace bmmo::session {
             navigation_keys_known = false;
             own_group_set = false;
             own_physicalized = false;
+            own_navigation = false;
+            own_nav_entity.clear();
+            own_key_count = 0;
+            rollback.clear();
+            own_inputs.clear();
+            body_guard = false;
+            body_guard_entity.clear();
             corrector.clear();
             hard_sets = blends = 0;
             mechanism_correctors.clear();

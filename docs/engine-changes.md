@@ -146,6 +146,39 @@ Merged and split units start a fresh countdown like any new unit, which is
 deterministic because merging follows contacts. Gameplay difference to
 retail: a body may fall asleep up to two PSIs (30 ms) earlier or later.
 
+## 6. Body guard for the Unphysicalize block (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.h` / `.cpp` (new
+members `m_KeepLevelBodies`, `m_KeepLevelBodiesExcept`, appended after the
+retail layout and zeroed in the constructor), `Behaviors/Physicalize.cpp`
+(Unphysicalize branch and the "already physicalized" early return),
+`Behaviors/SetPhysicsGlobals.cpp` (diagnostic print of the time factor
+changes when `BMMO_TRACE_TIMEFACTOR` is set).
+
+The retail death sequence resets the current sector: `Gameplay_SectorManager`
+runs the deactivation pass (Unphysicalize of every mechanism of the sector),
+restores the objects' initial matrices and physicalizes them again. In a
+networked physics session the server keeps the shared mechanisms (a personal
+death does not reset them, design section 2), so the client must not delete
+and recreate its bodies either: a recreated body starts from the initial
+pose with fresh contact state, and every snapshot after the death mismatched
+by about 1.5 m at first and by 1-10 mm for a second afterwards (the freshly
+created bodies settle on the floor differently from the server's resting
+ones), a rollback per snapshot.
+
+Now the bridge sets `m_KeepLevelBodies` for the duration of a session with
+`m_KeepLevelBodiesExcept` = the player's ball entity: the Unphysicalize input
+returns without deleting any other body, and the Physicalize input, which
+already returns early for a physicalized entity, additionally writes the
+body pose back to the entity so the script's matrix reset does not show. The
+mechanisms therefore keep the state the server has. Measured (2026-09-02,
+retail client vs headless server, Level 1, three deaths): 2040 snapshots
+compared, 0 mismatches, before the change 40 mismatches per run.
+
+Gameplay difference to retail: within a physics session a death does not
+reset the sector's mechanisms; outside a session the guard is off and the
+block behaves exactly as before.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

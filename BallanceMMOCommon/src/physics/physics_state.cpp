@@ -9,6 +9,7 @@
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
 #include "ivp_listener_object.hxx"
+#include "ivp_sim_unit.hxx"
 #include "ivp_debug_manager.hxx"
 #include "ivp_surface_manager.hxx"
 #include "ivp_surman_polygon.hxx"
@@ -142,8 +143,15 @@ namespace bmmo::physics {
                 continue;
             }
             out += object->get_name() ? object->get_name() : "<unnamed>";
-            if (const IVP_Core* core = object->get_core())
-                out += "[" + std::to_string(static_cast<int>(core->movement_state)) + "]";
+            if (const IVP_Core* core = object->get_core()) {
+                out += "[" + std::to_string(static_cast<int>(core->movement_state));
+                // the simulation unit's type and size (a unit that is not
+                // simulated does not integrate its cores)
+                if (IVP_Simulation_Unit* unit = core->sim_unit_of_core)
+                    out += "/" + std::to_string(static_cast<int>(unit->get_unit_movement_type())) + ":"
+                        + std::to_string(unit->sim_unit_cores.len());
+                out += "]";
+            }
         }
         return out;
     }
@@ -288,6 +296,16 @@ namespace bmmo::physics {
             return false;
         }
         debug->file_out_impacts = IVP_TRUE;
+        return true;
+    }
+
+    bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "no physics environment";
+            return false;
+        }
+        physics->Simulate(delta_ms);
         return true;
     }
 
@@ -596,6 +614,64 @@ namespace bmmo::physics {
         PhysicsObject* object = physics->GetPhysicsObject(entity);
         if (object && object->m_RealObject) object->m_RealObject->delete_silently();
         return true;
+    }
+
+    bool set_body_guard(CKIpionManager* physics, bool enable, const char* except_entity, std::string& error) {
+        error.clear();
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        CK_ID except_id = 0;
+        if (enable && except_entity && *except_entity) {
+            const std::string name = bounded(except_entity, BMMO_PHYSICS_NAME_SIZE);
+            CK3dEntity* entity = find_entity(physics, name);
+            if (!entity) {
+                error = "no 3D entity named '" + name + "'";
+                return false;
+            }
+            except_id = entity->GetID();
+        }
+        physics->m_KeepLevelBodies = enable ? 1 : 0;
+        physics->m_KeepLevelBodiesExcept = except_id;
+        return true;
+    }
+
+    bool get_clock(CKIpionManager* physics, float& time_factor, float& physics_delta, std::string& error) {
+        error.clear();
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        time_factor = physics->m_PhysicsTimeFactor;
+        physics_delta = physics->m_PhysicsDeltaTime;
+        return true;
+    }
+
+    std::string describe_core(CKIpionManager* physics, const char* entity_name) {
+        CK3dEntity* entity = find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE));
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+        IVP_Core* core = real ? real->get_core() : nullptr;
+        IVP_Environment* env = real ? real->get_environment() : nullptr;
+        if (!core || !env) return "<no core>";
+        char text[400];
+        std::snprintf(text, sizeof(text),
+                      "ms=%d unit=%d/%d t_env=%.6f t_env_lastpsi=%.6f t_core_lastpsi=%.6f i_dt=%.3f "
+                      "pos_lastpsi=(%.4f,%.4f,%.4f) delta=(%.4f,%.4f,%.4f) speed=(%.4f,%.4f,%.4f) wakeup_vec=%d "
+                      "factor=%.4f dt_ms=%.4f phys_dt=%.6f reset=%d",
+                      static_cast<int>(core->movement_state),
+                      core->sim_unit_of_core ? static_cast<int>(core->sim_unit_of_core->get_unit_movement_type()) : -1,
+                      core->sim_unit_of_core ? core->sim_unit_of_core->sim_unit_cores.len() : -1,
+                      env->get_current_time().get_time(), env->get_old_time_of_last_PSI().get_time(),
+                      core->time_of_last_psi.get_time(), static_cast<double>(core->i_delta_time),
+                      core->pos_world_f_core_last_psi.k[0], core->pos_world_f_core_last_psi.k[1],
+                      core->pos_world_f_core_last_psi.k[2], core->delta_world_f_core_psis.k[0],
+                      core->delta_world_f_core_psis.k[1], core->delta_world_f_core_psis.k[2], core->speed.k[0],
+                      core->speed.k[1], core->speed.k[2], core->is_in_wakeup_vec ? 1 : 0,
+                      static_cast<double>(physics->m_PhysicsTimeFactor), static_cast<double>(physics->m_DeltaTime),
+                      static_cast<double>(physics->m_PhysicsDeltaTime), physics->m_ResetRequested ? 1 : 0);
+        return text;
     }
 
     bool set_body_group(CKIpionManager* physics, const char* entity_name, const char* collision_group,

@@ -21,9 +21,24 @@ namespace bmmo::physics {
     bool capture_world_hash(CKIpionManager* physics, bmmo::physics::world_hash& out,
                             std::string& error);
     bool reset_session_clock(CKIpionManager* physics, int seed, std::string& error);
+    // One physics step outside the frame loop (design 9.6 rollback): the
+    // manager's Simulate() with the given behaviour delta in milliseconds.
+    bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
+    // Engine change #6: while enabled, the retail Unphysicalize block keeps
+    // every body except `except_entity` (the player's ball; null or empty =
+    // none), so the client-side sector reset after a death does not delete
+    // the shared mechanisms the server keeps.
+    bool set_body_guard(CKIpionManager* physics, bool enable, const char* except_entity, std::string& error);
+    // The manager's clock: time factor (0 while the retail scripts freeze
+    // physics: Level 1 tutorial, pause menu) and the next step's physics
+    // delta in seconds.
+    bool get_clock(CKIpionManager* physics, float& time_factor, float& physics_delta, std::string& error);
     // "name[state];name[state];..." for every entry of m_MovableObjects, in
     // list order (diagnostics: which bodies the world simulates).
     std::string describe_movable_objects(CKIpionManager* physics);
+    // Diagnostics: the integration state of one body's core (times, last-PSI
+    // position, per-PSI delta, speed, movement state, simulation unit).
+    std::string describe_core(CKIpionManager* physics, const char* entity_name);
     // Every physicalized entity: "name[movement_state](x,y,z);..." (all
     // bodies, simulated or asleep; position = core position at last PSI).
     std::string describe_physics_objects(CKIpionManager* physics);

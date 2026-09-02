@@ -458,6 +458,10 @@ private:
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
 	void physics_session_drive_remotes();
 	void physics_session_attach_remote_navigation(uint32_t player);
+	void physics_session_attach_own_navigation(const std::string& ball_name, uint8_t ball_type);
+	void physics_session_zero_retail_forces();
+	bmmo::session::rollback_world physics_session_rollback_world();
+	bool physics_session_rollback(const bmmo::session_snapshot_msg& snapshot);
 	void physics_session_request_resync(const char* reason);
 	void physics_session_apply_resync(const bmmo::session_snapshot_msg& snapshot);
 	float physics_session_ball_force(uint8_t ball_type) const;

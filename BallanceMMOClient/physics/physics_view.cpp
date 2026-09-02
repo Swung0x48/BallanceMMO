@@ -353,6 +353,83 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::set_body_guard(bool enable, const char* except_entity, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_body_guard) {
+            error = "the physics_RT bridge lacks set_body_guard";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_body_guard(manager_, enable ? 1 : 0, except_entity, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::get_clock(float& time_factor, float& physics_delta, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->get_clock) {
+            error = "the physics_RT bridge lacks get_clock";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->get_clock(manager_, &time_factor, &physics_delta, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::step_physics(float delta_ms, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->step_physics) {
+            error = "the physics_RT bridge lacks step_physics";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->step_physics(manager_, delta_ms, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::navigation_poll(const char* ball_entity, bool enable, const int* key_codes,
+                                       const uint32_t* key_blocks, int count, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_poll) {
+            error = "the physics_RT bridge lacks navigation_poll";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_poll(manager_, ball_entity, enable ? 1 : 0, key_codes, key_blocks, count, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::navigation_get_state(const char* ball_entity, bmmo_physics_nav_state& out, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_get_state) {
+            error = "the physics_RT bridge lacks navigation_get_state";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_get_state(manager_, ball_entity, &out, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::navigation_set_state(const char* ball_entity, const bmmo_physics_nav_state& state,
+                                            std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->navigation_set_state) {
+            error = "the physics_RT bridge lacks navigation_set_state";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->navigation_set_state(manager_, ball_entity, &state, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
     bool physics_view::unphysicalize(const char* entity_name, std::string& error) const {
         error.clear();
         if (!available()) {
