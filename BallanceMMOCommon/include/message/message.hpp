@@ -79,6 +79,19 @@ namespace bmmo {
         LatencyData,
         RealWorldTimestamp,
         RemoteCommand,
+
+        // collision-overhaul room & session protocol. New opcodes are appended
+        // here in a fixed order (docs/rooms-and-sessions-protocol.md); older
+        // opcodes above keep their values so legacy clients stay compatible.
+        RoomRequest,
+        RoomState,
+        RoomEvent,
+        SessionStart,
+        SessionEnd,
+        SessionReady,
+        SessionInput,
+        SessionSnapshot,
+        SessionResync,
     };
 
     template<typename T, opcode C = None>

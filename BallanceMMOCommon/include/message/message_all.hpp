@@ -56,5 +56,8 @@
 #include "latency_data_msg.hpp"
 #include "real_world_timestamp_msg.hpp"
 #include "remote_command_msg.hpp"
+#include "room_request_msg.hpp"
+#include "room_state_msg.hpp"
+#include "room_event_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

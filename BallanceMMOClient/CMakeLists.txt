@@ -121,6 +121,7 @@ set(BMMO_CLIENT_SRC
         session/fixed_tick.cpp
         session/input_injector.cpp
         physics/physics_view.cpp
+        session/room_client.cpp
 )
 
 # MinHook (BSD-2-Clause) for the CKInputManager::PreProcess hook used by

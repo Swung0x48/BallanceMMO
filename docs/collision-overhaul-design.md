@@ -80,7 +80,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 1. M0：分支、构建、设计文档、命令通道。
 2. M1（已完成）：确定性校验台（客户端固定 tick + 录制；无头世界回放；逐 tick 比对）。结论：四个平台对同一段 Level 1 录制（2345 帧，含开场碎块、键盘操控、死亡重置）全部位级一致，见第 6 节。
-3. M2：房间系统与影子球会话。
+3. M2（已完成）：房间系统与影子球会话。房间协议（`room_request`/`room_state`/`room_event`）落地，服务端 `BallanceMMOServer/room/room_manager.hpp` + `server.cpp`，客户端 `/mmo room ...` 命令与 `session/room_client.cpp`；球状态按房间过滤。详见第 7 节。
 4. M3：物理会话（多球、tick 协议、预测与修正、机关镜像、分节、死亡、迟到加入、重开）。
 5. M4：打磨（host 迁移、重同步、清理、打包）。
 
@@ -96,6 +96,22 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 - `BallanceMMOClient/automation/`：命令通道。
 - `docs/engine-changes.md`：引擎 fork 改动记录。
 
+
+## 7. 房间与影子球会话（M2）
+
+房间协议见 `docs/rooms-and-sessions-protocol.md`，本节记录落地情况与已验证行为。
+
+实现：
+- 协议：`BallanceMMOCommon/include/entity/room.hpp`（共享枚举与 POD），`message/room_request_msg.hpp`、`room_state_msg.hpp`、`room_event_msg.hpp`（显式小端、逐字段边界检查）。新 opcode 追加在 `bmmo::opcode` 末尾，旧消息不变。
+- 服务端：`BallanceMMOServer/room/room_manager.hpp`（纯房间状态，无网络：create/join/ready/start/kick/close/leave 与房主迁移），`server.cpp` 的 `handle_room_request` 收发消息、`state_mutex_` 下串行；`tick()` 的球广播按房间分组，房内成员只收本房间的球，房外玩家（room 0）之间仍互见；断连自动退房并通知。config 增加 `rooms_enabled`/`maximum_rooms`/`maximum_members`。
+- 客户端：`/mmo room list|create|join|leave|ready|start|kick|close|status` 子命令（`BallanceMMOClient.cpp`），`RoomState`/`RoomEvent` 处理与渲染在 `session/room_client.cpp`；Tab 补全已加。
+
+已验证（本机，服务端 + 原版客户端 + MockClient）：
+- 房间生命周期：create → list → status → ready → start(shadow) → leave，单成员离开自动关房；房主标记、ready 状态、phase（lobby/running）转换均正确。
+- 球状态按房间过滤：真客户端在关卡内、建房后移动，房外的 MockClient 收到该玩家 0 条球更新；离房后重新收到（动态生效）。基线（两者都在房外）互见正常。
+- `room_manager` 纯逻辑单元测试（`BallanceMMOServer/tests/room_manager_test.cpp`，gtest）：容量上限、ready 门禁、房主迁移、踢人、关房等断言全过。
+
+范围说明：M2 只把球状态按房间隔离；聊天保持全局（符合协议 1.2）。倒计时/分节等旧广播仍全局，留待后续。物理会话（`mode=Physics`）此阶段返回 `PhysicsUnavailable`，由 M3 实现。
 ## 6. 确定性结论与要求（M1）
 
 同一份客户端录制（`BallanceMMOClient` 命令通道 `record start`，BMRC v2）在下列引擎上回放，2345 帧的物理哈希、刚体姿态、探针位置/速度全部一致，输出录制文件逐字节相同：

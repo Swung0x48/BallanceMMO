@@ -392,6 +392,15 @@ private:
 	// dispatched, the results go to "<file>.out" and the BML log, and the file
 	// is deleted. Path: env BMMO_COMMAND_FILE, else Bin/bmmo_command.txt.
 	void process_command_file();
+
+	// collision-overhaul room system (docs/rooms-and-sessions-protocol.md)
+	bmmo::room_state_msg last_room_state_{};
+	std::mutex room_state_mtx_;
+	bool room_list_requested_ = false; // guarded by room_state_mtx_
+	void handle_room_state(bmmo::room_state_msg msg);
+	void handle_room_event(const bmmo::room_event_msg& msg);
+	void print_room_status();
+	void print_room_list();
 	std::string dispatch_automation_command(const std::string& line);
 	std::string automation_status_line();
 	std::string automation_dump_script(const std::string& name);

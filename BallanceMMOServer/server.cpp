@@ -23,6 +23,7 @@
 #include <picojson/picojson.h>
 #include "server_data.hpp"
 #include "config_manager.hpp"
+#include "room/room_manager.hpp"
 
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
@@ -256,6 +257,8 @@ public:
         const bool prev_ghost_mode = config_.ghost_mode;
         if (!config_.load())
             return false;
+        rooms_.max_rooms = config_.maximum_rooms;
+        rooms_.max_members = static_cast<uint16_t>(std::clamp<uint32_t>(config_.maximum_members, 1, bmmo::room::MAX_MEMBERS_PER_MESSAGE));
         if (clients_.empty()) map_names_.clear();
         map_names_.insert(config_.default_map_names.begin(), config_.default_map_names.end());
         if (!clients_.empty()) {
@@ -420,6 +423,218 @@ public:
                 unchanged_balls.emplace_back(i.second.state.timestamp, i.first);
                 i.second.timestamp_updated = true;
             }
+        }
+    }
+
+    // ---- collision-overhaul room system (docs/rooms-and-sessions-protocol.md) ----
+    // All of these run with state_mutex_ held (from on_message or a console command).
+
+    void send_room_event(HSteamNetConnection to, bmmo::room::event_type type,
+            bmmo::room::error_code error, uint32_t room,
+            HSteamNetConnection actor = k_HSteamNetConnection_Invalid,
+            HSteamNetConnection subject = k_HSteamNetConnection_Invalid,
+            const std::string& reason = {}) {
+        bmmo::room_event_msg msg;
+        msg.type = type; msg.error = error; msg.room = room;
+        msg.actor = actor; msg.subject = subject; msg.reason = reason;
+        msg.serialize();
+        send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    }
+
+    bmmo::room_state_msg build_room_state(HSteamNetConnection recipient) {
+        bmmo::room_state_msg st;
+        st.own_room = rooms_.room_of(recipient);
+        for (const auto& [id, r]: rooms_.rooms()) {
+            bmmo::room::room_info info;
+            info.id = r.id; info.name = r.name; info.host = r.host;
+            info.member_count = static_cast<uint16_t>(r.members.size());
+            info.capacity = r.capacity; info.phase = r.phase; info.mode = r.mode;
+            st.rooms.push_back(std::move(info));
+        }
+        if (st.own_room != 0) {
+            if (const auto* r = rooms_.find(st.own_room)) {
+                for (const auto& m: r->members) {
+                    bmmo::room::room_member mm;
+                    mm.id = m.id; mm.ready = m.ready; mm.is_host = (m.id == r->host);
+                    auto ci = clients_.find(m.id);
+                    if (ci != clients_.end()) { mm.name = ci->second.name; mm.map = ci->second.current_map; }
+                    st.members.push_back(std::move(mm));
+                }
+            }
+        }
+        return st;
+    }
+
+    void send_room_state(HSteamNetConnection to) {
+        auto st = build_room_state(to);
+        st.serialize();
+        send(to, st.raw.str().data(), st.size(), k_nSteamNetworkingSend_Reliable);
+    }
+
+    void send_room_state_to_room(uint32_t room) {
+        const auto* r = rooms_.find(room);
+        if (!r) return;
+        for (const auto& m: r->members) send_room_state(m.id);
+    }
+
+    // Room membership / list changed: refresh everyone's view (rare events).
+    void broadcast_room_states() {
+        for (const auto& [conn, _]: clients_) send_room_state(conn);
+    }
+
+    bool room_members_same_map(const bmmo::server_room& r) {
+        const bmmo::map* first = nullptr;
+        for (const auto& m: r.members) {
+            auto ci = clients_.find(m.id);
+            if (ci == clients_.end()) continue;
+            if (!first) first = &ci->second.current_map;
+            else if (ci->second.current_map != *first) return false;
+        }
+        return true;
+    }
+
+    // Removes a client from its room (voluntary Leave or a disconnect) and
+    // notifies the remaining members. `ack` sends the leaver a RequestAccepted.
+    void room_remove_and_notify(HSteamNetConnection c, bool ack) {
+        auto rr = rooms_.leave(c);
+        if (!rr.was_member) {
+            if (ack) send_room_event(c, bmmo::room::event_type::RequestDenied,
+                    bmmo::room::error_code::NotInRoom, 0);
+            return;
+        }
+        if (ack && clients_.contains(c))
+            send_room_event(c, bmmo::room::event_type::RequestAccepted,
+                    bmmo::room::error_code::None, rr.room);
+        for (auto m: rr.remaining) {
+            send_room_event(m, bmmo::room::event_type::PlayerLeft,
+                    bmmo::room::error_code::None, rr.room, c, c);
+            if (rr.new_host != k_HSteamNetConnection_Invalid)
+                send_room_event(m, bmmo::room::event_type::HostChanged,
+                        bmmo::room::error_code::None, rr.room, rr.new_host);
+        }
+        broadcast_room_states();
+    }
+
+    void handle_room_request(client_data_collection::iterator client_it,
+            const bmmo::room_request_msg& msg) {
+        using bmmo::room::action;
+        using bmmo::room::event_type;
+        using bmmo::room::error_code;
+        const HSteamNetConnection c = client_it->first;
+        rooms_.max_rooms = config_.maximum_rooms;
+        rooms_.max_members = static_cast<uint16_t>(std::clamp<uint32_t>(
+                config_.maximum_members, 1, bmmo::room::MAX_MEMBERS_PER_MESSAGE));
+        if (!config_.rooms_enabled) {
+            send_room_event(c, event_type::RequestDenied, error_code::Unsupported, 0);
+            return;
+        }
+        switch (msg.action) {
+            case action::List:
+                send_room_state(c);
+                break;
+            case action::Create: {
+                std::string name = msg.name;
+                bmmo::string_utils::sanitize_string(name);
+                if (name.size() > bmmo::room::MAX_ROOM_NAME) name.resize(bmmo::room::MAX_ROOM_NAME);
+                uint32_t id = 0;
+                auto err = rooms_.create(c, name, id);
+                if (err != error_code::None) {
+                    send_room_event(c, event_type::RequestDenied, err, 0);
+                    break;
+                }
+                if (name.empty())
+                    if (auto* r = rooms_.find(id)) r->name = "Room #" + std::to_string(id);
+                send_room_event(c, event_type::RequestAccepted, error_code::None, id, c);
+                broadcast_room_states();
+                Printf("%s (#%u) created room %u.", client_it->second.name, c, id);
+                break;
+            }
+            case action::Join: {
+                auto err = rooms_.join(c, msg.room);
+                if (err != error_code::None) {
+                    send_room_event(c, event_type::RequestDenied, err, msg.room);
+                    break;
+                }
+                send_room_event(c, event_type::RequestAccepted, error_code::None, msg.room, c);
+                if (const auto* r = rooms_.find(msg.room))
+                    for (const auto& m: r->members)
+                        if (m.id != c)
+                            send_room_event(m.id, event_type::PlayerJoined, error_code::None, msg.room, c, c);
+                broadcast_room_states();
+                break;
+            }
+            case action::Leave:
+                room_remove_and_notify(c, true);
+                break;
+            case action::Ready:
+            case action::Unready: {
+                auto err = rooms_.set_ready(c, msg.action == action::Ready);
+                if (err != error_code::None) {
+                    send_room_event(c, event_type::RequestDenied, err, 0);
+                    break;
+                }
+                const uint32_t room = rooms_.room_of(c);
+                if (const auto* r = rooms_.find(room))
+                    for (const auto& m: r->members)
+                        send_room_event(m.id, event_type::ReadyChanged, error_code::None, room, c, c);
+                send_room_state_to_room(room);
+                break;
+            }
+            case action::Start: {
+                const uint32_t room = rooms_.room_of(c);
+                auto* r = rooms_.find(room);
+                if (!r) { send_room_event(c, event_type::RequestDenied, error_code::NotInRoom, 0); break; }
+                if (r->host != c) { send_room_event(c, event_type::RequestDenied, error_code::NotHost, room); break; }
+                if (!r->all_ready()) { send_room_event(c, event_type::RequestDenied, error_code::NotReady, room); break; }
+                if (!room_members_same_map(*r)) { send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room); break; }
+                if (msg.mode == bmmo::room::mode::Physics) {
+                    // physics sessions arrive in milestone M3
+                    send_room_event(c, event_type::RequestDenied, error_code::PhysicsUnavailable, room);
+                    break;
+                }
+                auto err = rooms_.start(c, msg.mode);
+                if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
+                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
+                for (const auto& m: r->members)
+                    send_room_event(m.id, event_type::SessionStarting, error_code::None, room, c);
+                broadcast_room_states();
+                Printf("Room %u started a shadow session.", room);
+                break;
+            }
+            case action::Kick: {
+                bmmo::room_manager::removal_result rr;
+                auto err = rooms_.kick(c, msg.target, rr);
+                if (err != error_code::None) {
+                    send_room_event(c, event_type::RequestDenied, err, rooms_.room_of(c));
+                    break;
+                }
+                send_room_event(msg.target, event_type::Kicked, error_code::None, rr.room, c, msg.target);
+                for (auto m: rr.remaining) {
+                    send_room_event(m, event_type::PlayerLeft, error_code::None, rr.room, c, msg.target);
+                    if (rr.new_host != k_HSteamNetConnection_Invalid)
+                        send_room_event(m, event_type::HostChanged, error_code::None, rr.room, rr.new_host);
+                }
+                send_room_event(c, event_type::RequestAccepted, error_code::None, rr.room, c, msg.target);
+                broadcast_room_states();
+                break;
+            }
+            case action::Close: {
+                std::vector<HSteamNetConnection> members;
+                uint32_t room = 0;
+                auto err = rooms_.close(c, members, room);
+                if (err != error_code::None) {
+                    send_room_event(c, event_type::RequestDenied, err, rooms_.room_of(c));
+                    break;
+                }
+                for (auto m: members)
+                    send_room_event(m, event_type::RoomClosed, error_code::None, room, c);
+                broadcast_room_states();
+                Printf("Room %u closed by #%u.", room, c);
+                break;
+            }
+            default:
+                send_room_event(c, event_type::RequestDenied, error_code::Unsupported, 0);
+                break;
         }
     }
 
@@ -602,6 +817,8 @@ protected:
         username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
         ghost_spectator_clients_.erase(client);
+        room_remove_and_notify(client, false); // notify roommates a member left
+
         Printf(bmmo::color_code(msg.code), "%s (#%u) disconnected.", name, client);
 
         switch (clients_.size()) {
@@ -1334,6 +1551,14 @@ protected:
                 }
                 break;
             }
+            case bmmo::RoomRequest: {
+                bmmo::room_request_msg msg{};
+                msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                if (!msg.deserialize())
+                    break;
+                handle_room_request(client_it, msg);
+                break;
+            }
             case bmmo::CurrentSector: {
                 auto* msg = bmmo::message_utils::view_as<bmmo::current_sector_msg>(networking_msg);
                 if (!msg) break;
@@ -1584,7 +1809,19 @@ protected:
             for (const auto& i: ghost_spectator_clients_)
                 send(i, ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
         } else {
-            broadcast_message(ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+            // Room-scoped fan-out: a room's members see only their room's balls;
+            // players not in any room (room 0) still see one another, as before.
+            std::unordered_map<uint32_t, bmmo::owned_compressed_ball_state_msg> per_room;
+            for (const auto& b: ball_msg.balls)
+                per_room[rooms_.room_of(b.player_id)].balls.push_back(b);
+            for (const auto& u: ball_msg.unchanged_balls)
+                per_room[rooms_.room_of(u.player_id)].unchanged_balls.push_back(u);
+            for (auto& [_, m]: per_room) m.serialize();
+            for (const auto& [conn, _]: clients_) {
+                auto it = per_room.find(rooms_.room_of(conn));
+                if (it != per_room.end())
+                    send(conn, it->second.raw.str().data(), it->second.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+            }
         }
 
         ++ping_data_counter_;
@@ -1621,6 +1858,7 @@ protected:
     client_data_collection clients_;
     std::map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
     std::unordered_set<HSteamNetConnection> ghost_spectator_clients_; // ghost mode - only operators and spectators can see other players
+    bmmo::room_manager rooms_; // collision-overhaul room system (guarded by state_mutex_)
     // Guards all server state shared between the network thread and the
     // console thread (clients_, username_, maps_, map_names_,
     // ghost_spectator_clients_, permanent_notification_, last_countdown_map_,

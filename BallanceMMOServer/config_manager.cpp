@@ -41,6 +41,9 @@ bool config_manager::load() {
     log_level_restarts = yaml_load_value(config_, "log_level_restarts", log_level_restarts);
     serious_warning_as_dnf = yaml_load_value(config_, "serious_warning_as_dnf", serious_warning_as_dnf);
     ghost_mode = yaml_load_value(config_, "ghost_mode", ghost_mode);
+    rooms_enabled = yaml_load_value(config_, "rooms_enabled", rooms_enabled);
+    maximum_rooms = yaml_load_value(config_, "maximum_rooms", maximum_rooms);
+    maximum_members = yaml_load_value(config_, "maximum_members", maximum_members);
 
     std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
     if (logging_level_string == "msg")

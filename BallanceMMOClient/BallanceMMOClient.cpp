@@ -979,6 +979,43 @@ void BallanceMMOClient::init_commands() {
         if (!line.empty()) SendIngameMessage(line);
     });
     console_.register_aliases("list", {"l", "list-id", "li"});
+    console_.register_command("room", [&] {
+        if (!connected()) { SendIngameMessage("Error: not connected to a server."); return; }
+        const auto sub = console_.get_next_word(true);
+        bmmo::room_request_msg msg{};
+        if (sub.empty() || sub == "status") { print_room_status(); return; }
+        else if (sub == "list") {
+            msg.action = bmmo::room::action::List;
+            { std::lock_guard lk(room_state_mtx_); room_list_requested_ = true; }
+        }
+        else if (sub == "create") { msg.action = bmmo::room::action::Create; msg.name = console_.get_rest_of_line(); }
+        else if (sub == "join")   { msg.action = bmmo::room::action::Join; msg.room = static_cast<uint32_t>(console_.get_next_int()); }
+        else if (sub == "leave")  { msg.action = bmmo::room::action::Leave; }
+        else if (sub == "ready" || sub == "unready") {
+            const auto arg = console_.get_next_word(true);
+            bool ready = (sub == "ready");
+            if (arg == "off" || arg == "false" || arg == "0") ready = false;
+            else if (arg == "on" || arg == "true" || arg == "1") ready = true;
+            msg.action = ready ? bmmo::room::action::Ready : bmmo::room::action::Unready;
+        }
+        else if (sub == "start") {
+            msg.action = bmmo::room::action::Start;
+            const auto m = console_.get_next_word(true);
+            msg.mode = (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
+        }
+        else if (sub == "kick") {
+            msg.action = bmmo::room::action::Kick;
+            const auto w = console_.get_next_word();
+            if (w.empty()) { SendIngameMessage("Usage: /mmo room kick <player|#id>"); return; }
+            if (w[0] == '#') msg.target = static_cast<HSteamNetConnection>(atoll(w.substr(1).c_str()));
+            else msg.target = db_.get_client_id(w);
+            if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w)); return; }
+        }
+        else if (sub == "close") { msg.action = bmmo::room::action::Close; }
+        else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close.", sub)); return; }
+        msg.serialize();
+        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    });
     console_.register_command("dnf", [&] {
         if (current_map_.level == 0 || spectator_mode_)
             return;
@@ -1354,6 +1391,21 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                 else
                     options.push_back(get_display_nickname());
                 return options;
+            }
+            else if (lower1 == "room") {
+                if (length == 3)
+                    return {"list", "create", "join", "leave", "ready", "unready", "start", "kick", "close", "status"};
+                const auto sub = boost::algorithm::to_lower_copy(args[2]);
+                if (length == 4 && sub == "start") return {"shadow", "physics"};
+                if (length == 4 && (sub == "ready" || sub == "unready")) return {"on", "off"};
+                if (length == 4 && sub == "kick") {
+                    std::vector<std::string> options;
+                    db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                        if (pair.first != db_.get_client_id()) options.push_back(pair.second.name);
+                        return true;
+                    });
+                    return options;
+                }
             }
             else if (lower1 == "mode")
                 return {"hs", "sr"};
@@ -2179,6 +2231,20 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     }
     case bmmo::LevelFinish:
         break;
+    case bmmo::RoomState: {
+        bmmo::room_state_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_room_state(std::move(msg));
+        break;
+    }
+    case bmmo::RoomEvent: {
+        bmmo::room_event_msg msg{};
+        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
+        if (msg.deserialize())
+            handle_room_event(msg);
+        break;
+    }
     case bmmo::MapNames: {
         bmmo::map_names_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
