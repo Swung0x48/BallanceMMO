@@ -10,6 +10,30 @@
 
 #include <array>
 
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+
+namespace {
+    // BMMO_AUTOMATION_LOG=<path>: unbuffered trace of the pipe server's state
+    // machine (the mod loader's log is buffered and useless while it runs).
+    void pipe_trace(const char* format, ...) {
+        static FILE* sink = [] {
+            const char* path = std::getenv("BMMO_AUTOMATION_LOG");
+            FILE* file = path && *path ? std::fopen(path, "a") : nullptr;
+            if (file) std::setvbuf(file, nullptr, _IONBF, 0);
+            return file;
+        }();
+        if (!sink) return;
+        va_list args;
+        va_start(args, format);
+        std::vfprintf(sink, format, args);
+        va_end(args);
+        std::fputc('\n', sink);
+    }
+}
+
 namespace bmmo::automation {
     namespace {
         constexpr DWORD kBufferBytes = 64 * 1024;
@@ -37,6 +61,7 @@ namespace bmmo::automation {
         name_ = name;
         stopping_.store(false, std::memory_order_release);
         running_.store(true, std::memory_order_release);
+        pipe_trace("start: name=%s", name.c_str());
         thread_ = std::thread([this] { serve(); });
         return true;
     }
@@ -56,6 +81,7 @@ namespace bmmo::automation {
 
     void command_pipe::close_client() {
         std::lock_guard lk(write_mutex_);
+        pipe_trace("close_client: pipe=%p", pipe_);
         if (pipe_) {
             // Cancelling outstanding overlapped I/O unblocks the server thread.
             CancelIoEx(static_cast<HANDLE>(pipe_), nullptr);
@@ -102,6 +128,8 @@ namespace bmmo::automation {
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT
                     | PIPE_REJECT_REMOTE_CLIENTS,
                 1, kBufferBytes, kBufferBytes, 0, nullptr);
+            pipe_trace("serve: CreateNamedPipe(%s) -> %p err=%lu", path.c_str(), static_cast<void*>(pipe),
+                       static_cast<unsigned long>(GetLastError()));
             if (pipe == INVALID_HANDLE_VALUE) {
                 Sleep(200);
                 continue;
@@ -116,9 +144,11 @@ namespace bmmo::automation {
             bool connected = false;
             if (connect.hEvent) {
                 if (ConnectNamedPipe(pipe, &connect)) {
+                    pipe_trace("serve: ConnectNamedPipe returned TRUE");
                     connected = true;
                 } else {
                     const DWORD last = GetLastError();
+                    pipe_trace("serve: ConnectNamedPipe FALSE err=%lu", static_cast<unsigned long>(last));
                     if (last == ERROR_PIPE_CONNECTED) {
                         connected = true;
                     } else if (last == ERROR_IO_PENDING) {
@@ -126,10 +156,17 @@ namespace bmmo::automation {
                             connect.hEvent, static_cast<HANDLE>(wake_event_)};
                         const DWORD waited = WaitForMultipleObjects(
                             2, handles.data(), FALSE, INFINITE);
+                        pipe_trace("serve: connect wait -> %lu", static_cast<unsigned long>(waited));
                         connected = waited == WAIT_OBJECT_0;
                     }
                 }
                 CloseHandle(connect.hEvent);
+            }
+            {
+                ULONG client_pid = 0;
+                GetNamedPipeClientProcessId(pipe, &client_pid);
+                pipe_trace("serve: connected=%d stopping=%d client_pid=%lu", connected ? 1 : 0,
+                           stopping_.load(std::memory_order_acquire) ? 1 : 0, static_cast<unsigned long>(client_pid));
             }
             if (!connected || stopping_.load(std::memory_order_acquire)) {
                 close_client();
@@ -154,6 +191,8 @@ namespace bmmo::automation {
                         && GetOverlappedResult(pipe, &read, &bytes, FALSE);
                 }
                 CloseHandle(read.hEvent);
+                pipe_trace("serve: read ok=%d bytes=%lu err=%lu", ok ? 1 : 0, static_cast<unsigned long>(bytes),
+                           static_cast<unsigned long>(GetLastError()));
                 if (!ok || bytes == 0) break;
 
                 partial.append(buffer.data(), bytes);

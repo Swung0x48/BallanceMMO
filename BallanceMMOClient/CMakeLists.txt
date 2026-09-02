@@ -120,7 +120,7 @@ set(BMMO_CLIENT_SRC
         automation/client_automation.cpp
         session/fixed_tick.cpp
         session/input_injector.cpp
-        physics/retail_physics_view.cpp
+        physics/physics_view.cpp
 )
 
 # MinHook (BSD-2-Clause) for the CKInputManager::PreProcess hook used by
@@ -179,4 +179,10 @@ target_compile_definitions(BallanceMMOClient PRIVATE
         _CRT_NONSTDC_NO_WARNINGS)
 if (NOT MSVC)
     target_compile_options(BallanceMMOClient PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
+endif ()
+
+# Drop-in physics_RT plugin (open-source engine + BallanceMMO bridge); needs
+# the VirtoolsSDK imported targets created above, hence included here.
+if (BMMO_BUILD_PHYSICS_RT)
+    include("${CMAKE_CURRENT_LIST_DIR}/../cmake/PhysicsRTPlugin.cmake")
 endif ()

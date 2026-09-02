@@ -18,7 +18,9 @@
 #include "automation/command_pipe.h"
 #include "session/fixed_tick.hpp"
 #include "session/input_injector.hpp"
-#include "physics/retail_physics_view.hpp"
+#include "physics/physics_view.hpp"
+#include <game/menu_driver.hpp>
+#include <fstream>
 #include <physics/tick_record.hpp>
 #include <map>
 #include <set>
@@ -382,16 +384,19 @@ private:
 	// Test automation (docs/collision-overhaul-design.md section 3.6).
 	bmmo::automation::command_pipe command_pipe_;
 	std::set<CKDWORD> automation_held_keys_;
+	std::set<CKDWORD> automation_released_keys_;  // report KS_RELEASED once
 	void start_command_pipe_from_environment();
 	void process_command_pipe();
 	std::string dispatch_automation_command(const std::string& line);
 	std::string automation_status_line();
 	std::string automation_dump_script(const std::string& name);
 	std::string automation_load_level(int level);
+	bmmo::game::level_request level_request_;
+	void process_level_request();
 
 	// Deterministic session clock and physics state view (design 3.1, M1).
 	bmmo::session::fixed_tick_driver fixed_tick_;
-	bmmo::physics::retail_physics_view physics_view_;
+	bmmo::physics::physics_view physics_view_;
 	bmmo::physics::tick_record_writer record_writer_;
 	bool record_pending_frame_ = false;
 	bool record_anchor_pending_ = false;
@@ -399,6 +404,11 @@ private:
 	// existing record are injected tick by tick while a new record is written.
 	bmmo::physics::tick_record replay_source_;
 	bool replay_active_ = false;
+	bool replay_anchored_ = false;
+	bool fpu53_ = false;              // experiment: force 53-bit x87 precision per frame
+	uint64_t record_exact_from_ = 0;  // record exact core dumps for frames [from, to]
+	uint64_t record_exact_to_ = 0;   // replay keys apply from the tick after the anchor
+	std::ofstream record_diag_;      // <record path>.txt: bodies and physics events at key frames
 	size_t replay_index_ = 0;
 	// Keyboard state captured by the input hook for the current behaviour
 	// frame (after injection), plus the CK tick it was polled on.

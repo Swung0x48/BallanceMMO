@@ -401,6 +401,7 @@ void BallanceMMOClient::OnPostStartMenu()
 void BallanceMMOClient::OnProcess() {
     fixed_tick_.on_process(m_bml);
     process_command_pipe();
+    process_level_request();
     process_tick_record();
     poll_local_input();
     if (init_)

@@ -14,8 +14,8 @@
 
 | 主题 | 决策 |
 | --- | --- |
-| 客户端引擎二进制 | 先用确定性校验台验证开源 physics_RT 的跨平台一致性；可证明一致则物理会话要求使用开源 physics_RT（按哈希白名单），否则保持原版 DLL，依赖修正掩盖差异。 |
-| 服务端平台 | Windows 与 Linux 都要；无头引擎为 Ballanced 开源引擎静态链接（x64）。 |
+| 客户端引擎二进制 | 已用确定性校验台证明：装有开源 physics_RT（含 BMMO 桥接）的原版客户端与 Windows x86/x64、Linux x86_64、Android ARM64 的无头引擎逐帧位级一致（见第 6 节）。因此物理会话要求客户端使用开源 physics_RT（按哈希白名单），不再考虑原版 DLL + 修正掩盖的方案。 |
+| 服务端平台 | Windows 与 Linux 都要，其它平台（含 ARM64）也必须能跑；无头引擎为 Ballanced 开源引擎静态链接，已在 Windows x86/x64、Linux x86_64（GCC）、Android ARM64（NDK clang）验证一致。 |
 | 引擎 fork 改动 | 尽量不改；确有必要时允许，必须在 `docs/engine-changes.md` 逐条记录内容与理由。 |
 | tick 频率 | 按原版：CK 行为帧 1/66 s，Gameplay 脚本设置的物理 time factor 为 2，因此每 tick 恰好 2 个 IVP PSI（IVP `delta_PSI_time` = 1/66 s）。会话开始时从脚本读取 factor 并校验。 |
 | 机关 | 第一阶段镜像：机关脚本只在服务端运行；客户端挂起共享机关的本地脚本根，每 tick 把服务端机关刚体状态写入本地刚体。 |
@@ -73,7 +73,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 ## 4. 里程碑
 
 1. M0：分支、构建、设计文档、命令通道。
-2. M1：确定性校验台（客户端固定 tick + 录制；无头世界回放；逐 tick 比对；跨平台一致性结论）。
+2. M1（已完成）：确定性校验台（客户端固定 tick + 录制；无头世界回放；逐 tick 比对）。结论：四个平台对同一段 Level 1 录制（2345 帧，含开场碎块、键盘操控、死亡重置）全部位级一致，见第 6 节。
 3. M2：房间系统与影子球会话。
 4. M3：物理会话（多球、tick 协议、预测与修正、机关镜像、分节、死亡、迟到加入、重开）。
 5. M4：打磨（host 迁移、重同步、清理、打包）。
@@ -84,6 +84,28 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 - `BallanceMMOServer/room/`：房间管理。
 - `BallanceMMOServer/sim/`：无头世界、tick 调度、录制回放工具。
 - `BallanceMMOClient/session/`：客户端会话控制、预测修正。
-- `BallanceMMOClient/physics/`：原版 physics_RT 私有布局适配（参考 BallanceTAS `physics_RT.h`）。
+- `BallanceMMOClient/physics/`：通过 physics_RT 导出的 `bmmo_physics_api` 桥接表读取物理世界（哈希、刚体、事件日志）；原版 DLL 私有布局适配已删除。
+- `BallanceMMOCommon/include/physics/`、`src/physics/`：桥接 C API、世界哈希、录制格式、可移植数学（OpenLibm 子集）与确定性排序垫片。
+- `cmake/PhysicsFloatingPoint.cmake`、`PortableMath.cmake`、`PhysicsRTPlugin.cmake`、`BallancedHeadless.cmake`：客户端插件与无头引擎共用的确定性构建规则。
 - `BallanceMMOClient/automation/`：命令通道。
 - `docs/engine-changes.md`：引擎 fork 改动记录。
+
+## 6. 确定性结论与要求（M1）
+
+同一份客户端录制（`BallanceMMOClient` 命令通道 `record start`，BMRC v2）在下列引擎上回放，2345 帧的物理哈希、刚体姿态、探针位置/速度全部一致，输出录制文件逐字节相同：
+
+| 引擎 | 编译器 | 结果 |
+| --- | --- | --- |
+| 原版客户端 + 开源 physics_RT.dll（x86） | MSVC | 参考 |
+| 无头引擎 Windows x86 / x64 | MSVC `/fp:precise` | 2345/2345 |
+| 无头引擎 Linux x86_64（WSL Arch） | GCC 16 | 2345/2345 |
+| 无头引擎 Android ARM64（手机，adb） | NDK 28 clang | 2345/2345 |
+
+要做到这一点必须同时满足：
+
+1. 客户端与服务端使用同一份开源 physics_RT 源码；引擎 fork 的两处改动见 `docs/engine-changes.md`（向量 FPU 块大小固定为 1；`XArray/XSArray::Sort` 与 qhull 改用与 MSVC 运行库同序的确定性快速排序）。
+2. 浮点：MSVC `/fp:precise`（x86 加 `/arch:SSE2`），GCC/Clang `-ffp-contract=off -fexcess-precision=standard`；不能用 `/fp:strict`（x86 碰撞代码会崩）。
+3. 超越函数不走各平台 libm，而是构建进物理模块的 OpenLibm 子集（`BallanceMMOCommon/third_party/openlibm`）；`sqrt`/`fabs`/`floor` 等精确运算保持硬件实现。
+4. 无头引擎的空管理器必须严格遵守 CK2 的调用约定（例如 `CKWaveSound::PlayMinion` 传给 `Play` 的是 `SoundMinion` 包装而非源句柄）；此前所有“随内存布局变化”的假性不确定现象都来自这一处堆越界。
+
+验证工具：`BallanceMMOSimTool --replay`（`--write-record`、`--exact-frames`、`--bodies-frames`、`--debug-ticks`）、`scripts/bmrc_diff.py`、`scripts/test_det_qsort.cpp`；定位平台差异的方法是对两个引擎逐 tick 的行为块执行轨迹做 diff。

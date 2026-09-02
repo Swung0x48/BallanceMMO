@@ -33,6 +33,13 @@ function(bmmo_add_ballanced_headless BALLANCED_ROOT OUT_TARGET)
         set(SDL_TESTS OFF CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
         set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+        # Headless: no window system needed (SDL otherwise refuses to
+        # configure on a Unix box without X11/Wayland development files).
+        set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+        set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+        set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
+        set(SDL_RENDER OFF CACHE BOOL "" FORCE)
+        set(SDL_GPU OFF CACHE BOOL "" FORCE)
         foreach (_subsystem IN ITEMS AUDIO VIDEO GPU RENDER CAMERA JOYSTICK HAPTIC SENSOR DIALOG)
             set("SDL_${_subsystem}" OFF CACHE BOOL "" FORCE)
         endforeach ()
@@ -41,6 +48,13 @@ function(bmmo_add_ballanced_headless BALLANCED_ROOT OUT_TARGET)
             GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
             GIT_TAG 96292a5b464258a2b926e0a3d72f8b98c2a81aa6)
         FetchContent_MakeAvailable(bmmo_sdl3)
+    endif ()
+
+    # VxMath links the literal library name "pthread"; bionic has no such
+    # library (threads live in libc).  An empty target of that name makes the
+    # reference resolve to nothing on Android without touching the engine.
+    if (ANDROID AND NOT TARGET pthread)
+        add_library(pthread INTERFACE)
     endif ()
 
     set(VXMATH_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -101,6 +115,12 @@ function(bmmo_add_ballanced_headless BALLANCED_ROOT OUT_TARGET)
 
     # physics_RT constructs IVP objects whose layouts depend on the platform
     # macros IVP compiles with privately; mirror them at this boundary.
+    include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PhysicsFloatingPoint.cmake")
+    bmmo_apply_physics_fp_flags_to_all(physics_RTStatic)
+    bmmo_apply_deterministic_sort(ivp_compact_builder "${_src}/VxMath/include")
+    include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PortableMath.cmake")
+    bmmo_apply_portable_math_to_all(physics_RTStatic)
+    bmmo_link_portable_math(physics_RTStatic PUBLIC)
     if (WIN32 AND TARGET physics_RTStatic)
         target_compile_definitions(physics_RTStatic PRIVATE WIN32 _WINDOWS)
     endif ()

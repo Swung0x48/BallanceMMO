@@ -5,7 +5,10 @@
 //
 //   header:  magic "BMRC", version u32, tick_rate f64, level i32,
 //            physics_sha256[64] (hex, NUL padded), reserved[32]
-//   frames:  { keys[256] u8, hash u64, ivp_time f64, cores i32, flags u32 }
+//   frames:  v1 { keys[256] u8, hash u64, ivp_time f64, cores i32, flags u32 }
+//            v2 adds { surfaces u64, probe_position f64[3], probe_speed f32[3],
+//                      probe_rot_speed f32[3], pose u64, probe_name char[32] }
+//            (the probe core, see world_hash)
 //
 // Frame 0 is the first tick at which the retail Gameplay_Ingame script is
 // active (the level has started).  keys is the DirectInput keyboard state the
@@ -21,7 +24,7 @@
 namespace bmmo::physics {
     struct tick_record_header {
         char magic[4] = {'B', 'M', 'R', 'C'};
-        uint32_t version = 1;
+        uint32_t version = 2;
         double tick_rate = 66.0;
         int32_t level = 0;
         char physics_sha256[64] = {};
@@ -35,8 +38,15 @@ namespace bmmo::physics {
         double ivp_time = 0.0;
         int32_t cores = 0;
         uint32_t flags = 0;
+        uint64_t surfaces = 0;
+        double probe_position[3] = {};
+        float probe_speed[3] = {};
+        float probe_rot_speed[3] = {};
+        uint64_t pose = 0;
+        char probe_name[32] = {};
     };
-    static_assert(sizeof(tick_record_frame) == 256 + 8 + 8 + 4 + 4);
+    static_assert(sizeof(tick_record_frame) == 256 + 8 + 8 + 4 + 4 + 8 + 24 + 12 + 12 + 8 + 32);
+    inline constexpr size_t kTickRecordFrameV1Size = 256 + 8 + 8 + 4 + 4;
 
     class tick_record_writer {
     public:
@@ -72,13 +82,15 @@ namespace bmmo::physics {
                 return false;
             }
             stream.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (!stream || std::memcmp(header.magic, "BMRC", 4) != 0 || header.version != 1) {
-                error = "not a BMRC v1 record: " + path;
+            if (!stream || std::memcmp(header.magic, "BMRC", 4) != 0
+                    || (header.version != 1 && header.version != 2)) {
+                error = "not a BMRC v1/v2 record: " + path;
                 return false;
             }
             frames.clear();
             tick_record_frame frame;
-            while (stream.read(reinterpret_cast<char*>(&frame), sizeof(frame)))
+            const size_t frame_size = header.version == 1 ? kTickRecordFrameV1Size : sizeof(frame);
+            while (stream.read(reinterpret_cast<char*>(&frame), static_cast<std::streamsize>(frame_size)))
                 frames.push_back(frame);
             return true;
         }

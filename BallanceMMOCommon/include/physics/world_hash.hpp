@@ -24,7 +24,14 @@ namespace bmmo::physics {
     struct world_hash {
         uint64_t hash = 0;       // environment clock + every movable core
         uint64_t pose = 0;       // movable cores only, without absolute times
+        uint64_t surfaces = 0;   // order-independent signature of every body's collision surface
         int cores = 0;
+        // Probe: the game ball when simulated (name starts with "Ball_"), else
+        // the first simulated core; lets a replay show the size of a divergence.
+        char probe_name[32] = {};
+        double probe_position[3] = {};
+        float probe_speed[3] = {};
+        float probe_rot_speed[3] = {};
         double ivp_time = 0.0;
         int ivp_seed = 0;
         float delta_time_ms = 0.0f;

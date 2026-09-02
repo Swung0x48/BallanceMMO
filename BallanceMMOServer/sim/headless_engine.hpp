@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 
+#include <game/menu_driver.hpp>
+
 class CKContext;
 class CKTimeManager;
 class CKRenderContext;
@@ -51,12 +53,21 @@ namespace bmmo::sim {
         bool tick_debug(const std::function<void(const std::string& script, const std::string& block,
                                                  const std::string& sub_block, int action)>& on_step,
                         std::string& error);
-        // Mirrors Menu_Start: CurrentLevel[0,0] = level, "Load Level" -> Level.
+        // Starts a level through the retail menus (game/menu_driver.hpp);
+        // advanced by tick() until the level is selected.  Query with
+        // level_request().
+        void request_level(int level);
+        const bmmo::game::level_request& level_request() const { return level_request_; }
+        // Direct path: CurrentLevel[0,0] = level, "Load Level" -> Level.  The
+        // menus stay active; only for experiments.
         bool load_level(int level, std::string& error);
         bool send_message(const std::string& message, CKBeObject* target, std::string& error);
 
-        // Scriptable keyboard for the null input manager (CKKEY_* codes).
+        // Scriptable keyboard for the null input manager (CKKEY_* codes,
+        // KS_PRESSED / KS_RELEASED semantics like the retail manager).
         void set_key(unsigned key, bool down);
+        // Verbatim 256-byte keyboard buffer (a recorded retail frame).
+        void set_keyboard_state(const unsigned char* keys);
         void clear_keys();
 
         uint64_t ticks() const { return ticks_; }
@@ -71,6 +82,7 @@ namespace bmmo::sim {
         headless_engine() = default;
         bool finish_load(const std::string& resolved_file, std::string& error);
         void drain_player_commands();
+        void advance_level_request();
 
         engine_options options_;
         CKContext* context_ = nullptr;
@@ -79,5 +91,6 @@ namespace bmmo::sim {
         void* game_info_ = nullptr;
         uint64_t ticks_ = 0;
         bool startup_acquired_ = false;
+        bmmo::game::level_request level_request_;
     };
 }

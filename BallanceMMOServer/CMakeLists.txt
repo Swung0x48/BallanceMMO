@@ -32,6 +32,14 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH on)
 # endif ()
 
 #add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
+# BMMO_BUILD_SIM_ONLY: only the headless simulation library and tool (no
+# networking); used for physics determinism work on platforms where the
+# server's dependencies are not set up.
+option(BMMO_BUILD_SIM_ONLY "Build only the headless simulation library and tool" OFF)
+if (BMMO_BUILD_SIM_ONLY AND NOT BMMO_BUILD_SIM)
+    message(FATAL_ERROR "BMMO_BUILD_SIM_ONLY needs BMMO_BUILD_SIM=ON")
+endif ()
+if (NOT BMMO_BUILD_SIM_ONLY)
 if (NOT TARGET GameNetworkingSockets)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets ${CMAKE_CURRENT_BINARY_DIR}/GameNetworkingSockets)
 endif ()
@@ -63,6 +71,8 @@ set(YA_GETOPT_SRC "../submodule/ya_getopt/ya_getopt.c")
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
+endif ()  # NOT BMMO_BUILD_SIM_ONLY
+if (NOT BMMO_BUILD_SIM_ONLY)
 add_executable(BallanceMMOServer server.cpp config_manager.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMOServer PRIVATE)
 target_link_libraries(BallanceMMOServer GameNetworkingSockets::shared yaml-cpp replxx)
@@ -73,6 +83,7 @@ add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ${YA
 target_include_directories(BallanceMMORecordParser PRIVATE)
 target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared replxx)
 
+endif ()  # NOT BMMO_BUILD_SIM_ONLY (executables)
 if (BMMO_BUILD_SIM)
     include(${CMAKE_CURRENT_LIST_DIR}/../cmake/BallancedHeadless.cmake)
     bmmo_add_ballanced_headless(${CMAKE_CURRENT_LIST_DIR}/../submodule/Ballanced BMMO_HEADLESS_TARGET)
@@ -95,26 +106,40 @@ if (BMMO_BUILD_SIM)
     add_library(BallanceMMOSim STATIC
             sim/headless_engine.cpp sim/headless_engine.hpp
             sim/null_managers.cpp sim/null_managers.hpp
-            sim/physics_state.cpp sim/physics_state.hpp
-            sim/rasterizer_stub.cpp
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_state.cpp"
             "${BMMO_PLAYER_SRC_DIR}/Hotfix.cpp"
             "${BMMO_PLAYER_SRC_DIR}/GameConfig.cpp"
             "${BMMO_PLAYER_SRC_DIR}/IniFile.cpp"
             "${BMMO_PLAYER_SRC_DIR}/Logger.cpp"
             "${BMMO_PLAYER_SRC_DIR}/Utils.cpp")
     target_include_directories(BallanceMMOSim PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include"
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config"
             "${BMMO_PLAYER_SRC_DIR}" "${BMMO_PLAYER_GENERATED_DIR}")
     target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET})
     target_compile_features(BallanceMMOSim PUBLIC cxx_std_20)
     if (WIN32)
         target_compile_definitions(BallanceMMOSim PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
     endif ()
-    add_executable(BallanceMMOSimTool sim/sim_tool.cpp)
+    # The rasterizer stub answers a reference made by the static render
+    # engine; it must be an object of the executable itself (an archive
+    # member would be skipped by GNU ld, which scans libraries in order).
+    add_executable(BallanceMMOSimTool sim/sim_tool.cpp sim/rasterizer_stub.cpp sim/crash_report.cpp)
     target_link_libraries(BallanceMMOSimTool PRIVATE BallanceMMOSim)
-    target_link_libraries(BallanceMMOServer BallanceMMOSim)
-    target_compile_definitions(BallanceMMOServer PRIVATE BMMO_BUILD_SIM=1)
+    if (WIN32)
+        target_link_libraries(BallanceMMOSimTool PRIVATE dbghelp)
+    elseif (ANDROID)
+        # SDL's Android file layer uses the asset manager and the log API.
+        target_link_libraries(BallanceMMOSimTool PRIVATE android log)
+    endif ()
+    if (NOT BMMO_BUILD_SIM_ONLY)
+        target_sources(BallanceMMOServer PRIVATE sim/rasterizer_stub.cpp)
+        target_link_libraries(BallanceMMOServer BallanceMMOSim)
+        target_compile_definitions(BallanceMMOServer PRIVATE BMMO_BUILD_SIM=1)
+    endif ()
 endif ()
 
+if (NOT BMMO_BUILD_SIM_ONLY)
 target_compile_definitions(BallanceMMOServer PRIVATE BMMO_INCLUDE_INTERNAL)
 target_compile_definitions(BallanceMMOMockClient PRIVATE BMMO_INCLUDE_INTERNAL)
 target_compile_definitions(BallanceMMORecordParser PRIVATE BMMO_INCLUDE_INTERNAL)
@@ -184,3 +209,5 @@ if (BUILD_SERVER_APPIMAGE)
     add_executable(BallanceMMOLaunchSelector appimage/launch_selector.cpp)
     install(TARGETS BallanceMMOLaunchSelector DESTINATION bin)
 endif()
+
+endif ()  # NOT BMMO_BUILD_SIM_ONLY (tail)

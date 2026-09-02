@@ -322,6 +322,7 @@ namespace bmmo::sim {
         time_->SetTimeScaleFactor(1.0f);
         time_->SetMinimumDeltaTime(kFixedDeltaMs);
         time_->SetMaximumDeltaTime(kFixedDeltaMs);
+        advance_level_request();
         const CKERROR processed = context_->Process();
         if (processed != CK_OK) {
             error = "CKContext::Process failed: " + std::to_string(processed);
@@ -345,6 +346,7 @@ namespace bmmo::sim {
         time_->SetTimeScaleFactor(1.0f);
         time_->SetMinimumDeltaTime(kFixedDeltaMs);
         time_->SetMaximumDeltaTime(kFixedDeltaMs);
+        advance_level_request();
         const CKERROR started = context_->ProcessDebugStart(kFixedDeltaMs);
         if (started != CK_OK) {
             error = "ProcessDebugStart failed: " + std::to_string(started);
@@ -405,6 +407,31 @@ namespace bmmo::sim {
         return true;
     }
 
+    void headless_engine::request_level(int level) {
+        level_request_.begin(level);
+        log("level " + std::to_string(level) + " requested through the menus");
+    }
+
+    void headless_engine::advance_level_request() {
+        if (!level_request_.pending()) return;
+        using status = bmmo::game::level_request::status;
+        const bool was_pressed = level_request_.start_pressed;
+        switch (level_request_.step(context_)) {
+        case status::start_pressed:
+            if (!was_pressed) log("menu: pressed Start in Menu_Main at tick " + std::to_string(ticks_));
+            break;
+        case status::level_selected:
+            log("menu: selected level " + std::to_string(level_request_.level) + " in Menu_Start at tick "
+                + std::to_string(ticks_));
+            break;
+        case status::failed:
+            log("menu: level request failed: " + level_request_.error);
+            break;
+        default:
+            break;
+        }
+    }
+
     bool headless_engine::load_level(int level, std::string& error) {
         error.clear();
         CKDataArray* current_level = data_array("CurrentLevel");
@@ -426,7 +453,11 @@ namespace bmmo::sim {
 
     void headless_engine::set_key(unsigned key, bool down) {
         if (key >= 256) return;
-        if (auto* state = null_input_keyboard_state(context_)) state[key] = down ? 0x80 : 0;
+        if (auto* state = null_input_keyboard_state(context_)) state[key] = down ? KS_PRESSED : KS_RELEASED;
+    }
+
+    void headless_engine::set_keyboard_state(const unsigned char* keys) {
+        if (auto* state = null_input_keyboard_state(context_)) std::memcpy(state, keys, 256);
     }
 
     void headless_engine::clear_keys() {

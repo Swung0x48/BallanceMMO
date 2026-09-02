@@ -39,6 +39,7 @@ configure_file(${CONFIG_DIR}/version_config.h.in ${CONFIG_DIR}/version_config.h 
 option(BUILD_SERVER "Build BallanceMMO Server" ON)
 option(BUILD_CLIENT "Build BallanceMMO Client" ON)
 option(BMMO_BUILD_SIM "Build the headless Ballanced simulation runtime into the server" ON)
+option(BMMO_BUILD_PHYSICS_RT "Build the open-source physics_RT plugin with the BallanceMMO bridge (client)" ON)
 
 if(BUILD_SERVER)
     add_subdirectory(BallanceMMOServer)

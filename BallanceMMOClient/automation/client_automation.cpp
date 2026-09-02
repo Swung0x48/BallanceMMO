@@ -2,6 +2,7 @@
 // Every command runs on the game thread from OnProcess and answers one line.
 
 #include "BallanceMMOClient.h"
+#include <cfloat>
 
 #include <algorithm>
 #include <cctype>
@@ -106,9 +107,18 @@ void BallanceMMOClient::install_input_hook() {
 // Game thread, immediately after the retail input manager polled DirectInput
 // and before any behaviour of this frame runs.
 void BallanceMMOClient::on_input_polled(unsigned char* state) {
+#if defined(_MSC_VER) && defined(_M_IX86)
+    if (fpu53_) _controlfp(_PC_53, _MCW_PC);
+#endif
+    // The manager's buffer holds KS_IDLE / KS_PRESSED / KS_RELEASED (not
+    // DirectInput's 0x80): IsKeyDown tests KS_PRESSED, and a released key
+    // reads KS_RELEASED for exactly one frame.
+    for (const auto key: automation_released_keys_)
+        if (key < 256 && !automation_held_keys_.count(key)) state[key] = KS_RELEASED;
+    automation_released_keys_.clear();
     for (const auto key: automation_held_keys_)
-        if (key < 256) state[key] = 0x80;
-    if (replay_active_ && replay_index_ < replay_source_.frames.size() && gameplay_ingame_script_active()) {
+        if (key < 256) state[key] = KS_PRESSED;
+    if (replay_active_ && replay_anchored_ && replay_index_ < replay_source_.frames.size()) {
         const auto& source = replay_source_.frames[replay_index_];
         std::memcpy(state, source.keys.data(), source.keys.size());
     }
@@ -221,11 +231,14 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         const auto key = automation_key_code(key_name);
         if (!key) return "error unknown key " + key_name;
         if (action == "down") automation_held_keys_.insert(*key);
-        else if (action == "up") automation_held_keys_.erase(*key);
+        else if (action == "up") {
+            if (automation_held_keys_.erase(*key)) automation_released_keys_.insert(*key);
+        }
         else return "error action must be down or up";
         return "ok";
     }
     if (verb == "keys" && rest == "clear") {
+        automation_released_keys_.insert(automation_held_keys_.begin(), automation_held_keys_.end());
         automation_held_keys_.clear();
         return "ok";
     }
@@ -278,11 +291,59 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         bmmo::physics::world_hash hash;
         if (!physics_view_.capture(hash, error)) return "error " + error;
         return std::format(
-            "ok hash={:016x} cores={} ivp_time={:.6f} ivp_seed={} qh_seed={} delta_ms={:.4f} "
-            "physics_delta={:.6f} time_factor={:.6f} dll_sha256={} main_tick={}",
-            hash.hash, hash.cores, hash.ivp_time, hash.ivp_seed, 0, hash.delta_time_ms,
-            hash.physics_delta_time, hash.time_factor, physics_view_.dll_sha256(),
+            "ok hash={:016x} pose={:016x} cores={} ivp_time={:.6f} ivp_seed={} delta_ms={:.4f} "
+            "physics_delta={:.6f} time_factor={:.6f} dll_sha256={} build_id={} main_tick={}",
+            hash.hash, hash.pose, hash.cores, hash.ivp_time, hash.ivp_seed, hash.delta_time_ms,
+            hash.physics_delta_time, hash.time_factor, physics_view_.dll_sha256(), physics_view_.build_id(),
             static_cast<unsigned>(m_bml->GetTimeManager()->GetMainTickCount()));
+    }
+    if (verb == "physobjs") {
+        std::string error;
+        if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
+            return "error " + error;
+        if (rest.find("all") != std::string::npos) return "ok " + physics_view_.describe_physics_objects();
+        return "ok " + physics_view_.describe_movable_objects();
+    }
+    if (verb == "array") {
+        // array <name>: every cell of a CKDataArray (diagnostics).
+        std::string name = rest;
+        if (!name.empty() && name.front() == ' ') name.erase(0, 1);
+        CKDataArray* array = m_bml->GetArrayByName(name.c_str());
+        if (!array) return "error no data array named " + name;
+        const int rows = array->GetRowCount(), columns = array->GetColumnCount();
+        std::string out = std::format("ok {} rows={} columns={} |", name, rows, columns);
+        for (int c = 0; c < columns; ++c)
+            out += std::string(" ") + (array->GetColumnName(c) ? array->GetColumnName(c) : "?")
+                 + "(" + std::to_string(static_cast<int>(array->GetColumnType(c))) + ")";
+        char cell[1024];
+        for (int r = 0; r < rows; ++r) {
+            out += " || " + std::to_string(r) + ":";
+            for (int c = 0; c < columns; ++c) {
+                cell[0] = 0;
+                array->GetElementStringValue(r, c, cell);
+                cell[sizeof(cell) - 1] = 0;
+                out += std::string(c ? " | " : " ") + cell;
+            }
+        }
+        return out;
+    }
+    if (verb == "exactframes") {
+        std::istringstream args(rest);
+        args >> record_exact_from_ >> record_exact_to_;
+        return "ok exact core dumps for frames " + std::to_string(record_exact_from_) + ".."
+             + std::to_string(record_exact_to_);
+    }
+    if (verb == "fpu53") {
+        // Experiment: force 53-bit x87 precision at every frame start (Direct3D
+        // leaves the game thread at 24 bits).
+        fpu53_ = rest.find("on") != std::string::npos;
+        return fpu53_ ? "ok x87 precision forced to 53 bits each frame" : "ok x87 precision left alone";
+    }
+    if (verb == "physlog") {
+        std::string error;
+        if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
+            return "error " + error;
+        return "ok " + physics_view_.drain_event_log();
     }
     if (verb == "physdump") {
         auto* manager = m_bml->GetCKContext()->GetManagerByGuid(CKGUID(0x6BED328B, 0x141F5148));
@@ -308,27 +369,33 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         return "ok rng reset to " + std::to_string(seed);
     }
     if (verb == "record") {
+        // record start <path-without-spaces> [level]   (level: what the
+        // record is for when it starts before the level is loaded)
         std::istringstream args(rest);
         std::string action, path;
-        args >> action;
-        std::getline(args, path);
-        if (!path.empty() && path.front() == ' ') path.erase(0, 1);
+        int level = 0;
+        args >> action >> path >> level;
         if (action == "start") {
             std::string error;
             if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
                 return "error " + error;
             if (record_writer_.is_open()) record_writer_.close();
             bmmo::physics::tick_record_header header;
-            header.level = current_map_.level;
+            header.level = level > 0 ? level : current_map_.level;
             std::snprintf(header.physics_sha256, sizeof(header.physics_sha256), "%s",
                           physics_view_.dll_sha256().c_str());
             if (!record_writer_.open(path, header)) return "error cannot open " + path;
+            record_diag_.close();
+            record_diag_.open(path + ".txt", std::ios::trunc);
+            physics_view_.drain_event_log();  // install the listener, discard history
             record_pending_frame_ = false;
             record_anchor_pending_ = true;
+            replay_anchored_ = false;
             record_frames_ = 0;
             return "ok recording to " + path;
         }
         if (action == "stop") {
+            record_diag_.close();
             record_writer_.close();
             record_pending_frame_ = false;
             return "ok recorded " + std::to_string(record_frames_) + " frames";
@@ -359,17 +426,43 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         if (!record_writer_.open(out_path, header)) return "error cannot open " + out_path;
         record_pending_frame_ = false;
         record_anchor_pending_ = true;
+            replay_anchored_ = false;
         record_frames_ = 0;
         replay_index_ = 0;
         replay_active_ = true;
         return "ok replaying " + std::to_string(replay_source_.frames.size()) + " frames into " + out_path;
     }
     if (verb == "level") {
-        const int level = std::atoi(rest.c_str());
-        if (level < 1 || level > 13) return "error level must be 1..13";
-        return automation_load_level(level);
+        std::istringstream args(rest);
+        std::string mode;
+        int level = 0;
+        args >> level >> mode;
+        if (level < 1 || level > 13) return "error usage: level <1..13> [direct]";
+        if (mode == "direct") return automation_load_level(level);
+        level_request_.begin(level);
+        return "ok level " + std::to_string(level) + " requested through the menus";
     }
     return "error unknown command " + verb;
+}
+
+// Advances a menu-driven level request (game/menu_driver.hpp) one frame.
+void BallanceMMOClient::process_level_request() {
+    if (!level_request_.pending()) return;
+    using status = bmmo::game::level_request::status;
+    const bool was_pressed = level_request_.start_pressed;
+    switch (level_request_.step(m_bml->GetCKContext())) {
+    case status::start_pressed:
+        if (!was_pressed) GetLogger()->Info("Automation: pressed Start in Menu_Main");
+        break;
+    case status::level_selected:
+        GetLogger()->Info("Automation: selected level %d in Menu_Start", level_request_.level);
+        break;
+    case status::failed:
+        GetLogger()->Warn("Automation: level request failed: %s", level_request_.error.c_str());
+        break;
+    default:
+        break;
+    }
 }
 
 bool BallanceMMOClient::gameplay_ingame_script_active() {
@@ -377,45 +470,70 @@ bool BallanceMMOClient::gameplay_ingame_script_active() {
     return script && script->IsActive();
 }
 
-// Frame N of a record pairs the keyboard state the game observed during
-// tick N with the physics hash captured at the start of tick N+1, i.e. after
-// tick N's physics step.  Frame 0 is the first tick with Gameplay_Ingame
-// active; the headless replay uses the same anchor.
+// Frame k of a record pairs the keyboard state the game observed during
+// tick A+1+k (polled at that tick's PreProcess by the input manager) with
+// the physics hash after that tick's step.  BMLPlus runs the mods' OnProcess
+// from its PostProcess, after the physics step, so both are at hand here.
+// Tick A is the anchor: the first tick with Gameplay_Ingame active, at whose
+// OnProcess the session clock is reset (design 3.1); the headless replay
+// resets after the same tick and feeds frame k to tick A+1+k.
 void BallanceMMOClient::process_tick_record() {
     if (!record_writer_.is_open()) return;
-    std::string error;
-    if (record_pending_frame_) {
-        bmmo::physics::world_hash hash;
-        if (physics_view_.capture(hash, error)) {
-            record_frame_.hash = hash.hash;
-            record_frame_.ivp_time = hash.ivp_time;
-            record_frame_.cores = hash.cores;
-            record_writer_.write(record_frame_);
-            ++record_frames_;
-        }
-        record_pending_frame_ = false;
-    }
     if (!gameplay_ingame_script_active() || !input_manager_) return;
-    if (record_frames_ == 0 && !record_pending_frame_ && record_anchor_pending_) {
-        // Frame 0: same session reset as the headless replay (design 3.1).
+    std::string error;
+    const auto diagnose = [&](const char* label) {
+        if (!record_diag_.is_open()) return;
+        record_diag_ << label << " bodies: " << physics_view_.describe_physics_objects() << "\n"
+                     << label << " events: " << physics_view_.drain_event_log() << "\n";
+        record_diag_.flush();
+    };
+    if (record_anchor_pending_) {
         record_anchor_pending_ = false;
         if (!physics_view_.reset_session_clock(1, error))
             logger_->Warn("Record anchor reset failed: %s", error.c_str());
+        replay_anchored_ = true;
+        diagnose("anchor");
+        return;
+    }
+    if (replay_active_ && replay_index_ >= replay_source_.frames.size()) {
+        replay_active_ = false;
+        record_writer_.close();
+        record_diag_.close();
+        logger_->Info("Replay finished after %zu frames", replay_index_);
+        return;
     }
     record_frame_ = {};
-    if (replay_active_) {
-        if (replay_index_ >= replay_source_.frames.size()) {
-            replay_active_ = false;
-            record_writer_.close();
-            logger_->Info("Replay finished after %zu frames", replay_index_);
-            return;
-        }
-        ++replay_index_;
-    }
     if (input_hook_installed_)
         record_frame_.keys = frame_keys_;
     else if (const auto* keys = input_manager_->GetKeyboardState())
         std::memcpy(record_frame_.keys.data(), keys, record_frame_.keys.size());
     record_frame_.flags = m_bml->IsPaused() ? 1u : 0u;
-    record_pending_frame_ = true;
+    bmmo::physics::world_hash hash;
+    if (physics_view_.capture(hash, error)) {
+        record_frame_.hash = hash.hash;
+        record_frame_.ivp_time = hash.ivp_time;
+        record_frame_.cores = hash.cores;
+        record_frame_.surfaces = hash.surfaces;
+        record_frame_.pose = hash.pose;
+        std::snprintf(record_frame_.probe_name, sizeof(record_frame_.probe_name), "%s", hash.probe_name);
+        for (int k = 0; k < 3; ++k) {
+            record_frame_.probe_position[k] = hash.probe_position[k];
+            record_frame_.probe_speed[k] = hash.probe_speed[k];
+            record_frame_.probe_rot_speed[k] = hash.probe_rot_speed[k];
+        }
+    }
+    record_writer_.write(record_frame_);
+    if (record_diag_.is_open() && record_frames_ >= record_exact_from_ && record_frames_ <= record_exact_to_
+            && record_exact_to_ > 0) {
+        record_diag_ << "exact frame" << record_frames_ << " ivp_time=" << hash.ivp_time << " seed=" << hash.ivp_seed
+                     << "\n" << physics_view_.describe_cores_exact();
+        record_diag_.flush();
+    }
+    if (record_frames_ == 6 || record_frames_ == 66 || record_frames_ == 660 || record_frames_ == 1716) {
+        char label[32];
+        std::snprintf(label, sizeof(label), "frame%llu", static_cast<unsigned long long>(record_frames_));
+        diagnose(label);
+    }
+    ++record_frames_;
+    if (replay_active_) ++replay_index_;
 }

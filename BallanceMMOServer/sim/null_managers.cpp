@@ -28,22 +28,41 @@ namespace bmmo::sim {
             explicit null_input_manager(CKContext* context)
                 : CKInputManager(context, const_cast<CKSTRING>(kNullInputName)) {
                 std::memset(keys_, 0, sizeof(keys_));
+                std::memset(previous_, 0, sizeof(previous_));
+                std::memset(toggled_, 0, sizeof(toggled_));
                 context->RegisterNewManager(this);
             }
 
-            CKDWORD GetValidFunctionsMask() override { return CKMANAGER_FUNC_PreProcess; }
-            CKERROR PreProcess() override { return CK_OK; }
+            // The keyboard buffer holds the same KS_IDLE / KS_PRESSED /
+            // KS_RELEASED bytes as the retail manager, so recorded retail
+            // states can be replayed verbatim.  PreProcess derives the press
+            // edges; PostProcess retires KS_RELEASED after its one frame.
+            CKDWORD GetValidFunctionsMask() override {
+                return CKMANAGER_FUNC_PreProcess | CKMANAGER_FUNC_PostProcess;
+            }
+            CKERROR PreProcess() override {
+                for (int key = 0; key < 256; ++key) {
+                    toggled_[key] = (keys_[key] & KS_PRESSED) && !(previous_[key] & KS_PRESSED);
+                    previous_[key] = keys_[key];
+                }
+                return CK_OK;
+            }
+            CKERROR PostProcess() override {
+                for (auto& key: keys_)
+                    if (key == KS_RELEASED) key = KS_IDLE;
+                return CK_OK;
+            }
 
             void EnableKeyboardRepetition(CKBOOL enable) override { repetition_ = enable; }
             CKBOOL IsKeyboardRepetitionEnabled() override { return repetition_; }
             CKBOOL IsKeyDown(CKDWORD key, CKDWORD* stamp) override {
                 if (stamp) *stamp = 0;
-                return key < 256 && (keys_[key] & 0x80) ? TRUE : FALSE;
+                return key < 256 && (keys_[key] & KS_PRESSED) ? TRUE : FALSE;
             }
             CKBOOL IsKeyUp(CKDWORD key) override { return !IsKeyDown(key, nullptr); }
-            CKBOOL IsKeyToggled(CKDWORD, CKDWORD* stamp) override {
+            CKBOOL IsKeyToggled(CKDWORD key, CKDWORD* stamp) override {
                 if (stamp) *stamp = 0;
-                return FALSE;
+                return key < 256 && toggled_[key] ? TRUE : FALSE;
             }
             int GetKeyName(CKDWORD key, char* name) override {
                 if (!name) return 0;
@@ -93,6 +112,8 @@ namespace bmmo::sim {
 
         private:
             unsigned char keys_[256];
+            unsigned char previous_[256];
+            bool toggled_[256];
             CKBOOL repetition_ = FALSE;
             CKBOOL paused_ = FALSE;
             CKBOOL cursor_ = FALSE;
@@ -135,7 +156,13 @@ namespace bmmo::sim {
                 return source ? new (std::nothrow) silent_source(*source) : nullptr;
             }
             void ReleaseSource(void* source) override { delete static_cast<silent_source*>(source); }
-            void Play(CKWaveSound*, void* raw, CKBOOL) override {
+            void Play(CKWaveSound* sound, void* raw, CKBOOL) override {
+                // CKWaveSound::PlayMinion plays a duplicated sound by passing
+                // sound == NULL and the SoundMinion wrapper (64 bytes) as the
+                // source argument; the manager's own handle is inside it.
+                // Treating the wrapper as a silent_source wrote past its end
+                // and corrupted the heap (found by AddressSanitizer).
+                if (!sound && raw) raw = static_cast<SoundMinion*>(raw)->m_Source;
                 if (auto* source = static_cast<silent_source*>(raw)) source->playing = TRUE;
             }
             void Pause(CKWaveSound*, void* raw) override { InternalPause(raw); }
