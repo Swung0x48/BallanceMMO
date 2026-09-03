@@ -221,6 +221,7 @@ public:
 			}
 
 			if (dynamic_opacity_
+				&& !player.physicalized // balls in the simulation stay solid
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 				&& spectated_id_ != item.first
 #endif
@@ -279,7 +280,10 @@ public:
 		auto& player = objects_[id];
 		if (!is_valid_ball_type(player, current_ball_type)) return;
 		auto* current_ball = static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(player.balls[current_ball_type]));
-		player.physicalized = true;
+		if (!player.physicalized) {
+			player.physicalized = true;
+			set_ball_solid(id, player, true);
+		}
 		std::string ballName(physBall->GetElementStringValue(current_ball_type, 0, nullptr), '\0');
 		physBall->GetElementStringValue(current_ball_type, 0, ballName.data());
 		ballName += "_Mesh";
@@ -309,7 +313,12 @@ public:
 	void set_physicalized(HSteamNetConnection id, bool physicalized) {
 		std::lock_guard lk(mutex_);
 		auto it = objects_.find(id);
-		if (it != objects_.end()) it->second.physicalized = physicalized;
+		if (it == objects_.end() || it->second.physicalized == physicalized) return;
+		it->second.physicalized = physicalized;
+		// A ball that takes part in the simulation is a solid object one can
+		// collide with, so it looks like one; only shadow mode keeps peers
+		// translucent (where they are just ghosts passing through).
+		set_ball_solid(id, it->second, physicalized);
 	}
 
 	void remove(HSteamNetConnection id) {
@@ -464,7 +473,7 @@ public:
 		if (enabled) return;
 		db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
 			auto player_it = objects_.find(item.first);
-			if (player_it == objects_.end()) return true;
+			if (player_it == objects_.end() || player_it->second.physicalized) return true;
 			for (const CK_ID mat_id : player_it->second.materials) {
 				auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
 				VxColor color = mat->GetDiffuse();
@@ -510,6 +519,31 @@ public:
 		destroy_templates();
 	}
 private:
+	// Solid balls (physics sessions) drop alpha blending altogether; shadow
+	// mode balls go back to the translucent default, with the dynamic opacity
+	// timer reset so update() picks a distance-based value right away.
+	void set_ball_solid(HSteamNetConnection id, PlayerObjects& player, bool solid) {
+#ifdef BMMO_WITH_PLAYER_SPECTATION
+		if (!solid && spectated_id_ == id) return; // spectated balls stay solid
+#else
+		(void)id;
+#endif
+		for (const CK_ID mat_id : player.materials) {
+			auto* mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
+			if (!mat) continue;
+			VxColor color = mat->GetDiffuse();
+			color.a = solid ? 1.0f : ALPHA_DEFAULT;
+			mat->SetDiffuse(color);
+			mat->EnableAlphaBlend(!solid);
+			if (!solid) {
+				mat->SetSourceBlend(VXBLEND_SRCALPHA);
+				mat->SetDestBlend(VXBLEND_INVSRCALPHA);
+			}
+		}
+		player.last_opacity = solid ? 1.0f : ALPHA_DEFAULT;
+		player.last_opacity_timestamp = 0;
+	}
+
 	bool template_init_ = false;
 	std::vector<CK_ID> template_balls_;
 	IBML* bml_ = nullptr;
