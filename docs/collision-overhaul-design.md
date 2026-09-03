@@ -157,7 +157,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 ### 8.2 总体模型
 
 - **服务端**：每个物理房间一个 `headless_engine`（独立 CKContext），由唯一的模拟线程顺序推进。世界通过菜单加载关卡，等到 `Gameplay_Ingame` 首次激活（锚点）后执行会话重置（第 3.1 节），记录锚点世界哈希。原版球（`CurrentLevel[0,1]`）**停放** = 在原版脚本 Physicalize 它的那个 tick 的 PreSimulate 阶段把它的刚体**删除**（`delete_silently`，见 8.1 关于 calm 检查计数的事实；冻结不够），实体留在出生点，脚本继续运行但不再影响世界（空键盘、DepthTest 不命中、Trafo 距离不满足）。每个玩家一个**克隆球**：复制原版球实体（`CKContext::CopyObject`，只复制名字，共享网格、不带脚本，名字 `Ball_<type>_BMMO_<id>`），按客户端上报的配方 Physicalize，nocoll 组名 `P#<槽位>`（IVP 限 7 字符）；再加一个 BMMO 碰撞过滤器：玩家球与组名为 `Ball` 的非玩家物体不碰撞（保持原版语义），玩家球之间碰撞。客户端在自己的球 Physicalize 后把它的组名也改为 `P#<join_order>`，否则本地球（原版 `Ball` 组）永远碰不到远端镜像球。
-- **机关触发的并集**：原版所有 `TT Scaleable Proximity` 的 ObjectA 都是 `Ball_Pos_Frame`（原版球的子节点，停放后静止）。服务端在锚点扫描全部此类块，把每个块的 ObjectA 参数改接到一个私有 frame（`BMMO_Prox_<k>`），每 tick 在脚本执行前把该 frame 放到离该块 ObjectB（机关本体）最近的玩家球位置——原版的"任一球进入范围"语义由此成立，PE_Balloon 之类靠邻近创建力控制器的机关在服务端会真的启动。Level 1 有 18 个这样的块。
+- **机关触发的并集**：原版所有 `TT Scaleable Proximity` 的 ObjectA 都是 `Ball_Pos_Frame`（原版球的子节点，停放后静止）。服务端在锚点扫描全部此类块，把每个块的 ObjectA 参数改接到一个私有 frame（`BMMO_Prox_<k>`），每 tick 在脚本执行前把该 frame 放到离该块 ObjectB（机关本体）最近的玩家球位置——原版的"任一球进入范围"语义由此成立，PE_Balloon 之类靠邻近创建力控制器的机关在服务端会真的启动。Level 1 有 18 个这样的块。机关脚本里按球型分支的**身份**判定（`CurrentLevel[0,ActiveBall]` 的名字）另有一套并集，见 9.8。
 - **客户端**：本地球仍是原版球、由原版脚本驱动（预测）；远端球是精灵球实体按对方配方 Physicalize 的镜像刚体（组名 `BMMO_<id>`，同一过滤器）；共享机关的可动刚体每 tick 镜像服务端状态。
 - **权威划分**：物理（位姿/速度/碰撞）服务端权威；球的生命周期（Physicalize/Unphysicalize、变球、复活位姿）、分节、完成由客户端原版脚本决定并以可靠事件上报，服务端照做并转发给其他成员。这是 M3 的取舍：不在服务端重写检查点/死亡/变球逻辑（它们全部依赖单一 `Ball_Pos_Frame`），M4 再评估是否要服务端校验。
 - **时间线**：客户端锚点 = 会话开始后重开关卡并首次看到 `Gameplay_Ingame` 激活的那个 tick，记为本地 tick `first_tick`（首次开始为 0）。此后每个行为帧一个 tick（固定 1/66 s，`fixed_tick_driver` 节拍）。服务端在所有成员 `SessionReady` 后开始推进；tick T 在收齐所有成员 T 的输入、或服务端墙钟到达 `tick0_wall + (T + input_delay)/66 s` 时模拟，缺失输入沿用该玩家上一 tick 的输入。各客户端锚点的墙钟时刻可能相差 1–3 s（重开耗时），只影响修正延迟，不影响正确性。
@@ -365,3 +365,28 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - **变球那一帧原版力叶子没归零**：`physics_session_zero_retail_forces` 只在帧首（`own_navigation` 已挂上）跑，而新球的导航复制下一帧才挂过去；球还没有刚体时 `SetPhysicsForce.Create` 会排队到 PreSimulate 重试，读到的就是原版力值。现在 `OnPhysicalize` 里立刻再归零一次。
 
 变球到石球时服务端崩在 `IVP_ASSERT(worst_case_speed > max_coll_speed)`（`ivp_mindist_event.cxx:1143`）不是物理问题，是构建问题：`build-retail` 的 `CMAKE_CXX_FLAGS_RELEASE` 是空的，IVP 于是带着断言和每秒一行的统计输出（`IVP_IF(1 || ...)`）编进服务端，而这条界只在 IVP 自己的 `sqrt(1.001 - c²)` 余量内成立，一个自转快又直冲表面的球（石球质量 10）就能踩到。原版客户端的 physics_RT.dll 带 `NDEBUG`，所以只有服务端会死。见 `docs/building-and-deployment.md`；根 `CMakeLists.txt` 现在会在非 Debug 构建缺 `NDEBUG` 时告警。加回 `/O2 /Ob2 /DNDEBUG` 不改变模拟：`BallanceMMOSimTool --level 1 --ticks 2500 --report-every 250` 的每个世界/位姿哈希前后完全一致（速度快 1.7 倍）。
+
+
+### 9.8 机关的球身份并集（软木桥 P_Modul_29）
+
+症状：物理会话里玩家变成石球后压不断软木桥（绳索踏板桥），桥只是被压得下垂。
+
+原版脚本（`P_Modul_29_MF Script`，SimTool `--dump-script` 实测）：
+`TT Scaleable Proximity(ObjectA=Ball_Pos_Frame, ObjectB=P_Modul_29_Platte06, 距离 4)` → `Get Cell(CurrentLevel[0,ActiveBall])` → `Get Name` → `Test(Equal, "Ball_Stone")` → `Wave Player(Misc_RopeTears)` + `10 Hinges` 的 Shutdown（九块踏板脱开铰链落下）。Test 只有 True 出口。
+
+根因：邻近判定早就做了并集（8.2 的 `BMMO_Prox_<k>` 私有 frame），**身份判定没有**。服务端的 `CurrentLevel[0,1]`（ActiveBall）指的是**停放的原版球**：锚点时是 `Ball_Wood`，而且永远不会变——原版 `Trafo Manager` 靠原版球自己滚到变球器附近才触发，停放的球不动。于是 `Get Name` 永远返回 `Ball_Wood`，不管哪个玩家、什么球型压上去，桥都不断。客户端本地脚本读的是自己的球（正确），会在本地断桥，但服务端没断，机关刚体的修正又把踏板拉回去——玩家看到的就是"压不断"。
+
+修法（`physics_world::rewire_ball_identity_reads` / `update_ball_identity_reads`）：锚点扫描所有 `Get Cell` 块，目标数组是 `CurrentLevel`、列是 `ActiveBall`、**且所在根脚本里有被改接过的邻近块**（即机关脚本）的，把该块的目标参数改接到一份 `CurrentLevel` 的私有副本（`CopyObject` + `CK_DEPENDENCIES_COPY_DATAARRAY_DATA`，共享单元里引用的对象）。每 tick 脚本执行前，副本的 ActiveBall 单元写成"离该脚本任一机关（邻近块的 ObjectB）最近的玩家"的球型对应的**原版球实体**（`Ball_Stone`/`Ball_Wood`/`Ball_Paper`，名字正是脚本要比的那个）；没有玩家时写停放的原版球，即原版会读到的值。原版逻辑的读取（`Event_handler`、`Sound_Manager`、`Ball_Shadow`、Gameplay 各脚本）不改接——它们作用在停放球上，必须保持。Level 1–13 的实测：只有 `P_Modul_18_MF Script` 与 `P_Modul_29_MF Script` 被改接（Level 2 是 9 + 1）。
+
+验证工具：`BallanceMMOSimTool --level N --drop <名字片段> <球型> --drop-at X Y Z [--drop-height F] [--drop-sectors N] [--ticks N]`——在真正的会话世界里（停放原版球、克隆球、并集改接）逐个激活分节，把一名玩家的球丢到机关上，逐 tick 打印名字含该片段的刚体位置与 simulated 标志。Level 2 的 P_Modul_29（`PH` 表：分节 3，(960.709,46.4925,-346.743)）跑 300 tick，最低踏板的下落量：
+
+| | 石球 | 木球 | 纸球 |
+| --- | --- | --- | --- |
+| 修复前 | 2.51 m（只是下垂） | 2.31 m | — |
+| 修复后 | **8.51 m（绳断落桥）** | 2.31 m | 0.85 m |
+
+已知边界（都不是本次改动引入的）：
+
+- `P_Modul_18`（风扇）也读 ActiveBall，但读到的球是拿去 `SetPhysicsForce` 的。改接前后指向的都是**没有刚体**的原版球实体，服务端照旧不吹玩家球（`GetPhysicsObject(ent, FALSE)` 直接返回空，不会凭空造刚体）；而客户端本地脚本会吹自己的球，再被服务端快照修正拉回。要真正修就得让这类机关作用在玩家的克隆球上，但那样名字判定又会失败（克隆叫 `Ball_Stone_BMMO_<id>`），需要按消费者区分。
+- 远端玩家压断桥时，观察者客户端的本地脚本不会断（它只看自己的球），本地铰链仍拉着踏板，只能靠机关刚体的修正跟随服务端。
+- 分节并集一次只 pop 一个待激活分节、每 tick 一个：`Gameplay_SectorManager` 走完 PH 表需要不止一个 tick，连着激活多个分节会互相打断（`--drop` 模式实测：12 个分节按 1 tick 间隔激活，机关一个都没起来；间隔 30 tick 就正常）。真实会话里玩家逐段推进不受影响，迟到加入/补分节时值得留意。

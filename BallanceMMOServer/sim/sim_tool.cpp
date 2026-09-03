@@ -25,8 +25,11 @@
 #if defined(_MSC_VER)
 #include <crtdbg.h>
 #endif
+#include <algorithm>
 #include <cstring>
+#include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -61,6 +64,15 @@ namespace {
         std::string nav_mode;          // --nav retail-cxx|clone: replay through the session navigation (design 8.6)
         long long nav_frames = -1;     // --nav-frames N: compare only the first N frames
         int list_bodies_at = -1;       // --list-bodies-at N: bridge v2 list_bodies() at that tick
+        // --drop ENTITY BALLTYPE: server-side mechanism check.  Boots a
+        // physics-session world, activates the sectors, drops one player's
+        // ball of that type on that entity and prints what the mechanism does.
+        std::string drop_entity;
+        int drop_ball = 0;
+        float drop_height = 4.0f;      // --drop-height F: metres above the entity
+        int drop_sectors = 12;         // --drop-sectors N: sectors to activate first
+        float drop_at[3] = {};         // --drop-at X Y Z: drop there instead (PH matrix of a module)
+        bool have_drop_at = false;
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -106,6 +118,16 @@ namespace {
             else if (arg == "--nav") { if (!(v = next())) return false; out.nav_mode = v; }
             else if (arg == "--nav-frames") { if (!(v = next())) return false; out.nav_frames = std::atoll(v); }
             else if (arg == "--list-bodies-at") { if (!(v = next())) return false; out.list_bodies_at = std::atoi(v); }
+            else if (arg == "--drop") {
+                if (!(v = next())) return false; out.drop_entity = v;
+                if (!(v = next())) return false; out.drop_ball = std::atoi(v);
+            }
+            else if (arg == "--drop-at") {
+                for (float& k: out.drop_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
+                out.have_drop_at = true;
+            }
+            else if (arg == "--drop-height") { if (!(v = next())) return false; out.drop_height = static_cast<float>(std::atof(v)); }
+            else if (arg == "--drop-sectors") { if (!(v = next())) return false; out.drop_sectors = std::atoi(v); }
             else return false;
         }
         return !out.root.empty();
@@ -550,6 +572,105 @@ namespace {
 }
 
 namespace {
+    // Server-side mechanism check (design 8.3): boots a physics-session world
+    // the way a room does, activates the sectors, and drops one player's ball
+    // of the given type onto a mechanism part, then prints that part's height
+    // every report interval.  A mechanism that reacts to the ball (the rope
+    // bridge P_Modul_29 tearing under a stone ball) moves; one that does not
+    // holds its anchor pose.
+    int run_drop(const arguments& args) {
+        bmmo::sim::world_options options;
+        options.game_root = args.root;
+        options.level = args.level > 0 ? args.level : 1;
+        options.seed = 1;
+        options.boot_ticks = args.boot_ticks;
+        options.anchor_timeout = args.anchor_timeout;
+        options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
+        std::string error;
+        auto world = bmmo::sim::physics_world::create(options, error);
+        if (!world) {
+            std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+            return 1;
+        }
+        if (!world->add_player(1, error)) {
+            std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
+            return 1;
+        }
+        // One sector at a time: Gameplay_SectorManager needs its ticks to walk
+        // the PH table before the next activation resets it.
+        for (int sector = 1; sector <= args.drop_sectors; ++sector) {
+            world->activate_sector(sector);
+            for (int i = 0; i < 30; ++i)
+                if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+        }
+        if (!args.dump_array.empty()) dump_array(world->engine(), args.dump_array);
+        VxVector spawn(args.drop_at[0], args.drop_at[1], args.drop_at[2]);
+        if (!args.have_drop_at) {
+            // Module parts share names across sectors, so --drop-at (the PH
+            // table's matrix for the module) is the reliable way in.
+            auto* target = CK3dEntity::Cast(world->engine().context()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(args.drop_entity.c_str()), CKCID_3DENTITY, nullptr));
+            if (!target) {
+                std::fprintf(stderr, "no 3D entity named %s (pass --drop-at X Y Z)\n", args.drop_entity.c_str());
+                return 1;
+            }
+            target->GetPosition(&spawn);
+        }
+        spawn.y += args.drop_height;
+        // The parts of the mechanism this run watches: every physics body whose
+        // name carries the --drop name.
+        const auto watched = [&args](const bmmo::sim::physics_world& w) {
+            std::vector<bmmo::physics::body_state> bodies(
+                static_cast<size_t>(bmmo::physics::list_bodies(w.physics(), nullptr, 0)));
+            const int total = bmmo::physics::list_bodies(w.physics(), bodies.data(), static_cast<int>(bodies.size()));
+            bodies.resize(static_cast<size_t>(std::max(total, 0)));
+            std::erase_if(bodies, [&args](const bmmo::physics::body_state& body) {
+                return std::string_view(body.name).find(args.drop_entity) == std::string_view::npos;
+            });
+            return bodies;
+        };
+        const auto report_parts = [&](int tick) {
+            std::string text;
+            for (const auto& body: watched(*world)) {
+                char line[160];
+                std::snprintf(line, sizeof(line), " %s(%.3f,%.3f,%.3f)%s", body.name,
+                              body.position[0], body.position[1], body.position[2],
+                              body.simulated ? "*" : "");
+                text += line;
+            }
+            std::printf("tick=%d parts:%s\n  %s\n", tick, text.empty() ? " none physicalized" : text.c_str(),
+                        root_scripts(world->engine()).c_str());
+        };
+        bmmo::sim::lifecycle_event event;
+        event.type = bmmo::session::event_type::Physicalize;
+        event.ball_type = static_cast<uint8_t>(args.drop_ball);
+        event.position[0] = spawn.x;
+        event.position[1] = spawn.y;
+        event.position[2] = spawn.z;
+        event.recipe = world->retail_recipe(event.ball_type);
+        if (!world->apply_event(1, event, error)) {
+            std::fprintf(stderr, "physicalize failed: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("dropped ball type %d (%s) at (%.3f,%.3f,%.3f) onto %s\n", args.drop_ball,
+            world->ball_rows()[args.drop_ball].name.c_str(), spawn.x, spawn.y, spawn.z, args.drop_entity.c_str());
+        report_parts(-1);
+        std::map<std::string, double> start;
+        for (const auto& body: watched(*world)) start.emplace(body.name, body.position[1]);
+        for (int i = 0; i < args.ticks; ++i) {
+            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+            if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
+        }
+        double fell = 0.0;
+        for (const auto& body: watched(*world)) {
+            auto it = start.find(body.name);
+            if (it != start.end()) fell = std::max(fell, it->second - body.position[1]);
+        }
+        std::printf("summary: the lowest watched part of %s fell %.3f m\n", args.drop_entity.c_str(), fell);
+        std::fflush(stdout);
+        return 0;
+    }
+
     // Replays a client recording through the physics-session machinery
     // (physics_world + player_navigation) instead of the retail Ball
     // Navigation:
@@ -699,7 +820,9 @@ int main(int argc, char** argv) {
             "usage: BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N] "
             "[--report-every N] [--list-bodies-at N] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
-            "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n");
+            "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
+            "           [--drop-height F] [--drop-sectors N] (mechanism check in a session world)\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {
@@ -709,6 +832,7 @@ int main(int argc, char** argv) {
         }
         return run_replay_nav(args);
     }
+    if (!args.drop_entity.empty()) return run_drop(args);
     bmmo::sim::engine_options options;
     options.game_root = args.root;
     options.verbose = args.verbose;

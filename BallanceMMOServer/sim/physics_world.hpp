@@ -152,6 +152,15 @@ namespace bmmo::sim {
         void rewire_proximity_probes();
         void update_proximity_probes();
         size_t proximity_probe_count() const { return probes_.size(); }
+        // Ball identity union (design 8.3): a mechanism that gates on the
+        // active ball (the rope bridge P_Modul_29 tears only for "Ball_Stone")
+        // reads CurrentLevel[0,ActiveBall], which on the server names the
+        // parked retail ball and never changes.  Every such read inside a
+        // script whose proximity blocks were rewired is retargeted at a
+        // private copy of the array whose ActiveBall cell follows the player
+        // the probe frames follow.
+        void rewire_ball_identity_reads();
+        void update_ball_identity_reads();
         CK3dEntity* retail_ball() const;
         // Runs in the physics manager's PreSimulate pass of every tick: after
         // the scripts of that tick, before its PSIs.  Parks the retail ball
@@ -193,6 +202,9 @@ namespace bmmo::sim {
         };
         CK3dEntity* clone_ball(player& p, uint8_t ball_type, std::string& error);
         std::string ball_name(uint8_t ball_type) const;
+        // The retail entity of a ball type ("Ball_Stone"), the object the
+        // mechanism scripts compare names against; null if the level has none.
+        CK3dEntity* retail_ball_entity(uint8_t ball_type) const;
 
         world_options options_;
         std::unique_ptr<headless_engine> engine_;
@@ -213,6 +225,19 @@ namespace bmmo::sim {
         std::set<int> used_slots_;
         struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };
         std::vector<proximity_probe> probes_;
+        // A "Get Cell" that reads the active ball of a mechanism script: the
+        // block, the private CurrentLevel copy it reads instead, the local
+        // parameter that feeds it, the ActiveBall column and the mechanisms
+        // (proximity ObjectB) the script watches.
+        struct identity_probe {
+            CK_ID block = 0;
+            CK_ID array = 0;
+            CK_ID parameter = 0;
+            int column = 1;
+            std::vector<CK_ID> references;
+        };
+        std::vector<identity_probe> identities_;
+        CK_ID current_level_ = 0;
         CK_ID ball_pos_frame_ = 0;
         std::unordered_map<std::string, uint16_t> body_index_;
         std::set<std::string> last_body_set_;
