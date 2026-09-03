@@ -53,6 +53,15 @@ cmake -S . -B build-server -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-server --target BallanceMMOServer BallanceMMOSessionClient BallanceMMOSimTool
 ```
 
+Do not clear `CMAKE_CXX_FLAGS_RELEASE`: the IVP sources key their assertions
+and their debug output off `NDEBUG`, so a release tree without it builds a
+server that `BREAKPOINT`s the whole process on an assertion IVP's own bounds
+can trip (`worst_case_speed > max_coll_speed`, seen on a trafo into the stone
+ball) and prints a statistics line every second - besides running unoptimized.
+The configure step warns when the flag is missing. The simulation itself is
+unaffected: every world hash of a 2500-tick `BallanceMMOSimTool` replay is
+identical with and without `/O2 /Ob2 /DNDEBUG`.
+
 Works the same way on Linux (`GCC`/`Ninja`, `libssl-dev`, `libprotobuf-dev`,
 `protobuf-compiler`) and on Windows (x64 MSVC developer environment). Add
 `-DBUILD_SERVER_TESTS=ON` and build `BallanceMMOMessageTests` to run the unit
