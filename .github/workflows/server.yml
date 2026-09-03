@@ -2,19 +2,28 @@ name: Server
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, collision-overhaul ]
     paths-ignore:
       - 'BallanceMMOClient/**'
       - '.git*'
       - 'README.md'
+      - 'docs/**'
       - '.github/workflows/client.yml'
   pull_request:
-    branches: [ main ]
+    branches: [ main, collision-overhaul ]
     paths-ignore:
       - 'BallanceMMOClient/**'
       - '.git*'
       - 'README.md'
+      - 'docs/**'
       - '.github/workflows/client.yml'
+  workflow_dispatch:
+
+# The server now embeds the headless engine, so a build is expensive; drop
+# superseded runs of the same ref.
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
@@ -27,6 +36,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # Recursive: the server statically links the Ballanced engine
+    # (BMMO_BUILD_SIM) for its headless physics simulation.
     - name: Fetch git submodules
       run: git submodule update --init --recursive
 
@@ -38,7 +49,7 @@ jobs:
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
       run: |
         echo -e "\nfile(WRITE ${{github.workspace}}/version.txt \${BMMO_VER})" >> CMakeLists.txt
-        cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SERVER_APPIMAGE=ON
+        cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DBUILD_SERVER_TESTS=ON -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SERVER_APPIMAGE=ON
         echo "BMMO_VER=$(cat ${{github.workspace}}/version.txt)" >> "$GITHUB_ENV"
         echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> "$GITHUB_ENV"
 
@@ -47,11 +58,11 @@ jobs:
       working-directory: ${{github.workspace}}
       run: DESTDIR=AppDir cmake --build ./build --config ${{env.BUILD_TYPE}} --target install
 
+    # enable_testing() is called in BallanceMMOServer/, so the tests live in
+    # that subdirectory of the build tree; ctest run anywhere above it reports
+    # "No tests were found" and still exits 0.
     - name: Test
-      working-directory: ${{github.workspace}}
-      # Execute tests defined by the CMake configuration.  
-      # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
-      run: ctest -C ${{env.BUILD_TYPE}}
+      run: ctest --test-dir ${{github.workspace}}/build/BallanceMMOServer -C ${{env.BUILD_TYPE}} --output-on-failure --no-tests=error
 
     - name: Build AppImage
       working-directory: ${{github.workspace}}/build/BallanceMMOServer
@@ -96,7 +107,7 @@ jobs:
       - name: Restore artifacts, setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: b322364f06308bdd24823f9d8f03fe0cc86fd46f
+          vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
           vcpkgDirectory: '${{env.VCPKG_ROOT}}'
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
@@ -115,7 +126,7 @@ jobs:
       - name: Configure CMake
         run: |
           echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
-          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
+          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DBUILD_SERVER_TESTS=ON
           echo "BMMO_VER=$(cat version.txt)" >> $env:GITHUB_ENV
           echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
 
@@ -131,16 +142,19 @@ jobs:
       #   working-directory: ${{github.workspace}}/build/BallanceMMOServer
       #   run: ${{github.workspace}}/build/BallanceMMOServer/postbuild.bat ${{env.BUILD_TYPE}}
 
+      # The tests are registered in the BallanceMMOServer subdirectory of the
+      # build tree (that is where enable_testing() is called); ctest run above
+      # it reports "No tests were found" and still exits 0.
       - name: Test
-        working-directory: ${{github.workspace}}
-        run: ctest -C ${{env.BUILD_TYPE}}
+        run: ctest --test-dir ${{github.workspace}}/build/BallanceMMOServer -C ${{env.BUILD_TYPE}} --output-on-failure --no-tests=error
 
       # by setting a different working directory we avoid releasing the config file
       - name: Dry run and prepare for release
         working-directory: ${{github.workspace}}/build/BallanceMMOServer
         run: |
           .\BallanceMMOServer.exe --dry-run
-          Copy-Item -Path *.dll, *.exe -Destination ${{env.BUILD_TYPE}} -Force
+          New-Item -ItemType Directory -Path ${{env.BUILD_TYPE}} -Force | Out-Null
+          Copy-Item -Path *.dll, *.exe, start_ballancemmo_loop.bat, bmmo_loop.ps1 -Destination ${{env.BUILD_TYPE}} -Force -ErrorAction Ignore
 
       - name: Release Artifact
         uses: actions/upload-artifact@v4
