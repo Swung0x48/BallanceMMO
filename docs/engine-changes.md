@@ -196,8 +196,28 @@ collision overhaul makes ball-ball contact routine (player balls collide with
 each other, and design 9.10 spawns them at the same point), so the order now
 comes from keys both processes give the same objects: the nocoll group ident
 first (a player's ball carries `P#<join order>` on every peer), the object
-name as the tie-break. Single-player replays are unaffected (the branch is
-never reached); the two-player spawn test of design 9.10 is the evidence.
+name as the tie-break.
+
+Evidence (2026-09-03): with the pointer comparison restored and both criteria
+traced, three headless builds disagree about the very first pairs of a
+`--spawn-test` run (Level 2, three wood balls spawning at the same point,
+kicked apart at 3 m/s). The mindists are created in the tick the balls
+appear, so the disagreement is immediate:
+
+| pair | x64 | x86 | Linux |
+| --- | --- | --- | --- |
+| player 3 / player 2 | 1 | 0 | 0 |
+| player 3 / player 1 | 1 | 1 | 0 |
+| player 2 / player 1 | 1 | 1 | 0 |
+
+The per-tick world hashes then diverge: x64 against x86 at tick 30, x64
+against Linux and x86 against Linux at tick 20. With the ordering of this
+change the same command gives identical traces on x64 and Linux over the
+whole run, and the `--explode` traces match on x86 as well. The processes
+compared here are three headless builds; the pair that actually matters is
+the game against the server, whose allocator states differ at least as much.
+Single-player replays are unaffected because the branch is never reached
+(`rec_m3b.bmrc` still 4169/4169).
 
 ## 8. Quaternion of a physicalized entity computed in the plugin (physics_RT)
 
