@@ -32,6 +32,10 @@ BallanceMMO is a project which brings online experiences to Ballance.
 
 4. Type `reload` in the server console and apply your config changes. Now you're ready to share your address and invite others!
 
+### Physics sessions (collision-overhaul)
+
+Server-authoritative physics rooms (as opposed to the legacy shadow-ball mode) need a `physics_RT.dll` on the client and a `physics.game_root` on the server beyond the steps above — see [docs/building-and-deployment.md](docs/building-and-deployment.md) for the full client/server build, distribution and deployment guide for this branch.
+
 ## Dependencies or build tools
 
 - CMake 3.12 or later: Generate makefiles
@@ -51,6 +55,8 @@ BallanceMMO is a project which brings online experiences to Ballance.
 - Dev pack of BallanceModLoader (client-side, [*release page*](https://github.com/Gamepiaynmo/BallanceModLoader/releases)) and (optionally) [BallanceModLoaderPlus](https://github.com/doyaGu/BallanceModLoaderPlus)
 
 ## Building server
+
+> Building a physics-session-capable server (this branch's default) also compiles a static copy of the Ballanced engine and needs `physics.game_root` set at deploy time — see [docs/building-and-deployment.md](docs/building-and-deployment.md) for the exact steps and flags.
 
 1. Clone this repo __RECURSIVELY__
 
@@ -196,6 +202,8 @@ BallanceMMO is a project which brings online experiences to Ballance.
     ```
 
 ## Building client (Game Mod)
+
+> This branch also needs the `physics_RT` plugin built and shipped alongside the mod for physics sessions to work — see [docs/building-and-deployment.md](docs/building-and-deployment.md).
 
 ### Windows
 
