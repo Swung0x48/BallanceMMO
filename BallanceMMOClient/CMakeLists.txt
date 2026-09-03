@@ -23,20 +23,31 @@ if (NOT TARGET GameNetworkingSockets)
 endif ()
 find_package(OpenSSL REQUIRED)
 
-# The repository pins an older vcpkg baseline whose Boost CMake wrapper cannot
-# resolve the compiled regex component with recent MSVC toolsets.  Resolve the
-# single compiled Boost library from the triplet root instead; every other
-# Boost module used by the client is header-only.
+# Boost's CMake wrapper in the pinned vcpkg baselines cannot resolve the
+# compiled regex component with recent MSVC toolsets, so resolve it from the
+# triplet root instead.  Boost.Regex is header-only from 1.87 onwards (the v5
+# implementation), in which case there is no library to link and the headers
+# found here are all the client needs; every other Boost module it uses has
+# always been header-only.
 find_path(BMMO_BOOST_INCLUDE_DIR NAMES boost/regex.hpp REQUIRED)
 cmake_path(GET BMMO_BOOST_INCLUDE_DIR PARENT_PATH BMMO_VCPKG_TRIPLET_ROOT)
 file(GLOB BMMO_BOOST_REGEX_RELEASE "${BMMO_VCPKG_TRIPLET_ROOT}/lib/boost_regex-*-mt.lib")
 file(GLOB BMMO_BOOST_REGEX_DEBUG "${BMMO_VCPKG_TRIPLET_ROOT}/debug/lib/boost_regex-*-mt-gd.lib")
 list(LENGTH BMMO_BOOST_REGEX_RELEASE _bmmo_regex_release_count)
 list(LENGTH BMMO_BOOST_REGEX_DEBUG _bmmo_regex_debug_count)
-if (NOT _bmmo_regex_release_count EQUAL 1 OR NOT _bmmo_regex_debug_count EQUAL 1)
+if (_bmmo_regex_release_count GREATER 1 OR _bmmo_regex_debug_count GREATER 1)
     message(FATAL_ERROR
-        "Expected exactly one Boost.Regex release/debug library under ${BMMO_VCPKG_TRIPLET_ROOT}; "
+        "Expected at most one Boost.Regex release/debug library under ${BMMO_VCPKG_TRIPLET_ROOT}; "
         "got ${_bmmo_regex_release_count}/${_bmmo_regex_debug_count}")
+endif ()
+if (_bmmo_regex_release_count EQUAL 1 AND _bmmo_regex_debug_count EQUAL 1)
+    set(BMMO_BOOST_REGEX_LIBRARIES
+            optimized "${BMMO_BOOST_REGEX_RELEASE}"
+            debug "${BMMO_BOOST_REGEX_DEBUG}")
+    message(STATUS "[BallanceMMO] Boost.Regex: linking the compiled library")
+else ()
+    set(BMMO_BOOST_REGEX_LIBRARIES "")
+    message(STATUS "[BallanceMMO] Boost.Regex: header-only")
 endif ()
 
 if (NOT TARGET replxx)
@@ -166,8 +177,7 @@ target_link_libraries(BallanceMMOClient PRIVATE
                         replxx
                         GameNetworkingSockets::shared
                         OpenSSL::Crypto
-                        optimized "${BMMO_BOOST_REGEX_RELEASE}"
-                        debug "${BMMO_BOOST_REGEX_DEBUG}"
+                        ${BMMO_BOOST_REGEX_LIBRARIES}
                         CK2
                         VxMath
                         "${BMLPLUS_LIBRARY}")
