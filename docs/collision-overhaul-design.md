@@ -334,3 +334,16 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - 教程期间的发现：迟到加入者本地 IVP 时间不走（因子 0），旧的"回滚"每个快照都恢复 + 重模拟却什么也模拟不了（核心的 `t_env` 不变），表现为远端球总停在服务端上一个快照的位置；`frozen` 路径解决。
 - 自己的球的 1 mm 级残差出现在两球在出生点接触时：恢复只还原位姿/速度，IVP 接触状态在下一 PSI 重建，与"从未分叉"的连续模拟差 1 mm 左右，下一个快照拉齐（设计里预期的 GGPO 差别）。
 - 原版渐变路径（`body_corrector`）保留为 `session rollback off` 的回退。
+
+**跨平台验证（2026-09-02，Arch WSL，GCC 16.1.1）**：回滚路径此前只在 Windows/MSVC 上验证过，这次把服务端和两个无头客户端全部放到 Linux 上跑了一遍。
+
+- 单元测试 `BallanceMMOMessageTests` **75/75 通过**，含 6 个回滚引擎用例——回滚引擎第一次在 MSVC 以外的编译器上验证。注意 `enable_testing()` 在 `BallanceMMOServer/` 子目录里调用，在上层跑 `ctest` 会报 "No tests were found" 并且**退出码仍是 0**（原有 CI 的测试步骤因此一直空转），要 `ctest --test-dir <build>/BallanceMMOServer`。
+- 端到端：服务端 + `--host --expect 2` + `--join-first` 三个进程全在 WSL 内，`physics.game_root` 指向 `/mnt/c/...` 下的 Windows 游戏数据目录，两个客户端回放同一份录制输入。
+
+| 场景 | 快照 | 一致 | 不符 / 回滚 | max_err | frozen | unmatched |
+|---|---|---|---|---|---|---|
+| Linux 双人,HostA | 3832 | 3821 | 11 / 11 | 0.049 m | 0 | 0 |
+| Linux 双人,JoinB | 3968 | 3961 | 7 / 7 | 0.049 m | 0 | 0 |
+
+- 锚点位姿哈希 `cbf29ce484222325`，**与同日 Windows 侧的取值相同**——两端引擎在 Linux 上仍然位级一致，回滚只在对方按键沿附近触发，数量级与 Windows 结果一致。
+- `game_root` 只被当作数据读取（不加载任何 Windows DLL），所以 Linux 服务端可以直接复用一份 Windows 游戏目录。
