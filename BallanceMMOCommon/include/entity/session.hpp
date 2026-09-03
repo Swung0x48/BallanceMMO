@@ -58,6 +58,12 @@ namespace bmmo::session {
     constexpr uint8_t BODY_FLAG_SIMULATED         = 1u << 0;
     constexpr uint8_t BODY_FLAG_COLLISION_ENABLED = 1u << 1;
 
+    // session_event_msg Physicalize `flags` bits.  SPAWN: the retail script
+    // physicalized the ball at the level's current resetpoint
+    // (CurrentLevel[0,3]) - a spawn or a respawn, not a trafo - so the
+    // session's spawn impulse applies (design 9.10, session/spawn_impulse.hpp).
+    constexpr uint8_t PHYSICALIZE_FLAG_SPAWN = 1u << 0;
+
     // session_start_msg::players entry: one member's spawn assignment.
     struct player_entry {
         uint32_t id = 0;

@@ -42,7 +42,7 @@ namespace bmmo::session {
         float spawn_position[3] = {};
         float spawn_rotation[4] = {};
         bool spawn_known = false;
-        float spawn_offset[3] = {};          // ring offset relative to the retail resetpoint
+        float spawn_impulse = 0.0f;          // design 9.10: kick speed at the resetpoint, 0 = none
 
         // Restart / anchor detection.
         bool saw_ingame_inactive = false;
@@ -95,6 +95,7 @@ namespace bmmo::session {
         struct own_physicalize_report {
             bool valid = false;
             uint8_t ball_type = 0;
+            uint8_t flags = 0;      // design 9.10: PHYSICALIZE_FLAG_* resent unchanged, no new impulse
             float position[3] = {};
             float rotation[9] = {};
             bmmo::session::ball_recipe recipe;

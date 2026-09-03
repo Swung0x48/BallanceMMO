@@ -62,6 +62,7 @@ TEST(SessionStartMsg, SerializeDeserializeRoundTrip) {
     msg.input_delay = 6;
     msg.first_tick = 132;
     msg.seed = -42;
+    msg.spawn_impulse = 2.5f;
 
     bmmo::session::player_entry p0{};
     p0.id = 10; p0.join_order = 0; p0.ball_type = 1;
@@ -86,6 +87,7 @@ TEST(SessionStartMsg, SerializeDeserializeRoundTrip) {
     EXPECT_EQ(6, parsed.input_delay);
     EXPECT_EQ(132u, parsed.first_tick);
     EXPECT_EQ(-42, parsed.seed);
+    EXPECT_FLOAT_EQ(2.5f, parsed.spawn_impulse);
     ASSERT_EQ(2u, parsed.players.size());
     EXPECT_EQ(10u, parsed.players[0].id);
     EXPECT_EQ(0, parsed.players[0].join_order);

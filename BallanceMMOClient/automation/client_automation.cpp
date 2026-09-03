@@ -322,6 +322,22 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         }
         return "ok " + std::to_string(listed) + ": " + out;
     }
+    if (verb == "entity") {
+        // entity <name>: world matrix rows and parent of a 3D entity, for
+        // comparing entity placement with the headless engine (--dump-entity).
+        auto* context = m_bml->GetCKContext();
+        auto* entity = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
+            const_cast<CKSTRING>(rest.c_str()), CKCID_3DENTITY, nullptr));
+        if (!entity) return "error no 3D entity named " + rest;
+        const VxMatrix& world = entity->GetWorldMatrix();
+        const VxMatrix& local = entity->GetLocalMatrix();
+        CK3dEntity* parent = entity->GetParent();
+        return std::format("ok {} parent={} world=[{:a},{:a},{:a}][{:a},{:a},{:a}][{:a},{:a},{:a}][{:a},{:a},{:a}] local_pos=[{:a},{:a},{:a}]",
+            rest, parent && parent->GetName() ? parent->GetName() : "-",
+            world[0][0], world[0][1], world[0][2], world[1][0], world[1][1], world[1][2],
+            world[2][0], world[2][1], world[2][2], world[3][0], world[3][1], world[3][2],
+            local[3][0], local[3][1], local[3][2]);
+    }
     if (verb == "message") {
         auto* messages = m_bml->GetMessageManager();
         if (!messages || rest.empty()) return "error no message manager or name";
@@ -420,7 +436,18 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             return "error " + error;
         if (action != "reset") return "error usage: rng reset <seed>";
         if (!physics_view_.reset_random(seed, error)) return "error " + error;
-        return "ok rng reset to " + std::to_string(seed);
+        return "ok rng (ivp and Random block) reset to " + std::to_string(seed);
+    }
+    if (verb == "explode") {
+        // explode <wood|paper|stone>: activates the retail trafo explosion
+        // script directly, for the SimTool --explode determinism check.
+        std::string type = rest;
+        if (!type.empty()) type[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(type[0])));
+        if (type != "Wood" && type != "Paper" && type != "Stone") return "error usage: explode <wood|paper|stone>";
+        CKBehavior* script = bmmo::game::find_root_script(m_bml->GetCKContext(), ("Ball_Explosion_" + type).c_str());
+        if (!script) return "error no Ball_Explosion_" + type + " script";
+        script->Activate(TRUE, TRUE);
+        return "ok explode " + type + " at frame " + std::to_string(record_frames_);
     }
     if (verb == "record") {
         // record start <path-without-spaces> [level]   (level: what the

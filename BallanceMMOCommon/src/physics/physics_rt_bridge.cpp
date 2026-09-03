@@ -356,6 +356,30 @@ namespace {
         return 1;
     }
 
+    int32_t api_push_impulse(void* manager, const char* entity_name, const float direction_ws[3], float speed,
+                             uint32_t behavior_id, char* error, uint32_t error_size) {
+        if (!manager || !direction_ws) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::push_impulse(static_cast<CKIpionManager*>(manager), entity_name, direction_ws, speed,
+                                         behavior_id, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    void api_random_reset(int32_t seed) { bmmo::physics::random_reset(seed); }
+    int32_t api_random_get_state() { return bmmo::physics::random_get_state(); }
+    void api_random_set_state(int32_t state) { bmmo::physics::random_set_state(state); }
+    int32_t api_random_next() { return bmmo::physics::random_next(); }
+
+    int32_t api_install_random_block(void* ck_context) {
+        return bmmo::physics::install_random_block(static_cast<CKContext*>(ck_context));
+    }
+
     const bmmo_physics_api_v2 kApi = {
         sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
@@ -385,6 +409,12 @@ namespace {
         api_navigation_set_state,
         api_set_body_guard,
         api_get_clock,
+        api_push_impulse,
+        api_random_reset,
+        api_random_get_state,
+        api_random_set_state,
+        api_random_next,
+        api_install_random_block,
     };
 }
 

@@ -68,7 +68,8 @@ namespace bmmo::sim {
         return views_.size();
     }
 
-    void session_runner::create_session(uint32_t session, int level, const std::vector<uint32_t>& players) {
+    void session_runner::create_session(uint32_t session, int level,
+                                        const std::vector<std::pair<uint32_t, uint8_t>>& players) {
         post([this, session, level, players] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
@@ -83,6 +84,7 @@ namespace bmmo::sim {
             options.level = level;
             options.seed = config_.seed;
             options.trace = config_.trace;
+            options.spawn_impulse = config_.spawn_impulse;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
@@ -99,9 +101,9 @@ namespace bmmo::sim {
                 if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
                 return;
             }
-            for (uint32_t player: players) {
+            for (const auto& [player, join_order]: players) {
                 std::string add_error;
-                if (!s->world->add_player(player, add_error)) {
+                if (!s->world->add_player(player, join_order, add_error)) {
                     log("[session " + std::to_string(session) + "] add_player failed: " + add_error);
                     continue;
                 }
@@ -137,13 +139,13 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::add_player(uint32_t session, uint32_t player) {
-        post([this, session, player] {
+    void session_runner::add_player(uint32_t session, uint32_t player, uint8_t join_order) {
+        post([this, session, player, join_order] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
             std::string error;
-            if (!s.world->add_player(player, error)) {
+            if (!s.world->add_player(player, join_order, error)) {
                 log("[session " + std::to_string(session) + "] add_player failed: " + error);
                 return;
             }
@@ -329,6 +331,7 @@ namespace bmmo::sim {
         while (!s.events.empty() && s.events.front().tick <= tick) {
             pending_event e = std::move(s.events.front());
             s.events.erase(s.events.begin());
+            e.event.tick = e.tick;
             std::string error;
             if (!s.world->apply_event(e.player, e.event, error))
                 log("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)

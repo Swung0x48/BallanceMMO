@@ -14,6 +14,8 @@
 #include <memory>
 #include <sstream>
 
+#include <session/spawn_impulse.hpp>
+
 namespace {
     using bmmo::session::physics_session_state;
     using phase_type = physics_session_state::phase_type;
@@ -139,6 +141,7 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
     s.snapshot_interval = msg.snapshot_interval;
     s.input_delay = msg.input_delay;
     s.seed = msg.seed;
+    s.spawn_impulse = msg.spawn_impulse;
     s.map = msg.map;
     s.players = msg.players;
     s.own_join_order = -1;
@@ -304,13 +307,6 @@ void BallanceMMOClient::physics_session_anchor() {
             s.ball_forces.push_back(force);
         }
     }
-    if (CKDataArray* level = current_level_array()) {
-        VxMatrix reset;
-        if (level->GetElementValue(0, 3, &reset) && s.spawn_known) {
-            for (int k = 0; k < 3; ++k) s.spawn_offset[k] = s.spawn_position[k] - reset[3][k];
-        }
-    }
-
     bmmo::session_ready_msg ready;
     ready.session = s.session;
     ready.first_tick = 0;
@@ -415,22 +411,9 @@ void BallanceMMOClient::physics_session_frame() {
             physics_session_attach_own_navigation(ball_name, static_cast<uint8_t>(db_.get_ball_id(ball_name)));
     } else {
         s.own_group_set = false;
-        // Ring offset (design 3.4): while the retail script holds the ball at
-        // the resetpoint before physicalizing it, move it to our slot.
-        CKDataArray* level = current_level_array();
-        if (ball && s.spawn_known && level && s.players.size() > 1) {
-            VxMatrix reset;
-            VxVector position;
-            ball->GetPosition(&position);
-            if (level->GetElementValue(0, 3, &reset)) {
-                const VxVector reset_position(reset[3][0], reset[3][1], reset[3][2]);
-                if ((position - reset_position).SquareMagnitude() < 1e-6f) {
-                    VxVector target(reset_position.x + s.spawn_offset[0], reset_position.y + s.spawn_offset[1],
-                                    reset_position.z + s.spawn_offset[2]);
-                    if ((target - position).SquareMagnitude() > 1e-8f) ball->SetPosition(&target);
-                }
-            }
-        }
+        // The ball stays where the retail script puts it (the resetpoint);
+        // no ring slot to move it to (design 9.10 replaces the ring with a
+        // spawn impulse, applied once the body exists in OnPhysicalize).
     }
 
     // Mechanism states after this tick (design 8.5 step 5): the snapshot for
@@ -706,6 +689,15 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         remote.ball_type = event.ball_type;
         remote.physicalized = true;
         remote.corrector.clear();
+        // Design 9.10: the same spawn kick as our own ball, applied at once -
+        // the body exists here already.
+        if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && s.spawn_impulse > 0.0f) {
+            const uint32_t index = bmmo::session::spawn_direction_index(s.seed, static_cast<uint8_t>(join_order), event.tick);
+            std::string impulse_error;
+            if (!physics_view_.push_impulse(entity->GetName(), bmmo::session::kSpawnDirectionTable[index],
+                                            s.spawn_impulse, 0, impulse_error))
+                logger_->Warn("Physics session: spawn impulse for %s: %s", entity->GetName(), impulse_error.c_str());
+        }
         if (previous_type != std::numeric_limits<uint32_t>::max()) {
             // Inputs relayed for the old entity must not drive the new one.
             remote.inputs.clear();
@@ -912,6 +904,7 @@ void BallanceMMOClient::physics_session_check_own_body(const bmmo::session_snaps
     event.tick = s.current_tick() + 1;
     event.type = bmmo::session::event_type::Physicalize;
     event.ball_type = s.last_physicalize.ball_type;
+    event.flags = s.last_physicalize.flags;   // resent unchanged; no second impulse here
     const VxMatrix& world = ball->GetWorldMatrix();
     for (int k = 0; k < 3; ++k) event.position[k] = world[3][k];
     for (int r = 0; r < 3; ++r)
@@ -951,6 +944,20 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
     for (int k = 0; k < 3; ++k) event.position[k] = world[3][k];
     for (int r = 0; r < 3; ++r)
         for (int k = 0; k < 3; ++k) event.rotation[r * 3 + k] = world[r][k];
+    // Design 9.10: a Physicalize at the level's current resetpoint is a spawn
+    // or a respawn (a trafo never happens there), flagged so every side
+    // - including this one's own kick below - applies the same impulse.
+    bool spawn = false;
+    if (CKDataArray* level = current_level_array()) {
+        VxMatrix reset;
+        if (level->GetElementValue(0, 3, &reset)) {
+            const float dx = event.position[0] - reset[3][0];
+            const float dy = event.position[1] - reset[3][1];
+            const float dz = event.position[2] - reset[3][2];
+            spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+        }
+    }
+    if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
     auto& r = event.recipe;
     r.fixed = fixed != 0;
     r.friction = friction;
@@ -976,14 +983,31 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
     (void)collGroup;
     physics_session_send_event(event);
     // Keep it: a server that never applied this event has to be told again
-    // (physics_session_check_own_body).
+    // (physics_session_check_own_body), same flags, no second impulse.
     s.last_physicalize.valid = true;
     s.last_physicalize.ball_type = event.ball_type;
+    s.last_physicalize.flags = event.flags;
     for (int k = 0; k < 3; ++k) s.last_physicalize.position[k] = event.position[k];
     for (int k = 0; k < 9; ++k) s.last_physicalize.rotation[k] = event.rotation[k];
     s.last_physicalize.recipe = event.recipe;
     s.snapshots_without_own = 0;
     s.own_group_set = false;
+    if (spawn && s.spawn_impulse > 0.0f) {
+        // BMLPlus broadcasts OnPhysicalize before the block creates the body,
+        // so the bridge queues this into the frame's PreSimulate pass,
+        // anchored to a live behavior (the Ball Navigation script).
+        uint32_t behavior_id = s.navigation.ball_navigation;
+        if (behavior_id == 0) behavior_id = bmmo::game::read_navigation_graph(m_bml->GetCKContext()).ball_navigation;
+        const uint8_t join_order = static_cast<uint8_t>(s.own_join_order < 0 ? 63 : s.own_join_order);
+        const uint32_t index = bmmo::session::spawn_direction_index(s.seed, join_order, event.tick);
+        std::string impulse_error;
+        if (physics_view_.push_impulse(ball->GetName(), bmmo::session::kSpawnDirectionTable[index], s.spawn_impulse,
+                                       behavior_id, impulse_error))
+            logger_->Info("Physics session: spawn impulse index=%u speed=%.3f at tick %u", index, s.spawn_impulse,
+                          event.tick);
+        else
+            logger_->Warn("Physics session: spawn impulse: %s", impulse_error.c_str());
+    }
     // Design 9.6: the replica drives the ball, the retail leaves push zero.
     // The replica only moves to the new ball in the next frame, and a
     // SetPhysicsForce.Create that ran while the ball had no body is retried at
@@ -1319,12 +1343,12 @@ std::string BallanceMMOClient::physics_session_status_text() {
     for (const auto& [name, corrector]: s.mechanism_correctors)
         if (corrector.stats().max_error > mechanism_max_error) mechanism_max_error = corrector.stats().max_error;
     return std::format(
-        "session={} phase={} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
+        "session={} phase={} impulse={:.3f} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={} writes={}/{} mech_same={} mech_blend={} mech_hard={} "
         "mech_max_err={:.4f} events={}/{} phys_resends={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
-        s.session, phase, s.current_tick(), s.tick_base, s.assigned ? 1 : 0, static_cast<long long>(s.frames_since_anchor),
+        s.session, phase, s.spawn_impulse, s.current_tick(), s.tick_base, s.assigned ? 1 : 0, static_cast<long long>(s.frames_since_anchor),
         s.inputs_sent, s.navigation_keys_known ? 1 : 0, s.own_physicalized ? 1 : 0, s.own_group_set ? 1 : 0,
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
         s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,

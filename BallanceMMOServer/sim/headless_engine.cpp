@@ -11,6 +11,8 @@
 #include "GameConfig.h"
 bool EditScript(CKLevel* level, const CGameConfig& config, const char* resolvedFile);
 
+#include <physics/physics_state.hpp>
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -302,6 +304,14 @@ namespace bmmo::sim {
             error = "CKContext::Play failed: " + std::to_string(played);
             return false;
         }
+        // Deterministic "Random" block (design 9.10 / Part B): reroutes the
+        // Random blocks inside the trafo explosion scripts once Balls.nmo
+        // has been loaded by the boot scripts.  tick() repeats this while a
+        // level is still loading; cheap (SetFunction only on a mismatch), and
+        // reset_session_clock repeats it at every anchor anyway.
+        const int patched = bmmo::physics::install_random_block(context_);
+        if (patched >= 0) log("random block: " + std::to_string(patched) + " instances patched");
+        else log("random block: no \"Random\" prototype registered");
         return true;
     }
 
@@ -325,6 +335,16 @@ namespace bmmo::sim {
         time_->SetTimeScaleFactor(1.0f);
         time_->SetMinimumDeltaTime(kFixedDeltaMs);
         time_->SetMaximumDeltaTime(kFixedDeltaMs);
+        // Re-patch the "Random" block instances while a level is still
+        // loading (design 9.10): base.cmo's own instances are already caught
+        // by finish_load, this catches whatever a level's file adds, before
+        // its scripts get a chance to draw from it.  Stops once
+        // Gameplay_Ingame is active so a long session does not keep scanning
+        // every object every tick.
+        if (!bmmo::game::script_active(context_, "Gameplay_Ingame")) {
+            const int patched = bmmo::physics::install_random_block(context_);
+            if (patched > 0) log("random block: " + std::to_string(patched) + " instances patched");
+        }
         advance_level_request();
         const CKERROR processed = context_->Process();
         if (processed != CK_OK) {

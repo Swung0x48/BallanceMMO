@@ -211,6 +211,19 @@ void BallanceMMOClient::OnLoad()
         utils::md5_from_file(std::string{"..\\"}.append(file_data[0]), hash_data.data());
     }
 
+    // Design 9.10: route the retail "Random" block through the bridge's
+    // deterministic generator, wherever the bridge is available (the open
+    // source physics_RT.dll only - the retail one has no bridge at all).
+    {
+        std::string error;
+        if (physics_view_.available() || physics_view_.initialize(m_bml->GetCKContext(), error)) {
+            const int patched = physics_view_.install_random_block(error);
+            logger_->Info("Random block hooked (%d instances)", patched);
+        } else {
+            logger_->Info("Random block hook unavailable: %s", error.c_str());
+        }
+    }
+
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     spect_cam_ = static_cast<CKCamera*>(m_bml->GetCKContext()->CreateObject(CKCID_CAMERA, "Spectator_Cam"));
 #endif
@@ -293,6 +306,15 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
     else if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
         current_level_array_ = CKOBJID(m_bml->GetArrayByName("CurrentLevel"));
         ingame_parameter_array_ = CKOBJID(m_bml->GetArrayByName("IngameParameter"));
+    }
+
+    // Design 9.10: the hook only covers the Random blocks inside the trafo
+    // explosion scripts, which arrive with 3D Entities\Balls.nmo after
+    // OnLoad; the pass is idempotent (the session anchor repeats it too).
+    if (physics_view_.available()) {
+        std::string error;
+        const int patched = physics_view_.install_random_block(error);
+        if (patched > 0) logger_->Info("Random block hooked (%d instances)", patched);
     }
 }
 

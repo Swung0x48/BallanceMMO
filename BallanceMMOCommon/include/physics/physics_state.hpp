@@ -7,9 +7,11 @@
 
 #include <string>
 
+#include <physics/deterministic_random.hpp>
 #include <physics/physics_rt_api.h>
 #include <physics/world_hash.hpp>
 
+class CKContext;
 class CKIpionManager;
 
 namespace bmmo::physics {
@@ -88,4 +90,44 @@ namespace bmmo::physics {
     // IVP_Real_Object::change_nocoll_group_ident on a physicalized entity.
     bool set_body_group(CKIpionManager* physics, const char* entity_name, const char* collision_group,
                         std::string& error);
+
+    // ---- bridge API v6 (design 9.10) ----
+
+    // Push the body of `entity_name` at its mass centre with the impulse
+    // direction_ws * speed * mass: the retail Physics Impulse block's path for
+    // Referential == the entity and Position 0,0,0 (no spin).  Applied at
+    // once when the body exists; otherwise, when `behavior_id` names a live
+    // behavior, queued into the manager's PreSimulate pass of the current
+    // frame - the Physicalize block that creates the body runs later in the
+    // same frame - and dropped with a log line if the body never appears.
+    bool push_impulse(CKIpionManager* physics, const char* entity_name, const float direction_ws[3], float speed,
+                      uint32_t behavior_id, std::string& error);
+    // The deterministic generator behind the hooked "Random" block
+    // (physics/deterministic_random.hpp).  reset_session_clock seeds it too.
+    void random_reset(int32_t seed);
+    int32_t random_get_state();
+    void random_set_state(int32_t state);
+    int32_t random_next();
+    // Routes the Virtools "Random" blocks (GUID 0c622386-1c3054f7) inside the
+    // trafo explosion scripts Ball_Explosion_Wood/Paper/Stone through the
+    // generator: the block's own arithmetic with random_next() in place of
+    // rand() and the Microsoft RAND_MAX.  Only those blocks: every other
+    // Random in the game keeps the C runtime, so a draw that happens on one
+    // side only can never shift the pieces' sequence.  Idempotent; needs the
+    // scripts to exist (Balls.nmo loaded); reset_session_clock calls it too.
+    // Returns the number of blocks patched by this call, -1 without a context
+    // or when Logics is not registered.  The scripts' opening "Set Position"
+    // block is wrapped as well, so every explosion starts with
+    // restore_explosion_pieces().
+    int install_random_block(CKContext* context);
+    // Puts the trafo explosion pieces (the Ball_*Pieces_Frame hierarchies)
+    // back to their initial conditions, what the retail "TT Restore IC" of
+    // Ball_ResetPieces_* does after every explosion.  Needed once before the
+    // first explosion of a process: Balls_Init physicalizes the pieces for a
+    // few frames at game start, and how far they fall then depends on the
+    // start-up frame times (real time on the game, fixed on the headless
+    // engine), so without this the first explosion starts from poses that
+    // differ per process.  reset_session_clock calls it.  Returns the number
+    // of objects restored, -1 without a scene.
+    int restore_explosion_pieces(CKContext* context);
 }

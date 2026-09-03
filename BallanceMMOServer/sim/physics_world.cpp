@@ -5,6 +5,7 @@
 #include "PhysicsCallback.h"
 
 #include <physics/physics_state.hpp>
+#include <session/spawn_impulse.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -157,6 +158,7 @@ namespace bmmo::sim {
         anchor_surfaces_ = hash.surfaces;
         tick_ = 0;
         rng_cursor_ = ivp_srand_read();
+        random_cursor_ = bmmo::physics::random_get_state();
 
         navigation_ = bmmo::game::read_navigation_graph(context);
         if (!navigation_.valid()) {
@@ -620,15 +622,21 @@ namespace bmmo::sim {
         return clone;
     }
 
-    bool physics_world::add_player(uint32_t id, std::string& error) {
+    bool physics_world::add_player(uint32_t id, uint8_t join_order, std::string& error) {
         if (players_.count(id)) return true;
         player p;
         p.id = id;
-        int slot = 0;
-        while (slot < kMaxSlots && used_slots_.count(slot)) ++slot;
-        if (slot >= kMaxSlots) {
-            error = "no free player slot";
-            return false;
+        int slot = join_order;
+        if (slot >= kMaxSlots || used_slots_.count(slot)) {
+            const int wanted = slot;
+            slot = 0;
+            while (slot < kMaxSlots && used_slots_.count(slot)) ++slot;
+            if (slot >= kMaxSlots) {
+                error = "no free player slot";
+                return false;
+            }
+            log("world: join order " + std::to_string(wanted) + " for player " + std::to_string(id)
+                + " is taken, falling back to slot " + std::to_string(slot));
         }
         p.slot = slot;
         p.group = kPlayerGroupPrefix + std::to_string(slot);
@@ -793,6 +801,20 @@ namespace bmmo::sim {
                 p.navigation->set_force_value(force_value(event.ball_type));
             }
             body_set_changed_ = true;
+            if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && options_.spawn_impulse > 0.0f) {
+                const uint32_t idx = bmmo::session::spawn_direction_index(
+                        static_cast<int32_t>(options_.seed), static_cast<uint8_t>(p.slot), event.tick);
+                std::string impulse_error;
+                if (!bmmo::physics::push_impulse(manager, clone->GetName(), bmmo::session::kSpawnDirectionTable[idx],
+                            options_.spawn_impulse, 0, impulse_error))
+                    log("world: spawn impulse for player " + std::to_string(id) + " failed: " + impulse_error);
+                else {
+                    char text[160];
+                    std::snprintf(text, sizeof(text), "world: spawn impulse index=%u speed=%.3f for player %u at tick %u",
+                            idx, static_cast<double>(options_.spawn_impulse), id, event.tick);
+                    log(text);
+                }
+            }
             return true;
         }
         case event_type::Unphysicalize: {
@@ -833,6 +855,7 @@ namespace bmmo::sim {
 
     bool physics_world::tick(std::string& error) {
         ivp_srand(rng_cursor_);
+        bmmo::physics::random_set_state(random_cursor_);
         CKContext* context = engine_->context();
         // The Key Event bindings and force values are outputs of
         // Gameplay_Refresh, which runs a few frames after the anchor: re-read
@@ -871,6 +894,7 @@ namespace bmmo::sim {
         }
         ++tick_;
         rng_cursor_ = ivp_srand_read();
+        random_cursor_ = bmmo::physics::random_get_state();
         if (options_.trace) {
             bmmo::physics::world_hash h;
             std::string ignored;

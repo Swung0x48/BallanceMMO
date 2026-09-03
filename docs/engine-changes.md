@@ -179,6 +179,49 @@ Gameplay difference to retail: within a physics session a death does not
 reset the sector's mechanisms; outside a session the guard is off and the
 block behaves exactly as before.
 
+## 7. Deterministic ball-ball synapse order (physics_RT / IVP)
+
+File: `Source/BuildingBlocks/physics_RT/ivp/ivp_physics/ivp_mindist.cxx`
+(`IVP_Mindist::init_mindist`, new helper `ivp_ball_pair_order`).
+
+When both objects of a minimal-distance pair are balls, `init_mindist`
+decided which of them becomes synapse 0 by comparing their `client_data`
+pointers - the addresses of the `CK3dEntity` objects. That order fixes the
+sign of the contact plane and the roles of the two cores in the impact and
+friction solve, so two processes simulating the same pair (the game and its
+authoritative server, whose heaps differ) could diverge from the first
+ball-ball contact on. Retail Ballance never exercises the branch: the player
+ball is the only `IVP_Ball` in a level, every other body is a polygon. The
+collision overhaul makes ball-ball contact routine (player balls collide with
+each other, and design 9.10 spawns them at the same point), so the order now
+comes from keys both processes give the same objects: the nocoll group ident
+first (a player's ball carries `P#<join order>` on every peer), the object
+name as the tie-break. Single-player replays are unaffected (the branch is
+never reached); the two-player spawn test of design 9.10 is the evidence.
+
+## 8. Quaternion of a physicalized entity computed in the plugin (physics_RT)
+
+File: `Source/BuildingBlocks/physics_RT/CKIpionManager.cpp`
+(`FillTemplateInfo`, new `CKIpionManager::PhysicsQuaternionFromMatrix`).
+
+`FillTemplateInfo` turned the entity's world matrix into the IVP quaternion
+with `VxQuaternion::FromMatrix`, a function of the host's VxMath: the game's
+`VxMath.dll` on the client, the reimplementation on the headless server. The
+two agree on axis-aligned matrices (every body of the M1 replays) but differ
+in the last bit for general rotations, so a rotated entity physicalized on
+both peers started from different quaternions. Found with the trafo
+explosion pieces (design 9.10): with everything else made exact, one paper
+piece and two wood pieces - the ones with general rotations - still differed
+by a float ulp in the first frame. The conversion is now a copy of the
+reimplementation's algorithm compiled into the plugin (`sqrtf` is exact
+everywhere), so both peers compute it alike; the headless result is
+unchanged, so the M1 replays still match (`rec_m3b.bmrc` 4169/4169 after the
+change). With it the paper explosion replays bit-exact between the game and
+the headless engine (3456/3456 frames); two of the sixteen wood pieces still
+differ in the last bit from their first frame on, a residue that is not
+present between the x86, x64 and Linux headless builds (identical) and has
+not been located yet.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
@@ -205,3 +248,10 @@ block behaves exactly as before.
   `CKStateChunk` through `CKDeletePointer` (`delete[]`), left untouched, and
   the Player hotfix string over-read, since fixed as change #4 above after it
   crashed the server.
+- The deterministic "Random" block behind the trafo explosion pieces and the
+  spawn impulse (design section 9.10) needed no engine change either: the
+  function of the Random block instances inside the three explosion scripts
+  is replaced from BallanceMMO code at run time (`CKBehavior::SetFunction`
+  through `install_random_block`, both the headless engine and the client
+  mod), a mechanism CK already exposes for any behavior; the Logics sources
+  are untouched.

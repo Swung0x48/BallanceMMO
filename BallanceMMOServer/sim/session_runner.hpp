@@ -39,6 +39,7 @@ namespace bmmo::sim {
         uint32_t full_snapshot_interval = 66;
         uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
         int seed = 1;
+        float spawn_impulse = 0.0f;         // world_options::spawn_impulse (design 9.10)
     };
 
     struct session_snapshot {
@@ -85,10 +86,12 @@ namespace bmmo::sim {
         session_runner(const session_runner&) = delete;
         session_runner& operator=(const session_runner&) = delete;
 
-        // Boots a world for the level; on_world_ready follows.
-        void create_session(uint32_t session, int level, const std::vector<uint32_t>& players);
+        // Boots a world for the level; on_world_ready follows.  Each player is
+        // paired with its join order (design 9.10): the world's per-player
+        // slot and the spawn direction table both key off it.
+        void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players);
         void destroy_session(uint32_t session);
-        void add_player(uint32_t session, uint32_t player);
+        void add_player(uint32_t session, uint32_t player, uint8_t join_order);
         void remove_player(uint32_t session, uint32_t player);
         // The player anchored at first_tick; ticking starts when every player
         // of a not-yet-running session is ready.

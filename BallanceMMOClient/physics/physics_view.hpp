@@ -73,6 +73,18 @@ namespace bmmo::physics {
         bool set_body_guard(bool enable, const char* except_entity, std::string& error) const;
         bool get_clock(float& time_factor, float& physics_delta, std::string& error) const;
 
+        // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
+        // Impulse direction_ws * speed * mass at the body's mass centre; applied
+        // now, or at this frame's PreSimulate pass when the body does not
+        // exist yet (behavior_id anchors the queued callback).
+        bool push_impulse(const char* entity_name, const float direction_ws[3], float speed, uint32_t behavior_id,
+                          std::string& error) const;
+        // Routes the Virtools "Random" block through the bridge's deterministic
+        // generator (prototype + existing instances); returns the number of
+        // instances patched, -1 without the prototype.
+        int install_random_block(std::string& error) const;
+        int32_t random_next(std::string& error) const;
+
         // Identification of the loaded physics module (filled even when the
         // bridge is missing, so the retail DLL can be reported).
         const std::string& dll_sha256() const { return dll_sha256_; }

@@ -46,6 +46,10 @@ namespace bmmo::sim {
         std::filesystem::path game_root;
         int level = 1;
         int seed = 1;
+        // Spawn kick speed, m/s (design 9.10); 0 disables (solo sessions and
+        // debug/replay worlds that never set it stay bit-exact with a
+        // recording that has no impulse).
+        float spawn_impulse = 0.0f;
         int boot_ticks = 400;          // ticks for the composition to reach the main menu
         int anchor_timeout = 3000;     // ticks to wait for Gameplay_Ingame after the level request
         // Per-tick diagnostics in the log: rng / awake-body changes, input
@@ -80,11 +84,16 @@ namespace bmmo::sim {
     struct lifecycle_event {
         bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
         uint8_t ball_type = 0;
+        uint8_t flags = 0;   // Physicalize: bmmo::session::PHYSICALIZE_FLAG_* (design 9.10)
         float position[3] = {};
         float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // world matrix rows
         bmmo_physics_ball_recipe recipe{};
         int32_t sector = 0;
         std::string name;   // BodyRevived: the mechanism body
+        // The tick this event was submitted for (session_runner::pending_event
+        // tick): Physicalize's spawn impulse direction is derived from it, so
+        // both sides pick the same table entry (session/spawn_impulse.hpp).
+        uint32_t tick = 0;
     };
 
     class physics_world {
@@ -110,7 +119,11 @@ namespace bmmo::sim {
         // Retail spawn matrix of the level (CurrentLevel[0,3] at the anchor).
         const VxMatrix& spawn_matrix() const { return spawn_matrix_; }
 
-        bool add_player(uint32_t id, std::string& error);
+        // `join_order` is the player's slot when free (kMaxSlots stays 64: it
+        // is also the nocoll group index and the spawn direction table's
+        // per-player offset, design 9.10); a taken slot falls back to the
+        // lowest free one and logs it.
+        bool add_player(uint32_t id, uint8_t join_order, std::string& error);
         void remove_player(uint32_t id);
         bool has_player(uint32_t id) const { return players_.count(id) != 0; }
         size_t player_count() const { return players_.size(); }
@@ -248,6 +261,7 @@ namespace bmmo::sim {
         bool body_set_changed_ = true;
         void* filter_environment_ = nullptr;
         int rng_cursor_ = 0;
+        int random_cursor_ = 0;   // bmmo::physics::random_* state, saved/restored around tick() like rng_cursor_
         int exact_log_ticks_ = 0;   // debug: exact core dumps after a Physicalize event
         int rng_last_seed_ = 0, rng_last_cores_ = -1;   // debug: rng / awake-body change log
         float rng_last_pdelta_ = -1.0f;                  // debug: physics pause/resume detection

@@ -16,6 +16,7 @@ namespace bmmo {
         // Union of optional payloads; serialize()/deserialize() only put the
         // fields the current `type` needs on the wire.
         uint8_t ball_type = 0;              // Physicalize
+        uint8_t flags = 0;                  // Physicalize: session::PHYSICALIZE_FLAG_*
         float position[3] = {};             // Physicalize
         float rotation[9] = {};             // Physicalize: world matrix rows (right, up, dir)
         session::ball_recipe recipe;        // Physicalize
@@ -129,6 +130,7 @@ namespace bmmo {
             switch (type) {
                 case session::event_type::Physicalize:
                     raw.write(reinterpret_cast<const char*>(&ball_type), sizeof(ball_type));
+                    raw.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
                     raw.write(reinterpret_cast<const char*>(position), sizeof(position));
                     raw.write(reinterpret_cast<const char*>(rotation), sizeof(rotation));
                     write_recipe(recipe, raw);
@@ -160,6 +162,7 @@ namespace bmmo {
             switch (type) {
                 case session::event_type::Physicalize:
                     if (!message_utils::read_variable(raw, &ball_type)) return false;
+                    if (!message_utils::read_variable(raw, &flags)) return false;
                     if (!raw.read(reinterpret_cast<char*>(position), sizeof(position))) return false;
                     if (!raw.read(reinterpret_cast<char*>(rotation), sizeof(rotation))) return false;
                     if (!read_recipe(recipe, raw)) return false;

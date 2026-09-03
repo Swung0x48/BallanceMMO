@@ -3,6 +3,7 @@
 #include "CKAll.h"
 
 #include "CKIpionManager.h"
+#include "PhysicsCallback.h"
 #include "ivp_physics.hxx"
 #include "ivp_core.hxx"
 #include "ivp_real_object.hxx"
@@ -330,6 +331,15 @@ namespace bmmo::physics {
         physics->m_DeltaTime = 1000.0f / 66.0f;
         physics->m_PhysicsDeltaTime = (1000.0f / 66.0f) * physics->m_PhysicsTimeFactor;
         ivp_srand(seed == 0 ? 1 : seed);
+        // The generator behind the hooked Random blocks (design 9.10): the
+        // trafo explosion pieces draw from it, so it starts from the same seed
+        // at the same tick on every side - and the hook itself is (re)checked
+        // here, the one point every session and every recording passes.
+        random_reset(seed);
+        install_random_block(physics->m_Context);
+        // The pieces themselves start from the file's initial conditions on
+        // every side, not from wherever the start-up frames dropped them.
+        restore_explosion_pieces(physics->m_Context);
         return true;
     }
 
@@ -416,6 +426,15 @@ namespace bmmo::physics {
                 return std::strncmp(ident, prefix, std::strlen(prefix)) == 0;
             }
 
+            // Player balls always collide with each other, even when they
+            // spawn at the same point (design 9.10): IVP leaves a pair that
+            // is moving apart alone (a coincident pair has a zero contact
+            // normal and never schedules an event, no NaN), and a pair that
+            // comes back together while still overlapping is separated by
+            // the impact solver's rescue push.  A distance gate that made
+            // overlapping player balls intangible was tried and dropped: the
+            // filter is only re-asked when the OV tree re-inserts an object,
+            // so the pair stayed intangible and rested inside each other.
             IVP_BOOL check_objects_for_collision_detection(IVP_Real_Object* object0,
                                                            IVP_Real_Object* object1) override {
                 const bool player0 = is_player(object0);
@@ -733,5 +752,354 @@ namespace bmmo::physics {
         meta->add_collision_filter(filter);
         installed_filters().push_back(filter);
         return true;
+    }
+
+    // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
+
+    namespace {
+        // The retail Physics Impulse block's push for Referential == the
+        // entity and Position 0,0,0 (physics_RT/Behaviors/PhysicsImpulse.cpp),
+        // with the impulse vector direction * speed * mass: a kick of `speed`
+        // metres per second whatever the ball's mass, and no spin.  Every
+        // operation in the same order on both sides, so the bits agree.
+        bool push_now(CKIpionManager* physics, CK3dEntity* entity, const float direction[3], float speed) {
+            PhysicsObject* object = physics->GetPhysicsObject(entity);
+            IVP_Real_Object* obj = object ? object->m_RealObject : nullptr;
+            IVP_Core* core = obj ? obj->get_core() : nullptr;
+            if (!core) return false;
+            if (core->physical_unmoveable) return true;   // the block pushes nothing either
+            obj->ensure_in_simulation();
+            const float magnitude = speed * core->get_mass();
+            const float ix = direction[0] * magnitude;
+            const float iy = direction[1] * magnitude;
+            const float iz = direction[2] * magnitude;
+            IVP_U_Point dir(ix, iy, iz);
+            IVP_U_Matrix mat;
+            obj->get_m_world_f_object_AT(&mat);
+            IVP_U_Point ipz;
+            mat.vimult3(&dir, &ipz);
+            IVP_U_Float_Point p(0.0f, 0.0f, 0.0f);
+            IVP_U_Float_Point i(&ipz);
+            IVP_U_Float_Point d(&dir);
+            core->async_push_core(&p, &i, &d);
+            return true;
+        }
+
+        // Queued into m_PreSimulateCallbacks like navigation_callback:
+        // Process(pc) runs Execute at once, which only arms it (return 0 keeps
+        // it queued); the PreSimulate pass of the frame then pushes the body
+        // the Physicalize block created in between and returns 1, which
+        // removes and deletes it.
+        class impulse_callback final : public PhysicsCallback {
+        public:
+            impulse_callback(CKIpionManager* manager, CKBehavior* behavior, CK_ID entity, const float direction[3],
+                             float speed)
+                : PhysicsCallback(manager, behavior, 2), entity_(entity), speed_(speed) {
+                for (int k = 0; k < 3; ++k) direction_[k] = direction[k];
+            }
+            int Execute() override {
+                if (!armed_) {
+                    armed_ = true;
+                    return 0;
+                }
+                CK3dEntity* entity = m_IpionManager && m_IpionManager->m_Context
+                    ? CK3dEntity::Cast(m_IpionManager->m_Context->GetObject(entity_)) : nullptr;
+                if (!entity || !push_now(m_IpionManager, entity, direction_, speed_))
+                    std::printf("[bmmo] spawn impulse: %s has no body at the PreSimulate pass\n",
+                                entity && entity->GetName() ? entity->GetName() : "?");
+                return 1;
+            }
+        private:
+            CK_ID entity_;
+            float direction_[3] = {};
+            float speed_;
+            bool armed_ = false;
+        };
+
+        deterministic_random g_random;
+        const CKGUID kRandomBlockGuid(0x0c622386, 0x1c3054f7);
+        constexpr float kRandomMax = static_cast<float>(deterministic_random::kMax);
+
+        // min + r * (max - min) / RAND_MAX, in the block's own operation order
+        // (a product, then a quotient, then a sum: nothing to contract).
+        float draw(float min, float max) {
+            const float r = static_cast<float>(g_random.next());
+            const float span = max - min;
+            const float scaled = r * span;
+            return min + scaled / kRandomMax;
+        }
+
+        // Logics/Behaviors/Random.cpp (Ballanced) with rand() replaced by the
+        // deterministic generator and RAND_MAX by the Microsoft runtime's.
+        int random_block(const CKBehaviorContext& behcontext) {
+            CKBehavior* beh = behcontext.Behavior;
+            beh->ActivateInput(0, FALSE);
+            beh->ActivateOutput(0);
+            CKParameterOut* pout = beh->GetOutputParameter(0);
+            if (!pout) return CKBR_OK;
+            const CKGUID guid = pout->GetGUID();
+            // The block only draws when both inputs carry the output's type.
+            const auto input = [&](int index) -> CKParameterIn* {
+                CKParameterIn* pin = beh->GetInputParameter(index);
+                return pin && pin->GetGUID() == guid ? pin : nullptr;
+            };
+            CKParameterManager* pm = behcontext.ParameterManager;
+            if (pm && pm->IsDerivedFrom(guid, CKPGUID_FLOAT)) {
+                CKParameterIn* pmin = input(0);
+                if (!pmin) return CKBR_OK;
+                float min = 0.0f;
+                pmin->GetValue(&min);
+                CKParameterIn* pmax = input(1);
+                if (!pmax) return CKBR_OK;
+                float max = 0.0f;
+                pmax->GetValue(&max);
+                float res = draw(min, max);
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            if (guid == CKPGUID_INT) {
+                CKParameterIn* pmin = input(0);
+                if (!pmin) return CKBR_OK;
+                int min = 0;
+                pmin->GetValue(&min);
+                CKParameterIn* pmax = input(1);
+                if (!pmax) return CKBR_OK;
+                int max = 0;
+                pmax->GetValue(&max);
+                int res = min + g_random.next() * (max - min) / deterministic_random::kMax;
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            if (guid == CKPGUID_VECTOR) {
+                CKParameterIn* pmin = input(0);
+                if (!pmin) return CKBR_OK;
+                VxVector min(0.0f);
+                pmin->GetValue(&min);
+                CKParameterIn* pmax = input(1);
+                if (!pmax) return CKBR_OK;
+                VxVector max(0.0f);
+                pmax->GetValue(&max);
+                VxVector res;
+                res.x = draw(min.x, max.x);
+                res.y = draw(min.y, max.y);
+                res.z = draw(min.z, max.z);
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            if (guid == CKPGUID_2DVECTOR) {
+                CKParameterIn* pmin = input(0);
+                if (!pmin) return CKBR_OK;
+                Vx2DVector min;
+                pmin->GetValue(&min);
+                CKParameterIn* pmax = input(1);
+                if (!pmax) return CKBR_OK;
+                Vx2DVector max;
+                pmax->GetValue(&max);
+                Vx2DVector res;
+                res.x = draw(min.x, max.x);
+                res.y = draw(min.y, max.y);
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            if (guid == CKPGUID_RECT) {
+                CKParameterIn* pmin = input(0);
+                if (!pmin) return CKBR_OK;
+                VxRect min;
+                pmin->GetValue(&min);
+                CKParameterIn* pmax = input(1);
+                if (!pmax) return CKBR_OK;
+                VxRect max;
+                pmax->GetValue(&max);
+                VxRect res;
+                res.left = draw(min.left, max.left);
+                res.top = draw(min.top, max.top);
+                res.right = draw(min.right, max.right);
+                res.bottom = draw(min.bottom, max.bottom);
+                res.Normalize();
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            if (guid == CKPGUID_BOOL) {
+                CKBOOL res = g_random.next() & 1;
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            if (guid == CKPGUID_COLOR) {
+                CKParameterIn* pmin = input(0);
+                if (!pmin) return CKBR_OK;
+                VxColor min;
+                pmin->GetValue(&min);
+                CKParameterIn* pmax = input(1);
+                if (!pmax) return CKBR_OK;
+                VxColor max;
+                pmax->GetValue(&max);
+                VxColor res;
+                res.r = draw(min.r, max.r);
+                res.g = draw(min.g, max.g);
+                res.b = draw(min.b, max.b);
+                res.a = draw(min.a, max.a);
+                pout->SetValue(&res);
+                return CKBR_OK;
+            }
+            return CKBR_OK;
+        }
+    }
+
+    bool push_impulse(CKIpionManager* physics, const char* entity_name, const float direction_ws[3], float speed,
+                      uint32_t behavior_id, std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        if (!direction_ws) {
+            error = "no impulse direction";
+            return false;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return false;
+        }
+        if (push_now(physics, entity, direction_ws, speed)) return true;
+        // No body yet: the Physicalize block of this frame creates it before
+        // the manager's PreSimulate pass runs.
+        CKBehavior* behavior = behavior_id && physics->m_Context
+            ? CKBehavior::Cast(physics->m_Context->GetObject(behavior_id)) : nullptr;
+        if (!behavior || !physics->m_PreSimulateCallbacks) {
+            error = "'" + name + "' is not physicalized";
+            return false;
+        }
+        physics->m_PreSimulateCallbacks->Process(
+            new impulse_callback(physics, behavior, entity->GetID(), direction_ws, speed));
+        return true;
+    }
+
+    void random_reset(int32_t seed) { g_random.reset(seed == 0 ? 1 : seed); }
+    int32_t random_get_state() { return static_cast<int32_t>(g_random.state); }
+    void random_set_state(int32_t state) { g_random.state = static_cast<uint32_t>(state); }
+    int32_t random_next() { return g_random.next(); }
+
+    namespace {
+        // The scripts whose Random blocks feed physics: the trafo explosions
+        // (Balls.nmo, group All_Balls).  Only these are rerouted: every other
+        // Random block in the game (menus, sounds) keeps the C runtime, so a
+        // draw that happens on one side only - a sound script branching on a
+        // sound manager the headless engine does not have - can never shift
+        // the sequence the pieces are built from.
+        const char* const kExplosionScripts[] = {"Ball_Explosion_Wood", "Ball_Explosion_Paper", "Ball_Explosion_Stone"};
+
+        int patch_random_blocks(CKBehavior* behavior) {
+            if (!behavior) return 0;
+            int patched = 0;
+            // A block has block data (and a prototype GUID) only when it uses
+            // a function; a graph does not, and the retail CK2 may not guard
+            // GetPrototypeGuid against that.
+            if (behavior->IsUsingFunction() && behavior->GetPrototypeGuid() == kRandomBlockGuid
+                    && behavior->GetFunction() != &random_block) {
+                behavior->SetFunction(&random_block);
+                ++patched;
+            }
+            const int count = behavior->GetSubBehaviorCount();
+            for (int i = 0; i < count; ++i) patched += patch_random_blocks(behavior->GetSubBehavior(i));
+            return patched;
+        }
+    }
+
+    namespace {
+        // The parent frames of the trafo explosion pieces (Balls.nmo).
+        const char* const kPieceFrames[] = {"Ball_WoodPieces_Frame", "Ball_StonePieces_Frame", "Ball_PaperPieces_Frame"};
+
+        int restore_initial_condition(CKScene* scene, CKBeObject* object) {
+            if (!object || !object->IsInScene(scene)) return 0;
+            CKStateChunk* chunk = scene->GetObjectInitialValue(object);
+            if (!chunk) return 0;
+            CKReadObjectState(object, chunk);
+            return 1;
+        }
+
+        CK3dEntity* find_entity(CKContext* context, const char* name) {
+            return CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name), CKCID_3DENTITY, nullptr));
+        }
+
+        // The "Set Position" block (3DTrans) that opens every explosion
+        // script: "Set Position (0,0,0, Referential = Ball_Pos_Frame)" on the
+        // pieces frame.  Wrapped so the pieces start every explosion from an
+        // exact pose (see restore_explosion_pieces).
+        const CKGUID kSetPositionGuid(0xe456e78a, 0x456789aa);
+        CKBEHAVIORFCT g_set_position_original = nullptr;
+
+        int explosion_set_position(const CKBehaviorContext& behcontext) {
+            restore_explosion_pieces(behcontext.Context);
+            return g_set_position_original ? g_set_position_original(behcontext) : CKBR_OK;
+        }
+
+        int patch_explosion_placement(CKBehavior* script) {
+            int patched = 0;
+            const int count = script->GetSubBehaviorCount();
+            for (int i = 0; i < count; ++i) {
+                CKBehavior* block = script->GetSubBehavior(i);
+                if (!block || !block->IsUsingFunction() || block->GetPrototypeGuid() != kSetPositionGuid) continue;
+                if (block->GetFunction() == &explosion_set_position) continue;
+                if (!g_set_position_original) g_set_position_original = block->GetFunction();
+                block->SetFunction(&explosion_set_position);
+                ++patched;
+            }
+            return patched;
+        }
+    }
+
+    // Why the exactness dance: the game's CK2 and the reimplemented one round
+    // hierarchy transforms differently in the last bit (retail x87 code versus
+    // the rewrite), and the piece frames, Balls_MF above them and Ball_Pos_Frame
+    // all carry a 1e-6 skew from the level file, so the pieces' world
+    // matrices - what Physicalize reads - differed by a float ulp between the
+    // two engines and the pieces then flew apart differently.  With the piece
+    // frames detached and exactly axis-aligned, and Ball_Pos_Frame exactly on
+    // its ball, every transform in the chain is an exact operation (products
+    // with 0 and 1, one addition) and both engines agree bit for bit.
+    int restore_explosion_pieces(CKContext* context) {
+        CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+        if (!scene) return -1;
+        int restored = 0;
+        for (const char* frame_name: kPieceFrames) {
+            CK3dEntity* frame = find_entity(context, frame_name);
+            if (!frame) continue;
+            // TT Restore IC with Hierarchy, then the frame is taken out of the
+            // skewed hierarchy and squared up; the children's initial world
+            // matrices are restored last, so their local matrices (derived by
+            // the engine) come out exact.
+            restored += restore_initial_condition(scene, frame);
+            frame->SetParent(nullptr, TRUE);
+            VxMatrix world = frame->GetWorldMatrix();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) world[r][c] = r == c ? 1.0f : 0.0f;
+            world[3][3] = 1.0f;
+            frame->SetWorldMatrix(world);
+            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child))
+                restored += restore_initial_condition(scene, child);
+        }
+        // Ball_Pos_Frame sits on its ball's origin; the file gives it a 5e-6
+        // local offset that costs an inexact product per read.
+        if (CK3dEntity* pos_frame = find_entity(context, "Ball_Pos_Frame"))
+            if (pos_frame->GetParent()) pos_frame->SetLocalMatrix(VxMatrix::Identity());
+        return restored;
+    }
+
+    int install_random_block(CKContext* context) {
+        if (!context) return -1;
+        if (!CKGetPrototypeFromGuid(kRandomBlockGuid)) return -1;   // Logics is not registered
+        int patched = 0;
+        const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+        CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+        for (int i = 0; i < count; ++i) {
+            CKBehavior* behavior = CKBehavior::Cast(context->GetObject(ids[i]));
+            if (!behavior || behavior->GetParent() || !behavior->GetName()) continue;
+            for (const char* script: kExplosionScripts)
+                if (std::strcmp(behavior->GetName(), script) == 0)
+                    patched += patch_random_blocks(behavior) + patch_explosion_placement(behavior);
+        }
+        return patched;
     }
 }

@@ -54,6 +54,7 @@ public:
     uint32_t maximum_physics_rooms = 1;
     bool physics_debug_trace = false;              // per-tick diagnostics in the log (see world_options::trace)
     uint32_t physics_event_rate_limit = 20;        // client lifecycle events per second per player; 0 = no limit
+    float physics_spawn_impulse = 3.0f;            // spawn kick speed, m/s (design 9.10); 0 disables
     std::string physics_require_sha;               // non-empty: only this physics_RT.dll sha256 may join
     std::unordered_map<std::string, std::string> physics_allowed_mods;  // mod id -> version; empty = no check
     ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;

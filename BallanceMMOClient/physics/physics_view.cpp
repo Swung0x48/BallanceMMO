@@ -465,7 +465,48 @@ namespace bmmo::physics {
             error = "physics bridge is not initialized";
             return false;
         }
+        // Both generators: IVP's own (idle since engine change #5) and the
+        // one behind the hooked Random block.
         api_->set_random_seed(seed);
+        if (api_->random_reset) api_->random_reset(seed);
         return true;
+    }
+
+    bool physics_view::push_impulse(const char* entity_name, const float direction_ws[3], float speed,
+                                    uint32_t behavior_id, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->push_impulse) {
+            error = "the physics_RT bridge lacks push_impulse";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->push_impulse(manager_, entity_name, direction_ws, speed, behavior_id, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    int physics_view::install_random_block(std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->install_random_block) {
+            error = "the physics_RT bridge lacks install_random_block";
+            return -1;
+        }
+        const int patched = api_->install_random_block(context_);
+        if (patched < 0) error = "the Random block prototype is not registered";
+        return patched;
+    }
+
+    int32_t physics_view::random_next(std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->random_next) {
+            error = "the physics_RT bridge lacks random_next";
+            return -1;
+        }
+        return api_->random_next();
     }
 }

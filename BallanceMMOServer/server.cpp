@@ -538,6 +538,15 @@ public:
         bool world_ready = false, ticking = false;
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         float spawn_position[3] = {}, spawn_rotation[4] = {0, 0, 0, 1};
+        // Spawn kick speed sent in this session's SessionStart (design 9.10):
+        // fixed at on_world_ready so a late joiner gets the same value.
+        float spawn_impulse = 0;
+        // Stable per member: the lowest value not currently used by another
+        // member of this session, assigned when the member enters and freed
+        // when it leaves.  Both the SessionStart player_entry and the world's
+        // per-player slot use this number, so the server and every side agree
+        // on the spawn direction without exchanging it separately.
+        std::map<HSteamNetConnection, uint8_t> join_orders;
         // last Physicalize event of each member (serialized, player set) so a
         // late joiner can build the bodies that already exist
         std::map<HSteamNetConnection, std::string> last_physicalize;
@@ -556,7 +565,6 @@ public:
             bool have_position = false;
         };
         std::map<HSteamNetConnection, member_guard> guards;
-        std::map<HSteamNetConnection, std::array<float, 3>> spawns;   // ring slot per member
         uint64_t rejected_events = 0, flagged_events = 0;
     };
 
@@ -578,6 +586,7 @@ public:
         rc.input_delay = config_.physics_input_delay;
         rc.snapshot_interval = std::max<uint32_t>(1, config_.physics_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
+        rc.spawn_impulse = config_.physics_spawn_impulse;
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
@@ -611,6 +620,17 @@ public:
         return bmmo::room::error_code::None;
     }
 
+    // Lowest join_order not currently held by another member of s; stable for
+    // the member's stay in the session (design 9.10).
+    static uint8_t assign_join_order(physics_session_state& s, HSteamNetConnection c) {
+        std::set<uint8_t> used;
+        for (const auto& [member, order]: s.join_orders) used.insert(order);
+        uint8_t order = 0;
+        while (used.count(order)) ++order;
+        s.join_orders[c] = order;
+        return order;
+    }
+
     uint32_t start_physics_session(const bmmo::server_room& r, const bmmo::map& map) {
         physics_session_state s;
         s.id = next_session_id_++;
@@ -619,11 +639,15 @@ public:
         for (const auto& m: r.members) {
             s.members.push_back(m.id);
             client_session_[m.id] = s.id;
+            assign_join_order(s, m.id);
         }
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
+        std::vector<std::pair<uint32_t, uint8_t>> players;
+        players.reserve(s.members.size());
+        for (const auto m: s.members) players.emplace_back(m, s.join_orders[m]);
         physics_sessions_.emplace(id, std::move(s));
-        runner_->create_session(id, map.level, physics_sessions_[id].members);
+        runner_->create_session(id, map.level, players);
         return id;
     }
 
@@ -664,21 +688,17 @@ public:
         msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, config_.physics_input_delay));
         msg.first_tick = first_tick;
         msg.seed = 1;
-        // Spawn ring around the retail spawn (design 3.4): a single player keeps
-        // the retail spot so solo play reproduces the recording exactly.
-        const size_t count = s.members.size();
-        const float radius = count > 1 ? 6.0f : 0.0f;
-        for (size_t i = 0; i < count && i < bmmo::session::MAX_PLAYERS_PER_SESSION; ++i) {
+        msg.spawn_impulse = s.spawn_impulse;
+        // Every member spawns at the retail resetpoint (design 9.10): the
+        // kick set below moves same-tick spawns apart instead of a ring.
+        for (size_t i = 0; i < s.members.size() && i < bmmo::session::MAX_PLAYERS_PER_SESSION; ++i) {
             bmmo::session::player_entry entry;
             entry.id = s.members[i];
-            entry.join_order = static_cast<uint8_t>(i);
+            const auto jo = s.join_orders.find(entry.id);
+            entry.join_order = jo != s.join_orders.end() ? jo->second : static_cast<uint8_t>(i);
             entry.ball_type = 0;
-            const double angle = 2.0 * 3.14159265358979323846 * static_cast<double>(i) / static_cast<double>(count);
-            entry.spawn_position[0] = s.spawn_position[0] + radius * static_cast<float>(std::cos(angle));
-            entry.spawn_position[1] = s.spawn_position[1];
-            entry.spawn_position[2] = s.spawn_position[2] + radius * static_cast<float>(std::sin(angle));
+            for (int k = 0; k < 3; ++k) entry.spawn_position[k] = s.spawn_position[k];
             for (int k = 0; k < 4; ++k) entry.spawn_rotation[k] = s.spawn_rotation[k];
-            for (int k = 0; k < 3; ++k) s.spawns[entry.id][k] = entry.spawn_position[k];
             msg.players.push_back(entry);
         }
         msg.serialize();
@@ -701,6 +721,9 @@ public:
         s.ball_rows = info.ball_rows;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
         for (int k = 0; k < 4; ++k) s.spawn_rotation[k] = info.spawn_rotation[k];
+        // Fixed for the session's lifetime (design 9.10) so a late joiner gets
+        // the same value; a solo session stays bit-exact with a solo recording.
+        s.spawn_impulse = s.members.size() > 1 ? config_.physics_spawn_impulse : 0.0f;
         for (const auto m: s.members) send_session_start(s, m, 0);
         Printf("Physics session %u: world ready (anchor %016llx), SessionStart sent to %zu players.",
                 s.id, static_cast<unsigned long long>(s.anchor_hash), s.members.size());
@@ -770,7 +793,8 @@ public:
         auto& s = it->second;
         s.members.push_back(c);
         client_session_[c] = s.id;
-        runner_->add_player(s.id, c);
+        const uint8_t join_order = assign_join_order(s, c);
+        runner_->add_player(s.id, c, join_order);
         if (runner_->running(s.id)) {
             s.late.insert(c);
             send_session_start(s, c, 0);   // the real tick base follows in SessionAssign
@@ -792,6 +816,7 @@ public:
         s.ready.erase(c);
         s.assigned.erase(c);
         s.late.erase(c);
+        s.join_orders.erase(c);
         if (s.last_physicalize.erase(c) && runner_) {
             // The others still mirror this ball: relay an Unphysicalize on the
             // leaver's behalf (design 9.3).
@@ -912,6 +937,7 @@ public:
         bmmo::sim::lifecycle_event event;
         event.type = msg.type;
         event.ball_type = msg.ball_type;
+        event.flags = msg.flags;
         for (int k = 0; k < 3; ++k) event.position[k] = msg.position[k];
         for (int k = 0; k < 9; ++k) event.rotation[k] = msg.rotation[k];
         event.sector = msg.sector;
@@ -982,8 +1008,7 @@ public:
                     return std::sqrt(d);
                 };
                 const double pos[3] = {msg.position[0], msg.position[1], msg.position[2]};
-                bool near_spawn = false;
-                for (const auto& [member, slot]: s.spawns) near_spawn = near_spawn || distance(pos, slot.data()) <= 2.5;
+                const bool near_spawn = distance(pos, s.spawn_position) <= 2.5;
                 bool near_last = false;
                 if (guard.have_position) {
                     const float last[3] = {static_cast<float>(guard.last_position[0]),

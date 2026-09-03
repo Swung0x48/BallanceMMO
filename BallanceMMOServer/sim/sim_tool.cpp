@@ -2,11 +2,21 @@
 //
 //   BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N]
 //   BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--dump-diverge]
+//   BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S] [--spawn-ball T]
+//       [--ticks K] [--report-every R]
+//   BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK [--ticks N]
 //
 // Replay mode boots base.cmo, loads the recorded level, waits for the retail
 // Gameplay_Ingame script to activate (the record's frame 0 anchor), performs
 // the same session reset as the client recorder, then feeds the recorded
 // keyboard state tick by tick and compares physics hashes.
+//
+// --spawn-test boots a session world (design 9.10), physicalizes N players at
+// the level's resetpoint in the same tick and checks that the deterministic
+// spawn kick moves them apart without ever producing NaN; --explode activates
+// a trafo explosion script mid free-run and prints the pose hash and movable
+// core count every tick for 200 ticks (Part B: both are diffed between the
+// Windows and Linux builds for determinism).
 
 #include "headless_engine.hpp"
 #include "crash_report.hpp"
@@ -26,6 +36,8 @@
 #include <crtdbg.h>
 #endif
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <string>
@@ -58,6 +70,7 @@ namespace {
         std::string ivp_trace_path;
         long long exact_to = -1;
         std::string dump_array;        // --dump-array NAME: print every cell of a CKDataArray
+        std::string dump_entity;       // --dump-entity NAME: world matrix of a 3D entity at --dump-at (replay: before and after that frame)
         std::string list_scripts;      // --list-scripts SUBSTR: every root script whose name or owner matches
         std::string dump_script;       // print this script's whole graph (blocks, parameters, links)
         int dump_at = -1;              // tick at which to dump (-1: after the run)
@@ -83,6 +96,23 @@ namespace {
         std::string drop_prop;
         float drop_player_at[3] = {};  // --drop-player-at X Y Z: the player's ball goes here instead
         bool have_drop_player_at = false;
+        // --spawn-test N: spawn-impulse determinism check (design 9.10 / spec
+        // A.9).  Boots a session world, physicalizes N players at the level's
+        // resetpoint in the same tick and checks that the spawn kick moves
+        // them apart without producing NaN.
+        int spawn_test = 0;
+        float spawn_impulse = 3.0f;    // --spawn-impulse S: kick speed, m/s
+        int spawn_ball = 1;            // --spawn-ball T: retail ball type row (default 1 = Wood)
+        // --ticks / --report-every default differently for --spawn-test (200
+        // / 10 instead of the free-run defaults 660 / 66); track whether the
+        // user actually passed them.
+        bool ticks_explicit = false;
+        bool report_every_explicit = false;
+        // --explode wood|paper|stone AT_TICK: trafo-explosion determinism
+        // check (Part B).  Free run only (no --level-at needed: the level
+        // must already be running at AT_TICK, e.g. after --level-at).
+        std::string explode_type;
+        long long explode_at_tick = -1;
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -93,9 +123,11 @@ namespace {
             if (arg == "--root") { if (!(v = next())) return false; out.root = v; }
             else if (arg == "--replay") { if (!(v = next())) return false; out.replay = v; }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
-            else if (arg == "--ticks") { if (!(v = next())) return false; out.ticks = std::atoi(v); }
+            else if (arg == "--ticks") { if (!(v = next())) return false; out.ticks = std::atoi(v); out.ticks_explicit = true; }
             else if (arg == "--level-at") { if (!(v = next())) return false; out.level_at_tick = std::atoi(v); }
-            else if (arg == "--report-every") { if (!(v = next())) return false; out.report_every = std::atoi(v); }
+            else if (arg == "--report-every") {
+                if (!(v = next())) return false; out.report_every = std::atoi(v); out.report_every_explicit = true;
+            }
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
             else if (arg == "--anchor-timeout") { if (!(v = next())) return false; out.anchor_timeout = std::atoi(v); }
             else if (arg == "--verbose") out.verbose = true;
@@ -122,6 +154,7 @@ namespace {
                 if (!(v = next())) return false; out.exact_to = std::atoll(v);
             }
             else if (arg == "--dump-array") { if (!(v = next())) return false; out.dump_array = v; }
+            else if (arg == "--dump-entity") { if (!(v = next())) return false; out.dump_entity = v; }
             else if (arg == "--list-scripts") { if (!(v = next())) return false; out.list_scripts = v; }
             else if (arg == "--dump-script") { if (!(v = next())) return false; out.dump_script = v; }
             else if (arg == "--dump-at") { if (!(v = next())) return false; out.dump_at = std::atoi(v); }
@@ -148,6 +181,13 @@ namespace {
             else if (arg == "--drop-move") {
                 if (!(v = next())) return false; out.drop_move_sector = std::atoi(v);
                 if (!(v = next())) return false; out.drop_move_tick = std::atoi(v);
+            }
+            else if (arg == "--spawn-test") { if (!(v = next())) return false; out.spawn_test = std::atoi(v); }
+            else if (arg == "--spawn-impulse") { if (!(v = next())) return false; out.spawn_impulse = static_cast<float>(std::atof(v)); }
+            else if (arg == "--spawn-ball") { if (!(v = next())) return false; out.spawn_ball = std::atoi(v); }
+            else if (arg == "--explode") {
+                if (!(v = next())) return false; out.explode_type = v;
+                if (!(v = next())) return false; out.explode_at_tick = std::atoll(v);
             }
             else return false;
         }
@@ -271,6 +311,29 @@ namespace {
         std::fflush(stdout);
     }
 
+    // --dump-entity NAME: world matrix rows, parent and local position of a
+    // 3D entity (hex floats), the counterpart of the client's "entity" verb.
+    void dump_entity(const bmmo::sim::headless_engine& engine, const std::string& name) {
+        auto* entity = CK3dEntity::Cast(engine.context()->GetObjectByNameAndParentClass(
+            const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        if (!entity) {
+            std::printf("[dump tick %llu] no 3D entity named %s\n", static_cast<unsigned long long>(engine.ticks()), name.c_str());
+            return;
+        }
+        const VxMatrix& world = entity->GetWorldMatrix();
+        const VxMatrix& local = entity->GetLocalMatrix();
+        CK3dEntity* parent = entity->GetParent();
+        std::printf("[dump tick %llu] entity %s parent=%s world=[%a,%a,%a][%a,%a,%a][%a,%a,%a][%a,%a,%a] local_pos=[%a,%a,%a]\n",
+            static_cast<unsigned long long>(engine.ticks()), name.c_str(),
+            parent && parent->GetName() ? parent->GetName() : "-",
+            static_cast<double>(world[0][0]), static_cast<double>(world[0][1]), static_cast<double>(world[0][2]),
+            static_cast<double>(world[1][0]), static_cast<double>(world[1][1]), static_cast<double>(world[1][2]),
+            static_cast<double>(world[2][0]), static_cast<double>(world[2][1]), static_cast<double>(world[2][2]),
+            static_cast<double>(world[3][0]), static_cast<double>(world[3][1]), static_cast<double>(world[3][2]),
+            static_cast<double>(local[3][0]), static_cast<double>(local[3][1]), static_cast<double>(local[3][2]));
+        std::fflush(stdout);
+    }
+
     void dump_array(const bmmo::sim::headless_engine& engine, const std::string& name) {
         CKDataArray* array = engine.data_array(name.c_str());
         if (!array) {
@@ -388,8 +451,21 @@ namespace {
         std::fflush(stdout);
     }
 
+    // Part B / spec A.9: root script name of a trafo explosion by --explode's
+    // TYPE argument, null if TYPE is not one of wood|paper|stone.
+    const char* explosion_script_name(const std::string& type) {
+        if (type == "wood") return "Ball_Explosion_Wood";
+        if (type == "paper") return "Ball_Explosion_Paper";
+        if (type == "stone") return "Ball_Explosion_Stone";
+        return nullptr;
+    }
+
     int run_free(bmmo::sim::headless_engine& engine, const arguments& args) {
         std::string error;
+        // --explode: activated once at args.explode_at_tick, then the pose
+        // hash and movable core count print for 200 ticks (determinism check,
+        // Part B: the trafo pieces draw Random through the hooked block).
+        int explode_ticks_left = 0;
         for (int i = 0; i < args.ticks; ++i) {
             if (args.level > 0 && i == args.level_at_tick) {
                 if (args.direct_load) {
@@ -406,6 +482,21 @@ namespace {
             if (!engine.level_request().error.empty()) {
                 std::fprintf(stderr, "level request failed: %s\n", engine.level_request().error.c_str());
                 return 1;
+            }
+            if (!args.explode_type.empty() && static_cast<long long>(i) == args.explode_at_tick) {
+                const char* script_name = explosion_script_name(args.explode_type);
+                if (!script_name) {
+                    std::fprintf(stderr, "--explode type must be wood, paper or stone\n");
+                    return 2;
+                }
+                CKBehavior* explosion = bmmo::game::find_root_script(engine.context(), script_name);
+                if (!explosion) {
+                    std::fprintf(stderr, "explode: no root script named %s\n", script_name);
+                    return 1;
+                }
+                explosion->Activate(TRUE, TRUE);
+                explode_ticks_left = 200;
+                std::fprintf(stderr, "explode: activated %s at tick %d\n", script_name, i);
             }
             if (i < args.debug_ticks) {
                 std::string last;
@@ -425,6 +516,17 @@ namespace {
             } else if (!engine.tick(error)) {
                 std::fprintf(stderr, "tick %d failed: %s\n", i, error.c_str());
                 return 1;
+            }
+            if (explode_ticks_left > 0) {
+                bmmo::physics::world_hash hash;
+                std::string hash_error;
+                if (bmmo::physics::capture_world_hash(engine.physics(), hash, hash_error))
+                    std::printf("explode t=%d pose=%016llx cores=%d\n", i,
+                                static_cast<unsigned long long>(hash.pose), hash.cores);
+                else
+                    std::fprintf(stderr, "explode: hash failed at tick %d: %s\n", i, hash_error.c_str());
+                std::fflush(stdout);
+                --explode_ticks_left;
             }
             if (!args.trace_script.empty() && i < args.trace_ticks) trace_script(engine, args.trace_script);
             if (!args.dump_script.empty() && i == args.dump_at) dump_script(engine, args.dump_script);
@@ -500,6 +602,32 @@ namespace {
                     std::puts(error.c_str());
                 if (f == args.ivp_trace_to + 1) bmmo::physics::set_impact_trace(engine.physics(), nullptr, error);
             }
+            // --explode TYPE FRAME in a replay: the client automation verb
+            // "explode <type>" activated the same script from OnProcess of
+            // record frame F (its response names F), which the engine runs at
+            // the next Process, i.e. inside frame F + 1 of the record.
+            if (!args.explode_type.empty() && static_cast<long long>(frame) == args.explode_at_tick) {
+                const char* script_name = explosion_script_name(args.explode_type);
+                CKBehavior* script = script_name ? bmmo::game::find_root_script(engine.context(), script_name) : nullptr;
+                if (!script) {
+                    std::fprintf(stderr, "explode: no root script for --explode %s\n", args.explode_type.c_str());
+                    return 2;
+                }
+                script->Activate(TRUE, TRUE);
+                std::fprintf(stderr, "explode: activated %s before replay frame %zu\n", script_name, frame);
+            }
+            const auto dump_entities = [&](const char* when) {
+                if (args.dump_entity.empty() || static_cast<long long>(frame) != args.dump_at) return;
+                std::printf("--dump-entity %s frame %zu:\n", when, frame);
+                size_t start = 0;
+                while (start <= args.dump_entity.size()) {
+                    size_t comma = args.dump_entity.find(',', start);
+                    if (comma == std::string::npos) comma = args.dump_entity.size();
+                    if (comma > start) dump_entity(engine, args.dump_entity.substr(start, comma - start));
+                    start = comma + 1;
+                }
+            };
+            dump_entities("before");
             engine.set_keyboard_state(expected.keys.data());
             const long long frame_index = static_cast<long long>(frame);
             if (args.debug_from >= 0 && frame_index >= args.debug_from && frame_index <= args.debug_to) {
@@ -514,6 +642,7 @@ namespace {
                 }, error);
                 if (!ok) { std::fprintf(stderr, "debug tick failed: %s\n", error.c_str()); return 1; }
             } else if (!engine.tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+            dump_entities("after");
             if (args.bodies_from >= 0 && frame_index >= args.bodies_from && frame_index <= args.bodies_to) {
                 std::printf("bodies frame%lld: %s\nevents frame%lld: %s\n", frame_index,
                     bmmo::physics::describe_physics_objects(engine.physics()).c_str(), frame_index,
@@ -614,7 +743,7 @@ namespace {
             std::fprintf(stderr, "world create failed: %s\n", error.c_str());
             return 1;
         }
-        if (!world->add_player(1, error)) {
+        if (!world->add_player(1, 0, error)) {
             std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
             return 1;
         }
@@ -628,7 +757,7 @@ namespace {
                 std::fprintf(stderr, "sector event failed: %s\n", error.c_str());
         };
         if (args.drop_second_sector > 0) {
-            if (!world->add_player(2, error)) {
+            if (!world->add_player(2, 1, error)) {
                 std::fprintf(stderr, "add_player 2 failed: %s\n", error.c_str());
                 return 1;
             }
@@ -724,6 +853,152 @@ namespace {
         return 0;
     }
 
+    // Spawn impulse determinism check (spec A.9 / design 9.10): N players
+    // physicalize at the level's resetpoint in the same tick with the SPAWN
+    // flag; the deterministic kick should move them apart without ever
+    // producing NaN.  Windows vs Linux builds diff the per-tick pose hashes.
+    int run_spawn_test(const arguments& args) {
+        bmmo::sim::world_options options;
+        options.game_root = args.root;
+        options.level = args.level > 0 ? args.level : 1;
+        options.seed = 1;
+        options.spawn_impulse = args.spawn_impulse;
+        options.boot_ticks = args.boot_ticks;
+        options.anchor_timeout = args.anchor_timeout;
+        options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
+        std::string error;
+        auto world = bmmo::sim::physics_world::create(options, error);
+        if (!world) {
+            std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+            return 1;
+        }
+        const uint8_t ball_type = static_cast<uint8_t>(args.spawn_ball);
+        if (ball_type >= world->ball_rows().size()) {
+            std::fprintf(stderr, "--spawn-ball %d is out of range (%zu ball types)\n", args.spawn_ball, world->ball_rows().size());
+            return 2;
+        }
+        const int n = std::max(1, args.spawn_test);
+        std::vector<uint32_t> ids;
+        for (int i = 0; i < n; ++i) {
+            const uint32_t id = static_cast<uint32_t>(i + 1);
+            if (!world->add_player(id, static_cast<uint8_t>(i), error)) {
+                std::fprintf(stderr, "add_player %u failed: %s\n", id, error.c_str());
+                return 1;
+            }
+            ids.push_back(id);
+        }
+        for (int i = 0; i < args.drop_settle; ++i)
+            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+        // Every player physicalizes at the resetpoint in the same tick, the
+        // way N retail clients spawning together would report it.
+        const VxMatrix& spawn = world->spawn_matrix();
+        for (const uint32_t id: ids) {
+            bmmo::sim::lifecycle_event event;
+            event.type = bmmo::session::event_type::Physicalize;
+            event.ball_type = ball_type;
+            event.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+            for (int k = 0; k < 3; ++k) event.position[k] = spawn[3][k];
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) event.rotation[r * 3 + k] = spawn[r][k];
+            event.recipe = world->retail_recipe(ball_type);
+            event.tick = world->tick_index();
+            if (!world->apply_event(id, event, error)) {
+                std::fprintf(stderr, "physicalize player %u failed: %s\n", id, error.c_str());
+                return 1;
+            }
+        }
+        std::printf("spawned %d players (ball type %d, %s) at tick %u, impulse %.3f m/s\n", n, ball_type,
+            world->ball_rows()[ball_type].name.c_str(), world->tick_index(), static_cast<double>(args.spawn_impulse));
+        const int ticks = args.ticks_explicit ? args.ticks : 200;
+        const int report_every = args.report_every_explicit ? args.report_every : 10;
+        const std::string entity_prefix = world->ball_rows()[ball_type].name + "_BMMO_";
+        const auto entity_name = [&](uint32_t id) { return entity_prefix + std::to_string(id); };
+        bool any_nan = false;
+        // The largest centre distance every pair reached: the kick has done
+        // its job once a pair was clearly apart at some point, whatever the
+        // resetpoint's slope makes them do afterwards (Level 2's balls roll
+        // back together; with the overlap gate they then collide normally).
+        std::vector<double> max_distance(ids.size() * ids.size(), 0.0);
+        const auto track_distances = [&]() {
+            std::vector<std::array<double, 3>> now(ids.size());
+            std::vector<bool> present(ids.size(), false);
+            for (size_t i = 0; i < ids.size(); ++i) {
+                bmmo_physics_body_state state{};
+                std::string body_error;
+                if (!bmmo::physics::get_body_state(world->physics(), entity_name(ids[i]).c_str(), state, body_error)) continue;
+                present[i] = true;
+                for (int k = 0; k < 3; ++k) {
+                    now[i][k] = state.position[k];
+                    if (std::isnan(state.position[k])) any_nan = true;
+                }
+            }
+            for (size_t i = 0; i < ids.size(); ++i)
+                for (size_t j = i + 1; j < ids.size(); ++j) {
+                    if (!present[i] || !present[j]) continue;
+                    double d = 0.0;
+                    for (int k = 0; k < 3; ++k) d += (now[i][k] - now[j][k]) * (now[i][k] - now[j][k]);
+                    max_distance[i * ids.size() + j] = std::max(max_distance[i * ids.size() + j], std::sqrt(d));
+                }
+        };
+        for (int i = 0; i < ticks; ++i) {
+            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+            track_distances();
+            if (report_every <= 0 || i % report_every != 0) continue;
+            std::string line;
+            for (const uint32_t id: ids) {
+                bmmo_physics_body_state state{};
+                std::string body_error;
+                if (!bmmo::physics::get_body_state(world->physics(), entity_name(id).c_str(), state, body_error)) continue;
+                char part[192];
+                const double speed = std::sqrt(static_cast<double>(state.linear[0]) * state.linear[0]
+                    + static_cast<double>(state.linear[1]) * state.linear[1] + static_cast<double>(state.linear[2]) * state.linear[2]);
+                std::snprintf(part, sizeof(part), " p%u=(%.3f,%.3f,%.3f)v=%.3f", id, state.position[0], state.position[1],
+                              state.position[2], speed);
+                line += part;
+                for (int k = 0; k < 3; ++k) if (std::isnan(state.position[k])) any_nan = true;
+            }
+            bmmo::physics::world_hash hash;
+            std::string hash_error;
+            if (bmmo::physics::capture_world_hash(world->physics(), hash, hash_error))
+                std::printf("tick=%d%s pose=%016llx\n", i, line.c_str(), static_cast<unsigned long long>(hash.pose));
+            else
+                std::printf("tick=%d%s pose=<%s>\n", i, line.c_str(), hash_error.c_str());
+        }
+        std::vector<std::array<double, 3>> positions(ids.size());
+        bool ok = true;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            bmmo_physics_body_state state{};
+            std::string body_error;
+            if (!bmmo::physics::get_body_state(world->physics(), entity_name(ids[i]).c_str(), state, body_error)) {
+                std::fprintf(stderr, "player %u has no body at the end: %s\n", ids[i], body_error.c_str());
+                ok = false;
+                continue;
+            }
+            for (int k = 0; k < 3; ++k) {
+                positions[i][k] = state.position[k];
+                if (std::isnan(state.position[k])) any_nan = true;
+            }
+        }
+        for (size_t i = 0; i < positions.size(); ++i)
+            for (size_t j = i + 1; j < positions.size(); ++j) {
+                double d = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    const double diff = positions[i][k] - positions[j][k];
+                    d += diff * diff;
+                }
+                d = std::sqrt(d);
+                const double widest = max_distance[i * ids.size() + j];
+                std::printf("distance p%u-p%u = %.3f m at the end, %.3f m at the widest\n", ids[i], ids[j], d, widest);
+                // Apart at some point: two radius-2 balls that never reached
+                // 3.9 stayed inside each other the whole time.
+                if (widest < 3.9) ok = false;
+            }
+        if (any_nan) std::printf("summary: NaN detected in the final positions\n");
+        std::printf("summary: %s\n", (ok && !any_nan) ? "ok" : "FAILED");
+        std::fflush(stdout);
+        return (ok && !any_nan) ? 0 : 2;
+    }
+
     // Replays a client recording through the physics-session machinery
     // (physics_world + player_navigation) instead of the retail Ball
     // Navigation:
@@ -770,7 +1045,7 @@ namespace {
             std::fprintf(stderr, "world create failed: %s\n", error.c_str());
             return 1;
         }
-        if (!world->add_player(1, error)) {
+        if (!world->add_player(1, 0, error)) {
             std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
             return 1;
         }
@@ -877,7 +1152,11 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
             "           [--drop-at X Y Z] [--drop-height F] [--drop-sector N] [--drop-second-sector N]\n"
             "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
-            "           [--drop-player-at X Y Z] (mechanism check in a session world)\n");
+            "           [--drop-player-at X Y Z] (mechanism check in a session world)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S]\n"
+            "           [--spawn-ball T] [--ticks K] [--report-every R] (spawn-impulse determinism check)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK\n"
+            "           [--ticks N] (trafo-explosion determinism check, prints the pose hash for 200 ticks)\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {
@@ -888,6 +1167,7 @@ int main(int argc, char** argv) {
         return run_replay_nav(args);
     }
     if (!args.drop_entity.empty()) return run_drop(args);
+    if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;
     options.game_root = args.root;
     options.verbose = args.verbose;

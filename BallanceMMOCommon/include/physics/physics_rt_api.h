@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 5u   /* v5: body guard (engine change #6) */
+#define BMMO_PHYSICS_API_VERSION 6u   /* v6: spawn impulse, deterministic "Random" block (design 9.10) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -233,6 +233,34 @@ typedef struct bmmo_physics_api_v2 {
      * step in seconds. */
     int32_t (*get_clock)(void* ipion_manager, float* time_factor, float* physics_delta, char* error,
                          uint32_t error_size);
+
+    /* ---- v6 (design 9.10): spawn impulse, deterministic "Random" block ---- */
+
+    /* Push the body of entity_name at its mass centre with the impulse
+     * direction_ws * speed * mass: the retail Physics Impulse block's path
+     * for Referential == the entity and Position 0,0,0, so no spin.  Applied
+     * at once when the body exists; otherwise, when behavior_id names a live
+     * behavior, queued into the manager's PreSimulate pass of the current
+     * frame (the Physicalize block that creates the body runs later in the
+     * same frame) and dropped with a log line if the body never appears. */
+    int32_t (*push_impulse)(void* ipion_manager, const char* entity_name, const float direction_ws[3],
+                            float speed, uint32_t behavior_id, char* error, uint32_t error_size);
+    /* The deterministic generator behind the hooked "Random" block (the
+     * Microsoft runtime's LCG, RAND_MAX 32767; physics/deterministic_random.hpp).
+     * reset_session_clock seeds it as well; the server saves and restores the
+     * state per world. */
+    void (*random_reset)(int32_t seed);
+    int32_t (*random_get_state)(void);
+    void (*random_set_state)(int32_t state);
+    int32_t (*random_next)(void);
+    /* Route the Virtools "Random" blocks (GUID 0c622386-1c3054f7) inside the
+     * trafo explosion scripts Ball_Explosion_Wood/Paper/Stone through the
+     * generator (the block's own arithmetic, so the pieces keep the retail
+     * look).  Idempotent; call it after the scripts exist (Balls.nmo is
+     * loaded).  reset_session_clock calls it as well.  Returns the number of
+     * blocks patched by this call, -1 without a context or when Logics is not
+     * registered. */
+    int32_t (*install_random_block)(void* ck_context);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

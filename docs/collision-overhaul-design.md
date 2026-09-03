@@ -56,7 +56,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 ### 3.4 无头世界（服务端）
 
 - 加载顺序与客户端一致（base.cmo → 关卡 → 关卡脚本的 Object Load），保证自动命名一致；会话开始时两端交换"按加载顺序的对象名序列哈希"做握手。
-- 每玩家：克隆球实体与原版 Physicalize 配方、四个 `SetPhysicsForce` 叶子与 `Physics WakeUp`、独立相机参照、独立无碰撞组；出生点围绕原版 Resetpoint 小半径环形错开。
+- 每玩家：克隆球实体与原版 Physicalize 配方、四个 `SetPhysicsForce` 叶子与 `Physics WakeUp`、独立相机参照、独立无碰撞组；出生点是原版 Resetpoint 本身，出生时额外施加一个确定性冲量把球们踢开（9.10）。
 - 机关激活集合 = 所有玩家所在分节的并集；个人死亡不重置机关。
 - 一个模拟线程顺序推进所有房间；每房间独立 CKContext。
 
@@ -190,7 +190,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 1. `SessionStart`（网络线程）→ 游戏线程：记下参数，**先启用固定节拍驱动器**（否则锚点帧——`Gameplay_Ingame` 的第一帧、原版开场计时器起算的那一帧——的行为 delta 是重开关卡实际耗时（实测 4.5 ms 到上百 ms），两端开场结束、物理恢复的 tick 会差一帧），再调用 `restart_current_level()`；进入 Restarting。
 2. `OnProcess`：先看到 `Gameplay_Ingame` 失活、再看到它激活（边沿检测：收到 SessionStart 时它本来就是激活的）→ 锚点：`fixed_tick_` 重新启用（重设节拍原点；驱动器落后超过 33 tick 时也自动重设而不是快进），`physics_view_.reset_session_clock(seed)`、捕获世界哈希、安装玩家碰撞过滤器 → 发 `SessionReady`；进入 Running。锚点帧为第 0 帧，第 f 帧代表 tick `tick_base + f − 1`，`tick_base` 由 `SessionAssign` 给出，收到前输入只缓存。
-3. 每 tick（OnProcess 起始）：从输入钩子的 `frame_keys_` 取四个导航键（键码从 `Ball Navigation` 图的 `Key Event` 参数读取，映射到叶子编号），相机基向量用**上一帧末**记录的 `Cam_OrientRef` 矩阵（见 8.1），`ball_type`、`physicalized`/`paused`/`nav_active` 标志，写入环形历史并发 `SessionInput`（携带最近 ≤8 tick，UnreliableNoDelay）；把自己球的 core 状态（bridge `get_body_state`）存入历史。球一旦有刚体就把它的 nocoll 组改成 `P#<join_order>`；球没有刚体而位置正好等于 `CurrentLevel[0,3]` 复活点时，把它挪到复活点 + 出生环偏移（首次出生与每次复活都适用，单人会话偏移为 0）。
+3. 每 tick（OnProcess 起始）：从输入钩子的 `frame_keys_` 取四个导航键（键码从 `Ball Navigation` 图的 `Key Event` 参数读取，映射到叶子编号），相机基向量用**上一帧末**记录的 `Cam_OrientRef` 矩阵（见 8.1），`ball_type`、`physicalized`/`paused`/`nav_active` 标志，写入环形历史并发 `SessionInput`（携带最近 ≤8 tick，UnreliableNoDelay）；把自己球的 core 状态（bridge `get_body_state`）存入历史。球一旦有刚体就把它的 nocoll 组改成 `P#<join_order>`；客户端不再移动球——`OnPhysicalize` 里若原始位姿等于 `CurrentLevel[0,3]` 复活点，上报的 `Physicalize` 事件带出生标志（`flags` bit0），随后把冲量排进这一帧 PreSimulate 阶段（设计 9.10；首次出生与每次复活都适用，单人会话冲量为 0）。
 4. 事件：`OnPhysicalize(target==自己球)` → `Physicalize{tick, type, recipe, pose}`；`OnUnphysicalize` → `Unphysicalize{tick}`；`OnPostCheckpointReached` → `Sector{tick, sector}`；`OnLevelFinish` → `Finish`；桥接事件日志里非球刚体的 revived → `BodyRevived{tick, name}`。事件走可靠通道。
 5. 收到 `SessionSnapshot`（网络线程）→ 队列 → 游戏线程 tick 开头处理：远端球：按玩家找到镜像刚体 `set_body_state(…, wake=simulated)`；自己的球和机关（按字典名找到本地同名刚体，本地没有的跳过）走同一套修正（`body_corrector`）：每 tick 把本地刚体状态存入该刚体的历史，快照里 tick T 的状态只与历史中 T 的状态比较，**绝不与当前状态比**——服务端权威时间线落后客户端 `input_delay` 加网络延迟（本机实测约 8 tick），拿快照直接覆盖当前刚体会把运动中的机关每次倒回 8 tick（M3 联调时机关正是这样被反复倒带、冻结时机错开、RNG 随之分叉，球的静止位置也偏了几毫米）。位置误差 < ε₁（0.01）且速度误差 < ε₂（0.05）忽略；< ε₃（1.0）则把差值按 K=8 tick 逐步加到刚体上（每 tick 位置 +Δp/K、速度 +Δv/K，通过 `set_body_state` 写回），渐变进行中的新快照跳过不比（否则同一误差会被计两次）；更大误差直接硬置到快照状态并清空历史。每次 blend/hard 记一行日志，计数进 `/mmo room session`（自动化命令 `session`）。
 6. 远端玩家的 `Physicalize/Unphysicalize` 事件（服务端转发）→ 创建/销毁镜像刚体（`game_objects` 的精灵球实体，`physicalize_ball` 配方与对方一致，组名 `BMMO_<id>`）。远端球的显示位置由镜像刚体决定（`PlayerObjects.physicalized = true` 时跳过旧的外推）。
@@ -202,12 +202,12 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 1. **单元**：新消息序列化往返/截断（gtest，`tests/session_messages_test.cpp`）；`session_timeline`（纯逻辑：输入缓冲、缺失沿用、快照节奏）；`navigation_graph`（从图读取键→叶子映射的解析）。
 2. **离线导航复现**（最关键）：`BallanceMMOSimTool --replay <bmrc> --nav clone`：原版键盘照常喂给空输入管理器（教程等脚本行为不变），原版球在 Physicalize 的那个 tick 被删除刚体并由克隆球（原版配方、原版位姿、`P#0` 组）取代，克隆球由 C++ 导航从录制键驱动，`nav_active` 取原版 Key Event 的激活状态；为了覆盖死亡/复活，原版球实体每 tick 镜像克隆球位姿（`mirror_clone_to_retail`），原版脚本 Hide 它时克隆球去刚体、原版球再次 Physicalize 时克隆球重建。**结果（2026-09-02）**：2345 帧全部位级一致（哈希与 pose），含第一次按键、下落死亡、复活与第二次操作。`--nav retail-cxx`（原版球本身由 C++ 导航驱动、原版叶子力值清零）是诊断模式，目前在第一次按键帧出现方向分量偏差，尚未查明，不作为验收依据。
-3. **无头会话客户端** `BallanceMMOSessionClient`（`BallanceMMOServer/sim/session_client.cpp`，服务端构建的一部分，跨平台，单线程：引擎帧之间轮询网络）：无头引擎 + GNS 客户端，走真实房间/会话协议（登录 → 上报关卡 → 建房/加入第一个大厅房 → 准备 →（房主模式下人齐即开）），`SessionStart` 后经菜单加载关卡、在 `Gameplay_Ingame` 首次激活处锚点并发 `SessionReady`，键来自 bmrc（按锚点后帧号注入原版键盘缓冲，同时算出 `SessionInput` 的键位掩码），Physicalize/Unphysicalize/BodyRevived 从桥接事件日志推导（Physicalize 位姿取复活点矩阵 + 出生环偏移，创建后一 tick 的刚体位置离它超过 5 cm 才退回实体矩阵并告警），分节轮询 `IngameParameter[0,1]`，远端球用 `CopyObject` 的克隆按配方 Physicalize 并逐快照 `set_body_state`，自己球与机关走同一 `body_corrector`。用法：`BallanceMMOSessionClient --root <game> --server ip:port --join-first --record x.bmrc [--trace] [--no-correct] [--seconds S]`，每 5 s 打印一行 `status:`，退出码 0 表示自己球从未被修正。
+3. **无头会话客户端** `BallanceMMOSessionClient`（`BallanceMMOServer/sim/session_client.cpp`，服务端构建的一部分，跨平台，单线程：引擎帧之间轮询网络）：无头引擎 + GNS 客户端，走真实房间/会话协议（登录 → 上报关卡 → 建房/加入第一个大厅房 → 准备 →（房主模式下人齐即开）），`SessionStart` 后经菜单加载关卡、在 `Gameplay_Ingame` 首次激活处锚点并发 `SessionReady`，键来自 bmrc（按锚点后帧号注入原版键盘缓冲，同时算出 `SessionInput` 的键位掩码），Physicalize/Unphysicalize/BodyRevived 从桥接事件日志推导（Physicalize 位姿取复活点矩阵本身，不再加偏移，创建后一 tick 的刚体位置离它超过 5 cm 才退回实体矩阵并告警），分节轮询 `IngameParameter[0,1]`，远端球用 `CopyObject` 的克隆按配方 Physicalize 并逐快照 `set_body_state`，自己球与机关走同一 `body_corrector`。用法：`BallanceMMOSessionClient --root <game> --server ip:port --join-first --record x.bmrc [--trace] [--no-correct] [--seconds S]`，每 5 s 打印一行 `status:`，退出码 0 表示自己球从未被修正。
 4. **原版客户端端到端**：原版客户端做房主，无头会话客户端加入，`/mmo session status` 观察修正统计；球碰撞、机关镜像目视验证。
 
 **联调结果（2026-09-02，原版客户端 × 无头服务端，单人，Level 1）**：锚点后两端逐 tick 世界哈希（pose）与 IVP 状态位级一致：开场、机关物理化与暂停/恢复、球下落、按键驾驶、两次掉落死亡与复活，全程自己球的修正统计 `compared=658 ignored=658 blended=0 hard=0 max_err=0.0000`；`rng t=` 变化日志（seed/mc/清醒刚体集合）两端完全相同。之前三个各造成毫米到厘米级偏差的原因都已定位并修掉：(a) 机关快照直接覆盖当前刚体（服务端落后 ~8 tick，运动中的机关每次被倒回，冻结时机错开）→ 改为历史比较 + 渐变（8.5 第 5 条）；(b) 锚点物理时间因子 0.001/0.002 不一致（客户端重开关卡前脚本已设 2.0）→ `reset_session_clock` 统一为 1.0；锚点帧行为 delta 不固定（重开耗时 4.5 ms..上百 ms）→ `SessionStart` 时即启用固定节拍；(c) 死亡后机关清醒集合不同使全局休眠倒计数/RNG 分叉 → 引擎改动 #5。另外 `build-retail` 曾未开 `BMMO_PHYSICS_PORTABLE_MATH`（服务端用 UCRT sin/cos，四元数差 2 ulp），该选项现在默认开启。逐 tick 比对两端 `exact t=` 转储用 `scripts/compare_exact.py <server.log> <client.log> [max] [own player id]`；联调脚本 `scripts/run_server.py`（stdin 命令文件）、`scripts/launch_client.ps1`、`scripts/client_ctl.py`（文件命令通道）；客户端崩溃转储用 `scripts/minidump_info.py <dmp> <map...>` 配合 `/MAP` 链接符号化。离线复现（第 2 条）在改动 #5 之后重录重放：4169/4169 帧一致（录制时须 `fixedtick on`）。
 
-**双人联调结果（2026-09-02，原版客户端做房主 + 无头会话客户端加入，Level 1）**：房间/会话协议全程走通（两端锚点 pose 哈希一致、服务端 2 人同 tick 0 开跑、事件互相转发、双方都镜像出对方的球）；两端各自的球在 Physicalize 后 12 tick 的精确转储与服务端逐位相同；约 66 tick 后两球沿出生台的碟形斜面滚向中心并**互相顶住**（半径 6 的出生环放在 Level 1 的起点碟里会汇聚），从这一刻起两端各出现 4–11 cm 的持续误差并由修正器拉回——因为客户端里对方的球只是按快照回写的镜像（落后 8 到 38 tick），球-球接触的结果必然与服务端不同。这是设计 3.3 第一阶段镜像的预期行为，不是确定性缺陷；无接触时双人仍位级一致。无头客户端锚点早于原版客户端约 0.5 s，因而领先服务端 ~38 tick，大滞后下的渐变修正会互相叠加（误差 0.1 → 0.8 m 再收敛），第二阶段（远端球本地预测）解决。
+**双人联调结果（2026-09-02，原版客户端做房主 + 无头会话客户端加入，Level 1）**：房间/会话协议全程走通（两端锚点 pose 哈希一致、服务端 2 人同 tick 0 开跑、事件互相转发、双方都镜像出对方的球）；两端各自的球在 Physicalize 后 12 tick 的精确转储与服务端逐位相同；约 66 tick 后两球沿出生台的碟形斜面滚向中心并**互相顶住**（半径 6 的出生环放在 Level 1 的起点碟里会汇聚），从这一刻起两端各出现 4–11 cm 的持续误差并由修正器拉回——因为客户端里对方的球只是按快照回写的镜像（落后 8 到 38 tick），球-球接触的结果必然与服务端不同。这是设计 3.3 第一阶段镜像的预期行为，不是确定性缺陷；无接触时双人仍位级一致。无头客户端锚点早于原版客户端约 0.5 s，因而领先服务端 ~38 tick，大滞后下的渐变修正会互相叠加（误差 0.1 → 0.8 m 再收敛），第二阶段（远端球本地预测）解决。（出生环已在 9.10 被出生冲量取代，此处的联调数据按当时的实现保留，不代表现状。）
 
 ### 8.7 M3 明确不做
 
@@ -215,7 +215,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 - 多个物理房间同时运行（配置上限 1，M4 验证全局状态隔离）。
 - ~~分节反激活~~（9.9 已做）；远端球的本地预测（设计 3.3 第二阶段）；暂停语义；积分/生命同步。
 - 客户端死亡时本地分节重置带来的机关跳变（8.5 第 9 条）。
-- 球-球接触时的一致性：远端球是快照镜像，两球顶住/相撞后各端都要靠修正（8.6 双人结果）；远端球本地预测（3.3 第二阶段）与出生环/起点碟的几何问题留给 M4。
+- 球-球接触时的一致性：远端球是快照镜像，两球顶住/相撞后各端都要靠修正（8.6 双人结果）；远端球本地预测（3.3 第二阶段）与出生环/起点碟的几何问题留给 M4（出生环后来被 9.10 的出生冲量取代）。
 
 ## 9. M4 实施设计
 
@@ -281,9 +281,9 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 ### 9.4 服务端校验客户端事件
 
-只做拒绝明显不合理的事件，不做物理层面的重演：Physicalize 位姿必须在复活点环 2 m 内或距该玩家上一快照位置 5 m 内（变球）；配方的球型必须在 `Physicalize_GameBall` 行内且数值与行一致；`Sector` 只能等于当前或 +1（并集里已有的直接忽略）；每玩家每秒事件数上限由 `physics.event_rate_limit` 配置（默认 20，0 = 不限）。被拒绝的事件记日志并向该客户端回 `SessionEvent`（type 不变，`player = 0`，`name = "rejected"`）——M4 先记日志不回包。
+只做拒绝明显不合理的事件，不做物理层面的重演：Physicalize 位姿必须在复活点 2.5 m 内或距该玩家上一快照位置 5 m 内（变球）；配方的球型必须在 `Physicalize_GameBall` 行内且数值与行一致；`Sector` 只能等于当前或 +1（并集里已有的直接忽略）；每玩家每秒事件数上限由 `physics.event_rate_limit` 配置（默认 20，0 = 不限）。被拒绝的事件记日志并向该客户端回 `SessionEvent`（type 不变，`player = 0`，`name = "rejected"`）——M4 先记日志不回包。
 
-**实现（2026-09-02）**：`handle_session_event` 里，每玩家每秒超出 `physics.event_rate_limit` 的事件丢弃并记一次日志（固定窗口，`reload` 后立即生效；置 0 关闭。一次分节重置会为该分节的每个机关各发一条 `BodyRevived`，机关多的关卡应调高或关闭）；位姿检查用会话开始时发给各成员的出生环槽位（任一槽位 2.5 m 内）或该玩家最近快照位置 5 m 内，不满足只记 `suspicious event`（复活点随检查点移动而服务端只知道并集，不能据此拒绝）；Sector 只允许当前或 +1，其余记日志。计数在控制台 `sessions` 里显示。配置 `physics.require_physics_sha` 非空时 `SessionReady` 上报的 DLL sha 不匹配即结束会话（无头客户端豁免）。
+**实现（2026-09-02）**：`handle_session_event` 里，每玩家每秒超出 `physics.event_rate_limit` 的事件丢弃并记一次日志（固定窗口，`reload` 后立即生效；置 0 关闭。一次分节重置会为该分节的每个机关各发一条 `BodyRevived`，机关多的关卡应调高或关闭）；位姿检查用会话开始时发给各成员的复活点（2.5 m 内）或该玩家最近快照位置（5 m 内），不满足只记 `suspicious event`（复活点随检查点移动而服务端只知道并集，不能据此拒绝）；Sector 只允许当前或 +1，其余记日志。计数在控制台 `sessions` 里显示。配置 `physics.require_physics_sha` 非空时 `SessionReady` 上报的 DLL sha 不匹配即结束会话（无头客户端豁免）。
 
 **Physicalize 配方的校验以关卡的 `Physicalize_GameBall` 行为准，不用固定区间（2026-09-02 修）**：世界启动时把该表的每一行随 `world_ready_info` 交给网络线程（服务端日志里也逐行打印），事件到达时只拒绝**世界根本无法执行**的配方——球型不在表内、数值非有限、质量 ≤ 0；其余数值与该行不符的只记 `suspicious event`，**配方本身一个字节都不改**（会话的立身之本是两端执行客户端上报的同一次调用；改写会让一个诚实但被别的 Mod 改过物理的客户端与服务端各跑各的，永远互相修正）。几何（凸包/球/凹面）同样原样透传：原版确实存在凸包与球都为 0、只给 collision surface 的 Physicalize（实测出现在开了 BML cheat 后的复活；两端都走同一条 `CreatePhysicsObjectOnParameters`，默认半径 1.0，结果一致）。要真的拒绝数值，得先有"拒绝 → 通知客户端 → 客户端重报"的闭环。
 > 原来的固定区间把阻尼卡在 [0,1]，而 `Ball_Paper` 的 Linear Damp 是 **1.5**（实测三行：Paper 0.5/0.4/0.2/1.5/0.1 force 0.065，Stone 0.5/0.1/10/0.3/0.1 force 0.92，Wood 0.8/0.2/1.9/0.9/0.1 force 0.43），于是**每一次变成纸球的 Physicalize 都被拒绝**：服务端此后没有该玩家的刚体，球不再参与模拟、不再推动机关，而原版脚本一辈子只上报这一次。木球/石球在区间内，所以只有变纸球会犯。
@@ -425,3 +425,27 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 | Level 10 分节 2：道具**纸球**瞬移进风口 + 玩家纸球在旁边 2.5 m | 道具球一路掉下去（-17.6 → -52.3），玩家球被吹上去（-17.0 → -4.1） |
 
 已知边界：一个玩家在分节 N、另一个在 N+2 时，中间没人的分节 N+1 的机关不运行——玩家看到的就是原版"还没激活"的样子（对象隐藏），走到那里时才启动。
+
+### 9.10 出生冲量与确定性 Random 块
+
+**出生环的问题.** 9.9 之前每玩家的出生点是原版 Resetpoint 半径 6 的环形错位（3.4、8.5 第 3 条）；双人联调（8.6）已经看到 Level 1 的起点是个碟形斜面，环上的两个点会一起滚向中心互相顶住。更根本的问题是这个偏移量对大多数关卡不安全——半径 6 很容易把球错位到平台边缘之外、卡进墙里，或者落在原版脚本没设计过要处理的地方；而且它悄悄改写了原版 Resetpoint 的语义：脚本、机关、`CurrentLevel[0,3]` 的读者都认为复活点只有一个,球出现在别处等于给它们喂了假数据。改法是把偏移去掉，所有玩家都在同一个复活点 Physicalize，靠一次性的冲量把它们踢开，冲量方向按加入顺序取表里第几个方向，互不相同。
+
+**冲量的机制.** `session_event_msg` 的 Physicalize 载荷新增 `flags`（`ball_type` 之后），bit0 = `PHYSICALIZE_FLAG_SPAWN`：这次 Physicalize 发生在关卡当前复活点（`CurrentLevel[0,3]`），即出生或复活，不是变球。方向来自一张 64 个黄金角 XZ 平面单位向量的表，下标 = `(join_order + hash(seed, tick)) mod 64`，整个计算是整数运算（`BallanceMMOCommon/include/session/spawn_impulse.hpp` 的 `spawn_direction_index`），保证跨平台位级一致。冲量大小 = 方向 × 速度 × 质量，通过桥接的 `push_impulse` 在球的质心处施加，路径与原版 "Physics Impulse" 块（Referential = 实体、Position (0,0,0)）完全一样（无自旋）。
+
+三处施加时机不同，因为出生这一 tick 里球体的创建时刻不同：
+
+- **服务端克隆球**：`physics_world::apply_event` 处理 Physicalize 时刚体已经创建（8.1 的配方直接建刚体），冲量在这次调用里紧跟着施加，早于这个 tick 剩下的 PreSimulate 与 PSI。
+- **客户端自己的球**：BMLPlus 在原版 Physicalize 块函数返回、创建刚体之前先广播 `OnPhysicalize`，所以桥接此刻还找不到刚体；`push_impulse` 于是把冲量排进 `CKIpionManager` 这一帧的 PreSimulate 队列（锚定在 Ball Navigation 的行为块上），块函数创建完刚体之后、这一帧的物理步真正跑之前取出来施加，效果与服务端一次到位等价。
+- **远端球镜像**：服务端转发的 Physicalize 事件到达、镜像刚体按配方建好之后立即施加；此后快照按 8.5 第 5 条的历史比较/渐变机制照常纠正剩余误差。
+
+**配置与确定性.** `physics.spawn_impulse`（米/秒，默认 3，0 = 关闭）随 `session_start_msg` 下发（写在 `seed` 之后）；单人会话服务端强制发 0，使单人游玩仍与旧录像位级一致（8.6 第 2 条的 `--nav clone` 回放不受影响）。加入顺序需要跨重连稳定：服务端按世界槽位给每个成员分配 `join_order`（进入会话时取最小空闲值，离开时释放），送进 `player_entry` 供两端计算方向下标。9.4 的位姿校验相应改为"复活点 2.5 m 内或该玩家上一快照位置 5 m 内"——单一复活点取代了原来对环上任一槽位的检查。
+
+**确定性 Random 块（Part B）.** `3D Entities\Balls.nmo` 里 `Ball_Explosion_Wood/Stone/Paper`（变球爆炸的碎片脚本，`All_Balls`）会 Physicalize 16-18 块碎片，随后用 Virtools 自带的 "Random" 块给每块碎片的质量/摩擦力/冲量取随机值。这个块的实现直接调用宿主 C 运行时的 `rand()`：原版客户端经 `Logics.dll` 链接到 MSVCRT，无头服务端经 UCRT/glibc 链接——算法不同、调用历史也不同，碎片（可动 core，计入世界哈希约 2 秒）因此无法在两端重放。修法与出生冲量共用同一块桥接代码：`physics_state.cpp` 实现一个与平台无关的确定性生成器（Microsoft 运行时的 LCG，`state = state * 214013 + 2531011`，取值 `(state >> 16) & 0x7fff`，`RAND_MAX` 32767），`install_random_block` 只把这三个爆炸脚本内部的 "Random" 块实例（Balls.nmo 里共 5 个：木 1、石 1、纸 3）的函数换成用这个生成器改写的同一份算术（`random_next()` 代替 `rand()`，`CKBehavior::SetFunction`），**不动原型**：游戏里其余的 Random 块（`Sound.nmo` 2 个、`Gameplay.nmo`/`MenuLevel.nmo` 各 1 个）继续用 C 运行时，这样任何只在一端发生的抽样——比如客户端有声音管理器、无头引擎只有空实现，声音脚本的分支可能不同——都不可能挪动碎片所用的序列。安装点是 `reset_session_clock`（每次会话锚点、每次录制/回放锚点都经过它，且 Balls.nmo 早已加载），客户端 Mod 的 `OnLoad`/`OnLoadObject` 与无头引擎的加载完成处额外再调一次（幂等）。`reset_session_clock` 同时重播种这个生成器；服务端按世界保存/恢复生成器状态，和 `ivp_srand` 游标的做法一样。爆炸碎片在 nocoll 组 "Ball" 里，从不与玩家球碰撞（同组在 IVP 里不产生碰撞，BMMO 的玩家过滤器也排除这个组），所以这处改动只影响碎片自身与世界哈希，不涉及引擎改动。
+
+**同点出生时 IVP 的行为（源码结论 + SimTool 实测）.** 两个球体刚体球心重合时 `minimize_BB` 给零法线（`inv_len = 1`，无除零、无 NaN），`max_coll_speed` 为 0，不排任何碰撞事件；正在分离的一对球 IVP 完全不管；一对球在仍然重叠时又靠近，`p_calc_friction_s_PP` 把负间隙钳到 0，冲击求解器只以约 1.6 m/s 的"救援速度"把它们推开，不会爆开。实测（`--spawn-test`，Level 1/2，木球，踢出 3–5 m/s，3–4 个球）：球在 0.5 s 内分开 4–6 m，滚回碟底后正常相撞，150 tick 内全部静止在相互接触的位置（球心距 4.02），无 NaN；Windows x64 与 Linux 逐 tick 哈希一致。曾试过让球心距小于 3.5 的两个玩家球互不碰撞（"先穿过再相撞"）——IVP 只在 OV 树重新插入对象时才重新询问碰撞过滤器，被拒绝过的一对球之后一直互不碰撞、最终重叠着静止，因此撤掉了，玩家球之间始终碰撞。
+
+**碎片位级重放要过的三道坎（客户端录像 vs 无头回放，`explode <type>` + `--explode`）.** 把 Random 换成确定性生成器之后碎片的速度已经逐位一致，但位置仍差 0.14 m：(1) 游戏启动时 `Balls_Init` 的 `Init Ballpieces` 把碎片物理化了几帧再取消，碎片下落的距离取决于启动阶段的帧间隔（原版客户端是实时帧、每次启动都不同：实测 -1.165 / -1.207；无头固定 15.15 ms：-1.0085），所以每个进程里第一次爆炸的碎片起点都不一样——`reset_session_clock` 现在按原版 `Ball_ResetPieces_*` 的 `TT Restore IC` 做法把三个 `Ball_*Pieces_Frame` 层级恢复到文件里的初始条件（`restore_explosion_pieces`）。(2) 恢复之后仍差一个 float ulp：原版 CK2（x87 老代码）与重实现的 CK2 对层级矩阵的舍入不同，而 `Balls_MF`、碎片父框架、`Ball_Pos_Frame` 都带着关卡文件里 1e-6 的倾斜/缩放，任何一次 local↔world 换算都不精确。修法是让整条链只剩精确运算：碎片父框架脱离 `Balls_MF`、旋转部分写成精确单位阵、再恢复子物体的初始条件（子物体 local = world × I 精确）；`Ball_Pos_Frame` 的局部平移（文件里是 5e-6）清零，它的世界矩阵就等于球的世界矩阵。爆炸脚本开头的 `Set Position` 块被包了一层（和 Random 块一样按实例 `SetFunction`），每次爆炸前先做这一步，因为原版的 Restore IC 会把父框架重新挂回 `Balls_MF`。(3) 剩下一两块带一般旋转的碎片四元数仍差 ulp：`FillTemplateInfo` 用宿主 VxMath 的 `VxQuaternion::FromMatrix`，原版 `VxMath.dll` 与重实现对一般旋转的结果差最后一位——引擎改动 #8 把这个换算搬进 physics_RT 自己（重实现的算法，无头结果不变）。实测（原版客户端录像 vs 无头回放，Level 1，`explode` 后约 6 s）：石球 3458/3458 帧逐位一致；纸球在改动 #8 之后 3456/3456；木球 16 块碎片里 14 块逐位一致，`piece08`/`piece16` 从爆炸的第一帧起就差 1e-16 量级（四元数最后一位、位置一个 float ulp），之后各自弹跳分叉、碎片静止后世界哈希重新一致（3457 帧里 3359 帧匹配，球与机关全程逐位一致）。这两块碎片的初始矩阵、父框架、Random 抽样与冲量输入在两端都逐位相同，x86/x64/Linux 三个无头引擎之间也逐位相同（`--explode` 轨迹 200 tick 全等），所以剩下的差异只可能出在原版 CK2/VxMath 与重实现在爆炸这一帧内部某个浮点运算的最后一位（尚未定位）。会话里碎片只在客户端本地存在（服务端停放的球不会变球），这个残差不影响任何共享状态。
+
+**引擎改动 #7（`ivp_mindist.cxx`）.** 球-球 mindist 原来按 `client_data` 指针（即 `CK3dEntity*` 的堆地址）决定两个突触的顺序，从而决定接触法线的符号和两个 core 在冲击/摩擦求解里的角色；客户端与服务端的堆地址不同，第一次球球接触就会分叉。现在按 nocoll 组名（两端同一玩家的球都是 `P#<join_order>`）再按名字排序。原版游戏里只有一个球体刚体，这条路径从未执行过，单人回放不受影响（`rec_m3b.bmrc` 仍 4169/4169）。
+
+**验证工具.** `BallanceMMOSimTool --spawn-test N [--spawn-impulse S] [--ticks T]` 起 N 个玩家在同一个复活点各领一个方向的冲量，跑若干 tick 检查球之间不再重叠、无 NaN、两端哈希一致；`--explode <wood|paper|stone> AT_TICK` 触发对应的爆炸脚本并逐 tick 打印世界哈希，用来对比 Windows/Linux 在碎片飞散阶段是否仍然位级一致；客户端自动化命令新增 `explode <type>` 触发同一段脚本用于目视/录制对照。以上都建立在桥接 API v6 之上（`push_impulse`、`random_reset/get_state/set_state/next`、`install_random_block`）。
