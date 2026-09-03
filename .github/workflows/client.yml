@@ -2,26 +2,35 @@ name: Client
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, collision-overhaul ]
     paths-ignore:
       - 'BallanceMMOServer/**'
       - '.git*'
       - 'README.md'
+      - 'docs/**'
       - '.github/workflows/server.yml'
   pull_request:
-    branches: [ main ]
+    branches: [ main, collision-overhaul ]
     paths-ignore:
       - 'BallanceMMOServer/**'
       - '.git*'
       - 'README.md'
+      - 'docs/**'
       - '.github/workflows/server.yml'
+  workflow_dispatch:
+
+# A physics_RT build is expensive; drop superseded runs of the same ref.
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
-  BML_VER: '0.3.43'
-  BMLP_VER: '0.2.3'
-  BOOST_VER: '1.89.0'
+  # BMLPlus SDK the mod links against (include/BML + lib/BMLPlus.lib). Only
+  # BMLPlus is supported; the legacy BML 0.3.43 target was dropped along with
+  # the shadow-only build.
+  BMLP_VER: '0.3.12'
 
 jobs:
   build-client:
@@ -30,37 +39,30 @@ jobs:
       VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: lukka/get-cmake@latest
 
-      - name: Fetch git submodules
-        run: git submodule update --init --recursive
-
-      - name: Download and extract BML ${{env.BML_VER}}
-        working-directory: ${{github.workspace}}/BallanceMMOClient
+      - name: Read version
+        shell: pwsh
         run: |
-          curl -o BML-dev.zip -L https://github.com/yyc12345/BallanceModLoader/releases/download/${{env.BML_VER}}/BML-${{env.BML_VER}}-dev.zip
-          tar -xvf BML-dev.zip include lib
-          mv lib/* lib/BML -ErrorAction Ignore
-    
-      - name: Download and extract BMLPlus ${{env.BMLP_VER}}
-        working-directory: ${{github.workspace}}/BallanceMMOClient
-        run: |
-          curl -o BMLP-dev.zip -L https://github.com/yyc12345/BallanceModLoaderPlus/releases/download/v${{env.BMLP_VER}}/BMLP-${{env.BMLP_VER}}-dev.zip
-          tar -xvf BMLP-dev.zip Include Lib/BMLPlus.lib Lib/ImGui.lib
-          mkdir lib/BMLPlus
-          mv lib/*.lib lib/BMLPlus
+          $ver = (Select-String -Path CMakeLists.txt -Pattern '^set\(BMMO_VER\s+(.+)\)').Matches.Groups[1].Value.Trim()
+          echo "BMMO_VER=$ver" >> $env:GITHUB_ENV
+          echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
 
-      - name: Download and setup Boost ${{env.BOOST_VER}} headers
-        working-directory: ${{github.workspace}}/BallanceMMOClient
-        # yes we know this is for linux, but we only need its headers so it's fine
+      - name: Download and extract BMLPlus ${{env.BMLP_VER}} SDK
+        shell: pwsh
         run: |
-          $BOOST_VER_UNDERSCORES = "${{env.BOOST_VER}}".Replace('.', '_')
-          curl -o boost.tar.gz -L "https://archives.boost.io/release/${{env.BOOST_VER}}/source/boost_$BOOST_VER_UNDERSCORES.tar.gz"
-          tar -xzf boost.tar.gz boost_$BOOST_VER_UNDERSCORES/boost
-          New-Item -ItemType Junction -Path include/boost -Target (Get-Item boost_$BOOST_VER_UNDERSCORES/boost).FullName
+          curl -o BMLPlus-SDK.zip -L https://github.com/doyaGu/BallanceModLoaderPlus/releases/download/v${{env.BMLP_VER}}/BMLPlus-SDK-v${{env.BMLP_VER}}-Release.zip
+          New-Item -ItemType Directory -Path sdk/BMLPlus | Out-Null
+          tar -xf BMLPlus-SDK.zip -C sdk/BMLPlus
+          foreach ($f in 'sdk/BMLPlus/include/BML/BMLAll.h', 'sdk/BMLPlus/lib/BMLPlus.lib') {
+            if (-not (Test-Path $f)) { throw "BMLPlus SDK is missing $f" }
+          }
 
-      # Setup MSVC command prompt environment vars
+      # Setup MSVC command prompt environment vars (the mod is a Win32 module,
+      # like the game it loads into).
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: win32
@@ -68,7 +70,7 @@ jobs:
       - name: Restore artifacts, setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: b322364f06308bdd24823f9d8f03fe0cc86fd46f
+          vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
           vcpkgDirectory: '${{env.VCPKG_ROOT}}'
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
@@ -80,50 +82,55 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-#      - name: vcpkg check / install dependencies
-#        working-directory: ${{env.VCPKG_ROOT}}
-#        run: vcpkg install --triplet x64-windows
-
+      # CMAKE_TOOLCHAIN_FILE is passed explicitly: the runner image ships its
+      # own vcpkg inside Visual Studio, whose baseline pins msys2 packages that
+      # have since been deleted upstream.
       - name: Configure CMake
-        run: |
-          echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
-          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DVCPKG_TARGET_TRIPLET=x86-windows -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON
-          echo "BMMO_VER=$(cat version.txt)" >> $env:GITHUB_ENV
-          echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
+        shell: pwsh
+        run: >
+          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}}
+          -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+          -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}"
+          -DVCPKG_TARGET_TRIPLET=x86-windows
+          -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON
+          -DBMMO_BMLPLUS_SDK_ROOT="${{github.workspace}}/sdk/BMLPlus"
 
+      # physics_RT is the drop-in rebuild of the engine's physics plugin that
+      # server-authoritative physics rooms need; without it the mod loads but
+      # cannot take part in a session.
       - name: Build
-        working-directory: ${{github.workspace}}/build
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+        run: cmake --build ${{github.workspace}}/build --target BallanceMMOClient physics_RT
 
-#      - name: List build dir
-#        working-directory: ${{github.workspace}}/build
-#        run: dir
-
-      - name: Run post-build actions
-        working-directory: ${{github.workspace}}/build/BallanceMMOClient
+      - name: Stage artifact
+        shell: pwsh
         run: |
-          mkdir ${{env.BUILD_TYPE}}
-          Copy-Item -Path *.dll, *.bmod, *.bmodp -Destination ${{env.BUILD_TYPE}} -Force
-
-      - name: Test
-        working-directory: ${{github.workspace}}
-        run: ctest -C ${{env.BUILD_TYPE}}
+          New-Item -ItemType Directory -Path dist/ModLoader/Mods, dist/BuildingBlocks, dist/symbols | Out-Null
+          Copy-Item build/BallanceMMOClient/*.bmod, build/BallanceMMOClient/*.bmodp, build/BallanceMMOClient/*.dll `
+                    -Destination dist/ModLoader/Mods -ErrorAction Ignore
+          Copy-Item build/BuildingBlocks/physics_RT.dll -Destination dist/BuildingBlocks
+          Copy-Item build/BuildingBlocks/*.map -Destination dist/symbols -ErrorAction Ignore
+          # The value a server operator would put in physics.require_physics_sha.
+          (Get-FileHash build/BuildingBlocks/physics_RT.dll -Algorithm SHA256).Hash.ToLower() `
+            | Out-File dist/physics_RT.dll.sha256 -Encoding ascii
+          Get-Content dist/physics_RT.dll.sha256
 
       - name: Release artifact
         uses: actions/upload-artifact@v4
         with:
           name: client-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
-          path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
+          path: dist
 
       - name: Build spectation-enabled client
+        shell: pwsh
         run: |
           echo "`n#define BMMO_WITH_PLAYER_SPECTATION" | Out-File "BallanceMMOClient/bml_includes.h" -Encoding "UTF8" -Append
-          cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
-          cd ${{github.workspace}}/build/BallanceMMOClient
-          Copy-Item -Path *.dll, *.bmod, *.bmodp -Destination ${{env.BUILD_TYPE}} -Force
+          cmake --build ${{github.workspace}}/build --target BallanceMMOClient
+          Copy-Item build/BallanceMMOClient/*.bmod, build/BallanceMMOClient/*.bmodp, build/BallanceMMOClient/*.dll `
+                    -Destination dist/ModLoader/Mods -Force -ErrorAction Ignore
 
       - name: Release artifact
         uses: actions/upload-artifact@v4
         with:
           name: client-spectator-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
-          path: build/BallanceMMOClient/${{env.BUILD_TYPE}}
+          path: dist
