@@ -85,6 +85,21 @@ namespace bmmo::session {
         // engine change #6: the retail Unphysicalize keeps every body but this one
         bool body_guard = false;
         std::string body_guard_entity;
+        // The last Physicalize we reported for our own ball.  The retail
+        // scripts report a ball's life once (physicalize new Ball); if the
+        // server never applied that event - rejected by the validation, or
+        // dropped - our ball would stay out of the simulation for good, so we
+        // report it again when the snapshots keep coming without our body.
+        struct own_physicalize_report {
+            bool valid = false;
+            uint8_t ball_type = 0;
+            float position[3] = {};
+            float rotation[9] = {};
+            bmmo::session::ball_recipe recipe;
+        } last_physicalize;
+        int snapshots_without_own = 0;
+        uint64_t physicalize_resends = 0;
+        std::chrono::steady_clock::time_point last_physicalize_resend{};
 
         // Design 9.6: rollback instead of blending.  Own inputs per tick and
         // the relayed remote inputs per tick feed the re-simulation.
@@ -176,6 +191,10 @@ namespace bmmo::session {
             own_inputs.clear();
             body_guard = false;
             body_guard_entity.clear();
+            last_physicalize = {};
+            snapshots_without_own = 0;
+            physicalize_resends = 0;
+            last_physicalize_resend = {};
             corrector.clear();
             hard_sets = blends = 0;
             mechanism_correctors.clear();

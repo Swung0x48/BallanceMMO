@@ -114,6 +114,7 @@ namespace bmmo::sim {
             info.ok = true;
             info.anchor_hash = s->world->anchor_hash();
             info.anchor_surfaces = s->world->anchor_surfaces();
+            info.ball_rows = s->world->ball_rows();
             {
                 const VxMatrix& spawn = s->world->spawn_matrix();
                 VxQuaternion rotation;
@@ -162,6 +163,7 @@ namespace bmmo::sim {
             s.ready.erase(player);
             s.inputs.erase(player);
             s.acked.erase(player);
+            s.lifecycle_missing.erase(player);
             s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
                     [player](const pending_event& e) { return e.player == player; }), s.events.end());
             s.cadence.force_full();
@@ -269,20 +271,26 @@ namespace bmmo::sim {
     // not have and no Physicalize event for it has arrived yet; gives the
     // reliable event up to a second to catch up with the unreliable input.
     bool session_runner::waiting_for_lifecycle(session_state& s, uint32_t tick) {
-        bool blocked = false;
+        std::vector<uint32_t> blocking;
         for (const auto& [player, buffer]: s.inputs) {
             const auto* frame = buffer.peek(tick);
             if (!frame || !(frame->flags & bmmo::session::INPUT_FLAG_PHYSICALIZED)) continue;
-            if (s.world->player_physicalized(player)) continue;
+            if (s.world->player_physicalized(player)) { s.lifecycle_missing.erase(player); continue; }
             bool pending = false;
             for (const auto& e: s.events)
                 if (e.player == player && e.tick <= tick && e.event.type == bmmo::session::event_type::Physicalize) {
                     pending = true;
                     break;
                 }
-            if (!pending) { blocked = true; break; }
+            // A Physicalize is on its way (or arrived after we gave up): wait
+            // for it again.
+            if (pending) { s.lifecycle_missing.erase(player); continue; }
+            // Already waited a second for this player's event and gave up; the
+            // session must keep running at full speed for everybody else.
+            if (s.lifecycle_missing.count(player)) continue;
+            blocking.push_back(player);
         }
-        if (!blocked) {
+        if (blocking.empty()) {
             s.barrier_armed = false;
             return false;
         }
@@ -294,8 +302,11 @@ namespace bmmo::sim {
         }
         if (now >= s.barrier_deadline) {
             s.barrier_armed = false;
-            log("[session " + std::to_string(s.id) + "] lifecycle event missing at tick " + std::to_string(tick)
-                + "; continuing without it");
+            for (uint32_t player: blocking) {
+                s.lifecycle_missing.insert(player);
+                log("[session " + std::to_string(s.id) + "] no Physicalize for player " + std::to_string(player)
+                    + " at tick " + std::to_string(tick) + "; its ball stays out of the simulation until one arrives");
+            }
             return false;
         }
         return true;

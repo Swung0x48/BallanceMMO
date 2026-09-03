@@ -541,6 +541,9 @@ public:
         // last Physicalize event of each member (serialized, player set) so a
         // late joiner can build the bodies that already exist
         std::map<HSteamNetConnection, std::string> last_physicalize;
+        // The level's Physicalize_GameBall rows (from the world boot): the
+        // reference a reported ball recipe is validated against.
+        std::vector<bmmo::sim::physics_world::ball_row> ball_rows;
         // Event validation (design 9.4): rate limit rejects, the rest is
         // logged and counted in M4 (no rejection: the retail scripts decide
         // respawn poses per player, the server only knows the union).  The
@@ -695,6 +698,7 @@ public:
         s.world_ready = true;
         s.anchor_hash = info.anchor_hash;
         s.anchor_surfaces = info.anchor_surfaces;
+        s.ball_rows = info.ball_rows;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
         for (int k = 0; k < 4; ++k) s.spawn_rotation[k] = info.spawn_rotation[k];
         for (const auto m: s.members) send_session_start(s, m, 0);
@@ -912,25 +916,6 @@ public:
         for (int k = 0; k < 9; ++k) event.rotation[k] = msg.rotation[k];
         event.sector = msg.sector;
         event.name = msg.name;
-        if (msg.type == bmmo::session::event_type::Physicalize) {
-            const auto& r = msg.recipe;
-            auto& p = event.recipe;
-            p.fixed = r.fixed; p.start_frozen = r.start_frozen; p.enable_collision = r.enable_collision;
-            p.calc_mass_center = r.calc_mass_center;
-            p.friction = r.friction; p.elasticity = r.elasticity; p.mass = r.mass;
-            p.linear_damp = r.linear_damp; p.rot_damp = r.rot_damp;
-            for (int k = 0; k < 3; ++k) p.mass_center[k] = r.mass_center[k];
-            copy_name(p.collision_surface, sizeof(p.collision_surface), r.collision_surface);
-            p.convex_count = static_cast<int32_t>(std::min<size_t>(r.convex_meshes.size(), BMMO_PHYSICS_MAX_CONVEX));
-            for (int i = 0; i < p.convex_count; ++i) copy_name(p.convex[i], sizeof(p.convex[i]), r.convex_meshes[i]);
-            p.ball_count = static_cast<int32_t>(std::min<size_t>(r.balls.size(), BMMO_PHYSICS_MAX_BALLS));
-            for (int i = 0; i < p.ball_count; ++i) {
-                for (int k = 0; k < 3; ++k) p.ball_center[i][k] = r.balls[i].center[k];
-                p.ball_radius[i] = r.balls[i].radius;
-            }
-            p.concave_count = static_cast<int32_t>(std::min<size_t>(r.concave_meshes.size(), BMMO_PHYSICS_MAX_CONCAVE));
-            for (int i = 0; i < p.concave_count; ++i) copy_name(p.concave[i], sizeof(p.concave[i]), r.concave_meshes[i]);
-        }
         {
             // Design 9.4.  Rate limit: hard reject.  Everything else: log + count.
             auto& guard = s.guards[c];
@@ -957,14 +942,39 @@ public:
             };
             if (msg.type == bmmo::session::event_type::Physicalize) {
                 const auto& r = msg.recipe;
-                const bool numbers_ok = r.mass > 0.0f && r.mass <= 100.0f && r.friction >= 0.0f && r.friction <= 10.0f
-                    && r.elasticity >= 0.0f && r.elasticity <= 10.0f && r.linear_damp >= 0.0f && r.linear_damp <= 1.0f
-                    && r.rot_damp >= 0.0f && r.rot_damp <= 1.0f && r.balls.size() + r.convex_meshes.size() > 0;
-                if (msg.ball_type > 2 || !numbers_ok) {
+                // A dropped Physicalize costs the player its body for the rest
+                // of the session (the retail scripts report a ball's life
+                // once), so only a recipe the world cannot use at all is
+                // rejected: an unknown ball type, or a number the physics
+                // engine would choke on.  The rest is compared with the
+                // level's Physicalize_GameBall row - what the retail scripts
+                // hand the Physicalize block - and only flagged: the session
+                // rests on both sides running the very call the client
+                // reported, so the recipe is never rewritten here.
+                // Fixed bounds got this wrong (Ball_Paper's Linear Damp is
+                // 1.5, above the old 1.0 cap), and every trafo into a paper
+                // ball was rejected.
+                const size_t ball_types = s.ball_rows.empty() ? 3u : s.ball_rows.size();
+                const bool finite = std::isfinite(r.mass) && std::isfinite(r.friction) && std::isfinite(r.elasticity)
+                    && std::isfinite(r.linear_damp) && std::isfinite(r.rot_damp);
+                if (msg.ball_type >= ball_types || !finite || r.mass <= 0.0f) {
                     ++s.rejected_events;
                     Printf("Physics session %u: rejected Physicalize from %s (ball type %u, malformed recipe).", s.id,
                            client_it->second.name, msg.ball_type);
                     return;
+                }
+                if (msg.ball_type < s.ball_rows.size()) {
+                    const auto& row = s.ball_rows[msg.ball_type];
+                    auto expect = [&](const char* what, float value, float expected) {
+                        if (std::fabs(value - expected) <= 1e-3f * std::max(1.0f, std::fabs(expected))) return;
+                        flag(std::string("Physicalize ") + what + " " + std::to_string(value) + " instead of "
+                             + std::to_string(expected) + " (Physicalize_GameBall row " + std::to_string(msg.ball_type) + ")");
+                    };
+                    expect("friction", r.friction, row.friction);
+                    expect("elasticity", r.elasticity, row.elasticity);
+                    expect("mass", r.mass, row.mass);
+                    expect("linear damping", r.linear_damp, row.linear_damp);
+                    expect("rotation damping", r.rot_damp, row.rot_damp);
                 }
                 auto distance = [&](const double* a, const float* b) {
                     double d = 0.0;
@@ -988,6 +998,25 @@ public:
                     flag("sector " + std::to_string(msg.sector) + " after sector " + std::to_string(guard.sector));
                 guard.sector = std::max(guard.sector, msg.sector);
             }
+        }
+        if (msg.type == bmmo::session::event_type::Physicalize) {
+            const auto& r = msg.recipe;
+            auto& p = event.recipe;
+            p.fixed = r.fixed; p.start_frozen = r.start_frozen; p.enable_collision = r.enable_collision;
+            p.calc_mass_center = r.calc_mass_center;
+            p.friction = r.friction; p.elasticity = r.elasticity; p.mass = r.mass;
+            p.linear_damp = r.linear_damp; p.rot_damp = r.rot_damp;
+            for (int k = 0; k < 3; ++k) p.mass_center[k] = r.mass_center[k];
+            copy_name(p.collision_surface, sizeof(p.collision_surface), r.collision_surface);
+            p.convex_count = static_cast<int32_t>(std::min<size_t>(r.convex_meshes.size(), BMMO_PHYSICS_MAX_CONVEX));
+            for (int i = 0; i < p.convex_count; ++i) copy_name(p.convex[i], sizeof(p.convex[i]), r.convex_meshes[i]);
+            p.ball_count = static_cast<int32_t>(std::min<size_t>(r.balls.size(), BMMO_PHYSICS_MAX_BALLS));
+            for (int i = 0; i < p.ball_count; ++i) {
+                for (int k = 0; k < 3; ++k) p.ball_center[i][k] = r.balls[i].center[k];
+                p.ball_radius[i] = r.balls[i].radius;
+            }
+            p.concave_count = static_cast<int32_t>(std::min<size_t>(r.concave_meshes.size(), BMMO_PHYSICS_MAX_CONCAVE));
+            for (int i = 0; i < p.concave_count; ++i) copy_name(p.concave[i], sizeof(p.concave[i]), r.concave_meshes[i]);
         }
         runner_->submit_event(msg.session, c, msg.tick, std::move(event));
         // relay to the other members with the origin filled in

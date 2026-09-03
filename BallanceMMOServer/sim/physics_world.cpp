@@ -179,6 +179,16 @@ namespace bmmo::sim {
             error = "Physicalize_GameBall table is missing";
             return false;
         }
+        // These are what a client's Physicalize recipe is validated against
+        // (design 9.4), so the log has to say what the level actually holds.
+        for (size_t row = 0; row < ball_rows_.size(); ++row) {
+            const ball_row& b = ball_rows_[row];
+            char text[256];
+            std::snprintf(text, sizeof(text),
+                "world: ball type %zu = %s (friction %.4f elasticity %.4f mass %.4f linear damp %.4f rot damp %.4f force %.4f)",
+                row, b.name.c_str(), b.friction, b.elasticity, b.mass, b.linear_damp, b.rot_damp, b.force);
+            log(text);
+        }
         active_sectors_.insert(1);
         if (!ensure_collision_filter(error)) return false;
         rewire_proximity_probes();

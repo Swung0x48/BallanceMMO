@@ -121,9 +121,14 @@ namespace bmmo::session {
             for (const auto& body: snapshot.bodies) {
                 const std::string entity = entity_of(body);
                 if (entity.empty()) continue;
-                authoritative.emplace_back(entity, &body);
                 auto it = at->bodies.find(entity);
-                if (it == at->bodies.end()) continue;   // not tracked at that tick (e.g. just physicalized)
+                // Not tracked at that tick: the body did not exist here yet
+                // (just physicalized), or it is the entity a trafo has since
+                // replaced - the row belongs to the ball of tick T, not to
+                // this one.  Restoring it would teleport the new ball to the
+                // old one's pose; the next snapshot has a tick we recorded.
+                if (it == at->bodies.end()) continue;
+                authoritative.emplace_back(entity, &body);
                 double dp = 0.0, dv = 0.0;
                 for (int k = 0; k < 3; ++k) {
                     dp += (body.position[k] - it->second.position[k]) * (body.position[k] - it->second.position[k]);
@@ -199,9 +204,24 @@ namespace bmmo::session {
                 truncate_after(snapshot.tick);
                 return true;
             }
-            if (!tracked.own_entity.empty() && tracked.own_polls) world.nav_poll(tracked.own_entity, false);
+            // The window can span a trafo: the own ball is a different entity
+            // after it, and every recorded tick carries the entity it was
+            // simulated with.  Take polling off all of them (a replayed tick
+            // must use its recorded input, not the live keyboard) and drive
+            // each tick's own set below.
+            std::vector<std::string> polled;
+            auto stop_polling = [&](const rollback_tracked& t) {
+                if (t.own_entity.empty() || !t.own_polls) return;
+                for (const auto& name: polled) if (name == t.own_entity) return;
+                polled.push_back(t.own_entity);
+                world.nav_poll(t.own_entity, false);
+            };
+            stop_polling(tracked);
+            for (uint32_t t = snapshot.tick + 1; t <= current_tick; ++t)
+                if (tick_state* recorded = find(t)) stop_polling(recorded->tracked);
             for (uint32_t t = snapshot.tick + 1; t <= current_tick; ++t) {
                 tick_state* recorded = find(t);
+                const rollback_tracked& step_tracked = recorded ? recorded->tracked : tracked;
                 std::map<std::string, input_frame> inputs;
                 auto feed = [&](const std::string& entity) {
                     input_frame frame{};
@@ -216,11 +236,11 @@ namespace bmmo::session {
                         inputs[entity] = frame;
                     }
                 };
-                if (!tracked.own_entity.empty()) feed(tracked.own_entity);
-                for (const auto& remote: tracked.remote_entities) feed(remote);
+                if (!step_tracked.own_entity.empty()) feed(step_tracked.own_entity);
+                for (const auto& remote: step_tracked.remote_entities) feed(remote);
                 std::string trace;
                 if (verbose_ && world.log && resim_traces_ < 60) {
-                    for (const auto& remote: tracked.remote_entities) {
+                    for (const auto& remote: step_tracked.remote_entities) {
                         bmmo_physics_body_state before{};
                         if (!world.get_body(remote, before)) continue;
                         char buf[200];
@@ -233,7 +253,7 @@ namespace bmmo::session {
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
                 if (!trace.empty()) {
-                    for (const auto& remote: tracked.remote_entities) {
+                    for (const auto& remote: step_tracked.remote_entities) {
                         bmmo_physics_body_state after{};
                         if (!world.get_body(remote, after)) continue;
                         char buf[200];
@@ -253,7 +273,7 @@ namespace bmmo::session {
                 if (recorded) *recorded = std::move(state);
                 else history_.push_back(std::move(state));
             }
-            if (!tracked.own_entity.empty() && tracked.own_polls) world.nav_poll(tracked.own_entity, true);
+            for (const auto& entity: polled) world.nav_poll(entity, true);
             if (world.log)
                 world.log("rollback to tick " + std::to_string(snapshot.tick) + " (" + worst_entity + " off by "
                           + std::to_string(worst) + " m), re-simulated " + std::to_string(lag) + " ticks");

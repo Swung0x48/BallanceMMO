@@ -308,3 +308,64 @@ TEST(RollbackEngine, HistoryIsBounded) {
                                     [&](const std::string&, uint32_t, input_frame&) { return false; }));
     EXPECT_EQ(engine.stats().unmatched, 1u);
 }
+
+// A trafo replaces the own ball with a different entity mid-window: the
+// re-simulation must drive the entity each tick was recorded with, and the
+// snapshot row of a tick that belongs to the old ball must not be written onto
+// the new one.
+TEST(RollbackEngine, TrafoWindowDrivesTheBallOfEachTick) {
+    fake_world world;
+    world.bodies["OwnOld"];
+    world.bodies["OwnNew"].position[0] = 10.0;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["OwnOld"] = {};
+    world.navs["OwnNew"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+
+    rollback_tracked before;                 // ticks 1..3: the ball we started with
+    before.own_entity = "OwnOld";
+    before.own_polls = true;
+    before.remote_entities = {"Remote"};
+    rollback_tracked after = before;          // ticks 4..6: the ball the trafo made
+    after.own_entity = "OwnNew";
+
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        const std::string own = tick >= 4 ? "OwnNew" : "OwnOld";
+        input_frame frame{};
+        frame.keys = 1;
+        world.pending_keys[own] = frame.keys;
+        w.step();
+        engine.record(w, tick, tick >= 4 ? after : before, {{own, frame}, {"Remote", input_frame{}}});
+    }
+    world.calls.clear();
+    world.steps = 0;
+
+    // The server runs behind: its snapshot of tick 3 still carries the ball
+    // the trafo replaced, and it disagrees with what we recorded.
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    fake_body server_own = world.bodies["OwnOld"];
+    server_own.position[0] = -99.0;
+    const auto snapshot = snapshot_of(3, {ball_body(1, server_own), ball_body(2, server_remote)});
+    // player 1's ball is the entity we have now, which is what the mod maps to
+    auto entity_now = [](const body_state& body) -> std::string {
+        if (body.kind != body_kind::Ball) return {};
+        return body.owner == 1 ? "OwnNew" : body.owner == 2 ? "Remote" : "";
+    };
+
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    // the row of the pre-trafo ball never lands on the new one
+    EXPECT_EQ(world.count("set_body OwnNew"), 0);
+    EXPECT_GT(world.bodies["OwnNew"].position[0], 0.0);
+    // ticks 4..6 drive the ball they were recorded with
+    EXPECT_EQ(world.count("nav_input OwnNew"), 3);
+    EXPECT_EQ(world.count("nav_input OwnOld"), 0);
+    // and neither ball reads the live keyboard while they are replayed
+    EXPECT_EQ(world.count("nav_poll OwnOld off"), 1);
+    EXPECT_EQ(world.count("nav_poll OwnNew off"), 1);
+    EXPECT_EQ(world.count("nav_poll OwnOld on"), 1);
+    EXPECT_EQ(world.count("nav_poll OwnNew on"), 1);
+}

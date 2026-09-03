@@ -637,6 +637,11 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
             return;
         }
         auto& remote = s.remotes[event.player];
+        // A trafo: the peer's ball is a different entity now, so the mirror of
+        // the old one has to go (body, navigation and the relayed inputs that
+        // were meant for it) and its spirit ball has to be hidden.
+        const uint32_t previous_type = remote.physicalized && remote.entity != entity->GetName()
+            ? remote.ball_type : std::numeric_limits<uint32_t>::max();
         if (remote.physicalized && remote.entity != entity->GetName()) {
             if (remote.navigation) physics_view_.navigation_destroy(remote.entity.c_str(), error);
             physics_view_.unphysicalize(remote.entity.c_str(), error);
@@ -658,8 +663,14 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         remote.ball_type = event.ball_type;
         remote.physicalized = true;
         remote.corrector.clear();
+        if (previous_type != std::numeric_limits<uint32_t>::max()) {
+            // Inputs relayed for the old entity must not drive the new one.
+            remote.inputs.clear();
+            remote.have_input = false;
+            remote.applied = {};
+        }
         objects_.set_physicalized(event.player, true);
-        objects_.on_trafo(event.player, std::numeric_limits<uint32_t>::max(), event.ball_type);
+        objects_.on_trafo(event.player, previous_type, event.ball_type);
         // Design 9.1: drive the mirror with the retail navigation replica from
         // the relayed inputs; the snapshots then only correct it.
         physics_session_attach_remote_navigation(event.player);
@@ -704,6 +715,7 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
     CK3dObject* ball = get_current_ball();
     const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
     std::string error;
+    physics_session_check_own_body(snapshot, own_id);
     if (s.rollback_enabled) {
         if (snapshot.full)
             for (const auto& body: snapshot.bodies)
@@ -828,6 +840,47 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
     }
 }
 
+// Every snapshot carries a ball row for each physicalized player, awake or
+// not.  If ours is missing while our ball is physicalized here, the server has
+// no body for us: its copy of the last Physicalize never arrived or was
+// rejected, and no retail script will ever report it again (the ball would
+// stay out of the simulation and stop touching the mechanisms until death).
+// Report it once more, with the pose the ball has now.
+void BallanceMMOClient::physics_session_check_own_body(const bmmo::session_snapshot_msg& snapshot, uint32_t own_id) {
+    auto& s = physics_session_;
+    bool present = false;
+    for (const auto& body: snapshot.bodies)
+        if (body.kind == bmmo::session::body_kind::Ball && body.owner == own_id) { present = true; break; }
+    if (present || !s.own_physicalized || !s.last_physicalize.valid || s.resync_pending) {
+        s.snapshots_without_own = 0;
+        return;
+    }
+    // About a second of snapshots: well past the server's lag behind us.
+    if (++s.snapshots_without_own < 30) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s.last_physicalize_resend < std::chrono::seconds(2)) return;
+    CK3dObject* ball = get_current_ball();
+    if (!ball) return;
+    s.last_physicalize_resend = now;
+    s.snapshots_without_own = 0;
+    ++s.physicalize_resends;
+
+    bmmo::session_event_msg event;
+    event.tick = s.current_tick() + 1;
+    event.type = bmmo::session::event_type::Physicalize;
+    event.ball_type = s.last_physicalize.ball_type;
+    const VxMatrix& world = ball->GetWorldMatrix();
+    for (int k = 0; k < 3; ++k) event.position[k] = world[3][k];
+    for (int r = 0; r < 3; ++r)
+        for (int k = 0; k < 3; ++k) event.rotation[r * 3 + k] = world[r][k];
+    event.recipe = s.last_physicalize.recipe;
+    physics_session_send_event(event);
+    logger_->Warn("Physics session: the server has no body for our ball (%llu snapshots); Physicalize re-reported at tick %u",
+                  static_cast<unsigned long long>(s.physicalize_resends), event.tick);
+    if (s.physicalize_resends == 1)
+        SendIngameMessage("Physics session: the server did not take our ball; reporting it again.", bmmo::ansi::BrightYellow);
+}
+
 // ---------------------------------------------------------------- BML hooks
 
 void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
@@ -879,10 +932,27 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
         r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
     (void)collGroup;
     physics_session_send_event(event);
+    // Keep it: a server that never applied this event has to be told again
+    // (physics_session_check_own_body).
+    s.last_physicalize.valid = true;
+    s.last_physicalize.ball_type = event.ball_type;
+    for (int k = 0; k < 3; ++k) s.last_physicalize.position[k] = event.position[k];
+    for (int k = 0; k < 9; ++k) s.last_physicalize.rotation[k] = event.rotation[k];
+    s.last_physicalize.recipe = event.recipe;
+    s.snapshots_without_own = 0;
     s.own_group_set = false;
+    // Design 9.6: the replica drives the ball, the retail leaves push zero.
+    // The replica only moves to the new ball in the next frame, and a
+    // SetPhysicsForce.Create that ran while the ball had no body is retried at
+    // this frame's PreSimulate: zero the leaves now, or the trafo frame gets
+    // the retail force on top of the replica's.
+    if (s.own_navigation) physics_session_zero_retail_forces();
     if (s.trace) s.exact_log_frames = 12;
-    logger_->Info("Physics session: own ball %s physicalized at tick %u (type %u, %d convex, %d balls) pos=%a,%a,%a rows=%a,%a,%a|%a,%a,%a|%a,%a,%a",
-                  ball->GetName(), event.tick, event.ball_type, convexCnt, ballCnt,
+    logger_->Info("Physics session: own ball %s physicalized at tick %u (type %u, %d convex, %d balls, %d concave, "
+                  "friction %.4f elasticity %.4f mass %.4f linear damp %.4f rot damp %.4f surface '%s') "
+                  "pos=%a,%a,%a rows=%a,%a,%a|%a,%a,%a|%a,%a,%a",
+                  ball->GetName(), event.tick, event.ball_type, convexCnt, ballCnt, concaveCnt,
+                  friction, elasticity, mass, linearDamp, rotDamp, r.collision_surface.c_str(),
                   event.position[0], event.position[1], event.position[2],
                   event.rotation[0], event.rotation[1], event.rotation[2], event.rotation[3], event.rotation[4],
                   event.rotation[5], event.rotation[6], event.rotation[7], event.rotation[8]);
@@ -898,6 +968,8 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
     event.type = bmmo::session::event_type::Unphysicalize;
     physics_session_send_event(event);
     s.corrector.clear();
+    s.last_physicalize.valid = false;   // the ball is meant to be gone now
+    s.snapshots_without_own = 0;
     s.own_group_set = false;
     logger_->Info("Physics session: own ball unphysicalized at tick %u", event.tick);
 }
@@ -1205,7 +1277,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
     return std::format(
         "session={} phase={} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={} writes={}/{} mech_same={} mech_blend={} mech_hard={} "
-        "mech_max_err={:.4f} events={}/{} "
+        "mech_max_err={:.4f} events={}/{} phys_resends={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         s.session, phase, s.current_tick(), s.tick_base, s.assigned ? 1 : 0, static_cast<long long>(s.frames_since_anchor),
@@ -1213,7 +1285,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
         s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,
         s.mechanism_names.size(), s.body_writes, s.body_write_errors, s.mechanism_matches, s.mechanism_blends, s.mechanism_hard,
-        mechanism_max_error, s.events_sent, s.events_received,
+        mechanism_max_error, s.events_sent, s.events_received, s.physicalize_resends,
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,
         rs.too_far, rs.frozen, rs.max_error, rs.last_mismatch,

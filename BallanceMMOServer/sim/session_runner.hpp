@@ -58,6 +58,9 @@ namespace bmmo::sim {
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         float spawn_position[3] = {};
         float spawn_rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        // The level's Physicalize_GameBall rows: the reference the event
+        // validation compares a reported ball recipe with (design 9.4).
+        std::vector<physics_world::ball_row> ball_rows;
         std::string error;
     };
 
@@ -129,6 +132,10 @@ namespace bmmo::sim {
             // recipe and pose.
             std::chrono::steady_clock::time_point barrier_deadline{};
             bool barrier_armed = false;
+            // Players whose Physicalize the barrier already waited a second
+            // for: without this the barrier re-arms every tick and a single
+            // lost or rejected event pins the whole session at 1 tick/s.
+            std::set<uint32_t> lifecycle_missing;
         };
         bool waiting_for_lifecycle(session_state& s, uint32_t tick);
 

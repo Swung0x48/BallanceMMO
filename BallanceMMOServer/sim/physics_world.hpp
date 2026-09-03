@@ -94,8 +94,14 @@ namespace bmmo::sim {
         physics_world(const physics_world&) = delete;
         physics_world& operator=(const physics_world&) = delete;
 
+        // One row of the level's Physicalize_GameBall array: the physics the
+        // retail scripts hand the Physicalize block for that ball type.
+        struct ball_row { std::string name; float friction = 0, elasticity = 0, mass = 0, linear_damp = 0, rot_damp = 0, force = 0; };
+
         uint64_t anchor_hash() const { return anchor_hash_; }
         uint64_t anchor_surfaces() const { return anchor_surfaces_; }
+        // The Physicalize_GameBall rows in row order (= ball type order).
+        const std::vector<ball_row>& ball_rows() const { return ball_rows_; }
         uint32_t tick_index() const { return tick_; }
         int level() const { return options_.level; }
         const bmmo::game::navigation_graph& navigation() const { return navigation_; }
@@ -194,7 +200,6 @@ namespace bmmo::sim {
         uint32_t tick_ = 0;
         bmmo::game::navigation_graph navigation_;
         bool navigation_keys_known_ = false;
-        struct ball_row { std::string name; float friction = 0, elasticity = 0, mass = 0, linear_damp = 0, rot_damp = 0, force = 0; };
         std::vector<ball_row> ball_rows_;             // Physicalize_GameBall rows
         VxMatrix spawn_matrix_{};
         CK_ID retail_ball_ = 0;

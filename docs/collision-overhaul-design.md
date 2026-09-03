@@ -283,7 +283,12 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 只做拒绝明显不合理的事件，不做物理层面的重演：Physicalize 位姿必须在复活点环 2 m 内或距该玩家上一快照位置 5 m 内（变球）；配方的球型必须在 `Physicalize_GameBall` 行内且数值与行一致；`Sector` 只能等于当前或 +1（并集里已有的直接忽略）；每玩家每秒事件数上限由 `physics.event_rate_limit` 配置（默认 20，0 = 不限）。被拒绝的事件记日志并向该客户端回 `SessionEvent`（type 不变，`player = 0`，`name = "rejected"`）——M4 先记日志不回包。
 
-**实现（2026-09-02）**：`handle_session_event` 里，每玩家每秒超出 `physics.event_rate_limit` 的事件丢弃并记一次日志（固定窗口，`reload` 后立即生效；置 0 关闭。一次分节重置会为该分节的每个机关各发一条 `BodyRevived`，机关多的关卡应调高或关闭）；Physicalize 的球型 > 2 或配方数值出界（质量 (0,100]、摩擦/弹性 [0,10]、阻尼 [0,1]、至少一个球/凸包）直接拒绝；位姿检查用会话开始时发给各成员的出生环槽位（任一槽位 2.5 m 内）或该玩家最近快照位置 5 m 内，不满足只记 `suspicious event`（复活点随检查点移动而服务端只知道并集，不能据此拒绝）；Sector 只允许当前或 +1，其余记日志。计数在控制台 `sessions` 里显示。配置 `physics.require_physics_sha` 非空时 `SessionReady` 上报的 DLL sha 不匹配即结束会话（无头客户端豁免）。
+**实现（2026-09-02）**：`handle_session_event` 里，每玩家每秒超出 `physics.event_rate_limit` 的事件丢弃并记一次日志（固定窗口，`reload` 后立即生效；置 0 关闭。一次分节重置会为该分节的每个机关各发一条 `BodyRevived`，机关多的关卡应调高或关闭）；位姿检查用会话开始时发给各成员的出生环槽位（任一槽位 2.5 m 内）或该玩家最近快照位置 5 m 内，不满足只记 `suspicious event`（复活点随检查点移动而服务端只知道并集，不能据此拒绝）；Sector 只允许当前或 +1，其余记日志。计数在控制台 `sessions` 里显示。配置 `physics.require_physics_sha` 非空时 `SessionReady` 上报的 DLL sha 不匹配即结束会话（无头客户端豁免）。
+
+**Physicalize 配方的校验以关卡的 `Physicalize_GameBall` 行为准，不用固定区间（2026-09-02 修）**：世界启动时把该表的每一行随 `world_ready_info` 交给网络线程（服务端日志里也逐行打印），事件到达时只拒绝**世界根本无法执行**的配方——球型不在表内、数值非有限、质量 ≤ 0；其余数值与该行不符的只记 `suspicious event`，**配方本身一个字节都不改**（会话的立身之本是两端执行客户端上报的同一次调用；改写会让一个诚实但被别的 Mod 改过物理的客户端与服务端各跑各的，永远互相修正）。几何（凸包/球/凹面）同样原样透传：原版确实存在凸包与球都为 0、只给 collision surface 的 Physicalize（实测出现在开了 BML cheat 后的复活；两端都走同一条 `CreatePhysicsObjectOnParameters`，默认半径 1.0，结果一致）。要真的拒绝数值，得先有"拒绝 → 通知客户端 → 客户端重报"的闭环。
+> 原来的固定区间把阻尼卡在 [0,1]，而 `Ball_Paper` 的 Linear Damp 是 **1.5**（实测三行：Paper 0.5/0.4/0.2/1.5/0.1 force 0.065，Stone 0.5/0.1/10/0.3/0.1 force 0.92，Wood 0.8/0.2/1.9/0.9/0.1 force 0.43），于是**每一次变成纸球的 Physicalize 都被拒绝**：服务端此后没有该玩家的刚体，球不再参与模拟、不再推动机关，而原版脚本一辈子只上报这一次。木球/石球在区间内，所以只有变纸球会犯。
+>
+> 丢事件必须可恢复，所以还有两道保险：`session_runner::waiting_for_lifecycle` 的一秒栅栏改为**每玩家只等一次**（`lifecycle_missing`），否则一个永远等不到的 Physicalize 会把整个会话按住在 1 tick/s；客户端记住自己最后一次 Physicalize 的配方，连续 30 个快照里没有自己的球（快照对每个已物理化的玩家恒有一行，睡着也有）就带当前位姿重报一次（2 s 冷却，`session` 状态里的 `phys_resends`）。
 
 ### 9.5 清理与打包
 
@@ -347,3 +352,16 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 - 锚点位姿哈希 `cbf29ce484222325`，**与同日 Windows 侧的取值相同**——两端引擎在 Linux 上仍然位级一致，回滚只在对方按键沿附近触发，数量级与 Windows 结果一致。
 - `game_root` 只被当作数据读取（不加载任何 Windows DLL），所以 Linux 服务端可以直接复用一份 Windows 游戏目录。
+
+### 9.7 变球（trafo）
+
+原版 `Trafo Manager`（`Gameplay_Ingame`）：`Get Nearest In Group(Trafos)` 距离 < 4.3 → `dephysic Ball`（Unphysicalize 当前球）→ 动画约 1.35 s → `set new Ball`（`Set Cell` 把 `CurrentLevel[0,1]` 换成新球实体、`Set Parent` 把 `Ball_Pos_Frame` 挂到新球、`Activate Script(Reset=TRUE, Gameplay_Refresh)`，出口链路带 `delay=2`）→ `physicalize new Ball`（按 `Get Key Row` 读到的 `Physicalize_GameBall` 行 Switch：Paper = Convex Count 1，Stone/Wood = Ball Count 1 半径 2）。因此换球实体在 Physicalize 之前，Mod 的 `target == get_current_ball()` 判定对两端事件都成立，上报本身是对的。
+
+2026-09-02 修掉的变球缺陷（症状：变球后球不再参与服务端模拟、不再推动机关）：
+
+- **服务端拒绝纸球配方**（根因，见 9.4）。
+- **回滚窗口跨变球**（`rollback.hpp`）：重模拟原来整段用锚点 tick 的 `tracked`，跨过变球后驱动的是**已经不存在的旧球**（新球一次输入也拿不到），并且 `nav_poll` 关的也是旧球，重放的每个 tick 都读了实时键盘。改为逐 tick 用该 tick 记录的 `tracked`，窗口内出现过的每个自球都先关轮询、结束后再开。另外快照里映射到"当前球"的行如果在该 tick 的历史里没有对应刚体，不再写回——否则变球后的新球会被拉回旧球在 tick T 的位姿。回归用例 `RollbackEngine.TrafoWindowDrivesTheBallOfEachTick`。
+- **对方变球**（`physics_session_apply_event`）：旧球型的幽灵球没有隐藏（`on_trafo` 的 from 传的是 `UINT32_MAX`），转发输入环 `inputs`/`have_input`/`applied` 也没清——重放里旧球的输入会喂给新球。
+- **变球那一帧原版力叶子没归零**：`physics_session_zero_retail_forces` 只在帧首（`own_navigation` 已挂上）跑，而新球的导航复制下一帧才挂过去；球还没有刚体时 `SetPhysicsForce.Create` 会排队到 PreSimulate 重试，读到的就是原版力值。现在 `OnPhysicalize` 里立刻再归零一次。
+
+变球到石球时服务端崩在 `IVP_ASSERT(worst_case_speed > max_coll_speed)`（`ivp_mindist_event.cxx:1143`）不是物理问题，是构建问题：`build-retail` 的 `CMAKE_CXX_FLAGS_RELEASE` 是空的，IVP 于是带着断言和每秒一行的统计输出（`IVP_IF(1 || ...)`）编进服务端，而这条界只在 IVP 自己的 `sqrt(1.001 - c²)` 余量内成立，一个自转快又直冲表面的球（石球质量 10）就能踩到。原版客户端的 physics_RT.dll 带 `NDEBUG`，所以只有服务端会死。见 `docs/building-and-deployment.md`；根 `CMakeLists.txt` 现在会在非 Debug 构建缺 `NDEBUG` 时告警。加回 `/O2 /Ob2 /DNDEBUG` 不改变模拟：`BallanceMMOSimTool --level 1 --ticks 2500 --report-every 250` 的每个世界/位姿哈希前后完全一致（速度快 1.7 倍）。

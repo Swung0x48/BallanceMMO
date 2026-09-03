@@ -456,6 +456,7 @@ private:
 	void physics_session_apply_queues();
 	void physics_session_apply_event(const bmmo::session_event_msg& event);
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
+	void physics_session_check_own_body(const bmmo::session_snapshot_msg& snapshot, uint32_t own_id);
 	void physics_session_drive_remotes();
 	void physics_session_attach_remote_navigation(uint32_t player);
 	void physics_session_attach_own_navigation(const std::string& ball_name, uint8_t ball_type);
