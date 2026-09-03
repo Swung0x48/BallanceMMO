@@ -1062,6 +1062,7 @@ namespace bmmo::physics {
     int restore_explosion_pieces(CKContext* context) {
         CKScene* scene = context ? context->GetCurrentScene() : nullptr;
         if (!scene) return -1;
+        CKIpionManager* physics = CKIpionManager::GetManager(context);
         int restored = 0;
         for (const char* frame_name: kPieceFrames) {
             CK3dEntity* frame = find_entity(context, frame_name);
@@ -1077,8 +1078,23 @@ namespace bmmo::physics {
                 for (int c = 0; c < 4; ++c) world[r][c] = r == c ? 1.0f : 0.0f;
             world[3][3] = 1.0f;
             frame->SetWorldMatrix(world);
-            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child))
+            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child)) {
                 restored += restore_initial_condition(scene, child);
+                // The piece's convex hull is compiled once, at the very first
+                // Physicalize of the process - Balls_Init does one at game
+                // start, long before this - and cached under the mesh's name.
+                // It is built from the entity's scale, which CK derives from
+                // the local matrix, which comes from a product with the
+                // skewed parent above: the game's CK2 and the headless
+                // reimplementation round three of the wood pieces
+                // differently there, and the hull, its rotation inertia and
+                // every later spin of that piece follow.  Forget the cached
+                // hull while the piece has no body, so the next Physicalize
+                // compiles it from the exact hierarchy installed here.
+                if (physics && !physics->GetPhysicsObject(child))
+                    if (CKMesh* mesh = child->GetCurrentMesh())
+                        if (mesh->GetName()) physics->RemoveCollisionSurface(mesh->GetName());
+            }
         }
         // Ball_Pos_Frame sits on its ball's origin; the file gives it a 5e-6
         // local offset that costs an inexact product per read.

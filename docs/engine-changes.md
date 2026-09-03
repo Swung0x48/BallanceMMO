@@ -242,6 +242,37 @@ differ in the last bit from their first frame on, a residue that is not
 present between the x86, x64 and Linux headless builds (identical) and has
 not been located yet.
 
+## 9. Forgetting one named collision surface (physics_RT)
+
+File: `Source/BuildingBlocks/physics_RT/CKIpionManager.cpp` / `.h`
+(new `CKIpionManager::RemoveCollisionSurface`).
+
+`CreatePhysicsObjectOnParameters` compiles a convex hull the first time an
+entity is physicalized with a given Collision Surface name and caches it under
+that name; every later Physicalize reuses it. The manager could add to that
+cache and clear it whole, but not forget a single entry.
+
+The hull is built from the entity's scale, which `CK3dEntity::GetScale`
+derives from the *local* matrix, which CK derives from a product with the
+parent's inverse. The trafo explosion pieces hang under `Ball_WoodPieces_Frame`
+below `Balls_MF`, which the level file gives a 0.99999 scale, so that product
+is inexact and the game's CK2 rounds it differently from the reimplementation:
+three of the 51 pieces get a scale that differs by one ulp (`piece08`'s z is
+`0x1.0000620p+0` in the game and `0x1.0000640p+0` headless). The scale
+multiplies every mesh vertex, so the hull and its rotation inertia differ, and
+those pieces spin differently from their first simulated frame. Since the
+hulls are compiled at game start (`Balls_Init` physicalizes every piece once),
+flattening the hierarchy later cannot help - the cached hull is already wrong.
+
+With this entry point, `restore_explosion_pieces` (design 9.10) drops each
+piece's cached hull while the piece has no body, and the next Physicalize
+compiles it from the flattened hierarchy, which both engines derive
+identically. All three explosions then replay bit-exact between the game and
+the headless engine (wood 3457/3457, stone 3457/3457, paper 3456/3456), and
+the `--explode` traces stay identical across the x64, x86 and Linux headless
+builds. Nothing else calls it, so no other body's hull changes;
+`rec_m3b.bmrc` still replays 4169/4169.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
