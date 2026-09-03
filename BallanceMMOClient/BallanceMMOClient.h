@@ -30,6 +30,8 @@
 #include <mutex>
 #include <memory>
 #include <format>
+#include <deque>
+#include <optional>
 #include <queue>
 #include <asio.hpp>
 #include <parallel_hashmap/phmap.h>
@@ -397,7 +399,25 @@ private:
 	// collision-overhaul room system (docs/rooms-and-sessions-protocol.md)
 	bmmo::room_state_msg last_room_state_{};
 	std::mutex room_state_mtx_;
-	bool room_list_requested_ = false; // guarded by room_state_mtx_
+	bool room_list_requested_ = false;   // guarded by room_state_mtx_
+	bool room_status_requested_ = false; // guarded by room_state_mtx_
+	// One entry per room_request still waiting for its outcome. The server
+	// answers every request with exactly one RequestAccepted or RequestDenied
+	// (protocol 1.3) and the connection is reliable and ordered, so this queue
+	// stays in step and tells us which command an outcome belongs to.
+	// Guarded by room_state_mtx_.
+	struct pending_room_request {
+		bmmo::room::action action{};
+		bool ready = false;            // Ready / Unready: which one we sent
+		bmmo::room::mode mode{};       // Start: the session kind we asked for
+	};
+	static constexpr size_t MAX_PENDING_ROOM_REQUESTS = 16;
+	std::deque<pending_room_request> pending_room_requests_;
+	void push_room_request(const pending_room_request& request);
+	std::optional<pending_room_request> pop_room_request();
+	void reset_room_state();
+	std::string room_ready_text(HSteamNetConnection player);
+	void handle_room_request_outcome(const bmmo::room_event_msg& msg, bool accepted);
 	void handle_room_state(bmmo::room_state_msg msg);
 	void handle_room_event(const bmmo::room_event_msg& msg);
 	void print_room_status();
@@ -447,6 +467,10 @@ private:
 	void handle_session_remote_input(bmmo::session_remote_input_msg msg);
 	void handle_session_end(const bmmo::session_end_msg& msg);
 	void physics_session_begin(const bmmo::session_start_msg& msg);
+	// Seconds of the "3 - 2 - 1 - Go!" lead-in in front of the level restart
+	// that opens a physics session.
+	static constexpr int PHYSICS_SESSION_COUNTDOWN = 3;
+	void physics_session_countdown();
 	void physics_session_end_local(const std::string& reason);
 	void process_physics_session();
 	void physics_session_anchor();
@@ -1084,6 +1108,7 @@ private:
 		//thread_pool_.stop();
 		clear_map_names();
 		db_.clear();
+		reset_room_state();
 
 		// listener callbacks are other mods' code and will call BML APIs, so
 		// they belong on the game thread
@@ -1186,6 +1211,11 @@ private:
 		//beh->ActivateInput(0);
 		//beh->Activate();
 	}
+
+	// Game thread. The countdown cue: the arpeggio for "Get ready", one dong
+	// per number and the whistle on "Go!". Shared by the countdown_msg handler
+	// and the physics session lead-in.
+	void play_countdown_sound(bmmo::countdown_type type);
 
 	void send_countdown_message(bmmo::countdown_type type, bmmo::level_mode mode) {
 		bmmo::countdown_msg msg{};

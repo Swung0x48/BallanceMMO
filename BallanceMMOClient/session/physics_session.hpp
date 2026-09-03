@@ -27,7 +27,9 @@
 
 namespace bmmo::session {
     struct physics_session_state {
-        enum class phase_type { idle, restarting, running, ended };
+        // counting_down: the "3 - 2 - 1 - Go!" lead-in, before the restart that
+        // opens the session; the level is still the one the player was on.
+        enum class phase_type { idle, counting_down, restarting, running, ended };
         phase_type phase = phase_type::idle;
 
         // From SessionStart.

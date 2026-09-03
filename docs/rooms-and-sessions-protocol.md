@@ -59,7 +59,11 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | subject | u32（被操作者，可为 0） |
 | reason | string ≤ 256 |
 
-客户端命令：`/mmo room list|create [name]|join <id>|leave|ready [on|off]|start [physics|shadow]|kick <player>|close`。
+每一条 `room_request` 都恰好收到一条 `RequestAccepted` 或 `RequestDenied`（含 `List`、`Ready`/`Unready`、`Close`）。连接可靠且有序，客户端据此把结果对应回发出的子命令并回显；`RequestDenied` 的 `error`（必要时加 `reason`）说明失败原因。
+
+一次操作可能同时产生广播事件：服务端先发给发起者结果，再把 `PlayerJoined` / `PlayerLeft` / `HostChanged` / `RoomClosed` / `SessionStarting` 发给其他成员，最后推送 `room_state`。`Ready`/`Unready` 相反——先推 `room_state`（其中已带新的 ready 标记），再发 `ReadyChanged`，最后回结果，这样收到事件的客户端可以直接从名单里读出新状态与人数。客户端对自己发起的操作只显示结果那一条，不重复显示随之而来的广播事件。
+
+客户端命令：`/mmo room list|create [name]|join <id>|leave|ready [on|off]|start [physics|shadow]|kick <player>|close|status|session`。
 
 ## 2. 会话（物理模式）
 
@@ -71,7 +75,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 ### 2.1 时间线
 
-- `tick` 长度 1/66 s。每个客户端在收到 `SessionStart` 后重开当前关卡，`Gameplay_Ingame` 首次激活的行为帧为锚点，编号为 `first_tick`（首次开始为 0，迟到加入者由服务端指定）。锚点执行会话重置（IVP 时钟归零、`ivp_srand(seed)`），此后每个行为帧一个 tick。
+- `tick` 长度 1/66 s。每个客户端在收到 `SessionStart` 后先播放 3 秒 “3 - 2 - 1 - Go!” 倒计时（沿用 `countdown_msg` 的提示音与提示行，纯本地效果，不参与确定性），在 “Go!” 这一帧重开当前关卡，`Gameplay_Ingame` 首次激活的行为帧为锚点，编号为 `first_tick`（首次开始为 0，迟到加入者由服务端指定）。锚点执行会话重置（IVP 时钟归零、`ivp_srand(seed)`），此后每个行为帧一个 tick。
 - 客户端每 tick 发送 `SessionInput`；服务端在收齐所有成员该 tick 的输入、或墙钟超过 `开始时刻 + (tick + input_delay)/66 s` 时模拟该 tick，缺失输入沿用该玩家上一 tick 的输入。
 - 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`（不可靠）；每 66 tick 或刚体集合变化时广播 full 快照（可靠，携带机关名字典）。
 - 生命周期事件（`SessionEvent`）可靠传输，带发生的客户端 tick；服务端在不早于该 tick 的模拟步中应用，并转发给房间其他成员（`player` 字段为来源）。

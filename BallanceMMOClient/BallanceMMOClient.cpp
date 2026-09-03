@@ -984,42 +984,67 @@ void BallanceMMOClient::init_commands() {
     });
     console_.register_aliases("list", {"l", "list-id", "li"});
     console_.register_command("room", [&] {
-        if (!connected()) { SendIngameMessage("Error: not connected to a server."); return; }
+        if (!connected()) { SendIngameMessage("Error: not connected to a server.", bmmo::ansi::BrightRed); return; }
         const auto sub = console_.get_next_word(true);
         bmmo::room_request_msg msg{};
+        // Remembered until the server answers, so its RequestAccepted /
+        // RequestDenied can name the subcommand it belongs to.
+        pending_room_request pending{};
         if (sub.empty() || sub == "status") { print_room_status(); return; }
         else if (sub == "list") {
             msg.action = bmmo::room::action::List;
             { std::lock_guard lk(room_state_mtx_); room_list_requested_ = true; }
         }
         else if (sub == "create") { msg.action = bmmo::room::action::Create; msg.name = console_.get_rest_of_line(); }
-        else if (sub == "join")   { msg.action = bmmo::room::action::Join; msg.room = static_cast<uint32_t>(console_.get_next_int()); }
+        else if (sub == "join")   {
+            msg.action = bmmo::room::action::Join;
+            const auto w = console_.get_next_word();
+            if (w.empty() || std::atoi(w.c_str()) <= 0) {
+                SendIngameMessage("Usage: /mmo room join <id> (\"/mmo room list\" shows the ids).",
+                                  bmmo::ansi::BrightRed);
+                return;
+            }
+            msg.room = static_cast<uint32_t>(std::atoi(w.c_str()));
+        }
         else if (sub == "leave")  { msg.action = bmmo::room::action::Leave; }
         else if (sub == "ready" || sub == "unready") {
             const auto arg = console_.get_next_word(true);
             bool ready = (sub == "ready");
             if (arg == "off" || arg == "false" || arg == "0") ready = false;
             else if (arg == "on" || arg == "true" || arg == "1") ready = true;
+            else if (!arg.empty()) {
+                SendIngameMessage(std::format("Error: unknown argument \"{}\". Usage: /mmo room {} [on|off].",
+                                  arg, sub), bmmo::ansi::BrightRed);
+                return;
+            }
             msg.action = ready ? bmmo::room::action::Ready : bmmo::room::action::Unready;
+            pending.ready = ready;
         }
         else if (sub == "start") {
             msg.action = bmmo::room::action::Start;
             const auto m = console_.get_next_word(true);
-            msg.mode = (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
+            if (!m.empty() && m != "physics" && m != "shadow") {
+                SendIngameMessage(std::format("Error: unknown session mode \"{}\". Usage: /mmo room start [physics|shadow].",
+                                  m), bmmo::ansi::BrightRed);
+                return;
+            }
+            msg.mode = pending.mode = (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
         }
         else if (sub == "kick") {
             msg.action = bmmo::room::action::Kick;
             const auto w = console_.get_next_word();
-            if (w.empty()) { SendIngameMessage("Usage: /mmo room kick <player|#id>"); return; }
+            if (w.empty()) { SendIngameMessage("Usage: /mmo room kick <player|#id>", bmmo::ansi::BrightRed); return; }
             if (w[0] == '#') msg.target = static_cast<HSteamNetConnection>(atoll(w.substr(1).c_str()));
             else msg.target = db_.get_client_id(w);
-            if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w)); return; }
+            if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w), bmmo::ansi::BrightRed); return; }
         }
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
         else if (sub == "session") { SendIngameMessage(physics_session_status_text()); return; }
-        else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close.", sub)); return; }
+        else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close|status|session.", sub), bmmo::ansi::BrightRed); return; }
+        pending.action = msg.action;
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        push_room_request(pending);
     });
     console_.register_command("dnf", [&] {
         if (current_map_.level == 0 || spectator_mode_)
@@ -1710,6 +1735,40 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
     }
 }
 
+// Game thread. The countdown cue, shared by the countdown_msg handler and the
+// physics session lead-in (session/physics_session_client.cpp).
+void BallanceMMOClient::play_countdown_sound(bmmo::countdown_type type) {
+    using ct = bmmo::countdown_type;
+    switch (type) {
+        case ct::Unknown:
+            return;
+        case ct::Go:
+            play_wave_sound(sound_go_, true);
+            return;
+        case ct::Ready:
+        case ct::ConfirmReady: {
+            // one timer per note: CKWaveSound::SetPitch is an engine call, and
+            // the old pool task slept between the notes
+            static constexpr float base = 0.4375f;// 1.29f;
+            float delay = 0.0f;
+            for (const auto pitch: {base, base * std::powf(2.0f, 3.0f / 12), base * std::powf(2.0f, 7.0f / 12), base * 2.0f}) {
+                m_bml->AddTimer(delay, [this, pitch] {
+                    if (!sound_countdown_) return;
+                    sound_countdown_->SetPitch(pitch);
+                    play_wave_sound(sound_countdown_, true);
+                });
+                delay += 500.0f;
+            }
+            return;
+        }
+        default:  // one dong per number
+            if (!sound_countdown_) return;
+            sound_countdown_->SetPitch(0.875f);
+            play_wave_sound(sound_countdown_, true);
+            return;
+    }
+}
+
 void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     // general_message is a max-sized view used only to read the opcode, so it
     // is checked against sizeof(opcode) rather than its own (huge) size
@@ -2061,7 +2120,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 if (msg->content.map == current_map_ || msg->content.force_restart)
                     current_level_mode_ = msg->content.mode;
                 // asio::post(thread_pool_, [this] { play_beep(int(440 * std::powf(2.0f, 5.0f / 12)), 1000); });
-                play_wave_sound(sound_go_, true);
+                utils_.run_on_game_thread([this] { play_countdown_sound(bmmo::countdown_type::Go); });
                 // Everything below drives gameplay: it resets level timers,
                 // restarts the level through the engine's behavior graph and
                 // writes the energy array. That belongs on the game thread, so
@@ -2109,20 +2168,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   sender_name, map_name, msg->content.get_level_mode_label(),
                                   msg->content.get_type_label()
                 ).c_str());
-                // one timer per note on the game thread: CKWaveSound::SetPitch is
-                // an engine call, and the old pool task slept between the notes
-                utils_.run_on_game_thread([this] {
-                    static constexpr float base = 0.4375f;// 1.29f;
-                    float delay = 0.0f;
-                    for (const auto pitch: {base, base * std::powf(2.0f, 3.0f / 12), base * std::powf(2.0f, 7.0f / 12), base * 2.0f}) {
-                        m_bml->AddTimer(delay, [this, pitch] {
-                            if (!sound_countdown_) return;
-                            sound_countdown_->SetPitch(pitch);
-                            play_wave_sound(sound_countdown_, true);
-                        });
-                        delay += 500.0f;
-                    }
-                });
+                utils_.run_on_game_thread([this] { play_countdown_sound(bmmo::countdown_type::Ready); });
                 break;
             case ct::Countdown_1:
             case ct::Countdown_2:
@@ -2132,12 +2178,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                                   sender_name, map_name, msg->content.get_level_mode_label(),
                                   msg->content.get_type_label()).c_str());
                 // asio::post(thread_pool_, [this] { play_beep(440, 500); });
-                utils_.run_on_game_thread([this] {
-                    if (!sound_countdown_) return;
-                    sound_countdown_->SetPitch(0.875f);
-                    play_wave_sound(sound_countdown_, true);
-                });
-
+                utils_.run_on_game_thread([this, type = msg->content.type] { play_countdown_sound(type); });
                 break;
         }
         utils_.flash_window();

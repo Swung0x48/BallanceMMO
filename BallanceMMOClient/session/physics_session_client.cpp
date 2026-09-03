@@ -163,19 +163,53 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
         s.phase = phase_type::idle;
         return;
     }
-    s.phase = phase_type::restarting;
+    s.phase = phase_type::counting_down;
     s.saw_ingame_inactive = false;
-    s.restart_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    SendIngameMessage(std::format("Physics session {} starting: restarting the level to synchronize.", s.session),
+    s.restart_deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(PHYSICS_SESSION_COUNTDOWN + 5);
+    SendIngameMessage(std::format("Physics session {} starting: the level restarts on \"Go!\".", s.session),
                       bmmo::ansi::BrightGreen);
-    logger_->Info("Physics session %u: restart requested (players=%zu, join order %d)", s.session, s.players.size(),
+    logger_->Info("Physics session %u: countdown started (players=%zu, join order %d)", s.session, s.players.size(),
                   s.own_join_order);
-    // Fixed 1/66 s behaviour delta from here on: the retail intro timers start
-    // in the anchor frame (Gameplay_Ingame's first frame), and with the retail
-    // limits that frame's delta is whatever the restart took (4.5 ms .. 200 ms
-    // measured), which moved the intro's end by a tick between the two sides.
-    if (!fixed_tick_.enabled()) fixed_tick_.enable(m_bml);
-    restart_current_level();
+    physics_session_countdown();
+}
+
+// The classic "3 - 2 - 1 - Go!" lead-in (the same cue as /mmo countdown) in
+// front of the restart: everyone in the room gets their SessionStart within a
+// few milliseconds of each other, so the local timers stay in step. Nothing
+// here is part of the deterministic run - the restart, and with it the anchor
+// frame, happens on "Go!".
+void BallanceMMOClient::physics_session_countdown() {
+    const uint32_t session = physics_session_.session;
+    // Stale timers of a session that ended in the meantime must do nothing.
+    const auto still_starting = [this, session] {
+        return physics_session_.session == session && physics_session_.phase == phase_type::counting_down;
+    };
+    float delay = 0.0f;
+    for (int i = PHYSICS_SESSION_COUNTDOWN; i >= 1; --i) {
+        m_bml->AddTimer(delay, [this, session, i, still_starting] {
+            if (!still_starting()) return;
+            SendIngameMessage(std::format("Physics session {} - {}", session, i), bmmo::ansi::BrightGreen);
+            play_countdown_sound(bmmo::countdown_type::Countdown_1);   // one dong per number
+        });
+        delay += 1000.0f;
+    }
+    m_bml->AddTimer(delay, [this, session, still_starting] {
+        if (!still_starting()) return;
+        auto& s = physics_session_;
+        SendIngameMessage(std::format("Physics session {} - Go!", session), bmmo::ansi::BrightGreen);
+        play_countdown_sound(bmmo::countdown_type::Go);
+        s.phase = phase_type::restarting;
+        s.saw_ingame_inactive = false;
+        s.restart_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        logger_->Info("Physics session %u: restart requested", session);
+        // Fixed 1/66 s behaviour delta from here on: the retail intro timers start
+        // in the anchor frame (Gameplay_Ingame's first frame), and with the retail
+        // limits that frame's delta is whatever the restart took (4.5 ms .. 200 ms
+        // measured), which moved the intro's end by a tick between the two sides.
+        if (!fixed_tick_.enabled()) fixed_tick_.enable(m_bml);
+        restart_current_level();
+    });
 }
 
 void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
@@ -204,6 +238,15 @@ void BallanceMMOClient::process_physics_session() {
     switch (s.phase) {
     case phase_type::idle:
     case phase_type::ended:
+        return;
+    case phase_type::counting_down:
+        // The lead-in only waits; leaving the level during it (a quit to the
+        // menu, a death that ends the run) cancels the session instead of
+        // restarting something else on "Go!".
+        if (!m_bml->IsIngame())
+            physics_session_end_local("the level was left during the countdown");
+        else if (std::chrono::steady_clock::now() > s.restart_deadline)
+            physics_session_end_local("the countdown did not finish");
         return;
     case phase_type::restarting: {
         const bool active = gameplay_ingame_script_active();
@@ -1256,6 +1299,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
     auto& s = physics_session_;
     const char* phase = "idle";
     switch (s.phase) {
+    case phase_type::counting_down: phase = "counting down"; break;
     case phase_type::restarting: phase = "restarting"; break;
     case phase_type::running: phase = "running"; break;
     case phase_type::ended: phase = "ended"; break;

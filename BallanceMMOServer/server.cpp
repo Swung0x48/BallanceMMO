@@ -1061,6 +1061,7 @@ public:
         switch (msg.action) {
             case action::List:
                 send_room_state(c);
+                send_room_event(c, event_type::RequestAccepted, error_code::None, rooms_.room_of(c), c);
                 break;
             case action::Create: {
                 std::string name = msg.name;
@@ -1107,10 +1108,13 @@ public:
                     break;
                 }
                 const uint32_t room = rooms_.room_of(c);
+                // The refreshed roster goes out first: it carries the new flag,
+                // and the clients render the event from it.
+                send_room_state_to_room(room);
                 if (const auto* r = rooms_.find(room))
                     for (const auto& m: r->members)
                         send_room_event(m.id, event_type::ReadyChanged, error_code::None, room, c, c);
-                send_room_state_to_room(room);
+                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c, c);
                 break;
             }
             case action::Start: {
@@ -1201,6 +1205,7 @@ public:
                 }
                 for (auto m: members)
                     send_room_event(m, event_type::RoomClosed, error_code::None, room, c);
+                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
                 broadcast_room_states();
                 Printf("Room %u closed by #%u.", room, c);
                 break;
