@@ -168,7 +168,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 - `physics_world.hpp/.cpp`：`physics_world`，包装一个 `headless_engine`：`boot(level)`（加载 base.cmo → 菜单进关 → 等锚点 → 停放原版球 → 会话重置 → 记录锚点哈希/表面签名）、`add_player / remove_player`、`apply_input(player, tick, input)`、`apply_event(player, event)`、`tick()`、`snapshot(full)`。
 - `player_navigation.hpp/.cpp`（实际文件名）：每玩家一个相机参照实体（`CamRef_BMMO_<id>`，每 tick 用输入中的三条基向量写世界矩阵的旋转部分）+ 导航状态机。导航按 8.1 语义：四个叶子各自维护 Key Event 的电平状态；本 tick 键按下沿 → 创建与 `PhysicsControllerForce` 逐行等价的控制器（`TransformVector` → `IVP_U_Point.normize()` → `mult(force)`）并 `ensure_in_simulation()`；抬起沿 → 删除控制器并 `ensure_in_simulation()`；`nav_active` 由假变真时重置电平（Key Event.On 语义），由真变假时全部 Shutdown。整个过程在物理管理器的 PreSimulate 阶段执行（`physics_world::pre_simulate`，通过一个自定义 `PhysicsCallback`），即本 tick 的脚本之后、PSI 之前。叶子按其 **Key Event 在图中的子块序号**排序（这是引擎执行 Key Event 的顺序，也就是多键同按时控制器加入 core 的顺序），方向从图读取，力值取 `Physicalize_GameBall` 行；键码在 `Gameplay_Refresh` 跑过后才可读（锚点后第 3 tick），两端都要延迟读取。
-- `sector_union`：服务端不跑原版检查点逻辑；收到玩家分节上报后，对每个尚未激活的分节 S 执行“只激活”：`IngameParameter[0,2]=0`、`[0,1]=S`，`scene->Activate(Gameplay_SectorManager, reset)`（下一 tick 执行）。已激活分节永不反激活（并集，只增不减）。
+- `update_sectors`（原 `sector_union`，2026-09-03 重写，见 9.9）：服务端不跑原版检查点逻辑，**正在运行的分节 = 所有玩家所在分节的集合**——有人到的分节启动，没人的分节反激活。每 tick 比较该集合与已激活集合，差异逐个交给原版 `Gameplay_SectorManager`（`IngameParameter[0,2]=反激活`、`[0,1]=激活`，`scene->Activate(..., reset)`），一次一个：管理器走完 PH 表要约 7 帧，中途重启会既打断遍历又在它刚启动的机关脚本读 `CurrentLevel[Activation Phase?]` 之前把该标志翻掉。
 - `mechanism_wake`：客户端上报 `BodyRevived{tick, name}`（其原版脚本对机关做了 `Physics WakeUp`），服务端对同名刚体 `ensure_in_simulation()`。
 - `session_runner.hpp/.cpp`：模拟线程。命令队列（创建/销毁世界、加入/离开、输入、事件、重同步请求）；每个世界一个 tick 调度器（8.2 的规则），每 tick 后调用 `on_snapshot` 回调；快照每 `snapshot_interval` tick 一次（不可靠），每 66 tick 或刚体集合变化时发 full（可靠，含机关名字典）。**生命周期屏障**：某玩家 tick T 的输入标记 physicalized 而世界里还没有它的球、也没收到 tick ≤ T 的 Physicalize 事件时，最多等 1 s 让可靠事件追上不可靠输入，再继续。多房间时在世界间切换前后保存/恢复 `ivp_srand` 游标；M3 配置上限 `maximum_physics_rooms: 1`，多房间留 M4 验证。
 - `server.cpp` 集成：`Start(mode=Physics)` 校验（`physics.enabled`、`game_root`、全员同一原版关卡、Mod 白名单——`ModList` 登录时已收到，存入 `client_data.mods`）→ 房间进入 `Starting` → 模拟线程 boot 世界 → 就绪后发 `SessionStart` → 收 `SessionReady`：比对锚点哈希与表面签名，不一致则 `SessionEnd(reason)`；全员就绪 → 开始推进 → `SessionInput/SessionEvent` 转入队列 → 快照回调直接用 `interface_->SendMessageToConnection`（GNS 线程安全）发给房间成员 → 离开/断线 → `remove_player` 并广播 `PlayerLeft`；房主 `Close`/`End` 或全员离开 → 销毁世界 → `SessionEnd`。迟到加入：房间 Running 时 `Join` 允许，服务端发 `SessionStart`，客户端重开关卡并锚点后发 `SessionReady`，服务端以 `SessionAssign{first_tick = 收到 Ready 时的当前 tick}` 回复（在场成员为 0；重开耗时 1–3 s，因此不能在 SessionStart 里预先给号），客户端此后按 `first_tick + 锚点后帧数` 编号并补发缓存的输入；服务端再补发所有在场玩家最后一次 Physicalize 事件与 full 快照；不做哈希校验。重开：房主再次 `Start` 相当于 `End` + `Start`。
@@ -213,7 +213,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 - 服务端校验客户端上报的生命周期/分节事件（M4）。
 - 多个物理房间同时运行（配置上限 1，M4 验证全局状态隔离）。
-- 分节反激活；远端球的本地预测（设计 3.3 第二阶段）；暂停语义；积分/生命同步。
+- ~~分节反激活~~（9.9 已做）；远端球的本地预测（设计 3.3 第二阶段）；暂停语义；积分/生命同步。
 - 客户端死亡时本地分节重置带来的机关跳变（8.5 第 9 条）。
 - 球-球接触时的一致性：远端球是快照镜像，两球顶住/相撞后各端都要靠修正（8.6 双人结果）；远端球本地预测（3.3 第二阶段）与出生环/起点碟的几何问题留给 M4。
 
@@ -378,15 +378,42 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 修法（`physics_world::rewire_ball_identity_reads` / `update_ball_identity_reads`）：锚点扫描所有 `Get Cell` 块，目标数组是 `CurrentLevel`、列是 `ActiveBall`、**且所在根脚本里有被改接过的邻近块**（即机关脚本）的，把该块的目标参数改接到一份 `CurrentLevel` 的私有副本（`CopyObject` + `CK_DEPENDENCIES_COPY_DATAARRAY_DATA`，共享单元里引用的对象）。每 tick 脚本执行前，副本的 ActiveBall 单元写成"离该脚本任一机关（邻近块的 ObjectB）最近的玩家"的球型对应的**原版球实体**（`Ball_Stone`/`Ball_Wood`/`Ball_Paper`，名字正是脚本要比的那个）；没有玩家时写停放的原版球，即原版会读到的值。原版逻辑的读取（`Event_handler`、`Sound_Manager`、`Ball_Shadow`、Gameplay 各脚本）不改接——它们作用在停放球上，必须保持。Level 1–13 的实测：只有 `P_Modul_18_MF Script` 与 `P_Modul_29_MF Script` 被改接（Level 2 是 9 + 1）。
 
-验证工具：`BallanceMMOSimTool --level N --drop <名字片段> <球型> --drop-at X Y Z [--drop-height F] [--drop-sectors N] [--ticks N]`——在真正的会话世界里（停放原版球、克隆球、并集改接）逐个激活分节，把一名玩家的球丢到机关上，逐 tick 打印名字含该片段的刚体位置与 simulated 标志。Level 2 的 P_Modul_29（`PH` 表：分节 3，(960.709,46.4925,-346.743)）跑 300 tick，最低踏板的下落量：
+验证工具：`BallanceMMOSimTool --level N --drop <名字片段> <球型> --drop-at X Y Z [--drop-height F] [--drop-sector N] [--drop-second-sector N] [--drop-move 分节 tick] [--ticks N]`——在真正的会话世界里（停放原版球、克隆球、并集改接）逐个激活分节，把一名玩家的球丢到机关上，逐 tick 打印名字含该片段的刚体位置与 simulated 标志。Level 2 的 P_Modul_29（`PH` 表：分节 3，(960.709,46.4925,-346.743)）跑 300 tick，最低踏板的下落量：
 
 | | 石球 | 木球 | 纸球 |
 | --- | --- | --- | --- |
 | 修复前 | 2.51 m（只是下垂） | 2.31 m | — |
 | 修复后 | **8.51 m（绳断落桥）** | 2.31 m | 0.85 m |
 
-已知边界（都不是本次改动引入的）：
+已知边界：
 
-- `P_Modul_18`（风扇）也读 ActiveBall，但读到的球是拿去 `SetPhysicsForce` 的。改接前后指向的都是**没有刚体**的原版球实体，服务端照旧不吹玩家球（`GetPhysicsObject(ent, FALSE)` 直接返回空，不会凭空造刚体）；而客户端本地脚本会吹自己的球，再被服务端快照修正拉回。要真正修就得让这类机关作用在玩家的克隆球上，但那样名字判定又会失败（克隆叫 `Ball_Stone_BMMO_<id>`），需要按消费者区分。
 - 远端玩家压断桥时，观察者客户端的本地脚本不会断（它只看自己的球），本地铰链仍拉着踏板，只能靠机关刚体的修正跟随服务端。
-- 分节并集一次只 pop 一个待激活分节、每 tick 一个：`Gameplay_SectorManager` 走完 PH 表需要不止一个 tick，连着激活多个分节会互相打断（`--drop` 模式实测：12 个分节按 1 tick 间隔激活，机关一个都没起来；间隔 30 tick 就正常）。真实会话里玩家逐段推进不受影响，迟到加入/补分节时值得留意。
+- 名字判定的机关一次只认一个球：多个玩家同时在同一机关上时，取离机关最近的那个。
+
+（初版把所有改接的读取都指向原版球实体，于是 `P_Modul_18`（风扇）照旧吹不动玩家球；分节并集当时也是每 tick 只 pop 一个待激活分节。两者都在 9.9 修掉。）
+
+### 9.9 机关按用途取球 + 分节并集重写
+
+**风扇（`P_Modul_18`）吹不动玩家球.** 它读的也是 `CurrentLevel[0,ActiveBall]`，但读到的球是拿去 `Box Box Intersection`（球在不在风口箱子里）和 `SetPhysicsForce`（持续力控制器）的。9.8 把这类读取也指向了**没有刚体**的原版球实体，所以服务端照旧不吹任何人；客户端本地脚本却在吹自己的球，再被服务端快照拉回。
+
+修法：按**消费者**区分同一个 Get Cell 的用途。原版桥的名字判定是一个**参数运算**（`Get Name`）喂给 `Test`，而作用在球上的机关把球交给**行为块**。`rewire_ball_identity_reads` 现在扫 `CKCID_PARAMETEROPERATION`，看有没有运算读这个块的输出（注意参数连线存在读方 `CKParameterIn::m_OutSource`，producer 的 destination 列表在运行时是空的，只能反向找）：
+
+- 有运算读它（Level 1–13 里只有 `Get Name`）→ 写**原版球实体**（`Ball_Stone`……），名字判定成立；
+- 没有 → 写**离机关最近的玩家的克隆球**，机关真的作用在那个球上。
+
+日志里能看到分类：`P_Modul_29_MF Script (Get Name) x1, P_Modul_18_MF Script (body) x9`。
+
+实测（Level 2 分节 3 的风扇，PH 矩阵 (1016.67,45.6233,-366.743)，纸球从上方 3 m 丢下）：修复前球落到 y≈47.6 就停住不动；修复后被吹到 y≈66（160 tick 内）。软木桥不受影响（石球仍 8.5 m、木球 2.3 m）。
+
+**分节并集重写.** 原来"只激活、永不反激活、每 tick pop 一个"有两个问题：没人的分节的机关一直在跑；同一 tick 有多个分节变化时后一个会打断前一个。实测原因：`Gameplay_SectorManager` 不是同步执行完的——它走 PH 表要**约 7 帧**（每行的 `Activate Script` 都等一帧），期间 `CurrentLevel[Activation Phase?]` 为 FALSE，走完才置 TRUE；机关脚本在被 `Activate Script` 启动后的第一帧读这个标志，读到 FALSE 就走"关闭"分支。所以在管理器忙的时候再 `scene->Activate(..., reset)`（或直接 `CKBehavior::Execute`）等于把前一个分节的机关全部掐死——1 tick 间隔连开 12 个分节时一个机关都起不来，同 tick 连开 2 个则只有最后一个活。
+
+现在 `physics_world::update_sectors()` 每 tick：
+
+1. `desired` = 所有玩家 `p.sector` 的集合（`apply_event(Sector)` 只更新 `p.sector`，不再直接激活）；
+2. 与 `active_sectors_` 求差，取一个待激活和一个待反激活配成一次管理器运行（和原版过检查点时"反激活旧、激活新"完全一样）；
+3. 仅在管理器空闲且已空闲 ≥3 tick 时启动下一次（那两 tick 让上一批机关脚本读完标志）；
+4. 剩下的差异在随后的帧里继续，日志带 `(more to come)`。
+
+变化在出现的那一 tick 就被接受，不会丢；应用则按管理器自己的节奏排队。实测（Level 2，玩家 1 在分节 3、玩家 2 在分节 5）：`sector +3 -1 at tick 2` → `sector +5 at tick 9`，此时 `P_Modul_29_Platte01..09`（分节 3）与 `PE_Balloon_Platte01..08`（分节 5）同时是刚体；玩家 1 也走到分节 5 后 `sector -3`，桥的刚体消失。
+
+已知边界：一个玩家在分节 N、另一个在 N+2 时，中间没人的分节 N+1 的机关不运行——玩家看到的就是原版"还没激活"的样子（对象隐藏），走到那里时才启动。

@@ -131,9 +131,10 @@ namespace bmmo::sim {
         // snapshot() call (a full snapshot is then due).
         bool body_set_changed() const { return body_set_changed_; }
 
-        // Activate a sector on the server if it is not active yet (union).
-        void activate_sector(int sector);
+        // The sectors the world is running: the union of the sectors its
+        // players are in, applied by update_sectors() in the tick it changes.
         const std::set<int>& active_sectors() const { return active_sectors_; }
+        void update_sectors();
 
         std::string describe() const;
         CKIpionManager* physics() const;
@@ -220,20 +221,23 @@ namespace bmmo::sim {
         CK_ID sector_manager_ = 0;
         CK_ID ingame_parameter_ = 0;
         std::set<int> active_sectors_;
-        std::vector<int> pending_sectors_;
+        int sector_idle_ticks_ = 0;     // ticks the sector manager has been idle
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
         struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };
         std::vector<proximity_probe> probes_;
         // A "Get Cell" that reads the active ball of a mechanism script: the
         // block, the private CurrentLevel copy it reads instead, the local
-        // parameter that feeds it, the ActiveBall column and the mechanisms
+        // parameter that feeds it, the ActiveBall column, whether the script
+        // only tests the ball's name (then it gets the retail entity of the
+        // player's ball type, otherwise the player's clone) and the mechanisms
         // (proximity ObjectB) the script watches.
         struct identity_probe {
             CK_ID block = 0;
             CK_ID array = 0;
             CK_ID parameter = 0;
             int column = 1;
+            bool by_name = false;
             std::vector<CK_ID> references;
         };
         std::vector<identity_probe> identities_;

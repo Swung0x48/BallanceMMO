@@ -65,12 +65,16 @@ namespace {
         long long nav_frames = -1;     // --nav-frames N: compare only the first N frames
         int list_bodies_at = -1;       // --list-bodies-at N: bridge v2 list_bodies() at that tick
         // --drop ENTITY BALLTYPE: server-side mechanism check.  Boots a
-        // physics-session world, activates the sectors, drops one player's
-        // ball of that type on that entity and prints what the mechanism does.
+        // physics-session world, puts the player in a sector, drops their ball
+        // of that type on that entity and prints what the mechanism does.
         std::string drop_entity;
         int drop_ball = 0;
         float drop_height = 4.0f;      // --drop-height F: metres above the entity
-        int drop_sectors = 12;         // --drop-sectors N: sectors to activate first
+        int drop_sector = 1;           // --drop-sector N: the sector the player reports
+        int drop_second_sector = 0;    // --drop-second-sector N: a second player, parked there
+        int drop_settle = 30;          // --drop-settle N: ticks between the sector and the drop
+        int drop_move_sector = 0;      // --drop-move SECTOR TICK: the player moves on at that tick
+        int drop_move_tick = 0;
         float drop_at[3] = {};         // --drop-at X Y Z: drop there instead (PH matrix of a module)
         bool have_drop_at = false;
     };
@@ -127,7 +131,13 @@ namespace {
                 out.have_drop_at = true;
             }
             else if (arg == "--drop-height") { if (!(v = next())) return false; out.drop_height = static_cast<float>(std::atof(v)); }
-            else if (arg == "--drop-sectors") { if (!(v = next())) return false; out.drop_sectors = std::atoi(v); }
+            else if (arg == "--drop-sector") { if (!(v = next())) return false; out.drop_sector = std::atoi(v); }
+            else if (arg == "--drop-second-sector") { if (!(v = next())) return false; out.drop_second_sector = std::atoi(v); }
+            else if (arg == "--drop-settle") { if (!(v = next())) return false; out.drop_settle = std::atoi(v); }
+            else if (arg == "--drop-move") {
+                if (!(v = next())) return false; out.drop_move_sector = std::atoi(v);
+                if (!(v = next())) return false; out.drop_move_tick = std::atoi(v);
+            }
             else return false;
         }
         return !out.root.empty();
@@ -573,11 +583,12 @@ namespace {
 
 namespace {
     // Server-side mechanism check (design 8.3): boots a physics-session world
-    // the way a room does, activates the sectors, and drops one player's ball
-    // of the given type onto a mechanism part, then prints that part's height
-    // every report interval.  A mechanism that reacts to the ball (the rope
-    // bridge P_Modul_29 tearing under a stone ball) moves; one that does not
-    // holds its anchor pose.
+    // the way a room does, puts its player (and optionally a second one) in a
+    // sector so the union starts that sector's mechanisms, and drops the
+    // player's ball of the given type onto a mechanism part, then prints that
+    // part's height every report interval.  A mechanism that reacts to the
+    // ball (the rope bridge P_Modul_29 tearing under a stone ball) moves; one
+    // that does not holds its anchor pose.
     int run_drop(const arguments& args) {
         bmmo::sim::world_options options;
         options.game_root = args.root;
@@ -596,13 +607,25 @@ namespace {
             std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
             return 1;
         }
-        // One sector at a time: Gameplay_SectorManager needs its ticks to walk
-        // the PH table before the next activation resets it.
-        for (int sector = 1; sector <= args.drop_sectors; ++sector) {
-            world->activate_sector(sector);
-            for (int i = 0; i < 30; ++i)
-                if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+        // The sector union follows the players: report where each of them is
+        // and the world starts (and stops) the right mechanisms on its own.
+        const auto report_sector = [&](uint32_t player, int sector) {
+            bmmo::sim::lifecycle_event where;
+            where.type = bmmo::session::event_type::Sector;
+            where.sector = sector;
+            if (!world->apply_event(player, where, error))
+                std::fprintf(stderr, "sector event failed: %s\n", error.c_str());
+        };
+        if (args.drop_second_sector > 0) {
+            if (!world->add_player(2, error)) {
+                std::fprintf(stderr, "add_player 2 failed: %s\n", error.c_str());
+                return 1;
+            }
+            report_sector(2, args.drop_second_sector);
         }
+        report_sector(1, args.drop_sector);
+        for (int i = 0; i < args.drop_settle; ++i)
+            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
         if (!args.dump_array.empty()) dump_array(world->engine(), args.dump_array);
         VxVector spawn(args.drop_at[0], args.drop_at[1], args.drop_at[2]);
         if (!args.have_drop_at) {
@@ -658,6 +681,10 @@ namespace {
         std::map<std::string, double> start;
         for (const auto& body: watched(*world)) start.emplace(body.name, body.position[1]);
         for (int i = 0; i < args.ticks; ++i) {
+            if (args.drop_move_sector > 0 && i == args.drop_move_tick) {
+                report_sector(1, args.drop_move_sector);
+                std::printf("tick=%d player 1 moved to sector %d\n", i, args.drop_move_sector);
+            }
             if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
         }
@@ -822,7 +849,8 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
-            "           [--drop-height F] [--drop-sectors N] (mechanism check in a session world)\n");
+            "           [--drop-at X Y Z] [--drop-height F] [--drop-sector N] [--drop-second-sector N]\n"
+            "           [--drop-settle N] (mechanism check in a session world)\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {

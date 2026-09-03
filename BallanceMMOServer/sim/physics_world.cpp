@@ -44,6 +44,27 @@ namespace bmmo::sim {
             return matrix;
         }
 
+        // Whether the script only wants a value computed from the ball rather
+        // than the ball itself.  The rope bridge's name test is a parameter
+        // *operation* ("Get Name") feeding a Test block, while a mechanism
+        // that works on the ball (the fan's SetPhysicsForce, its box test)
+        // hands it to a behaviour.  Parameter links live on the reading side
+        // (CKParameterIn::m_OutSource), so the consumers are found by looking
+        // for readers, not through the producer's destination list.
+        std::string operation_on(CKContext* context, CKParameter* value) {
+            if (!context || !value) return {};
+            const int count = context->GetObjectsCountByClassID(CKCID_PARAMETEROPERATION);
+            CK_ID* ids = context->GetObjectsListByClassID(CKCID_PARAMETEROPERATION);
+            for (int i = 0; i < count; ++i) {
+                auto* operation = CKParameterOperation::Cast(context->GetObject(ids[i]));
+                if (!operation) continue;
+                for (CKParameterIn* in: {operation->GetInParameter1(), operation->GetInParameter2()})
+                    if (in && in->GetDirectSource() == value)
+                        return operation->GetName() ? operation->GetName() : "?";
+            }
+            return {};
+        }
+
         // Per-tick hook in the physics manager's PreSimulate pass: the retail
         // callback container executes a new callback immediately and keeps it
         // queued while Execute returns 0, so the first call only arms it and
@@ -394,6 +415,13 @@ namespace bmmo::sim {
                 ++untouched[script];
                 continue;
             }
+            // What the block's consumers want out of the cell decides which
+            // object goes in it: a name test ("Ball_Stone") wants the retail
+            // entity, anything else (P_Modul_18's fan pushes the ball with
+            // SetPhysicsForce and tests its box) wants the body that is
+            // actually there, i.e. the player's clone.
+            const std::string operation = operation_on(context, block->GetOutputParameter(0));
+            const bool by_name = !operation.empty();
             const std::string name = "BMMO_Ball_" + std::to_string(identities_.size());
             CKDependencies dependencies;
             dependencies.Resize(CKCID_MAXCLASSID);
@@ -416,8 +444,9 @@ namespace bmmo::sim {
             CK_ID array_id = copy->GetID();
             parameter->SetValue(&array_id, sizeof(array_id));
             if (target->SetDirectSource(parameter) != CK_OK) continue;
-            identities_.push_back({block->GetID(), array_id, parameter->GetID(), ball_column, watched->second});
-            ++rewired[script];
+            identities_.push_back({block->GetID(), array_id, parameter->GetID(), ball_column, by_name,
+                                   watched->second});
+            ++rewired[script + (by_name ? " (" + operation + ")" : " (body)")];
         }
         const auto describe = [](const std::map<std::string, int>& counts) {
             std::string text;
@@ -430,10 +459,13 @@ namespace bmmo::sim {
     }
 
     // Before the scripts of a tick run: the ActiveBall cell of every private
-    // copy names the retail ball entity of the ball type of the player nearest
-    // to one of that script's mechanisms, so a name test ("Ball_Stone") sees
-    // the ball that is actually there.  With no player around it keeps naming
-    // the retail ball, which is what the retail script would have read.
+    // copy names the ball of the player nearest to one of that script's
+    // mechanisms -- the retail entity of that player's ball type where the
+    // script tests the name ("Ball_Stone"), the player's clone where it works
+    // on the ball itself (the fan's SetPhysicsForce and box test), so both the
+    // name and the body are the ones actually on the mechanism.  With no
+    // player around it keeps naming the parked retail ball, which is what the
+    // retail script would have read.
     void physics_world::update_ball_identity_reads() {
         if (identities_.empty()) return;
         CKContext* context = engine_->context();
@@ -445,7 +477,7 @@ namespace bmmo::sim {
             bool have = false;
             for (const auto& [id, p]: players_) {
                 if (!p.physicalized || !p.ball) continue;
-                CK3dEntity* entity = retail_ball_entity(p.ball_type);
+                CK3dEntity* entity = identity.by_name ? retail_ball_entity(p.ball_type) : p.ball;
                 if (!entity) continue;
                 VxVector position;
                 p.ball->GetPosition(&position);
@@ -674,10 +706,52 @@ namespace bmmo::sim {
         return it != players_.end() ? it->second.sector : 0;
     }
 
-    void physics_world::activate_sector(int sector) {
-        if (sector <= 0 || active_sectors_.count(sector)) return;
-        if (std::find(pending_sectors_.begin(), pending_sectors_.end(), sector) == pending_sectors_.end())
-            pending_sectors_.push_back(sector);
+    // Sector union (design 8.3, revised).  The retail Gameplay_SectorManager
+    // knows one ball: it activates the sector that ball entered and resets the
+    // one it left.  The server has many balls, so the sectors that run are the
+    // sectors its players are in -- every one of them, and only those: a
+    // mechanism nobody is at stops, one that any player reaches starts.
+    //
+    // Every change is taken the tick it appears, but they are handed to the
+    // manager one at a time: its PH-table walk spans about seven frames (it
+    // waits for each Activate Script), and starting a new run in the middle of
+    // one both resets that walk and flips CurrentLevel[Activation Phase?]
+    // under the mechanism scripts it has just started -- they read that cell
+    // in their first frame and stay dead if it is false.  So one pass per idle
+    // manager, deactivate and activate paired in it exactly like a retail
+    // checkpoint does, and the rest of the changes follow in the next frames.
+    void physics_world::update_sectors() {
+        std::set<int> desired;
+        for (const auto& [id, p]: players_)
+            if (p.sector > 0) desired.insert(p.sector);
+        if (desired.empty() || desired == active_sectors_) return;
+        CKContext* context = engine_->context();
+        auto* parameters = CKDataArray::Cast(context->GetObject(ingame_parameter_));
+        auto* manager_script = CKBehavior::Cast(context->GetObject(sector_manager_));
+        if (!parameters || !manager_script) return;
+        // Idle means the walk is over; the two extra ticks give the mechanism
+        // scripts it started their own first frame before the flag moves again.
+        sector_idle_ticks_ = manager_script->IsActive() ? 0 : sector_idle_ticks_ + 1;
+        if (sector_idle_ticks_ < 3) return;
+        int activate = 0, deactivate = 0;
+        for (int sector: desired)
+            if (!active_sectors_.count(sector)) { activate = sector; break; }
+        for (int sector: active_sectors_)
+            if (!desired.count(sector)) { deactivate = sector; break; }
+        parameters->SetElementValue(0, 2, &deactivate, sizeof(deactivate));
+        parameters->SetElementValue(0, 1, &activate, sizeof(activate));
+        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager_script, TRUE);
+        sector_idle_ticks_ = 0;
+        if (activate) active_sectors_.insert(activate);
+        if (deactivate) active_sectors_.erase(deactivate);
+        body_set_changed_ = true;
+        std::string text = "world: sector";
+        if (activate) text += " +" + std::to_string(activate);
+        if (deactivate) text += " -" + std::to_string(deactivate);
+        text += " at tick " + std::to_string(tick_) + ", running:";
+        for (int sector: active_sectors_) text += " " + std::to_string(sector);
+        if (desired != active_sectors_) text += " (more to come)";
+        log(text);
     }
 
     bool physics_world::apply_event(uint32_t id, const lifecycle_event& event, std::string& error) {
@@ -731,8 +805,8 @@ namespace bmmo::sim {
             return true;
         }
         case event_type::Sector:
+            // The sector union follows the players (update_sectors).
             p.sector = event.sector;
-            activate_sector(event.sector);
             return true;
         case event_type::Finish:
             p.finished = true;
@@ -777,25 +851,7 @@ namespace bmmo::sim {
         }
         update_proximity_probes();
         update_ball_identity_reads();
-        // Sector union: activate-only (design 8.3).  IngameParameter[0,2] = 0
-        // skips the deactivation pass, [0,1] = sector selects the rows to
-        // activate; the manager runs inside this tick's Process like the retail
-        // "Execute Script" block would make it.
-        if (!pending_sectors_.empty()) {
-            const int sector = pending_sectors_.front();
-            pending_sectors_.erase(pending_sectors_.begin());
-            auto* parameters = CKDataArray::Cast(context->GetObject(ingame_parameter_));
-            auto* manager_script = CKBehavior::Cast(context->GetObject(sector_manager_));
-            if (parameters && manager_script) {
-                int deactivate = 0, activate = sector;
-                parameters->SetElementValue(0, 2, &deactivate, sizeof(deactivate));
-                parameters->SetElementValue(0, 1, &activate, sizeof(activate));
-                if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager_script, TRUE);
-                active_sectors_.insert(sector);
-                body_set_changed_ = true;
-                log("world: activating sector " + std::to_string(sector) + " at tick " + std::to_string(tick_));
-            }
-        }
+        update_sectors();
         // Navigation edges and parking run from the PreSimulate pass (see
         // tick_callback); one callback at a time in case a tick had no
         // physics step.
