@@ -543,7 +543,8 @@ public:
         std::map<HSteamNetConnection, std::string> last_physicalize;
         // Event validation (design 9.4): rate limit rejects, the rest is
         // logged and counted in M4 (no rejection: the retail scripts decide
-        // respawn poses per player, the server only knows the union).
+        // respawn poses per player, the server only knows the union).  The
+        // per-second cap is physics.event_rate_limit (0 = no limit).
         struct member_guard {
             int sector = 1;
             uint32_t events_in_window = 0;
@@ -933,16 +934,18 @@ public:
         {
             // Design 9.4.  Rate limit: hard reject.  Everything else: log + count.
             auto& guard = s.guards[c];
+            const uint32_t rate_limit = config_.physics_event_rate_limit;   // 0 = no limit
             const auto now = std::chrono::steady_clock::now();
             if (now - guard.window_start > std::chrono::seconds(1)) {
                 guard.window_start = now;
                 guard.events_in_window = 0;
             }
-            if (++guard.events_in_window > 20) {
-                if (guard.events_in_window == 21) {
+            ++guard.events_in_window;
+            if (rate_limit != 0 && guard.events_in_window > rate_limit) {
+                if (guard.events_in_window == rate_limit + 1) {
                     ++s.rejected_events;
-                    Printf("Physics session %u: %s sends more than 20 events per second; dropping the excess.",
-                           s.id, client_it->second.name);
+                    Printf("Physics session %u: %s sends more than %u events per second; dropping the excess.",
+                           s.id, client_it->second.name, rate_limit);
                 }
                 return;
             }

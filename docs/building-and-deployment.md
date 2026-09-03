@@ -107,6 +107,7 @@ physics:
   snapshot_interval: 2
   input_delay: 6
   maximum_physics_rooms: 1        # one physics world costs roughly one core
+  event_rate_limit: 20            # client events per second per player; 0 = no limit
   require_physics_sha: ""         # empty = accept any physics_RT build
 ```
 
@@ -125,8 +126,11 @@ physics:
   `config.yml`, type `reload` in the server console rather than restarting
   the process.
 - The server validates client-reported physics events at the rate/shape
-  level (design section 9.4): more than 20 events/second per player are
-  dropped, malformed `Physicalize` payloads are rejected outright, and
-  suspicious-but-plausible ones (pose far from every spawn slot,
+  level (design section 9.4): more than `event_rate_limit` events/second per
+  player are dropped, malformed `Physicalize` payloads are rejected outright,
+  and suspicious-but-plausible ones (pose far from every spawn slot,
   non-monotonic sector) are only logged and counted — check the console
-  `sessions` command for `flagged`/`rejected` counters.
+  `sessions` command for `flagged`/`rejected` counters. The cap defaults to
+  20; `event_rate_limit: 0` turns it off, which is worth doing on levels
+  where a sector reset wakes more than 20 mechanisms at once (each one is a
+  `BodyRevived` event and they all land in the same second).

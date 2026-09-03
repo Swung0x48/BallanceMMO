@@ -132,6 +132,7 @@ physics:
   input_delay: 6                      # tick；服务端最多等待这么久再用上一 tick 的输入
   maximum_physics_rooms: 1            # M3 只验证过单房间
   debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
+  event_rate_limit: 20                # 每玩家每秒上报事件数上限，超出部分丢弃；0 = 不限
   require_physics_sha: ""             # 非空时只接受该 sha256 的 physics_RT.dll（SessionReady 上报；无头会话客户端不受限）
   allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）；为空则不检查
     BallanceMMOClient: "3.6.8-beta18"

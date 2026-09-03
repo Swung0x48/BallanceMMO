@@ -281,9 +281,9 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 ### 9.4 服务端校验客户端事件
 
-只做拒绝明显不合理的事件，不做物理层面的重演：Physicalize 位姿必须在复活点环 2 m 内或距该玩家上一快照位置 5 m 内（变球）；配方的球型必须在 `Physicalize_GameBall` 行内且数值与行一致；`Sector` 只能等于当前或 +1（并集里已有的直接忽略）；每玩家每秒事件数上限 20。被拒绝的事件记日志并向该客户端回 `SessionEvent`（type 不变，`player = 0`，`name = "rejected"`）——M4 先记日志不回包。
+只做拒绝明显不合理的事件，不做物理层面的重演：Physicalize 位姿必须在复活点环 2 m 内或距该玩家上一快照位置 5 m 内（变球）；配方的球型必须在 `Physicalize_GameBall` 行内且数值与行一致；`Sector` 只能等于当前或 +1（并集里已有的直接忽略）；每玩家每秒事件数上限由 `physics.event_rate_limit` 配置（默认 20，0 = 不限）。被拒绝的事件记日志并向该客户端回 `SessionEvent`（type 不变，`player = 0`，`name = "rejected"`）——M4 先记日志不回包。
 
-**实现（2026-09-02）**：`handle_session_event` 里，每玩家每秒第 21 条起丢弃并记一次日志；Physicalize 的球型 > 2 或配方数值出界（质量 (0,100]、摩擦/弹性 [0,10]、阻尼 [0,1]、至少一个球/凸包）直接拒绝；位姿检查用会话开始时发给各成员的出生环槽位（任一槽位 2.5 m 内）或该玩家最近快照位置 5 m 内，不满足只记 `suspicious event`（复活点随检查点移动而服务端只知道并集，不能据此拒绝）；Sector 只允许当前或 +1，其余记日志。计数在控制台 `sessions` 里显示。配置 `physics.require_physics_sha` 非空时 `SessionReady` 上报的 DLL sha 不匹配即结束会话（无头客户端豁免）。
+**实现（2026-09-02）**：`handle_session_event` 里，每玩家每秒超出 `physics.event_rate_limit` 的事件丢弃并记一次日志（固定窗口，`reload` 后立即生效；置 0 关闭。一次分节重置会为该分节的每个机关各发一条 `BodyRevived`，机关多的关卡应调高或关闭）；Physicalize 的球型 > 2 或配方数值出界（质量 (0,100]、摩擦/弹性 [0,10]、阻尼 [0,1]、至少一个球/凸包）直接拒绝；位姿检查用会话开始时发给各成员的出生环槽位（任一槽位 2.5 m 内）或该玩家最近快照位置 5 m 内，不满足只记 `suspicious event`（复活点随检查点移动而服务端只知道并集，不能据此拒绝）；Sector 只允许当前或 +1，其余记日志。计数在控制台 `sessions` 里显示。配置 `physics.require_physics_sha` 非空时 `SessionReady` 上报的 DLL sha 不匹配即结束会话（无头客户端豁免）。
 
 ### 9.5 清理与打包
 
