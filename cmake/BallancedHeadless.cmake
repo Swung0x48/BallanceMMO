@@ -79,6 +79,17 @@ function(bmmo_add_ballanced_headless BALLANCED_ROOT OUT_TARGET)
     set(CKRE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(CKRE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(CKRE_INSTALL OFF CACHE BOOL "" FORCE)
+    # RenderEngine's deps/CMakeLists.txt adds bgfx unconditionally ("if (NOT
+    # TARGET bgfx)"), even with the rasterizer off and the shader headers
+    # checked in.  Nothing in this configuration links bgfx, bimg or bx
+    # (CKRasterizerLib pulls in CK2 and VxMath only), so claiming the name up
+    # front skips a large third-party compile and, on Linux, the X11 and
+    # OpenGL development packages bgfx's CMake insists on.  Same trick as the
+    # pthread placeholder above.  Only valid while the rasterizer, the shader
+    # compiler, the examples and the tests are all off: those do link bgfx.
+    if (NOT TARGET bgfx)
+        add_library(bgfx INTERFACE)
+    endif ()
     add_subdirectory("${_src}/RenderEngine" "${CMAKE_BINARY_DIR}/Ballanced/RenderEngine")
 
     set(CKPARAMOP_BUILD_SHARED OFF CACHE BOOL "" FORCE)

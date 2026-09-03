@@ -1,0 +1,224 @@
+name: Collision overhaul
+
+# Builds everything the collision-overhaul line needs: the client mod together
+# with the physics_RT plugin it loads, and the server with its headless
+# Ballanced engine, on the platforms the existing workflows already cover.
+#
+# Kept separate from client.yml / server.yml because this branch configures the
+# build differently (BMLPlus SDK root, physics_RT plugin target, BMMO_BUILD_SIM);
+# fold them together once this merges into main.
+
+on:
+  push:
+    branches: [ collision-overhaul ]
+  pull_request:
+    branches: [ collision-overhaul ]
+  workflow_dispatch:
+
+# A full engine build is expensive; drop superseded runs of the same branch.
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+  # BMLPlus SDK the client links against (include/BML + lib/BMLPlus.lib).
+  BMLP_VER: '0.3.12'
+
+jobs:
+  client-windows:
+    name: Client mod + physics_RT (Windows x86)
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: lukka/get-cmake@latest
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path CMakeLists.txt -Pattern '^set\(BMMO_VER\s+(.+)\)').Matches.Groups[1].Value.Trim()
+          echo "BMMO_VER=$ver" >> $env:GITHUB_ENV
+          echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
+
+      - name: Download BMLPlus ${{env.BMLP_VER}} SDK
+        shell: pwsh
+        run: |
+          curl -o BMLPlus-SDK.zip -L https://github.com/doyaGu/BallanceModLoaderPlus/releases/download/v${{env.BMLP_VER}}/BMLPlus-SDK-v${{env.BMLP_VER}}-Release.zip
+          New-Item -ItemType Directory -Path sdk/BMLPlus | Out-Null
+          tar -xf BMLPlus-SDK.zip -C sdk/BMLPlus
+          if (-not (Test-Path sdk/BMLPlus/include/BML/BMLAll.h)) { throw 'BMLPlus SDK layout unexpected' }
+          if (-not (Test-Path sdk/BMLPlus/lib/BMLPlus.lib)) { throw 'BMLPlus SDK is missing BMLPlus.lib' }
+
+      # The mod is a Win32 (x86) module, like the game it loads into.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: win32
+
+      - name: Restore artifacts, setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: b322364f06308bdd24823f9d8f03fe0cc86fd46f
+          vcpkgDirectory: '${{env.VCPKG_ROOT}}'
+          vcpkgJsonGlob: vcpkg.json
+          runVcpkgInstall: false
+
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Configure CMake
+        shell: pwsh
+        run: >
+          cmake -G Ninja -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+          -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}"
+          -DVCPKG_TARGET_TRIPLET=x86-windows
+          -DBUILD_SERVER=OFF -DBUILD_CLIENT=ON
+          -DVIRTOOLS_SDK_FETCH_FROM_GIT=ON
+          -DBMMO_BMLPLUS_SDK_ROOT="${{github.workspace}}/sdk/BMLPlus"
+
+      # physics_RT is a separate target: without it the mod loads but cannot
+      # take part in physics sessions.
+      - name: Build
+        run: cmake --build build --target BallanceMMOClient physics_RT
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/ModLoader/Mods, dist/BuildingBlocks, dist/symbols | Out-Null
+          Copy-Item build/BallanceMMOClient/*.bmodp, build/BallanceMMOClient/*.dll -Destination dist/ModLoader/Mods
+          Copy-Item build/BuildingBlocks/physics_RT.dll -Destination dist/BuildingBlocks
+          Copy-Item build/BuildingBlocks/*.map -Destination dist/symbols -ErrorAction Ignore
+          # The sha the server's physics.require_physics_sha would be set to.
+          (Get-FileHash build/BuildingBlocks/physics_RT.dll -Algorithm SHA256).Hash.ToLower() `
+            | Out-File dist/physics_RT.dll.sha256 -Encoding ascii
+          Get-Content dist/physics_RT.dll.sha256
+
+      - name: Release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
+          path: dist
+
+  server-windows:
+    name: Server + headless engine (Windows x64)
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{github.workspace}}/submodule/vcpkg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: lukka/get-cmake@latest
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path CMakeLists.txt -Pattern '^set\(BMMO_VER\s+(.+)\)').Matches.Groups[1].Value.Trim()
+          echo "BMMO_VER=$ver" >> $env:GITHUB_ENV
+          echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Restore artifacts, setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: b322364f06308bdd24823f9d8f03fe0cc86fd46f
+          vcpkgDirectory: '${{env.VCPKG_ROOT}}'
+          vcpkgJsonGlob: vcpkg.json
+          runVcpkgInstall: false
+
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      # BMMO_BUILD_SIM defaults to ON: this also builds the static headless
+      # Ballanced engine the physics rooms simulate in.
+      - name: Configure CMake
+        shell: pwsh
+        run: >
+          cmake -G Ninja -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+          -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}"
+          -DYAML_BUILD_SHARED_LIBS=ON
+          -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DBUILD_SERVER_TESTS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build -C ${{env.BUILD_TYPE}} --output-on-failure
+
+      # A different working directory keeps the generated config.yml out of the
+      # artifact.
+      - name: Dry run and stage artifact
+        shell: pwsh
+        working-directory: build/BallanceMMOServer
+        run: |
+          .\BallanceMMOServer.exe --dry-run
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item *.exe, *.dll, start_ballancemmo_loop.bat, bmmo_loop.ps1 -Destination dist -ErrorAction Ignore
+
+      - name: Release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-windows-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
+          path: build/BallanceMMOServer/dist
+
+  server-linux:
+    name: Server + headless engine (Linux x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: lukka/get-cmake@latest
+
+      - name: Read version
+        run: |
+          echo "BMMO_VER=$(sed -n 's/^set(BMMO_VER[[:space:]]\+\(.*\))[[:space:]]*$/\1/p' CMakeLists.txt)" >> "$GITHUB_ENV"
+          echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> "$GITHUB_ENV"
+
+      # The headless engine builds SDL3 from source with every device subsystem
+      # off, so no window-system development packages are needed.
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libprotobuf-dev protobuf-compiler ninja-build
+
+      - name: Configure CMake
+        run: >
+          cmake -G Ninja -B build -S . -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+          -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF -DBUILD_SERVER_TESTS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build -C ${{env.BUILD_TYPE}} --output-on-failure
+
+      - name: Dry run and stage artifact
+        working-directory: build/BallanceMMOServer
+        run: |
+          ./BallanceMMOServer --dry-run
+          mkdir -p dist/lib
+          cp BallanceMMOServer BallanceMMOMockClient BallanceMMORecordParser \
+             BallanceMMOSimTool BallanceMMOSessionClient start_ballancemmo_loop.sh dist/
+          cp -a lib/. dist/lib/
+
+      - name: Release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-linux-${{env.BMMO_VER}}-${{env.SHA_SHORT}}
+          path: build/BallanceMMOServer/dist
