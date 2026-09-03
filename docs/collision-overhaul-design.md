@@ -378,7 +378,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 修法（`physics_world::rewire_ball_identity_reads` / `update_ball_identity_reads`）：锚点扫描所有 `Get Cell` 块，目标数组是 `CurrentLevel`、列是 `ActiveBall`、**且所在根脚本里有被改接过的邻近块**（即机关脚本）的，把该块的目标参数改接到一份 `CurrentLevel` 的私有副本（`CopyObject` + `CK_DEPENDENCIES_COPY_DATAARRAY_DATA`，共享单元里引用的对象）。每 tick 脚本执行前，副本的 ActiveBall 单元写成"离该脚本任一机关（邻近块的 ObjectB）最近的玩家"的球型对应的**原版球实体**（`Ball_Stone`/`Ball_Wood`/`Ball_Paper`，名字正是脚本要比的那个）；没有玩家时写停放的原版球，即原版会读到的值。原版逻辑的读取（`Event_handler`、`Sound_Manager`、`Ball_Shadow`、Gameplay 各脚本）不改接——它们作用在停放球上，必须保持。Level 1–13 的实测：只有 `P_Modul_18_MF Script` 与 `P_Modul_29_MF Script` 被改接（Level 2 是 9 + 1）。
 
-验证工具：`BallanceMMOSimTool --level N --drop <名字片段> <球型> --drop-at X Y Z [--drop-height F] [--drop-sector N] [--drop-second-sector N] [--drop-move 分节 tick] [--ticks N]`——在真正的会话世界里（停放原版球、克隆球、并集改接）逐个激活分节，把一名玩家的球丢到机关上，逐 tick 打印名字含该片段的刚体位置与 simulated 标志。Level 2 的 P_Modul_29（`PH` 表：分节 3，(960.709,46.4925,-346.743)）跑 300 tick，最低踏板的下落量：
+验证工具：`BallanceMMOSimTool --level N --drop <名字片段> <球型> --drop-at X Y Z [--drop-height F] [--drop-sector N] [--drop-second-sector N] [--drop-move 分节 tick] [--drop-prop 实体] [--drop-player-at X Y Z] [--ticks N]`——在真正的会话世界里（停放原版球、克隆球、并集改接）逐个激活分节，把一名玩家的球丢到机关上，逐 tick 打印名字含该片段的刚体位置与 simulated 标志。Level 2 的 P_Modul_29（`PH` 表：分节 3，(960.709,46.4925,-346.743)）跑 300 tick，最低踏板的下落量：
 
 | | 石球 | 木球 | 纸球 |
 | --- | --- | --- | --- |
@@ -415,5 +415,13 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 4. 剩下的差异在随后的帧里继续，日志带 `(more to come)`。
 
 变化在出现的那一 tick 就被接受，不会丢；应用则按管理器自己的节奏排队。实测（Level 2，玩家 1 在分节 3、玩家 2 在分节 5）：`sector +3 -1 at tick 2` → `sector +5 at tick 9`，此时 `P_Modul_29_Platte01..09`（分节 3）与 `PE_Balloon_Platte01..08`（分节 5）同时是刚体；玩家 1 也走到分节 5 后 `sector -3`，桥的刚体消失。
+
+**道具球（关卡自带的非玩家球）不受影响.** 两个并集都只遍历 `players_`：道具球既不会移动邻近探针（`BMMO_Prox_<k>` 只放到玩家球上），也永远不会被写进 ActiveBall 单元，所以机关只认玩家的球——和原版一样。`--drop-prop <实体>`（把关卡里已被分节激活的道具球瞬移到落点，`--drop-player-at` 单独指定玩家球位置）实测：
+
+| 场景 | 结果 |
+| --- | --- |
+| Level 9 分节 4：玩家**木球**在桥上 + 道具**石球**瞬移到 Platte06 上方 | 踏板只下垂 2.733 m，与没有道具球时**逐位相同**（桥不断） |
+| 同上，玩家换成**石球** | 8.492 m，绳断（对照） |
+| Level 10 分节 2：道具**纸球**瞬移进风口 + 玩家纸球在旁边 2.5 m | 道具球一路掉下去（-17.6 → -52.3），玩家球被吹上去（-17.0 → -4.1） |
 
 已知边界：一个玩家在分节 N、另一个在 N+2 时，中间没人的分节 N+1 的机关不运行——玩家看到的就是原版"还没激活"的样子（对象隐藏），走到那里时才启动。

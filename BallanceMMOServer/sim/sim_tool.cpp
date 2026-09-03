@@ -77,6 +77,12 @@ namespace {
         int drop_move_tick = 0;
         float drop_at[3] = {};         // --drop-at X Y Z: drop there instead (PH matrix of a module)
         bool have_drop_at = false;
+        // --drop-prop ENTITY: beam that level prop (a non-player ball placed by
+        // the PH table) onto the drop spot as well, to check that a mechanism
+        // still only reacts to the player's ball.
+        std::string drop_prop;
+        float drop_player_at[3] = {};  // --drop-player-at X Y Z: the player's ball goes here instead
+        bool have_drop_player_at = false;
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -134,6 +140,11 @@ namespace {
             else if (arg == "--drop-sector") { if (!(v = next())) return false; out.drop_sector = std::atoi(v); }
             else if (arg == "--drop-second-sector") { if (!(v = next())) return false; out.drop_second_sector = std::atoi(v); }
             else if (arg == "--drop-settle") { if (!(v = next())) return false; out.drop_settle = std::atoi(v); }
+            else if (arg == "--drop-prop") { if (!(v = next())) return false; out.drop_prop = v; }
+            else if (arg == "--drop-player-at") {
+                for (float& k: out.drop_player_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
+                out.have_drop_player_at = true;
+            }
             else if (arg == "--drop-move") {
                 if (!(v = next())) return false; out.drop_move_sector = std::atoi(v);
                 if (!(v = next())) return false; out.drop_move_tick = std::atoi(v);
@@ -664,19 +675,34 @@ namespace {
             std::printf("tick=%d parts:%s\n  %s\n", tick, text.empty() ? " none physicalized" : text.c_str(),
                         root_scripts(world->engine()).c_str());
         };
+        VxVector player_spawn = args.have_drop_player_at
+            ? VxVector(args.drop_player_at[0], args.drop_player_at[1], args.drop_player_at[2]) : spawn;
         bmmo::sim::lifecycle_event event;
         event.type = bmmo::session::event_type::Physicalize;
         event.ball_type = static_cast<uint8_t>(args.drop_ball);
-        event.position[0] = spawn.x;
-        event.position[1] = spawn.y;
-        event.position[2] = spawn.z;
+        event.position[0] = player_spawn.x;
+        event.position[1] = player_spawn.y;
+        event.position[2] = player_spawn.z;
         event.recipe = world->retail_recipe(event.ball_type);
         if (!world->apply_event(1, event, error)) {
             std::fprintf(stderr, "physicalize failed: %s\n", error.c_str());
             return 1;
         }
-        std::printf("dropped ball type %d (%s) at (%.3f,%.3f,%.3f) onto %s\n", args.drop_ball,
-            world->ball_rows()[args.drop_ball].name.c_str(), spawn.x, spawn.y, spawn.z, args.drop_entity.c_str());
+        std::printf("dropped ball type %d (%s) at (%.3f,%.3f,%.3f), watching %s\n", args.drop_ball,
+            world->ball_rows()[args.drop_ball].name.c_str(), player_spawn.x, player_spawn.y, player_spawn.z,
+            args.drop_entity.c_str());
+        if (!args.drop_prop.empty()) {
+            // The level's own ball, physicalized by the sector activation: beam
+            // it to the drop spot the same way a player would have pushed it.
+            const double position[3] = {spawn.x, spawn.y, spawn.z};
+            const double upright[4] = {0.0, 0.0, 0.0, 1.0};   // beaming needs a rotation as well
+            const float still[3] = {0.0f, 0.0f, 0.0f};
+            if (!bmmo::physics::set_body_state(world->physics(), args.drop_prop.c_str(), position, upright,
+                                               still, still, true, error))
+                std::fprintf(stderr, "prop %s: %s\n", args.drop_prop.c_str(), error.c_str());
+            else
+                std::printf("prop %s beamed to (%.3f,%.3f,%.3f)\n", args.drop_prop.c_str(), spawn.x, spawn.y, spawn.z);
+        }
         report_parts(-1);
         std::map<std::string, double> start;
         for (const auto& body: watched(*world)) start.emplace(body.name, body.position[1]);
@@ -850,7 +876,8 @@ int main(int argc, char** argv) {
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
             "           [--drop-at X Y Z] [--drop-height F] [--drop-sector N] [--drop-second-sector N]\n"
-            "           [--drop-settle N] (mechanism check in a session world)\n");
+            "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
+            "           [--drop-player-at X Y Z] (mechanism check in a session world)\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {
