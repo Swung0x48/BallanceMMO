@@ -217,8 +217,17 @@ namespace bmmo::sim {
         if (!ensure_collision_filter(error)) return false;
         rewire_proximity_probes();
         rewire_ball_identity_reads();
-        log("world: anchored, hash=" + std::to_string(anchor_hash_) + " surfaces=" + std::to_string(anchor_surfaces_)
-            + " leaves=" + std::to_string(navigation_.leaves.size()) + " balls=" + std::to_string(ball_rows_.size()));
+        {
+            // Hex, like every other place these two are printed (the client's
+            // anchor line, SessionEnd's mismatch reason, the sim tool): the
+            // whole point of the line is to be compared against those.
+            char text[192];
+            std::snprintf(text, sizeof(text), "world: anchored, hash=%016llx surfaces=%016llx leaves=%zu balls=%zu",
+                static_cast<unsigned long long>(anchor_hash_),
+                static_cast<unsigned long long>(anchor_surfaces_),
+                navigation_.leaves.size(), ball_rows_.size());
+            log(text);
+        }
         {
             char text[512];
             std::snprintf(text, sizeof(text),
