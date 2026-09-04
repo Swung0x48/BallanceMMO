@@ -349,7 +349,7 @@ differ, the window in which `P_Modul_01_Pusher`, `_Rinne` and `_Filler` are
 awake, and all nine bodies are identical throughout it; the remaining 4204
 frames match. Proven offline by rebuilding the FNV-1a fold from the exact hex
 floats the recording stores and searching the permutations
-(`<scratchpad>/order_solve.py`), so it needs no client run.
+(`scripts/order_solve.py`), so it needs no client run.
 
 That list is appended to from IVP's `event_object_revived` and is only walked
 to write entity matrices back, so its order does not reach the solver — which
