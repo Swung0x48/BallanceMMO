@@ -349,12 +349,18 @@ namespace {
                     break;
                 }
                 assigned_ = true;
+                // A start member is numbered from its own anchor, and the
+                // schedule it has been running since then is the one the
+                // server's deadlines were measured against: leave it alone.
+                // A late joiner is numbered from a tick the server picked, so
+                // its numbering (and the inputs queued under the old one)
+                // restart here.
+                if (msg.first_tick != 0) {
+                    frames_since_anchor_ = 0;
+                    input_history_.clear();
+                    origin_ = clock_type::now();
+                }
                 tick_base_ = msg.first_tick;
-                // The schedule restarts from the assignment: frames simulated so
-                // far (none for a start member) keep their slots.
-                origin_ = clock_type::now() - std::chrono::duration_cast<clock_type::duration>(
-                    std::chrono::duration<double>(static_cast<double>(std::max<int64_t>(frames_since_anchor_, 0))
-                                                  / bmmo::sim::kTickRate));
                 logf("tick base %u assigned (%lld frames since anchor)", tick_base_, static_cast<long long>(frames_since_anchor_));
                 flush_inputs();
                 break;
@@ -697,12 +703,13 @@ namespace {
         }
 
         void pace_and_frame() {
-            if (!assigned_) {
-                // Hold frame 1 until the server assigns the tick base: everybody
-                // starts together instead of an early anchor running ahead.
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                return;
-            }
+            // Frames run from the anchor, not from the assignment, like the
+            // retail mod: the server starts its own schedule when SessionReady
+            // arrives (one trip after the anchor), so a client that waits for
+            // the assignment to come back starts a further trip late and every
+            // input it sends is for a tick the server has already simulated.
+            // Inputs before the assignment queue up and flush_inputs() sends
+            // them when the tick base lands.
             const uint64_t next_frame = static_cast<uint64_t>(frames_since_anchor_ + 1);
             if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
                 paused_once_ = true;
