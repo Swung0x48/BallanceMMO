@@ -371,15 +371,30 @@ private:
 		}
 		utils_.run_on_game_thread([this] { if (ping_) ping_->update(""); });
 	}
+	// The F3 panel.  The connection half is published by the network thread
+	// (ping_text_); the physics half is read from the session state, which
+	// only this thread may touch and which changes every tick while a session
+	// runs - so the panel is rebuilt whenever either half moved, and not at
+	// all while it is hidden.
+	//
+	// The two cached halves are function-local rather than members on purpose:
+	// this class does not survive having members added to it (three launches
+	// with two extra std::strings here hang the engine at startup, three
+	// without them do not), which is a layout-dependent bug living somewhere
+	// else and not something to step on while adding a status panel.
 	void apply_pending_ping_text() { // game thread only
-		std::string text;
+		static std::string connection_half, shown;
+		if (!ping_ || !ping_->visible_) return;
 		{
 			std::lock_guard lk(ping_text_mtx_);
-			if (!ping_text_pending_) return;
-			ping_text_pending_ = false;
-			text = ping_text_;
+			if (ping_text_pending_) {
+				ping_text_pending_ = false;
+				connection_half = ping_text_;
+			}
 		}
-		if (ping_) ping_->update(text, false);
+		const std::string text = connection_half + physics_session_overlay_text();
+		if (text == shown) return;
+		if (ping_->update(text, false)) shown = text;
 	}
 
 	BMLVersion loader_version_{}, source_version_{};
@@ -501,6 +516,7 @@ private:
 	void physics_session_on_sector(int sector);
 	void physics_session_on_finish();
 	std::string physics_session_status_text();
+	std::string physics_session_overlay_text();
 	CKDataArray* current_level_array() {
 		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;
 	}

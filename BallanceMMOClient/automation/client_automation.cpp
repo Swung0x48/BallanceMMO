@@ -296,6 +296,17 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         automation_held_keys_.clear();
         return "ok";
     }
+    // The F3 panel: what it would show, and the same toggle F3+F3 does, so a
+    // scripted run can look at it without a keyboard.
+    if (verb == "panel") {
+        if (rest == "toggle") {
+            std::lock_guard lk(bml_mtx_);
+            ping_->toggle();
+            status_->toggle();
+            return std::string("ok panel ") + (ping_->visible_ ? "shown" : "hidden");
+        }
+        return "ok " + physics_session_overlay_text();
+    }
     if (verb == "screenshot") {
         auto* render_context = m_bml->GetRenderContext();
         if (!render_context || rest.empty()) return "error no render context or path";

@@ -392,7 +392,9 @@ void BallanceMMOClient::OnPostStartMenu()
     }
     else {
         ping_ = std::make_shared<text_sprite>("T_MMO_PING", "", RIGHT_MOST, 0.03f);
-        ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.4f));
+        // Tall enough for the connection block plus the physics block a
+        // session adds under it; text past the box is clipped, not scrolled.
+        ping_->sprite_->SetSize(Vx2DVector(RIGHT_MOST, 0.66f));
         ping_->sprite_->SetFont("Arial", utils_.get_display_font_size(10), 500, false, false);
         status_ = std::make_shared<text_sprite>("T_MMO_STATUS", "Disconnected", RIGHT_MOST, 0.0f);
         status_->sprite_->SetFont("Times New Roman", utils_.get_display_font_size(11), 700, false, false);

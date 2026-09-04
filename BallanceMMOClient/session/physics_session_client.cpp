@@ -1319,6 +1319,43 @@ float BallanceMMOClient::physics_session_ball_force(uint8_t ball_type) const {
     return s.navigation.leaves.empty() ? 0.0f : s.navigation.leaves.front().force_value;
 }
 
+// The F3 panel's physics block (game thread).  Empty outside a session, so
+// the panel looks exactly as it did before for everyone not in one.  What is
+// worth watching live rather than in a log: how far the relay is behind, and
+// whether the corrections are converging.
+std::string BallanceMMOClient::physics_session_overlay_text() {
+    auto& s = physics_session_;
+    if (s.phase == phase_type::idle) return {};
+    const char* phase = "idle";
+    switch (s.phase) {
+    case phase_type::counting_down: phase = "counting down"; break;
+    case phase_type::restarting: phase = "restarting"; break;
+    case phase_type::running: phase = "running"; break;
+    case phase_type::ended: phase = "ended"; break;
+    default: break;
+    }
+    const auto& rs = s.rollback.stats();
+    const auto& st = s.corrector.stats();
+    std::string text = std::format("\nPhysics session {} ({})\n", s.session, phase);
+    if (s.phase != phase_type::running) return text;
+    // The relay is input_delay + one trip behind us (design 9.1), which is
+    // what every correction below has to travel.
+    text += std::format("Tick: {} (relay {} behind)\n", s.current_tick(),
+                        s.current_tick() > s.last_snapshot_tick ? s.current_tick() - s.last_snapshot_tick : 0);
+    text += std::format("Input delay: {} ticks ({} ms)\n", s.input_delay,
+                        static_cast<int>(s.input_delay * 1000 / 66));
+    text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
+    if (rs.snapshots)
+        text += std::format("Rollbacks: {} ({:.0f}%), {} ticks resim\n", rs.rollbacks,
+                            100.0 * rs.mismatched / rs.snapshots, rs.resim_ticks);
+    text += std::format("Max error: {:.3f} m\n", std::max(rs.max_error, st.max_error));
+    if (rs.too_far || rs.frozen || s.resyncs_sent)
+        text += std::format("Too far: {}  Frozen: {}  Resyncs: {}\n", rs.too_far, rs.frozen, s.resyncs_sent);
+    if (!s.remotes.empty()) text += std::format("Remote balls: {}\n", s.remotes.size());
+    if (!s.last_error.empty()) text += "Last error: " + s.last_error + "\n";
+    return text;
+}
+
 std::string BallanceMMOClient::physics_session_status_text() {
     auto& s = physics_session_;
     const char* phase = "idle";
