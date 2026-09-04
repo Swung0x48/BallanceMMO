@@ -209,6 +209,14 @@ namespace {
         }
 
         bool connect() {
+            // BMMO_FAKE_LAG_MS=<one way ms>: reproduce a distant server against
+            // a local one, so the server's own logs are at hand.
+            if (const char* lag = std::getenv("BMMO_FAKE_LAG_MS"); lag && *lag) {
+                const int32_t ms = static_cast<int32_t>(std::atoi(lag));
+                SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_FakePacketLag_Send, ms);
+                SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_FakePacketLag_Recv, ms);
+                logf("fake packet lag: %d ms each way (round trip %d ms)", ms, ms * 2);
+            }
             SteamNetworkingIPAddr address{};
             if (!address.ParseString(args_.server.c_str())) { logf("bad server address %s", args_.server.c_str()); return false; }
             SteamNetworkingConfigValue_t opt = generate_opt();
