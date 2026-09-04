@@ -535,3 +535,23 @@ Windows 服务端不复现。
 `Ready`/`Unready`、`List`、`Close` 根本不回结果，客户端于是既不回显，也会把队首那条
 错配给下一条命令的结果。现在超过 5 秒没等到结果就报
 `Error: the server did not answer "/mmo room ready".` 并丢弃该条，队列不再错位。
+
+**握手改成比引擎版本，`require_physics_sha` 删除.** 锚点的两个值里，`anchor_hash`
+在没有可动刚体的锚点上恒等于 FNV 的初值，实际起作用的只有 `anchor_surfaces`；而它只
+回答"世界一不一样"，回答不了"物理代码一不一样"——积分器被改过、关卡相同的客户端照样
+握手通过。原来补这一块的 `physics.require_physics_sha` 并不称职：那串 sha 由客户端自
+己算自己报（不是完整性保证），默认空所以没人开，每次重编都要改配置，`headless-` 前缀
+还直接绕过。
+
+现在两端都编进同一个构建 id（`ballanced-<引擎提交>+bmmo-<仓库提交>`，
+`cmake/BuildId.cmake`），`SessionReady` 上报，服务端只比引擎那一半——仓库那一半会因为
+改文档而变——不同就结束会话并写明两边版本，任一边解析不出（从没有 git 的导出目录构建）
+则不比，只记一行日志。构建 id 改成**每次构建前**生成而不是 configure 时定死：旧的做法
+让一棵长期不重新 configure 的构建树一直自称当初那个提交（`build-client-stock` 报
+`bmmo-72f61dc9b55c` 而二进制是当前源码），拿这种标识去卡准入只会既放过该拦的又拦下不该
+拦的。工作区有未提交改动时 id 带 `-dirty`：同一提交、不同工作区，本来就不是同一个构建。
+
+三条路径都在 WSL Linux 服务端 × 本机 Win32 原版客户端上实测：引擎版本相同 → 会话正常
+开始；服务端用 `-DBMMO_BUILD_ID` 换成另一个引擎提交 → 两端都收到
+`Swung0x48 runs engine ballanced-40ce91e307ff, this server runs ballanced-000000badbad`；
+服务端 id 为 `unknown` → 日志记 `not comparable, letting it in`，会话照常开始。

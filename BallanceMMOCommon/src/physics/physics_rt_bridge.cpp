@@ -12,12 +12,10 @@
 #include <cstdlib>
 #include <string>
 
+#include <bmmo_build_id.h>
+
 void ivp_srand(int seed);
 int ivp_srand_read();
-
-#ifndef BMMO_PHYSICS_BUILD_ID
-#define BMMO_PHYSICS_BUILD_ID "unknown"
-#endif
 
 #if defined(_WIN32)
 #define BMMO_PHYSICS_EXPORT __declspec(dllexport)

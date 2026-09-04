@@ -99,10 +99,13 @@ Players need, under their game install:
    no installer that does this automatically yet — call it out explicitly in
    release notes / install instructions.
 
-Client and server must agree on the exact `physics_RT` build. On join, the
-client reports its DLL's sha256 and a `ballanced-<engine commit>+bmmo-<repo
-commit>` build id; see *Deploying the server* below for how the server can
-enforce this.
+Client and server must agree on the `physics_RT` build. Both sides compile in
+a `ballanced-<engine commit>+bmmo-<repo commit>` build id, resolved by
+`cmake/BuildId.cmake` before every build rather than once at configure time,
+and the server refuses a physics session whose client reports a different
+engine commit than its own. A build from an export with no git history says
+`unknown` and is not compared; pass `-DBMMO_BUILD_ID=ballanced-<rev>+bmmo-<rev>`
+to give such a build the id it should have.
 
 ## Deploying the server
 
@@ -118,7 +121,6 @@ physics:
   maximum_physics_rooms: 1        # one physics world costs roughly one core
   event_rate_limit: 20            # client events per second per player; 0 = no limit
   spawn_impulse: 3.0              # m/s kick applied to every spawn Physicalize; 0 = off; solo sessions force 0
-  require_physics_sha: ""         # empty = accept any physics_RT build
 ```
 
 - `game_root` must point at a complete copy of the game's *data* (not an
@@ -126,11 +128,11 @@ physics:
   and asset folders directly, it never loads or executes any Windows DLL).
   The same directory tree works whether the server itself runs on Windows or
   Linux. Without it, `physics.enabled` rooms fall back to shadow-ball mode.
-- Set `require_physics_sha` to the sha256 of the exact `physics_RT.dll` you
-  distribute to lock out mismatched or tampered clients; leave it empty
-  during development. Headless clients (`BallanceMMOSessionClient`, load
-  testing / CI) report a `headless-*` build id and are always exempt from
-  this check.
+- Nothing has to be configured to keep mismatched builds out: the engine
+  commit is compared on join. It is not an integrity check - the client
+  reports its own id - only a guard against the two sides having been built
+  from different sources, which otherwise shows up as a world mismatch or as
+  a session that hard-corrects forever.
 - Start the server via `start_ballancemmo_loop` (handles logging and
   restarts on crash), not the executable directly. After editing
   `config.yml`, type `reload` in the server console rather than restarting

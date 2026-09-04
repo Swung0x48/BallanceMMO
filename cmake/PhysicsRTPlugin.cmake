@@ -35,17 +35,6 @@ if (NOT TARGET physics_RT)
     message(FATAL_ERROR "the Ballanced building-block tree did not define physics_RT")
 endif ()
 
-execute_process(COMMAND git -C "${_bmmo_root}/submodule/Ballanced" rev-parse --short=12 HEAD
-        OUTPUT_VARIABLE _bmmo_engine_rev OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-execute_process(COMMAND git -C "${_bmmo_root}" rev-parse --short=12 HEAD
-        OUTPUT_VARIABLE _bmmo_rev OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if (NOT _bmmo_engine_rev)
-    set(_bmmo_engine_rev "unknown")
-endif ()
-if (NOT _bmmo_rev)
-    set(_bmmo_rev "unknown")
-endif ()
-
 file(GLOB _bmmo_ivp_dirs LIST_DIRECTORIES true "${_bmmo_bb}/physics_RT/ivp/*")
 list(FILTER _bmmo_ivp_dirs EXCLUDE REGEX "\\.(cxx|hxx|txt|md)$")
 
@@ -57,8 +46,8 @@ target_include_directories(physics_RT PRIVATE
         "${_bmmo_root}/BallanceMMOCommon/include"
         "${_bmmo_bb}/physics_RT"
         ${_bmmo_ivp_dirs})
-target_compile_definitions(physics_RT PRIVATE
-        "BMMO_PHYSICS_BUILD_ID=\"ballanced-${_bmmo_engine_rev}+bmmo-${_bmmo_rev}\"")
+include("${CMAKE_CURRENT_LIST_DIR}/BuildId.cmake")
+bmmo_add_build_id(physics_RT)
 if (WIN32)
     # Same platform defines the IVP libraries use (object layouts depend on them).
     target_compile_definitions(physics_RT PRIVATE WIN32 _WINDOWS)
@@ -72,4 +61,3 @@ bmmo_link_portable_math(physics_RT PRIVATE)
 set_target_properties(physics_RT PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/BuildingBlocks"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/BuildingBlocks")
-message(STATUS "[BallanceMMO] physics_RT plugin: ballanced-${_bmmo_engine_rev}+bmmo-${_bmmo_rev}")

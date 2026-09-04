@@ -71,8 +71,11 @@ bool config_manager::load() {
         physics_debug_trace = yaml_load_value(physics, "debug_trace", physics_debug_trace);
         physics_event_rate_limit = yaml_load_value(physics, "event_rate_limit", physics_event_rate_limit);
         physics_spawn_impulse = yaml_load_value(physics, "spawn_impulse", physics_spawn_impulse);
-        physics_require_sha = yaml_load_value(physics, "require_physics_sha", physics_require_sha);
         physics_allowed_mods = yaml_load_value(physics, "allowed_mods", decltype(physics_allowed_mods){});
+        // Was a pin on one physics_RT.dll's sha256, which the client reported
+        // about itself and every rebuild invalidated; the session handshake
+        // compares engine revisions instead.  Drop it from files that have it.
+        physics.remove("require_physics_sha");
         if (physics_snapshot_interval == 0) physics_snapshot_interval = 1;
     }
 
@@ -202,7 +205,6 @@ void config_manager::save(bool reload_values) {
                    "# - Physics sessions (collision-overhaul): enabled, game_root (directory containing base.cmo),\n"
                    "#   snapshot_interval / input_delay (ticks), maximum_physics_rooms, allowed_mods (\"mod id: version\"),\n"
                    "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\"),\n"
-                   "#   require_physics_sha (sha256 of the only physics_RT.dll allowed in; empty = any),\n"
                    "#   event_rate_limit (client lifecycle events per second per player; 0 = no limit),\n"
                    "#   spawn_impulse (spawn kick speed in m/s, design 9.10; 0 disables; a solo session stays at 0).\n"
                 << std::endl;

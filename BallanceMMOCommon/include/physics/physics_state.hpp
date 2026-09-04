@@ -15,6 +15,12 @@ class CKContext;
 class CKIpionManager;
 
 namespace bmmo::physics {
+    // "ballanced-<engine revision>+bmmo-<repository revision>" of the build
+    // this engine came from (cmake/BuildId.cmake, resolved before every
+    // build).  The client's plugin reports the same string in session_ready
+    // and the server compares the engine half of it against its own.
+    const char* build_id();
+
     // The bridge ABI structs are used directly: no field-by-field copy at the
     // C boundary, and the two sides can never drift apart.
     using body_state = bmmo_physics_body_state;

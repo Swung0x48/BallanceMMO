@@ -121,6 +121,10 @@ if (BMMO_BUILD_SIM)
             "${BMMO_PLAYER_SRC_DIR}" "${BMMO_PLAYER_GENERATED_DIR}")
     target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET})
     target_compile_features(BallanceMMOSim PUBLIC cxx_std_20)
+    # The same build id the client's physics_RT plugin reports, so the server
+    # can tell a client running another engine revision from its own.
+    include(${CMAKE_CURRENT_LIST_DIR}/../cmake/BuildId.cmake)
+    bmmo_add_build_id(BallanceMMOSim)
     if (WIN32)
         target_compile_definitions(BallanceMMOSim PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
     endif ()

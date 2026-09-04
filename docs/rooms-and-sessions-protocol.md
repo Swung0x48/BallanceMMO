@@ -100,7 +100,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | spawn_impulse | f32（每次出生 Physicalize 的踢出速度 m/s，0 = 无；写在 seed 之后） |
 | players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度；这是原版复活点本身，每个成员都相同——设计 9.10 去掉了出生环偏移） |
 
-`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64。服务端把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。
+`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64。服务端把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。同时比 `build_id` 的引擎半部（`ballanced-<rev>`）：不同则同样结束会话，任一边为 `unknown` 时不比。
 
 `session_input_msg`（client → server，unreliable no-delay）：session u32、first_tick u32、count u8（≤ 8，从 first_tick 起连续 count 个 tick，最新的在最后），每项：keys u8（bit0 叶子 0 … bit3 叶子 3，叶子编号按 `Ball Navigation` 图内 `SetPhysicsForce` 的子块顺序；bit4 Shift、bit5 Space 仅作记录）、cam_right f32×3、cam_up f32×3、cam_dir f32×3（`Cam_OrientRef` 世界矩阵的三条基向量）、ball_type u8、flags u8（bit0 physicalized、bit1 paused、bit2 nav_active——客户端 BallNav activate/deactivate 的当前状态，服务端据此复现 Key Event 的 On/Off）。
 
@@ -139,7 +139,6 @@ physics:
   maximum_physics_rooms: 1            # M3 只验证过单房间
   debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
   event_rate_limit: 20                # 每玩家每秒上报事件数上限，超出部分丢弃；0 = 不限
-  require_physics_sha: ""             # 非空时只接受该 sha256 的 physics_RT.dll（SessionReady 上报；无头会话客户端不受限）
   allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）；为空则不检查
     BallanceMMOClient: "3.6.8-beta18"
 ```
@@ -147,6 +146,6 @@ physics:
 ### 3.1 部署
 
 - 服务端需要一份完整的游戏数据目录（`physics.game_root`，含 `base.cmo`、`3D Entities`、`Textures`、`Sounds` 等），Windows 与 Linux 都可以；一个物理房间的世界大约占一个核心，`maximum_physics_rooms` 默认 1。
-- 客户端需要与服务端同一提交构建的 physics_RT.dll 与 Mod（桥接 API 版本一致；`SessionReady` 上报 DLL 的 sha256 与构建 id）。`require_physics_sha` 非空时只接受该 sha；以 `headless-` 开头的（无头会话客户端）不受此限。
+- 客户端需要与服务端同一引擎提交构建的 physics_RT.dll 与 Mod。`SessionReady` 上报 DLL 的 sha256 与构建 id（`ballanced-<引擎提交>+bmmo-<仓库提交>`，每次构建前重新生成）；服务端只比引擎那一半，不同则结束会话并写明两边版本。无 git 可读的构建报 `unknown`，不参与比较（可用 `-DBMMO_BUILD_ID=` 指定）。
 - 安装目标：`BallanceMMOServer`、`BallanceMMOSimTool`（离线回放/诊断）、`BallanceMMOSessionClient`（无头会话客户端，用于联调与压测）。
 - 服务端校验客户端事件（设计 9.4）：每玩家每秒超过 20 条事件的部分直接丢弃；球型超范围或配方数值不合理的 Physicalize 直接拒绝；位姿远离复活点 2.5 m 且远离上次位置 5 m 的 Physicalize、非单调的 Sector 只记日志并计数（控制台 `sessions` 显示 flagged/rejected）。

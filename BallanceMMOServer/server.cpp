@@ -27,6 +27,7 @@
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
+#include <physics/physics_state.hpp>
 #include <cmath>
 #endif
 
@@ -858,16 +859,37 @@ public:
             if (!s.late.count(m) && !s.assigned.count(m)) send_session_assign(s, m, 0);
     }
 
+    // The engine half of a build id ("ballanced-<rev>" of
+    // "ballanced-<rev>+bmmo-<rev>"), empty when it was never resolved.
+    static std::string engine_revision(const std::string& build_id) {
+        const auto plus = build_id.find('+');
+        const std::string engine = (plus == std::string::npos) ? build_id : build_id.substr(0, plus);
+        return engine.find("unknown") == std::string::npos ? engine : std::string{};
+    }
+
     void handle_session_ready(client_data_collection::iterator client_it, const bmmo::session_ready_msg& msg) {
         const HSteamNetConnection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
-        if (!config_.physics_require_sha.empty() && msg.physics_sha256 != config_.physics_require_sha
-                && msg.physics_sha256.rfind("headless-", 0) != 0) {
-            end_physics_session(msg.session, Sprintf("%s runs physics_RT %s, this server requires %s",
-                    client_it->second.name, msg.physics_sha256.substr(0, 12), config_.physics_require_sha.substr(0, 12)));
-            return;
+        // Same engine, or the two sides do not simulate alike: the session
+        // would spend itself hard-correcting a client that never agrees.  Only
+        // the engine half of the build id is compared - the repository half
+        // moves on commits that cannot change the physics - and an id neither
+        // side could resolve (a build from an export with no git) is not held
+        // against anyone.
+        {
+            const std::string ours = engine_revision(bmmo::physics::build_id());
+            const std::string theirs = engine_revision(msg.build_id);
+            if (theirs.empty() || ours.empty()) {
+                Printf("Physics session %u: %s reports build \"%s\" against this server's \"%s\"; "
+                       "not comparable, letting it in.", msg.session, client_it->second.name,
+                       msg.build_id.c_str(), bmmo::physics::build_id());
+            } else if (theirs != ours) {
+                end_physics_session(msg.session, Sprintf("%s runs engine %s, this server runs %s",
+                        client_it->second.name, theirs.c_str(), ours.c_str()));
+                return;
+            }
         }
         if (!s.late.count(c) && s.world_ready
                 && (msg.anchor_hash != s.anchor_hash || msg.anchor_surfaces != s.anchor_surfaces)) {

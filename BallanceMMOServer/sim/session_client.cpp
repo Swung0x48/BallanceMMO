@@ -590,7 +590,7 @@ namespace {
             ready.anchor_hash = hash.pose;
             ready.anchor_surfaces = hash.surfaces;
             ready.physics_sha256 = sizeof(void*) == 8 ? "headless-64" : "headless-32";
-            ready.build_id = "BallanceMMOSessionClient";
+            ready.build_id = bmmo::physics::build_id();
             ready.serialize();
             send_bytes(ready.raw.str(), k_nSteamNetworkingSend_Reliable);
             logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", load_waited_,

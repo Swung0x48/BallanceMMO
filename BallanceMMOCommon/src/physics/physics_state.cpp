@@ -17,6 +17,8 @@
 #include "ivp_compact_surface.hxx"
 #include "ivp_compact_ledge.hxx"
 
+#include <bmmo_build_id.h>
+
 #include <algorithm>
 #include <cfloat>
 #include <cstring>
@@ -27,6 +29,8 @@
 int ivp_srand_read();
 
 namespace bmmo::physics {
+
+    const char* build_id() { return BMMO_PHYSICS_BUILD_ID; }
 
     // Sum of per-body signatures (name + compact surface bytes, or the
     // surface type for balls), so the result does not depend on table order.
