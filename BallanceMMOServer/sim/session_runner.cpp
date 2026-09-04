@@ -256,7 +256,11 @@ namespace bmmo::sim {
                 + " pending_events=" + std::to_string(s.events.size());
             for (auto& [player, buffer]: s.inputs)
                 text += " in[" + std::to_string(player) + "]=" + std::to_string(buffer.pending())
-                      + "@" + std::to_string(buffer.last_fresh_tick());
+                      + "@" + std::to_string(buffer.last_fresh_tick())
+                      + " next=" + std::to_string(buffer.next_tick())
+                      + " rx=" + std::to_string(buffer.received())
+                      + " kept=" + std::to_string(buffer.stored())
+                      + " late=" + std::to_string(buffer.stale());
             log("[session " + std::to_string(session) + "] " + text);
         });
     }

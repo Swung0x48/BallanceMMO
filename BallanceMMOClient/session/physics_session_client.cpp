@@ -17,6 +17,14 @@
 #include <session/spawn_impulse.hpp>
 
 namespace {
+    // Diagnostic: how often the server had to simulate a tick without our input
+    // for it (session_snapshot_msg.acked_input_tick).  A file-scope object, not
+    // a member: the mod class does not survive having its layout moved.
+    struct input_freshness_stats {
+        uint64_t reports = 0, starved = 0, lag_sum = 0;
+        uint32_t last_acked = 0;
+    } input_freshness;
+
     using bmmo::session::physics_session_state;
     using phase_type = physics_session_state::phase_type;
 
@@ -746,6 +754,16 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
     s.have_snapshot = true;
     s.last_snapshot_tick = std::max(s.last_snapshot_tick, snapshot.tick);
     ++s.snapshots_applied;
+    // Did the server have our input for the tick it just simulated, or did it
+    // fall back on the last one it had?  Kept out of physics_session_state so
+    // the mod class's layout does not move (see the F3 panel commit).
+    if (s.assigned) {
+        ++input_freshness.reports;
+        input_freshness.last_acked = snapshot.acked_input_tick;
+        if (snapshot.acked_input_tick < snapshot.tick) ++input_freshness.starved;
+        const uint32_t lag = s.current_tick() > snapshot.tick ? s.current_tick() - snapshot.tick : 0;
+        input_freshness.lag_sum += lag;
+    }
     const auto own_id = db_.get_client_id();
     CK3dObject* ball = get_current_ball();
     const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
@@ -1345,6 +1363,12 @@ std::string BallanceMMOClient::physics_session_overlay_text() {
     text += std::format("Input delay: {} ticks ({} ms)\n", s.input_delay,
                         static_cast<int>(s.input_delay * 1000 / 66));
     text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
+    if (input_freshness.reports)
+        text += std::format("Input late: {}/{} ({:.0f}%), acked {}, lag {:.0f}\n",
+                            input_freshness.starved, input_freshness.reports,
+                            100.0 * static_cast<double>(input_freshness.starved) / static_cast<double>(input_freshness.reports),
+                            input_freshness.last_acked,
+                            static_cast<double>(input_freshness.lag_sum) / static_cast<double>(input_freshness.reports));
     if (rs.snapshots)
         text += std::format("Rollbacks: {} ({:.0f}%), {} ticks resim\n", rs.rollbacks,
                             100.0 * rs.mismatched / rs.snapshots, rs.resim_ticks);

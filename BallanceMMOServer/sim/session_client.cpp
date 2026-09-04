@@ -1054,6 +1054,20 @@ namespace {
 
         void apply_snapshot(const bmmo::session_snapshot_msg& snapshot) {
             if (have_snapshot_ && snapshot.tick <= last_snapshot_tick_ && !snapshot.full) { ++snapshots_stale_; return; }
+            // Diagnostic: did the server have our input for the tick it just
+            // simulated, or did it fall back on the last one it had?  The
+            // input carries the camera rows, which change every tick, so a
+            // stale frame steers the ball slightly differently.
+            if (assigned_) {
+                ++input_reports_;
+                if (snapshot.acked_input_tick < snapshot.tick) {
+                    const uint32_t behind = snapshot.tick - snapshot.acked_input_tick;
+                    ++input_starved_;
+                    if (behind > worst_starved_) worst_starved_ = behind;
+                }
+                lead_sum_ += current_tick() > snapshot.tick ? current_tick() - snapshot.tick : 0;
+                ++lead_count_;
+            }
             std::string error;
             CKIpionManager* physics = engine_->physics();
             CK3dEntity* ball = current_ball();
@@ -1456,7 +1470,8 @@ namespace {
             logf("status: phase=%d session=%u tick=%u assigned=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu max_err=%.4f last=%s "
-                 "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f",
+                 "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
+                 "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
                  static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(snapshots_received_),
@@ -1474,7 +1489,11 @@ namespace {
                  rs.last_mismatch.c_str(),
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
-                 static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error);
+                 static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error,
+                 static_cast<unsigned long long>(input_reports_), static_cast<unsigned long long>(input_starved_),
+                 input_reports_ ? 100.0 * static_cast<double>(input_starved_) / static_cast<double>(input_reports_) : 0.0,
+                 worst_starved_,
+                 lead_count_ ? static_cast<double>(lead_sum_) / static_cast<double>(lead_count_) : 0.0);
         }
 
         // ------------------------------------------------------------ state
@@ -1515,6 +1534,10 @@ namespace {
         std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
         float previous_cam_[3][3] = {};
         bool previous_cam_valid_ = false;
+        // Input freshness as the server saw it (session_snapshot_msg.acked_input_tick).
+        uint64_t input_reports_ = 0, input_starved_ = 0;
+        uint32_t worst_starved_ = 0;
+        uint64_t lead_sum_ = 0, lead_count_ = 0;
         bmmo::game::navigation_graph navigation_;
         bool navigation_known_ = false;
         std::vector<ball_row> ball_rows_;

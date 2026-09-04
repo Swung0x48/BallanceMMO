@@ -69,12 +69,21 @@ namespace bmmo::session {
             int stored = 0;
             uint32_t tick = first_tick;
             for (const auto& frame: frames) {
+                ++received_;
                 if (tick >= next_tick_ && tick < next_tick_ + kMaxLookahead)
                     stored += frames_.emplace(tick, frame).second ? 1 : 0;
+                else if (tick < next_tick_)
+                    ++stale_;   // the tick was simulated before this frame arrived
                 ++tick;
             }
+            stored_ += static_cast<uint64_t>(stored);
             return stored;
         }
+
+        // Diagnostics: frames offered, kept, and already-simulated on arrival.
+        uint64_t received() const { return received_; }
+        uint64_t stored() const { return stored_; }
+        uint64_t stale() const { return stale_; }
 
         bool has(uint32_t tick) const { return frames_.count(tick) != 0; }
         const input_frame* peek(uint32_t tick) const {
@@ -119,6 +128,7 @@ namespace bmmo::session {
         uint32_t last_tick_ = 0;
         uint32_t next_tick_ = 0;
         bool any_ = false;
+        uint64_t received_ = 0, stored_ = 0, stale_ = 0;
     };
 
     class tick_scheduler {
