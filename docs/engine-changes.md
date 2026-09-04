@@ -407,6 +407,44 @@ cases - including their surface signatures - are byte-identical between the
 Linux x64 and the Windows x86 headless builds, and a retail client starts a
 physics session on a Linux server.
 
+## 13. The body guard's exemption list (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.h` (new member
+`m_KeepLevelBodiesFree` and the `KeepsBodyOf` predicate, appended after the
+retail layout like change #6's own members), `Behaviors/Physicalize.cpp` (both
+guard sites ask the predicate now).
+
+Change #6's guard is a blunt "during a session nothing but the player's ball
+may be unphysicalized", and it caught one set of bodies it was never meant to:
+the trafo explosion pieces. They are the only bodies the retail scripts create
+*and destroy again* inside a session - `Ball_Explosion_<type>` physicalizes the
+51 pieces, `Ball_ResetPieces_<type>` fades them for two seconds and gives them
+back - and the server has none of them, so nothing about them is shared state
+the guard has to protect. With the guard on, their De Physicalize was
+swallowed, the pieces stayed physical for the rest of the session, and the next
+explosion hit the "already physicalized" early return of the Physicalize
+block, which under the guard writes the *body's* pose back to the entity: every
+trafo after the first showed its pieces lying where the first trafo's pieces had
+come to rest (and left an invisible pile of bodies at that trafo for balls to
+hit).
+
+The guard now carries a list of entities it never covers.
+`bmmo::physics::restore_explosion_pieces` fills it with the three
+`Ball_*Pieces_Frame` hierarchies (54 entities) - it walks them anyway, and it
+runs at every session anchor and at the start of every explosion, so the list
+is always in place before a piece can be physicalized; `set_body_guard(false)`
+clears it. The engine keeps knowing nothing about Ballance's object names.
+
+Reproduced and verified headlessly (`BallanceMMOSimTool --level 2 --explode
+wood 300 --activate Ball_ResetPieces_Wood 400 --beam 150 10 -141 560 --explode
+wood 600 --list-bodies-at 610`, with and without `--body-guard Ball_Wood 250`):
+before the change the guarded run's second explosion left every piece at the
+first explosion's landing spot while the unguarded one put them at the ball;
+after it, all 20 ball bodies and all 215 pose hashes of the two explosions are
+identical between the guarded and the unguarded run. The single-explosion
+`--explode` output, the `rec_m3b` replay (4169/4169) and `--spawn-test 3` are
+unchanged.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

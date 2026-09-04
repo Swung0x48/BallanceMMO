@@ -225,7 +225,10 @@ typedef struct bmmo_physics_api_v2 {
     /* While enabled, the retail Unphysicalize block keeps every body except
      * except_entity (the player's ball, may be NULL/empty): the client-side
      * sector reset after a death must not delete the shared mechanisms the
-     * server keeps.  Disable at the end of the session. */
+     * server keeps.  Disable at the end of the session.  The trafo explosion
+     * pieces are exempt as well (engine change #13): restore_explosion_pieces
+     * names them, so the scripts that create and drop them again within a
+     * session keep working. */
     int32_t (*set_body_guard)(void* ipion_manager, int32_t enable, const char* except_entity,
                               char* error, uint32_t error_size);
     /* The manager's clock: time factor (seconds per behaviour millisecond,

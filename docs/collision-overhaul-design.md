@@ -321,7 +321,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 - `BallanceMMOCommon/include/session/rollback.hpp`：`rollback_engine`（`record` / `on_snapshot`）+ `rollback_world` 适配器（get/set body、get/set nav、nav_input、nav_poll、step、simulating、log）。Mod 在 `physics_session_frame` 末尾记录每 tick（自己的球、有导航复制的远端球、机关字典里的机关；应用的输入 = 自己的 `input_frame`、远端上次驱动喂入的帧），`physics_session_apply_snapshot` 在 `rollback_enabled`（默认开，自动化 `session rollback on|off` 可切回渐变路径）时走 `physics_session_rollback`；无头客户端同样（`--no-rollback` 切回）。回滚后重新排队下一帧的相机行（重模拟消耗了它）。
 - 桥接 API v5：v4 之外加 `set_body_guard`（引擎改动 #6）和 `get_clock`（时间因子 / 下一步物理 delta）。
-- 引擎改动 #6（`docs/engine-changes.md`）：会话期间原版 Unphysicalize 块只放行当前球，其它刚体保留；Physicalize 块对已有刚体把刚体位姿写回实体。原因：原版死亡分节重置会删掉并重建机关刚体，新刚体从初始位姿落下、接触状态全新，此后每个快照都不符（先 1.5 m，随后 1–10 mm 持续约 1 s）。Mod 每帧对当前球名启用守卫，会话结束关闭。
+- 引擎改动 #6（`docs/engine-changes.md`）：会话期间原版 Unphysicalize 块只放行当前球，其它刚体保留；Physicalize 块对已有刚体把刚体位姿写回实体。原因：原版死亡分节重置会删掉并重建机关刚体，新刚体从初始位姿落下、接触状态全新，此后每个快照都不符（先 1.5 m，随后 1–10 mm 持续约 1 s）。Mod 每帧对当前球名启用守卫，会话结束关闭。（守卫的豁免名单见 9.14 / 引擎改动 #13：变球碎片是会话期间原版脚本自建自毁的刚体，不归守卫管。）
 - **本地物理时钟停止时的路径**：原版脚本会把物理时间因子设为 0（Level 1 的 `Gameplay_Tutorial` 在关卡开始后停约 26 s；暂停菜单），这段时间本地既不能预测也不能重模拟。引擎通过 `world.simulating()`（`get_clock` 因子 > 0）识别，不符时只写入权威状态、不重模拟、计入 `frozen`。同步开始的会话两端一起进教程、快照一致；迟到加入者在自己的教程期间靠这条路径贴住服务端。
 - 诊断：`session` 状态行里的 `rollback: snaps/ok/mism/rb/resim/unmatched/far/frozen/max_err/last`；前 40 次不符打印逐刚体本地/服务端位姿；`session trace on` 打开重模拟逐步轨迹；`BMMO_TRACE_TIMEFACTOR=1` 让 physics_RT 打印哪个脚本改了时间因子。
 - 单元测试 `BallanceMMOServer/tests/rollback_engine_test.cpp`（假世界：匹配不回滚、不符恢复并按记录输入重模拟、时钟停止只贴齐、超出重模拟窗口只写入、历史有界、未命中计数）。
@@ -555,3 +555,41 @@ Windows 服务端不复现。
 开始；服务端用 `-DBMMO_BUILD_ID` 换成另一个引擎提交 → 两端都收到
 `Swung0x48 runs engine ballanced-40ce91e307ff, this server runs ballanced-000000badbad`；
 服务端 id 为 `unknown` → 日志记 `not comparable, letting it in`，会话照常开始。
+
+### 9.14 变球碎片总是落在第一个变球器那边（引擎改动 #13）
+
+**症状.** 物理会话里第二次以后的每一次变球，碎片都不在当前变球器炸开，而是出现在
+**本次会话第一次变球**的那个变球器旁边——正是第一批碎片当时停下来的地方。
+
+**根因.** 不在 9.10 的碎片归正链上，而在引擎改动 #6 的 body guard。原版一次变球的
+碎片生命周期是：`Ball_Explosion_<type>` 把 51 块碎片 Physicalize，两秒后
+`Ball_ResetPieces_<type>` 淡出、**De Physicalize**、`Restore IC`。会话期间 guard 是
+"除了自己的球，谁也不许 Unphysicalize"，于是这条 De Physicalize 被吞掉，碎片刚体从第
+一次变球起就再也没消失过；下一次爆炸走到 Physicalize 块的"已经物理化"提前返回，而
+guard 在那里会把**刚体的**位姿写回实体（#6 用来抵消死亡时分节重置的矩阵复位），碎片就
+被拉回上一次停下的位置。除了看起来不对，那堆看不见的刚体还一直躺在第一个变球器旁边挡
+球，而服务端世界里根本没有它们。
+
+碎片是原版脚本在会话期间**自己创建又自己销毁**的唯一一批刚体，服务端不持有它们，本来
+就不该由 guard 保护。引擎改动 #13 于是给 guard 加了一张豁免表：
+`restore_explosion_pieces` 顺手把三个 `Ball_*Pieces_Frame` 层级（54 个实体）写进
+`m_KeepLevelBodiesFree`——它本来就要走这些层级，而且在每次锚点和每次爆炸开头都会跑，
+豁免表永远早于碎片被物理化就位；`set_body_guard(false)` 清空它。引擎仍然不认识任何
+Ballance 的对象名。
+
+**无头复现（SimTool 新增 `--activate SCRIPT TICK`、`--body-guard ENTITY TICK`，
+`--explode` 可重复，`--beam` 也能在自由跑里用）.**
+
+```
+BallanceMMOSimTool --root <game> --level 2 --level-at 30 --ticks 615 \
+    --explode wood 300 --activate Ball_ResetPieces_Wood 400 \
+    --beam 150 10 -141 560 --explode wood 600 --list-bodies-at 610 \
+    [--body-guard Ball_Wood 250]
+```
+
+`--activate` 是必需的：`--explode` 只激活爆炸脚本，而原版是变球流程稍后再激活
+`Ball_ResetPieces_<type>`。改动前，带 `--body-guard` 的一跑第二次爆炸的碎片全部留在
+第一次的落点（~(20, 8, -153)），不带的一跑则出现在被 beam 过去的球那里（~(150, …)）；
+改动后两跑的 20 个球体刚体位置与两次爆炸的 215 个 `pose` 哈希逐位相同。单次
+`--explode` 的输出、`rec_m3b` 回放（4169/4169）、`--spawn-test 3` 与 82 个单元测试均
+不变。

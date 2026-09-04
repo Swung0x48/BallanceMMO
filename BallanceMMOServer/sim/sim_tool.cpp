@@ -17,6 +17,12 @@
 // a trafo explosion script mid free-run and prints the pose hash and movable
 // core count every tick for 200 ticks (Part B: both are diffed between the
 // Windows and Linux builds for determinism).
+//
+// --explode is repeatable, and with --activate Ball_ResetPieces_<type> (the
+// trafo sequence's own clean-up, which --explode does not run), --beam and
+// --body-guard a free run can play the session's side of a second trafo:
+// explode, reset, move the ball, explode again, and the guarded run must come
+// out like the unguarded one (design 9.14 / engine change #13).
 
 #include "headless_engine.hpp"
 #include "crash_report.hpp"
@@ -116,11 +122,22 @@ namespace {
         // user actually passed them.
         bool ticks_explicit = false;
         bool report_every_explicit = false;
-        // --explode wood|paper|stone AT_TICK: trafo-explosion determinism
-        // check (Part B).  Free run only (no --level-at needed: the level
-        // must already be running at AT_TICK, e.g. after --level-at).
-        std::string explode_type;
-        long long explode_at_tick = -1;
+        // --explode wood|paper|stone AT_TICK, repeatable: trafo-explosion
+        // determinism check (Part B).  Free run only (no --level-at needed:
+        // the level must already be running at AT_TICK, e.g. after
+        // --level-at).  A second explosion checks that the pieces of the
+        // previous one were really given back (engine changes #6 and #13).
+        std::vector<std::pair<std::string, long long>> explosions;
+        // --activate SCRIPT TICK, repeatable: activate any root script at that
+        // tick.  The trafo sequence runs Ball_ResetPieces_<type> a moment
+        // after the explosion (fade, De Physicalize, Restore IC); --explode
+        // alone does not, so a two-explosion check has to ask for it.
+        std::vector<std::pair<std::string, long long>> activations;
+        // --body-guard ENTITY TICK: arm the session body guard (engine change
+        // #6) on that entity from that tick, the way a physics session does,
+        // so a free run can check what the guard does to the level's bodies.
+        std::string body_guard_entity;
+        long long body_guard_tick = -1;
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -204,8 +221,18 @@ namespace {
             else if (arg == "--spawn-impulse") { if (!(v = next())) return false; out.spawn_impulse = static_cast<float>(std::atof(v)); }
             else if (arg == "--spawn-ball") { if (!(v = next())) return false; out.spawn_ball = std::atoi(v); }
             else if (arg == "--explode") {
-                if (!(v = next())) return false; out.explode_type = v;
-                if (!(v = next())) return false; out.explode_at_tick = std::atoll(v);
+                std::string type;
+                if (!(v = next())) return false; type = v;
+                if (!(v = next())) return false; out.explosions.emplace_back(type, std::atoll(v));
+            }
+            else if (arg == "--activate") {
+                std::string script;
+                if (!(v = next())) return false; script = v;
+                if (!(v = next())) return false; out.activations.emplace_back(script, std::atoll(v));
+            }
+            else if (arg == "--body-guard") {
+                if (!(v = next())) return false; out.body_guard_entity = v;
+                if (!(v = next())) return false; out.body_guard_tick = std::atoll(v);
             }
             else return false;
         }
@@ -515,8 +542,40 @@ namespace {
                 std::fprintf(stderr, "level request failed: %s\n", engine.level_request().error.c_str());
                 return 1;
             }
-            if (!args.explode_type.empty() && static_cast<long long>(i) == args.explode_at_tick) {
-                const char* script_name = explosion_script_name(args.explode_type);
+            if (args.beam_frame >= 0 && static_cast<long long>(i) == args.beam_frame) {
+                CKDataArray* level = engine.data_array("CurrentLevel");
+                CK3dEntity* ball = level ? CK3dEntity::Cast(level->GetElementObject(0, 1)) : nullptr;
+                const double upright[4] = {0.0, 0.0, 0.0, 1.0};
+                const float still[3] = {0.0f, 0.0f, 0.0f};
+                if (!ball || !bmmo::physics::set_body_state(engine.physics(), ball->GetName(), args.beam_at, upright,
+                                                            still, still, true, error)) {
+                    std::fprintf(stderr, "beam failed at tick %d: %s\n", i, error.c_str());
+                    return 2;
+                }
+                std::fprintf(stderr, "beam: %s to (%.3f,%.3f,%.3f) at tick %d\n", ball->GetName(),
+                             args.beam_at[0], args.beam_at[1], args.beam_at[2], i);
+            }
+            if (args.body_guard_tick >= 0 && static_cast<long long>(i) == args.body_guard_tick) {
+                if (!bmmo::physics::set_body_guard(engine.physics(), true, args.body_guard_entity.c_str(), error)) {
+                    std::fprintf(stderr, "body guard failed: %s\n", error.c_str());
+                    return 1;
+                }
+                std::fprintf(stderr, "body guard armed at tick %d (except %s, %d entities exempt)\n", i,
+                             args.body_guard_entity.c_str(), engine.physics()->m_KeepLevelBodiesFree.Size());
+            }
+            for (const auto& [name, tick]: args.activations) {
+                if (static_cast<long long>(i) != tick) continue;
+                CKBehavior* script = bmmo::game::find_root_script(engine.context(), name.c_str());
+                if (!script) {
+                    std::fprintf(stderr, "activate: no root script named %s\n", name.c_str());
+                    return 1;
+                }
+                script->Activate(TRUE, TRUE);
+                std::fprintf(stderr, "activate: %s at tick %d\n", name.c_str(), i);
+            }
+            for (const auto& [type, tick]: args.explosions) {
+                if (static_cast<long long>(i) != tick) continue;
+                const char* script_name = explosion_script_name(type);
                 if (!script_name) {
                     std::fprintf(stderr, "--explode type must be wood, paper or stone\n");
                     return 2;
@@ -639,11 +698,12 @@ namespace {
             // "explode <type>" activated the same script from OnProcess of
             // record frame F (its response names F), which the engine runs at
             // the next Process, i.e. inside frame F + 1 of the record.
-            if (!args.explode_type.empty() && static_cast<long long>(frame) == args.explode_at_tick) {
-                const char* script_name = explosion_script_name(args.explode_type);
+            for (const auto& [type, tick]: args.explosions) {
+                if (static_cast<long long>(frame) != tick) continue;
+                const char* script_name = explosion_script_name(type);
                 CKBehavior* script = script_name ? bmmo::game::find_root_script(engine.context(), script_name) : nullptr;
                 if (!script) {
-                    std::fprintf(stderr, "explode: no root script for --explode %s\n", args.explode_type.c_str());
+                    std::fprintf(stderr, "explode: no root script for --explode %s\n", type.c_str());
                     return 2;
                 }
                 script->Activate(TRUE, TRUE);
@@ -1216,7 +1276,9 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S]\n"
             "           [--spawn-ball T] [--ticks K] [--report-every R] (spawn-impulse determinism check)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK\n"
-            "           [--ticks N] (trafo-explosion determinism check, prints the pose hash for 200 ticks)\n");
+            "           [--explode ... AT_TICK] [--activate SCRIPT TICK] [--body-guard ENTITY TICK]\n"
+            "           [--beam X Y Z TICK] [--ticks N]\n"
+            "           (trafo-explosion determinism check, prints the pose hash for 200 ticks)\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {

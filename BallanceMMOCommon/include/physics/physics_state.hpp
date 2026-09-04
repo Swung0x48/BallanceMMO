@@ -137,7 +137,10 @@ namespace bmmo::physics {
     // few frames at game start, and how far they fall then depends on the
     // start-up frame times (real time on the game, fixed on the headless
     // engine), so without this the first explosion starts from poses that
-    // differ per process.  reset_session_clock calls it.  Returns the number
-    // of objects restored, -1 without a scene.
+    // differ per process.  reset_session_clock calls it.  Also names the
+    // pieces to the body guard as entities it must not cover (engine change
+    // #13): they are the one set of bodies the retail scripts create and
+    // destroy again within a session.  Returns the number of objects
+    // restored, -1 without a scene.
     int restore_explosion_pieces(CKContext* context);
 }

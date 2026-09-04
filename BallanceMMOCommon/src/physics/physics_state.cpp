@@ -740,6 +740,11 @@ namespace bmmo::physics {
         }
         physics->m_KeepLevelBodies = enable ? 1 : 0;
         physics->m_KeepLevelBodiesExcept = except_id;
+        // The exempt entities (engine change #13) are named by
+        // restore_explosion_pieces, which runs at every anchor - i.e. before
+        // the guard goes on again; ids of a level that is being left behind
+        // do not outlive the guard they belonged to.
+        if (!enable) physics->m_KeepLevelBodiesFree.Clear();
         return true;
     }
 
@@ -1150,10 +1155,21 @@ namespace bmmo::physics {
         CKScene* scene = context ? context->GetCurrentScene() : nullptr;
         if (!scene) return -1;
         CKIpionManager* physics = CKIpionManager::GetManager(context);
+        // Engine change #13: the pieces are the one set of bodies the retail
+        // scripts create and destroy again inside a session - the explosion
+        // physicalizes them, Ball_ResetPieces_<type> gives them back two
+        // seconds later.  The body guard of engine change #6 would swallow
+        // that Unphysicalize like a mechanism's, and the next explosion would
+        // find the pieces still physicalized, keep the bodies of the previous
+        // one and snap the pieces back to where they came to rest then (the
+        // trafo before this one).  Name them here, where the piece hierarchy
+        // is walked anyway, and the guard leaves them alone.
+        if (physics) physics->m_KeepLevelBodiesFree.Clear();
         int restored = 0;
         for (const char* frame_name: kPieceFrames) {
             CK3dEntity* frame = find_entity(context, frame_name);
             if (!frame) continue;
+            if (physics) physics->m_KeepLevelBodiesFree.PushBack(frame->GetID());
             // TT Restore IC with Hierarchy, then the frame is taken out of the
             // skewed hierarchy and squared up; the children's initial world
             // matrices are restored last, so their local matrices (derived by
@@ -1167,6 +1183,7 @@ namespace bmmo::physics {
             frame->SetWorldMatrix(world);
             for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child)) {
                 restored += restore_initial_condition(scene, child);
+                if (physics) physics->m_KeepLevelBodiesFree.PushBack(child->GetID());
                 // The piece's convex hull is compiled once, at the very first
                 // Physicalize of the process - Balls_Init does one at game
                 // start, long before this - and cached under the mesh's name.
