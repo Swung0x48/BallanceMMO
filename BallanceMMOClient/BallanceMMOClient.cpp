@@ -427,6 +427,7 @@ void BallanceMMOClient::OnProcess() {
     fixed_tick_.on_process(m_bml);
     process_physics_session();
     process_command_pipe();
+    process_room_requests();
     process_level_request();
     process_tick_record();
     poll_local_input();

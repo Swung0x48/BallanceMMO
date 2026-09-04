@@ -59,7 +59,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | subject | u32（被操作者，可为 0） |
 | reason | string ≤ 256 |
 
-每一条 `room_request` 都恰好收到一条 `RequestAccepted` 或 `RequestDenied`（含 `List`、`Ready`/`Unready`、`Close`）。连接可靠且有序，客户端据此把结果对应回发出的子命令并回显；`RequestDenied` 的 `error`（必要时加 `reason`）说明失败原因。
+每一条 `room_request` 都恰好收到一条 `RequestAccepted` 或 `RequestDenied`（含 `List`、`Ready`/`Unready`、`Close`）。连接可靠且有序，客户端据此把结果对应回发出的子命令并回显；`RequestDenied` 的 `error`（必要时加 `reason`）说明失败原因。客户端等结果最多 5 秒：超时就报 `Error: the server did not answer "/mmo room <sub>".` 并把这一条丢掉，免得不回结果的服务端（早于本节的版本）让命令悄无声息，又把结果错配给后面的命令。
 
 一次操作可能同时产生广播事件：服务端先发给发起者结果，再把 `PlayerJoined` / `PlayerLeft` / `HostChanged` / `RoomClosed` / `SessionStarting` 发给其他成员，最后推送 `room_state`。`Ready`/`Unready` 相反——先推 `room_state`（其中已带新的 ready 标记），再发 `ReadyChanged`，最后回结果，这样收到事件的客户端可以直接从名单里读出新状态与人数。客户端对自己发起的操作只显示结果那一条，不重复显示随之而来的广播事件。
 

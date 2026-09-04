@@ -5,7 +5,9 @@
 #include "../BallanceMMOClient.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
+#include <vector>
 
 namespace {
     // How a subcommand is spelled in the messages we print back to the user.
@@ -34,7 +36,28 @@ void BallanceMMOClient::push_room_request(const pending_room_request& request) {
     // oldest entry is the one whose outcome we have clearly missed.
     if (pending_room_requests_.size() >= MAX_PENDING_ROOM_REQUESTS)
         pending_room_requests_.pop_front();
-    pending_room_requests_.push_back(request);
+    auto entry = request;
+    entry.sent = std::chrono::steady_clock::now();
+    pending_room_requests_.push_back(entry);
+}
+
+// Game thread, every frame. Reports the commands whose outcome never arrived
+// (a server older than protocol 1.3 answers neither Ready/Unready, List nor
+// Close) and drops them, so the next command's outcome is not read as theirs.
+void BallanceMMOClient::process_room_requests() {
+    std::vector<pending_room_request> timed_out;
+    {
+        std::lock_guard lk(room_state_mtx_);
+        const auto now = std::chrono::steady_clock::now();
+        while (!pending_room_requests_.empty()
+                && now - pending_room_requests_.front().sent > ROOM_REQUEST_TIMEOUT) {
+            timed_out.push_back(pending_room_requests_.front());
+            pending_room_requests_.pop_front();
+        }
+    }
+    for (const auto& request: timed_out)
+        SendIngameMessage(std::format("Error: the server did not answer \"/mmo room {}\".",
+                room_action_name(request.action)), bmmo::ansi::BrightRed);
 }
 
 std::optional<BallanceMMOClient::pending_room_request> BallanceMMOClient::pop_room_request() {

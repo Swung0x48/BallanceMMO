@@ -30,6 +30,7 @@
 #include <mutex>
 #include <memory>
 #include <format>
+#include <chrono>
 #include <deque>
 #include <optional>
 #include <queue>
@@ -410,11 +411,17 @@ private:
 		bmmo::room::action action{};
 		bool ready = false;            // Ready / Unready: which one we sent
 		bmmo::room::mode mode{};       // Start: the session kind we asked for
+		std::chrono::steady_clock::time_point sent{};
 	};
 	static constexpr size_t MAX_PENDING_ROOM_REQUESTS = 16;
+	// A server that answers nothing (one older than the outcome protocol) would
+	// otherwise leave the command silent and, worse, hand its entry to the next
+	// command's outcome. Say so instead, once the answer is clearly not coming.
+	static constexpr std::chrono::seconds ROOM_REQUEST_TIMEOUT{5};
 	std::deque<pending_room_request> pending_room_requests_;
 	void push_room_request(const pending_room_request& request);
 	std::optional<pending_room_request> pop_room_request();
+	void process_room_requests();
 	void reset_room_state();
 	std::string room_ready_text(HSteamNetConnection player);
 	void handle_room_request_outcome(const bmmo::room_event_msg& msg, bool accepted);

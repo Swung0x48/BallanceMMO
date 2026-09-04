@@ -529,3 +529,9 @@ Windows 服务端不复现。
 同一组用例（连同 `surfaces=`）在 Linux x64 与 Windows x86 无头构建之间逐字节相同；
 原版客户端连 Linux 服务端（本机 WSL）开 Level 2 物理会话，锚点两端都是
 `0ce8aeb84f5f017c`，会话正常开始。
+
+**顺带修的：房间命令没有回显.** 客户端按可靠有序连接把 `RequestAccepted` /
+`RequestDenied` 依次对应回自己发出的子命令（协议 1.3）。比 632bf1c 早的服务端对
+`Ready`/`Unready`、`List`、`Close` 根本不回结果，客户端于是既不回显，也会把队首那条
+错配给下一条命令的结果。现在超过 5 秒没等到结果就报
+`Error: the server did not answer "/mmo room ready".` 并丢弃该条，队列不再错位。
