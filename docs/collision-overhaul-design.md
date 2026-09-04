@@ -499,3 +499,33 @@ Level 10 另有一次第 7 帧的哈希差异，那时可动 core 的精确状�
 **仍然不同的函数.** `Vx3DInverseMatrix`（`GetInverseWorldMatrix` 会用）、`VxVector::Normalize`、`VxQuaternion::FromMatrix`、`Vx3DDecomposeMatrix`、`Vx3DInterpolateMatrix`、`Vx3DMatrixFromRotation`。求逆试了 36 种写法（余子式用 float 还是 double、行列式三项的求和顺序、倒数取 float 还是 double、最后一次乘法在哪个精度）都没对上，说明原版用的是另一套算法，而不只是另一种舍入顺序。Level 11 剩下的分叉仍在秋千上；Level 10 是第 7 帧 `P_Modul_01` 物理化时的老问题（匹配帧数从 2837 涨到 4210，首帧分叉位置未变）。
 
 **四平台基线.** `scripts/determinism_baseline.py <tag>` 在一个引擎构建上跑固定的 17 个用例（13 关机关扫描 + `rec_m3b` 游玩回放 + 三种爆炸），把每帧的引擎自身状态（世界哈希、活动 core 数、IVP 时钟与种子、movement-check 计数、下次 PSI 时刻、位姿是否与客户端一致）压成一行；`scripts/compare_platforms.py` 跨平台比对。这套基线是改动前后判断"有没有退化"的依据，也是以后任何引擎改动的第一道关。
+
+### 9.13 Linux 服务端上的"world mismatch"：碰撞面签名不跨平台
+
+**症状.** 原版客户端连 Linux 服务端，开物理会话必被拒：`Physics session 1
+(room 1) ended: world mismatch for <player> (client <A>/<B>, server <A>/<C>)`。
+`session_ready_msg` 的两个值里，可动 core 位姿哈希 `anchor_hash` 两端相同，
+只有碰撞面签名 `anchor_surfaces` 不同——也就是说物理状态一致，被拒的是几何。
+Windows 服务端不复现。
+
+**根因（引擎改动 #12）.** `surface_signature` 直接哈希每个刚体
+`IVP_Compact_Surface` 的原始字节，而这块 blob 的排布是构建选项决定的：
+`IVP_Template_Surbuild_LedgeSoup` 的 `merge_points` 默认值在 `WIN32` 下是
+`IVP_SLMP_MERGE_AND_REALLOCATE`（把重复顶点合并进一个共享点数组），其它平台是
+`IVP_SLMP_NO_MERGE`（每个 ledge 各存一份）。同一个凸包，两种存法：
+`mass_center`、`rotation_inertia`、`upper_limit_radius` 逐位相同，节点数、ledge
+数、三角形数也相同，但 blob 大小和内容不同（Level 2 的 `A01_Floor_00`：579 节点 /
+290 ledge / 580 三角形，合并后 32916 字节，不合并 44100 字节）。签名于是必然不等。
+把默认值统一成游戏在跑的那一种即可；客户端不受影响（`WIN32` 分支本来就是它）。
+
+**复现与验证用的手段.** `physics_state.cpp` 的 `describe_surfaces_exact` 逐刚体
+打印 `blob`（签名哈希的那些字节）、`head`（三个头部浮点的哈希）和节点/ledge/三角形
+计数，SimTool 的 `--dump-surfaces-at N` 把它导出来，两端文本 diff 就能把"几何真的
+不同"和"只是存法不同"分开；`report` 也一并打印 `surfaces=`。定位过程就是这样做的：
+42 个刚体的 `head` 和计数全等，`blob` 全不等。
+
+**验证.** Linux 上改动前后：三个关卡各自由跑 1200–1500 tick、三次 trafo 爆炸、
+出生冲量测试、机关落体，输出逐字节相同，Level 1 录像回放的帧数与哈希也不变。改动后，
+同一组用例（连同 `surfaces=`）在 Linux x64 与 Windows x86 无头构建之间逐字节相同；
+原版客户端连 Linux 服务端（本机 WSL）开 Level 2 物理会话，锚点两端都是
+`0ce8aeb84f5f017c`，会话正常开始。

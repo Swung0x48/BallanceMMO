@@ -375,6 +375,38 @@ the shipped function returns the transpose of the reimplementation's result
 and its sine and cosine carry only about four correct digits, so anything
 that comes to depend on it needs its own investigation first.
 
+## 12. One compact-surface layout on every platform (physics_RT / IVP)
+
+File: `Source/BuildingBlocks/physics_RT/ivp/ivp_compact_builder/ivp_template_surbuild.hxx`
+
+`IVP_Template_Surbuild_LedgeSoup`'s default for `merge_points` was
+`IVP_SLMP_MERGE_AND_REALLOCATE` under `WIN32` and `IVP_SLMP_NO_MERGE`
+everywhere else. Merging folds the hull's duplicate vertices into one shared
+point array at the end of the compact surface and points every ledge at it;
+without it each ledge carries its own copy. The solid is the same either way -
+`mass_center`, `rotation_inertia` and `upper_limit_radius` come out
+bit-identical, and so does everything the simulation computes from the hull -
+but the blob it lives in has a different size and different bytes, and the two
+forms do not answer pointer identity of a shared vertex the same way.
+
+That mattered because the session handshake compares a signature of exactly
+those bytes (`bmmo::physics::surface_signature`, `session_ready_msg`'s
+`anchor_surfaces`): every Windows client refused every session on a Linux (or
+Android) server with "world mismatch", while the world hash the same message
+carries agreed. Level 2 anchored at `0ce8aeb84f5f017c` on the client and
+`66ad16dd3d381480` on the server; per body the counts and the header floats
+matched and only the storage differed (`A01_Floor_00`: 579 nodes, 290 ledges,
+580 triangles on both; 32916 bytes merged against 44100 unmerged).
+
+The game runs the merging one, so every platform now does. The change is
+inert for the simulation: on Linux, three levels free-run for 1200-1500 ticks,
+the three trafo explosions, the spawn-impulse test and a mechanism drop all
+produce byte-identical output before and after, and the Level 1 client
+recording replays to the same frame with the same hashes. After it, those same
+cases - including their surface signatures - are byte-identical between the
+Linux x64 and the Windows x86 headless builds, and a retail client starts a
+physics session on a Linux server.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

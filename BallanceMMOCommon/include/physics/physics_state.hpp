@@ -51,6 +51,10 @@ namespace bmmo::physics {
     // Diagnostics: every simulated core with its exact state (hex floats), one
     // line per core, sorted by name so two worlds can be diffed textually.
     std::string describe_cores_exact(CKIpionManager* physics);
+    // Diagnostics: the per-body terms of the world hash's surface signature
+    // (name, surface type, compact-surface size and hash), one line per body,
+    // sorted by name so two worlds can be diffed textually.
+    std::string describe_surfaces_exact(CKIpionManager* physics);
     // Diagnostics: route IVP's own impact / mindist / PSI debug prints
     // (IVP_Debug_Manager::file_out_impacts) to `path`; null path stops.
     bool set_impact_trace(CKIpionManager* physics, const char* path, std::string& error);

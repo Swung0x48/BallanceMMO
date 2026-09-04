@@ -15,6 +15,7 @@
 #include "ivp_surface_manager.hxx"
 #include "ivp_surman_polygon.hxx"
 #include "ivp_compact_surface.hxx"
+#include "ivp_compact_ledge.hxx"
 
 #include <algorithm>
 #include <cfloat>
@@ -265,6 +266,88 @@ namespace bmmo::physics {
                 core->delta_world_f_core_psis.k[0], core->delta_world_f_core_psis.k[1],
                 core->delta_world_f_core_psis.k[2], static_cast<double>(core->i_delta_time),
                 core->time_of_last_psi.get_seconds());
+            lines.emplace_back(text);
+        }
+        std::sort(lines.begin(), lines.end());
+        std::string out;
+        for (const auto& line: lines) {
+            out += line;
+            out += '\n';
+        }
+        return out;
+    }
+
+    namespace {
+        // Summary of one compact surface: its ledge tree walked, so a body
+        // whose hull differs between two worlds can be told apart from a body
+        // whose hull is merely stored differently.  The point count is
+        // deliberately not reported: a ledge whose points were merged into the
+        // surface's shared array keeps the size field of the unmerged ledge it
+        // was copied from, so there is no honest per-ledge count to give.
+        struct surface_walk {
+            fnv1a64 header;   // mass centre, rotation inertia, radius
+            int nodes = 0, ledges = 0, triangles = 0;
+        };
+
+        void walk_node(surface_walk& w, const IVP_Compact_Ledgetree_Node* node) {
+            if (!node) return;
+            ++w.nodes;
+            const IVP_Compact_Ledge* ledge = node->is_terminal() ? node->get_compact_ledge()
+                                                                 : node->get_compact_hull();
+            if (ledge) {
+                ++w.ledges;
+                w.triangles += ledge->get_n_triangles();
+            }
+            if (node->is_terminal()) return;
+            walk_node(w, node->left_son());
+            walk_node(w, node->right_son());
+        }
+
+        surface_walk walk_surface(const IVP_Compact_Surface* surface) {
+            surface_walk w;
+            if (!surface) return w;
+            for (int k = 0; k < 3; ++k) w.header.feed(surface->mass_center.k[k]);
+            for (int k = 0; k < 3; ++k) w.header.feed(surface->rotation_inertia.k[k]);
+            w.header.feed(surface->upper_limit_radius);
+            walk_node(w, surface->get_compact_ledge_tree_root());
+            return w;
+        }
+    }
+
+    // Diagnostics: the per-body terms surface_signature() sums, one line per
+    // body, sorted by name so two worlds whose surface signatures differ can
+    // be diffed textually down to the body that differs.  `blob` is what the
+    // signature itself hashes; `head` and the counts describe the same hull
+    // independently of how the engine stored it, which is what tells a real
+    // geometry difference from a storage one.
+    std::string describe_surfaces_exact(CKIpionManager* physics) {
+        if (!physics) return {};
+        std::vector<std::string> lines;
+        char text[512];
+        for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
+            IVP_Real_Object* real = (*it).m_RealObject;
+            if (!real) continue;
+            const char* name = real->get_name() ? real->get_name() : "";
+            int type = -1, size = 0;
+            fnv1a64 blob;
+            surface_walk walk;
+            if (IVP_SurfaceManager* manager = real->get_surface_manager()) {
+                type = static_cast<int>(manager->get_type());
+                if (manager->get_type() == IVP_SURMAN_POLYGON) {
+                    const IVP_Compact_Surface* surface =
+                        static_cast<IVP_SurfaceManager_Polygon*>(manager)->get_compact_surface();
+                    if (surface) {
+                        size = surface->get_size();
+                        blob.feed(surface, static_cast<size_t>(size));
+                        walk = walk_surface(surface);
+                    }
+                }
+            }
+            std::snprintf(text, sizeof(text),
+                          "%s type=%d size=%d blob=%016llx head=%016llx nodes=%d ledges=%d tris=%d",
+                          name, type, size, static_cast<unsigned long long>(blob.value),
+                          static_cast<unsigned long long>(walk.header.value),
+                          walk.nodes, walk.ledges, walk.triangles);
             lines.emplace_back(text);
         }
         std::sort(lines.begin(), lines.end());

@@ -84,6 +84,7 @@ namespace {
         std::string nav_mode;          // --nav retail-cxx|clone: replay through the session navigation (design 8.6)
         long long nav_frames = -1;     // --nav-frames N: compare only the first N frames
         int list_bodies_at = -1;       // --list-bodies-at N: bridge v2 list_bodies() at that tick
+        int dump_surfaces_at = -1;     // --dump-surfaces-at N: per-body surface signatures at that tick
         // --drop ENTITY BALLTYPE: server-side mechanism check.  Boots a
         // physics-session world, puts the player in a sector, drops their ball
         // of that type on that entity and prints what the mechanism does.
@@ -177,6 +178,7 @@ namespace {
             else if (arg == "--nav") { if (!(v = next())) return false; out.nav_mode = v; }
             else if (arg == "--nav-frames") { if (!(v = next())) return false; out.nav_frames = std::atoll(v); }
             else if (arg == "--list-bodies-at") { if (!(v = next())) return false; out.list_bodies_at = std::atoi(v); }
+            else if (arg == "--dump-surfaces-at") { if (!(v = next())) return false; out.dump_surfaces_at = std::atoi(v); }
             else if (arg == "--drop") {
                 if (!(v = next())) return false; out.drop_entity = v;
                 if (!(v = next())) return false; out.drop_ball = std::atoi(v);
@@ -440,9 +442,10 @@ namespace {
         } else {
             if (hash.cores > 0)
                 std::printf("    movable: %s\n", bmmo::physics::describe_movable_objects(engine.physics()).c_str());
-            std::printf("tick=%llu hash=%016llx pose=%016llx cores=%d ivp_time=%.6f seed=%d delta=%.4f pdelta=%.6f factor=%.6f ingame=%d\n",
+            std::printf("tick=%llu hash=%016llx pose=%016llx surfaces=%016llx cores=%d ivp_time=%.6f seed=%d delta=%.4f pdelta=%.6f factor=%.6f ingame=%d\n",
                 static_cast<unsigned long long>(engine.ticks()),
-                static_cast<unsigned long long>(hash.hash), static_cast<unsigned long long>(hash.pose), hash.cores, hash.ivp_time,
+                static_cast<unsigned long long>(hash.hash), static_cast<unsigned long long>(hash.pose),
+                static_cast<unsigned long long>(hash.surfaces), hash.cores, hash.ivp_time,
                 hash.ivp_seed, hash.delta_time_ms, hash.physics_delta_time, hash.time_factor,
                 gameplay_ingame_active(engine) ? 1 : 0);
             std::printf("    %s\n", root_scripts(engine).c_str());
@@ -464,6 +467,19 @@ namespace {
                         body.name, body.movable ? 1 : 0, body.simulated ? 1 : 0,
                         body.collision_enabled ? 1 : 0, static_cast<int>(body.movement_state),
                         body.position[0], body.position[1], body.position[2]);
+        std::fflush(stdout);
+    }
+
+    // The per-body terms of the handshake's surface signature: what a client
+    // and this engine have to agree on before a session may start.
+    void dump_surfaces(const bmmo::sim::headless_engine& engine) {
+        bmmo::physics::world_hash hash;
+        std::string error;
+        bmmo::physics::capture_world_hash(engine.physics(), hash, error);
+        std::printf("surfaces at tick %llu: %016llx\n%s",
+                    static_cast<unsigned long long>(engine.ticks()),
+                    static_cast<unsigned long long>(hash.surfaces),
+                    bmmo::physics::describe_surfaces_exact(engine.physics()).c_str());
         std::fflush(stdout);
     }
 
@@ -549,6 +565,7 @@ namespace {
             if (!args.list_scripts.empty() && i == args.dump_at) list_scripts(engine, args.list_scripts);
             if (!args.dump_array.empty() && i == args.dump_at) dump_array(engine, args.dump_array);
             if (args.list_bodies_at >= 0 && i == args.list_bodies_at) list_bodies(engine);
+            if (args.dump_surfaces_at >= 0 && i == args.dump_surfaces_at) dump_surfaces(engine);
             if (args.report_every > 0 && engine.ticks() % static_cast<uint64_t>(args.report_every) == 0)
                 report(engine);
         }
@@ -1189,7 +1206,7 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, args)) {
         std::fprintf(stderr,
             "usage: BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N] "
-            "[--report-every N] [--list-bodies-at N] [--verbose]\n"
+            "[--report-every N] [--list-bodies-at N] [--dump-surfaces-at N] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
