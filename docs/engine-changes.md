@@ -328,12 +328,37 @@ and drift from both the shipped DLL and the scalar path.
 
 Evidence (2026-09-03), the 13-level mechanism sweep of design 9.11. Before:
 levels 3, 7, 8, 9, 10, 11 and 13 diverged from the client recording. After:
-3, 7, 8, 9 and 13 match for their whole run, 10 and 11 remain, and every case
-that already matched still does — levels 1, 2, 4, 5, 6, 12, the `rec_m3b`
-gameplay replay and all three explosions. Windows x64, Windows x86, Linux
-x86_64 and Android arm64 produce identical engine state on all 17 cases both
-before and after. After the change the four functions are bit-identical to the
-shipped DLL over 200000 inputs of both random and Ballance-like shape.
+3, 7, 8, 9 and 13 match for their whole run, and every case that already
+matched still does — levels 1, 2, 4, 5, 6, 12, the `rec_m3b` gameplay replay
+and all three explosions. Levels 10 and 11 still report a hash mismatch, but
+that turned out not to be a physics difference at all (see below). Windows
+x64, Windows x86, Linux x86_64 and Android arm64 produce identical engine
+state on all 17 cases both before and after. After the change the four
+functions are bit-identical to the shipped DLL over 200000 inputs of both
+random and Ballance-like shape.
+
+What levels 10 and 11 really are: the world hash folds each movable core in
+the order `CKIpionManager::m_MovableObjects` happens to hold them, and the two
+engines hold two of the bodies the other way round. Every body is
+bit-identical. On level 11 the recording's own hash is reproduced exactly by
+folding its own core states in the order `P_Modul_26_Rope`, `_Sack`,
+`_Rope001`, `_Sack001`, `Ball_Wood`, `P_Modul_08_Schaukel`, `Schaukel001`,
+while the reimplementation folds the last two the other way; 809 frames later
+all seven bodies still match to the last bit. On level 10 only frames 7 to 27
+differ, the window in which `P_Modul_01_Pusher`, `_Rinne` and `_Filler` are
+awake, and all nine bodies are identical throughout it; the remaining 4204
+frames match. Proven offline by rebuilding the FNV-1a fold from the exact hex
+floats the recording stores and searching the permutations
+(`<scratchpad>/order_solve.py`), so it needs no client run.
+
+That list is appended to from IVP's `event_object_revived` and is only walked
+to write entity matrices back, so its order does not reach the solver — which
+is consistent with the bodies never actually parting. The physics of all
+thirteen levels therefore replays bit-exactly; what is left is that the
+diagnostic hash answers a slightly stronger question than "is the state the
+same". Fixing that means either folding in a canonical order, which would
+invalidate every existing recording, or teaching the replay tool to recognise
+the case; neither is done yet.
 
 Note the direction of this change. The client keeps its retail `VxMath.dll`;
 the physics plugin links the Virtools SDK import library, so nothing shipped
