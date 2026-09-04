@@ -542,6 +542,12 @@ public:
         // Spawn kick speed sent in this session's SessionStart (design 9.10):
         // fixed at on_world_ready so a late joiner gets the same value.
         float spawn_impulse = 0;
+        // Ticks the server waits for this session's inputs, sized at the start
+        // from the worst round trip among the members (session_input_delay).
+        // Fixed for the session's life: the scheduler's deadlines are measured
+        // from the start with this value in them, and a late joiner cannot be
+        // allowed to move the timeline the running members are already on.
+        uint32_t input_delay = 6;
         // Stable per member: the lowest value not currently used by another
         // member of this session, assigned when the member enters and freed
         // when it leaves.  Both the SessionStart player_entry and the world's
@@ -601,8 +607,8 @@ public:
             end_physics_session(session, "simulation failed: " + reason);
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
-        Printf("Physics sessions enabled (game root %s, input delay %u ticks, snapshot interval %u).",
-                config_.physics_game_root, rc.input_delay, rc.snapshot_interval);
+        Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
+               "snapshot interval %u).", config_.physics_game_root, config_.physics_input_delay, rc.snapshot_interval);
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -632,11 +638,36 @@ public:
         return order;
     }
 
+    // The worst case among the members: the session's clock is one clock for
+    // everyone, so the slack has to suit the member whose input has the
+    // furthest to come.  `physics.input_delay` is the floor, for a link too
+    // good (or too new) to have shown its latency yet.
+    uint32_t session_input_delay(const bmmo::server_room& r) {
+        int worst = 0;
+        std::string detail;
+        for (const auto& m: r.members) {
+            SteamNetConnectionRealTimeStatus_t status{};
+            interface_->GetConnectionRealTimeStatus(m.id, &status, 0, nullptr);
+            auto it = clients_.find(m.id);
+            const int peak = it == clients_.end() ? 0 : it->second.ping_peak_ms;
+            const int ping = std::max(status.m_nPing < 0 ? 0 : status.m_nPing, peak);
+            if (it != clients_.end())
+                it->second.ping_peak_ms = static_cast<uint16_t>(std::min(ping, 65535));
+            worst = std::max(worst, ping);
+            detail += Sprintf("%s%s %d ms", detail.empty() ? "" : ", ", get_client_name(m.id), ping);
+        }
+        const uint32_t delay = bmmo::session::input_delay_for_ping(worst, config_.physics_input_delay);
+        Printf("Room %u: input delay %u ticks (%.0f ms) for a worst round trip of %d ms (%s).",
+               r.id, delay, delay * 1000.0 / 66.0, worst, detail.c_str());
+        return delay;
+    }
+
     uint32_t start_physics_session(const bmmo::server_room& r, const bmmo::map& map) {
         physics_session_state s;
         s.id = next_session_id_++;
         s.room = r.id;
         s.map = map;
+        s.input_delay = session_input_delay(r);
         for (const auto& m: r.members) {
             s.members.push_back(m.id);
             client_session_[m.id] = s.id;
@@ -647,8 +678,9 @@ public:
         std::vector<std::pair<uint32_t, uint8_t>> players;
         players.reserve(s.members.size());
         for (const auto m: s.members) players.emplace_back(m, s.join_orders[m]);
+        const uint32_t input_delay = s.input_delay;
         physics_sessions_.emplace(id, std::move(s));
-        runner_->create_session(id, map.level, players);
+        runner_->create_session(id, map.level, players, input_delay);
         return id;
     }
 
@@ -686,7 +718,7 @@ public:
         msg.map = s.map;
         msg.tick_rate = 66;
         msg.snapshot_interval = static_cast<uint8_t>(std::min<uint32_t>(255, std::max<uint32_t>(1, config_.physics_snapshot_interval)));
-        msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, config_.physics_input_delay));
+        msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, s.input_delay));
         msg.first_tick = first_tick;
         msg.seed = 1;
         msg.spawn_impulse = s.spawn_impulse;
@@ -836,7 +868,7 @@ public:
     }
 
     uint32_t late_tick_base(const physics_session_state& s) const {
-        return runner_->current_tick(s.id) + std::max<uint32_t>(1, config_.physics_input_delay) + 2;
+        return runner_->current_tick(s.id) + std::max<uint32_t>(1, s.input_delay) + 2;
     }
 
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick) {
@@ -2479,11 +2511,12 @@ protected:
         if (ping_data_counter_ >= bmmo::PING_INTERVAL_TICKS) {
             bmmo::latency_data_msg ping_msg{};
             ping_msg.data.reserve(clients_.size());
-            for (const auto& i: clients_) {
+            for (auto& i: clients_) {
                 SteamNetConnectionRealTimeStatus_t status{};
                 interface_->GetConnectionRealTimeStatus(i.first, &status, 0, nullptr);
-                ping_msg.data.try_emplace(i.first,
-                        (uint16_t) std::min(status.m_nPing, (int) std::numeric_limits<uint16_t>::max()));
+                const auto ping = (uint16_t) std::min(status.m_nPing, (int) std::numeric_limits<uint16_t>::max());
+                i.second.ping_peak_ms = std::max(i.second.ping_peak_ms, ping);
+                ping_msg.data.try_emplace(i.first, ping);
             }
             ping_msg.serialize();
             ping_data_counter_ = 0;

@@ -84,6 +84,23 @@ TEST(TickScheduler, DeadlinesFollowInputDelay) {
     EXPECT_GT(scheduler.until_due(start), tick_scheduler::clock::duration::zero());
 }
 
+TEST(InputDelayForPing, CoversOneWayPlusJitterAndRespectsTheFloor) {
+    // A link with no measurable latency still gets the floor.
+    EXPECT_EQ(input_delay_for_ping(0, 6), 6u);
+    EXPECT_EQ(input_delay_for_ping(0, 0), 2u);   // margin alone, rounded up
+    // 100 ms round trip: 50 ms one way, 75 ms with the jitter allowance, plus
+    // the 16 ms margin = 91 ms = 7 ticks - above the floor, so it wins.
+    EXPECT_EQ(input_delay_for_ping(100, 6), 7u);
+    // Bigger round trips keep scaling, and the floor stops mattering.
+    EXPECT_EQ(input_delay_for_ping(200, 6), 11u);
+    EXPECT_EQ(input_delay_for_ping(400, 6), 21u);
+    EXPECT_GT(input_delay_for_ping(300, 6), input_delay_for_ping(150, 6));
+    // Never below the floor, never past the cap, never confused by a negative.
+    EXPECT_EQ(input_delay_for_ping(10, 12), 12u);
+    EXPECT_EQ(input_delay_for_ping(100000, 6), kInputDelayMaxTicks);
+    EXPECT_EQ(input_delay_for_ping(-1, 6), 6u);
+}
+
 TEST(TickScheduler, LateJoinerTickIncludesMargin) {
     tick_scheduler scheduler;
     const auto start = tick_scheduler::clock::time_point(0s);

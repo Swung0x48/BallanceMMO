@@ -34,7 +34,7 @@ namespace bmmo::sim {
     struct runner_config {
         bool trace = false;                 // world_options::trace
         std::filesystem::path game_root;
-        uint32_t input_delay = 6;
+        uint32_t input_delay = 6;           // floor; each session sizes its own from ping
         uint32_t snapshot_interval = 2;
         uint32_t full_snapshot_interval = 66;
         uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
@@ -89,7 +89,10 @@ namespace bmmo::sim {
         // Boots a world for the level; on_world_ready follows.  Each player is
         // paired with its join order (design 9.10): the world's per-player
         // slot and the spawn direction table both key off it.
-        void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players);
+        // `input_delay` is this session's, sized by the caller from the
+        // members' round trips; 0 falls back to the runner's configured floor.
+        void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
+                            uint32_t input_delay = 0);
         void destroy_session(uint32_t session);
         void add_player(uint32_t session, uint32_t player, uint8_t join_order);
         void remove_player(uint32_t session, uint32_t player);
@@ -126,6 +129,7 @@ namespace bmmo::sim {
             std::map<uint32_t, bmmo::session::input_buffer> inputs;
             std::map<uint32_t, uint32_t> acked;
             std::vector<pending_event> events;   // sorted by tick on insertion
+            uint32_t input_delay = 0;   // ticks of grace this session gives inputs
             bmmo::session::tick_scheduler scheduler;
             bmmo::session::snapshot_cadence cadence;
             bool running = false;

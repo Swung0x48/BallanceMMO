@@ -25,6 +25,37 @@ namespace bmmo::session {
         return std::chrono::microseconds(static_cast<int64_t>(tick) * 1000000 / 66);
     }
 
+    // How long a session may make the server wait for a tick's inputs, in
+    // ticks, for a link whose worst observed round trip is `ping_ms`.
+    //
+    // The server simulates tick T at the latest input_delay tick lengths after
+    // T's nominal time (tick_scheduler::deadline), and the client runs its own
+    // clock from the same anchor, so what has to fit inside that window is one
+    // trip from the client, not a round trip.
+    //
+    // Half again on top, because what decides whether an input is late is the
+    // jitter, not the average: a path with a 20 ms median and 200 ms
+    // excursions misses far more deadlines than its mean suggests, and a
+    // round trip - even the worst one seen - is a smoothed number that does
+    // not show those excursions.  Plus one tick, so a link with no measurable
+    // latency at all still gets the scheduler's own granularity as slack.
+    inline constexpr int kInputDelayJitterPercent = 150;
+    inline constexpr int kInputDelayMarginMs = 16;
+    // Beyond this the corrections are further back than the rollback history
+    // is worth keeping, and the session is not playable anyway.
+    inline constexpr uint32_t kInputDelayMaxTicks = 40;
+
+    inline uint32_t input_delay_for_ping(int ping_ms, uint32_t floor_ticks) {
+        if (ping_ms < 0) ping_ms = 0;
+        const int64_t budget_ms = static_cast<int64_t>(ping_ms) * kInputDelayJitterPercent / (2 * 100)
+                                + kInputDelayMarginMs;
+        const int64_t ticks = (budget_ms * 66 + 999) / 1000;   // round up to whole ticks
+        uint32_t delay = static_cast<uint32_t>(ticks < 0 ? 0 : ticks);
+        if (delay < floor_ticks) delay = floor_ticks;
+        if (delay > kInputDelayMaxTicks) delay = kInputDelayMaxTicks;
+        return delay;
+    }
+
     class input_buffer {
     public:
         // Inputs a client may send ahead of the server (ticks further in the

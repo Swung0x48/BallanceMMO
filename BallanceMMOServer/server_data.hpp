@@ -18,6 +18,12 @@ struct client_data {
     uint8_t uuid[16]{};
     int64_t login_time{};
     std::map<std::string, std::string> mods;   // ModList at login (physics session whitelist)
+    // Worst round trip GNS has reported for this connection, in milliseconds.
+    // A physics session sizes its input delay from this rather than from the
+    // ping of the moment: what makes an input late is the bad minute, not the
+    // average one.  Sampled with the periodic latency broadcast and again
+    // whenever a session starts.
+    uint16_t ping_peak_ms = 0;
 };
 
 struct map_data {

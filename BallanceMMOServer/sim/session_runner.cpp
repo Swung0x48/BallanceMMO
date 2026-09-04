@@ -69,12 +69,14 @@ namespace bmmo::sim {
     }
 
     void session_runner::create_session(uint32_t session, int level,
-                                        const std::vector<std::pair<uint32_t, uint8_t>>& players) {
-        post([this, session, level, players] {
+                                        const std::vector<std::pair<uint32_t, uint8_t>>& players,
+                                        uint32_t input_delay) {
+        post([this, session, level, players, input_delay] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
             s->level = level;
+            s->input_delay = input_delay ? input_delay : config_.input_delay;
             {
                 std::lock_guard lk(view_mutex_);
                 views_[session] = view{};
@@ -172,7 +174,7 @@ namespace bmmo::sim {
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
-                s.scheduler.start(clock::now(), s.world->tick_index(), config_.input_delay);
+                s.scheduler.start(clock::now(), s.world->tick_index(), s.input_delay);
                 s.running = true;
                 {
                     std::lock_guard lk(view_mutex_);
@@ -195,7 +197,7 @@ namespace bmmo::sim {
             s.inputs[player].reset(first_tick);
             if (s.running) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
-                s.scheduler.start(clock::now(), s.world->tick_index(), config_.input_delay);
+                s.scheduler.start(clock::now(), s.world->tick_index(), s.input_delay);
                 s.running = true;
                 {
                     std::lock_guard lk(view_mutex_);

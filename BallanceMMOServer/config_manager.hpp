@@ -50,7 +50,8 @@ public:
     bool physics_enabled = false;
     std::string physics_game_root;                 // directory containing base.cmo
     uint32_t physics_snapshot_interval = 2;        // ticks between snapshots
-    uint32_t physics_input_delay = 6;              // ticks the server waits for late inputs
+    uint32_t physics_input_delay = 6;              // floor for the per-session input delay;
+                                                   // the value itself comes from the members' ping
     uint32_t maximum_physics_rooms = 1;
     bool physics_debug_trace = false;              // per-tick diagnostics in the log (see world_options::trace)
     uint32_t physics_event_rate_limit = 20;        // client lifecycle events per second per player; 0 = no limit
