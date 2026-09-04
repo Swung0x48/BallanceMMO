@@ -298,6 +298,58 @@ with the reimplementation's own algorithm, so a headless result is unchanged:
 `rec_m3b.bmrc` still replays 4169/4169, and the explosion and spawn traces of
 design 9.10 are byte-identical before and after.
 
+## 11. Float accumulation order matched to the game's VxMath (VxMath)
+
+Files: `Source/VxMath/include/VxMatrix.inl` (`Vx3DMultiplyMatrix`,
+`Vx3DMultiplyMatrix4` and the SSE kernels `VxSIMDMultiplyMatrixM`,
+`VxSIMDMultiplyMatrixM4`), `Source/VxMath/include/VxSIMD.inl`
+(`VxSIMDMatrixMultiplyVector3`, `VxSIMDMatrixRotateVector3`).
+
+`CK3dEntity` is implemented in `CK2_3D.dll`, not in `CK2.dll`, and it derives
+a child's local matrix as parent-inverse times child-world through
+`Vx3DMultiplyMatrix` — a call that lands in the game's `VxMath.dll`. Float
+addition is not associative, and the two implementations grouped the four
+products differently: the reimplementation summed them left to right, the
+shipped DLL sums them pairwise, `(p0+p1)+(p2+p3)`. One or two ulp per element,
+which is exactly the size of the mechanism drift that had resisted every
+earlier explanation.
+
+Determined by measurement rather than by reading. The harness (`scripts/vxmath_diff`) loads the shipped `VxMath.dll` with `LoadLibrary` so its symbols
+never collide with the reimplementation's identically named inline versions,
+sets the x87 control word to the 24-bit precision the client actually runs at
+(`000a001f`), checks that both sides agree on storage and operand order, and
+then exhausts every ordering of the four products against the real DLL.
+Exactly one grouping survives 60000 random matrix pairs. The same method
+showed the two vector transforms accumulate left to right, which the scalar
+reimplementation already did but its SSE kernels did not. Those kernels are
+now written with explicit `_mm_mul_ps` / `_mm_add_ps` instead of the
+`VX_FMADD_PS` macro, so an FMA-enabled build cannot fuse a rounding step away
+and drift from both the shipped DLL and the scalar path.
+
+Evidence (2026-09-03), the 13-level mechanism sweep of design 9.11. Before:
+levels 3, 7, 8, 9, 10, 11 and 13 diverged from the client recording. After:
+3, 7, 8, 9 and 13 match for their whole run, 10 and 11 remain, and every case
+that already matched still does — levels 1, 2, 4, 5, 6, 12, the `rec_m3b`
+gameplay replay and all three explosions. Windows x64, Windows x86, Linux
+x86_64 and Android arm64 produce identical engine state on all 17 cases both
+before and after. After the change the four functions are bit-identical to the
+shipped DLL over 200000 inputs of both random and Ballance-like shape.
+
+Note the direction of this change. The client keeps its retail `VxMath.dll`;
+the physics plugin links the Virtools SDK import library, so nothing shipped
+to players changed. Only the reimplementation moved, to match the binary the
+game already runs.
+
+Measured and still different, so far unreconciled: `Vx3DInverseMatrix`,
+`VxVector::Normalize`, `VxQuaternion::FromMatrix`, `Vx3DDecomposeMatrix`,
+`Vx3DInterpolateMatrix` and `Vx3DMatrixFromRotation`. Thirty-six plausible
+formulations of the inverse were tried against the shipped DLL and none
+reproduced it, so that one uses a different algorithm, not merely a different
+rounding order. `Vx3DMatrixFromRotation` is not a rounding difference at all:
+the shipped function returns the transpose of the reimplementation's result
+and its sine and cosine carry only about four correct digits, so anything
+that comes to depend on it needs its own investigation first.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

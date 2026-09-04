@@ -473,3 +473,25 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 Level 10 另有一次第 7 帧的哈希差异，那时可动 core 的精确状态两端完全相同，差的是环境量（固定节拍刚启用时的平滑 delta），属于录制起点的时序噪声，不是机关问题。
 
 **工具.** 客户端自动化命令 `sector <n>`（激活分节）、`beam <x> <y> <z>`（把当前球瞬移到机关上方砸下去）、`entity <name>`（实体矩阵）；SimTool 对应 `--sector N FRAME`、`--beam X Y Z FRAME`、`--dump-entity NAME`。脚本 `<scratchpad>/mech_check.py` 把"录制—激活分节—回放—比对"串成一条命令。
+
+> 上面"需要客户端也换用 BMMO 编译的 CK2/VxMath"的判断，在 9.12 里被推翻了：方向对（确实是 CK 侧的矩阵推导），落点错（不在 CK2），而且一个 DLL 都不用换。
+
+### 9.12 定位并消除重实现与原版 VxMath 的求和顺序差异
+
+**落点错在哪.** `CK3dEntity` 根本不在 `CK2.dll` 里。原版整套 DLL 没有任何一个导出 `CK3dEntity::GetScale` / `SetWorldMatrix`——它们在 SDK 头里是 `CK_PURE` 纯虚，实现随类注册一起放在 `RenderEngines/CK2_3D.dll`；fork 里对应的也正是 `Source/RenderEngine/src/CK3dEntity.cpp`。而 CK2_3D 自己不算矩阵：推导子物体局部矩阵那一步是 `Vx3DMultiplyMatrix(child->m_LocalMatrix, parentInverse, child->m_WorldMatrix)`，一个 **VxMath.dll 的导出函数**。真正握着分叉的库是 VxMath，不是 CK2。
+
+**差在哪.** 浮点加法不满足结合律。四个乘积 `p_k = A[k][j]*B[i][k]`，重实现从左往右累加 `((p0+p1)+p2)+p3`，原版两两相加 `(p0+p1)+(p2+p3)`。每个元素差 1–2 ulp，正好是机关漂移的量级。
+
+**怎么确定的：量出来的，不是读出来的.** `scripts/vxmath_diff` 用 `LoadLibrary` 按修饰名加载原版 `VxMath.dll`（不能链接导入库，否则它的符号会和 fork 同名的 inline 版本在同一映像里撞车），把 x87 控制字设成客户端实际运行的 24 位精度（`000a001f`），先用单位阵／平移阵／缩放阵确认两边对存储顺序和操作数顺序的理解一致，再穷举四个乘积的全部求和顺序去对原版。6 万对随机矩阵下只剩一种分组存活。两个向量变换用同样办法测出原版是从左往右——重实现的标量路径本来就对，是它的 SSE 内核折反了方向。
+
+**改动（引擎改动 #11）.** `Vx3DMultiplyMatrix` / `Vx3DMultiplyMatrix4` 的标量与 SSE 路径改成两两相加，`VxSIMDMatrixMultiplyVector3` / `VxSIMDMatrixRotateVector3` 改成从左往右。SSE 一律写成显式 `_mm_mul_ps` / `_mm_add_ps`，不再用 `VX_FMADD_PS`，免得开了 FMA 的构建把一次舍入融掉。改完这四个函数在 20 万组输入（随机的和 Ballance 形状的各一半）上与原版逐位相同。
+
+**方向.** 客户端一个字节都没动，仍然用原版 `VxMath.dll`（physics_RT 链接的是 Virtools SDK 导入库）；是重实现向已经发行的二进制靠拢。
+
+**结果.** 13 关机关扫描：3、7、9、13（摇篮转臂）和 8（秋千）全程逐位一致，原先一致的关卡一个都没退化，只剩 10 和 11。四个平台（Windows x64 / Windows x86 / Linux x86_64 / Android arm64）在改动前后都是 17 个用例逐帧完全相同。
+
+**为什么最终没有换库.** "换 VxMath.dll"这条路也量了一遍，比预期贵得多。fork 把 `Vx3D*` 系列做成了头文件 inline，`VxMath.dll` 一个都不导出，而游戏其余模块实际 import 了其中 168 个符号，全得补成导出转发；`CK2.dll` 同样缺 219 个（135 个只是 `char*` 变 `const char*`、返回类型 `CKERROR` 变 `int` 这类签名漂移，另外 84 个另有原因）。更要紧的是 fork 的 VxMath 与原版还有**语义**差异，不只是舍入：`Vx3DMatrixFromRotation` 的结果与原版互为转置，且原版的正余弦只有约四位有效数字；`Vx3DInterpolateMatrix` 在 step=0 时两边返回的都不是同一个端点。把这样一个 VxMath 塞进原版游戏，会改掉物理之外的行为。
+
+**仍然不同的函数.** `Vx3DInverseMatrix`（`GetInverseWorldMatrix` 会用）、`VxVector::Normalize`、`VxQuaternion::FromMatrix`、`Vx3DDecomposeMatrix`、`Vx3DInterpolateMatrix`、`Vx3DMatrixFromRotation`。求逆试了 36 种写法（余子式用 float 还是 double、行列式三项的求和顺序、倒数取 float 还是 double、最后一次乘法在哪个精度）都没对上，说明原版用的是另一套算法，而不只是另一种舍入顺序。Level 11 剩下的分叉仍在秋千上；Level 10 是第 7 帧 `P_Modul_01` 物理化时的老问题（匹配帧数从 2837 涨到 4210，首帧分叉位置未变）。
+
+**四平台基线.** `scripts/determinism_baseline.py <tag>` 在一个引擎构建上跑固定的 17 个用例（13 关机关扫描 + `rec_m3b` 游玩回放 + 三种爆炸），把每帧的引擎自身状态（世界哈希、活动 core 数、IVP 时钟与种子、movement-check 计数、下次 PSI 时刻、位姿是否与客户端一致）压成一行；`scripts/compare_platforms.py` 跨平台比对。这套基线是改动前后判断"有没有退化"的依据，也是以后任何引擎改动的第一道关。
