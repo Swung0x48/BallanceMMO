@@ -374,6 +374,43 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         if (rest.find("all") != std::string::npos) return "ok " + physics_view_.describe_physics_objects();
         return "ok " + physics_view_.describe_movable_objects();
     }
+    if (verb == "sector") {
+        // sector <n>: activate that sector's mechanisms the way the server's
+        // world does, so a later sector's bodies exist without playing the
+        // level.  The headless replay does the same with --sector at the same
+        // frame, which is how the mechanisms are checked for bit-exactness.
+        int sector = std::atoi(rest.c_str());
+        if (sector < 1) return "error usage: sector <n>";
+        auto* context = m_bml->GetCKContext();
+        CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
+        CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
+        if (!parameters || !manager) return "error IngameParameter or Gameplay_SectorManager missing";
+        int none = 0;
+        parameters->SetElementValue(0, 2, &none, sizeof(none));
+        parameters->SetElementValue(0, 1, &sector, sizeof(sector));
+        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+        return std::format("ok sector {} activated at frame {}", sector, record_frames_);
+    }
+    if (verb == "beam") {
+        // beam <x> <y> <z>: put the current ball there at rest, so it falls
+        // onto a mechanism.  The headless replay does the same with --beam at
+        // the same frame.
+        std::istringstream args(rest);
+        double x = 0, y = 0, z = 0;
+        if (!(args >> x >> y >> z)) return "error usage: beam <x> <y> <z>";
+        std::string error;
+        if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
+            return "error " + error;
+        CK3dObject* ball = get_current_ball();
+        if (!ball || !ball->GetName()) return "error no current ball";
+        const double position[3] = {x, y, z};
+        const double upright[4] = {0.0, 0.0, 0.0, 1.0};
+        const float still[3] = {0.0f, 0.0f, 0.0f};
+        if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))
+            return "error " + error;
+        return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}", ball->GetName(), x, y, z,
+                           record_frames_);
+    }
     if (verb == "array") {
         // array <name>: every cell of a CKDataArray (diagnostics).
         std::string name = rest;

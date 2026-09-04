@@ -71,6 +71,13 @@ namespace {
         long long exact_to = -1;
         std::string dump_array;        // --dump-array NAME: print every cell of a CKDataArray
         std::string dump_entity;       // --dump-entity NAME: world matrix of a 3D entity at --dump-at (replay: before and after that frame)
+        // --beam X Y Z FRAME: put the current ball there at rest before that
+        // replay frame, mirroring the client automation verb "beam", so a
+        // mechanism can be hit the same way on both engines.
+        double beam_at[3] = {};
+        long long beam_frame = -1;
+        // --sector N FRAME, repeatable: activate that sector before that frame
+        std::vector<std::pair<int, long long>> sectors;
         std::string list_scripts;      // --list-scripts SUBSTR: every root script whose name or owner matches
         std::string dump_script;       // print this script's whole graph (blocks, parameters, links)
         int dump_at = -1;              // tick at which to dump (-1: after the run)
@@ -155,6 +162,15 @@ namespace {
             }
             else if (arg == "--dump-array") { if (!(v = next())) return false; out.dump_array = v; }
             else if (arg == "--dump-entity") { if (!(v = next())) return false; out.dump_entity = v; }
+            else if (arg == "--sector") {
+                int sector = 0;
+                if (!(v = next())) return false; sector = std::atoi(v);
+                if (!(v = next())) return false; out.sectors.emplace_back(sector, std::atoll(v));
+            }
+            else if (arg == "--beam") {
+                for (double& k: out.beam_at) { if (!(v = next())) return false; k = std::atof(v); }
+                if (!(v = next())) return false; out.beam_frame = std::atoll(v);
+            }
             else if (arg == "--list-scripts") { if (!(v = next())) return false; out.list_scripts = v; }
             else if (arg == "--dump-script") { if (!(v = next())) return false; out.dump_script = v; }
             else if (arg == "--dump-at") { if (!(v = next())) return false; out.dump_at = std::atoi(v); }
@@ -628,6 +644,33 @@ namespace {
                 }
             };
             dump_entities("before");
+            for (const auto& [sector, at]: args.sectors) {
+                if (at != static_cast<long long>(frame)) continue;
+                CKDataArray* parameters = engine.data_array("IngameParameter");
+                CKBehavior* manager = bmmo::game::find_root_script(engine.context(), "Gameplay_SectorManager");
+                if (!parameters || !manager) {
+                    std::fprintf(stderr, "sector: IngameParameter or Gameplay_SectorManager missing\n");
+                    return 2;
+                }
+                int none = 0, activate = sector;
+                parameters->SetElementValue(0, 2, &none, sizeof(none));
+                parameters->SetElementValue(0, 1, &activate, sizeof(activate));
+                if (CKScene* scene = engine.context()->GetCurrentScene()) scene->Activate(manager, TRUE);
+                std::fprintf(stderr, "sector: %d activated before replay frame %zu\n", sector, frame);
+            }
+            if (args.beam_frame >= 0 && static_cast<long long>(frame) == args.beam_frame) {
+                CKDataArray* level = engine.data_array("CurrentLevel");
+                CK3dEntity* ball = level ? CK3dEntity::Cast(level->GetElementObject(0, 1)) : nullptr;
+                const double upright[4] = {0.0, 0.0, 0.0, 1.0};
+                const float still[3] = {0.0f, 0.0f, 0.0f};
+                if (!ball || !bmmo::physics::set_body_state(engine.physics(), ball->GetName(), args.beam_at, upright,
+                                                            still, still, true, error)) {
+                    std::fprintf(stderr, "beam failed at frame %zu: %s\n", frame, error.c_str());
+                    return 2;
+                }
+                std::fprintf(stderr, "beam: %s to (%.3f,%.3f,%.3f) before replay frame %zu\n", ball->GetName(),
+                             args.beam_at[0], args.beam_at[1], args.beam_at[2], frame);
+            }
             engine.set_keyboard_state(expected.keys.data());
             const long long frame_index = static_cast<long long>(frame);
             if (args.debug_from >= 0 && frame_index >= args.debug_from && frame_index <= args.debug_to) {

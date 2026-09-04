@@ -273,6 +273,31 @@ the `--explode` traces stay identical across the x64, x86 and Linux headless
 builds. Nothing else calls it, so no other body's hull changes;
 `rec_m3b.bmrc` still replays 4169/4169.
 
+## 10. Geometry the physics consumes is derived in the plugin (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.cpp` / `.h` (new
+`PhysicsScaleFromMatrix`, `PhysicsAxisFromMatrix`, used by
+`CreatePhysicsObjectOnParameters` and `UpdateObjectWorldMatrix`),
+`Source/BuildingBlocks/physics_RT/Behaviors/PhysicsHinge.cpp`.
+
+`CK3dEntity::GetScale` and `CK3dEntity::GetOrientation` do not return stored
+data: they take the length of a world- or local-matrix row, which means a
+square root, and `GetOrientation` divides by it. A level's matrix rows are
+never exactly unit length, so the game's `VxMath.dll` and a reimplementation
+differ in the last bit. What the physics does with those numbers is not
+cosmetic: the scale multiplies every mesh vertex before a collision hull is
+compiled, and the orientation *is* the axis of a `Set Physics Hinge`
+constraint, so a hinged mechanism swings differently from its first frame.
+
+Evidence (2026-09-03): Level 8's tilting board `P_Modul_30_Wippe`, a hinged
+body that simulates from level start, diverged between the game and the
+headless replay at frame 64, in the last bit of one velocity component, with
+its position still identical; Level 9 diverged the same way at frame 534.
+Both are gone with this change. The three quantities are now computed here,
+with the reimplementation's own algorithm, so a headless result is unchanged:
+`rec_m3b.bmrc` still replays 4169/4169, and the explosion and spawn traces of
+design 9.10 are byte-identical before and after.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
