@@ -70,8 +70,8 @@ namespace bmmo::sim {
 
     void session_runner::create_session(uint32_t session, int level,
                                         const std::vector<std::pair<uint32_t, uint8_t>>& players,
-                                        uint32_t input_delay) {
-        post([this, session, level, players, input_delay] {
+                                        uint32_t input_delay, float spawn_impulse) {
+        post([this, session, level, players, input_delay, spawn_impulse] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
@@ -86,7 +86,7 @@ namespace bmmo::sim {
             options.level = level;
             options.seed = config_.seed;
             options.trace = config_.trace;
-            options.spawn_impulse = config_.spawn_impulse;
+            options.spawn_impulse = spawn_impulse;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };

@@ -39,7 +39,6 @@ namespace bmmo::sim {
         uint32_t full_snapshot_interval = 66;
         uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
         int seed = 1;
-        float spawn_impulse = 0.0f;         // world_options::spawn_impulse (design 9.10)
     };
 
     struct session_snapshot {
@@ -91,8 +90,12 @@ namespace bmmo::sim {
         // slot and the spawn direction table both key off it.
         // `input_delay` is this session's, sized by the caller from the
         // members' round trips; 0 falls back to the runner's configured floor.
+        // `spawn_impulse` is this session's kick speed in metres per second -
+        // the same number session_start_msg carries to every member, so the
+        // world is built with what the clients were told.  The runner has no
+        // copy of its own: there is nowhere else for the world to get it.
         void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
-                            uint32_t input_delay = 0);
+                            uint32_t input_delay, float spawn_impulse);
         void destroy_session(uint32_t session);
         void add_player(uint32_t session, uint32_t player, uint8_t join_order);
         void remove_player(uint32_t session, uint32_t player);

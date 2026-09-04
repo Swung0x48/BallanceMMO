@@ -922,7 +922,12 @@ void BallanceMMOClient::physics_session_check_own_body(const bmmo::session_snaps
     event.tick = s.current_tick() + 1;
     event.type = bmmo::session::event_type::Physicalize;
     event.ball_type = s.last_physicalize.ball_type;
-    event.flags = s.last_physicalize.flags;   // resent unchanged; no second impulse here
+    // The spawn bit is what makes a Physicalize kick the ball, and this one is
+    // a resend of a body that was already kicked (or deliberately was not):
+    // leaving the bit set had the server kick the re-created body while the
+    // client, correctly, did not.  Everything else about the event is resent
+    // unchanged.
+    event.flags = static_cast<uint8_t>(s.last_physicalize.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
     const VxMatrix& world = ball->GetWorldMatrix();
     for (int k = 0; k < 3; ++k) event.position[k] = world[3][k];
     for (int r = 0; r < 3; ++r)

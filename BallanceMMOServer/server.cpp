@@ -593,7 +593,6 @@ public:
         rc.input_delay = config_.physics_input_delay;
         rc.snapshot_interval = std::max<uint32_t>(1, config_.physics_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
-        rc.spawn_impulse = config_.physics_spawn_impulse;
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
@@ -673,14 +672,21 @@ public:
             client_session_[m.id] = s.id;
             assign_join_order(s, m.id);
         }
+        // Design 9.10: one number for the whole session - the world is built
+        // with it and every SessionStart carries it.  Decided here, before the
+        // world exists, because world_options is frozen at create_session: a
+        // member joining or leaving during the world's boot must not be able
+        // to move it out from under the clients that were already told.
+        s.spawn_impulse = s.members.size() > 1 ? config_.physics_spawn_impulse : 0.0f;
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
         players.reserve(s.members.size());
         for (const auto m: s.members) players.emplace_back(m, s.join_orders[m]);
         const uint32_t input_delay = s.input_delay;
+        const float spawn_impulse = s.spawn_impulse;
         physics_sessions_.emplace(id, std::move(s));
-        runner_->create_session(id, map.level, players, input_delay);
+        runner_->create_session(id, map.level, players, input_delay, spawn_impulse);
         return id;
     }
 
@@ -754,9 +760,8 @@ public:
         s.ball_rows = info.ball_rows;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
         for (int k = 0; k < 4; ++k) s.spawn_rotation[k] = info.spawn_rotation[k];
-        // Fixed for the session's lifetime (design 9.10) so a late joiner gets
-        // the same value; a solo session stays bit-exact with a solo recording.
-        s.spawn_impulse = s.members.size() > 1 ? config_.physics_spawn_impulse : 0.0f;
+        // s.spawn_impulse was fixed in start_physics_session, together with
+        // the world's, and does not move for the session's lifetime.
         for (const auto m: s.members) send_session_start(s, m, 0);
         Printf("Physics session %u: world ready (anchor %016llx), SessionStart sent to %zu players.",
                 s.id, static_cast<unsigned long long>(s.anchor_hash), s.members.size());
