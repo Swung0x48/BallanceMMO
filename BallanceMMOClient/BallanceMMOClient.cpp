@@ -1071,6 +1071,20 @@ void BallanceMMOClient::init_commands() {
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         push_room_request(pending);
     });
+    // Any automation verb from the in-game command bar: "/mmo auto record
+    // start D:/rec/a.bmrc 2".  Same dispatcher as the command file and the
+    // pipe, on the same thread (OnFullCommand is already on the game one), and
+    // the answer goes to the chat instead of "<command file>.out" - so a run
+    // can be recorded, marked and inspected without a second window.
+    console_.register_command("auto", [&] {
+        const auto line = console_.get_rest_of_line();
+        if (line.empty()) {
+            SendIngameMessage("Usage: /mmo auto <automation command>, e.g. "
+                              "\"/mmo auto record start D:/rec/a.bmrc 2\" or \"/mmo auto status\".");
+            return;
+        }
+        SendIngameMessage(dispatch_automation_command(line));
+    });
     console_.register_command("dnf", [&] {
         if (current_map_.level == 0 || spectator_mode_)
             return;
@@ -1461,6 +1475,19 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                     });
                     return options;
                 }
+            }
+            else if (lower1 == "auto") {
+                // The verbs of dispatch_automation_command (client_automation.cpp).
+                if (length == 3)
+                    return {"status", "session", "record", "replay", "level", "entity", "objects", "physobjs",
+                            "physview", "sector", "beam", "explode", "activate", "screenshot", "panel", "key",
+                            "array", "script", "scripts", "message", "rng", "physlog", "physdump", "fixedtick",
+                            "exactframes", "fpu53", "ping", "quit"};
+                const auto sub = boost::algorithm::to_lower_copy(args[2]);
+                if (length == 4 && (sub == "record" || sub == "replay")) return {"start", "stop"};
+                if (length == 4 && sub == "explode") return {"wood", "paper", "stone"};
+                if (length == 4 && sub == "session") return {"trace", "rollback"};
+                if (length == 5 && sub == "session") return {"on", "off"};
             }
             else if (lower1 == "mode")
                 return {"hs", "sr"};

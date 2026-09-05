@@ -69,9 +69,10 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 ### 3.6 自动化命令通道
 
-自动化命令有两条等价通道，命令集相同（`ping`/`status`/`physview`/`physobjs`/`level N`/`key`/`record`/`quit` 等），都在游戏线程的 OnProcess 里派发：
+自动化命令有三条等价通道，命令集相同（`ping`/`status`/`physview`/`physobjs`/`level N`/`key`/`record`/`quit` 等），都在游戏线程派发：
 
 - **命名管道**（`BMMO_COMMAND_PIPE`）：交互式使用，一问一答。
+- **游戏内命令栏**：`/mmo auto <自动化命令>`（如 `/mmo auto record start D:/rec/a.bmrc 2`），走同一个 `dispatch_automation_command`，回答直接发到聊天/日志。自己手动跑一段再标注问题时不用再开第二个窗口；`OnFullCommand` 本来就保证在游戏线程上执行。
 - **命令文件**（`BMMO_COMMAND_FILE`，缺省 `Bin/bmmo_command.txt`）：更稳的回退方式。每帧若文件存在则读取整份、逐行派发、把结果写入同目录 `<file>.out` 和 BML 日志（`CommandFile: <cmd> -> <resp>`），随后删除该文件。派发在 OnProcess 最前面执行，即使后续逻辑抛异常也不受影响，因此既能驱动游戏又能用日志观察是否按预期工作。
 
 
