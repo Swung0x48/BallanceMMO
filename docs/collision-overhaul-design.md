@@ -593,3 +593,12 @@ BallanceMMOSimTool --root <game> --level 2 --level-at 30 --ticks 615 \
 改动后两跑的 20 个球体刚体位置与两次爆炸的 215 个 `pose` 哈希逐位相同。单次
 `--explode` 的输出、`rec_m3b` 回放（4169/4169）、`--spawn-test 3` 与 82 个单元测试均
 不变。
+
+**线上实测（2026-09-04，okbc.st 服务端 + 本机原版客户端，Level 2 物理房间）.** 客户端
+自动化也补了对应的 `activate <root script>`（`explode` 只放爆炸，缺的就是变球流程稍后
+激活的 `Ball_ResetPieces_<type>`）。会话中依次：`explode wood`（球在 (19.2, 8.7,
+-152.9)）→ 碎片落在球周围；`activate Ball_ResetPieces_Wood` → 碎片实体回到初始条件
+(0.360, -1.002, -0.290)、`physobjs` 里只剩 `Ball_Wood`，**证明 De Physicalize 这次真的
+过去了**；把球开下去摔到 (90.8, -22.4, -136.0) 再 `explode wood` → 碎片出现在
+x≈85–115、z≈-122…-148，跟着球走，不再留在第一次的落点。整段会话 7142 个快照里 7096 个
+一致，46 次不符全部来自开局的装饰纸球（最大 2 cm），三次死亡复活都正常。

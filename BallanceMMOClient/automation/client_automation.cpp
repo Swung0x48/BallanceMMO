@@ -497,6 +497,16 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         script->Activate(TRUE, TRUE);
         return "ok explode " + type + " at frame " + std::to_string(record_frames_);
     }
+    if (verb == "activate") {
+        // activate <root script>: the SimTool's --activate.  The piece of the
+        // trafo sequence "explode" leaves out is Ball_ResetPieces_<type>
+        // (fade, De Physicalize, Restore IC), which is what gives the pieces
+        // back; a two-explosion check has to ask for it.
+        CKBehavior* script = bmmo::game::find_root_script(m_bml->GetCKContext(), rest.c_str());
+        if (!script) return "error no root script named " + rest;
+        script->Activate(TRUE, TRUE);
+        return "ok activate " + rest + " at frame " + std::to_string(record_frames_);
+    }
     if (verb == "record") {
         // record start <path-without-spaces> [level]   (level: what the
         // record is for when it starts before the level is loaded)
