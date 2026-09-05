@@ -470,8 +470,23 @@ void BallanceMMOClient::physics_session_frame() {
     const bool keys_were_known = s.navigation_keys_known;
     if (!s.navigation_keys_known) {
         auto graph = bmmo::game::read_navigation_graph(m_bml->GetCKContext());
-        bool complete = graph.valid();
-        for (const auto& leaf: graph.leaves) complete = complete && leaf.key != 0;
+        // Other mods graft SetPhysicsForce leaves of their own onto Ball
+        // Navigation (NewBallType's sticky ball, fly-up/fly-down helpers),
+        // driven by Key Events with no key bound.  They would keep "every leaf
+        // has a key" false for the whole session, and a session that never
+        // learns its keys never sends any: the server's copy of the ball then
+        // sits at the spawn while the player drives the local one (found by
+        // the session black box, design 9.15).  The server runs the unmodded
+        // script with four keyed leaves, so only those count: unbound leaves
+        // are dropped and the survivors renumbered in retail order, and the
+        // wait for Gameplay_Refresh to bind the retail four stays.
+        if (graph.valid()) {
+            graph.leaves.erase(std::remove_if(graph.leaves.begin(), graph.leaves.end(),
+                                              [](const bmmo::game::navigation_leaf& leaf) { return leaf.key == 0; }),
+                               graph.leaves.end());
+            for (size_t i = 0; i < graph.leaves.size(); ++i) graph.leaves[i].index = static_cast<int>(i);
+        }
+        const bool complete = graph.valid() && graph.leaves.size() >= 4;
         if (complete) {
             s.navigation = graph;
             s.navigation_keys_known = true;

@@ -430,6 +430,20 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             hash.physics_delta_time, hash.time_factor, physics_view_.dll_sha256(), physics_view_.build_id(),
             static_cast<unsigned>(m_bml->GetTimeManager()->GetMainTickCount()));
     }
+    if (verb == "navgraph") {
+        // What the session's key detection sees right now: the same reader
+        // physics_session_frame runs until every leaf has a key.  A session
+        // whose status says keys_known=0 is diagnosed here, not by guessing
+        // which mod rewired Ball Navigation.
+        const auto graph = bmmo::game::read_navigation_graph(m_bml->GetCKContext());
+        std::string out = std::format("ok valid={} error='{}' ball_navigation={} direction_ref={} leaves={}",
+                                      graph.valid() ? 1 : 0, graph.error, static_cast<unsigned>(graph.ball_navigation),
+                                      static_cast<unsigned>(graph.direction_ref), graph.leaves.size());
+        for (const auto& leaf: graph.leaves)
+            out += std::format(" [{}: order={} key={} dir=({:.0f},{:.0f},{:.0f}) force={:.2f}]", leaf.index, leaf.key_order,
+                               leaf.key, leaf.direction.x, leaf.direction.y, leaf.direction.z, leaf.force_value);
+        return out;
+    }
     if (verb == "physobjs") {
         std::string error;
         if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
