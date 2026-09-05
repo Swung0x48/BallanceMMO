@@ -116,6 +116,13 @@ void config_manager::init_config() {
     tmp_prop->SetComment("Disable all sound events. Not recommended but still here just in case this is needed.");
     tmp_prop->SetDefaultBoolean(false);
     props_["mute_everything"] = tmp_prop;
+    tmp_prop = config->GetProperty("Gameplay", "SessionJournal");
+    tmp_prop->SetComment("Record every physics session to ModLoader/BMMOJournals (inputs, events, snapshots, corrections) "
+                         "so a bug seen in play can be analysed afterwards. Read when a session starts, so a change here "
+                         "takes effect from the next one; \"/mmo journal on|off\" moves this same setting, and "
+                         "\"/mmo journal mark <text>\" leaves a note at the current tick.");
+    tmp_prop->SetDefaultBoolean(true);
+    props_["session_journal"] = tmp_prop;
 }
 
 void config_manager::load_external_config() {

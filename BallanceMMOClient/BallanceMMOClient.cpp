@@ -4,6 +4,7 @@
 // #include <fstream>
 #include "CommandMMO.h"
 #include "BallanceMMOClient.h"
+#include "session/session_journal_client.hpp"
 
 IMod* BMLEntry(IBML* bml) {
     BallanceMMOClient::init_socket();
@@ -715,6 +716,16 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
         ignore_forced_sounds_ = prop->GetBoolean();
         return;
     }
+    else if (prop == config_manager_["session_journal"]) {
+        // Purely local recording: without this branch the reconnect below would
+        // drop the running physics session (cleanup() ends it) just because a
+        // player unticked the black box in the mod menu.  Flipping the flag is
+        // the whole effect - the next session start reads the property again,
+        // and a file already open keeps recording to the end of its session
+        // (only "journal off" from the command bar closes one early).
+        bmmo::session::client_journal::instance().set_enabled(prop->GetBoolean());
+        return;
+    }
     if (connected() || connecting()) {
         disconnect_from_server();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -1084,6 +1095,13 @@ void BallanceMMOClient::init_commands() {
             return;
         }
         SendIngameMessage(dispatch_automation_command(line));
+    });
+    // The session black box (session/session_journal_client.hpp), straight from
+    // the command bar: "/mmo journal mark the ball went through the floor"
+    // leaves a note and a body checkpoint at the tick it was typed at.
+    console_.register_command("journal", [&] {
+        const auto line = console_.get_rest_of_line();
+        SendIngameMessage(dispatch_automation_command("journal " + line));
     });
     console_.register_command("dnf", [&] {
         if (current_map_.level == 0 || spectator_mode_)
@@ -1479,15 +1497,19 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
             else if (lower1 == "auto") {
                 // The verbs of dispatch_automation_command (client_automation.cpp).
                 if (length == 3)
-                    return {"status", "session", "record", "replay", "level", "entity", "objects", "physobjs",
-                            "physview", "sector", "beam", "explode", "activate", "screenshot", "panel", "key",
-                            "array", "script", "scripts", "message", "rng", "physlog", "physdump", "fixedtick",
+                    return {"status", "session", "journal", "record", "replay", "level", "entity", "objects",
+                            "physobjs", "physview", "sector", "beam", "explode", "activate", "screenshot", "panel",
+                            "key", "array", "script", "scripts", "message", "rng", "physlog", "physdump", "fixedtick",
                             "exactframes", "fpu53", "ping", "quit"};
                 const auto sub = boost::algorithm::to_lower_copy(args[2]);
                 if (length == 4 && (sub == "record" || sub == "replay")) return {"start", "stop"};
                 if (length == 4 && sub == "explode") return {"wood", "paper", "stone"};
                 if (length == 4 && sub == "session") return {"trace", "rollback"};
                 if (length == 5 && sub == "session") return {"on", "off"};
+                if (length == 4 && sub == "journal") return {"on", "off", "status", "mark"};
+            }
+            else if (lower1 == "journal") {
+                if (length == 3) return {"on", "off", "status", "mark"};
             }
             else if (lower1 == "mode")
                 return {"hs", "sr"};

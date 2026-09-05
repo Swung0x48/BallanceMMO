@@ -16,6 +16,8 @@
 
 #include <session/spawn_impulse.hpp>
 
+#include "session_journal_client.hpp"
+
 namespace {
     // Diagnostic: how often the server had to simulate a tick without our input
     // for it (session_snapshot_msg.acked_input_tick).  A file-scope object, not
@@ -58,6 +60,27 @@ namespace {
         return p;
     }
 
+    // A lifecycle event in journal shape (session/journal.hpp EVENT records):
+    // the same field copy on the way out and on the way in, so both sides of a
+    // session read alike in the black box.
+    bmmo::session::journal_event to_journal_event(const bmmo::session_event_msg& msg, uint32_t id) {
+        bmmo::session::journal_event e;
+        // Both ticks are the stamped one: only the server sees the tick its
+        // world finally dequeued the event at, and a client never learns it.
+        e.tick = msg.tick;
+        e.event_tick = msg.tick;
+        e.id = id;
+        e.type = msg.type;
+        e.ball_type = msg.ball_type;
+        e.flags = msg.flags;
+        for (int k = 0; k < 3; ++k) e.position[k] = msg.position[k];
+        for (int k = 0; k < 9; ++k) e.rotation[k] = msg.rotation[k];
+        e.sector = msg.sector;
+        e.name = msg.name;
+        e.recipe = to_bridge_recipe(msg.recipe);
+        return e;
+    }
+
     VxMatrix matrix_from_pose(const float position[3], const float rotation[9]) {
         VxMatrix matrix;
         matrix.SetIdentity();
@@ -68,6 +91,15 @@ namespace {
         matrix[3][2] = position[2];
         matrix[3][3] = 1.0f;
         return matrix;
+    }
+
+    // The join order this client mirrors a player with: the roster SessionStart
+    // brought, or the last slot for someone who joined after it - the server
+    // announces a join to the joiner alone, so nothing on the wire carries a
+    // late joiner's order.  The black box records the same guess.
+    uint8_t mirror_join_order(const physics_session_state& s, uint32_t id) {
+        for (const auto& p: s.players) if (p.id == id) return static_cast<uint8_t>(p.join_order);
+        return 63;
     }
 }
 
@@ -96,12 +128,16 @@ void BallanceMMOClient::handle_session_assign(const bmmo::session_assign_msg& ms
             s.resync_pending = true;
             s.have_snapshot = false;
             s.consecutive_hard = s.consecutive_unmatched = 0;
+            bmmo::session::client_journal::instance().note(
+                    s.tick_base, std::format("resync: reassigned, tick base {}", s.tick_base));
             logger_->Info("Physics session %u: resynced, tick base %u", s.session, s.tick_base);
             return;
         }
         s.assigned = true;
         s.tick_base = first_tick;
         s.last_rebases = fixed_tick_.rebases();
+        bmmo::session::client_journal::instance().note(
+                s.tick_base, std::format("assigned: tick base {}", s.tick_base));
         logger_->Info("Physics session %u: tick base %u assigned (%lld frames since anchor)", s.session,
                       s.tick_base, static_cast<long long>(s.frames_since_anchor));
         physics_session_flush_inputs();
@@ -144,6 +180,9 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
     auto& s = physics_session_;
     if (s.phase != phase_type::idle) physics_session_end_local("replaced by a new session");
     s.reset_runtime();
+    // The black box is armed once per session, so switching it off in the BML
+    // menu takes effect from the next one (and never mid-recording).
+    bmmo::session::client_journal::instance().set_enabled(config_manager_["session_journal"]->GetBoolean());
     s.session = msg.session;
     s.room = msg.room;
     s.snapshot_interval = msg.snapshot_interval;
@@ -235,6 +274,9 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     if (s.own_navigation && physics_view_.available()) physics_view_.navigation_destroy(s.own_nav_entity.c_str(), error);
     if (s.body_guard && physics_view_.available()) physics_view_.set_body_guard(false, nullptr, error);
     if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
+    // The black box closes here, whatever ended the session; the file is the
+    // only thing that survives reset_runtime().
+    bmmo::session::client_journal::instance().end(s.current_tick(), reason);
     const uint32_t session = s.session;
     s.reset_runtime();
     s.phase = phase_type::idle;
@@ -332,7 +374,61 @@ void BallanceMMOClient::physics_session_anchor() {
                   hash.time_of_last_psi, hash.time_of_next_psi, hash.delta_time_ms, hash.physics_delta_time,
                   hash.time_factor, physics_view_.describe_movable_objects().c_str());
     logger_->Info("Physics session anchor bodies: %s", physics_view_.describe_physics_objects().substr(0, 900).c_str());
+    physics_session_journal_begin();
     SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
+}
+
+// Opens this session's black box (session/session_journal_client.hpp) at the
+// anchor, where the world the server will hash is finally known.  The tick base
+// is not: it arrives with SessionAssign and goes into a NOTE, so the header's
+// first_tick stays 0.  A journal that cannot be opened is logged once and the
+// session runs without one.
+void BallanceMMOClient::physics_session_journal_begin() {
+    auto& s = physics_session_;
+    auto& journal = bmmo::session::client_journal::instance();
+    if (!journal.enabled()) return;
+    bmmo::session::journal_header header;
+    header.session = s.session;
+    header.level = s.map.level;
+    header.seed = s.seed;
+    header.spawn_impulse = s.spawn_impulse;
+    header.input_delay = s.input_delay;
+    header.first_tick = 0;
+    header.anchor_hash = s.anchor_hash;
+    header.anchor_surfaces = s.anchor_surfaces;
+    header.build_id = physics_view_.build_id();
+    header.own_player = db_.get_client_id();
+    // The same fallback s.own_group and the own spawn impulse use: a roster
+    // that does not name us still puts our ball in slot 63, so the file has to
+    // say 63 too or a replay would spawn it in another group, with another
+    // impulse direction.  255 is reserved for a server journal, which has no
+    // own player at all.
+    header.own_join_order = static_cast<uint8_t>(s.own_join_order < 0 ? 63 : s.own_join_order);
+    std::vector<bmmo::session::journal_player> members;
+    std::string start = std::format("start: session {} room {} level {} players", s.session, s.room, s.map.level);
+    for (const auto& p: s.players) {
+        bmmo::session::journal_player member;
+        member.tick = 0;
+        member.id = p.id;
+        member.join_order = p.join_order;
+        member.added = true;
+        if (p.id == header.own_player)
+            member.name = get_display_nickname();
+        else if (const auto state = db_.get(p.id))
+            member.name = state->name;
+        members.push_back(member);
+        start += std::format(" {}({}, join {})", member.name, member.id, member.join_order);
+    }
+    std::string error;
+    if (!journal.begin(header, bmmo::session::client_journal::directory(),
+                       bmmo::session::client_journal::kMaxBytes, members, error)) {
+        logger_->Warn("Physics session: no journal for this session: %s", error.c_str());
+        return;
+    }
+    journal.note(0, start);
+    journal.note(0, std::format("anchor: hash={:016x} surfaces={:016x} build={}", s.anchor_hash, s.anchor_surfaces,
+                                physics_view_.build_id()));
+    logger_->Info("Physics session %u: journal at %s", s.session, journal.path().string().c_str());
 }
 
 // Sends every buffered input frame the server does not have yet, newest
@@ -504,6 +600,9 @@ void BallanceMMOClient::physics_session_frame() {
         s.last_input_keys = frame.keys;
         s.last_input_flags = frame.flags;
     }
+    // The black box: our own frame for this tick, exactly as it is about to go
+    // to the server and into the rollback history.
+    bmmo::session::client_journal::instance().own_input(tick, frame);
     s.input_history.emplace_back(tick, frame);
     if (s.rollback_enabled) {
         s.own_inputs[tick] = frame;
@@ -617,6 +716,16 @@ void BallanceMMOClient::physics_session_frame() {
     for (auto& [id, remote]: s.remotes)
         if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
     physics_session_drive_remotes();
+
+    // The black box, last thing in the frame: the fingerprint of our own world
+    // as the next step will find it (every correction applied above included),
+    // and the bodies themselves every 10 s or after a correction moved them.
+    auto& journal = bmmo::session::client_journal::instance();
+    if (journal.recording()) {
+        bmmo::physics::world_hash hash;
+        if (physics_view_.capture(hash, error)) journal.tick(tick, hash);
+        if (journal.checkpoint_due(tick)) journal.local_checkpoint(tick, physics_view_.list_bodies());
+    }
 }
 
 void BallanceMMOClient::physics_session_send_event(bmmo::session_event_msg& event) {
@@ -625,6 +734,9 @@ void BallanceMMOClient::physics_session_send_event(bmmo::session_event_msg& even
     event.serialize();
     send(event.raw.str().data(), event.size(), k_nSteamNetworkingSend_Reliable);
     ++s.events_sent;
+    // The black box: our own events carry player 0 on the wire; in the file
+    // they are ours by id, like the relayed ones are their sender's.
+    bmmo::session::client_journal::instance().event(to_journal_event(event, db_.get_client_id()));
 }
 
 // Queued snapshots and relayed lifecycle events, in arrival order.
@@ -640,9 +752,20 @@ void BallanceMMOClient::physics_session_apply_queues() {
         inputs.swap(s.remote_input_queue);
     }
     for (auto& event: events) physics_session_apply_event(event);
+    auto& journal = bmmo::session::client_journal::instance();
     for (const auto& msg: inputs) {
         if (msg.session != s.session) continue;
         for (const auto& entry: msg.entries) {
+            // The black box: what the server says it applied for that player at
+            // that tick, whether or not we mirror them here.  A frame for a
+            // player the roster never had is how this client learns of a late
+            // join, and the file needs that player before its inputs.
+            if (journal.needs_player(entry.player)) {
+                const auto state = db_.get(entry.player);
+                journal.late_player(msg.tick, entry.player, mirror_join_order(s, entry.player),
+                                    state ? state->name : std::string{});
+            }
+            journal.relayed_input(msg.tick, entry.player, entry.frame);
             auto it = s.remotes.find(entry.player);
             if (it == s.remotes.end()) continue;
             auto& remote = it->second;
@@ -661,6 +784,18 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
     auto& s = physics_session_;
     if (event.session != s.session) return;
     if (event.player == 0 || event.player == db_.get_client_id()) return;
+    // The black box: a relayed event of another member (ours went in when it
+    // was sent, so an echo of it must not be written twice).  A member the
+    // roster never had gets its PLAYER record first, in the same tick group:
+    // a replay builds its member list from those records and would drop this
+    // event as "unknown player" without one.
+    auto& journal = bmmo::session::client_journal::instance();
+    if (journal.needs_player(event.player)) {
+        const auto state = db_.get(event.player);
+        journal.late_player(event.tick, event.player, mirror_join_order(s, event.player),
+                            state ? state->name : std::string{});
+    }
+    journal.event(to_journal_event(event, event.player));
     std::string error;
     switch (event.type) {
     case bmmo::session::event_type::Physicalize: {
@@ -737,6 +872,10 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
 void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot) {
     auto& s = physics_session_;
     if (snapshot.session != s.session) return;
+    // The black box gets the snapshot as it arrived, before the staleness and
+    // resync filters below decide what to do with it: those decisions are what
+    // an offline replay has to be able to second-guess.
+    bmmo::session::client_journal::instance().received_snapshot(snapshot);
     if (s.have_snapshot && snapshot.tick <= s.last_snapshot_tick && !snapshot.full) {
         ++s.snapshots_stale;
         return;
@@ -1085,6 +1224,19 @@ void BallanceMMOClient::physics_session_on_finish() {
 
 void BallanceMMOClient::physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action) {
     auto& s = physics_session_;
+    // The black box records every one of these, not only the first 200 the log
+    // gets (kind 2 hard, 3 blend; the rollback engine reports its own).
+    auto& journal = bmmo::session::client_journal::instance();
+    if (journal.recording()) {
+        bmmo::session::journal_correction record;
+        record.tick = tick;
+        record.local_tick = s.current_tick();
+        record.kind = std::strcmp(action, "hard") == 0 ? 2 : 3;
+        record.entity = name;
+        record.error_m = static_cast<float>(error);
+        journal.correction(record);
+        if (record.kind == 2) journal.request_checkpoint();   // a hard set moved a body
+    }
     if (++s.corrections_logged > 200) return;   // enough to diagnose, not enough to flood
     logger_->Info("Physics session: %s correction of %s for tick %u (error %.4f m, local tick %u)",
                   action, name.c_str(), tick, error, s.current_tick());
@@ -1134,6 +1286,26 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
     world.log = [this](const std::string& text) {
         auto& s = physics_session_;
         if (++s.corrections_logged <= 200) logger_->Info("Physics session: %s", text.c_str());
+    };
+    // The black box: every decision the engine takes about a snapshot (kinds 0
+    // mismatch, 1 rollback, 5 too far, 6 frozen, 7 unmatched), structured, so
+    // the timeline does not have to be parsed back out of the log lines.
+    world.on_correction = [](const bmmo::session::rollback_correction& c) {
+        auto& journal = bmmo::session::client_journal::instance();
+        if (!journal.recording()) return;
+        bmmo::session::journal_correction record;
+        record.tick = c.tick;
+        record.local_tick = c.local_tick;
+        record.kind = c.kind;
+        record.entity = c.entity;
+        record.error_m = static_cast<float>(c.error_m);
+        record.velocity_error = static_cast<float>(c.velocity_error);
+        for (int k = 0; k < 3; ++k) {
+            record.local_position[k] = c.local_position[k];
+            record.server_position[k] = c.server_position[k];
+        }
+        journal.correction(record);
+        if (c.kind == 1) journal.request_checkpoint();   // a rollback re-simulated every body
     };
     return world;
 }
@@ -1189,6 +1361,8 @@ void BallanceMMOClient::physics_session_request_resync(const char* reason) {
     msg.serialize();
     send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
     ++s.resyncs_sent;
+    bmmo::session::client_journal::instance().note(
+            s.current_tick(), std::format("resync: requested ({}) at tick {}", reason, s.current_tick()));
     logger_->Info("Physics session %u: resync requested (%s) at tick %u", s.session, reason, s.current_tick());
 }
 
@@ -1222,6 +1396,18 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
                                          body.owner == own_id ? true : wake, error))
             ++s.body_writes;
         else { ++s.body_write_errors; s.last_error = error; }
+    }
+    // The black box: the whole world was rebuilt from this snapshot (kind 4),
+    // so the next checkpoint is worth having whatever the rate limit says.
+    auto& journal = bmmo::session::client_journal::instance();
+    if (journal.recording()) {
+        bmmo::session::journal_correction record;
+        record.tick = snapshot.tick;
+        record.local_tick = s.current_tick();
+        record.kind = 4;
+        journal.correction(record);
+        journal.note(s.current_tick(), std::format("resync: applied from tick {}", snapshot.tick));
+        journal.request_checkpoint();
     }
     logger_->Info("Physics session %u: resync applied from the full snapshot of tick %u (%zu bodies)", s.session,
                   snapshot.tick, snapshot.bodies.size());

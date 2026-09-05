@@ -71,6 +71,10 @@ bool config_manager::load() {
         physics_debug_trace = yaml_load_value(physics, "debug_trace", physics_debug_trace);
         physics_event_rate_limit = yaml_load_value(physics, "event_rate_limit", physics_event_rate_limit);
         physics_spawn_impulse = yaml_load_value(physics, "spawn_impulse", physics_spawn_impulse);
+        physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
+        physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
+        physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",
+                physics_journal_checkpoint_ticks);
         physics_allowed_mods = yaml_load_value(physics, "allowed_mods", decltype(physics_allowed_mods){});
         // Was a pin on one physics_RT.dll's sha256, which the client reported
         // about itself and every rebuild invalidated; the session handshake
@@ -208,7 +212,12 @@ void config_manager::save(bool reload_values) {
                    "#     round trip among its members when it starts),\n"
                    "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\"),\n"
                    "#   event_rate_limit (client lifecycle events per second per player; 0 = no limit),\n"
-                   "#   spawn_impulse (spawn kick speed in m/s, design 9.10; 0 disables; a solo session stays at 0).\n"
+                   "#   spawn_impulse (spawn kick speed in m/s, design 9.10; 0 disables; a solo session stays at 0),\n"
+                   "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
+                   "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
+                   "#     relative to the server's own directory, empty = record nothing),\n"
+                   "#   journal_max_mb (cap per session file; recording stops there),\n"
+                   "#   journal_checkpoint_ticks (ticks between full body checkpoints in the journal; 0 = none).\n"
                 << std::endl;
     config_file << config_;
     config_file << std::endl;

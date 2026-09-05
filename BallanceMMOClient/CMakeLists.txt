@@ -119,6 +119,7 @@ set(BMMO_CLIENT_HDR
         utils.h
         automation/command_pipe.h
         session/physics_session.hpp
+        session/session_journal_client.hpp
 )
 set(BMMO_CLIENT_SRC
         BallanceMMOClient.cpp
@@ -135,6 +136,7 @@ set(BMMO_CLIENT_SRC
         physics/physics_view.cpp
         session/room_client.cpp
         session/physics_session_client.cpp
+        session/session_journal_client.cpp
 )
 
 # MinHook (BSD-2-Clause) for the CKInputManager::PreProcess hook used by

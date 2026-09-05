@@ -8,6 +8,7 @@
 // inputs.  Pure logic over a small world adapter, shared by the retail mod
 // (through the physics bridge) and the headless session client.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -23,6 +24,25 @@
 #include "../physics/physics_rt_api.h"
 
 namespace bmmo::session {
+    // What the engine did about an authoritative snapshot, for the session
+    // journal (session/journal.hpp CORRECTION records) and any other observer.
+    // `kind` uses the journal's numbering; this engine emits 0 mismatch,
+    // 1 rollback, 5 too_far, 6 frozen and 7 unmatched.  `entity` is the body
+    // furthest past its own threshold (empty when there is none) - a mismatch
+    // can be triggered by velocity alone, and then the largest position error
+    // names the wrong body - and the positions are that body's local and
+    // server pose at `tick`.
+    struct rollback_correction {
+        uint32_t tick = 0;         // the snapshot's tick
+        uint32_t local_tick = 0;   // where the client was when it arrived
+        uint8_t kind = 0;
+        std::string entity;
+        double error_m = 0.0;
+        double velocity_error = 0.0;
+        double local_position[3] = {};
+        double server_position[3] = {};
+    };
+
     struct rollback_world {
         std::function<bool(const std::string& entity, bmmo_physics_body_state& out)> get_body;
         // wake: ensure_in_simulation when true, freeze when false
@@ -39,6 +59,9 @@ namespace bmmo::session {
         // re-simulated.  Optional; missing means "simulating".
         std::function<bool()> simulating;
         std::function<void(const std::string&)> log;
+        // Optional: every decision the engine takes about a snapshot, so the
+        // session journal can record it without parsing the log lines.
+        std::function<void(const rollback_correction&)> on_correction;
     };
 
     // What the caller tracks at a tick: the bodies (entity names) and, for
@@ -108,14 +131,24 @@ namespace bmmo::session {
                          const std::function<std::string(const body_state&)>& entity_of,
                          const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at) {
             ++stats_.snapshots;
+            rollback_correction correction;
+            correction.tick = snapshot.tick;
+            correction.local_tick = current_tick;
+            auto report = [&](uint8_t kind) {
+                if (!world.on_correction) return;
+                correction.kind = kind;
+                world.on_correction(correction);
+            };
             tick_state* at = find(snapshot.tick);
             if (!at) {
                 ++stats_.unmatched;
+                report(7);
                 return false;
             }
             // 1. compare
             bool mismatch = false;
-            double worst = 0.0;
+            double worst = 0.0;        // largest position error: the log lines and the stats
+            double worst_breach = 0.0; // furthest past a threshold: the journal's subject
             std::string worst_entity, detail;
             std::vector<std::pair<std::string, const body_state*>> authoritative;
             for (const auto& body: snapshot.bodies) {
@@ -137,7 +170,27 @@ namespace bmmo::session {
                 }
                 dp = std::sqrt(dp);
                 dv = std::sqrt(dv);
-                if (dp > worst) { worst = dp; worst_entity = entity; }
+                if (dp > worst) {
+                    worst = dp;
+                    worst_entity = entity;
+                }
+                // The mismatch can be a velocity one (0.01 m/s trips before
+                // 1 mm of drift does), so the record names the body that is
+                // furthest past its own threshold, not the one that moved
+                // most: otherwise the journal blames an in-tolerance body and
+                // reports dv = 0 for exactly the event it was written for.
+                const double breach = std::max(thresholds_.position > 0.0 ? dp / thresholds_.position : dp,
+                                               thresholds_.velocity > 0.0 ? dv / thresholds_.velocity : dv);
+                if (breach > worst_breach) {
+                    worst_breach = breach;
+                    correction.entity = entity;
+                    correction.error_m = dp;
+                    correction.velocity_error = dv;
+                    for (int k = 0; k < 3; ++k) {
+                        correction.local_position[k] = it->second.position[k];
+                        correction.server_position[k] = body.position[k];
+                    }
+                }
                 if (dp > thresholds_.position || dv > thresholds_.velocity) {
                     mismatch = true;
                     if (detailed_logs_ < 40) {
@@ -158,6 +211,7 @@ namespace bmmo::session {
             }
             ++stats_.mismatched;
             stats_.last_mismatch = worst_entity;
+            report(0);
             const bool frozen = world.simulating && !world.simulating();
             if (!detail.empty() && world.log && !frozen && detailed_logs_++ < 40)
                 world.log("mismatch at tick " + std::to_string(snapshot.tick) + " (local " + std::to_string(current_tick) + "):"
@@ -194,6 +248,7 @@ namespace bmmo::session {
                 // the scripts stopped the local clock: the authoritative
                 // states stand until the clock runs again
                 ++stats_.frozen;
+                report(6);
                 truncate_after(snapshot.tick);
                 return true;
             }
@@ -201,6 +256,7 @@ namespace bmmo::session {
             if (lag > thresholds_.max_resim_ticks) {
                 ++stats_.too_far;
                 if (world.log) world.log("rollback: lag " + std::to_string(lag) + " ticks, bodies set without re-simulation");
+                report(5);
                 truncate_after(snapshot.tick);
                 return true;
             }
@@ -277,6 +333,7 @@ namespace bmmo::session {
             if (world.log)
                 world.log("rollback to tick " + std::to_string(snapshot.tick) + " (" + worst_entity + " off by "
                           + std::to_string(worst) + " m), re-simulated " + std::to_string(lag) + " ticks");
+            report(1);
             return true;
         }
 

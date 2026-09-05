@@ -121,6 +121,9 @@ physics:
   maximum_physics_rooms: 1        # one physics world costs roughly one core
   event_rate_limit: 20            # client events per second per player; 0 = no limit
   spawn_impulse: 3.0              # m/s kick applied to every spawn Physicalize; 0 = off; solo sessions force 0
+  journal_dir: journals           # session black box: one .bmjr per session; empty = record nothing
+  journal_max_mb: 256             # cap per session file; recording stops there (a final NOTE says so)
+  journal_checkpoint_ticks: 660   # ticks between full body checkpoints in the journal; 0 = none
 ```
 
 - `game_root` must point at a complete copy of the game's *data* (not an
@@ -147,3 +150,63 @@ physics:
   20; `event_rate_limit: 0` turns it off, which is worth doing on levels
   where a sector reset wakes more than 20 mechanisms at once (each one is a
   `BodyRevived` event and they all land in the same second).
+
+## Session journals (the black box)
+
+With `journal_dir` set, every physics session writes
+`<journal_dir>/session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjr`: everything the
+session's world consumed (members, every applied input frame, every lifecycle
+event) plus a fingerprint per tick and a full body checkpoint every
+`journal_checkpoint_ticks`, so a bug that only happens in a live room can be
+replayed offline bit for bit. The [design doc](collision-overhaul-design.md)
+section 9.15 has the format and the capture points.
+
+`journal_dir` is resolved against the **server's own directory**, not its
+working directory — the headless engine chdirs into the game's `Bin`. On the
+deployed server that means `~/bmmo/journals/`. The start banner ends with
+`journal <dir>` (or `journal off`), and the console `sessions` command prints
+each running session's file, so you can fetch the right one while the room is
+still up (`scp -i ~/.ssh/bmmo_deploy_ed25519 …`). Measured on a two-player
+Level 1 session: about 120 B/tick, 8 KB/s, so the 256 MB cap is roughly 9.5
+hours of one session; recording costs about 0.025 ms/tick.
+
+Replay it on any machine that has a copy of the game data (a Windows box with
+the same `game_root` tree is the usual one — the journal itself is
+platform-independent, field-by-field little-endian):
+
+```
+BallanceMMOSimTool --replay-session session_1_level1_20260905080958.bmjr --list
+BallanceMMOSimTool --root C:/path/to/Ballance/data \
+    --replay-session session_1_level1_20260905080958.bmjr --report-every 500
+```
+
+`--list` is the triage pass: it prints the header, the members, the tick range,
+every event/note/correction and the checkpoint ticks without booting the engine
+(no `--root` needed) and streams the file, so it stays usable on a journal at
+the cap. The replay prints
+`summary: ticks=N matched=M first_divergence=T checkpoints=C checkpoint_mismatches=D`
+and exits 0 when nothing diverged, 3 when something did. A journal left behind
+by a crash is expected to be truncated: both readers keep everything before the
+cut and report the dropped bytes.
+
+`python scripts/journal_trace.py <a.bmjr> [b.bmjr …] [--log ModLoader.log …]`
+is the merged timeline — the server's inputs and events, each client's own tick
+hash and corrections, and the log lines that carry the same tick, one block per
+tick, plus the wall-clock mapping so a player's "it looked wrong around 21:37"
+lands on a tick. `--log` takes this server's own log as readily as a player's
+`ModLoader.log`: it reads BMLPlus, ISO and BMMO's own console stamps
+(`[09-05 04:09:19]`, dated from the journal header, so a log that runs across
+New Year still lands on the right day). `--diff` compares two journals tick by
+tick (exit 3 on a divergence, 1 when it had nothing to compare).
+
+The client records too, which is what makes a player's report actionable: the
+BML property `Gameplay`/`SessionJournal` (on by default, read when a session
+starts) writes the same format to `<game>/ModLoader/BMMOJournals`, keeping the
+newest 10 files. `/mmo journal status` prints the current file,
+`/mmo journal mark <text>` drops a note plus a body checkpoint at the current
+tick ("ask the player to type that the moment it looks wrong"), and
+`/mmo journal on|off` moves the same property. Ask for the `.bmjr` next to the
+player's `ModLoader.log`; `journal_trace.py` takes both at once. A client
+journal is best effort by nature (it does not know when the server applied its
+events), so it explains what that client saw — the server's journal is the
+authority.

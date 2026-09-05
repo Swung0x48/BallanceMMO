@@ -243,6 +243,87 @@ TEST(RollbackEngine, MismatchRestoresAndResimulatesWithRecordedInputs) {
     EXPECT_EQ(engine.stats().matched, 1u);
 }
 
+// What the session journal records: one correction per decision, the mismatch
+// (kind 0) before the completed rollback (kind 1), and an unmatched snapshot
+// (kind 7) with no entity.
+TEST(RollbackEngine, CorrectionCallbackReportsEveryDecision) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 4, 3, own_inputs);
+
+    std::vector<bmmo::session::rollback_correction> corrections;
+    auto w = world.adapter();
+    w.on_correction = [&](const bmmo::session::rollback_correction& c) { corrections.push_back(c); };
+
+    // the server had the own ball 0.5 m further at tick 2
+    fake_body server_own;
+    server_own.position[0] = 0.5;
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    ASSERT_EQ(corrections.size(), 2u);
+    EXPECT_EQ(corrections[0].kind, 0);
+    EXPECT_EQ(corrections[0].tick, 2u);
+    EXPECT_EQ(corrections[0].local_tick, 4u);
+    EXPECT_EQ(corrections[0].entity, "Own");
+    EXPECT_NEAR(corrections[0].error_m, 0.5, 1e-9);
+    EXPECT_NEAR(corrections[0].velocity_error, 0.0, 1e-9);
+    EXPECT_NEAR(corrections[0].local_position[0], 0.0, 1e-9);
+    EXPECT_NEAR(corrections[0].server_position[0], 0.5, 1e-9);
+    // the rollback carries the same worst offender
+    EXPECT_EQ(corrections[1].kind, 1);
+    EXPECT_EQ(corrections[1].entity, "Own");
+    EXPECT_NEAR(corrections[1].error_m, 0.5, 1e-9);
+
+    const auto missing = snapshot_of(99, {ball_body(1, server_own)});
+    EXPECT_FALSE(engine.on_snapshot(w, missing, 4, entity_of,
+                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    ASSERT_EQ(corrections.size(), 3u);
+    EXPECT_EQ(corrections[2].kind, 7);
+    EXPECT_EQ(corrections[2].tick, 99u);
+    EXPECT_TRUE(corrections[2].entity.empty());
+}
+
+// A mismatch can be a velocity one - 0.01 m/s trips well before 1 mm of drift
+// does, which is what the onset of a divergence looks like - and then the
+// record must name that body, not the one that drifted furthest inside the
+// tolerance.  The log lines keep naming the largest position error.
+TEST(RollbackEngine, VelocityOnlyMismatchNamesTheOffendingBody) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 4, 100, own_inputs);
+
+    std::vector<bmmo::session::rollback_correction> corrections;
+    auto w = world.adapter();
+    w.on_correction = [&](const bmmo::session::rollback_correction& c) { corrections.push_back(c); };
+
+    // the remote ball is where the client had it but moving at 1 m/s, while
+    // the own ball is 0.5 mm off: inside the position threshold
+    fake_body server_own = world.bodies["Own"];
+    server_own.position[0] += 0.0005;
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.linear[0] = 1.0f;
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, server_remote)});
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    ASSERT_EQ(corrections.size(), 2u);
+    for (const auto& c: corrections) {
+        EXPECT_EQ(c.entity, "Remote");
+        EXPECT_NEAR(c.velocity_error, 1.0, 1e-9);
+        EXPECT_NEAR(c.error_m, 0.0, 1e-9);
+        EXPECT_NEAR(c.local_position[0], 5.0, 1e-9);
+        EXPECT_NEAR(c.server_position[0], 5.0, 1e-9);
+    }
+    EXPECT_EQ(engine.stats().last_mismatch, "Own");
+}
+
 TEST(RollbackEngine, FrozenClockSnapsWithoutResimulation) {
     fake_world world;
     world.bodies["Own"];

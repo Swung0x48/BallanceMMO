@@ -2,11 +2,59 @@
 
 #include "CKAll.h"
 
+#include <physics/physics_state.hpp>
+
 #include <algorithm>
 #include <chrono>
+#include <ctime>
+#include <system_error>
 
 namespace bmmo::sim {
     using clock = std::chrono::steady_clock;
+
+    namespace {
+        // session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjr.  The same instant
+        // goes into the header as utc_ms: file name and wall clock must agree,
+        // or a journal cannot be lined up with a player's "it broke at 21:37".
+        std::string journal_file_name(uint32_t session, int level, uint64_t& utc_ms) {
+            const auto now = std::chrono::system_clock::now();
+            utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now.time_since_epoch()).count());
+            const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+            std::tm parts{};
+#ifdef _WIN32
+            gmtime_s(&parts, &seconds);
+#else
+            gmtime_r(&seconds, &parts);
+#endif
+            char stamp[16] = {};
+            std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &parts);
+            return "session_" + std::to_string(session) + "_level" + std::to_string(level)
+                 + "_" + stamp + ".bmjr";
+        }
+
+        // The server's lifecycle_event as the journal stores it: a plain field
+        // copy plus the player it belongs to (journal.hpp cannot include the
+        // server's headers, so the conversion lives here).  `applied` is the
+        // tick the world consumed it at, which is the one a replay has to feed
+        // it back at; `e.tick` is the tick the client stamped it for and can be
+        // older when the event arrived late.
+        bmmo::session::journal_event to_journal_event(uint32_t player, const lifecycle_event& e, uint32_t applied) {
+            bmmo::session::journal_event out;
+            out.tick = applied;
+            out.event_tick = e.tick;
+            out.id = player;
+            out.type = e.type;
+            out.ball_type = e.ball_type;
+            out.flags = e.flags;
+            for (int k = 0; k < 3; ++k) out.position[k] = e.position[k];
+            for (int k = 0; k < 9; ++k) out.rotation[k] = e.rotation[k];
+            out.sector = e.sector;
+            out.name = e.name;
+            out.recipe = e.recipe;
+            return out;
+        }
+    }
 
     session_runner::session_runner(runner_config config, session_callbacks callbacks)
         : config_(std::move(config)), callbacks_(std::move(callbacks)) {
@@ -68,10 +116,56 @@ namespace bmmo::sim {
         return views_.size();
     }
 
+    std::string session_runner::journal_path(uint32_t session) const {
+        std::lock_guard lk(view_mutex_);
+        auto it = views_.find(session);
+        return it == views_.end() ? std::string{} : it->second.journal;
+    }
+
+    // Opens this session's black box and writes its header.  Any failure is
+    // logged once and the session runs on without a journal: the recorder must
+    // never be able to break a simulation.
+    void session_runner::open_journal(session_state& s, float spawn_impulse, uint64_t anchor_hash,
+                                      uint64_t anchor_surfaces, uint32_t first_tick) {
+        if (config_.journal_dir.empty()) return;
+        const std::string prefix = "[session " + std::to_string(s.id) + "] journal: ";
+        std::error_code ec;
+        std::filesystem::create_directories(config_.journal_dir, ec);
+        if (ec) {
+            log(prefix + config_.journal_dir.string() + ": " + ec.message());
+            return;
+        }
+        bmmo::session::journal_header header;
+        header.kind = bmmo::session::journal_kind::server;
+        header.session = s.id;
+        header.level = s.level;
+        header.seed = config_.seed;
+        header.spawn_impulse = spawn_impulse;
+        header.input_delay = s.input_delay;
+        header.checkpoint_ticks = config_.journal_checkpoint_ticks;
+        header.first_tick = first_tick;
+        header.anchor_hash = anchor_hash;
+        header.anchor_surfaces = anchor_surfaces;
+        header.build_id = bmmo::physics::build_id();
+        const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
+        s.journal_start = clock::now();
+        std::string error;
+        if (!s.journal.open(path, header, config_.journal_max_bytes, error)) {
+            log(prefix + error);
+            return;
+        }
+        {
+            std::lock_guard lk(view_mutex_);
+            views_[s.id].journal = path.string();
+        }
+        log(prefix + path.string());
+    }
+
     void session_runner::create_session(uint32_t session, int level,
                                         const std::vector<std::pair<uint32_t, uint8_t>>& players,
-                                        uint32_t input_delay, float spawn_impulse) {
-        post([this, session, level, players, input_delay, spawn_impulse] {
+                                        uint32_t input_delay, float spawn_impulse, const std::string& note,
+                                        std::vector<std::string> names) {
+        post([this, session, level, players, input_delay, spawn_impulse, note, names = std::move(names)] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
@@ -100,17 +194,31 @@ namespace bmmo::sim {
                 s->failed = true;
                 info.error = error;
                 log("[session " + std::to_string(session) + "] world boot failed: " + error);
+                // A session that never reached the anchor is exactly when the
+                // box is wanted: the header (anchor fields 0), who was in the
+                // room and why it died, then close.
+                open_journal(*s, spawn_impulse, 0, 0, 0);
+                if (!note.empty()) s->journal.note(0, "start: " + note);
+                s->journal.note(0, "boot failed: " + error);
+                s->journal.close();
                 if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
                 return;
             }
-            for (const auto& [player, join_order]: players) {
+            const uint32_t first_tick = s->world->tick_index();
+            open_journal(*s, spawn_impulse, s->world->anchor_hash(), s->world->anchor_surfaces(), first_tick);
+            if (!note.empty()) s->journal.note(first_tick, "start: " + note);
+            for (size_t i = 0; i < players.size(); ++i) {
+                const auto [player, join_order] = players[i];
                 std::string add_error;
                 if (!s->world->add_player(player, join_order, add_error)) {
                     log("[session " + std::to_string(session) + "] add_player failed: " + add_error);
                     continue;
                 }
                 s->players.insert(player);
+                s->join_orders[player] = join_order;
                 s->inputs[player].reset(0);
+                s->journal.player(first_tick, player, join_order, true,
+                                  i < names.size() ? names[i] : std::string{});
             }
             s->cadence.interval = config_.snapshot_interval;
             s->cadence.full_interval = config_.full_snapshot_interval;
@@ -133,16 +241,23 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::destroy_session(uint32_t session) {
-        post([this, session] {
+    void session_runner::destroy_session(uint32_t session, const std::string& reason) {
+        post([this, session, reason] {
+            if (auto it = sessions_.find(session); it != sessions_.end()) {
+                auto& s = *it->second;
+                s.journal.note(s.world ? s.world->tick_index() : 0,
+                               "end: " + (reason.empty() ? std::string("session destroyed") : reason));
+                s.journal.close();
+            }
             sessions_.erase(session);
             std::lock_guard lk(view_mutex_);
             views_.erase(session);
         });
     }
 
-    void session_runner::add_player(uint32_t session, uint32_t player, uint8_t join_order) {
-        post([this, session, player, join_order] {
+    void session_runner::add_player(uint32_t session, uint32_t player, uint8_t join_order,
+                                    const std::string& name) {
+        post([this, session, player, join_order, name] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
@@ -152,8 +267,10 @@ namespace bmmo::sim {
                 return;
             }
             s.players.insert(player);
+            s.join_orders[player] = join_order;
             s.inputs[player].reset(s.world->tick_index());
             s.cadence.force_full();
+            s.journal.player(s.world->tick_index(), player, join_order, true, name);
         });
     }
 
@@ -162,8 +279,12 @@ namespace bmmo::sim {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
+            // Join order is the world's business at add time only; a removal
+            // needs the player id alone.
+            s.journal.player(s.world ? s.world->tick_index() : 0, player, 0, false, {});
             if (s.world) s.world->remove_player(player);
             s.players.erase(player);
+            s.join_orders.erase(player);
             s.ready.erase(player);
             s.inputs.erase(player);
             s.acked.erase(player);
@@ -324,6 +445,9 @@ namespace bmmo::sim {
     // snapshot.
     void session_runner::step(session_state& s) {
         const uint32_t tick = s.world->tick_index();
+        // Everything the journal costs hangs off this: a capped or absent box
+        // does not even capture a hash.
+        const bool recording = s.journal.is_open() && !s.journal.capped();
         std::vector<std::pair<uint32_t, bmmo::session::input_frame>> applied;
         applied.reserve(s.inputs.size());
         for (auto& [player, buffer]: s.inputs) {
@@ -332,29 +456,81 @@ namespace bmmo::sim {
             if (fresh) s.acked[player] = tick;
             s.world->set_input(player, frame);
             applied.emplace_back(player, frame);
+            // What the world consumed, not what arrived on the wire: the wire
+            // can lose, duplicate and reorder, the world cannot.
+            if (recording)
+                s.journal.input(tick, player, frame, fresh ? bmmo::session::JOURNAL_INPUT_FRESH : 0);
         }
         if (callbacks_.on_inputs && applied.size() > 1) callbacks_.on_inputs(s.id, tick, applied);
-        while (!s.events.empty() && s.events.front().tick <= tick) {
-            pending_event e = std::move(s.events.front());
-            s.events.erase(s.events.begin());
+        // Every event due this tick, in the members' JOIN ORDER - not in the
+        // order the network happened to deliver them.  The order two events of
+        // the same tick are applied in changes the world (two balls
+        // physicalized in one tick are created in that order), so it is part of
+        // the determinism contract now, and join order is the one order a
+        // client's own journal can reproduce offline: nobody but the server
+        // knows who got there first, but every member knows every join order.
+        // An unknown player (its removal raced the event) sorts after all known
+        // ones; stable_sort keeps arrival order within one rank.
+        size_t due_count = 0;
+        while (due_count < s.events.size() && s.events[due_count].tick <= tick) ++due_count;
+        std::vector<pending_event> due(std::make_move_iterator(s.events.begin()),
+                                       std::make_move_iterator(s.events.begin() + due_count));
+        s.events.erase(s.events.begin(), s.events.begin() + due_count);
+        const auto join_rank = [&s](uint32_t player) {
+            const auto it = s.join_orders.find(player);
+            return it == s.join_orders.end() ? 256u : static_cast<uint32_t>(it->second);
+        };
+        std::stable_sort(due.begin(), due.end(), [&join_rank](const pending_event& a, const pending_event& b) {
+            return join_rank(a.player) < join_rank(b.player);
+        });
+        for (pending_event& e: due) {
             e.event.tick = e.tick;
+            // After the tick is stamped: the spawn impulse direction is derived
+            // from that field, so the record has to carry it - but the world
+            // consumes the event now, at `tick`, which is what the record is
+            // filed under.  An event that arrived after its own tick was
+            // simulated would otherwise be replayed too early.
+            if (recording) s.journal.event(to_journal_event(e.player, e.event, tick));
             std::string error;
-            if (!s.world->apply_event(e.player, e.event, error))
+            if (!s.world->apply_event(e.player, e.event, error)) {
                 log("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)
                     + " at tick " + std::to_string(e.tick) + " failed: " + error);
+                if (recording) s.journal.note(tick, "event failed: " + error);
+            }
         }
         std::string error;
         if (!s.world->tick(error)) {
             s.failed = true;
             s.running = false;
             log("[session " + std::to_string(s.id) + "] tick " + std::to_string(tick) + " failed: " + error);
+            if (recording)
+                s.journal.note(tick, "end: tick " + std::to_string(tick) + " failed: " + error);
             if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
             return;
+        }
+        if (recording) {
+            bmmo::physics::world_hash hash;
+            std::string hash_error;
+            // A hash the engine will not produce leaves the tick without a
+            // record; a replay reports those as not compared instead of failing.
+            if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error))
+                s.journal.tick(tick, hash, static_cast<uint32_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - s.journal_start).count()));
         }
         s.scheduler.advance();
         const bool changed = s.world->body_set_changed();
         const int decision = s.cadence.decide(tick, changed);
         if (decision != 0) emit_snapshot(s, decision == 2);
+        // The box's own checkpoint, last and through the read-only path:
+        // snapshot() would recompute body_set_changed_ against its own call and
+        // number mechanisms the server has not numbered yet, and the journal
+        // must not change one byte of what the server sends.
+        if (recording && config_.journal_checkpoint_ticks != 0
+                && tick % config_.journal_checkpoint_ticks == 0) {
+            std::vector<bmmo::session::body_state> bodies;
+            s.world->snapshot_for_journal(bodies);
+            s.journal.checkpoint(tick, bmmo::session::JOURNAL_CHECKPOINT_FULL, bodies);
+        }
     }
 
     void session_runner::run() {
@@ -399,6 +575,10 @@ namespace bmmo::sim {
             wake_.wait_for(lk, sleep_for);
         }
         lk.unlock();
+        // A session still running when the server goes down says so in its box
+        // rather than just stopping mid-file.
+        for (auto& [id, sp]: sessions_)
+            if (sp) sp->journal.note(sp->world ? sp->world->tick_index() : 0, "end: server stopped");
         sessions_.clear();
     }
 }

@@ -3,6 +3,7 @@
 // from the /mmo room subcommand in BallanceMMOClient.cpp; here we render the
 // room_state roster / list and the room_event notifications.
 #include "../BallanceMMOClient.h"
+#include "session_journal_client.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -212,6 +213,16 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
                     bmmo::ansi::BrightGreen);
             break;
         case event_type::PlayerLeft:
+            // The black box: this is the only unambiguous "left" signal a
+            // remaining member gets (the leaver's relayed Unphysicalize is the
+            // same message a living player sends when its ball dies), and the
+            // server drops that player from the session world here, so a replay
+            // of our file has to drop it too.
+            utils_.run_on_game_thread([this, subject = msg.subject] {
+                if (physics_session_.session == 0) return;
+                bmmo::session::client_journal::instance().leave_player(
+                        physics_session_.current_tick(), subject);
+            });
             if (msg.actor == msg.subject)  // left on their own
                 SendIngameMessage(std::format("{} left the room.", get_username(msg.subject)));
             else if (msg.actor != own)     // our own kick is reported by its outcome

@@ -1,9 +1,10 @@
 # Plan: the session black box (server journal + offline replay)
 
-Status: **plan only, nothing implemented yet.** Written 2026-09-04 for whoever
-picks it up. No engine change, no protocol change, no client change is needed
-for the recorder itself — it is server-side plus tooling, so rolling it out
-means replacing the server binary only.
+Status: **implemented (2026-09-05), see
+[docs/collision-overhaul-design.md](collision-overhaul-design.md) 9.15; the
+format moved to `BallanceMMOCommon/include/session/journal.hpp` so the client
+records too.** What follows is the plan as written on 2026-09-04, kept for its
+reasoning; where it differs from 9.15, 9.15 is what was built.
 
 ## Why
 
@@ -66,7 +67,7 @@ All in `BallanceMMOServer/sim/session_runner.cpp`, on the simulation thread
 - `destroy_session()` / the failure path — a `NOTE` record with the reason and
   close.
 
-## File format (`BallanceMMOServer/sim/session_journal.hpp/.cpp`)
+## File format (built as `BallanceMMOCommon/include/session/journal.hpp`)
 
 Little-endian, field-by-field serialization (never a struct dump: the writer is
 Linux x64, the reader is usually Windows x64). Header `"BMMOJRNL"` + `uint32`
@@ -154,7 +155,8 @@ timestamps) so a player's "it looked wrong around 21:37" lands on a tick.
 
 ## Tests
 
-1. **Round trip** (gtest, `BallanceMMOServer/tests`, runs in
+1. **Round trip** (gtest, built as
+   `BallanceMMOServer/tests/session_journal_test.cpp`, runs in
    `BallanceMMOMessageTests`): synthetic journal with every record type,
    including repeated inputs and a truncated tail; read it back and compare.
 2. **End to end, local**: a local server with `journal_dir` set, one
@@ -169,7 +171,10 @@ timestamps) so a player's "it looked wrong around 21:37" lands on a tick.
 
 ## Order of work
 
-1. `session_journal.hpp/.cpp` + the round-trip test (self-contained, no server).
+1. The format + the round-trip test (self-contained, no server) — built as
+   `BallanceMMOCommon/include/session/journal.hpp`, header-only, because the
+   client writes the same file (`BallanceMMOClient/session/session_journal_client.hpp/.cpp`,
+   `BallanceMMOServer/sim/session_client.cpp --journal`).
 2. Hook `session_runner` + config + `config_manager` comment block.
 3. `--replay-session` in the SimTool.
 4. `scripts/journal_trace.py`.

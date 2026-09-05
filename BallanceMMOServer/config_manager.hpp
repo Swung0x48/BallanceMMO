@@ -56,6 +56,12 @@ public:
     bool physics_debug_trace = false;              // per-tick diagnostics in the log (see world_options::trace)
     uint32_t physics_event_rate_limit = 20;        // client lifecycle events per second per player; 0 = no limit
     float physics_spawn_impulse = 3.0f;            // spawn kick speed, m/s (design 9.10); 0 disables
+    // Session black box (design 9.15): where the journals go (relative to the
+    // server's own directory; empty = record nothing), the cap per session
+    // file and how often a full body checkpoint is written.
+    std::string physics_journal_dir = "journals";
+    uint32_t physics_journal_max_mb = 256;
+    uint32_t physics_journal_checkpoint_ticks = 660;
     std::unordered_map<std::string, std::string> physics_allowed_mods;  // mod id -> version; empty = no check
     ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
 

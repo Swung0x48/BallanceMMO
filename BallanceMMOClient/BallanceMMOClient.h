@@ -496,6 +496,8 @@ private:
 	void physics_session_end_local(const std::string& reason);
 	void process_physics_session();
 	void physics_session_anchor();
+	// The session black box: session/session_journal_client.hpp.
+	void physics_session_journal_begin();
 	void physics_session_frame();
 	void physics_session_flush_inputs();
 	void physics_session_send_event(bmmo::session_event_msg& event);

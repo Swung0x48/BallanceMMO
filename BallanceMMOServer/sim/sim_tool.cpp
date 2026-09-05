@@ -2,6 +2,7 @@
 //
 //   BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N]
 //   BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--dump-diverge]
+//   BallanceMMOSimTool --root <game dir> --replay-session <file.bmjr> [--list] [--write-journal <out.bmjr>]
 //   BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S] [--spawn-ball T]
 //       [--ticks K] [--report-every R]
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK [--ticks N]
@@ -10,6 +11,13 @@
 // Gameplay_Ingame script to activate (the record's frame 0 anchor), performs
 // the same session reset as the client recorder, then feeds the recorded
 // keyboard state tick by tick and compares physics hashes.
+//
+// --replay-session is the offline side of the session black box (design 9.15):
+// it rebuilds the world a room ran from its journal (members, every applied
+// input frame, every lifecycle event) and compares each tick's fingerprint and
+// each checkpoint's bodies with what the recording says, so a bug that only
+// happens in a live multiplayer session is reproducible here.  --list is the
+// triage pass (no engine boot at all).
 //
 // --spawn-test boots a session world (design 9.10), physicalizes N players at
 // the level's resetpoint in the same tick and checks that the deterministic
@@ -29,6 +37,7 @@
 #include "physics_world.hpp"
 #include <entity/session.hpp>
 #include <physics/physics_state.hpp>
+#include <session/journal.hpp>
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
@@ -45,15 +54,32 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
     struct arguments {
         std::string root;
         std::string replay;
+        // --replay-session <file.bmjr>: the session black box (design 9.15).
+        // --list prints the file and simulates nothing (no --root needed);
+        // --journal-trace turns on the world's per-tick diagnostics;
+        // --write-journal writes this replay's own journal so two platforms'
+        // replays can be diffed with scripts/journal_trace.py --diff;
+        // --continue-after-jump replays past a hole in the tick numbering
+        // (which the replay would otherwise stop at: the world ticks once per
+        // journal tick, so past a hole it is simply on the wrong tick).
+        std::string replay_session;
+        bool list_journal = false;
+        bool stop_on_divergence = false;
+        bool continue_after_jump = false;
+        bool journal_trace = false;
+        std::string write_journal;
         int level = 0;
         int ticks = 660;
         int level_at_tick = 200;
@@ -147,6 +173,12 @@ namespace {
             const char* v = nullptr;
             if (arg == "--root") { if (!(v = next())) return false; out.root = v; }
             else if (arg == "--replay") { if (!(v = next())) return false; out.replay = v; }
+            else if (arg == "--replay-session") { if (!(v = next())) return false; out.replay_session = v; }
+            else if (arg == "--list") out.list_journal = true;
+            else if (arg == "--stop-on-divergence") out.stop_on_divergence = true;
+            else if (arg == "--continue-after-jump") out.continue_after_jump = true;
+            else if (arg == "--journal-trace") out.journal_trace = true;
+            else if (arg == "--write-journal") { if (!(v = next())) return false; out.write_journal = v; }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
             else if (arg == "--ticks") { if (!(v = next())) return false; out.ticks = std::atoi(v); out.ticks_explicit = true; }
             else if (arg == "--level-at") { if (!(v = next())) return false; out.level_at_tick = std::atoi(v); }
@@ -178,6 +210,10 @@ namespace {
                 if (!(v = next())) return false; out.exact_from = std::atoll(v);
                 if (!(v = next())) return false; out.exact_to = std::atoll(v);
             }
+            // --from A --to B: the session-replay spelling of --exact-frames,
+            // where the numbers are journal ticks rather than record frames.
+            else if (arg == "--from") { if (!(v = next())) return false; out.exact_from = std::atoll(v); }
+            else if (arg == "--to") { if (!(v = next())) return false; out.exact_to = std::atoll(v); }
             else if (arg == "--dump-array") { if (!(v = next())) return false; out.dump_array = v; }
             else if (arg == "--dump-entity") { if (!(v = next())) return false; out.dump_entity = v; }
             else if (arg == "--sector") {
@@ -236,7 +272,8 @@ namespace {
             }
             else return false;
         }
-        return !out.root.empty();
+        // --list of a journal is pure file reading: no game data needed.
+        return !out.root.empty() || !out.replay_session.empty();
     }
 
     bool gameplay_ingame_active(const bmmo::sim::headless_engine& engine) {
@@ -358,17 +395,22 @@ namespace {
 
     // --dump-entity NAME: world matrix rows, parent and local position of a
     // 3D entity (hex floats), the counterpart of the client's "entity" verb.
-    void dump_entity(const bmmo::sim::headless_engine& engine, const std::string& name) {
+    // Returned as text so a caller can hold the line of the tick before a
+    // divergence and only print it when there is one.
+    std::string describe_entity(const bmmo::sim::headless_engine& engine, const std::string& name) {
+        char line[768] = {};
         auto* entity = CK3dEntity::Cast(engine.context()->GetObjectByNameAndParentClass(
             const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
         if (!entity) {
-            std::printf("[dump tick %llu] no 3D entity named %s\n", static_cast<unsigned long long>(engine.ticks()), name.c_str());
-            return;
+            std::snprintf(line, sizeof(line), "[dump tick %llu] no 3D entity named %s\n",
+                static_cast<unsigned long long>(engine.ticks()), name.c_str());
+            return line;
         }
         const VxMatrix& world = entity->GetWorldMatrix();
         const VxMatrix& local = entity->GetLocalMatrix();
         CK3dEntity* parent = entity->GetParent();
-        std::printf("[dump tick %llu] entity %s parent=%s world=[%a,%a,%a][%a,%a,%a][%a,%a,%a][%a,%a,%a] local_pos=[%a,%a,%a]\n",
+        std::snprintf(line, sizeof(line),
+            "[dump tick %llu] entity %s parent=%s world=[%a,%a,%a][%a,%a,%a][%a,%a,%a][%a,%a,%a] local_pos=[%a,%a,%a]\n",
             static_cast<unsigned long long>(engine.ticks()), name.c_str(),
             parent && parent->GetName() ? parent->GetName() : "-",
             static_cast<double>(world[0][0]), static_cast<double>(world[0][1]), static_cast<double>(world[0][2]),
@@ -376,7 +418,25 @@ namespace {
             static_cast<double>(world[2][0]), static_cast<double>(world[2][1]), static_cast<double>(world[2][2]),
             static_cast<double>(world[3][0]), static_cast<double>(world[3][1]), static_cast<double>(world[3][2]),
             static_cast<double>(local[3][0]), static_cast<double>(local[3][1]), static_cast<double>(local[3][2]));
+        return line;
+    }
+
+    void dump_entity(const bmmo::sim::headless_engine& engine, const std::string& name) {
+        std::printf("%s", describe_entity(engine, name).c_str());
         std::fflush(stdout);
+    }
+
+    // --dump-entity takes a comma separated list.
+    std::string describe_entities(const bmmo::sim::headless_engine& engine, const std::string& names) {
+        std::string out;
+        size_t start = 0;
+        while (start <= names.size()) {
+            size_t comma = names.find(',', start);
+            if (comma == std::string::npos) comma = names.size();
+            if (comma > start) out += describe_entity(engine, names.substr(start, comma - start));
+            start = comma + 1;
+        }
+        return out;
     }
 
     void dump_array(const bmmo::sim::headless_engine& engine, const std::string& name) {
@@ -1242,6 +1302,817 @@ namespace {
         std::fflush(stdout);
         return first_divergence < 0 ? 0 : 3;
     }
+
+    // ------------------------------------------------------- session journal
+    // The offline side of the session black box (design 9.15).  A server
+    // journal holds everything its physics_world consumed - the members with
+    // their join orders, every input frame the world was actually fed, every
+    // client-reported lifecycle event as it was applied - plus the fingerprint
+    // of every tick and a full body checkpoint now and then.  Feeding those
+    // back into a world built from the same header reproduces the room bit for
+    // bit; the first tick whose hash disagrees is the bug.
+
+    const char* event_type_name(bmmo::session::event_type type) {
+        switch (type) {
+            case bmmo::session::event_type::Physicalize: return "Physicalize";
+            case bmmo::session::event_type::Unphysicalize: return "Unphysicalize";
+            case bmmo::session::event_type::Sector: return "Sector";
+            case bmmo::session::event_type::Finish: return "Finish";
+            case bmmo::session::event_type::BodyRevived: return "BodyRevived";
+        }
+        return "unknown";
+    }
+
+    const char* correction_kind_name(uint8_t kind) {
+        static const char* names[] = {"mismatch", "rollback", "hard", "blend", "resync", "too_far", "frozen", "unmatched"};
+        return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "?";
+    }
+
+    // A header from a machine with a broken clock, or a corrupted one, carries
+    // an utc_ms no calendar holds.  Unguarded that kills the whole listing:
+    // MSVC's strftime calls the invalid parameter handler on the tm gmtime_s
+    // refused to fill in, and the process dies before a single buffered line
+    // reaches the console.  Print the raw number instead - every record after
+    // the header is still worth reading, which is the point of --list.
+    std::string utc_string(uint64_t utc_ms) {
+        const std::time_t seconds = static_cast<std::time_t>(utc_ms / 1000);
+        std::tm parts{};
+#ifdef _WIN32
+        if (gmtime_s(&parts, &seconds) != 0)
+#else
+        if (gmtime_r(&seconds, &parts) == nullptr)
+#endif
+            return "utc_ms=" + std::to_string(utc_ms) + " (out of range)";
+        char stamp[32] = {};
+        if (std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", &parts) == 0)
+            return "utc_ms=" + std::to_string(utc_ms) + " (out of range)";
+        char text[64] = {};
+        std::snprintf(text, sizeof(text), "%s.%03uZ", stamp, static_cast<unsigned>(utc_ms % 1000));
+        return text;
+    }
+
+    // The engine half of a build id ("ballanced-<sha>" before the '+'): the
+    // part that has to match for a replay to mean anything.
+    std::string engine_build(const std::string& build_id) {
+        const size_t plus = build_id.find('+');
+        return plus == std::string::npos ? build_id : build_id.substr(0, plus);
+    }
+
+    // The journal's event back into the world's own struct: the mirror of
+    // session_runner.cpp's to_journal_event (journal.hpp deliberately knows
+    // nothing about the server's headers).
+    bmmo::sim::lifecycle_event to_lifecycle_event(const bmmo::session::journal_event& e) {
+        bmmo::sim::lifecycle_event out;
+        out.type = e.type;
+        out.ball_type = e.ball_type;
+        out.flags = e.flags;
+        for (int k = 0; k < 3; ++k) out.position[k] = e.position[k];
+        for (int k = 0; k < 9; ++k) out.rotation[k] = e.rotation[k];
+        out.recipe = e.recipe;
+        out.sector = e.sector;
+        out.name = e.name;
+        // The stamp, not the tick the record is filed under: the spawn impulse
+        // direction is derived from this field, and the two differ whenever the
+        // event reached the server after the tick it was asked for.  The reader
+        // already resolved a file written before the split (no trailing u32) to
+        // the applied tick, so 0 here means an event stamped for tick 0.
+        out.tick = e.event_tick;
+        return out;
+    }
+
+    // --list: the whole file in a screen, without booting the engine.  This is
+    // the triage pass on a journal fetched from a live server, so it streams:
+    // read_journal would expand a file at the 256 MB cap into some 13 million
+    // structs, and every line here needs only the record in front of it.  The
+    // counting summary is printed after the lines instead of before them - the
+    // price of not holding the file in memory.
+    int list_journal(const std::string& path) {
+        bmmo::session::journal_header h;
+        std::string error;
+        uint64_t dropped = 0, unknown = 0, delivered = 0;
+        size_t tick_records = 0, inputs = 0;
+        uint32_t first_ms = 0, last_ms = 0, low_tick = 0, high_tick = 0;
+        bool have_ms = false, have_tick = false, seen_tick_record = false;
+        // The renumbering a resync leaves behind: the highest tick a TICK
+        // record has reached, and the records that came back below it.
+        uint32_t high_tick_record = 0, first_duplicate = 0;
+        size_t duplicate_ticks = 0;
+        std::vector<uint32_t> group_ticks;   // deduped against the previous entry, sorted at the end
+        std::vector<uint32_t> full_checkpoints, local_checkpoints, received_checkpoints;
+        uint64_t parse_error_record = 0;
+        int parse_error_tag = 0;
+        std::printf("=== %s\n", path.c_str());
+        // The header record is parsed by scan_journal itself, so the first
+        // callback already knows it: print it from there, once.
+        bool header_printed = false;
+        const auto print_header = [&] {
+            if (header_printed) return;
+            header_printed = true;
+            std::printf("header: %s session=%u level=%d seed=%d impulse=%.3f input_delay=%u checkpoint_ticks=%u"
+                        " first_tick=%u\n",
+                h.kind == bmmo::session::journal_kind::server ? "server" : "client", h.session, h.level, h.seed,
+                static_cast<double>(h.spawn_impulse), h.input_delay, h.checkpoint_ticks, h.first_tick);
+            std::printf("        anchor hash=%016llx surfaces=%016llx build=%s\n",
+                static_cast<unsigned long long>(h.anchor_hash), static_cast<unsigned long long>(h.anchor_surfaces),
+                h.build_id.c_str());
+            std::printf("        utc=%s own_player=%u own_join_order=%u\n", utc_string(h.utc_ms).c_str(),
+                h.own_player, static_cast<unsigned>(h.own_join_order));
+        };
+        auto on_record = [&](bmmo::session::journal_tag tag, const std::string& payload) {
+            print_header();
+            bmmo::session::journal_detail::cursor in(payload);
+            const auto seen_tick = [&](uint32_t tick) {
+                if (!have_tick) { low_tick = high_tick = tick; have_tick = true; }
+                low_tick = std::min(low_tick, tick);
+                high_tick = std::max(high_tick, tick);
+                if (group_ticks.empty() || group_ticks.back() != tick) group_ticks.push_back(tick);
+            };
+            switch (tag) {
+                case bmmo::session::journal_tag::player: {
+                    bmmo::session::journal_player p;
+                    p.tick = in.u32();
+                    p.id = in.u32();
+                    p.join_order = in.u8();
+                    p.added = in.u8() != 0;
+                    p.name = in.str();
+                    if (!in.ok) break;
+                    seen_tick(p.tick);
+                    // A founding member (added at first_tick, before any TICK
+                    // record) gets the member line as well as its own record.
+                    if (!seen_tick_record && p.added && p.tick == h.first_tick)
+                        std::printf("member: p%u join=%u \"%s\"\n", p.id, static_cast<unsigned>(p.join_order),
+                            p.name.c_str());
+                    std::printf("tick %-8u player %cp%u join=%u \"%s\"\n", p.tick, p.added ? '+' : '-', p.id,
+                        static_cast<unsigned>(p.join_order), p.name.c_str());
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::input: {
+                    // Counted, never printed: the inputs are the bulk of the
+                    // file and no human reads them one per line.
+                    const uint32_t tick = in.u32();
+                    if (!in.ok) break;
+                    seen_tick(tick);
+                    ++inputs;
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::event: {
+                    bmmo::session::journal_event e;
+                    e.tick = in.u32();
+                    e.id = in.u32();
+                    e.type = static_cast<bmmo::session::event_type>(in.u8());
+                    e.ball_type = in.u8();
+                    e.flags = in.u8();
+                    in.f32_array(e.position, 3);
+                    in.f32_array(e.rotation, 9);
+                    e.sector = in.i32();
+                    e.name = in.str();
+                    if (!in.ok || !bmmo::session::journal_detail::read_recipe(in, e.recipe)) break;
+                    e.event_tick = in.size - in.pos >= 4 ? in.u32() : e.tick;
+                    if (!in.ok) break;
+                    seen_tick(e.tick);
+                    // "stamped S applied T" only when they differ: that gap is
+                    // an event that reached the server after its own tick, and
+                    // is itself worth seeing.
+                    char stamp[48] = {};
+                    if (e.event_tick != e.tick)
+                        std::snprintf(stamp, sizeof(stamp), " stamped %u applied %u", e.event_tick, e.tick);
+                    std::printf("tick %-8u event p%u %s ball=%u flags=%02x sector=%d pos=(%.3f,%.3f,%.3f) name=%s%s\n",
+                        e.tick, e.id, event_type_name(e.type), static_cast<unsigned>(e.ball_type),
+                        static_cast<unsigned>(e.flags), e.sector, static_cast<double>(e.position[0]),
+                        static_cast<double>(e.position[1]), static_cast<double>(e.position[2]), e.name.c_str(), stamp);
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::tick: {
+                    const uint32_t tick = in.u32();
+                    in.u64();
+                    in.u64();
+                    in.i32();
+                    const uint32_t ms = in.u32();
+                    if (!in.ok) break;
+                    seen_tick(tick);
+                    // A client renumbers its ticks at a resync, so the same
+                    // tick can carry two fingerprints and read_journal keeps
+                    // only the last of each.  Streaming cannot remember which
+                    // ticks already had a record, but a TICK that comes back
+                    // at or below the highest one seen IS that renumbering,
+                    // and on a real resync journal this counts what
+                    // read_journal counts.
+                    if (seen_tick_record && tick <= high_tick_record) {
+                        if (duplicate_ticks++ == 0) first_duplicate = tick;
+                    }
+                    high_tick_record = std::max(high_tick_record, tick);
+                    seen_tick_record = true;
+                    ++tick_records;
+                    last_ms = ms;
+                    if (!have_ms) { first_ms = ms; have_ms = true; }
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::checkpoint: {
+                    const uint32_t tick = in.u32();
+                    const uint8_t flags = in.u8();
+                    if (!in.ok) break;
+                    seen_tick(tick);
+                    if (flags & bmmo::session::JOURNAL_CHECKPOINT_FULL) full_checkpoints.push_back(tick);
+                    if (flags & bmmo::session::JOURNAL_CHECKPOINT_LOCAL) local_checkpoints.push_back(tick);
+                    if (flags & bmmo::session::JOURNAL_CHECKPOINT_RECEIVED) received_checkpoints.push_back(tick);
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::note: {
+                    bmmo::session::journal_note n;
+                    n.tick = in.u32();
+                    n.text = in.str();
+                    if (!in.ok) break;
+                    seen_tick(n.tick);
+                    std::printf("tick %-8u note %s\n", n.tick, n.text.c_str());
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::correction: {
+                    bmmo::session::journal_correction c;
+                    c.tick = in.u32();
+                    c.local_tick = in.u32();
+                    c.kind = in.u8();
+                    c.entity = in.str();
+                    c.error_m = in.f32();
+                    c.velocity_error = in.f32();
+                    in.f64_array(c.local_position, 3);
+                    in.f64_array(c.server_position, 3);
+                    if (!in.ok) break;
+                    seen_tick(c.tick);
+                    std::printf("tick %-8u correction %s local=%u %s error=%.4f m dv=%.3f local=(%.3f,%.3f,%.3f)"
+                                " server=(%.3f,%.3f,%.3f)\n",
+                        c.tick, correction_kind_name(c.kind), c.local_tick, c.entity.c_str(),
+                        static_cast<double>(c.error_m), static_cast<double>(c.velocity_error), c.local_position[0],
+                        c.local_position[1], c.local_position[2], c.server_position[0], c.server_position[1],
+                        c.server_position[2]);
+                    ++delivered;
+                    return true;
+                }
+                case bmmo::session::journal_tag::header:
+                default:
+                    break;
+            }
+            // The header is record 1 and this one is not counted yet: the same
+            // 1-based position read_journal reports.
+            parse_error_record = 2 + delivered + unknown;
+            parse_error_tag = static_cast<int>(tag);
+            return false;
+        };
+        if (!bmmo::session::scan_journal(path, h, on_record, error, &dropped, &unknown)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        print_header();   // an empty file still has a header to show
+        std::sort(group_ticks.begin(), group_ticks.end());
+        group_ticks.erase(std::unique(group_ticks.begin(), group_ticks.end()), group_ticks.end());
+        std::error_code ec;
+        const uintmax_t file_size = std::filesystem::file_size(path, ec);
+        const uint64_t read = !ec && file_size >= dropped ? static_cast<uint64_t>(file_size) - dropped : 0;
+        std::printf("ticks: %u..%u groups=%zu tick_records=%zu inputs=%zu records=%llu unknown=%llu"
+                    " read=%llu dropped=%llu\n",
+            low_tick, high_tick, group_ticks.size(), tick_records, inputs,
+            static_cast<unsigned long long>(1 + delivered + unknown), static_cast<unsigned long long>(unknown),
+            static_cast<unsigned long long>(read), static_cast<unsigned long long>(dropped));
+        if (have_ms)
+            std::printf("wall clock: first tick +%u ms, last tick +%u ms after %s\n", first_ms, last_ms,
+                utc_string(h.utc_ms).c_str());
+        std::string warning;
+        const auto warn = [&](const std::string& text) {
+            if (!warning.empty()) warning += "; ";
+            warning += text;
+        };
+        if (parse_error_record != 0)
+            warn("record " + std::to_string(parse_error_record) + " (tag " + std::to_string(parse_error_tag)
+               + ") does not parse");
+        if (dropped != 0) warn("truncated: " + std::to_string(dropped) + " bytes dropped");
+        if (unknown != 0) warn(std::to_string(unknown) + " unknown records skipped");
+        if (duplicate_ticks != 0)
+            warn(std::to_string(duplicate_ticks) + " duplicate TICK records (first at tick "
+               + std::to_string(first_duplicate) + ", kept the last of each)");
+        if (!warning.empty()) std::printf("warning: %s\n", warning.c_str());
+        const auto print_checkpoints = [](const char* what, const std::vector<uint32_t>& ticks) {
+            if (ticks.empty()) return;
+            std::string line;
+            for (size_t i = 0; i < ticks.size() && i < 24; ++i) line += (i ? ", " : "") + std::to_string(ticks[i]);
+            if (ticks.size() > 24) line += ", ...";
+            std::printf("checkpoints %s: %zu [%s]\n", what, ticks.size(), line.c_str());
+        };
+        print_checkpoints("FULL", full_checkpoints);
+        print_checkpoints("LOCAL", local_checkpoints);
+        print_checkpoints("RECEIVED", received_checkpoints);
+        std::fflush(stdout);
+        return 0;
+    }
+
+    // How a recorded checkpoint compares with the same world now.
+    struct checkpoint_diff {
+        size_t compared = 0, differing = 0, missing = 0, extra = 0, renumbered = 0, unresolved = 0;
+        double worst = 0.0;
+        std::string worst_name;
+        std::string worst_detail;
+        std::string first_missing;   // the identity of a recorded body the replay does not have
+        std::string first_extra;     // ... and of a replayed body the recording does not have
+    };
+
+    // What to call a body in a report: its name when it has one, and what it is
+    // otherwise (a delta snapshot's rows carry no names).
+    std::string body_label(const bmmo::session::body_state& body, const std::string& name) {
+        if (!name.empty()) return name;
+        return (body.kind == bmmo::session::body_kind::Ball ? "ball of p" : "mechanism #")
+             + std::to_string(body.owner);
+    }
+
+    // Bodies are matched by name where there is one and by (kind, owner)
+    // otherwise.  A mechanism's `owner` is only the number the run that wrote
+    // the record happened to give it - the server numbers a mechanism when one
+    // of its own snapshots first carries it, the replay when one of ITS
+    // snapshots does, and a delta row carries no name to catch the difference -
+    // so a nameless mechanism row is resolved through `dictionary`, the names
+    // the file's own full snapshots taught us, before the replay's numbering is
+    // touched at all.  A row that resolves to nothing is counted as unresolved
+    // rather than compared: it must never pass for a match or a mismatch.
+    checkpoint_diff compare_checkpoint(const std::vector<bmmo::session::body_state>& recorded,
+                                       const std::vector<bmmo::session::body_state>& replayed,
+                                       const std::map<uint32_t, std::string>& dictionary) {
+        checkpoint_diff diff;
+        std::map<std::pair<uint8_t, uint32_t>, size_t> by_key;
+        std::map<std::string, size_t> by_name;
+        for (size_t i = 0; i < replayed.size(); ++i) {
+            by_key.emplace(std::make_pair(static_cast<uint8_t>(replayed[i].kind), replayed[i].owner), i);
+            if (!replayed[i].name.empty()) by_name.emplace(replayed[i].name, i);
+        }
+        std::vector<bool> used(replayed.size(), false);
+        for (const auto& body: recorded) {
+            std::string name = body.name;
+            if (name.empty() && body.kind == bmmo::session::body_kind::Mechanism) {
+                auto known = dictionary.find(body.owner);
+                if (known == dictionary.end()) { ++diff.unresolved; continue; }
+                name = known->second;
+            }
+            size_t index = replayed.size();
+            auto key = by_key.find(std::make_pair(static_cast<uint8_t>(body.kind), body.owner));
+            if (!name.empty()) {
+                auto named = by_name.find(name);
+                if (named != by_name.end()) {
+                    index = named->second;
+                    if (key == by_key.end() || key->second != index) ++diff.renumbered;
+                }
+            }
+            if (index == replayed.size() && key != by_key.end()) {
+                const auto& other = replayed[key->second];
+                if (name.empty() || other.name.empty()) index = key->second;
+            }
+            if (index == replayed.size()) {
+                ++diff.missing;
+                if (diff.first_missing.empty()) diff.first_missing = body_label(body, name);
+                continue;
+            }
+            used[index] = true;
+            ++diff.compared;
+            const auto& other = replayed[index];
+            double dp = 0.0, dv = 0.0, da = 0.0, dr = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double p = body.position[k] - other.position[k];
+                const double v = static_cast<double>(body.linear[k]) - static_cast<double>(other.linear[k]);
+                const double a = static_cast<double>(body.angular[k]) - static_cast<double>(other.angular[k]);
+                dp += p * p;
+                dv += v * v;
+                da += a * a;
+            }
+            for (int k = 0; k < 4; ++k) dr = std::max(dr, std::abs(body.rotation[k] - other.rotation[k]));
+            dp = std::sqrt(dp);
+            dv = std::sqrt(dv);
+            da = std::sqrt(da);
+            const bool differs = dp > 1e-6 || dv > 1e-4 || da > 1e-4 || dr > 1e-6 || body.flags != other.flags;
+            // Only a body that actually disagrees can be the worst offender:
+            // naming one that matches to the last bit hides the real problem,
+            // which is usually a body that is missing altogether.
+            if (differs) ++diff.differing;
+            if (differs && dp >= diff.worst) {
+                diff.worst = dp;
+                diff.worst_name = other.name.empty() ? name : other.name;
+                if (diff.worst_name.empty()) diff.worst_name = body_label(body, name);
+                char detail[320];
+                std::snprintf(detail, sizeof(detail),
+                    "dp=%.6f dv=%.4f da=%.4f drot=%.6f flags=%02x/%02x recorded=(%.4f,%.4f,%.4f) replayed=(%.4f,%.4f,%.4f)",
+                    dp, dv, da, dr, static_cast<unsigned>(body.flags), static_cast<unsigned>(other.flags),
+                    body.position[0], body.position[1], body.position[2],
+                    other.position[0], other.position[1], other.position[2]);
+                diff.worst_detail = detail;
+            }
+        }
+        for (size_t i = 0; i < replayed.size(); ++i) {
+            if (used[i]) continue;
+            ++diff.extra;
+            if (diff.first_extra.empty()) diff.first_extra = body_label(replayed[i], replayed[i].name);
+        }
+        return diff;
+    }
+
+    int run_replay_session(const arguments& args) {
+        // --list streams the file and never builds the in-memory journal: it
+        // is the pass that has to work on a 256 MB box fetched from a server.
+        if (args.list_journal) return list_journal(args.replay_session);
+        bmmo::session::journal journal;
+        std::string error;
+        if (!bmmo::session::read_journal(args.replay_session, journal, error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        if (!journal.warning.empty())
+            std::fprintf(stderr, "journal warning: %s\n", journal.warning.c_str());
+        if (args.root.empty()) {
+            std::fprintf(stderr, "--replay-session needs --root <game dir> (only --list works without it)\n");
+            return 2;
+        }
+        if (journal.ticks.empty()) {
+            std::fprintf(stderr, "the journal has no ticks to replay\n");
+            return 1;
+        }
+        const auto& header = journal.header;
+        const bool client_journal = header.kind == bmmo::session::journal_kind::client;
+        if (client_journal) {
+            std::printf("client journal of player %u: replaying the SERVER's view from what this client sent and\n"
+                        "received.  Its own INPUT records are what it sent, not necessarily what the server applied,\n"
+                        "and its TICK hashes are of its own world, so only the received snapshots are compared.\n",
+                        header.own_player);
+            std::printf("client journal: same-tick events applied in join-order order, the server's rule\n");
+        }
+        const std::string build = bmmo::physics::build_id();
+        if (engine_build(build) != engine_build(header.build_id))
+            std::printf("warning: engine build differs: journal %s, this tool %s\n",
+                header.build_id.c_str(), build.c_str());
+
+        bmmo::sim::world_options options;
+        options.game_root = args.root;
+        options.level = header.level > 0 ? header.level : (args.level > 0 ? args.level : 1);
+        options.seed = header.seed;
+        options.spawn_impulse = header.spawn_impulse;
+        options.trace = args.journal_trace;
+        options.boot_ticks = args.boot_ticks;
+        options.anchor_timeout = args.anchor_timeout;
+        options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
+        auto world = bmmo::sim::physics_world::create(options, error);
+        if (!world) {
+            std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+            return 1;
+        }
+        // Wrong game data is the first thing to check when everything diverges
+        // from the very first tick, so it is checked before the very first tick.
+        if (header.anchor_hash != 0 && header.anchor_hash != world->anchor_hash())
+            std::printf("warning: anchor hash %016llx, journal says %016llx (different game data or engine build)\n",
+                static_cast<unsigned long long>(world->anchor_hash()),
+                static_cast<unsigned long long>(header.anchor_hash));
+        if (header.anchor_surfaces != 0 && header.anchor_surfaces != world->anchor_surfaces())
+            std::printf("warning: anchor surfaces %016llx, journal says %016llx (different game data)\n",
+                static_cast<unsigned long long>(world->anchor_surfaces()),
+                static_cast<unsigned long long>(header.anchor_surfaces));
+
+        // --write-journal: this replay's own box, so the same journal replayed
+        // on two platforms can be diffed with scripts/journal_trace.py --diff.
+        bmmo::session::journal_writer out;
+        const auto started = std::chrono::steady_clock::now();
+        if (!args.write_journal.empty()) {
+            bmmo::session::journal_header out_header;
+            out_header.kind = bmmo::session::journal_kind::server;
+            out_header.session = header.session;
+            out_header.level = world->level();
+            out_header.seed = options.seed;
+            out_header.spawn_impulse = options.spawn_impulse;
+            out_header.input_delay = header.input_delay;
+            out_header.checkpoint_ticks = header.checkpoint_ticks;
+            out_header.first_tick = journal.ticks.front().tick;
+            out_header.anchor_hash = world->anchor_hash();
+            out_header.anchor_surfaces = world->anchor_surfaces();
+            out_header.build_id = build;
+            out_header.utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            const std::filesystem::path path = args.write_journal;
+            std::error_code ec;
+            if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
+            std::string open_error;
+            if (!out.open(path, out_header, 0, open_error)) {
+                std::fprintf(stderr, "%s\n", open_error.c_str());
+                return 1;
+            }
+            out.note(out_header.first_tick, "start: replay of " + args.replay_session);
+            std::printf("writing the replay's journal to %s\n", path.string().c_str());
+        }
+
+        // The last tick the recording side really ran: past it only the
+        // leaving players and the end note remain (or, after a crash, nothing).
+        uint32_t last_sim_tick = journal.ticks.front().tick;
+        for (const auto& group: journal.ticks)
+            if (group.has_tick || !group.inputs.empty() || !group.events.empty()) last_sim_tick = group.tick;
+
+        size_t simulated = 0, matched = 0, compared = 0, checkpoints = 0, checkpoint_mismatches = 0;
+        long long first_divergence = -1, first_checkpoint_divergence = -1;
+        std::string dump_before;   // --dump-entity: the tick before the divergence
+        bool warned_offset = false;
+        bool stopped_at_jump = false;
+        std::vector<bmmo::session::body_state> bodies;
+        // The players the replayed world knows, and the join orders they hold:
+        // a client journal only ever names the members its own SessionStart
+        // listed, so an id that turns up in a relayed input or event has to be
+        // added here or its ball never exists in the replay.
+        std::map<uint32_t, uint8_t> replay_players;
+        // Mechanism index -> name, learned from every recorded row that carries
+        // one.  Delta snapshot rows are nameless and their index is the
+        // recording's own numbering, which is not this replay's.
+        std::map<uint32_t, std::string> dictionary;
+        uint32_t last_written_tick = journal.ticks.front().tick;
+        bool have_previous_group = false;
+        uint32_t previous_group = 0;
+        // A player that has records but no PLAYER record of its own (a late
+        // join the recording side was never told about).  The join order is a
+        // guess - the world falls back to a free slot anyway - and the guess
+        // decides the spawn impulse direction, so it is said out loud.
+        const auto ensure_player = [&](uint32_t id, uint32_t tick) {
+            if (id == 0 || replay_players.count(id)) return;
+            uint8_t order = 0;
+            while (order < 63) {
+                bool taken = false;
+                for (const auto& [other, other_order]: replay_players) {
+                    (void) other;
+                    if (other_order == order) { taken = true; break; }
+                }
+                if (!taken) break;
+                ++order;
+            }
+            if (!world->add_player(id, order, error)) {
+                std::printf("tick %u: add_player %u failed: %s\n", tick, id, error.c_str());
+                return;
+            }
+            replay_players[id] = order;
+            std::printf("note: p%u has records but no PLAYER record (late join); added with join order %u\n",
+                id, static_cast<unsigned>(order));
+            if (out.is_open()) out.player(tick, id, order, true, {});
+        };
+        for (const auto& group: journal.ticks) {
+            for (const auto& n: group.notes) std::printf("tick %u note: %s\n", n.tick, n.text.c_str());
+            for (const auto& c: group.corrections)
+                std::printf("tick %u correction: %s local=%u %s error=%.4f m\n", c.tick,
+                    correction_kind_name(c.kind), c.local_tick, c.entity.c_str(), static_cast<double>(c.error_m));
+            for (const auto& cp: group.checkpoints) {
+                // A LOCAL checkpoint is the client's own body list, where every
+                // owner is 0: it knows names but no numbering, and letting it
+                // near the dictionary would rename index 0 every 660 ticks.
+                if (cp.flags & bmmo::session::JOURNAL_CHECKPOINT_LOCAL) continue;
+                for (const auto& body: cp.bodies)
+                    if (body.kind == bmmo::session::body_kind::Mechanism && !body.name.empty())
+                        dictionary[body.owner] = body.name;
+            }
+            if (group.tick > last_sim_tick) continue;   // the session's tail
+            for (const auto& p: group.players) {
+                if (p.added) {
+                    if (!world->add_player(p.id, p.join_order, error))
+                        std::printf("tick %u: add_player %u failed: %s\n", p.tick, p.id, error.c_str());
+                    else
+                        replay_players[p.id] = p.join_order;
+                } else {
+                    world->remove_player(p.id);
+                    replay_players.erase(p.id);
+                }
+                if (out.is_open()) out.player(p.tick, p.id, p.join_order, p.added, p.name);
+            }
+            // The world ticks once per group, so a hole in the numbering leaves
+            // it behind for the rest of the file.  A client's numbering restarts
+            // on a late join and on every resync, which is exactly why this has
+            // to run for a client journal too.
+            if (!warned_offset && world->tick_index() != group.tick) {
+                warned_offset = true;
+                std::printf("warning: the world is at tick %u where the journal is at %u; the recording has a gap\n",
+                    world->tick_index(), group.tick);
+            }
+            // A hole in the numbering, not only between two ticks that both
+            // have a TICK record: a late joiner's journal has its anchor era
+            // under the provisional base 0 and everything after the assignment
+            // hundreds of ticks higher, with nothing in between.
+            if (have_previous_group && group.tick != previous_group + 1) {
+                std::printf("warning: the journal jumps from tick %u to tick %u (a late join or a resync restarts the"
+                            " numbering); everything after this point is compared against a world that is %lld ticks"
+                            " behind\n", previous_group, group.tick,
+                    static_cast<long long>(group.tick) - static_cast<long long>(world->tick_index()));
+                if (!args.continue_after_jump) {
+                    std::printf("stopping at the jump (--continue-after-jump replays past it anyway)\n");
+                    stopped_at_jump = true;
+                    break;
+                }
+            }
+            have_previous_group = true;
+            previous_group = group.tick;
+            for (const auto& in: group.inputs) {
+                ensure_player(in.id, group.tick);
+                world->set_input(in.id, in.frame);
+                if (out.is_open()) out.input(in.tick, in.id, in.frame, in.flags);
+            }
+            // The server applies a tick's events in the members' join order
+            // (session_runner::step), and that order is what a server journal's
+            // file order already IS.  A client wrote them in the order they
+            // reached it - its own first, the relayed ones after - so a client
+            // journal has to be sorted back into the server's rule here, or the
+            // replay creates two balls of the same tick the other way round and
+            // diverges from the session for good.
+            std::vector<const bmmo::session::journal_event*> ordered;
+            ordered.reserve(group.events.size());
+            for (const auto& e: group.events) ordered.push_back(&e);
+            if (client_journal && ordered.size() > 1) {
+                const auto join_rank = [&replay_players](uint32_t id) {
+                    const auto it = replay_players.find(id);
+                    return it == replay_players.end() ? 256u : static_cast<uint32_t>(it->second);
+                };
+                std::stable_sort(ordered.begin(), ordered.end(),
+                    [&join_rank](const bmmo::session::journal_event* a, const bmmo::session::journal_event* b) {
+                        return join_rank(a->id) < join_rank(b->id);
+                    });
+            }
+            for (const auto* entry: ordered) {
+                const auto& e = *entry;
+                if (static_cast<uint8_t>(e.type) > static_cast<uint8_t>(bmmo::session::event_type::BodyRevived)) {
+                    // A newer writer's event type: the world would not know
+                    // what to do with it, and guessing would be worse.
+                    std::printf("tick %u: event type %u from p%u is unknown to this build, skipped\n", e.tick,
+                        static_cast<unsigned>(e.type), e.id);
+                    continue;
+                }
+                if (out.is_open()) out.event(e);
+                ensure_player(e.id, group.tick);
+                const bmmo::sim::lifecycle_event event = to_lifecycle_event(e);
+                // The gap between the two ticks is the event arriving after the
+                // tick it asked for: worth seeing, because a divergence here is
+                // about the recording, not about the physics.
+                if (event.tick != e.tick)
+                    std::printf("tick %u: %s event from p%u was stamped for tick %u\n", e.tick,
+                        event_type_name(e.type), e.id, event.tick);
+                if (!world->apply_event(e.id, event, error)) {
+                    std::printf("tick %u: %s event from p%u failed: %s\n", e.tick, event_type_name(e.type), e.id,
+                        error.c_str());
+                    if (out.is_open()) out.note(e.tick, "event failed: " + error);
+                }
+            }
+            if (!args.dump_entity.empty()) dump_before = describe_entities(world->engine(), args.dump_entity);
+            if (!world->tick(error)) {
+                std::fprintf(stderr, "tick %u failed: %s\n", group.tick, error.c_str());
+                // The one case where the reason matters most is the one that
+                // must not leave the written box without an end note.
+                if (out.is_open()) {
+                    out.note(group.tick, "end: replay stopped: tick " + std::to_string(group.tick) + " failed: " + error);
+                    out.close();
+                }
+                return 1;
+            }
+            ++simulated;
+            last_written_tick = group.tick;
+            bmmo::physics::world_hash actual;
+            if (!bmmo::physics::capture_world_hash(world->physics(), actual, error)) {
+                std::fprintf(stderr, "hash failed at tick %u: %s\n", group.tick, error.c_str());
+                if (out.is_open()) {
+                    out.note(group.tick, "end: replay stopped: hash failed at tick " + std::to_string(group.tick)
+                           + ": " + error);
+                    out.close();
+                }
+                return 1;
+            }
+            if (out.is_open())
+                out.tick(group.tick, actual, static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started).count()));
+            bool same = true;
+            // A client journal's hashes are of its own world; a tick without a
+            // TICK record (the crash tail) was simulated but is not compared.
+            const bool comparable = !client_journal && group.has_tick;
+            if (comparable) {
+                const auto& expected = group.record;
+                ++compared;
+                same = actual.hash == expected.hash;
+                if (same) {
+                    ++matched;
+                } else if (first_divergence < 0) {
+                    first_divergence = static_cast<long long>(group.tick);
+                    std::printf("    replay movable: %s\n",
+                        bmmo::physics::describe_movable_objects(world->physics()).c_str());
+                    std::printf("    replay bodies: %s\n",
+                        bmmo::physics::describe_physics_objects(world->physics()).c_str());
+                    std::printf("    replay events: %s\n",
+                        bmmo::physics::drain_event_log(world->physics()).c_str());
+                    std::printf("    pose expected=%016llx actual=%016llx cores=%d/%d probe=%s/%s\n",
+                        static_cast<unsigned long long>(expected.pose),
+                        static_cast<unsigned long long>(actual.pose), expected.cores, actual.cores,
+                        expected.probe_name.c_str(), actual.probe_name);
+                    std::printf("    probe expected pos=(%.9g,%.9g,%.9g) speed=(%.9g,%.9g,%.9g)\n"
+                                "    probe actual   pos=(%.9g,%.9g,%.9g) speed=(%.9g,%.9g,%.9g)\n",
+                        expected.probe_position[0], expected.probe_position[1], expected.probe_position[2],
+                        static_cast<double>(expected.probe_speed[0]), static_cast<double>(expected.probe_speed[1]),
+                        static_cast<double>(expected.probe_speed[2]),
+                        actual.probe_position[0], actual.probe_position[1], actual.probe_position[2],
+                        static_cast<double>(actual.probe_speed[0]), static_cast<double>(actual.probe_speed[1]),
+                        static_cast<double>(actual.probe_speed[2]));
+                    if (!args.dump_entity.empty())
+                        std::printf("--dump-entity before tick %u:\n%s--dump-entity after tick %u:\n%s", group.tick,
+                            dump_before.c_str(), group.tick, describe_entities(world->engine(), args.dump_entity).c_str());
+                    std::printf("DIVERGE tick=%u expected=%016llx actual=%016llx\n", group.tick,
+                        static_cast<unsigned long long>(expected.hash), static_cast<unsigned long long>(actual.hash));
+                }
+            }
+            // Checkpoints: the recording's bodies against the same world now.
+            // A client's LOCAL checkpoint is its own world, not the server's,
+            // so only FULL (server) and RECEIVED (authoritative) rows compare.
+            bool checkpoint_bad = false;
+            for (const auto& cp: group.checkpoints) {
+                const bool full = (cp.flags & bmmo::session::JOURNAL_CHECKPOINT_FULL) != 0;
+                const bool received = (cp.flags & bmmo::session::JOURNAL_CHECKPOINT_RECEIVED) != 0;
+                if (!full && !received) continue;
+                ++checkpoints;
+                world->snapshot(true, bodies);
+                const checkpoint_diff diff = compare_checkpoint(cp.bodies, bodies, dictionary);
+                const bool bad = diff.differing != 0 || diff.missing != 0 || (full && diff.extra != 0);
+                if (bad) {
+                    checkpoint_bad = true;
+                    ++checkpoint_mismatches;
+                    if (first_checkpoint_divergence < 0) first_checkpoint_divergence = static_cast<long long>(cp.tick);
+                }
+                if (bad || diff.renumbered != 0 || diff.unresolved != 0) {
+                    std::string detail;
+                    const auto add = [&detail](const std::string& text) {
+                        if (!detail.empty()) detail += "; ";
+                        detail += text;
+                    };
+                    // Name what is actually wrong: a missing or an extra body
+                    // has no dp to be the worst offender with, and it is the
+                    // more interesting half of the two.
+                    if (!diff.first_missing.empty()) add("missing: " + diff.first_missing);
+                    // Only a full snapshot claims to hold every body; a delta
+                    // leaves out what did not change, so its "extra" rows are
+                    // the normal case and not worth a name.
+                    if (full && !diff.first_extra.empty()) add("extra: " + diff.first_extra);
+                    if (!diff.worst_name.empty()) add("worst " + diff.worst_name + " " + diff.worst_detail);
+                    std::printf("checkpoint tick %u (%s): %zu bodies, %zu differ, %zu only recorded, %zu only replayed,"
+                                " %zu renumbered, %zu unresolved%s%s\n",
+                        cp.tick, full ? "FULL" : "RECEIVED", diff.compared, diff.differing, diff.missing, diff.extra,
+                        diff.renumbered, diff.unresolved, detail.empty() ? "" : "; ", detail.c_str());
+                }
+            }
+            if (out.is_open() && header.checkpoint_ticks != 0 && group.tick % header.checkpoint_ticks == 0) {
+                world->snapshot(true, bodies);
+                out.checkpoint(group.tick, bmmo::session::JOURNAL_CHECKPOINT_FULL, bodies);
+            }
+            if (args.exact_from >= 0 && static_cast<long long>(group.tick) >= args.exact_from
+                    && static_cast<long long>(group.tick) <= args.exact_to)
+                std::printf("exact tick%u ivp_time=%.6f seed=%d\n%s", group.tick, actual.ivp_time, actual.ivp_seed,
+                    bmmo::physics::describe_cores_exact(world->physics()).c_str());
+            if (args.report_every > 0 && ((simulated - 1) % static_cast<size_t>(args.report_every)) == 0) {
+                if (comparable)
+                    std::printf("tick=%u %s expected=%016llx actual=%016llx cores=%d/%d pose=%s probe=%s/%s"
+                                " dpos=(%.3g,%.3g,%.3g)\n",
+                        group.tick, same ? "ok" : "MISMATCH",
+                        static_cast<unsigned long long>(group.record.hash),
+                        static_cast<unsigned long long>(actual.hash), group.record.cores, actual.cores,
+                        group.record.pose == actual.pose ? "same" : "DIFF", group.record.probe_name.c_str(),
+                        actual.probe_name, actual.probe_position[0] - group.record.probe_position[0],
+                        actual.probe_position[1] - group.record.probe_position[1],
+                        actual.probe_position[2] - group.record.probe_position[2]);
+                else
+                    std::printf("tick=%u hash=%016llx pose=%016llx cores=%d probe=%s\n", group.tick,
+                        static_cast<unsigned long long>(actual.hash), static_cast<unsigned long long>(actual.pose),
+                        actual.cores, actual.probe_name);
+                std::fflush(stdout);
+            }
+            // A client journal has no comparable hash at all: its checkpoints
+            // are the only divergence there is, so the flag has to see them.
+            if ((!same || checkpoint_bad) && args.stop_on_divergence) {
+                std::printf("stopping at the first divergence (tick %u, %s)\n", group.tick,
+                    !same ? (checkpoint_bad ? "the hash and a checkpoint" : "the hash") : "a checkpoint");
+                break;
+            }
+            if (args.ticks_explicit && simulated >= static_cast<size_t>(std::max(args.ticks, 0))) {
+                std::printf("stopping after %zu ticks (--ticks)\n", simulated);
+                break;
+            }
+        }
+        if (out.is_open()) {
+            // The last tick this replay really ran, not the input file's last
+            // group: with --ticks or --stop-on-divergence they are thousands of
+            // ticks apart, and a NOTE past the last TICK record invents a tick.
+            out.note(last_written_tick, "end: replay finished");
+            out.close();
+        }
+        std::printf("summary: ticks=%zu matched=%zu first_divergence=%lld checkpoints=%zu checkpoint_mismatches=%zu\n",
+            simulated, matched, first_divergence, checkpoints, checkpoint_mismatches);
+        if (stopped_at_jump)
+            std::printf("note: the replay stopped at a tick jump; the summary covers only the ticks before it\n");
+        if (client_journal)
+            std::printf("note: a client journal's own TICK hashes are of its own world; the %zu received snapshots"
+                        " are the server's word and are what was compared\n", checkpoints);
+        else if (compared != simulated)
+            std::printf("note: %zu of %zu ticks had no TICK record and were simulated without comparing\n",
+                simulated - compared, simulated);
+        std::fflush(stdout);
+        return first_divergence < 0 && first_checkpoint_divergence < 0 && !stopped_at_jump ? 0 : 3;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -1269,6 +2140,11 @@ int main(int argc, char** argv) {
             "[--report-every N] [--list-bodies-at N] [--dump-surfaces-at N] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
+            "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjr> [--list] [--ticks N]\n"
+            "           [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]\n"
+            "           [--write-journal <out.bmjr>] [--report-every N] [--continue-after-jump]\n"
+            "           (session black box: replays a room's journal and compares every tick and checkpoint;\n"
+            "            --list prints the file without booting the engine)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
             "           [--drop-at X Y Z] [--drop-height F] [--drop-sector N] [--drop-second-sector N]\n"
             "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
@@ -1279,6 +2155,11 @@ int main(int argc, char** argv) {
             "           [--explode ... AT_TICK] [--activate SCRIPT TICK] [--body-guard ENTITY TICK]\n"
             "           [--beam X Y Z TICK] [--ticks N]\n"
             "           (trafo-explosion determinism check, prints the pose hash for 200 ticks)\n");
+        return 2;
+    }
+    if (!args.replay_session.empty()) return run_replay_session(args);
+    if (args.root.empty()) {
+        std::fprintf(stderr, "--root <game dir> is required\n");
         return 2;
     }
     if (!args.nav_mode.empty()) {

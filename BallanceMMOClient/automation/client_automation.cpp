@@ -2,6 +2,7 @@
 // Every command runs on the game thread from OnProcess and answers one line.
 
 #include "BallanceMMOClient.h"
+#include "session/session_journal_client.hpp"
 #include <cfloat>
 
 #include <algorithm>
@@ -265,6 +266,57 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         if (rest == "rollback on") { physics_session_.rollback_enabled = true; return "ok session rollback on"; }
         if (rest == "rollback off") { physics_session_.rollback_enabled = false; return "ok session rollback off"; }
         return "ok " + physics_session_status_text();
+    }
+    if (verb == "journal") {
+        // The session black box (session/session_journal_client.hpp).  The verb
+        // and the BML property Gameplay/SessionJournal are ONE setting: "on" and
+        // "off" write the property, and a session reads it once when it starts,
+        // so the switch arms or disarms the NEXT session.  The one thing that
+        // happens immediately is "off" closing an open file: someone who types
+        // it wants the recording to stop now (the menu tick never touches a
+        // running session).  "mark" is the one a player uses: it leaves a note
+        // and a body checkpoint at the tick where something looked wrong.
+        auto& journal = bmmo::session::client_journal::instance();
+        std::istringstream args(rest);
+        std::string action;
+        args >> action;
+        std::string text;
+        std::getline(args, text);
+        if (!text.empty() && text.front() == ' ') text.erase(0, 1);
+        if (action.empty() || action == "status") return "ok " + journal.status();
+        if (action == "on") {
+            journal.set_enabled(true);
+            // The property is the setting: the next session start reads it
+            // again, so the verb has to move it too or that read would undo
+            // this answer.  Nothing can be opened mid-session - the header
+            // needs the anchor, which is long past.
+            config_manager_["session_journal"]->SetBoolean(true);
+            return journal.recording()
+                    ? "ok journal on (SessionJournal=true), already recording to " + journal.path().string()
+                    : "ok journal on (SessionJournal=true), recording starts with the next session";
+        }
+        if (action == "off") {
+            // A capped file is still open, and "journal status" keeps printing
+            // it: close it on the open flag, not on recording(), or the answer
+            // would deny a file the next status line still shows.
+            const bool was_open = journal.open();
+            const bool was_recording = journal.recording();
+            const std::string path = journal.path().string();
+            journal.set_enabled(false);
+            config_manager_["session_journal"]->SetBoolean(false);
+            if (was_open) journal.end(physics_session_.current_tick(), "recording turned off");
+            if (!was_open) return "ok journal off (SessionJournal=false), nothing was being recorded";
+            return was_recording ? "ok journal off (SessionJournal=false), closed " + path
+                                 : "ok journal off (SessionJournal=false), closed the capped " + path;
+        }
+        if (action == "mark") {
+            if (text.empty()) return "error usage: journal mark <text>";
+            if (!journal.recording()) return "error no session journal is open";
+            const uint32_t tick = physics_session_.current_tick();
+            journal.mark(tick, text, physics_view_.list_bodies());
+            return std::format("ok mark at tick {}: {}", tick, text);
+        }
+        return "error usage: journal on|off|status|mark <text>";
     }
     if (verb == "mmo") {
         OnFullCommand(rest);

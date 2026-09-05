@@ -593,6 +593,13 @@ public:
         rc.input_delay = config_.physics_input_delay;
         rc.snapshot_interval = std::max<uint32_t>(1, config_.physics_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
+        // The headless engine chdir's into the game's Bin directory, so the
+        // journal directory has to be resolved against the directory the
+        // server was started from before the first world boots.
+        if (!config_.physics_journal_dir.empty())
+            rc.journal_dir = config_manager::resolve_path(config_.physics_journal_dir.c_str());
+        rc.journal_max_bytes = static_cast<uint64_t>(config_.physics_journal_max_mb) << 20;
+        rc.journal_checkpoint_ticks = config_.physics_journal_checkpoint_ticks;
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
@@ -607,7 +614,8 @@ public:
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u).", config_.physics_game_root, config_.physics_input_delay, rc.snapshot_interval);
+               "snapshot interval %u, journal %s).", config_.physics_game_root, config_.physics_input_delay,
+               rc.snapshot_interval, rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string());
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -681,12 +689,23 @@ public:
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
+        std::vector<std::string> names;
         players.reserve(s.members.size());
-        for (const auto m: s.members) players.emplace_back(m, s.join_orders[m]);
+        names.reserve(s.members.size());
+        // What the journal's first note says: the room and who was in it when
+        // the session started, so a file found weeks later still names names.
+        std::string note = Sprintf("room %u \"%s\":", r.id, r.name);
+        for (size_t i = 0; i < s.members.size(); ++i) {
+            const auto m = s.members[i];
+            players.emplace_back(m, s.join_orders[m]);
+            names.push_back(get_client_name(m));
+            note += Sprintf("%s %s(%u, join %u)", i == 0 ? "" : ",", names.back(),
+                    static_cast<unsigned>(m), static_cast<unsigned>(s.join_orders[m]));
+        }
         const uint32_t input_delay = s.input_delay;
         const float spawn_impulse = s.spawn_impulse;
         physics_sessions_.emplace(id, std::move(s));
-        runner_->create_session(id, map.level, players, input_delay, spawn_impulse);
+        runner_->create_session(id, map.level, players, input_delay, spawn_impulse, note, std::move(names));
         return id;
     }
 
@@ -711,7 +730,7 @@ public:
         }
         room_session_.erase(s.room);
         rooms_.reset_session(s.room);
-        if (runner_) runner_->destroy_session(session);
+        if (runner_) runner_->destroy_session(session, reason);
         broadcast_room_states();
         Printf("Physics session %u (room %u) ended: %s", session, s.room, reason);
     }
@@ -832,7 +851,7 @@ public:
         s.members.push_back(c);
         client_session_[c] = s.id;
         const uint8_t join_order = assign_join_order(s, c);
-        runner_->add_player(s.id, c, join_order);
+        runner_->add_player(s.id, c, join_order, get_client_name(c));
         if (runner_->running(s.id)) {
             s.late.insert(c);
             send_session_start(s, c, 0);   // the real tick base follows in SessionAssign
@@ -1119,11 +1138,13 @@ public:
         if (!runner_) { Printf("Physics sessions are unavailable."); return; }
         if (physics_sessions_.empty()) Printf("No physics session is running.");
         for (const auto& [id, s]: physics_sessions_) {
+            const std::string journal = runner_->journal_path(id);
             Printf("Session %u: room %u, level %d, %zu members, %zu ready, world %s, ticking %s, tick %u, "
-                   "events flagged %llu / rejected %llu.",
+                   "events flagged %llu / rejected %llu, journal %s.",
                     id, s.room, s.map.level, s.members.size(), s.ready.size(), s.world_ready ? "ready" : "booting",
                     s.ticking ? "yes" : "no", runner_->current_tick(id),
-                    static_cast<unsigned long long>(s.flagged_events), static_cast<unsigned long long>(s.rejected_events));
+                    static_cast<unsigned long long>(s.flagged_events), static_cast<unsigned long long>(s.rejected_events),
+                    journal.empty() ? "off" : journal.c_str());
             runner_->describe(id);
         }
     }

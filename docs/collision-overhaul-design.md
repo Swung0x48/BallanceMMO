@@ -603,3 +603,293 @@ BallanceMMOSimTool --root <game> --level 2 --level-at 30 --ticks 615 \
 过去了**；把球开下去摔到 (90.8, -22.4, -136.0) 再 `explode wood` → 碎片出现在
 x≈85–115、z≈-122…-148，跟着球走，不再留在第一次的落点。整段会话 7142 个快照里 7096 个
 一致，46 次不符全部来自开局的装饰纸球（最大 2 cm），三次死亡复活都正常。
+
+### 9.15 会话黑匣子（服务端日志 + 离线回放 + 客户端录制）
+
+**动机.** 只在真人多人房间里才出现的物理 bug，此前没有任何复现手段。`.bmrc` 录像（客户端
+`record start`，`BallanceMMOSimTool --replay`）录的是一个人的键盘，而且 `record start` 会重置
+会话时钟，天然是单人的；除此之外只剩客户端日志（`session trace on`：`mismatch at tick N`、
+`rollback to tick N`）和服务端 `physics.debug_trace`，两边都只给症状，给不出一个能重跑的世界。
+但服务端本来就是权威且确定的：给定锚点世界、每 tick 每个玩家的输入帧、客户端上报的生命周期事件，
+模拟逐位可复现（第 8 节的前提，Windows/Linux 已经对齐，见 9.13）。把这三样原样记下来，
+会话就能离线一比一重放——这就是黑匣子。
+
+**确定性契约.** `bmmo::sim::physics_world` 的全部输入面只有六个调用：`create()`、`add_player()`、
+`remove_player()`、`set_input()`、`apply_event()`、`tick()`。journal 记的正是它们，
+`physics_world.hpp` 的类声明前把这条契约写成了注释：以后谁再给世界加一路输入，必须在同一个动作里
+补进 journal，否则用到它的那些会话，每一次回放都会静默分叉。契约里还有一条不是"记什么"而是"按什么顺序"：
+**同一 tick 到期的多条事件按成员的 join order 应用**，不是按到达顺序（下面单开一段说为什么必须是它），
+服务端与任何一次离线回放共用这同一条规则。
+
+格式放在 `BallanceMMOCommon/include/session/journal.hpp`（纯头文件，写与读都在里面），因为写它的是
+两边：服务端写它的世界吃进去的东西（kind 0），客户端——原版 mod 或无头会话客户端——写同一批记录，
+外加它收到的快照和它自己做的每一次修正（kind 1）。读它的有三处：SimTool 的 `--replay-session`、
+`scripts/journal_trace.py`、单元测试 `BallanceMMOServer/tests/session_journal_test.cpp`（14 个用例，
+含 event_tick 的往返与旧格式兼容）。
+
+**格式（version 1，扩展名 `.bmjr`）.** 一律小端、逐字段写，绝不 dump 结构体：写的可能是 Linux x64
+服务端，读的是 Windows x64/x86。
+
+```
+file   = magic "BMMOJRNL" (8 字节) , u32 version , record*
+record = u8 tag , u32 payload_size , payload[payload_size]
+str    = u16 长度 , 该长度的字节（无结尾 0，上限 4096）
+```
+
+| tag | 名称 | payload |
+| --- | --- | --- |
+| 0 | HEADER | `u8 kind`（0 服务端 / 1 客户端）, `u32 session`, `i32 level`, `i32 seed`, `f32 spawn_impulse`, `u32 input_delay`, `u32 checkpoint_ticks`, `u32 first_tick`, `u64 anchor_hash`, `u64 anchor_surfaces`, `str build_id`, `u64 utc_ms`, `u32 own_player`, `u8 own_join_order` |
+| 1 | PLAYER | `u32 tick`, `u32 id`, `u8 join_order`, `u8 added`（1 加入 / 0 离开）, `str name` |
+| 2 | INPUT | `u32 tick`, `u32 id`, `u8 repeat`, `u8 flags`；`repeat == 0` 时再跟 `u8 keys`, `f32 cam_right[3]`, `f32 cam_up[3]`, `f32 cam_dir[3]`, `u8 ball_type`, `u8 input_flags` |
+| 3 | EVENT | `u32 tick`（世界**应用**它的 tick）, `u32 id`, `u8 type`, `u8 ball_type`, `u8 flags`, `f32 position[3]`, `f32 rotation[9]`, `i32 sector`, `str name`, recipe, `u32 event_tick`（事件**自带**的 tick） |
+| 4 | TICK | `u32 tick`, `u64 hash`, `u64 pose`, `i32 cores`, `u32 ms`, `str probe_name`, `f64 probe_position[3]`, `f32 probe_speed[3]` |
+| 5 | CHECKPOINT | `u32 tick`, `u8 flags`, `u32 count`, count × body |
+| 6 | NOTE | `u32 tick`, `str text` |
+| 7 | CORRECTION | `u32 tick`（快照的 tick）, `u32 local_tick`, `u8 kind`, `str entity`, `f32 error_m`, `f32 velocity_error`, `f64 local_position[3]`, `f64 server_position[3]` |
+
+```
+body   = u8 kind (0 球 / 1 机关) , u32 owner , str name , f64 position[3] ,
+         f64 rotation[4] (x,y,z,w) , f32 linear[3] , f32 angular[3] , u8 flags
+recipe = bmmo_physics_ball_recipe 的字段按声明顺序，定长字符数组写成 str；
+         convex / ball / concave 三组计数写时钳到 BMMO_PHYSICS_MAX_*，读时校验
+```
+
+除 HEADER 外每条记录的第一个字段都是 tick，所以读者不认识任何 tag 也能按 tick 分组；长度前缀让格式
+双向兼容：老读者跳过不认识的 tag（并计数），也会忽略新写者往已知 payload 尾部追加的字段。
+
+`INPUT.repeat == 1` 表示"与本文件中该玩家上一条 INPUT 逐位相同"（没人动相机时的常态，一条 10 字节）；
+`flags` bit0 = FRESH（写者当时确实拿到了这个玩家自己的帧），bit1 = RELAYED（客户端：这帧是服务端
+中转来的，也就是服务端真正应用的那一帧）。`CHECKPOINT.flags` bit0 = FULL（全部可动刚体，带名字）、
+bit1 = LOCAL（客户端自己的世界）、bit2 = RECEIVED（收到的快照原样）。`CORRECTION.kind` 依次是
+0 mismatch、1 rollback、2 hard、3 blend、4 resync、5 too_far、6 frozen、7 unmatched
+（`session/rollback.hpp` 的 `rollback_correction`，回滚引擎的 `on_correction` 回调把它们送出来）。
+NOTE 除自由文本外还承担结构化里程碑，用前缀区分：`start:`、`boot failed:`、`anchor:`、`assigned:`、
+`resync:`、`late join:`、`event failed:`、`mark:`、`cap:`、`end:`。
+
+**EVENT 为什么有两个 tick.** 服务端 `step()` 把所有 `e.tick <= tick` 的事件出队并在**当前** tick 应用，
+而事件自带的 tick 是客户端盖的章：会话故意落后客户端 `input_delay` 个 tick，抖动一超就会有事件迟到，
+落到服务端已经跑过的 tick 上。这两个 tick 缺一不可——分组的 tick 决定回放**何时**应用它，而
+`lifecycle_event::tick` 决定出生冲量的方向（`spawn_direction_index(seed, slot, event.tick)`，9.10）。
+只记标记 tick 会把事件提前应用，只记应用 tick 会把球踢向错误的方向。所以 `tick` 是应用 tick、
+`event_tick` 是标记 tick（原样写，0 也是合法的标记：客户端在锚点帧就是 0），追加在 recipe 之后，
+早于该字段的旧文件读出来 `event_tick = tick`。两者不同时，SimTool 的 `--list` 打
+`stamped S applied T`、回放打 `tick T: <type> event from pN was stamped for tick S`，
+`journal_trace.py` 打 `event@S`——这个差本身就是值得看见的症状。下面实测的第二次会话里，16 条
+BodyRevived 是客户端盖 tick 6、服务端 tick 7 才应用的，还有三条 Unphysicalize 盖 2959/3752/3760、
+同样晚一个 tick 才应用。
+
+**同一 tick 的两条事件谁先应用.** `step()` 把这个 tick 到期的事件**全部取出**，按事件主人的
+**join order** 稳定排序，再逐条应用；未知玩家（他的移除与事件擦身而过）排在所有已知玩家之后，
+同一名次内保持到达顺序。顺序是有后果的：两个玩家在同一 tick 各 physicalize 一个球，世界按应用顺序给它们
+建刚体，换个顺序整段模拟就是另一个世界。之所以定成 join order，是因为它是**唯一一个客户端也能复现的
+顺序**——谁的包先到只有服务端知道，而每个成员都知道每个人的 join order。于是同一条规则写在两处：
+服务端的 `session_runner.cpp::step()`，以及 SimTool 回放**客户端** journal 时对每个 tick 组的重排
+（`sim_tool.cpp`）。服务端 journal 不动一个字：它按实际应用顺序落盘，文件顺序**就是**应用顺序；
+客户端 journal 的组内顺序只是它自己的收信顺序，不再拿来当真，回放开头会横幅说明
+`client journal: same-tick events applied in join-order order, the server's rule`，
+`--write-journal` 写出的也是重排之后的顺序。
+这是 9.15 最后堵上的一个致命缺口：在这条规则之前，joiner 那份 journal 从两人同 tick physicalize 的那一刻
+起就整段不可用（下面的实测有两轮对照数字）。
+
+**服务端捕获点.** 全部在 `BallanceMMOServer/sim/session_runner.cpp`，模拟线程上，不加锁：
+
+- `create_session()`：`physics_world::create` 成功后开文件，写 header（level、seed、
+  **本会话的** spawn_impulse 而不是配置里的、本会话的 input delay、checkpoint 周期、
+  `first_tick`、锚点 hash/surfaces、`bmmo::physics::build_id()`、UTC 毫秒），一条
+  `start: room <id> "<房名>": <名字>(<id>, join <序号>), ...` NOTE，然后每个初始成员一条 PLAYER。
+  启动**失败**也照样开文件：header（锚点写 0）+ `boot failed: <error>` NOTE + 关闭——黑匣子在最需要它
+  的时候不能是空的。
+- `add_player()` / `remove_player()`：各一条 PLAYER。
+- `step()`：`buffer.take(tick, fresh)` 真正交给世界的那批输入逐条 INPUT（`fresh` 进 FRESH 位）；
+  每条出队事件（已按 join order 排好，见上）在 `e.event.tick = e.tick` 之后一条 EVENT，写入顺序就是
+  应用顺序（`apply_event` 失败也写，再补一条 `event failed:` NOTE）；`world->tick()` 成功后 `capture_world_hash` 一条 TICK（`ms` 是距 header 的
+  稳定时钟毫秒）；每 `journal_checkpoint_ticks`（默认 660 = 10 s）一条 FULL CHECKPOINT。
+- `destroy_session()`：`end: <reason>` NOTE，关闭。
+
+录制不能改动模拟，也不能改动**服务端发出的字节**。checkpoint 因此走新增的只读通道
+`physics_world::snapshot_for_journal()`：它与 `snapshot(true, ...)` 共用 `collect_bodies()`，但不写
+`body_index_`、`last_body_set_`、`body_set_changed_`。否则 journal 的那次全量快照会替服务端提前给
+非模拟机关编号（编号就是 delta 快照里上线的 `owner`），也会在关卡脚本于本 tick 内新建刚体时把
+`body_set_changed_` 顶起来，让下一 tick 多发一份 FULL 快照。默认配置下两者都够不着
+（`snapshot_interval` 2 与 `full_interval` 66 都整除 660），但这是个必须堵死的洞，不是可以留着的巧合。
+
+**服务端配置.** `physics.journal_dir`（默认 `journals`，空 = 不录）、`physics.journal_max_mb`
+（默认 256）、`physics.journal_checkpoint_ticks`（默认 660）。`journal_dir` 用
+`config_manager::resolve_path` 相对**服务端自身所在目录**解析，不是进程 cwd：无头引擎启动时会把
+工作目录切到游戏的 `Bin`。文件名 `session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjr`。启动横幅里带
+`journal <目录>`（关掉时是 `off`），控制台 `sessions` 命令的每行末尾带该会话的 journal 路径。
+
+**客户端录制.** 原版 mod 侧是 `BallanceMMOClient/session/session_journal_client.hpp/.cpp` 的
+`bmmo::session::client_journal`，实例是 .cpp 里的文件级单例而不是 mod 类的成员（mod 类的布局不能动，
+与输入新鲜度计数器同理）。开关是 BML 属性 `Gameplay`/`SessionJournal`（bool，默认开），**会话开始时读一次**，
+所以在菜单里改它是从下一次会话生效；目录 `<游戏>/ModLoader/BMMOJournals`（cwd 是 `Bin`，取其父目录），
+文件名再加 `_p<自己的 id>`，只保留最新 10 份，每份上限 256 MB。挂点：
+
+| 时机 | 记录 |
+| --- | --- |
+| `physics_session_anchor` | header + 每个成员一条 PLAYER + `anchor:` / `start:` NOTE |
+| `handle_session_assign` | `assigned: tick base N` / `resync: reassigned, tick base N` NOTE |
+| `physics_session_frame` | 自己的 INPUT（发出去之前）、帧末的 TICK |
+| `physics_session_apply_queues` | 中转来的 INPUT（RELAYED）、收到的快照（RECEIVED CHECKPOINT） |
+| `physics_session_send_event` / `_apply_event` | 自己发的 / 收到的 EVENT |
+| 回滚引擎 `on_correction`、hard/blend、resync | CORRECTION（kind 0/1/5/6/7、2/3、4） |
+| 每 660 tick、以及每次回滚或 hard 修正后（最密 33 tick 一次） | LOCAL CHECKPOINT |
+| `physics_session_request_resync` | `resync: requested (<原因>)` NOTE |
+| `physics_session_end_local` | `end: <原因>` NOTE + 关闭 |
+
+客户端 journal 的 EVENT 两个 tick 都是标记 tick：客户端永远不知道服务端在哪个 tick 出队。
+房间里后来加入的人，客户端只会从中转输入或收到的事件里第一次看见他，于是补一条 PLAYER 记录 +
+一条 `late join: player <id> (<名字>) first seen here; join order <n> is a guess, ...` NOTE
+（协议只把加入通知给加入者本人，既有成员拿不到他的 join order；写死一个错的比写明是猜的更糟）；
+离开则由 `PlayerLeft` 写一条移除记录，因为服务端会把这个玩家连同刚体和输入状态一起从世界里去掉。
+
+命令：`/mmo journal on|off|status|mark <text>`（自动化通道里是 `journal ...`，`/mmo auto journal ...`
+也走同一个分发器，tab 补全已收录）。`on`/`off` 写的就是上面那个 BML 属性，两者是同一个开关，不是两个；
+唯一的即时效果是 `off` 会把当下正开着的文件收尾关闭（打这条命令的人就是要它现在停）。
+`mark <text>` 写一条 `mark:` NOTE 外加一份 LOCAL CHECKPOINT，不受频率限制——玩家指着的这一刻，
+比省下的几 KB 重要。
+
+无头会话客户端 `BallanceMMOSessionClient --journal <file.bmjr>` 写的是同一批记录——包括 `PlayerLeft`
+的移除记录：`RoomEvent` 分支上挂 `journal_leave_player()`，写一条 `added = 0` 的 PLAYER 并把这个 id 从
+"已 announce" 集合里删掉（他再进来时要重新 announce 一次）。所以端到端测试不需要开原版游戏就能覆盖
+客户端格式，包括"这一 tick 之后他不在这个世界里了"这句话。
+
+**离线回放（SimTool）.**
+
+```
+BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjr> [--list] [--ticks N]
+    [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]
+    [--write-journal <out.bmjr>] [--report-every N] [--continue-after-jump]
+```
+
+`--list` 是分诊通道：不启动引擎、不需要 `--root`，用 `scan_journal` 流式扫一遍，只累计计数器和
+PLAYER/EVENT/NOTE/CORRECTION/CHECKPOINT 行（INPUT 只计数不展开）。实测一份 64 MB / 116 万条记录的
+文件，流式 `--list` 峰值 11.8 MB，先 `read_journal` 全量展开则是 157 MB（13 倍），折算到 256 MB
+上限约合 45 MB 对 600 MB——分诊本来就是拿到线上文件后的第一步，不该先要一台大内存机器。
+回放则：从 header 建 `world_options`，构建 id 只比引擎那一半（不同只警告），
+锚点 hash/surfaces 与本机游戏数据比对（不同基本就是游戏数据不对，这是第一个要查的），按文件顺序加入
+初始成员，然后每个 tick 组依次 PLAYER 增删 → 每条 INPUT `set_input` → 每条 EVENT `apply_event`
+（`lifecycle_event.tick` 取 `event_tick`）→ `world->tick()` → 比 `hash`/`pose`；遇到 FULL checkpoint
+逐刚体比位置（double）、旋转、线/角速度。收尾一行
+`summary: ticks=N matched=M first_divergence=T checkpoints=C checkpoint_mismatches=D`，
+退出码 0 = 没有分叉、3 = 有分叉（含 checkpoint 不符与在 tick 跳变处停下）、1 = 出错、2 = 用法不对。
+
+几条为了不骗人而加的规矩：checkpoint 里的无名机关行（delta 快照不带名字）先用全量快照学到的
+索引→名字字典解析，解析不出就记为 `unresolved` 而不参与比较，绝不拿回放自己的编号去撞；
+"最差刚体"只在真的有差时才报，缺一个或多一个刚体则直接报 `missing:` / `extra:` 加身份；
+tick 号出现空洞（晚加入或 resync 会让客户端重新编号）时停下并说明，`--continue-after-jump` 才继续。
+客户端 journal 走同一条路但只是尽力而为：它的 TICK 哈希是它自己预测的世界，不参与比较，
+真正比的是 RECEIVED 快照——那是服务端的话；每个 tick 组里的多条 EVENT 先按 join order 重排回服务端的
+规则（横幅会说明这一点，服务端 journal 则原样照放）。`--write-journal` 让这次回放写出自己的服务端 kind
+journal（事件按重排后的顺序写），于是两个平台的回放可以用 `journal_trace.py --diff` 逐 tick 对，
+一份客户端 journal 也可以用它来量"它到底复现了服务端世界的多少 tick"。
+
+**合并时间线（`scripts/journal_trace.py`）.** 纯 Python 3.8+、只用标准库，同一份格式的第二个实现
+（两个读者互为校验，实测在截断文件上计数逐字节一致）。
+
+```
+journal_trace.py <a.bmjr> [b.bmjr ...] [--log ModLoader.log ...] [--around TICK] [--window 40] [--nonempty]
+journal_trace.py <a.bmjr> [...] --list
+journal_trace.py <a.bmjr> <b.bmjr> --diff
+journal_trace.py --selftest
+```
+
+默认输出是一条合并时间线：每个 tick 一块，先是服务端 journal 的输入、事件、NOTE 和
+hash/pose/probe，然后每份客户端 journal 自己的 tick 哈希、修正、NOTE、收到的快照，
+最后是带该 tick 的日志行（识别 `mismatch at tick N (local M)`、`rollback to tick N`、
+`resim tick N`、`physicalized at tick N`、`resync requested (...)`、`tick base N assigned` 等，
+其它带 `tick N` 的行也挂到 N 上）。同时打印墙钟映射（header 的 UTC + 每条 TICK 的 `ms`），
+玩家说"21:37 左右不对劲"就能落到具体 tick 上。`--log` 认三种时间戳：BMLPlus 的
+`[09/04/2026 22:47:06.611]`、ISO 的 `[2026-09-05 04:09:19]`，以及 **BMMO 自己的控制台格式**
+`[09-05 04:09:19]`——本地时间、没有年份，服务端和无头会话客户端的日志用的都是它，所以现在服务端自己的
+日志也能进这条时间线。年份取自第一份 journal header 的 UTC 时间（按本地时区换算，因为控制台打的是本地
+时间），跨年时按月份回退自动 +1；行首还要跳过控制台打印前擦除输入行留下的 `\x1b[0K` 和 `\r`，
+否则服务端日志的第一段时间就全丢了。剩下的空白不在解析器这边：无头会话客户端的 `mismatch` /
+`rollback` 这些诊断行本身不带时间戳（它的 printer 就不打），所以那份日志只有带戳的行能上钟。
+`--diff` 比前两份 journal，规则按这一对的类型走：
+两份服务端 journal 的哈希才是同一个世界（`--write-journal` 就是为它准备的），哈希计入退出码；
+服务端 + 客户端只共享服务端的快照，那里哈希只作参考、退出码看 checkpoint 比对，
+delta 快照缺的刚体只作信息、不算分歧；两份客户端 journal 没有权威的一半，哈希就是全部，
+于是又计入退出码——两个玩家 desync 就是这么分诊的。
+退出码 3 = 有分歧，1 = 什么都没比上（崩溃或启动失败的文件不该在 CI 里绿着过）。
+它的 `--list` 与 SimTool 一样是流式的（同一份 64 MB 文件峰值 10.4 MB，全量展开是 1.07 GB），
+输出在 GBK 控制台上也不会被中文房名或 emoji 打断（stdout/stderr 一律 reconfigure 成 UTF-8）。
+`--selftest` 用脚本自己的写者造一份含全部 tag 的合成 journal 再读回来。
+
+**实测（2026-09-05，本机 Windows x64 服务端 + 两个无头会话客户端，Level 1）.** 同一天跑了两次真实两人
+会话（都是 host 中途退出，服务端与两个客户端各录一份），第二次是加上 join order 排序规则之后重跑的。
+下面的数字来自第二次，只有"体积与速率""每 tick 代价""崩溃尾巴"三项是第一次量的（录制路径没变，
+第二次的 609,243 B / 5,089 tick = 119.7 B/tick 与第一次的 119.4 对得上）：
+
+- **服务端 journal 离线逐位重放**：`summary: ticks=5088 matched=5088 first_divergence=-1
+  checkpoints=8 checkpoint_mismatches=0`，退出码 0（第一次会话同样是 5123/5123、0 处不符）。
+  中途退人、两轮 physicalize（两轮都是两个玩家落在同一 tick）、死亡复活、以及三条标记/应用 tick
+  分离的 Unphysicalize 全部原样重现。
+- **`--write-journal` 往返**：回放写出的 journal 与源文件 `journal_trace.py --diff`
+  `hash: matched=5123/5123`、`pose: matched=5123/5123`，`first_divergence=-1`（第一次会话）。
+- **客户端 journal（排序规则的成绩单）**：host 那份 1,988 份 RECEIVED 快照 3 处不符，joiner 那份
+  2,343 份也是 3 处——两边不符的是**同样的三处**，正是服务端晚一个 tick 才应用的那三条 Unphysicalize
+  （tick 2959 / 3752 / 3760，报的都是 `missing: ball of p...`）。把两份的 `--write-journal` 输出与
+  服务端 journal 逐 tick 对：host `hash/pose matched=3888/3891`、joiner `matched=4596/4599`，
+  两边差的 tick 集合都恰好是 `{2959, 3752, 3760}`。**规则之前**：joiner 那份 376/2,336 处不符，
+  世界从 tick 1862（两人同 tick physicalize 的那一刻）起就分叉，之后整段不可用。
+- **顺序本身的证据**：joiner 文件里 tick 1862 和 3163 两组都是它自己（p201606466）在前，
+  它的回放写出的 journal 里是 p2779083744 在前——与服务端 journal 的顺序一致；服务端 journal 的
+  tick 7 那组也是 host 的 8 条在前、joiner 的 8 条在后（按 join order）。
+- **`PlayerLeft` 移除记录**：joiner 那份里有 `tick 4405 player -p2779083744`，服务端那份里是
+  `tick 4400 player -p2779083744`——两边都记下了"他从这个世界里被去掉了"。
+- **体积与速率**：服务端 611,684 B / 14,209 条记录 / 5,123 tick / 77.6 s = 119.4 B/tick、7.9 KB/s、
+  两人时 3.9 KB/s/人；客户端 host 355.0 B/tick、23.4 KB/s，joiner 310.5 B/tick、20.5 KB/s
+  ——客户端约为服务端的 3 倍，因为它还存每 2 tick 一份 RECEIVED 快照和全部中转输入。
+  按这个速率 256 MB 上限约合服务端 9.5 小时、客户端 3.2 小时。
+- **每 tick 代价**：回放本身 2.14 ms/tick；同一次回放加上 `--write-journal` 只多 127 ms / 5123 tick
+  = **0.025 ms/tick（约 1.1%）**，写的是整份 611 KB、14,208 条记录、8 个全量 checkpoint。
+- **崩溃尾巴**：把服务端 journal 截掉最后 2000 字节，`--list` 报
+  `read=609655 dropped=29` + `warning: truncated: 29 bytes dropped` 并照常列出头部、成员与
+  checkpoint，回放前 200 tick 仍 `matched=200`，Python 读者给出逐字节相同的计数。
+- **回归**：98/98 单元测试；`rec_m3b.bmrc` 回放 4169/4169；9.14 的两次爆炸 body-guard 用例开关
+  guard 两跑的 224 行 pose 与 tick 610 刚体表完全相同；`--level 2 --spawn-test 3 --spawn-ball 2`
+  `summary: ok`。
+
+**原版客户端实测（2026-09-05，本机服务端 + 本机原版客户端，Level 1 与 Level 2 各一场）.** 通过文件命令
+通道驱动真机：连接、`level N`、建房、`ready`、`start physics`、按键、`journal mark looks wrong here`、
+`journal status`、`/mmo journal status`。Level 1 一场（死亡一次、复活一次）：客户端写出
+`ModLoader/BMMOJournals/session_1_level1_…_p2070170140.bmjr`（1.04 MB，3194 tick，48 份 FULL、6 份
+LOCAL、1525 份 RECEIVED checkpoint），`--list` 里 mark 落在 tick 1939；服务端那份 `--replay-session`
+2963/2963 逐位一致；客户端那份回放 1525 份收到的快照全部一致；`journal_trace.py <服务端> <客户端>
+--log ModLoader.log --around 1939` 把 mark、`unphysicalized at tick 2047` 的日志行和两边的 hash 排在同一
+屏上。Level 2 一场：服务端 1963/1963 逐位一致；客户端那份回放 986 份快照里 72 份不符，第一处在 tick 272
+——服务端回放打印的 `BodyRevived event … was stamped for tick 272`（273 才应用）就是它：一条晚应用的机关
+复活事件让回放世界早一个 tick 醒来一个机关，此后一直差着，正是上面第 4 条说的"事件只有标记 tick"。
+
+**黑匣子第一场就抓到的 bug.** Level 1 那场合并时间线里，服务端每条 INPUT 都是 `keys=00`，服务端的球
+一直停在出生点，客户端的球却在 `key up down` 之后掉下了平台：客户端 `session` 状态行 `keys_known=0`。
+新加的自动化动词 `navgraph`（打印 `read_navigation_graph` 看到的东西）给出原因：这份安装里的其他 mod
+（NewBallType/BallSticky 等）往 Ball Navigation 里接了自己的 SetPhysicsForce 叶子，本机看到 6 片叶子，
+其中两片（order 39/40，方向 (0,±1,0)，force 1.9）由没有绑键的 Key Event 驱动，`key=0`；而客户端等
+"每片叶子都有键"的条件永远不成立，于是整场会话不发任何按键，回滚也从不跟踪自己的球（`rb=0 mism=0`
+看起来一切正常）。修法在 `physics_session_client.cpp`：丢掉 `key==0` 的叶子，按原版顺序重新编号，
+等到原版四片都拿到键为止（服务端跑的是无 mod 的脚本，本来就只有这四片）。修完同一流程
+`keys_known=1`、`4 navigation leaves, keys 200/208/205/203`、`own ball … driven by the navigation
+replica`，服务端 journal 里有 215 条 `keys=01` 的输入，回滚跟踪着自己的球（978 份快照 0 处不符）。
+
+**注意事项.**
+
+1. 上限到了就写一条 `cap:` NOTE 然后停止录制（不是截断，也不是无限长）。默认 256 MB，按上面的实测
+   速率是服务端约 9.5 小时、客户端约 3.2 小时一份。
+2. `journal_dir` 相对服务端自身所在目录解析，不是 cwd（无头引擎会 chdir 进游戏的 `Bin`）；
+   部署机上就是 `~/bmmo/journals/`。客户端固定写到 `<游戏>/ModLoader/BMMOJournals`，只留最新 10 份。
+3. 跨平台：文件逐字段小端写，Linux x64 服务端录的直接在 Windows 上 `--replay-session`；
+   两个平台各自 `--write-journal` 再 `--diff`，就是一次跨平台逐 tick 的一致性检查（9.13 的常备闸门）。
+4. **客户端 journal 的回放是尽力而为**，判定权威结论永远看服务端那份。同 tick 事件的顺序不再是其中
+   一项：join order 规则两边共用，回放会把客户端写下的组内顺序重排回服务端的规则（曾经的 376 处不符
+   就只是这一件事）。剩下的尽力而为有三样：输入是它发出的和服务端中转给它的，不是服务端 `take()`
+   真正交给世界的那一帧；事件只有标记 tick，服务端晚应用的那些会差一个 tick（上面实测里剩下的 3 处
+   checkpoint 不符全部是它）；晚加入者的 join order 是猜的，NOTE 里写明。客户端 journal 的价值是解释
+   "这个客户端看见了什么、为什么回滚"，不是裁判。
+5. 录制不改模拟：checkpoint 走只读的 `snapshot_for_journal()`，实测整份 journal 只花 0.025 ms/tick。
+   `--list` 是流式的，只有回放才建内存中的分组结构。
+6. 真机原版客户端上跑过的：整条录制链路、`journal status|mark`、`/mmo journal status`、单人会话的
+   回放与合并时间线（见上面的原版客户端实测）。还只经过编译的：BML 菜单里的 `SessionJournal` 开关、
+   10 份轮转、以及原版 mod 那条 `PlayerLeft` 挂点（无头客户端上同名的那条已经在实测会话里写出记录了，
+   见上）；`cap:` 与 `resync:` 两条路径也还没在实测会话里触发过。

@@ -986,6 +986,20 @@ namespace bmmo::sim {
     }
 
     void physics_world::snapshot(bool full, std::vector<bmmo::session::body_state>& out) {
+        collect_bodies(full, true, out);
+    }
+
+    // The bodies a full snapshot would carry, without the bookkeeping: the
+    // black box reads the world, it must not answer the runner's "did the body
+    // set change" question with its own call, nor number a mechanism the
+    // server's own snapshots have not numbered yet (that number is the `owner`
+    // field on the wire).  An unnumbered body gets the index it would be given
+    // next, so the record still lines up with the run's numbering.
+    void physics_world::snapshot_for_journal(std::vector<bmmo::session::body_state>& out) {
+        collect_bodies(true, false, out);
+    }
+
+    void physics_world::collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out) {
         using bmmo::session::body_kind;
         using bmmo::session::body_state;
         out.clear();
@@ -1005,6 +1019,7 @@ namespace bmmo::sim {
             if (p.physicalized && p.ball && p.ball->GetName()) ball_owner[p.ball->GetName()] = id;
 
         std::set<std::string> current_set;
+        size_t unnumbered = 0;
         for (const auto& body: bodies) {
             if (!body.movable) continue;
             const std::string name = body.name;
@@ -1027,13 +1042,16 @@ namespace bmmo::sim {
             current_set.insert(name);
             if (!full && !body.simulated) continue;
             auto index = body_index_.find(name);
-            if (index == body_index_.end())
+            if (index == body_index_.end() && bookkeeping)
                 index = body_index_.emplace(name, static_cast<uint16_t>(body_index_.size())).first;
             state.kind = body_kind::Mechanism;
-            state.owner = index->second;
+            state.owner = index != body_index_.end()
+                        ? index->second
+                        : static_cast<uint16_t>(body_index_.size() + unnumbered++);
             if (full) state.name = name;
             out.push_back(std::move(state));
         }
+        if (!bookkeeping) return;
         body_set_changed_ = current_set != last_body_set_;
         last_body_set_ = std::move(current_set);
     }

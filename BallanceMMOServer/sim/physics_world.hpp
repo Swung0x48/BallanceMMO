@@ -96,6 +96,14 @@ namespace bmmo::sim {
         uint32_t tick = 0;
     };
 
+    // Determinism contract (design 9.15).  The world's entire input surface is
+    // create(), add_player(), remove_player(), set_input(), apply_event() and
+    // tick(): given those calls in that order, the simulation is reproducible
+    // bit for bit, which is what makes the session journal a black box and not
+    // a log.  Anything that ever gives the world another input must be
+    // journalled by session_runner (BallanceMMOCommon session/journal.hpp) in
+    // the same breath, or every replay of a session that used it silently
+    // diverges from the session it is meant to reproduce.
     class physics_world {
     public:
         static std::unique_ptr<physics_world> create(const world_options& options, std::string& error);
@@ -140,6 +148,10 @@ namespace bmmo::sim {
         // movable mechanism body (delta snapshots: only the simulated ones).
         // Mechanism indices are stable per world; names are filled for full.
         void snapshot(bool full, std::vector<bmmo::session::body_state>& out);
+        // The same bodies a full snapshot carries, read only: the session
+        // journal must not move the snapshot cadence or the mechanism
+        // numbering by looking at the world (design 9.15).
+        void snapshot_for_journal(std::vector<bmmo::session::body_state>& out);
         // Whether the set of movable mechanism bodies changed since the last
         // snapshot() call (a full snapshot is then due).
         bool body_set_changed() const { return body_set_changed_; }
@@ -195,6 +207,9 @@ namespace bmmo::sim {
 
     private:
         physics_world() = default;
+        // Shared by snapshot() and snapshot_for_journal(); `bookkeeping` says
+        // whether the call owns the body-set flag and the mechanism numbering.
+        void collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out);
         bool boot(std::string& error);
         bool anchor(std::string& error);
         bool ensure_collision_filter(std::string& error);

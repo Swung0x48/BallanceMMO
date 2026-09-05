@@ -12,6 +12,7 @@
 // physics room at a time.
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include <entity/session.hpp>
+#include <session/journal.hpp>
 #include <session/timeline.hpp>
 
 #include "physics_world.hpp"
@@ -39,6 +41,13 @@ namespace bmmo::sim {
         uint32_t full_snapshot_interval = 66;
         uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
         int seed = 1;
+        // The session black box (design 9.15): every input the world consumed
+        // goes to <journal_dir>/session_<id>_level<N>_<UTC>.bmjr, so a bug that
+        // only happens in a live room can be replayed offline bit for bit.
+        // Empty = record nothing.
+        std::filesystem::path journal_dir;
+        uint64_t journal_max_bytes = 256ull << 20;   // per session file; 0 = no limit
+        uint32_t journal_checkpoint_ticks = 660;     // full body checkpoint cadence; 0 = none
     };
 
     struct session_snapshot {
@@ -94,16 +103,28 @@ namespace bmmo::sim {
         // the same number session_start_msg carries to every member, so the
         // world is built with what the clients were told.  The runner has no
         // copy of its own: there is nowhere else for the world to get it.
+        // `note` goes into the journal as `start: <note>` (the room and its
+        // members: what a human needs to recognise the recording later) and
+        // `names` are the players' display names, parallel to `players` -
+        // either the same length or empty.
         void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
-                            uint32_t input_delay, float spawn_impulse);
-        void destroy_session(uint32_t session);
-        void add_player(uint32_t session, uint32_t player, uint8_t join_order);
+                            uint32_t input_delay, float spawn_impulse, const std::string& note = {},
+                            std::vector<std::string> names = {});
+        // `reason` goes into the journal as `end: <reason>` before it closes.
+        void destroy_session(uint32_t session, const std::string& reason = {});
+        // `name` is the player's display name for the journal's PLAYER record.
+        void add_player(uint32_t session, uint32_t player, uint8_t join_order, const std::string& name = {});
         void remove_player(uint32_t session, uint32_t player);
         // The player anchored at first_tick; ticking starts when every player
         // of a not-yet-running session is ready.
         void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
         void submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
                           std::vector<bmmo::session::input_frame> frames);
+        // Events due in the same tick are applied in the members' JOIN ORDER,
+        // never in arrival order: the order is part of the determinism
+        // contract (design 9.15), because it is the only one a client can
+        // reproduce offline - its own journal cannot know which of two players
+        // reached the server first, but every member knows every join order.
         void submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event);
         void request_full_snapshot(uint32_t session);
         // Diagnostics through the log callback.
@@ -116,6 +137,8 @@ namespace bmmo::sim {
         // Tick to assign to a late joiner anchoring now.
         uint32_t late_join_tick(uint32_t session) const;
         size_t session_count() const;
+        // The session's journal file, empty when it is not recording.
+        std::string journal_path(uint32_t session) const;
 
     private:
         struct pending_event {
@@ -128,6 +151,10 @@ namespace bmmo::sim {
             int level = 0;
             std::unique_ptr<physics_world> world;
             std::set<uint32_t> players;
+            // Join order per player: the rank step() sorts a tick's due events
+            // by (the world keeps its own copy, but only for players it could
+            // add, and the order is needed for every member).
+            std::map<uint32_t, uint8_t> join_orders;
             std::set<uint32_t> ready;
             std::map<uint32_t, bmmo::session::input_buffer> inputs;
             std::map<uint32_t, uint32_t> acked;
@@ -146,8 +173,15 @@ namespace bmmo::sim {
             // for: without this the barrier re-arms every tick and a single
             // lost or rejected event pins the whole session at 1 tick/s.
             std::set<uint32_t> lifecycle_missing;
+            // The black box (design 9.15).  Touched on the simulation thread
+            // only; `journal_start` is the instant its header was written, the
+            // origin every TICK record's `ms` is measured from.
+            bmmo::session::journal_writer journal;
+            std::chrono::steady_clock::time_point journal_start{};
         };
         bool waiting_for_lifecycle(session_state& s, uint32_t tick);
+        void open_journal(session_state& s, float spawn_impulse, uint64_t anchor_hash,
+                          uint64_t anchor_surfaces, uint32_t first_tick);
 
         void run();
         void post(std::function<void()> command);
@@ -167,7 +201,8 @@ namespace bmmo::sim {
 
         // cross-thread view
         mutable std::mutex view_mutex_;
-        struct view { uint32_t next_tick = 0; bool running = false; std::chrono::steady_clock::time_point start{}; uint32_t first_tick = 0; };
+        struct view { uint32_t next_tick = 0; bool running = false; std::chrono::steady_clock::time_point start{}; uint32_t first_tick = 0;
+                      std::string journal; };
         std::map<uint32_t, view> views_;
     };
 }
