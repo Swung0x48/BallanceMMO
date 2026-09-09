@@ -482,6 +482,20 @@ private:
 
 	// Physics session (design 8.5): session/physics_session_client.cpp.
 	bmmo::session::physics_session_state physics_session_;
+	// The retail pause chain writes the physics time factor itself (0 on pause,
+	// 2.0 on unpause, via Event_handler's "Pause Level"/"Unpause Level" ->
+	// "Set Physics Globals").  During a session both blocks are rewritten to
+	// the factor the run already has, so the menu's write is a no-op and the
+	// world keeps stepping; the retail values go back when the session ends.
+	struct pause_clock_write {
+		CK_ID behavior = 0;
+		float retail = 0.0f;
+		float applied = 0.0f;
+	};
+	pause_clock_write pause_clock_[2];   // [0] Pause Level, [1] Unpause Level
+	bool pause_clock_resolve();
+	void pause_clock_apply(float factor);
+	void pause_clock_restore();
 	void handle_session_start(bmmo::session_start_msg msg);
 	void handle_session_assign(const bmmo::session_assign_msg& msg);
 	void handle_session_snapshot(bmmo::session_snapshot_msg msg);

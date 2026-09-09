@@ -24,6 +24,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <vector>
 
 int ivp_srand_read();
@@ -1241,5 +1242,103 @@ namespace bmmo::physics {
                     patched += patch_random_blocks(behavior) + patch_explosion_placement(behavior);
         }
         return patched;
+    }
+
+    // ---- bridge API v8: session clock guard ----
+
+    namespace {
+        struct clock_guard_entry {
+            bool enabled = false;
+            float target = 1.0f;
+            uint32_t pause_behavior = 0;
+            bool paused = false;
+            bool callback_queued = false;
+        };
+
+        std::map<CKIpionManager*, clock_guard_entry>& clock_guards() {
+            // Never destroyed: the physics manager may outlive static storage
+            // at process exit (see the event log listener above).
+            static auto* guards = new std::map<CKIpionManager*, clock_guard_entry>();
+            return *guards;
+        }
+
+        // The retail pause menu is the Event_handler chain deactivating
+        // Gameplay_Ingame, and the PreSimulate pass runs after this frame's
+        // scripts, so the sensor already reads the state the menu put it in.
+        // The mod cannot supply this flag itself: its frame hook runs after
+        // the physics step, one frame too late for the pause frame.
+        bool pause_sensor_paused(CKIpionManager* physics, uint32_t behavior_id) {
+            if (!behavior_id || !physics->m_Context) return false;
+            CKBehavior* sensor = CKBehavior::Cast(physics->m_Context->GetObject(behavior_id));
+            return sensor && !sensor->IsActive();
+        }
+
+        // Queued into m_PreSimulateCallbacks and left there for the whole
+        // session, unlike the one-shot callbacks above: the pass runs after
+        // SetDeltaTime recomputed the step from whatever factor the level
+        // scripts left behind, so the factor is put back and the physics delta
+        // recomputed with it before simulate_dtime() reads it.  Return 0 keeps
+        // it queued; 1 (once disabled) lets the container delete it.
+        class clock_guard_callback final : public PhysicsCallback {
+        public:
+            clock_guard_callback(CKIpionManager* manager, CKBehavior* behavior)
+                : PhysicsCallback(manager, behavior, 2) {}
+            ~clock_guard_callback() override {
+                auto it = clock_guards().find(m_IpionManager);
+                if (it != clock_guards().end()) it->second.callback_queued = false;
+            }
+            int Execute() override {
+                auto it = clock_guards().find(m_IpionManager);
+                if (it == clock_guards().end() || !it->second.enabled) return 1;
+                clock_guard_entry& guard = it->second;
+                const bool paused = pause_sensor_paused(m_IpionManager, guard.pause_behavior);
+                // Pinned while the menu is open and for the single pass in
+                // which it closes: that is the pass the unpause chain uses to
+                // write 2.0, which the run before the pause may not have had.
+                // Every other pass only samples, so the level scripts stay in
+                // charge of the clock exactly as they are on the server.
+                const bool hold = paused || guard.paused;
+                guard.paused = paused;
+                if (!hold) guard.target = m_IpionManager->m_PhysicsTimeFactor;
+                if (m_IpionManager->m_PhysicsTimeFactor != guard.target) {
+                    m_IpionManager->m_PhysicsTimeFactor = guard.target;
+                    m_IpionManager->m_PhysicsDeltaTime = m_IpionManager->m_DeltaTime * guard.target;
+                }
+                return 0;
+            }
+        };
+    }
+
+    bool set_clock_guard(CKIpionManager* physics, bool enable, float time_factor, uint32_t behavior_id,
+                         uint32_t pause_behavior_id, std::string& error) {
+        error.clear();
+        if (!physics) {
+            error = "the clock guard needs an existing physics manager";
+            return false;
+        }
+        if (!enable) {
+            // The queued callback sees enabled == false at its next pass and
+            // removes itself; nothing is deleted from under the container.
+            // callback_queued stays set until its destructor runs, so enabling
+            // again before that pass simply resumes the same callback.
+            auto it = clock_guards().find(physics);
+            if (it != clock_guards().end()) it->second.enabled = false;
+            return true;
+        }
+        clock_guard_entry& guard = clock_guards()[physics];
+        guard.enabled = true;
+        guard.pause_behavior = pause_behavior_id;
+        if (guard.callback_queued) return true;
+        guard.target = time_factor < 0.0f ? 0.0f : time_factor;
+        guard.paused = pause_sensor_paused(physics, pause_behavior_id);
+        CKBehavior* behavior = behavior_id && physics->m_Context
+            ? CKBehavior::Cast(physics->m_Context->GetObject(behavior_id)) : nullptr;
+        if (!behavior || !physics->m_PreSimulateCallbacks) {
+            error = "the clock guard needs an existing behavior to attach to";
+            return false;
+        }
+        guard.callback_queued = true;   // before Process: the callback may run inside it
+        physics->m_PreSimulateCallbacks->Process(new clock_guard_callback(physics, behavior));
+        return guard.callback_queued;
     }
 }

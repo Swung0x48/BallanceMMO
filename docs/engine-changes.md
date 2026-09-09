@@ -153,7 +153,14 @@ members `m_KeepLevelBodies`, `m_KeepLevelBodiesExcept`, appended after the
 retail layout and zeroed in the constructor), `Behaviors/Physicalize.cpp`
 (Unphysicalize branch and the "already physicalized" early return),
 `Behaviors/SetPhysicsGlobals.cpp` (diagnostic print of the time factor
-changes when `BMMO_TRACE_TIMEFACTOR` is set).
+changes when `BMMO_TRACE_TIMEFACTOR` is set; during a physics session the
+client rewrites the `Physic Time Factor` input of the `Set Physics Globals`
+block in the `Pause Level`/`Unpause Level` chain to the factor currently in
+use, so the pause chain's write is a no-op and the diagnostic prints the
+factor in use; the clock guard, bridge API v8, covers the pass in which the
+menu closes - the pass in which shared scripts such as `Gameplay_Refresh`
+write 2.0 - and every other pass only samples the factor, leaving the level
+scripts in charge).
 
 The retail death sequence resets the current sector: `Gameplay_SectorManager`
 runs the deactivation pass (Unphysicalize of every mechanism of the sector),
@@ -471,7 +478,17 @@ creation; `PhysicsImpulse` and `PhysicsWakeUp` call `WakeUpFromScript` instead
 of `ensure_in_simulation()` directly. The observer is null by default, so an
 ordinary physics_RT user (the retail game) is unaffected. BallanceMMO's bridge
 installs a callback that appends `script_wakeup <name>;` to its event log next
-to the generic `revived` diagnostics, and the client physics API is version 7.
+to the generic `revived` diagnostics, and the client physics API was version 7
+at this change. Version 8 later added the session clock guard (design doc
+section 9.2): a persistent PreSimulate callback that samples
+`m_PhysicsTimeFactor` on every pass, so the level scripts drive the clock
+exactly as they do on the server, but pins the factor to the value the run had
+before the retail pause menu opened while `pause_behavior_id`
+(`Gameplay_Ingame`) is inactive - and for the single pass in which the menu
+closes. The pause chain's own write is neutralized on the client by rewriting
+that block's `Physic Time Factor` input to the factor in use (no engine
+change), so the guard only has to cover the menu-closing pass. That one is
+bridge-only and needed no engine change.
 
 Evidence: the new headless regression test "Script wakeups are distinct from
 simulation revival" plus the four existing ones all pass. It creates a sleeping

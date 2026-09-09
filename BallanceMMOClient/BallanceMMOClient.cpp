@@ -332,6 +332,11 @@ void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
 
 void BallanceMMOClient::OnPostExitLevel() {
     physics_session_end_local("left the level");
+    // The guard's callback hangs on a level script, so the teardown destroys it
+    // with the script; disabling it here hands the time factor back anyway.
+    std::string error;
+    physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
+    pause_clock_restore();
     ball_nav_active_ = false;
     countdown_restart_ = false;
     force_hs_calibration_ = false;

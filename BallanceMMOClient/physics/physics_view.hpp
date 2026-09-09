@@ -85,6 +85,15 @@ namespace bmmo::physics {
         int install_random_block(std::string& error) const;
         int32_t random_next(std::string& error) const;
 
+        // ---- bridge API v8: session clock guard ----
+        // Keeps the retail pause menu from freezing the session clock: the
+        // factor is pinned to the value the run had before the menu opened
+        // while pause_behavior_id is inactive, and sampled (so the level
+        // scripts stay in charge) on every other pass.  behavior_id anchors
+        // the callback so it is re-attached after a reset.
+        bool set_clock_guard(bool enable, float time_factor, uint32_t behavior_id, uint32_t pause_behavior_id,
+                             std::string& error) const;
+
         // Identification of the loaded physics module (filled even when the
         // bridge is missing, so the retail DLL can be reported).
         const std::string& dll_sha256() const { return dll_sha256_; }

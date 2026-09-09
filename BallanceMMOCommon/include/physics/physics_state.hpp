@@ -143,4 +143,14 @@ namespace bmmo::physics {
     // destroy again within a session.  Returns the number of objects
     // restored, -1 without a scene.
     int restore_explosion_pieces(CKContext* context);
+
+    // ---- bridge API v8: session clock guard ----
+
+    // Keeps the retail pause menu (which stops Gameplay_Ingame and writes the
+    // physics time factor 0) from freezing or slowing the session: while
+    // pause_behavior_id is inactive the factor is pinned to the value the run
+    // had before, and every other pass only samples it, so the level scripts
+    // drive the clock exactly as they do on the server.
+    bool set_clock_guard(CKIpionManager* physics, bool enable, float time_factor, uint32_t behavior_id,
+                         uint32_t pause_behavior_id, std::string& error);
 }

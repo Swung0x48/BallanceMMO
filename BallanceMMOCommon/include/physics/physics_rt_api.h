@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 7u   /* v7: script wakeup origin isolation */
+#define BMMO_PHYSICS_API_VERSION 8u   /* v8: session clock guard */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -264,6 +264,22 @@ typedef struct bmmo_physics_api_v2 {
      * blocks patched by this call, -1 without a context or when Logics is not
      * registered. */
     int32_t (*install_random_block)(void* ck_context);
+
+    /* ---- v8: session clock guard ---- */
+
+    /* Keep the session's clock out of the retail pause menu's hands.  The
+     * guard samples the manager's physics time factor on every PreSimulate
+     * pass, so the level scripts stay in charge of it exactly as they are on
+     * the server, but while pause_behavior_id names a behavior that is
+     * deactivated (the Event_handler's "Pause Level" chain stops
+     * Gameplay_Ingame) the factor is pinned to the value the run had before
+     * the menu opened - and for the one pass in which it closes, which is the
+     * pass the unpause chain uses to write 2.0.  Idempotent while enabled;
+     * needs a live behavior (behavior_id) to attach the callback to, and
+     * re-attaches after the engine destroyed it.  time_factor is only the
+     * starting pin, used if the guard is installed while the menu is open. */
+    int32_t (*set_clock_guard)(void* ipion_manager, int32_t enable, float time_factor, uint32_t behavior_id,
+                               uint32_t pause_behavior_id, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

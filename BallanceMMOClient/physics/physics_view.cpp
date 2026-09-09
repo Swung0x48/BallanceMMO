@@ -509,4 +509,21 @@ namespace bmmo::physics {
         }
         return api_->random_next();
     }
+
+    bool physics_view::set_clock_guard(bool enable, float time_factor, uint32_t behavior_id,
+                                       uint32_t pause_behavior_id, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_clock_guard) {
+            error = "the physics_RT bridge lacks set_clock_guard";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_clock_guard(manager_, enable ? 1 : 0, time_factor, behavior_id, pause_behavior_id,
+                                   text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
 }

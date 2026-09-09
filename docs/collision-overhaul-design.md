@@ -17,7 +17,7 @@
 | 客户端引擎二进制 | 已用确定性校验台证明：装有开源 physics_RT（含 BMMO 桥接）的原版客户端与 Windows x86/x64、Linux x86_64、Android ARM64 的无头引擎逐帧位级一致（见第 6 节）。因此物理会话要求客户端使用开源 physics_RT（按哈希白名单），不再考虑原版 DLL + 修正掩盖的方案。 |
 | 服务端平台 | Windows 与 Linux 都要，其它平台（含 ARM64）也必须能跑；无头引擎为 Ballanced 开源引擎静态链接，已在 Windows x86/x64、Linux x86_64（GCC）、Android ARM64（NDK clang）验证一致。 |
 | 引擎 fork 改动 | 尽量不改；确有必要时允许，必须在 `docs/engine-changes.md` 逐条记录内容与理由。 |
-| tick 频率 | 按原版：CK 行为帧 1/66 s，Gameplay 脚本设置的物理 time factor 为 2，因此每 tick 恰好 2 个 IVP PSI（IVP `delta_PSI_time` = 1/66 s）。会话开始时从脚本读取 factor 并校验。 |
+| tick 频率 | 按原版：CK 行为帧 1/66 s。会话锚点把物理 time factor 重置为 1.0（`m_PhysicsTimeFactor = 0.001`），之后**关卡脚本照常驱动它**，两端因此完全一致：锚点后所有关卡都由 `Gameplay_Ingame` 的 init 写 2.0（每 tick 2 个 PSI，IVP `delta_PSI_time` 仍为 1/66 s；实测 Level 1/2/8 均如此），只有 Level 1 的 `Gameplay_Tutorial` 在教程期间写 0（冻结约 24 s，两端一起冻结）；tick 边界与 PSI 边界始终重合。时钟守卫（API v8 `set_clock_guard`）只在**暂停菜单打开期间**（以及关闭后的那一帧——恢复链正是在这一帧写 2.0）把因子钉回暂停前的值，其余每帧只采样。 |
 | 机关 | 第一阶段镜像：机关脚本只在服务端运行；客户端挂起共享机关的本地脚本根，每 tick 把服务端机关刚体状态写入本地刚体。 |
 | 死亡 | 个人死亡不重置共享机关。 |
 | BML 版本 | 只支持最新 BMLPlus（当前 0.3.12）；不再构建 BML 0.3.43 目标。 |
@@ -39,7 +39,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 - tick = 1/66 s 真实时间；每 tick 调用一次 `CKContext::Process()`；`CKTimeManager` 的最小/最大 delta 都设为 `1000/66` ms，使行为帧 delta 与墙钟无关。
 - 客户端在 `OnProcess` 中做节拍：落后则 `SkipRenderForNextTick()` 连续多跑 tick，超前则等待到下一 tick 时刻。
-- 会话开始（以及重开）时两端执行同样的重置：IVP 环境 `base_time/current_time/time_of_last_psi/time_of_next_psi`、`CKIpionManager` 平滑 delta 与**物理时间因子**（重置为新建世界的 1.0，即 `m_PhysicsTimeFactor = 0.001`：已经跑过一次关卡的客户端会带着 Gameplay 脚本设过的 2.0 进入锚点，而刚启动的服务端世界是 1.0，锚点后第一个 tick 一边跑 1 个 PSI、一边跑 2 个，IVP 绝对时间从此相差 1/66 s；M3 联调中实测如此）、`ivp_srand(seed)`、`qh_srand(1)`（做法与 BallanceTAS `ResetPhysicsTime` 一致）。
+- 会话开始（以及重开）时两端执行同样的重置：IVP 环境 `base_time/current_time/time_of_last_psi/time_of_next_psi`、`CKIpionManager` 平滑 delta 与**物理时间因子**（重置为新建世界的 1.0，即 `m_PhysicsTimeFactor = 0.001`：已经跑过一次关卡的客户端会带着 Gameplay 脚本设过的 2.0 进入锚点，而刚启动的服务端世界是 1.0，锚点后第一个 tick 一边跑 1 个 PSI、一边跑 2 个，IVP 绝对时间从此相差 1/66 s；M3 联调中实测如此）、`ivp_srand(seed)`、`qh_srand(1)`（做法与 BallanceTAS `ResetPhysicsTime` 一致）。锚点之后由关卡脚本继续驱动 factor（锚点后所有关卡写 2.0，Level 1 教程期间写 0），两端轨迹一致；暂停菜单的写入由时钟守卫在菜单打开期间（及关闭后一帧）钉回暂停前的值，因此会话内世界按脚本的因子步进。
 - 服务端权威时间线落后客户端约一个单向延迟：tick T 在收齐所有成员的输入或超时后才模拟；超时的玩家沿用上一 tick 输入。
 - **休眠判定与全局状态解耦（引擎改动 #5）**：原版 IVP 用环境里唯一的倒计数决定哪个 PSI 做"静止检查"（每个被模拟的 sim unit 每 PSI 都减一，归零时用 `ivp_rand()` 重置为 15..19），所以任何一个刚体何时冻结取决于此前有多少**别的**刚体在动、以及全局 RNG 游标。两端只要清醒刚体集合不同（别的玩家所在分节、客户端本地重置过的机关），同一个球就会差几个 PSI 冻结、停在略不同的位置——M3 联调里球每 ~50 tick 需要一次 ~1 cm 修正就是它。现在每个 sim unit 自带倒计数（首次 10 PSI，之后每 17 PSI，无随机），`ivp_rand()` 不再被模拟使用，`ivp_srand(seed)` 只是保留的接口。多房间时也不再需要按世界保存/恢复 RNG 游标。
 
@@ -84,7 +84,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 2. M1（已完成）：确定性校验台（客户端固定 tick + 录制；无头世界回放；逐 tick 比对）。结论：四个平台对同一段 Level 1 录制（2345 帧，含开场碎块、键盘操控、死亡重置）全部位级一致，见第 6 节。
 3. M2（已完成）：房间系统与影子球会话。房间协议（`room_request`/`room_state`/`room_event`）落地，服务端 `BallanceMMOServer/room/room_manager.hpp` + `server.cpp`，客户端 `/mmo room ...` 命令与 `session/room_client.cpp`；球状态按房间过滤。详见第 7 节。
 4. M3（已完成，提交 f7e1060）：物理会话（多球、tick 协议、预测与修正、机关镜像、分节、死亡）。实施设计与联调结果见第 8 节。
-5. M4（进行中）：远端球本地预测、重同步与暂停、迟到加入/断线/host 迁移的路径验证、服务端校验客户端事件、清理与打包。实施设计见第 9 节。
+5. M4（进行中）：远端球本地预测、重同步与暂停语义（9.2 已完成：会话期间暂停不再停摆世界）、迟到加入/断线/host 迁移的路径验证、服务端校验客户端事件、清理与打包。实施设计见第 9 节。
 
 ## 5. 目录约定
 
@@ -145,7 +145,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 | 球导航 = `Gameplay_Ingame/Ball Navigation` 内四个 `SetPhysicsForce` 叶子（Position 0,0,0，Pos Referential = 当前球，Direction 为 (1,0,0)/(-1,0,0)/(0,-1,0)/(0,1,0) 之一，Direction Ref = `Cam_OrientRef`，Force Value = `Physicalize_GameBall` 表该球型的 Force 列），每个叶子由一个 `Key Event` 驱动：Pressed → Create，Released → Shutdown；Create/Shutdown 的 Out 都接 `Physics WakeUp`。第五个叶子（Direction 0,0,1）只在 Gameplay_Init 的调试标志为 TRUE 时启用，原版恒为 FALSE。 | `Gameplay_Ingame` 图 |
 | `SetPhysicsForce.Create` 在脚本执行的当场创建 `PhysicsControllerForce`（`PhysicsCallbackContainer::Process(cb)` 立即执行回调，只有球尚无刚体时才排队到 PreSimulate 重试）：力向量 = Cam_OrientRef.TransformVector(Direction) 归一化 × Force，每个 PSI 通过 `async_push_core` 施加；Shutdown 立即删除控制器。控制器加入 core 的顺序 = 创建顺序。同一帧内 `Ball Navigation` 先于相机脚本执行，因此 Create 读到的是**上一帧末**的 Cam_OrientRef 矩阵（离线回放实测：用本帧末矩阵会在按键帧偏差一个方向分量）。 | `physics_RT/Behaviors/PhysicsForce.cpp`、`PhysicsCallback.cpp`、离线回放 |
 | 球的物理配方：Wood/Stone 为 Ball Count=1、半径 2、Collision Surface=`Ball_X_Mesh`；Paper 为 Convex Count=1、Convex=`Ball_Paper_Mesh`。Friction/Elasticity/Mass/Linear Damp/Rot Damp 来自 `Physicalize_GameBall`（Paper 0.5/0.4/0.2/1.5/0.1，Stone 0.5/0.1/10/0.3/0.1，Wood 0.8/0.2/1.9/0.9/0.1），Collision Group=`Ball`，Automatic Calculate Mass Center=FALSE 且 Shift Mass Center=0,0,0（即显式的零质心偏移，走 `mass_center_override` 路径）。 | `physicalize new Ball` 子图、`Physicalize_GameBall` 数组 |
-| 关卡开始：`Gameplay_Ingame` 激活 → `Init Ingame`（Set Physics Globals：重力 0,0,-20、时间因子 2；Execute Script `Gameplay_SectorManager` 激活分节 1）→ `BallManager/New Ball`：Set World Matrix(CurrentLevel[0,3] 复活点) → Delayer 3 s → `physicalize new Ball` → Physics WakeUp。 | `Gameplay_Ingame` 图 |
+| 关卡开始：`Gameplay_Ingame` 激活 → `Init Ingame`（Set Physics Globals：重力 0,0,-20、时间因子 2——会话期间该写入照常生效，两端一致；暂停菜单的 0 由暂停链参数改写变成空操作（见 9.2），时钟守卫负责菜单关闭那一 pass 的写入；Execute Script `Gameplay_SectorManager` 激活分节 1）→ `BallManager/New Ball`：Set World Matrix(CurrentLevel[0,3] 复活点) → Delayer 3 s → `physicalize new Ball` → Physics WakeUp。 | `Gameplay_Ingame` 图 |
 | 死亡：`BallManager` 每帧用 `Box Box Intersection` 检测球与 `DepthTestCubes`；命中后 BallNav deactivate → 1 s 后 Unphysicalize 并隐藏 → `Set Cell IngameParameter[0,1]=[0,2]=当前分节` 并 Execute `Gameplay_SectorManager`（即重置当前分节机关）→ New Ball（3 s 后在复活点重新 Physicalize）。 | `Deactivate Ball` 子图 |
 | 变球：`Trafo Manager` 用 `Get Nearest In Group(Trafos)` 距离 < 4.3 触发：Unphysicalize → 动画 1.35 s → 换球实体 → Physicalize 新球型。 | `Trafo Manager` 子图 |
 | 分节：`Gameplay_SectorManager` 被 Execute Script 同步执行：读 `IngameParameter[0,2]`（Deactivate Sector）与 `[0,1]`（Activate Sector），先按 PH 表逐行重置 Sector==Deactivate 的对象（Type 1：Activate Script(reset)，Type 2：Unphysicalize+Hide），再激活 Sector==Activate 的对象（Type 1：Show+Set World Matrix+Activate Script；Type 2：Physicalize 箱子；Type 3：Physicalize 球型对象）；`CurrentLevel[0,4]`（Activation Phase?）在激活阶段为 TRUE。到达检查点由 `Gameplay_Events/activate Sektor` 触发同一脚本。 | `Gameplay_SectorManager`、`Gameplay_Events` 图 |
@@ -196,7 +196,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 5. 收到 `SessionSnapshot`（网络线程）→ 队列 → 游戏线程 tick 开头处理：远端球：按玩家找到镜像刚体 `set_body_state(…, wake=simulated)`；自己的球和机关（按字典名找到本地同名刚体，本地没有的跳过）走同一套修正（`body_corrector`）：每 tick 把本地刚体状态存入该刚体的历史，快照里 tick T 的状态只与历史中 T 的状态比较，**绝不与当前状态比**——服务端权威时间线落后客户端 `input_delay` 加网络延迟（本机实测约 8 tick），拿快照直接覆盖当前刚体会把运动中的机关每次倒回 8 tick（M3 联调时机关正是这样被反复倒带、冻结时机错开、RNG 随之分叉，球的静止位置也偏了几毫米）。位置误差 < ε₁（0.01）且速度误差 < ε₂（0.05）忽略；< ε₃（1.0）则把差值按 K=8 tick 逐步加到刚体上（每 tick 位置 +Δp/K、速度 +Δv/K，通过 `set_body_state` 写回），渐变进行中的新快照跳过不比（否则同一误差会被计两次）；更大误差直接硬置到快照状态并清空历史。每次 blend/hard 记一行日志，计数进 `/mmo room session`（自动化命令 `session`）。
 6. 远端玩家的 `Physicalize/Unphysicalize` 事件（服务端转发）→ 创建/销毁镜像刚体（`game_objects` 的精灵球实体，`physicalize_ball` 配方与对方一致，组名 `BMMO_<id>`）。远端球的显示位置由镜像刚体决定（`PlayerObjects.physicalized = true` 时跳过旧的外推）。
 7. `SessionEnd` 或离房 → 销毁镜像刚体、停止发送、`fixed_tick_.disable`；本地球不动。
-8. 会话中 ESC 暂停：本地物理停摆，服务端不停；恢复后由修正拉回。M3 记为已知限制。
+8. 会话中 ESC 暂停：暂停菜单不再停摆世界——世界继续按 66 Hz 步进（本地物理与远端球都照常推进），暂停期间本地输入按全零处理，退出菜单即恢复，也不再触发 resync（见 9.2）。M3 期间曾是"本地物理停摆、恢复后由修正拉回"的已知限制，已由 9.2 的时钟守卫与暂停链参数改写解决。
 9. 死亡：客户端原版脚本在 `Deactivate Ball` 后重置当前分节（机关回到初始位姿并重新 Physicalize，桥接事件日志里出现 revived → 客户端上报 `BodyRevived`），服务端只唤醒同名刚体、不重置（个人死亡不重置共享机关，见第 2 节）。客户端下一次快照就会把这些机关硬置回服务端状态（误差 1.5 m 左右，Level 1 的纸球/木箱实测），肉眼可见一次跳变；球本身不受影响（引擎改动 #5 之后球的历史不再依赖机关的清醒状态）。M3 已知限制，M4 考虑在客户端拦截原版分节重置。
 
 ### 8.6 验证计划
@@ -214,7 +214,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 
 - 服务端校验客户端上报的生命周期/分节事件（M4）。
 - 多个物理房间同时运行（配置上限 1，M4 验证全局状态隔离）。
-- ~~分节反激活~~（9.9 已做）；远端球的本地预测（设计 3.3 第二阶段）；暂停语义；积分/生命同步。
+- ~~分节反激活~~（9.9 已做）；远端球的本地预测（设计 3.3 第二阶段）；~~暂停语义~~（9.2 已做）；积分/生命同步。
 - 客户端死亡时本地分节重置带来的机关跳变（8.5 第 9 条）。
 - 球-球接触时的一致性：远端球是快照镜像，两球顶住/相撞后各端都要靠修正（8.6 双人结果）；远端球本地预测（3.3 第二阶段）与出生环/起点碟的几何问题留给 M4（出生环后来被 9.10 的出生冲量取代）。
 
@@ -223,7 +223,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 依次做：
 
 1. **远端球本地预测**（3.3 第二阶段）——双人联调里唯一的非一致来源是球-球接触时对方的球只是滞后镜像；做完之后接触也走本地物理。
-2. **重同步与暂停语义**——客户端暂停、长时间掉帧、硬修正反复出现时能回到一致状态，而不是永远靠渐变追。
+2. **重同步与暂停语义**——暂停不再需要重同步（9.2：会话期间世界继续步进，暂停只把本地输入置零、不再触发 resync）；长时间掉帧与硬修正反复出现时能回到一致状态，而不是永远靠渐变追。
 3. **路径验证**：迟到加入、断线、host 迁移、房主重开，用无头会话客户端做成可重复的脚本。
 4. **服务端校验客户端事件**：Physicalize 位姿/配方、分节单调、事件频率。
 5. **清理与打包**：诊断模式收口、原版球停放后的控制台刷屏、安装目标、配置与部署说明。
@@ -254,13 +254,16 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 
 ### 9.2 重同步与暂停
 
-- **暂停**（ESC、失焦）：客户端本地物理停摆，服务端不停。恢复后固定节拍驱动器最多快进 33 tick，超过则重设节拍原点——此时客户端的 tick 编号与服务端脱节。M4 规定：驱动器重设原点时客户端向服务端发 `SessionResync{session, last_full_tick}`，服务端回 `SessionAssign{first_tick = 当前 tick}` 并强制一次全量快照；客户端收到后把 `tick_base` 改为新值、`frames_since_anchor` 归零重排（后续帧号从新基数计）、清空所有修正历史，并在下一次全量快照时对所有刚体（自己的球、远端球、机关）硬置一次。输入历史里旧编号的帧丢弃。
+- **暂停**（ESC、失焦）：**会话期间暂停不再停摆世界**。暂停菜单打开时原版脚本会把物理时间因子设为 0，客户端在锚点安装了时钟守卫（API v8 `set_clock_guard`）：只要 `pause_behavior_id`（`Gameplay_Ingame`，暂停链正是停掉它）处于非激活状态，守卫就把因子钉回**暂停前的值**，因此本地物理与远端球继续按暂停前的速率步进；退出菜单的那一帧（恢复链会写 2.0）仍然钉住，之后守卫恢复为只采样，让关卡脚本继续当家。**守卫单独不够**：暂停链写 0 的那一 pass，`Gameplay_Ingame->IsActive()` 仍为 1（翻转晚一帧），守卫会把 0 采样成「暂停前的值」——这个帧内歧义在守卫内部无法消除（教程脚本合法写 0，形状完全相同）。所以会话锚点时把 `Event_handler` 的 `Pause Level`/`Unpause Level` 链里 `Set Physics Globals` 的「Physic Time Factor」输入改写成**当前物理时间因子**（每帧按 `get_clock` 刷新；该输入经 `CKIpionManager::SetTimeFactor` 的 `×0.001` 缩放，脚本值是正常时的 2.0，故写入的是引擎值 ×1000），暂停/恢复链执行时写进去的就是已经在用的值，对时钟是空操作；会话结束（`physics_session_end_local` / `OnPostExitLevel`）写回零售值。守卫保留，负责恢复帧上由 `Gameplay_Refresh`/`Gameplay_Ingame` 造成的写入（这两个是服务端也会跑的共享脚本，不能打补丁）。暂停期间本地输入按全零处理，退出菜单即恢复，也不再触发 `SessionResync`。世界照常步进，两端状态继续一致。
+- **节拍原点重设 / 长时间掉帧**：固定节拍驱动器落后超过 33 tick 时会重设节拍原点，此时客户端的 tick 编号与服务端脱节，仍走重同步：客户端向服务端发 `SessionResync{session, last_full_tick}`，服务端回 `SessionAssign{first_tick = 当前 tick}` 并强制一次全量快照；客户端收到后把 `tick_base` 改为新值、`frames_since_anchor` 归零重排（后续帧号从新基数计）、清空所有修正历史，并在下一次全量快照时对所有刚体（自己的球、远端球、机关）硬置一次。输入历史里旧编号的帧丢弃。
 - **反复硬置**：自己球连续 3 次快照落入硬置档，或 `unmatched` 连续超过 30 个快照（历史里找不到快照 tick，即编号已错位），同样触发 `SessionResync`。
 - 服务端对 `SessionResync` 的处理与迟到加入相同（`late` 集合 + 当前 tick 编号 + 全量快照），因此迟到加入路径与重同步路径共用一套代码和测试。
 - **编号要领先**：迟到加入与重同步分配的不是服务端"当前 tick"，而是 `当前 tick + input_delay + 2`。客户端从收到分配那一刻起按这个编号推进，才能像会话开始时的成员一样领先服务端；按当前 tick 分配时客户端反而落后半个 RTT，每个快照到达时本地还没有那个 tick 的历史，全部 `unmatched`（首次联调正是如此，1380/1380）。
 - 客户端触发重同步后继续按旧编号推进（原版客户端停不了帧），旧编号的输入被服务端的输入缓冲丢弃；收到新的 `SessionAssign` 才归零重排。
 
-**结果（2026-09-02，无头客户端 `--pause-at 4200 --pause-ms 5000`）**：暂停后节拍原点重设 → `SessionResync` → 服务端 `resynced at tick 4532` → 客户端 `resynced: tick base 4532` → 全量快照 10 个刚体一次写入；之后自己球 `compared=1679 ignored=705 blended=185 hard=0 max_err=0.14`（另一方在它暂停期间一直在推它，误差来自接触）。
+**结果（2026-09-02，无头客户端 `--pause-at 4200 --pause-ms 5000`）**：注意 `--pause-at` 是**进程级 stall**（`session_client.cpp` 整线程 sleep 5 s），不是暂停菜单，所以仍会重设节拍原点并触发 `SessionResync`：服务端 `resynced at tick 4532` → 客户端 `resynced: tick base 4532` → 全量快照 10 个刚体一次写入；之后自己球 `compared=1679 ignored=705 blended=185 hard=0 max_err=0.14`（另一方在它暂停期间一直在推它，误差来自接触）。ESC 暂停菜单在 9.2 的新语义下不再走这条路径。
+
+**结果（2026-09-09，原版客户端 ESC 暂停 6 s，Level 1）**：暂停期间因子恒 `0.002000`、`ivp_time` 持续增长（2.000/s，每 tick 0.030303）、`fixedtick` 66.0/s、`resyncs` 不增、`frozen=0`；恢复后 `paused=0`，方向键驱动球，因子不变。Level 1 教程期两端一起冻结（客户端 `time_factor=0.000000`、`ivp_time` 不动），教程结束后两端 2.0。
 
 ### 9.3 路径验证（无头会话客户端脚本）
 
@@ -270,7 +273,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 | 断线 | 无头客户端进程被杀 | 服务端 `member_left`，克隆球去刚体，其余成员收到 `Unphysicalize`（服务端代发）；会话继续 |
 | host 迁移 | 房主（原版客户端）离开 | 房间 host 变更，会话不中断，新 host 能 `/mmo room close` 结束会话 |
 | 房主重开 | 房主再次 `start physics` | 旧会话 `SessionEnd("restarted by the host")`，新会话全员重锚 |
-| 暂停恢复 | 原版客户端 ESC 5 s 后恢复 | 触发 9.2 的重同步，之后 `blended=0` |
+| 暂停恢复 | 原版客户端 ESC 5 s 后恢复 | 世界照常 66 Hz 步进（`frozen=0`、无 `SessionResync`）；暂停期间本地输入全零，退出菜单后恢复 |
 
 服务端在成员离开时代发该玩家的 `Unphysicalize`（目前只在世界里去刚体，其他客户端的镜像会留下），这是 M3 遗漏的一条。已补：`physics_session_member_left` 用离开者的 id 向其余成员发 `SessionEvent{Unphysicalize}`。
 
@@ -305,7 +308,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - 两端的物理和导航复制是位级一致的同一段代码（M1、9.1），重模拟就是把服务端会做的事在本地再做一遍。
 - 服务端每 2 tick 的快照已经带全部球和清醒机关的完整核心状态（f64 位姿、速度），恢复用 `set_body_state`（beam + 速度 + 清醒/冻结）。
 - 只重跑物理与导航，不重跑 CK 脚本（脚本每帧只在真实帧里跑一次）：窗口只有约 10 tick，脚本驱动的东西（检查点、机关唤醒）在真实帧里照样发生。
-- IVP 的 PSI 时刻由环境里的双精度时钟推进，每 tick 恰好 2 个 PSI 且有整整一个 PSI 的裕度，绝对时间平移 K 个 tick 不改变分组；回滚**不倒拨绝对时钟**，重模拟让本地 IVP 时间比服务端多走 K 个 tick（只影响 mindist 事件表里的 float 相对时刻，产生的罕见差异由下一个快照再次纠正）。
+- IVP 的 PSI 时刻由环境里的双精度时钟推进，会话期间每 tick 的 PSI 数由关卡脚本写下的时间因子决定（锚点后所有关卡 2.0 → 2 个 PSI，Level 1 教程期间 0 → 不步进；两端一致，暂停菜单期间由时钟守卫钉住，见第 2 节），tick 边界与 PSI 边界重合，绝对时间平移 K 个 tick 就是平移 K 个 tick 对应的 PSI 数、不改变分组；回滚**不倒拨绝对时钟**，重模拟让本地 IVP 时间比服务端多走 K 个 tick（只影响 mindist 事件表里的 float 相对时刻，产生的罕见差异由下一个快照再次纠正）。
 
 **与 GGPO 的差别**：没有完整存档，恢复后的接触/摩擦内部状态是 IVP 在下一个 PSI 重建的，所以重模拟结果与"从未分叉"的连续模拟不保证位级相同，但每 2 tick 的权威快照会再次拉齐；没有对等方，回滚只在客户端；不做输入延迟协商（服务端的 `input_delay` 固定）。
 
@@ -323,7 +326,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - `BallanceMMOCommon/include/session/rollback.hpp`：`rollback_engine`（`record` / `on_snapshot`）+ `rollback_world` 适配器（get/set body、get/set nav、nav_input、nav_poll、step、simulating、log）。Mod 在 `physics_session_frame` 末尾记录每 tick（自己的球、有导航复制的远端球、机关字典里的机关；应用的输入 = 自己的 `input_frame`、远端上次驱动喂入的帧），`physics_session_apply_snapshot` 在 `rollback_enabled`（默认开，自动化 `session rollback on|off` 可切回渐变路径）时走 `physics_session_rollback`；无头客户端同样（`--no-rollback` 切回）。回滚后重新排队下一帧的相机行（重模拟消耗了它）。
 - 桥接 API v5：v4 之外加 `set_body_guard`（引擎改动 #6）和 `get_clock`（时间因子 / 下一步物理 delta）。
 - 引擎改动 #6（`docs/engine-changes.md`）：会话期间原版 Unphysicalize 块只放行当前球，其它刚体保留；Physicalize 块对已有刚体把刚体位姿写回实体。原因：原版死亡分节重置会删掉并重建机关刚体，新刚体从初始位姿落下、接触状态全新，此后每个快照都不符（先 1.5 m，随后 1–10 mm 持续约 1 s）。Mod 每帧对当前球名启用守卫，会话结束关闭。（守卫的豁免名单见 9.14 / 引擎改动 #13：变球碎片是会话期间原版脚本自建自毁的刚体，不归守卫管。）
-- **本地物理时钟停止时的路径**：原版脚本会把物理时间因子设为 0（Level 1 的 `Gameplay_Tutorial` 在关卡开始后停约 26 s；暂停菜单），这段时间本地既不能预测也不能重模拟。引擎通过 `world.simulating()`（`get_clock` 因子 > 0）识别，不符时只写入权威状态、不重模拟、计入 `frozen`。同步开始的会话两端一起进教程、快照一致；迟到加入者在自己的教程期间靠这条路径贴住服务端。
+- **本地物理时钟停止时的路径**：原版脚本会把物理时间因子设为 0（Level 1 的 `Gameplay_Tutorial` 在关卡开始后停约 24 s；暂停菜单），这段时间本地既不能预测也不能重模拟。引擎通过 `world.simulating()`（`get_clock` 因子 > 0）识别，不符时只写入权威状态、不重模拟、计入 `frozen`。同步开始的会话两端一起进教程、快照一致；迟到加入者在自己的教程期间靠这条路径贴住服务端。会话期间时钟守卫**不会解除教程冻结**：它只在暂停菜单打开期间（及关闭后一帧）钉住因子，教程期因子为 0 时守卫照常采样为 0，因此这条路径仍然用于教程冻结；暂停菜单的 0 由暂停链参数改写抵消（守卫负责菜单关闭那一 pass），不再走这条路径。
 - 诊断：`session` 状态行里的 `rollback: snaps/ok/mism/rb/resim/unmatched/far/frozen/max_err/last`；前 40 次不符打印逐刚体本地/服务端位姿；`session trace on` 打开重模拟逐步轨迹；`BMMO_TRACE_TIMEFACTOR=1` 让 physics_RT 打印哪个脚本改了时间因子。
 - 单元测试 `BallanceMMOServer/tests/rollback_engine_test.cpp`（假世界：匹配不回滚、不符恢复并按记录输入重模拟、时钟停止只贴齐、超出重模拟窗口只写入、历史有界、未命中计数）。
 
@@ -337,7 +340,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 | 同上，无头侧 | 2510 | 2484 | 26 / 26 | 5 | 无头端与服务端几乎零滞后，恢复后无需重模拟 |
 | 迟到加入（无头），教程期间 | 3135 | 3111 | 16 / 11 | 23 | `frozen=5`（教程里其他人没动就一致），教程结束后按键沿回滚，最大误差 5.48 m 是加入瞬间 |
 
-- 教程期间的发现：迟到加入者本地 IVP 时间不走（因子 0），旧的"回滚"每个快照都恢复 + 重模拟却什么也模拟不了（核心的 `t_env` 不变），表现为远端球总停在服务端上一个快照的位置；`frozen` 路径解决。
+- 教程期间的发现：迟到加入者本地 IVP 时间不走（因子 0），旧的"回滚"每个快照都恢复 + 重模拟却什么也模拟不了（核心的 `t_env` 不变），表现为远端球总停在服务端上一个快照的位置；`frozen` 路径解决。（时钟守卫不解除教程冻结：教程期两端因子都为 0，这条路径照常生效。）
 - 自己的球的 1 mm 级残差出现在两球在出生点接触时：恢复只还原位姿/速度，IVP 接触状态在下一 PSI 重建，与"从未分叉"的连续模拟差 1 mm 左右，下一个快照拉齐（设计里预期的 GGPO 差别）。
 - 原版渐变路径（`body_corrector`）保留为 `session rollback off` 的回退。
 

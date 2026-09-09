@@ -114,6 +114,26 @@ namespace {
         for (const auto& p: s.players) if (p.id == id) return static_cast<uint8_t>(p.join_order);
         return 63;
     }
+
+    // The behavior the PreSimulate clock guard hangs its callback on: the
+    // navigation replica while the session has one, otherwise the level script
+    // itself.  A destroyed behavior takes its callbacks with it
+    // (ClearBehaviorCallbacks), so the id is resolved again on every frame the
+    // guard is re-attached.
+    uint32_t clock_guard_behavior_id(IBML* bml, const physics_session_state& s) {
+        if (s.navigation.ball_navigation) return s.navigation.ball_navigation;
+        CKBehavior* script = bml->GetScriptByName("Gameplay_Ingame");
+        return script ? script->GetID() : 0;
+    }
+
+    // The behavior whose deactivation *is* the retail pause: the Event_handler's
+    // "Pause Level" chain stops Gameplay_Ingame.  The guard reads it inside the
+    // engine's PreSimulate pass, because the mod's own frame hook runs after
+    // the physics step and would see the pause one frame too late.
+    uint32_t pause_sensor_behavior_id(IBML* bml) {
+        CKBehavior* script = bml->GetScriptByName("Gameplay_Ingame");
+        return script ? script->GetID() : 0;
+    }
 }
 
 // ---------------------------------------------------------------- network thread
@@ -288,8 +308,12 @@ void BallanceMMOClient::physics_session_countdown() {
 
 void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     auto& s = physics_session_;
-    if (s.phase == phase_type::idle) return;
     std::string error;
+    pause_clock_restore();
+    // The clock guard is scoped to the session and must not outlive it, so it
+    // is dropped even when there is nothing left to tear down.
+    physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
+    if (s.phase == phase_type::idle) return;
     for (auto& [id, remote]: s.remotes) {
         if (remote.navigation && physics_view_.available()) physics_view_.navigation_destroy(remote.entity.c_str(), error);
         if (remote.physicalized && physics_view_.available()) physics_view_.unphysicalize(remote.entity.c_str(), error);
@@ -342,6 +366,69 @@ void BallanceMMOClient::process_physics_session() {
     }
 }
 
+// The two retail blocks that write the physics time factor from the pause menu
+// (design: the session clock).  Resolved from the level's Event_handler, which
+// exists by the time the session anchors.
+//
+// Unit conversion: the block feeds its "Physic Time Factor" input straight to
+// CKIpionManager::SetTimeFactor, which scales it by 0.001
+// (CKIpionManager.cpp:848) -- the script value is 2 during normal play, while
+// get_clock() reports the scaled engine value (0.002).
+static constexpr float kTimeFactorScriptScale = 1000.0f;
+
+bool BallanceMMOClient::pause_clock_resolve() {
+    CKBehavior* event_handler = m_bml->GetScriptByName("Event_handler");
+    if (!event_handler) return false;
+    static const char* kChains[2] = {"Pause Level", "Unpause Level"};
+    bool resolved = true;
+    for (int i = 0; i < 2; ++i) {
+        pause_clock_[i] = {};
+        CKBehavior* chain = ScriptHelper::FindFirstBB(event_handler, kChains[i]);
+        CKBehavior* block = chain ? ScriptHelper::FindFirstBB(chain, "Set Physics Globals", true) : nullptr;
+        auto* input = block ? block->GetInputParameter(1) : nullptr;
+        CKParameter* param = input ? input->GetRealSource() : nullptr;
+        if (!param) {
+            resolved = false;
+            continue;
+        }
+        pause_clock_[i].behavior = block->GetID();
+        pause_clock_[i].retail = ScriptHelper::GetParamValue<float>(param);
+        pause_clock_[i].applied = pause_clock_[i].retail;
+    }
+    if (resolved)
+        logger_->Info("Physics session: pause chain time factors: pause=%.4f unpause=%.4f",
+                      pause_clock_[0].retail, pause_clock_[1].retail);
+    return resolved;
+}
+
+void BallanceMMOClient::pause_clock_apply(float factor) {
+    const float script = factor * kTimeFactorScriptScale;
+    for (auto& write: pause_clock_) {
+        if (!write.behavior || write.applied == script) continue;
+        auto* block = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(write.behavior));
+        auto* input = block ? block->GetInputParameter(1) : nullptr;
+        CKParameter* param = input ? input->GetRealSource() : nullptr;
+        if (!param) continue;
+        float value = script;
+        param->SetValue(&value, sizeof(value));
+        write.applied = script;
+    }
+}
+
+void BallanceMMOClient::pause_clock_restore() {
+    for (auto& write: pause_clock_) {
+        if (!write.behavior) continue;
+        auto* block = static_cast<CKBehavior*>(m_bml->GetCKContext()->GetObject(write.behavior));
+        auto* input = block ? block->GetInputParameter(1) : nullptr;
+        CKParameter* param = input ? input->GetRealSource() : nullptr;
+        if (param && write.applied != write.retail) {
+            float value = write.retail;
+            param->SetValue(&value, sizeof(value));
+        }
+        write = {};
+    }
+}
+
 // The anchor frame: session clock reset, world hash, SessionReady.
 void BallanceMMOClient::physics_session_anchor() {
     auto& s = physics_session_;
@@ -357,6 +444,27 @@ void BallanceMMOClient::physics_session_anchor() {
     if (!physics_view_.reset_session_clock(s.seed, error)) {
         physics_session_end_local("session clock reset failed: " + error);
         return;
+    }
+    // The retail pause menu stops Gameplay_Ingame and writes the time factor 0;
+    // the guard pins the factor to the value the run had before the menu opened
+    // for as long as it is open, and samples it otherwise, so the level scripts
+    // keep driving the clock exactly as they do on the server.
+    const uint32_t guard_id = clock_guard_behavior_id(m_bml, s);
+    const uint32_t pause_id = pause_sensor_behavior_id(m_bml);
+    if (!guard_id)
+        logger_->Warn("Physics session: no behavior to anchor the clock guard on");
+    else if (!pause_id)
+        logger_->Warn("Physics session: clock guard has no pause sensor (Gameplay_Ingame)");
+    else if (!physics_view_.set_clock_guard(true, 0.001f, guard_id, pause_id, error))
+        logger_->Warn("Physics session: clock guard: %s", error.c_str());
+    // The pause menu's own time-factor write is turned into a no-op for the
+    // session (see pause_clock_resolve): the retail chain would otherwise stop
+    // the clock, which the server never does.
+    if (!pause_clock_resolve())
+        logger_->Warn("Physics session: the pause chain's time factor block was not found");
+    else {
+        float factor = 0.0f, delta = 0.0f;
+        if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
     }
     bmmo::physics::world_hash hash;
     if (!physics_view_.capture(hash, error)) {
@@ -483,6 +591,21 @@ void BallanceMMOClient::physics_session_frame() {
     CK3dObject* ball = get_current_ball();
     const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
 
+    // Re-attach the clock guard every frame: a sector change or a level reset
+    // destroys the behavior it hung on (and with it the callback), while the
+    // session keeps running.  Idempotent while the callback is still there.
+    const uint32_t guard_id = clock_guard_behavior_id(m_bml, s);
+    const uint32_t pause_id = pause_sensor_behavior_id(m_bml);
+    if (guard_id && pause_id && !physics_view_.set_clock_guard(true, 0.001f, guard_id, pause_id, error))
+        s.last_error = error;
+    // Keep the pause chain's write equal to the factor in use: it changes only
+    // when the level scripts change it (the tutorial), so this is a compare
+    // most frames.
+    {
+        float factor = 0.0f, delta = 0.0f;
+        if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
+    }
+
     // The tick driver restarted its schedule (pause, long stall): our tick
     // numbers no longer line up with the server's.
     if (s.assigned && fixed_tick_.rebases() != s.last_rebases) {
@@ -580,8 +703,25 @@ void BallanceMMOClient::physics_session_frame() {
     // basis from the END of the previous frame (the retail Ball Navigation
     // executes before the camera scripts of a frame), nav state after this
     // frame's scripts.
+
+    // Pause menu (ESC): the retail scripts stop Gameplay_Ingame, which also
+    // stops the keyboard poll they drive, while the session keeps stepping
+    // (PreSimulate clock guard).  Report zero keys and stop the replica from
+    // polling them, so the ball is not driven by the arrow keys the player
+    // holds while the menu is open.
+    const bool muted = m_bml->IsIngame() && !gameplay_ingame_script_active();
+    if (muted != s.input_muted) {
+        logger_->Info("Physics session: input %s (ingame script %d, paused %d)", muted ? "muted" : "live",
+                      gameplay_ingame_script_active() ? 1 : 0, m_bml->IsPaused() ? 1 : 0);
+        if (s.own_navigation
+                && !physics_view_.navigation_poll(s.own_nav_entity.c_str(), !muted, s.own_key_codes, s.own_key_blocks,
+                                                  s.own_key_count, error))
+            s.last_error = error;
+        s.input_muted = muted;
+    }
     bmmo::session::input_frame frame{};
-    if (s.navigation_keys_known && input_hook_installed_) frame.keys = s.navigation.keys_from_state(frame_keys_.data());
+    if (!muted && s.navigation_keys_known && input_hook_installed_)
+        frame.keys = s.navigation.keys_from_state(frame_keys_.data());
     float cam[3][3] = {};
     bool cam_valid = false;
     if (auto* orient = m_bml->Get3dEntityByName("Cam_OrientRef")) {
@@ -609,8 +749,8 @@ void BallanceMMOClient::physics_session_frame() {
     }
     frame.ball_type = ball_name.empty() ? 0 : static_cast<uint8_t>(db_.get_ball_id(ball_name));
     frame.flags = static_cast<uint8_t>((s.own_physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
-                | (m_bml->IsPaused() ? bmmo::session::INPUT_FLAG_PAUSED : 0)
-                | (ball_nav_active_ ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));
+                | (muted ? bmmo::session::INPUT_FLAG_PAUSED : 0)
+                | (!muted && ball_nav_active_ ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));
     {
         const uint8_t nav_mask = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
         if (s.trace && (frame.keys != s.last_input_keys || (frame.flags & nav_mask) != (s.last_input_flags & nav_mask))) {
@@ -1332,7 +1472,10 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
     world.nav_poll = [this](const std::string& entity, bool enable) {
         auto& s = physics_session_;
         std::string error;
-        return physics_view_.navigation_poll(entity.c_str(), enable, s.own_key_codes, s.own_key_blocks, s.own_key_count, error);
+        // A replay must not switch the polling back on while the pause menu
+        // has it off: the ball would follow the held arrow keys again.
+        return physics_view_.navigation_poll(entity.c_str(), enable && !s.input_muted, s.own_key_codes,
+                                            s.own_key_blocks, s.own_key_count, error);
     };
     world.step = [this]() {
         std::string error;
@@ -1618,7 +1761,7 @@ void BallanceMMOClient::physics_session_attach_own_navigation(const std::string&
     }
     if (!physics_view_.navigation_create(ball_name.c_str(), "CamRef_BMMO_self", s.navigation.ball_navigation, directions,
                                          count, physics_session_ball_force(ball_type), error)
-            || !physics_view_.navigation_poll(ball_name.c_str(), true, key_codes, key_blocks, count, error)) {
+            || !physics_view_.navigation_poll(ball_name.c_str(), !s.input_muted, key_codes, key_blocks, count, error)) {
         logger_->Warn("Physics session: own ball navigation replica: %s", error.c_str());
         s.last_error = error;
         return;

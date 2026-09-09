@@ -72,6 +72,10 @@ namespace bmmo::session {
         float previous_cam[3][3] = {};        // Cam_OrientRef rows at the end of the previous frame
         bool previous_cam_valid = false;
         uint64_t inputs_sent = 0;
+        // The pause menu stopped Gameplay_Ingame: the session keeps stepping
+        // (PreSimulate clock guard), but the keys are reported as zero and the
+        // own navigation replica stops polling them.
+        bool input_muted = false;
 
         // Navigation graph (key bindings arrive a few frames after the anchor).
         bmmo::game::navigation_graph navigation;
@@ -205,6 +209,7 @@ namespace bmmo::session {
             input_history.clear();
             previous_cam_valid = false;
             inputs_sent = 0;
+            input_muted = false;
             navigation = {};
             navigation_keys_known = false;
             own_group_set = false;

@@ -378,6 +378,21 @@ namespace {
         return bmmo::physics::install_random_block(static_cast<CKContext*>(ck_context));
     }
 
+    int32_t api_set_clock_guard(void* manager, int32_t enable, float time_factor, uint32_t behavior_id,
+                                uint32_t pause_behavior_id, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_clock_guard(static_cast<CKIpionManager*>(manager), enable != 0, time_factor,
+                                            behavior_id, pause_behavior_id, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     const bmmo_physics_api_v2 kApi = {
         sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
@@ -413,6 +428,7 @@ namespace {
         api_random_set_state,
         api_random_next,
         api_install_random_block,
+        api_set_clock_guard,
     };
 }
 
