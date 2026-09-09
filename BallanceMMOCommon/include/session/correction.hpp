@@ -35,6 +35,7 @@ namespace bmmo::session {
         double hard_position = 1.0;      // metres: beyond this, hard set
         uint32_t blend_ticks = 8;
         uint32_t history_ticks = 660;    // 10 s of states
+        double identity_guard_m = 20.0;  // metres: beyond this, the row names another instance
     };
 
     struct correction_step {
@@ -62,6 +63,7 @@ namespace bmmo::session {
         void clear() {
             history_.clear();
             remaining_ = 0;
+            compared_locally_ = false;
         }
 
         // Compares an authoritative pose for its tick with the local history.
@@ -80,6 +82,7 @@ namespace bmmo::session {
                 ++stats_.unmatched;
                 return step;
             }
+            compared_locally_ = true;
             double dp[3], dv[3];
             for (int k = 0; k < 3; ++k) {
                 dp[k] = authoritative.position[k] - local->position[k];
@@ -139,6 +142,30 @@ namespace bmmo::session {
         bool blending() const { return remaining_ > 0; }
         const correction_stats& stats() const { return stats_; }
         size_t history_size() const { return history_.size(); }
+        // True when the last compare() found a local record for the
+        // authoritative tick and the difference was implausibly large: the row
+        // names another instance of the same name, not ours.  It is not
+        // derived from history_size(): a hard step wipes the history
+        // (compare()), and the mismatch that caused the hard step has to
+        // survive that wipe.
+        bool identity_mismatch() const {
+            return compared_locally_ && stats_.last_error > thresholds_.identity_guard_m;
+        }
+        // Same question for a caller that has an authoritative row but never
+        // ran compare() (the rollback path applies snapshots through the
+        // rollback engine, so it does not).  Compares the row with the local
+        // record for its own tick; no record for that tick means "cannot tell",
+        // not "another instance".
+        bool identity_mismatch(const ball_pose& authoritative) const {
+            const ball_pose* local = find(authoritative.tick);
+            if (!local) return false;
+            double dp = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double d = authoritative.position[k] - local->position[k];
+                dp += d * d;
+            }
+            return std::sqrt(dp) > thresholds_.identity_guard_m;
+        }
 
     private:
         const ball_pose* find(uint32_t tick) const {
@@ -152,6 +179,7 @@ namespace bmmo::session {
         double blend_position_[3] = {};
         float blend_linear_[3] = {};
         uint32_t remaining_ = 0;
+        bool compared_locally_ = false;   // last compare() matched a local record
         correction_stats stats_;
     };
     using own_ball_corrector = body_corrector;

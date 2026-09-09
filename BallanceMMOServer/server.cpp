@@ -28,6 +28,7 @@
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
 #include <physics/physics_state.hpp>
+#include <session/lifecycle.hpp>
 #include <cmath>
 #endif
 
@@ -570,6 +571,13 @@ public:
             std::chrono::steady_clock::time_point window_start{};
             double last_position[3] = {};
             bool have_position = false;
+            // Repeat-event guard (design 9.4 hardening).  BodyRevived is a
+            // "this body is back" notification the client re-sends every frame
+            // it still believes a body is missing; the stamps differ (measured:
+            // up to 18 ticks apart inside one burst) while the (ball_type,
+            // name) does not, so the dedup key must not contain the stamp.
+            std::vector<bmmo::session::repeat_event_key> recent_revives;
+            uint64_t dropped_duplicate = 0, late_events = 0;
         };
         std::map<HSteamNetConnection, member_guard> guards;
         uint64_t rejected_events = 0, flagged_events = 0;
@@ -1101,6 +1109,20 @@ public:
                     flag("sector " + std::to_string(msg.sector) + " after sector " + std::to_string(guard.sector));
                 guard.sector = std::max(guard.sector, msg.sector);
             }
+        }
+        if (msg.type == bmmo::session::event_type::BodyRevived) {
+            auto& guard = s.guards[c];
+            // Diagnostics only: a late event is legal and must be applied (the
+            // production Level 8 journal carries 126 events at offset -29..-31,
+            // Level 2 five BodyRevived 3058 ticks late).  Lateness is never a
+            // reason to drop anything.
+            const uint32_t now_tick = runner_->current_tick(msg.session);
+            if (static_cast<int32_t>(now_tick - msg.tick) > 0) ++guard.late_events;
+            if (bmmo::session::repeat_event_duplicate(guard.recent_revives, msg.ball_type, msg.name, msg.tick)) {
+                ++guard.dropped_duplicate;
+                return;   // no submit_event, no relay: members must not replay it either
+            }
+            bmmo::session::record_repeat_event(guard.recent_revives, msg.ball_type, msg.name, msg.tick);
         }
         if (msg.type == bmmo::session::event_type::Physicalize) {
             const auto& r = msg.recipe;

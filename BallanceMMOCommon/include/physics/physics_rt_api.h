@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 6u   /* v6: spawn impulse, deterministic "Random" block (design 9.10) */
+#define BMMO_PHYSICS_API_VERSION 7u   /* v7: script wakeup origin isolation */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline

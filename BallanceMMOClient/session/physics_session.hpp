@@ -116,6 +116,7 @@ namespace bmmo::session {
         // recorded at T, never with the current one).
         std::map<std::string, body_corrector> mechanism_correctors;
         uint64_t mechanism_blends = 0, mechanism_hard = 0;
+        uint64_t mechanism_identity_drops = 0;   // rows dropped by the identity guard
         uint64_t corrections_logged = 0;
 
         // Remote balls: player -> mirrored entity.
@@ -202,6 +203,7 @@ namespace bmmo::session {
             hard_sets = blends = 0;
             mechanism_correctors.clear();
             mechanism_blends = mechanism_hard = 0;
+            mechanism_identity_drops = 0;
             corrections_logged = 0;
             remotes.clear();
             mechanism_names.clear();

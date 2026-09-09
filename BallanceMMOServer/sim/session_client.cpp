@@ -973,7 +973,7 @@ namespace {
                     send_event(event);
                     own_group_set_ = false;
                     logf("own ball unphysicalized at tick %u", tick);
-                } else if (kind == "revived" && !name.empty() && name.rfind("Ball_", 0) != 0
+                } else if (kind == "script_wakeup" && !name.empty() && name.rfind("Ball_", 0) != 0
                            && name.find("_BMMO_") == std::string::npos && !revived_reported.count(name)) {
                     revived_reported.insert(name);
                     bmmo::session_event_msg event;

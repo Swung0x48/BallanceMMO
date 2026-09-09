@@ -445,6 +445,42 @@ identical between the guarded and the unguarded run. The single-explosion
 `--explode` output, the `rec_m3b` replay (4169/4169) and `--spawn-test 3` are
 unchanged.
 
+## 14. Script wake-ups told apart from IVP revivals (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.h` / `.cpp` (new
+`m_ScriptWakeupObserver` member appended after the retail layout like changes
+#6 and #13, plus `WakeUpFromScript` and `NotifyScriptWakeup`),
+`Behaviors/Physicalize.cpp`, `Behaviors/PhysicsImpulse.cpp` and
+`Behaviors/PhysicsWakeUp.cpp` (the three places a script explicitly asks a body
+to wake), and `physics_RT/tests/test_physics_regressions.cpp`.
+
+IVP reports every wake through one global listener. That includes script
+requests, but also collisions, snapshot restoration and re-simulation after a
+rollback, and the client mod cannot tell those apart. It sent all of them to
+the server as `BodyRevived`, and the server called `ensure_in_simulation()` on
+each one; IVP resets the resting detection even for an already-awake body, so a
+client's predicted collision or rollback restore could wake the authoritative
+body again. The production journals show the resulting flood: 101,025
+`BodyRevived` events in an 18-minute Level 8 session, peaking at 827 per second.
+
+The engine now records only explicit script intent. `WakeUpFromScript` wakes
+the body and then calls `NotifyScriptWakeup`, which filters on the observer
+being installed, the object belonging to this manager's environment, and the
+body being movable. `Physicalize` reports a successful, non-fixed, non-frozen
+creation; `PhysicsImpulse` and `PhysicsWakeUp` call `WakeUpFromScript` instead
+of `ensure_in_simulation()` directly. The observer is null by default, so an
+ordinary physics_RT user (the retail game) is unaffected. BallanceMMO's bridge
+installs a callback that appends `script_wakeup <name>;` to its event log next
+to the generic `revived` diagnostics, and the client physics API is version 7.
+
+Evidence: the new headless regression test "Script wakeups are distinct from
+simulation revival" plus the four existing ones all pass. It creates a sleeping
+body and checks that manager-side creation, a direct `ensure_in_simulation()`,
+a beam restore and a re-simulation produce ordinary `revived` events but no
+script intent, that `WakeUpFromScript` reports its target (also when the body is
+already awake), and that a fixed body reports nothing. The production Level 8
+journal still replays tick-identical.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

@@ -122,6 +122,8 @@ void BallanceMMOClient::handle_session_assign(const bmmo::session_assign_msg& ms
             s.tick_base = first_tick;
             s.frames_since_anchor = 0;
             s.input_history.clear();
+            s.own_inputs.clear();
+            s.rollback.invalidate_history();
             s.corrector.clear();
             for (auto& [name, corrector]: s.mechanism_correctors) corrector.clear();
             for (auto& [id, remote]: s.remotes) remote.corrector.clear();
@@ -685,12 +687,15 @@ void BallanceMMOClient::physics_session_frame() {
         }
     }
 
-    // Mechanism wake-ups the retail scripts did this frame.
+    // Only explicit script wake-ups belong on the authoritative timeline.
+    // IVP's generic revived events also include predicted collisions and
+    // rollback restores: sending those back would wake the server's bodies
+    // again and feed the next correction.
     s.revived_reported_this_frame.clear();
     const std::string events = physics_view_.drain_event_log();
     size_t pos = 0;
-    while ((pos = events.find("revived ", pos)) != std::string::npos) {
-        pos += 8;
+    while ((pos = events.find("script_wakeup ", pos)) != std::string::npos) {
+        pos += 14;
         const size_t end = events.find(';', pos);
         if (end == std::string::npos) break;
         const std::string name = events.substr(pos, end - pos);
@@ -784,12 +789,15 @@ void BallanceMMOClient::physics_session_apply_queues() {
             auto it = s.remotes.find(entry.player);
             if (it == s.remotes.end()) continue;
             auto& remote = it->second;
+            // A reordered frame is still authoritative for its historical
+            // tick. Keep it for rollback without replacing the live predictor
+            // with an older input.
+            remote.inputs[msg.tick] = entry.frame;
+            while (remote.inputs.size() > physics_session_state::kInputRing) remote.inputs.erase(remote.inputs.begin());
             if (remote.have_input && msg.tick < remote.input_tick) continue;   // out of order
             remote.input = entry.frame;
             remote.input_tick = msg.tick;
             remote.have_input = true;
-            remote.inputs[msg.tick] = entry.frame;
-            while (remote.inputs.size() > physics_session_state::kInputRing) remote.inputs.erase(remote.inputs.begin());
         }
     }
     for (auto& snapshot: snapshots) physics_session_apply_snapshot(snapshot);
@@ -827,6 +835,7 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         const uint32_t previous_type = remote.physicalized && remote.entity != entity->GetName()
             ? remote.ball_type : std::numeric_limits<uint32_t>::max();
         if (remote.physicalized && remote.entity != entity->GetName()) {
+            s.rollback.invalidate_history();
             if (remote.navigation) physics_view_.navigation_destroy(remote.entity.c_str(), error);
             physics_view_.unphysicalize(remote.entity.c_str(), error);
         } else if (remote.navigation) {
@@ -843,6 +852,10 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
             s.last_error = error;
             return;
         }
+        // Queues run after this frame's history capture. The new body (also a
+        // same-name respawn) must first be recorded on the NEXT live frame;
+        // older snapshots cannot safely rewind the current world through it.
+        s.rollback.invalidate_history();
         remote.entity = entity->GetName();
         remote.ball_type = event.ball_type;
         remote.physicalized = true;
@@ -872,6 +885,7 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
     case bmmo::session::event_type::Unphysicalize: {
         auto it = s.remotes.find(event.player);
         if (it == s.remotes.end()) return;
+        if (it->second.physicalized || it->second.navigation) s.rollback.invalidate_history();
         if (it->second.navigation) physics_view_.navigation_destroy(it->second.entity.c_str(), error);
         it->second.navigation = false;
         if (it->second.physicalized) physics_view_.unphysicalize(it->second.entity.c_str(), error);
@@ -1031,6 +1045,12 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
         for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
         auto& corrector = s.mechanism_correctors[name->second];
         const auto step = corrector.compare(pose);
+        if (corrector.identity_mismatch()) {
+            corrector.clear();                 // history belongs to another instance
+            ++s.mechanism_identity_drops;
+            bmmo::session::client_journal::instance().note(snapshot.tick, "mechanism identity guard: " + name->second);
+            continue;                          // never hard-set, never blend
+        }
         if (step.action == bmmo::session::correction_step::kind::hard) {
             ++s.mechanism_hard;
             physics_session_log_correction(name->second, snapshot.tick, corrector.stats().last_error, "hard");
@@ -1113,6 +1133,10 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
                           target->GetName() ? target->GetName() : "?", s.current_tick() + 1, convexCnt, ballCnt, concaveCnt);
         return;
     }
+    // BML calls this before body creation/PreSimulate. Discard old lifetimes
+    // now; this frame's post-physics record captures the newly created body.
+    // In particular, a same-name respawn is not the body in the old history.
+    s.rollback.invalidate_history();
     bmmo::session_event_msg event;
     event.tick = s.current_tick() + 1;   // this frame's physics step is still ahead
     event.type = bmmo::session::event_type::Physicalize;
@@ -1207,6 +1231,7 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
     if (s.phase != phase_type::running || !target) return;
     CK3dObject* ball = get_current_ball();
     if (!ball || target != static_cast<CK3dEntity*>(ball)) return;
+    s.rollback.invalidate_history();
     bmmo::session_event_msg event;
     event.tick = s.current_tick() + 1;
     event.type = bmmo::session::event_type::Unphysicalize;
@@ -1337,7 +1362,22 @@ bool BallanceMMOClient::physics_session_rollback(const bmmo::session_snapshot_ms
             return it->second.entity;
         }
         auto name = s.mechanism_names.find(body.owner);
-        return name == s.mechanism_names.end() ? std::string() : name->second;
+        if (name == s.mechanism_names.end()) return std::string();
+        // Identity guard: a row this far from our record for the same tick
+        // names another instance of the same name (other sector).  Skip it
+        // instead of letting the engine compare it with our body: an empty
+        // entity is skipped (rollback.hpp:171), while a name whose state is
+        // not in the history rejects the whole snapshot.
+        auto& corrector = s.mechanism_correctors[name->second];
+        bmmo::session::ball_pose pose;
+        pose.tick = snapshot.tick;
+        for (int k = 0; k < 3; ++k) pose.position[k] = body.position[k];
+        if (corrector.identity_mismatch(pose)) {
+            corrector.clear();
+            ++s.mechanism_identity_drops;
+            return std::string();
+        }
+        return name->second;
     };
     auto input_at = [&](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
         const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
@@ -1385,6 +1425,9 @@ void BallanceMMOClient::physics_session_request_resync(const char* reason) {
 // history to compare with yet).
 void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapshot_msg& snapshot) {
     auto& s = physics_session_;
+    // A hard world overwrite also invalidates records collected while we
+    // waited for this full snapshot, not just those dropped on reassignment.
+    s.rollback.invalidate_history();
     std::string error;
     const auto own_id = db_.get_client_id();
     CK3dObject* ball = get_current_ball();

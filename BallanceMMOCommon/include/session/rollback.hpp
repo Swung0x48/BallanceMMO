@@ -2,11 +2,12 @@
 
 // Client-side rollback (design 9.6): the client runs ahead of the server's
 // confirmed progress and predicts; when the authoritative snapshot of tick
-// T disagrees with what the client recorded at T, every tracked body and
-// navigation replica is restored to T and the ticks T+1 .. now are
-// re-simulated (physics + navigation only, no scripts) from the recorded
-// inputs.  Pure logic over a small world adapter, shared by the retail mod
-// (through the physics bridge) and the headless session client.
+// T disagrees with what the client recorded at T, the bodies that breached
+// their own tolerance are restored to the server pose, every other tracked
+// body and navigation replica is restored to its own record for T, and the
+// ticks T+1 .. now are re-simulated (physics + navigation only, no scripts)
+// from the recorded inputs.  Pure logic over a small world adapter, shared by
+// the retail mod (through the physics bridge) and the headless session client.
 
 #include <algorithm>
 #include <cmath>
@@ -74,8 +75,20 @@ namespace bmmo::session {
     };
 
     struct rollback_thresholds {
+        // Balls keep the tolerances the engine was tuned with. A shared
+        // mechanism is a script-driven body, so its pose carries more
+        // mirroring noise and gets the wider pair below; both pairs are an
+        // "error equivalent to a tenth of a second of motion"
+        // (position / velocity = 0.1 s), only at 50x the scale.
         double position = 0.001;   // metres
         double velocity = 0.01;    // m/s
+        // Legal mechanism motion measures <= 0.81 m/tick (Level 8 windows,
+        // build/online-symptoms-20260909/mech-jitter), so 0.05 m is about 6%
+        // of one such tick: a genuine divergence is still caught inside a
+        // tick, while sub-tick pose noise (float velocity mirrored into a
+        // double pose, one substep of phase) no longer rolls the session back.
+        double mechanism_position = 0.05;   // metres
+        double mechanism_velocity = 0.5;    // m/s
         size_t history_ticks = 64;
         uint32_t max_resim_ticks = 40;   // give up (hard set only) beyond this lag
     };
@@ -93,8 +106,13 @@ namespace bmmo::session {
     public:
         explicit rollback_engine(rollback_thresholds thresholds = {}) : thresholds_(thresholds) {}
 
+        // Body creation/destruction is not replayable by this adapter. A
+        // lifecycle boundary starts a new history, even when a respawn reuses
+        // the same entity name. Keep session diagnostics across that boundary.
+        void invalidate_history() { history_.clear(); }
+
         void clear() {
-            history_.clear();
+            invalidate_history();
             stats_ = {};
             detailed_logs_ = 0;
             resim_traces_ = 0;
@@ -114,6 +132,15 @@ namespace bmmo::session {
             state.tracked = tracked;
             state.inputs = inputs_applied;
             capture(world, state);
+            // Also catch callers discovering a new/missing body or navigation
+            // replica at record time. No replay may span different live sets.
+            const auto same_entities = [](const auto& a, const auto& b) {
+                return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+                    [](const auto& left, const auto& right) { return left.first == right.first; });
+            };
+            if (!history_.empty() && (!same_entities(history_.back().bodies, state.bodies)
+                    || !same_entities(history_.back().navs, state.navs)))
+                invalidate_history();
             if (!history_.empty() && history_.back().tick >= tick) {
                 // re-recording (resim) or a numbering restart: drop from here
                 while (!history_.empty() && history_.back().tick >= tick) history_.pop_back();
@@ -125,7 +152,8 @@ namespace bmmo::session {
         // Authoritative snapshot of `tick`.  `entity_of` maps a snapshot body
         // to the local entity name (empty = not tracked here); `input_at`
         // supplies the input a navigated ball had at a tick during the
-        // re-simulation (the recorded own input, the relayed remote input).
+        // re-simulation. Relayed remote inputs supersede recorded predictions;
+        // the own ball keeps the input recorded for that tick's entity.
         // Returns true when a rollback happened.
         bool on_snapshot(const rollback_world& world, const session_snapshot_msg& snapshot, uint32_t current_tick,
                          const std::function<std::string(const body_state&)>& entity_of,
@@ -151,17 +179,25 @@ namespace bmmo::session {
             double worst_breach = 0.0; // furthest past a threshold: the journal's subject
             std::string worst_entity, detail;
             std::vector<std::pair<std::string, const body_state*>> authoritative;
+            std::vector<std::string> breached;   // rows snapped to the server pose
             for (const auto& body: snapshot.bodies) {
                 const std::string entity = entity_of(body);
                 if (entity.empty()) continue;
                 auto it = at->bodies.find(entity);
-                // Not tracked at that tick: the body did not exist here yet
-                // (just physicalized), or it is the entity a trafo has since
-                // replaced - the row belongs to the ball of tick T, not to
-                // this one.  Restoring it would teleport the new ball to the
-                // old one's pose; the next snapshot has a tick we recorded.
-                if (it == at->bodies.end()) continue;
+                // A currently mapped body without a state at T cannot be
+                // left in the world while the others rewind: world.step()
+                // advances it too. Reject the WHOLE snapshot before any write.
+                if (it == at->bodies.end()) {
+                    invalidate_history();
+                    ++stats_.unmatched;
+                    report(7);
+                    return false;
+                }
                 authoritative.emplace_back(entity, &body);
+                // Each row is judged by the tolerance of its own kind: a
+                // mechanism row at the same error as a ball is not a
+                // divergence.
+                const tolerance tol = tolerance_for(body.kind);
                 double dp = 0.0, dv = 0.0;
                 for (int k = 0; k < 3; ++k) {
                     dp += (body.position[k] - it->second.position[k]) * (body.position[k] - it->second.position[k]);
@@ -174,13 +210,14 @@ namespace bmmo::session {
                     worst = dp;
                     worst_entity = entity;
                 }
-                // The mismatch can be a velocity one (0.01 m/s trips before
-                // 1 mm of drift does), so the record names the body that is
-                // furthest past its own threshold, not the one that moved
-                // most: otherwise the journal blames an in-tolerance body and
-                // reports dv = 0 for exactly the event it was written for.
-                const double breach = std::max(thresholds_.position > 0.0 ? dp / thresholds_.position : dp,
-                                               thresholds_.velocity > 0.0 ? dv / thresholds_.velocity : dv);
+                // The mismatch can be a velocity one (for a ball, 0.01 m/s
+                // trips before 1 mm of drift does), so the record names the
+                // body that is furthest past its own threshold, not the one
+                // that moved most: otherwise the journal blames an
+                // in-tolerance body and reports dv = 0 for exactly the event
+                // it was written for.
+                const double breach = std::max(tol.position > 0.0 ? dp / tol.position : dp,
+                                               tol.velocity > 0.0 ? dv / tol.velocity : dv);
                 if (breach > worst_breach) {
                     worst_breach = breach;
                     correction.entity = entity;
@@ -191,8 +228,9 @@ namespace bmmo::session {
                         correction.server_position[k] = body.position[k];
                     }
                 }
-                if (dp > thresholds_.position || dv > thresholds_.velocity) {
+                if (dp > tol.position || dv > tol.velocity) {
                     mismatch = true;
+                    breached.push_back(entity);
                     if (detailed_logs_ < 40) {
                         char buf[256];
                         std::snprintf(buf, sizeof(buf), " %s dp=%.4f dv=%.3f local=(%.3f,%.3f,%.3f)%s server=(%.3f,%.3f,%.3f)%s",
@@ -209,6 +247,18 @@ namespace bmmo::session {
                 ++stats_.matched;
                 return false;
             }
+            // A deletion can happen after the last record and before queued
+            // snapshots run. Preflight every restore target before changing
+            // any body, rather than partly restoring and replaying dead names.
+            for (const auto& [entity, state]: at->bodies) {
+                bmmo_physics_body_state live{};
+                if (!world.get_body(entity, live)) {
+                    invalidate_history();
+                    ++stats_.unmatched;
+                    report(7);
+                    return false;
+                }
+            }
             ++stats_.mismatched;
             stats_.last_mismatch = worst_entity;
             report(0);
@@ -217,10 +267,16 @@ namespace bmmo::session {
                 world.log("mismatch at tick " + std::to_string(snapshot.tick) + " (local " + std::to_string(current_tick) + "):"
                           + detail);
 
-            // 2. restore tick T: snapshot bodies from the server, the other
-            //    tracked bodies and every navigation replica from the history
+            // 2. restore tick T: the bodies that breached their tolerance from
+            //    the server, every other tracked body and every navigation
+            //    replica from the history
             const rollback_tracked tracked = at->tracked;
             for (const auto& [entity, body]: authoritative) {
+                // A body that agreed with the server stays on its own record
+                // for T (below): snapping it to a sub-tolerance pose would
+                // also copy the server's wake flag over its local one, which
+                // resets the mechanism freeze timer on every snapshot.
+                if (std::find(breached.begin(), breached.end(), entity) == breached.end()) continue;
                 bmmo_physics_body_state state{};
                 for (int k = 0; k < 3; ++k) {
                     state.position[k] = body->position[k];
@@ -237,7 +293,7 @@ namespace bmmo::session {
             }
             for (const auto& [entity, state]: at->bodies) {
                 bool from_server = false;
-                for (const auto& [name, body]: authoritative) from_server = from_server || name == entity;
+                for (const auto& name: breached) from_server = from_server || name == entity;
                 if (!from_server) world.set_body(entity, state, state.simulated);
             }
             for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
@@ -260,11 +316,9 @@ namespace bmmo::session {
                 truncate_after(snapshot.tick);
                 return true;
             }
-            // The window can span a trafo: the own ball is a different entity
-            // after it, and every recorded tick carries the entity it was
-            // simulated with.  Take polling off all of them (a replayed tick
-            // must use its recorded input, not the live keyboard) and drive
-            // each tick's own set below.
+            // A replayed tick must use recorded input, not the live keyboard.
+            // Lifecycle changes invalidate history, so this window contains
+            // only bodies that can all be restored before the first step.
             std::vector<std::string> polled;
             auto stop_polling = [&](const rollback_tracked& t) {
                 if (t.own_entity.empty() || !t.own_polls) return;
@@ -279,21 +333,26 @@ namespace bmmo::session {
                 tick_state* recorded = find(t);
                 const rollback_tracked& step_tracked = recorded ? recorded->tracked : tracked;
                 std::map<std::string, input_frame> inputs;
-                auto feed = [&](const std::string& entity) {
+                auto feed = [&](const std::string& entity, bool remote) {
                     input_frame frame{};
-                    bool have = false;
-                    if (recorded) {
+                    // A live remote step records our prediction, which may
+                    // predate a key edge the server has since relayed. Reusing
+                    // that prediction would reproduce the same divergence on
+                    // every rollback. Own inputs are already exact and must
+                    // stay attached to their historical entity across a trafo.
+                    bool have = remote && input_at(entity, t, frame);
+                    if (!have && recorded) {
                         auto it = recorded->inputs.find(entity);
                         if (it != recorded->inputs.end()) { frame = it->second; have = true; }
                     }
-                    if (!have) have = input_at(entity, t, frame);
+                    if (!have && !remote) have = input_at(entity, t, frame);
                     if (have) {
                         world.nav_input(entity, frame);
                         inputs[entity] = frame;
                     }
                 };
-                if (!step_tracked.own_entity.empty()) feed(step_tracked.own_entity);
-                for (const auto& remote: step_tracked.remote_entities) feed(remote);
+                if (!step_tracked.own_entity.empty()) feed(step_tracked.own_entity, false);
+                for (const auto& remote: step_tracked.remote_entities) feed(remote, true);
                 std::string trace;
                 if (verbose_ && world.log && resim_traces_ < 60) {
                     for (const auto& remote: step_tracked.remote_entities) {
@@ -372,6 +431,17 @@ namespace bmmo::session {
 
         void truncate_after(uint32_t tick) {
             while (!history_.empty() && history_.back().tick > tick) history_.pop_back();
+        }
+
+        struct tolerance {
+            double position = 0.0;
+            double velocity = 0.0;
+        };
+
+        tolerance tolerance_for(body_kind kind) const {
+            if (kind == body_kind::Mechanism)
+                return {thresholds_.mechanism_position, thresholds_.mechanism_velocity};
+            return {thresholds_.position, thresholds_.velocity};
         }
 
         rollback_thresholds thresholds_;

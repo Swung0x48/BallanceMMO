@@ -232,6 +232,22 @@ namespace bmmo::physics {
         // Never destroyed: the IVP environment may outlive static storage at
         // process exit and would call into a dead listener.
         event_log_listener& g_event_log = *new event_log_listener();
+
+        // The engine calls this only for an explicit script wake-up; the
+        // environment check already happened in CKIpionManager. It shares the
+        // listener's log so the entries keep one format and one drain point.
+        void record_script_wakeup(IVP_Real_Object* object) {
+            if (!object || g_event_log.text.size() > 256 * 1024) return;
+            IVP_Environment* environment = object->get_environment();
+            char stamp[64];
+            std::snprintf(stamp, sizeof(stamp), "t=%.6f ", environment
+                ? environment->get_current_time().get_seconds() : -1.0);
+            g_event_log.text += stamp;
+            g_event_log.text += "script_wakeup";
+            g_event_log.text += ' ';
+            g_event_log.text += object->get_name() ? object->get_name() : "?";
+            g_event_log.text += ';';
+        }
     }
 
     std::string drain_event_log(CKIpionManager* physics) {
@@ -241,6 +257,10 @@ namespace bmmo::physics {
             g_event_log.environment = environment;
             g_event_log.text += "listener installed;";
         }
+        // The observer is a manager member, so a new environment or manager
+        // needs its own hook even though the log itself is shared.
+        if (physics && physics->m_ScriptWakeupObserver != &record_script_wakeup)
+            physics->m_ScriptWakeupObserver = &record_script_wakeup;
         std::string out;
         out.swap(g_event_log.text);
         return out;

@@ -3,6 +3,7 @@
 #include "CKAll.h"
 
 #include <physics/physics_state.hpp>
+#include <session/lifecycle.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -405,15 +406,15 @@ namespace bmmo::sim {
             const auto* frame = buffer.peek(tick);
             if (!frame || !(frame->flags & bmmo::session::INPUT_FLAG_PHYSICALIZED)) continue;
             if (s.world->player_physicalized(player)) { s.lifecycle_missing.erase(player); continue; }
-            bool pending = false;
-            for (const auto& e: s.events)
-                if (e.player == player && e.tick <= tick && e.event.type == bmmo::session::event_type::Physicalize) {
-                    pending = true;
-                    break;
-                }
-            // A Physicalize is on its way (or arrived after we gave up): wait
-            // for it again.
-            if (pending) { s.lifecycle_missing.erase(player); continue; }
+            // A Physicalize that belongs to the frame at `tick` is stamped at
+            // most tick + input_delay + 1 (see session/lifecycle.hpp), so ask
+            // for that horizon: the event is already queued, and waiting for it
+            // does not apply it any earlier than its own stamp tick.
+            const uint32_t horizon = tick + s.input_delay + 1;
+            if (bmmo::session::physicalize_pending(s.events, player, horizon)) {
+                s.lifecycle_missing.erase(player);
+                continue;
+            }
             // Already waited a second for this player's event and gave up; the
             // session must keep running at full speed for everybody else.
             if (s.lifecycle_missing.count(player)) continue;
