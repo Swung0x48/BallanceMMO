@@ -30,6 +30,19 @@ namespace {
     using bmmo::session::physics_session_state;
     using phase_type = physics_session_state::phase_type;
 
+    // Option A (findings/mechanism-strategy-decision.md): the client renders
+    // the script-constrained mechanism bodies from the two newest authoritative
+    // poses instead of predicting them.  A pair further apart than this in one
+    // snapshot interval is a teleport (sector change, level reset, re-entry),
+    // and a target further than this from the local pose means our body is
+    // somewhere else entirely: both are followed by a snap, never by a skipped
+    // write, so the body can never be left behind at the old pose.
+    constexpr double kMechanismSnapTravel = 0.5;   // metres per snapshot pair
+    constexpr double kMechanismSnapJump = 1.0;     // metres from the local pose
+    // Below this the body already sits on the target pose: writing it again
+    // would only disturb the core's sleep state.
+    constexpr double kMechanismWriteEpsilon = 1e-4;
+
     void copy_name(char* out, size_t size, const std::string& text) {
         std::snprintf(out, size, "%s", text.c_str());
     }
@@ -125,7 +138,6 @@ void BallanceMMOClient::handle_session_assign(const bmmo::session_assign_msg& ms
             s.own_inputs.clear();
             s.rollback.invalidate_history();
             s.corrector.clear();
-            for (auto& [name, corrector]: s.mechanism_correctors) corrector.clear();
             for (auto& [id, remote]: s.remotes) remote.corrector.clear();
             s.resync_pending = true;
             s.have_snapshot = false;
@@ -212,6 +224,16 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
     }
     if (!m_bml->IsIngame()) {
         SendIngameMessage("Physics session: you must be in the level to take part.", bmmo::ansi::BrightRed);
+        // Say it out loud instead of going silent: the server's start barrier
+        // waits for this member's SessionReady, which will never come.  Leaving
+        // the room removes us from the session and re-runs the barrier for the
+        // members that are actually here.
+        bmmo::room_request_msg leave;
+        leave.action = bmmo::room::action::Leave;
+        leave.room = s.room;
+        leave.serialize();
+        send(leave.raw.str().data(), leave.size(), k_nSteamNetworkingSend_Reliable);
+        logger_->Info("Physics session %u: not in the level, left room %u", s.session, s.room);
         s.phase = phase_type::idle;
         return;
     }
@@ -537,22 +559,6 @@ void BallanceMMOClient::physics_session_frame() {
         // spawn impulse, applied once the body exists in OnPhysicalize).
     }
 
-    // Mechanism states after this tick (design 8.5 step 5): the snapshot for
-    // tick T is compared with these, never with a later state of the body.
-    for (const auto& [index, name]: s.mechanism_names) {
-        bmmo_physics_body_state local{};
-        if (!physics_view_.get_body_state(name.c_str(), local, error)) continue;
-        bmmo::session::ball_pose pose;
-        pose.tick = tick;
-        for (int k = 0; k < 3; ++k) {
-            pose.position[k] = local.position[k];
-            pose.linear[k] = local.linear[k];
-            pose.angular[k] = local.angular[k];
-        }
-        for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
-        s.mechanism_correctors[name].record(pose);
-    }
-
     // Remote balls after this tick (design 9.1): the snapshot for tick T is
     // compared with the state recorded at T.
     for (auto& [id, remote]: s.remotes) {
@@ -636,7 +642,6 @@ void BallanceMMOClient::physics_session_frame() {
                 tracked.remote_entities.push_back(remote.entity);
                 applied[remote.entity] = remote.applied;
             }
-        for (const auto& [index, name]: s.mechanism_names) tracked.mechanisms.push_back(name);
         s.rollback.record(physics_session_rollback_world(), tick, tracked, applied);
     }
     if (s.assigned) {
@@ -712,9 +717,41 @@ void BallanceMMOClient::physics_session_frame() {
         physics_session_send_event(event);
     }
 
+    // A too_far or frozen decision sets the bodies and truncates the history
+    // without re-simulating, so the world stays on the snapshot while our tick
+    // counter runs on: the two timelines no longer line up.  Re-anchor instead
+    // of drifting, once - request_resync itself rate-limits, and a request
+    // already in flight will bring the full snapshot this needs.
+    const uint64_t too_far_before = s.rollback.stats().too_far;
+    const uint64_t frozen_before = s.rollback.stats().frozen;
+    const uint64_t judged_before = s.rollback.stats().snapshots;
+    const uint64_t matched_before = s.rollback.stats().matched;
     physics_session_apply_queues();
+    // Option A: after the queue was drained, every mechanism has this
+    // snapshot's authority row; render it before the rollback decision below
+    // (which may restore the world) and before the blends continue.
+    physics_session_apply_mechanism_authority();
+    if (s.rollback_enabled && !s.resync_pending) {
+        const auto& rollback = s.rollback.stats();
+        // The rollback path returns before the correction ladder of the
+        // non-rollback path, so that ladder's resync triggers never run here.
+        // A snapshot the engine judged without a single body matching it - the
+        // tick was missing from the history, or a body kept breaching its
+        // tolerance - is the same loss of usable history, so count it: matched
+        // is the only counter that proves the tick's record was found and
+        // every tracked body agreed.
+        const uint64_t judged = rollback.snapshots - judged_before;
+        if (rollback.matched != matched_before) s.consecutive_unmatched = 0;
+        else if (judged > 0) s.consecutive_unmatched += static_cast<int>(judged);
+        if (rollback.too_far != too_far_before)
+            physics_session_request_resync("rollback lag beyond the re-simulation window");
+        else if (rollback.frozen != frozen_before)
+            physics_session_request_resync("local physics clock frozen");
+        else if (s.consecutive_unmatched >= 30)
+            physics_session_request_resync("30 snapshots without a match");
+    }
 
-    // Continue running blends (own ball and mechanisms).
+    // Continue running blends (own ball and remote balls).
     auto apply_blend = [&](const std::string& name, bmmo::session::body_corrector& corrector) {
         if (!corrector.blending()) return;
         const auto step = corrector.next_blend();
@@ -732,10 +769,23 @@ void BallanceMMOClient::physics_session_frame() {
         else { ++s.body_write_errors; s.last_error = error; }
     };
     if (s.own_physicalized) apply_blend(ball_name, s.corrector);
-    for (auto& [name, corrector]: s.mechanism_correctors) apply_blend(name, corrector);
     for (auto& [id, remote]: s.remotes)
         if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
     physics_session_drive_remotes();
+
+    // The record for this tick was captured before the snapshot corrections
+    // above, so a rollback to it would restore the divergent pose and lose the
+    // correction on the first re-simulated tick.  Re-capture it now, keeping
+    // its tick label, tracked set and inputs: this is the state the next
+    // step will start from, the same one the journal hash below describes.
+    if (s.rollback_enabled && !s.rollback.amend_record(physics_session_rollback_world(), tick)) {
+        // False means this tick is no longer in the history - invalidate_history
+        // or the history_ticks trim dropped it - so the record still holds the
+        // pre-correction pose.  Log it once per session instead of every frame.
+        if (s.amend_failures++ == 0)
+            logger_->Warn("Physics session %u: amend_record found no history entry for tick %u (the tick was dropped)",
+                          s.session, tick);
+    }
 
     // The black box, last thing in the frame: the fingerprint of our own world
     // as the next step will find it (every correction applied above included),
@@ -938,10 +988,13 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
     std::string error;
     physics_session_check_own_body(snapshot, own_id);
     if (s.rollback_enabled) {
-        if (snapshot.full)
-            for (const auto& body: snapshot.bodies)
-                if (body.kind == bmmo::session::body_kind::Mechanism && !body.name.empty())
-                    s.mechanism_names[body.owner] = body.name;
+        for (const auto& body: snapshot.bodies)
+            if (body.kind == bmmo::session::body_kind::Mechanism) {
+                if (snapshot.full && !body.name.empty()) s.mechanism_names[body.owner] = body.name;
+                // Option A: the row is not compared or restored, it is stored
+                // as authority for the frame's applier.
+                physics_session_note_mechanism(snapshot.tick, body);
+            }
         physics_session_rollback(snapshot);
         return;
     }
@@ -1027,43 +1080,10 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
             else { ++s.body_write_errors; s.last_error = error; }
             continue;
         }
-        // Mechanism: resolve the dictionary index, skip bodies this client
-        // does not have (other sectors).
+        // Mechanism (Option A): no local prediction, no comparison - the row
+        // is stored as authority and rendered by the frame's applier.
         if (snapshot.full && !body.name.empty()) s.mechanism_names[body.owner] = body.name;
-        auto name = s.mechanism_names.find(body.owner);
-        if (name == s.mechanism_names.end()) continue;
-        const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
-        bmmo_physics_body_state local{};
-        if (!physics_view_.get_body_state(name->second.c_str(), local, error)) continue;   // not physicalized here
-        bmmo::session::ball_pose pose;
-        pose.tick = snapshot.tick;
-        for (int k = 0; k < 3; ++k) {
-            pose.position[k] = body.position[k];
-            pose.linear[k] = body.linear[k];
-            pose.angular[k] = body.angular[k];
-        }
-        for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
-        auto& corrector = s.mechanism_correctors[name->second];
-        const auto step = corrector.compare(pose);
-        if (corrector.identity_mismatch()) {
-            corrector.clear();                 // history belongs to another instance
-            ++s.mechanism_identity_drops;
-            bmmo::session::client_journal::instance().note(snapshot.tick, "mechanism identity guard: " + name->second);
-            continue;                          // never hard-set, never blend
-        }
-        if (step.action == bmmo::session::correction_step::kind::hard) {
-            ++s.mechanism_hard;
-            physics_session_log_correction(name->second, snapshot.tick, corrector.stats().last_error, "hard");
-            if (physics_view_.set_body_state(name->second.c_str(), step.target.position, step.target.rotation,
-                                             step.target.linear, step.target.angular, wake, error))
-                ++s.body_writes;
-            else { ++s.body_write_errors; s.last_error = error; }
-        } else if (step.action == bmmo::session::correction_step::kind::blend) {
-            ++s.mechanism_blends;
-            physics_session_log_correction(name->second, snapshot.tick, corrector.stats().last_error, "blend");
-        } else {
-            ++s.mechanism_matches;
-        }
+        physics_session_note_mechanism(snapshot.tick, body);
     }
 }
 
@@ -1361,34 +1381,24 @@ bool BallanceMMOClient::physics_session_rollback(const bmmo::session_snapshot_ms
             if (it == s.remotes.end() || !it->second.physicalized || !it->second.navigation) return {};
             return it->second.entity;
         }
-        auto name = s.mechanism_names.find(body.owner);
-        if (name == s.mechanism_names.end()) return std::string();
-        // Identity guard: a row this far from our record for the same tick
-        // names another instance of the same name (other sector).  Skip it
-        // instead of letting the engine compare it with our body: an empty
-        // entity is skipped (rollback.hpp:171), while a name whose state is
-        // not in the history rejects the whole snapshot.
-        auto& corrector = s.mechanism_correctors[name->second];
-        bmmo::session::ball_pose pose;
-        pose.tick = snapshot.tick;
-        for (int k = 0; k < 3; ++k) pose.position[k] = body.position[k];
-        if (corrector.identity_mismatch(pose)) {
-            corrector.clear();
-            ++s.mechanism_identity_drops;
-            return std::string();
-        }
-        return name->second;
+        // Mechanisms are not tracked by the rollback engine (Option A): they
+        // are server-authoritative, so no snapshot row may restore or
+        // re-simulate them.  An empty entity makes on_snapshot skip the row
+        // (rollback.hpp), and rollback_tracked no longer lists them either.
+        return std::string();
     };
+    // Only an exact hit counts: the engine feeds a relayed frame instead of the
+    // recorded prediction when this succeeds, and a frame from an earlier tick
+    // would replay a key edge the tick did not have.
     auto input_at = [&](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
         const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
         if (entity == s.own_nav_entity) inputs = &s.own_inputs;
         else
             for (const auto& [id, remote]: s.remotes)
                 if (remote.entity == entity) inputs = &remote.inputs;
-        if (!inputs || inputs->empty()) return false;
-        auto it = inputs->upper_bound(tick);
-        if (it == inputs->begin()) return false;
-        --it;   // the frame at `tick`, else the latest before it
+        if (!inputs) return false;
+        auto it = inputs->find(tick);
+        if (it == inputs->end()) return false;
         out = it->second;
         return true;
     };
@@ -1448,6 +1458,9 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
             if (!body.name.empty()) s.mechanism_names[body.owner] = body.name;
             auto name = s.mechanism_names.find(body.owner);
             if (name == s.mechanism_names.end()) continue;
+            // Option A: the applier renders from the stored pair, so the hard
+            // set below is also the first half of it.
+            physics_session_note_mechanism(snapshot.tick, body);
             target = name->second.c_str();
         }
         if (physics_view_.set_body_state(target, body.position, body.rotation, body.linear, body.angular,
@@ -1469,6 +1482,107 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
     }
     logger_->Info("Physics session %u: resync applied from the full snapshot of tick %u (%zu bodies)", s.session,
                   snapshot.tick, snapshot.bodies.size());
+}
+
+// Option A: store one authoritative mechanism row.  Rows arrive with every
+// snapshot, full or not (the non-full ones carry exactly the simulated bodies,
+// which are the ones that move), and are keyed by the server's owner index -
+// so a row is kept even before its dictionary name is known, and two instances
+// that share one name never mix.
+void BallanceMMOClient::physics_session_note_mechanism(uint32_t tick, const bmmo::session::body_state& body) {
+    auto& authority = physics_session_.mechanism_authority[body.owner];
+    if (authority.have_latest) {
+        if (authority.latest.tick > tick) return;   // a queued older snapshot
+        if (authority.latest.tick < tick) {
+            // A newer interval: the pose that was newest becomes the older half
+            // of the pair.
+            authority.previous = authority.latest;
+            authority.have_previous = true;
+        }
+        // Equal tick: replace the newest pose in place and leave the pair
+        // alone, so the applier keeps the span it had instead of a pair that
+        // collapsed onto one tick.
+    }
+    auto& pose = authority.latest;
+    pose.tick = tick;
+    for (int k = 0; k < 3; ++k) {
+        pose.position[k] = body.position[k];
+        pose.linear[k] = body.linear[k];
+        pose.angular[k] = body.angular[k];
+    }
+    for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
+    pose.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
+    authority.have_latest = true;
+}
+
+// Option A: render the stored authoritative mechanism poses, once per frame
+// after the snapshot queue was drained.  Only bodies this client actually has
+// are written (a mechanism of another sector is not physicalized here), and a
+// dictionary name carried by several server bodies is driven by the one whose
+// authoritative pose is nearest to ours.
+void BallanceMMOClient::physics_session_apply_mechanism_authority() {
+    auto& s = physics_session_;
+    if (s.mechanism_names.empty() || s.mechanism_authority.empty()) return;
+    std::map<std::string, std::vector<uint32_t>> candidates;
+    for (const auto& [owner, name]: s.mechanism_names) {
+        const auto it = s.mechanism_authority.find(owner);
+        if (it != s.mechanism_authority.end() && it->second.have_latest) candidates[name].push_back(owner);
+    }
+    const uint32_t tick = s.current_tick();
+    std::string error;
+    for (const auto& [name, owners]: candidates) {
+        bmmo_physics_body_state local{};
+        if (!physics_view_.get_body_state(name.c_str(), local, error)) continue;   // not physicalized here
+        const physics_session_state::mechanism_pose_pair* history = nullptr;
+        double nearest = 0.0;
+        for (uint32_t owner: owners) {
+            const auto& authority = s.mechanism_authority[owner];
+            double distance = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double d = authority.latest.position[k] - local.position[k];
+                distance += d * d;
+            }
+            if (!history || distance < nearest) {
+                history = &authority;
+                nearest = distance;
+            }
+        }
+        if (!history) continue;
+        const auto& latest = history->latest;
+        double position[3];
+        if (history->have_previous && latest.tick > history->previous.tick) {
+            const double span = static_cast<double>(latest.tick - history->previous.tick);
+            double alpha = std::clamp((static_cast<double>(tick) - history->previous.tick) / span, 0.0, 1.0);
+            double travel = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double d = latest.position[k] - history->previous.position[k];
+                travel += d * d;
+            }
+            if (std::sqrt(travel) > kMechanismSnapTravel || std::sqrt(nearest) > kMechanismSnapJump) {
+                alpha = 1.0;   // teleport or a local body elsewhere: snap, never lerp
+                ++s.mechanism_snaps;
+            }
+            for (int k = 0; k < 3; ++k)
+                position[k] = history->previous.position[k] + alpha * (latest.position[k] - history->previous.position[k]);
+        } else {
+            for (int k = 0; k < 3; ++k) position[k] = latest.position[k];
+        }
+        double dq = 0.0, dp = 0.0, dv = 0.0;
+        for (int k = 0; k < 4; ++k) dq += latest.rotation[k] * local.rotation[k];
+        for (int k = 0; k < 3; ++k) {
+            dp += (position[k] - local.position[k]) * (position[k] - local.position[k]);
+            dv += (latest.linear[k] - local.linear[k]) * (latest.linear[k] - local.linear[k]);
+        }
+        // Already there: leave the core (and its sleep state) alone instead of
+        // rewriting the same pose every frame.
+        if (std::sqrt(dp) < kMechanismWriteEpsilon && std::sqrt(dv) < kMechanismWriteEpsilon
+                && std::fabs(std::fabs(dq) - 1.0) < kMechanismWriteEpsilon)
+            continue;
+        if (physics_view_.set_body_state(name.c_str(), position, latest.rotation, latest.linear, latest.angular,
+                                         latest.simulated, error))
+            ++s.body_writes;
+        else { ++s.body_write_errors; s.last_error = error; }
+    }
 }
 
 // Design 9.6: the own ball's forces come from the shared replica (polling the
@@ -1649,21 +1763,19 @@ std::string BallanceMMOClient::physics_session_status_text() {
         remote_blended += rs.blended;
         remote_hard += rs.hard;
     }
-    double mechanism_max_error = 0.0;
-    for (const auto& [name, corrector]: s.mechanism_correctors)
-        if (corrector.stats().max_error > mechanism_max_error) mechanism_max_error = corrector.stats().max_error;
     return std::format(
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
-        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={} writes={}/{} mech_same={} mech_blend={} mech_hard={} "
-        "mech_max_err={:.4f} events={}/{} phys_resends={} "
+        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} mech_snaps={} amend_failures={} "
+        "events={}/{} phys_resends={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         s.session, phase, s.spawn_impulse, s.current_tick(), s.tick_base, s.assigned ? 1 : 0, static_cast<long long>(s.frames_since_anchor),
         s.inputs_sent, s.navigation_keys_known ? 1 : 0, s.own_physicalized ? 1 : 0, s.own_group_set ? 1 : 0,
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
         s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,
-        s.mechanism_names.size(), s.body_writes, s.body_write_errors, s.mechanism_matches, s.mechanism_blends, s.mechanism_hard,
-        mechanism_max_error, s.events_sent, s.events_received, s.physicalize_resends,
+        s.mechanism_names.size(), s.mechanism_authority.size(), s.body_writes, s.body_write_errors, s.mechanism_snaps,
+        s.amend_failures,
+        s.events_sent, s.events_received, s.physicalize_resends,
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,
         rs.too_far, rs.frozen, rs.max_error, rs.last_mismatch,

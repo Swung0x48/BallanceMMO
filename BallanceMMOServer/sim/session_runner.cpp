@@ -316,6 +316,10 @@ namespace bmmo::sim {
             auto& s = *it->second;
             if (!s.players.count(player)) return;
             s.ready.insert(player);
+            // A resync or a late join re-anchors a buffer that may already hold
+            // frames: reset() keeps everything at or after first_tick and
+            // refuses to move the cursor backwards, so the batch the client
+            // sent right after it was told the base survives the re-anchor.
             s.inputs[player].reset(first_tick);
             if (s.running) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {

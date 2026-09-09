@@ -73,6 +73,13 @@ namespace bmmo::sim {
         std::string error;
     };
 
+    // Start barrier (design 8.3): how long a session waits for its members to
+    // report SessionReady after SessionStart went out, before the ones that
+    // stayed silent are dropped and the rest start without them.  The server
+    // checks the deadline from its own main loop rather than from a tick: a
+    // session whose members never answered has no ticks at all.
+    inline constexpr std::chrono::seconds kStartBarrierTimeout{8};
+
     struct session_callbacks {
         std::function<void(const world_ready_info&)> on_world_ready;
         std::function<void(const session_snapshot&)> on_snapshot;
@@ -116,7 +123,12 @@ namespace bmmo::sim {
         void add_player(uint32_t session, uint32_t player, uint8_t join_order, const std::string& name = {});
         void remove_player(uint32_t session, uint32_t player);
         // The player anchored at first_tick; ticking starts when every player
-        // of a not-yet-running session is ready.
+        // of a not-yet-running session is ready.  A late join or a resync calls
+        // this again on a running session with the base the server assigned:
+        // input_buffer::reset() keeps the frames already queued at or after it
+        // and never moves the cursor back, so the client's first batch after
+        // the re-anchor is not lost and the last frame applied stays the
+        // fallback for the ticks in between.
         void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
         void submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
                           std::vector<bmmo::session::input_frame> frames);

@@ -62,8 +62,9 @@ namespace bmmo::session {
         // future are dropped as garbage).
         static constexpr uint32_t kMaxLookahead = 660;
 
-        // Stores `count` consecutive frames starting at first_tick; frames for
-        // ticks already consumed are ignored.  Returns how many were new.
+        // Stores `count` consecutive frames starting at first_tick; frames
+        // behind the consumption point are counted stale and dropped.
+        // Returns how many were new.
         template <class Frames>
         int submit(uint32_t first_tick, const Frames& frames) {
             int stored = 0;
@@ -73,7 +74,7 @@ namespace bmmo::session {
                 if (tick >= next_tick_ && tick < next_tick_ + kMaxLookahead)
                     stored += frames_.emplace(tick, frame).second ? 1 : 0;
                 else if (tick < next_tick_)
-                    ++stale_;   // the tick was simulated before this frame arrived
+                    ++stale_;   // simulated, or re-anchored past, before this frame arrived
                 ++tick;
             }
             stored_ += static_cast<uint64_t>(stored);
@@ -93,7 +94,15 @@ namespace bmmo::session {
 
         // The input to apply for `tick`: the client's frame when it arrived,
         // else the last one applied (or a default frame before any arrived).
-        // Advances the consumption point; earlier frames are discarded.
+        //
+        // Consumption only ever moves forward, one call at a time: frames up
+        // to and including `tick` are discarded and the cursor moves to the
+        // first tick after it.  A missing frame is not waited for and does not
+        // hold the cursor back - the world has already simulated those ticks
+        // with the reused frame - so a frame that arrives after its tick was
+        // consumed is counted stale by submit() and never applied late.  A
+        // cursor held ahead by reset() stays ahead: take() cannot pull it back
+        // to a tick the buffer was re-anchored past.
         const input_frame& take(uint32_t tick, bool& fresh) {
             auto it = frames_.find(tick);
             fresh = it != frames_.end();
@@ -103,7 +112,8 @@ namespace bmmo::session {
                 any_ = true;
             }
             frames_.erase(frames_.begin(), frames_.upper_bound(tick));
-            next_tick_ = tick + 1;
+            if (tick >= next_tick_)
+                next_tick_ = tick + 1;
             return last_;
         }
 
@@ -113,13 +123,22 @@ namespace bmmo::session {
         size_t pending() const { return frames_.size(); }
         uint32_t next_tick() const { return next_tick_; }
 
-        // Late joiners start at their first tick; nothing before it exists.
+        // Re-anchors the buffer at `first_tick`: the first tick the caller
+        // expects to consume next (a late joiner's, or a resync's, assigned
+        // base).  The cursor never moves backwards - a base behind the
+        // consumption point names ticks the world has already simulated, so it
+        // is ignored - and frames below the new anchor are dropped and counted
+        // stale instead of being kept to confuse the cursor.  Frames at or
+        // after the anchor are kept: they are the ones the caller is waiting
+        // for, so a re-anchor cannot lose input that already arrived.  The last
+        // applied frame stays the fallback for the ticks in between, exactly as
+        // it is for a frame lost in flight.
         void reset(uint32_t first_tick) {
-            frames_.clear();
+            if (first_tick < next_tick_) first_tick = next_tick_;
+            const auto keep = frames_.lower_bound(first_tick);
+            for (auto it = frames_.begin(); it != keep; ++it) ++stale_;
+            frames_.erase(frames_.begin(), keep);
             next_tick_ = first_tick;
-            last_ = {};
-            last_tick_ = first_tick;
-            any_ = false;
         }
 
     private:

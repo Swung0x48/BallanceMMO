@@ -75,22 +75,40 @@ namespace bmmo::session {
     };
 
     struct rollback_thresholds {
-        // Balls keep the tolerances the engine was tuned with. A shared
-        // mechanism is a script-driven body, so its pose carries more
-        // mirroring noise and gets the wider pair below; both pairs are an
-        // "error equivalent to a tenth of a second of motion"
-        // (position / velocity = 0.1 s), only at 50x the scale.
-        double position = 0.001;   // metres
-        double velocity = 0.01;    // m/s
-        // Legal mechanism motion measures <= 0.81 m/tick (Level 8 windows,
+        // One pair for every tracked body.  The old 1 mm / 0.01 m/s pair was
+        // tighter than the client's own moving-prediction noise (median
+        // 9 mm / 0.084 m/s, P95 21 mm; build/live-rollback-retest-20260909/
+        // findings/P1-evidence.md sections 4 and 8), so about half of all
+        // snapshots rolled the session back on noise alone.  The pair below
+        // covers the position noise at its P95: the worst measured phase is
+        // 33.8 mm, inside 0.05 m.  It does NOT cover the velocity noise at
+        // that percentile -- the measured ball velocity P95 is 0.8869 m/s
+        // (own ball, L11_move) and 0.6364 m/s (peer ball, L8_move), both
+        // above 0.5 m/s -- so velocity coverage stops in the median-to-P95
+        // band and a velocity-only breach above ~0.5 m/s still rolls the
+        // session back.  The pair keeps position / velocity = 0.1 s -- "an
+        // error equivalent to a tenth of a second of motion" -- so a body
+        // 0.5 m/s off reaches the tolerance inside 0.1 s.
+        double position = 0.05;   // metres
+        double velocity = 0.5;    // m/s
+        // A shared mechanism is a script-driven body: its pose is no cleaner
+        // than a ball's, so it gets the same pair.  Legal mechanism motion
+        // measures <= 0.81 m/tick (Level 8 windows,
         // build/online-symptoms-20260909/mech-jitter), so 0.05 m is about 6%
         // of one such tick: a genuine divergence is still caught inside a
         // tick, while sub-tick pose noise (float velocity mirrored into a
         // double pose, one substep of phase) no longer rolls the session back.
         double mechanism_position = 0.05;   // metres
         double mechanism_velocity = 0.5;    // m/s
-        size_t history_ticks = 64;
-        uint32_t max_resim_ticks = 40;   // give up (hard set only) beyond this lag
+        // The server's base lead is the input delay (at most 40 ticks,
+        // timeline.hpp kInputDelayMaxTicks) plus the round-trip allowance plus
+        // a 2-tick margin, so the client's lag can exceed the old 40-tick resim
+        // window.  48 covers the clamped worst case (~40 ticks, see
+        // late_tick_base in BallanceMMOServer/server.cpp); the history holds
+        // two windows so the anchor tick of a full resim is still recorded
+        // when its snapshot arrives.
+        size_t history_ticks = 96;
+        uint32_t max_resim_ticks = 48;   // give up (hard set only) beyond this lag
     };
 
     struct rollback_stats {
@@ -147,6 +165,23 @@ namespace bmmo::session {
             }
             history_.push_back(std::move(state));
             while (history_.size() > thresholds_.history_ticks) history_.pop_front();
+        }
+
+        // The corrections a live frame applies after its physics step (snapshot
+        // rollback, blend, mechanism) change the state the next step starts
+        // from, so the record for that tick must reflect them: a later rollback
+        // restores this record and re-simulates from it exactly as the live
+        // frame did.  The entry was captured before those corrections, and the
+        // re-simulation writes its result back into the same entry, so an
+        // unamended record re-bakes the loss of its own correction into the
+        // history.  Keeps the tick's inputs and tracked set.  Returns false
+        // when the tick is no longer recorded (evicted, invalidated or never
+        // recorded), so the caller must not treat the amendment as applied.
+        bool amend_record(const rollback_world& world, uint32_t tick) {
+            tick_state* at = find(tick);
+            if (!at) return false;
+            capture(world, *at);
+            return true;
         }
 
         // Authoritative snapshot of `tick`.  `entity_of` maps a snapshot body
@@ -302,10 +337,15 @@ namespace bmmo::session {
             const uint32_t lag = current_tick > snapshot.tick ? current_tick - snapshot.tick : 0;
             if (frozen) {
                 // the scripts stopped the local clock: the authoritative
-                // states stand until the clock runs again
+                // states stand until the clock runs again.  No re-simulation
+                // runs, so no record can carry this tick, and the caller's tick
+                // counter keeps running: truncating would keep T but drop
+                // T+1..current, and every later snapshot of that range would be
+                // unmatched.  Drop the history; the caller sees frozen grow and
+                // must re-anchor (resync) before recording again.
                 ++stats_.frozen;
                 report(6);
-                truncate_after(snapshot.tick);
+                invalidate_history();
                 return true;
             }
             ++stats_.rollbacks;
@@ -313,7 +353,14 @@ namespace bmmo::session {
                 ++stats_.too_far;
                 if (world.log) world.log("rollback: lag " + std::to_string(lag) + " ticks, bodies set without re-simulation");
                 report(5);
-                truncate_after(snapshot.tick);
+                // No re-simulation runs, so no record can carry this tick and
+                // the caller's tick counter keeps running: keeping the records
+                // at or before T would leave a hole T+1..current that makes
+                // every later snapshot of that range unmatched and feeds later
+                // inputs time-shifted.  Drop the history; the caller sees
+                // too_far grow and must re-anchor (resync) before recording
+                // again.
+                invalidate_history();
                 return true;
             }
             // A replayed tick must use recorded input, not the live keyboard.
@@ -410,6 +457,9 @@ namespace bmmo::session {
                 if (entity.empty()) return;
                 bmmo_physics_body_state body{};
                 if (world.get_body(entity, body)) state.bodies[entity] = body;
+                // A tracked name the world no longer knows must not survive an
+                // amendment: a later rollback would write the body back.
+                else state.bodies.erase(entity);
             };
             grab(state.tracked.own_entity);
             for (const auto& remote: state.tracked.remote_entities) grab(remote);
@@ -418,6 +468,7 @@ namespace bmmo::session {
                 if (entity.empty()) return;
                 bmmo_physics_nav_state nav{};
                 if (world.get_nav(entity, nav)) state.navs[entity] = nav;
+                else state.navs.erase(entity);
             };
             grab_nav(state.tracked.own_entity);
             for (const auto& remote: state.tracked.remote_entities) grab_nav(remote);
@@ -427,10 +478,6 @@ namespace bmmo::session {
             for (auto it = history_.rbegin(); it != history_.rend(); ++it)
                 if (it->tick == tick) return &*it;
             return nullptr;
-        }
-
-        void truncate_after(uint32_t tick) {
-            while (!history_.empty() && history_.back().tick > tick) history_.pop_back();
         }
 
         struct tolerance {

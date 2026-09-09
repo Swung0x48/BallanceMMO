@@ -61,7 +61,14 @@ namespace bmmo::session {
         // Inputs: the recent frames (tick, frame), newest last; the backlog
         // before the assignment is flushed when it arrives.
         std::deque<std::pair<uint32_t, input_frame>> input_history;
-        static constexpr size_t kInputHistory = 8;
+        // Retransmit window: every frame re-sends the recent ticks, so this is
+        // how far back a lagging client can refill a gap, and one message per
+        // frame covers the whole window.  It cannot be wider than the wire cap
+        // (session_input_msg serializes at most session::MAX_INPUT_FRAMES
+        // frames, and the sender trims the ring to this size): a wider ring
+        // would make the serializer keep the oldest frames of the window and
+        // drop the newest ones the server actually needs.
+        static constexpr size_t kInputHistory = bmmo::session::MAX_INPUT_FRAMES;
         float previous_cam[3][3] = {};        // Cam_OrientRef rows at the end of the previous frame
         bool previous_cam_valid = false;
         uint64_t inputs_sent = 0;
@@ -111,13 +118,27 @@ namespace bmmo::session {
         std::map<uint32_t, input_frame> own_inputs;
         static constexpr size_t kInputRing = 128;
 
-        // Shared mechanisms: one corrector per dictionary name, same ladder as
-        // the own ball (a snapshot for tick T is compared with the local state
-        // recorded at T, never with the current one).
-        std::map<std::string, body_corrector> mechanism_correctors;
-        uint64_t mechanism_blends = 0, mechanism_hard = 0;
-        uint64_t mechanism_identity_drops = 0;   // rows dropped by the identity guard
+        // Shared mechanisms (Option A, findings/mechanism-strategy-decision.md):
+        // the client does not predict the script-constrained bodies (rope,
+        // sandbag, see-saw); it renders the server's pose.  Every snapshot row
+        // is kept here as authority, keyed by the server's owner index, with
+        // the two newest poses of that body so the applier can interpolate.
+        struct mechanism_pose_pair {
+            struct pose_state {
+                uint32_t tick = 0;
+                double position[3] = {};
+                double rotation[4] = {0.0, 0.0, 0.0, 1.0};
+                float linear[3] = {};
+                float angular[3] = {};
+                bool simulated = false;
+            };
+            pose_state latest, previous;
+            bool have_latest = false, have_previous = false;
+        };
+        std::map<uint32_t, mechanism_pose_pair> mechanism_authority;
+        uint64_t mechanism_snaps = 0;            // authority writes applied as a snap, not a lerp
         uint64_t corrections_logged = 0;
+        uint64_t amend_failures = 0;             // amend_record calls whose tick was no longer recorded
 
         // Remote balls: player -> mirrored entity.
         // Remote balls (design 9.1): mirrored entity driven by the bridge
@@ -145,7 +166,7 @@ namespace bmmo::session {
         uint32_t last_snapshot_tick = 0;
         bool have_snapshot = false;
         uint64_t snapshots_received = 0, snapshots_applied = 0, snapshots_stale = 0;
-        uint64_t body_writes = 0, body_write_errors = 0, mechanism_matches = 0;
+        uint64_t body_writes = 0, body_write_errors = 0;
         uint64_t events_sent = 0, events_received = 0;
         std::set<std::string> revived_reported_this_frame;
 
@@ -201,16 +222,16 @@ namespace bmmo::session {
             last_physicalize_resend = {};
             corrector.clear();
             hard_sets = blends = 0;
-            mechanism_correctors.clear();
-            mechanism_blends = mechanism_hard = 0;
-            mechanism_identity_drops = 0;
+            mechanism_authority.clear();
+            mechanism_snaps = 0;
             corrections_logged = 0;
+            amend_failures = 0;
             remotes.clear();
             mechanism_names.clear();
             last_snapshot_tick = 0;
             have_snapshot = false;
             snapshots_received = snapshots_applied = snapshots_stale = 0;
-            body_writes = body_write_errors = mechanism_matches = 0;
+            body_writes = body_write_errors = 0;
             events_sent = events_received = 0;
             resync_pending = false;
             last_rebases = 0;

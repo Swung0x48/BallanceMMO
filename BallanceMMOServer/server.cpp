@@ -27,6 +27,7 @@
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
+#include "sim/late_tick.hpp"
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
 #include <cmath>
@@ -57,6 +58,21 @@ public:
             }
             std::this_thread::sleep_until(update_begin + bmmo::SERVER_RECEIVE_INTERVAL);
         }
+    }
+
+    // The start barrier is a wall-clock deadline, so it is checked from the
+    // main loop rather than from tick(): a session whose members never answered
+    // SessionReady has no ticks at all, and tick() is skipped entirely unless
+    // the server is ticking.  Runs before the tick broadcast every iteration.
+    bool update() override {
+        const bool had_messages = role::update();
+#if BMMO_BUILD_SIM
+        {
+            std::lock_guard lk(state_mutex_);
+            check_start_barriers();
+        }
+#endif
+        return had_messages;
     }
 
     EResult send(const HSteamNetConnection destination, const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) const {
@@ -538,6 +554,11 @@ public:
         std::set<HSteamNetConnection> assigned;             // got their SessionAssign
         std::set<HSteamNetConnection> late;                 // joined a running session: no hash check
         bool world_ready = false, ticking = false;
+        // Start barrier (design 8.3): armed when SessionStart goes out, so a
+        // member that never reports SessionReady cannot pin the session at its
+        // boot for ever.  Checked by check_start_barriers() from the main loop.
+        std::chrono::steady_clock::time_point start_deadline{};
+        bool start_barrier_armed = false;
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         float spawn_position[3] = {}, spawn_rotation[4] = {0, 0, 0, 1};
         // Spawn kick speed sent in this session's SessionStart (design 9.10):
@@ -790,6 +811,10 @@ public:
         // s.spawn_impulse was fixed in start_physics_session, together with
         // the world's, and does not move for the session's lifetime.
         for (const auto m: s.members) send_session_start(s, m, 0);
+        // The barrier starts now: from here on check_start_barriers() will drop
+        // members that never answer with SessionReady once the window is up.
+        s.start_barrier_armed = true;
+        s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
         Printf("Physics session %u: world ready (anchor %016llx), SessionStart sent to %zu players.",
                 s.id, static_cast<unsigned long long>(s.anchor_hash), s.members.size());
     }
@@ -858,6 +883,18 @@ public:
         auto& s = it->second;
         s.members.push_back(c);
         client_session_[c] = s.id;
+        // Sample this connection's round trip now.  The periodic latency
+        // broadcast is up to PING_INTERVAL_TICKS away, and until it lands
+        // ping_peak_ms is 0, which would give the first SessionAssign no
+        // round-trip allowance at all.
+        {
+            SteamNetConnectionRealTimeStatus_t status{};
+            interface_->GetConnectionRealTimeStatus(c, &status, 0, nullptr);
+            const int ping_ms = std::max(status.m_nPing, 0);
+            const auto ping = (uint16_t) std::min(ping_ms, (int) std::numeric_limits<uint16_t>::max());
+            if (auto ci = clients_.find(c); ci != clients_.end())
+                ci->second.ping_peak_ms = std::max(ci->second.ping_peak_ms, ping);
+        }
         const uint8_t join_order = assign_join_order(s, c);
         runner_->add_player(s.id, c, join_order, get_client_name(c));
         if (runner_->running(s.id)) {
@@ -865,6 +902,15 @@ public:
             send_session_start(s, c, 0);   // the real tick base follows in SessionAssign
         } else if (s.world_ready) {
             send_session_start(s, c, 0);
+            // A member joining before the barrier lifted needs the window to
+            // answer with SessionReady, but only the first such join arms it:
+            // re-arming on every join would let a trickle of joiners postpone
+            // the deadline for ever.  A join while the barrier is pending
+            // shares the deadline already running.
+            if (!s.start_barrier_armed) {
+                s.start_barrier_armed = true;
+                s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
+            }
         }
         Printf("Physics session %u: %s joined%s.", s.id, get_client_name(c), s.late.count(c) ? " late" : "");
     }
@@ -899,8 +945,19 @@ public:
         else assign_start_members(s);   // the leaver may have been the one everybody waited for
     }
 
-    uint32_t late_tick_base(const physics_session_state& s) const {
-        return runner_->current_tick(s.id) + std::max<uint32_t>(1, s.input_delay) + 2;
+    // The tick a late joiner (or a resync) is anchored at.  input_delay ticks
+    // ahead of the server is not enough on its own: the SessionAssign that
+    // carries the base is reliable, so the client only learns it a full round
+    // trip after the server computed it, and the frames it stamps from there
+    // would reach the server behind the ticks they name.  The member's worst
+    // observed round trip, rounded up to whole ticks, pays for that trip - up
+    // to the caps in sim/late_tick.hpp, which keep the client's lag inside its
+    // rollback window up to a 424 ms round trip; past that the client's resync
+    // guard takes over.
+    uint32_t late_tick_base(const physics_session_state& s, HSteamNetConnection c) const {
+        const auto it = clients_.find(c);
+        const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
+        return runner_->current_tick(s.id) + bmmo::sim::late_tick_lead_ticks(s.input_delay, rtt_ms);
     }
 
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick) {
@@ -921,6 +978,47 @@ public:
             if (!s.late.count(m) && !s.ready.count(m)) return;
         for (const auto m: s.members)
             if (!s.late.count(m) && !s.assigned.count(m)) send_session_assign(s, m, 0);
+    }
+
+    // Start barrier (design 8.3): SessionStart went out, but a member that
+    // never answers with SessionReady would pin the session at its boot for
+    // ever - assign_start_members waits for every member, and
+    // session_runner::player_ready only starts ticking when all of them are
+    // ready.  Once the deadline has passed the silent members are dropped and
+    // the rest start without them; a session that loses everybody ends.
+    void check_start_barriers() {
+        if (!runner_) return;
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<uint32_t> all_silent;
+        std::vector<std::pair<uint32_t, HSteamNetConnection>> dropped;   // session, member
+        for (auto& [id, s]: physics_sessions_) {
+            if (!s.start_barrier_armed || !s.world_ready) continue;
+            if (runner_->running(id)) { s.start_barrier_armed = false; continue; }
+            if (now < s.start_deadline) continue;
+            s.start_barrier_armed = false;
+            size_t silent = 0;
+            for (const auto m: s.members)
+                if (!s.ready.count(m) && !s.late.count(m)) ++silent;
+            if (silent == 0) continue;   // everybody answered; the barrier did its job
+            Printf("Physics session %u: %zu of %zu members did not report ready within %lld s.",
+                   id, silent, s.members.size(),
+                   static_cast<long long>(bmmo::sim::kStartBarrierTimeout.count()));
+            if (silent == s.members.size()) { all_silent.push_back(id); continue; }
+            for (const auto m: s.members)
+                if (!s.ready.count(m) && !s.late.count(m)) dropped.emplace_back(id, m);
+        }
+        // Outside the loop: ending a session or dropping a member erases from
+        // physics_sessions_, which would invalidate the iteration above.
+        for (const auto id: all_silent) end_physics_session(id, "nobody reported ready");
+        for (const auto& [session, m]: dropped) {
+            send_session_end(session, m, "did not report ready");
+            // Out of the session but not out of the room: the rest start
+            // without it (assign_start_members re-checks as it goes), and it
+            // can rejoin the room to late-join what is now a running session.
+            // Leaving it in the room matters - the client is told the session
+            // ended and has no way to learn it was removed from the room.
+            physics_session_member_left(m);
+        }
     }
 
     // The engine half of a build id ("ballanced-<rev>" of
@@ -969,7 +1067,7 @@ public:
         // A late joiner starts input_delay ahead of the server like everybody
         // else (the server simulates tick T only after the inputs for T), so
         // every snapshot refers to a tick the client has already recorded.
-        const uint32_t assigned = s.late.count(c) ? late_tick_base(s) : 0;
+        const uint32_t assigned = s.late.count(c) ? late_tick_base(s, c) : 0;
         runner_->player_ready(msg.session, c, assigned);
         if (s.late.count(c)) send_session_assign(s, c, assigned);
         else assign_start_members(s);
@@ -993,7 +1091,7 @@ public:
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         if (!runner_->running(s.id)) return;
-        const uint32_t assigned = late_tick_base(s);
+        const uint32_t assigned = late_tick_base(s, c);
         s.late.insert(c);
         s.ready.insert(c);
         runner_->player_ready(s.id, c, assigned);

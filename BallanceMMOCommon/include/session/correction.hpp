@@ -30,8 +30,25 @@ namespace bmmo::session {
     };
 
     struct correction_thresholds {
-        double ignore_position = 0.01;   // metres
-        double ignore_velocity = 0.05;   // m/s
+        // A ball's predicted pose differs from the server's by more than the
+        // old 1 mm / 0.01 m/s pair on nearly every moving tick.  The measured
+        // moving-prediction noise of the 2026-09-09 retest is 9 mm /
+        // 0.084 m/s at the median and 33.8 mm at the 95th percentile of the
+        // worst phase (build/live-rollback-retest-20260909/findings/
+        // P1-evidence.md section 8), so the pair below covers the 95th
+        // percentile of the position noise in every measured phase.  It does
+        // not cover the velocity noise at that percentile: the measured ball
+        // velocity P95 is 0.8869 m/s (own ball, L11_move) and 0.6364 m/s
+        // (peer ball, L8_move), so velocity coverage stops in the
+        // median-to-P95 band and a velocity-only breach above ~0.5 m/s is
+        // still a correction.  It keeps position / velocity = 0.1 s -- the
+        // same "error equivalent to a tenth of a second of motion" the
+        // rollback engine's pairs use -- so a divergence closing at 0.1 m/s
+        // still reaches the tolerance inside 0.5 s.  Equal to the rollback
+        // engine's mechanism pair: a shared mechanism is at least as noisy as
+        // a ball.
+        double ignore_position = 0.05;   // metres
+        double ignore_velocity = 0.5;    // m/s
         double hard_position = 1.0;      // metres: beyond this, hard set
         uint32_t blend_ticks = 8;
         uint32_t history_ticks = 660;    // 10 s of states

@@ -12,6 +12,7 @@
 
 #include <session/correction.hpp>
 #include <session/rollback.hpp>
+#include <session/timeline.hpp>
 
 namespace {
     using bmmo::session::ball_pose;
@@ -366,7 +367,7 @@ TEST(RollbackEngine, CorrectionCallbackReportsEveryDecision) {
     EXPECT_TRUE(corrections[2].entity.empty());
 }
 
-// A mismatch can be a velocity one - 0.01 m/s trips well before 1 mm of drift
+// A mismatch can be a velocity one - 0.5 m/s trips well before 5 cm of drift
 // does, which is what the onset of a divergence looks like - and then the
 // record must name that body, not the one that drifted furthest inside the
 // tolerance.  The log lines keep naming the largest position error.
@@ -431,7 +432,7 @@ TEST(RollbackEngine, LagBeyondLimitSetsBodiesWithoutResimulation) {
     world.bodies["Remote"];
     bmmo::session::rollback_thresholds thresholds;
     thresholds.max_resim_ticks = 3;
-    thresholds.history_ticks = 64;
+    thresholds.history_ticks = 96;
     rollback_engine engine(thresholds);
     std::map<uint32_t, input_frame> own_inputs;
     run_ticks(world, engine, 8, 100, own_inputs);
@@ -445,11 +446,129 @@ TEST(RollbackEngine, LagBeyondLimitSetsBodiesWithoutResimulation) {
     EXPECT_EQ(engine.stats().rollbacks, 1u);
     EXPECT_EQ(world.steps, 0);
     EXPECT_NEAR(world.bodies["Own"].position[2], 1.0, 1e-9);
-    // the history after the snapshot tick was dropped: tick 8 is unmatched now
+    // no re-simulation recorded the lag, so the whole history went with it and
+    // tick 8 is unmatched now
+    EXPECT_EQ(engine.history_size(), 0u);
     const auto later = snapshot_of(8, {ball_body(1, world.bodies["Own"])});
     EXPECT_FALSE(engine.on_snapshot(world.adapter(), later, 8, entity_of,
                                     [&](const std::string&, uint32_t, input_frame&) { return false; }));
     EXPECT_EQ(engine.stats().unmatched, 1u);
+}
+
+// D1: a lag beyond the limit cannot be re-simulated, so the engine must not
+// keep a record for the tick it just snapped to either - the tick counter runs
+// on, and a surviving record would answer snapshots for a world state that no
+// longer corresponds to that tick's inputs.
+TEST(RollbackEngine, LagBeyondLimitLeavesNoHistoryToMatch) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"];
+    bmmo::session::rollback_thresholds thresholds;
+    thresholds.max_resim_ticks = 3;
+    rollback_engine engine(thresholds);
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 8, 100, own_inputs);
+    ASSERT_GT(engine.history_size(), 1u);
+
+    fake_body server_own;
+    server_own.position[2] = 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(engine.stats().too_far, 1u);
+    EXPECT_EQ(engine.history_size(), 0u);
+    // the applied tick itself is gone too: the caller has to re-anchor
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of,
+                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(engine.stats().unmatched, 1u);
+    EXPECT_EQ(engine.stats().matched, 0u);
+}
+
+// D2: the live frame records a tick before the corrections of that tick are
+// applied.  amend_record re-captures it, so a later rollback restores the
+// corrected state instead of undoing the correction on its own tick.
+TEST(RollbackEngine, AmendRecordReplacesTheTickStateWithoutTouchingInputs) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    // key 0 held from tick 3: the own ball accelerates at ticks 3 and 4
+    run_ticks(world, engine, 4, 3, own_inputs);
+    const auto recorded = engine.history_size();
+
+    // the snapshot of tick 2 corrected the own ball and its navigation replica
+    // after that tick's step: 0.25 m at rest
+    world.bodies["Own"].position[0] = 0.25;
+    world.bodies["Own"].linear[0] = 0.0f;
+    bmmo_physics_nav_state nav{};
+    nav.active = 1;
+    nav.key_mask = 2;
+    world.navs["Own"] = nav;
+    ASSERT_TRUE(engine.amend_record(world.adapter(), 2));
+    EXPECT_EQ(engine.history_size(), recorded);
+    EXPECT_FALSE(engine.amend_record(world.adapter(), 99));
+    EXPECT_EQ(engine.history_size(), recorded);
+
+    // the amended pose is the record now: the server agrees with it
+    fake_body server_own;
+    server_own.position[0] = 0.25;
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
+                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(engine.stats().matched, 1u);
+    EXPECT_EQ(engine.stats().mismatched, 0u);
+
+    // a real disagreement at tick 2 restores the amended navigation replica
+    // and re-simulates ticks 3 and 4 with the inputs recorded for them
+    server_own.position[0] = 0.5;
+    const auto later = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), later, 4, entity_of,
+        [&](const std::string& entity, uint32_t tick, input_frame& out) {
+            if (entity != "Own") return false;
+            auto it = own_inputs.find(tick);
+            if (it == own_inputs.end()) return false;
+            out = it->second;
+            return true;
+        }));
+    EXPECT_EQ(engine.stats().resim_ticks, 2u);
+    EXPECT_EQ(world.count("nav_input Own keys=1"), 2);
+    EXPECT_NEAR(world.bodies["Own"].linear[0], 2.0f, 1e-6f);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 0.5 + 1.0 * kDt + 2.0 * kDt, 1e-9);
+    EXPECT_EQ(world.navs["Own"].active, 1u);
+    EXPECT_EQ(world.navs["Own"].key_mask, 2u);
+}
+
+// The correction of tick T has to survive a rollback to T.  Unamended, the
+// history still holds the pre-correction state, so the server row that the
+// correction was fixing looks like a fresh divergence and the rollback undoes
+// it - which is the loop the amend closes.
+TEST(RollbackEngine, CorrectionOfTheCurrentTickSurvivesARollbackOnlyWhenAmended) {
+    for (const bool amend: {false, true}) {
+        SCOPED_TRACE(amend ? "amended" : "not amended");
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Own"] = {};
+        rollback_engine engine;
+        std::map<uint32_t, input_frame> own_inputs;
+        run_ticks(world, engine, 4, 100, own_inputs);
+
+        // the snapshot of tick 2 moved the own ball to 0.5 m after that step
+        world.bodies["Own"].position[0] = 0.5;
+        if (amend) EXPECT_TRUE(engine.amend_record(world.adapter(), 2));
+
+        fake_body server_own;
+        server_own.position[0] = 0.5;
+        const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+        const bool rolled = engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
+                                              [&](const std::string&, uint32_t, input_frame&) { return false; });
+        EXPECT_EQ(rolled, !amend);
+        EXPECT_EQ(engine.stats().mismatched, amend ? 0u : 1u);
+        EXPECT_EQ(engine.stats().rollbacks, amend ? 0u : 1u);
+    }
 }
 
 TEST(RollbackEngine, HistoryIsBounded) {
@@ -758,11 +877,11 @@ TEST(RollbackEngine, RestoreWritesOnlyTheBodyThatBreached) {
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
 }
 
-// A shared mechanism row is judged by its own tolerance: 5 mm of pose error
-// (5x the ball tolerance, inside the mechanism one) is not a divergence for a
-// mechanism, while the same row on a ball still is - and the wider tolerance
-// is not unlimited.
-TEST(RollbackEngine, MechanismRowsUseTheirOwnWiderTolerance) {
+// A shared mechanism row and a ball row are judged by the same tolerance:
+// 5 mm of pose error is prediction noise for either - the ball pair used to be
+// 50x tighter, which rolled the session back on that noise - and both trip
+// once the error passes the tolerance.
+TEST(RollbackEngine, MechanismAndBallRowsShareTheSameTolerance) {
     fake_world world;
     world.bodies["Wippe"];
     rollback_engine engine;
@@ -788,7 +907,7 @@ TEST(RollbackEngine, MechanismRowsUseTheirOwnWiderTolerance) {
     EXPECT_EQ(world.count("set_body"), 0);
     EXPECT_EQ(world.steps, 0);
 
-    // the same 5 mm on a ball row is a mismatch
+    // the same 5 mm on a ball row is tolerated too
     fake_world ball_world;
     ball_world.bodies["Own"];
     rollback_engine ball_engine;
@@ -796,16 +915,21 @@ TEST(RollbackEngine, MechanismRowsUseTheirOwnWiderTolerance) {
     run_ticks(ball_world, ball_engine, 3, 100, own_inputs);
     fake_body server_own;
     server_own.position[0] = 0.005;
-    EXPECT_TRUE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3, entity_of,
-                                        [](const std::string&, uint32_t, input_frame&) { return false; }));
-    EXPECT_EQ(ball_engine.stats().mismatched, 1u);
+    EXPECT_FALSE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3, entity_of,
+                                         [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(ball_engine.stats().mismatched, 0u);
 
-    // past the mechanism tolerance the mechanism row is a mismatch too
+    // past the tolerance both rows are mismatches
     body_state beyond = row;
     beyond.position[0] = 0.06;
     EXPECT_TRUE(engine.on_snapshot(w, snapshot_of(2, {beyond}), 3, mechanism_of,
                                    [](const std::string&, uint32_t, input_frame&) { return false; }));
     EXPECT_EQ(engine.stats().mismatched, 1u);
+
+    server_own.position[0] = 0.06;
+    EXPECT_TRUE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3, entity_of,
+                                        [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(ball_engine.stats().mismatched, 1u);
 }
 
 // The identity guard: Level 8 has two same-named P_Modul_30_Wippe instances
@@ -867,4 +991,109 @@ TEST(BodyCorrector, IdentityGuardComparesARowWithTheRecordedTick) {
     EXPECT_FALSE(corrector.identity_mismatch(row));
     row.tick = 6;               // no record for this tick: cannot tell
     EXPECT_FALSE(corrector.identity_mismatch(row));
+}
+
+// The frozen path runs no re-simulation, so it must not keep a partial
+// history: the caller's tick counter keeps running while T+1..current are
+// never recorded again, and every later snapshot of that range is unmatched.
+TEST(RollbackEngine, FrozenClockLeavesNoHistoryAndLaterSnapshotsAreUnmatched) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 4, 100, own_inputs);
+    ASSERT_EQ(engine.history_size(), 4u);
+    world.clock_running = false;
+
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] = 7.0;
+    const auto snapshot = snapshot_of(2, {ball_body(1, world.bodies["Own"]), ball_body(2, server_remote)});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(engine.stats().frozen, 1u);
+    EXPECT_EQ(engine.history_size(), 0u);
+    // the applied tick is gone too: the caller has to re-anchor
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
+                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(engine.stats().unmatched, 1u);
+    EXPECT_EQ(engine.stats().matched, 0u);
+}
+
+// A navigation replica the world has dropped must not survive an amendment:
+// the record would write it back on the next rollback.
+TEST(RollbackEngine, AmendRecordDropsAVanishedNavigationReplica) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 4, 100, own_inputs);
+
+    world.navs.erase("Remote");   // the replica is gone from the world
+    ASSERT_TRUE(engine.amend_record(world.adapter(), 2));
+    EXPECT_EQ(engine.history_size(), 4u);
+
+    fake_body server_own;
+    server_own.position[0] = 1.0;   // past the 0.05 m pair: a real rollback
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(world.count("set_nav Remote"), 0);
+    EXPECT_EQ(world.count("set_nav Own"), 1);
+}
+
+// The same for a body: a tracked name the world has dropped must not survive
+// an amendment either, or the next rollback restores a replica that is gone.
+TEST(RollbackEngine, AmendRecordDropsAVanishedBodyReplica) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 4, 100, own_inputs);
+
+    world.bodies.erase("Remote");   // the replica is gone from the world
+    ASSERT_TRUE(engine.amend_record(world.adapter(), 2));
+    EXPECT_EQ(engine.history_size(), 4u);
+
+    fake_body server_own;
+    server_own.position[0] = 1.0;   // past the 0.05 m pair: a real rollback
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own)});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(world.count("set_body Remote"), 0);
+    EXPECT_EQ(world.count("set_body Own"), 1);
+}
+
+// amend_record's contract: true only while the tick is still recorded.  The
+// live frame ignores the return value, so a false must not be read as applied.
+TEST(RollbackEngine, AmendRecordReportsWhetherTheTickIsStillRecorded) {
+    fake_world world;
+    world.bodies["Own"];
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    auto w = world.adapter();
+    engine.record(w, 1, tracked, {});
+    EXPECT_TRUE(engine.amend_record(w, 1));
+    EXPECT_FALSE(engine.amend_record(w, 2));      // never recorded
+    engine.invalidate_history();
+    EXPECT_FALSE(engine.amend_record(w, 1));      // no longer recorded
+}
+
+// The client limits have to hold the worst lag the server may assign: the base
+// lead is the input delay (at most kInputDelayMaxTicks) plus a round-trip
+// allowance plus 2, and the history must keep two full resim windows so a
+// rollback at the depth limit still finds its anchor record.
+TEST(RollbackEngine, DefaultLimitsCoverTheWorstServerLead) {
+    const bmmo::session::rollback_thresholds limits;
+    EXPECT_EQ(limits.max_resim_ticks, 48u);
+    EXPECT_EQ(limits.history_ticks, 96u);
+    EXPECT_GE(limits.max_resim_ticks, bmmo::session::kInputDelayMaxTicks + 2);
+    EXPECT_GE(limits.history_ticks, 2 * static_cast<size_t>(limits.max_resim_ticks));
 }
