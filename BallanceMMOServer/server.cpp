@@ -570,6 +570,12 @@ public:
         // from the start with this value in them, and a late joiner cannot be
         // allowed to move the timeline the running members are already on.
         uint32_t input_delay = 6;
+        // The tick base the members present at the start are numbered from:
+        // the same lead a late joiner gets, measured from tick 0 (design 9.2,
+        // sim/late_tick.hpp session_start_tick_base).  Fixed here, with the
+        // input delay, so every start member shares one numbering base however
+        // far apart their level loads were.
+        uint32_t start_tick_base = 0;
         // Stable per member: the lowest value not currently used by another
         // member of this session, assigned when the member enters and freed
         // when it leaves.  Both the SessionStart player_entry and the world's
@@ -674,11 +680,21 @@ public:
         return order;
     }
 
+    // The session's latency budget, measured once, before the world exists: the
+    // input delay tick_scheduler waits for a tick's inputs, and the worst
+    // round trip among the members it was sized from - the same number the
+    // members present at the start are numbered from.  One pass samples the
+    // connections, so both budgets come out of it.
+    struct session_latency {
+        uint32_t input_delay = 6;
+        uint32_t worst_rtt_ms = 0;
+    };
+
     // The worst case among the members: the session's clock is one clock for
     // everyone, so the slack has to suit the member whose input has the
     // furthest to come.  `physics.input_delay` is the floor, for a link too
     // good (or too new) to have shown its latency yet.
-    uint32_t session_input_delay(const bmmo::server_room& r) {
+    session_latency measure_session_latency(const bmmo::server_room& r) {
         int worst = 0;
         std::string detail;
         for (const auto& m: r.members) {
@@ -692,10 +708,12 @@ public:
             worst = std::max(worst, ping);
             detail += Sprintf("%s%s %d ms", detail.empty() ? "" : ", ", get_client_name(m.id), ping);
         }
-        const uint32_t delay = bmmo::session::input_delay_for_ping(worst, config_.physics_input_delay);
+        session_latency out;
+        out.worst_rtt_ms = static_cast<uint32_t>(worst);
+        out.input_delay = bmmo::session::input_delay_for_ping(worst, config_.physics_input_delay);
         Printf("Room %u: input delay %u ticks (%.0f ms) for a worst round trip of %d ms (%s).",
-               r.id, delay, delay * 1000.0 / 66.0, worst, detail.c_str());
-        return delay;
+               r.id, out.input_delay, out.input_delay * 1000.0 / 66.0, worst, detail.c_str());
+        return out;
     }
 
     uint32_t start_physics_session(const bmmo::server_room& r, const bmmo::map& map) {
@@ -703,7 +721,17 @@ public:
         s.id = next_session_id_++;
         s.room = r.id;
         s.map = map;
-        s.input_delay = session_input_delay(r);
+        const session_latency latency = measure_session_latency(r);
+        s.input_delay = latency.input_delay;
+        // Design 9.2: the members present at the start are anchored at the same
+        // lead a late joiner is, measured from tick 0 (the world has not ticked
+        // when their SessionAssign goes out).  Their numbering is the server's
+        // plus that lead, and each of them renumbers itself onto it when the
+        // assignment arrives, so a slow level load no longer leaves its member
+        // numbering from its own anchor and running that far ahead of the world
+        // for the rest of the session (sim/late_tick.hpp,
+        // session_start_tick_base).
+        s.start_tick_base = bmmo::sim::session_start_tick_base(s.input_delay, latency.worst_rtt_ms);
         for (const auto& m: r.members) {
             s.members.push_back(m.id);
             client_session_[m.id] = s.id;
@@ -969,15 +997,21 @@ public:
         s.assigned.insert(c);
     }
 
-    // Tick 0 for every start member, sent together once the last of them is
-    // ready: a client that anchored early would otherwise run ahead of the
-    // server by the time it spent waiting, and the relay lag (design 9.1)
-    // grows by the same amount.
+    // The session's start base for every member present at the start, sent
+    // together once the last of them is ready (design 9.2).  One number for all
+    // of them, not per-member: they are renumbered onto it at the same moment,
+    // so their numberings stay in step with each other and only the assignment
+    // round trip separates their clocks.  It is the lead a late joiner gets
+    // measured from tick 0 - the world has not ticked yet, so there is no
+    // "current +" term - which keeps a member that anchored early from being
+    // numbered from its own anchor for the rest of the session, running ahead
+    // of the server by however long the slowest level load took: the relay lag
+    // (design 9.1) and the rollback lag both grew by that amount, unbounded.
     void assign_start_members(physics_session_state& s) {
         for (const auto m: s.members)
             if (!s.late.count(m) && !s.ready.count(m)) return;
         for (const auto m: s.members)
-            if (!s.late.count(m) && !s.assigned.count(m)) send_session_assign(s, m, 0);
+            if (!s.late.count(m) && !s.assigned.count(m)) send_session_assign(s, m, s.start_tick_base);
     }
 
     // Start barrier (design 8.3): SessionStart went out, but a member that
@@ -1063,11 +1097,13 @@ public:
         }
         s.ready.insert(c);
         // Late joiners are numbered from the server's current tick; members
-        // present at the start from 0 (protocol 2.2, session_assign_msg).
-        // A late joiner starts input_delay ahead of the server like everybody
-        // else (the server simulates tick T only after the inputs for T), so
-        // every snapshot refers to a tick the client has already recorded.
-        const uint32_t assigned = s.late.count(c) ? late_tick_base(s, c) : 0;
+        // present at the start from the session's start base (protocol 2.2,
+        // session_assign_msg).  Both are input_delay plus a round-trip
+        // allowance ahead of where the client would be if it were told the
+        // server's tick itself, so its frames arrive before the deadline for
+        // the tick they name and every snapshot refers to a tick it has
+        // already recorded.
+        const uint32_t assigned = s.late.count(c) ? late_tick_base(s, c) : s.start_tick_base;
         runner_->player_ready(msg.session, c, assigned);
         if (s.late.count(c)) send_session_assign(s, c, assigned);
         else assign_start_members(s);

@@ -386,12 +386,14 @@ namespace {
                     break;
                 }
                 assigned_ = true;
-                // A start member is numbered from its own anchor, and the
-                // schedule it has been running since then is the one the
-                // server's deadlines were measured against: leave it alone.
-                // A late joiner is numbered from a tick the server picked, so
-                // its numbering (and the inputs queued under the old one)
-                // restart here.
+                // A numbered base is the ordinary case: the server anchors the
+                // members present at the start at its start lead and a late
+                // joiner (or a resync) at its current tick plus the same lead,
+                // so the numbering is not the one this client has been running
+                // since its own anchor.  Renumber onto it, exactly as the retail
+                // client does (physics_session_client.cpp).  Base 0 is the one
+                // case left over: a server that still numbers a start member
+                // from its own anchor leaves the numbering alone.
                 if (msg.first_tick != 0) {
                     frames_since_anchor_ = 0;
                     input_history_.clear();

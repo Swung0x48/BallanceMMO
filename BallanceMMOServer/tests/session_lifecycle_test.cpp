@@ -9,10 +9,11 @@
 // slack the assigned base counts on in the tick_scheduler.
 //
 // Finally the server-side halves this test target cannot link (server.cpp): the
-// caps on the lead a late joiner is anchored at, shared through
-// sim/late_tick.hpp, and the rule that only the first join before the start
-// barrier arms it (that one is still mirrored).  The budgets they have to fit
-// in are the production ones.
+// caps on the lead a late joiner is anchored at, the base the members present at
+// the start are numbered from and the window its clamp keeps the start lag
+// inside, all shared through sim/late_tick.hpp, and the rule that only the first
+// join before the start barrier arms it (that one is still mirrored).  The
+// budgets they have to fit in are the production ones.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -30,6 +31,7 @@ using namespace bmmo::session;
 using bmmo::sim::kLateTickLeadCapTicks;
 using bmmo::sim::kLateTickRttCapTicks;
 using bmmo::sim::late_tick_lead_ticks;
+using bmmo::sim::session_start_tick_base;
 
 namespace {
     struct stub_event { event_type type = event_type::Physicalize; };
@@ -269,6 +271,47 @@ TEST(LateTickLead, TheUncappedArithmeticIsTheTooFarCliff) {
     const uint32_t uncapped_lead = delay + raw_rtt_ticks + 2;
     EXPECT_GT(client_lag_ticks(uncapped_lead, raw_rtt_ticks),
               static_cast<double>(rollback_thresholds{}.max_resim_ticks));
+}
+
+// ---------------------------------------------------------------------------
+// The base the members present at the start of a session are numbered from:
+// the same lead with no "current tick" term, because the world has not ticked
+// when their SessionAssign goes out.  It exists because a member that kept its
+// own anchor numbering ran ahead of the server by however long it waited for
+// the slowest level load - a lead nothing bounded, against the same resim
+// window.  The price is that the offset is not zero: the lag a start member
+// works with is the base plus the input delay (its numbering offset from the
+// world plus the delay the world applies a tick at), so the base is clamped to
+// the window less that delay instead of following the lead cap off the cliff.
+// ---------------------------------------------------------------------------
+
+TEST(SessionStartBase, IsTheLeadMeasuredFromTickZeroBelowTheClamp) {
+    EXPECT_EQ(session_start_tick_base(6, 0), 8u);
+    EXPECT_EQ(session_start_tick_base(6, 300), 6u + kLateTickRttCapTicks + 2u);
+}
+
+TEST(SessionStartBase, ClampKeepsTheStartLagInsideTheClientResimWindow) {
+    // lag = base + input_delay against rollback.hpp's max_resim_ticks = 48, with
+    // 4 ticks of the window left to the ordinary corrections, so the base is
+    // clamped to 44 - input_delay.
+    constexpr uint32_t budget = 44;
+    // 400 ms is the case the lead cap used to lose: the uncapped lead is 34,
+    // the clamp is what the window allows.
+    const uint32_t far_ping = 400;
+    const uint32_t far_delay = input_delay_for_ping(static_cast<int>(far_ping), 6);
+    EXPECT_EQ(session_start_tick_base(far_delay, far_ping), budget - far_delay);
+    // The swept range, including the input delay's own cap: the clamp holds for
+    // every link the policy can produce, and never reaches 0 - a zero base would
+    // silently disable the client's rebase-on-nonzero-first_tick and put that
+    // member back on its own anchor numbering.
+    for (uint32_t ping = 0; ping <= 1000; ping += 50) {
+        const uint32_t delay = input_delay_for_ping(static_cast<int>(ping), 6);
+        const uint32_t base = session_start_tick_base(delay, ping);
+        EXPECT_LE(base + delay, budget) << "ping " << ping;
+        EXPECT_GE(base, 1u) << "ping " << ping;
+    }
+    EXPECT_EQ(session_start_tick_base(kInputDelayMaxTicks, 65535), budget - kInputDelayMaxTicks);
+    EXPECT_GE(session_start_tick_base(kInputDelayMaxTicks, 65535), 1u);
 }
 
 // ---------------------------------------------------------------------------

@@ -75,7 +75,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 ### 2.1 时间线
 
-- `tick` 长度 1/66 s。每个客户端在收到 `SessionStart` 后先播放 3 秒 “3 - 2 - 1 - Go!” 倒计时（沿用 `countdown_msg` 的提示音与提示行，纯本地效果，不参与确定性），在 “Go!” 这一帧重开当前关卡，`Gameplay_Ingame` 首次激活的行为帧为锚点，编号为 `first_tick`（首次开始为 0，迟到加入者由服务端指定）。锚点执行会话重置（IVP 时钟归零、`ivp_srand(seed)`），此后每个行为帧一个 tick。
+- `tick` 长度 1/66 s。每个客户端在收到 `SessionStart` 后先播放 3 秒 “3 - 2 - 1 - Go!” 倒计时（沿用 `countdown_msg` 的提示音与提示行，纯本地效果，不参与确定性），在 “Go!” 这一帧重开当前关卡，`Gameplay_Ingame` 首次激活的行为帧为锚点，锚点的编号由服务端在 `SessionAssign` 里给出：会话开始时在场的成员用**会话起始基数**（见 2.2 的公式），迟到加入者与重同步者用服务端当前 tick 加上同一个前导量。锚点执行会话重置（IVP 时钟归零、`ivp_srand(seed)`），此后每个行为帧一个 tick。
 - 客户端每 tick 发送 `SessionInput`；服务端在收齐所有成员该 tick 的输入、或墙钟超过 `开始时刻 + (tick + input_delay)/66 s` 时模拟该 tick，缺失输入沿用该玩家上一 tick 的输入。
 - `input_delay` 是**每个会话**自己的，在会话开始时定下并写进该会话的 `SessionStart`：取成员里最差的一条链路（GNS 的 `m_nPing`，且用该连接上见过的峰值而不是当下值），按 `单程 × 1.5 + 16 ms` 折成 tick，再夹在 `physics.input_delay`（下限）与 40 tick（上限）之间。窗口装的是**单程**——客户端按自己的时钟跑在服务端调度之前，输入只需单向抵达；乘 1.5 是因为决定输入迟不迟到的是抖动而不是均值，而 RTT 本身已经是平滑过的数。定下之后整场不变：调度的截止时刻是从会话开始时刻带着这个值算出来的，迟到加入者不能把已经在跑的成员的时间线挪走。
 - 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`（不可靠）；每 66 tick 或刚体集合变化时广播 full 快照（可靠，携带机关名字典）。
@@ -96,7 +96,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | tick_rate | u8（66） |
 | snapshot_interval | u8 |
 | input_delay | u8 |
-| first_tick | u32（接收者锚点 tick 的编号） |
+| first_tick | u32（接收者锚点 tick 的编号；实际编号随 `SessionAssign` 到达，两端客户端都不读这里，服务端写 0） |
 | seed | i32 |
 | spawn_impulse | f32（每次出生 Physicalize 的踢出速度 m/s，0 = 无；写在 seed 之后） |
 | players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度；这是原版复活点本身，每个成员都相同——设计 9.10 去掉了出生环偏移） |
@@ -117,7 +117,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 `session_snapshot_msg`（server → client，unreliable；full 版本 reliable）：session u32、tick u32、full u8、acked_input_tick u32、bodies u16 count，每项：kind u8（`Ball=0, Mechanism=1`）、owner u32（球：玩家 id；机关：字典索引）、name string ≤ 64（仅 full 且 kind=Mechanism，其余为空串）、position f64×3、rotation f64×4、linear f32×3、angular f32×3、flags u8（bit0 simulated、bit1 collision enabled）。位置与四元数用双精度，因为 IVP core 的位置/四元数本身是双精度（速度是单精度），镜像/修正要按位写回。
 
-`session_assign_msg`（server → client，reliable；会话开始时在场的成员在全员 `session_ready_msg` 到齐后一起收到 `first_tick = 0`，迟到加入者与重同步者即时收到 `first_tick = 服务端当前 tick + input_delay + 2`，从而与其他成员一样领先服务端；`session_resync_msg{session, last_full_tick}`（client → server，reliable）由客户端在节拍原点重设、连续 3 次硬置或连续 30 个快照对不上历史时发出，服务端按迟到加入处理：重新分配编号、重发各成员最近的 Physicalize、强制一次全量快照；客户端收到新分配后清空历史，用下一个全量快照一次写入全部刚体）：session u32、first_tick u32——客户端锚点帧对应的服务端 tick 编号：会话开始时在场的成员为 0，迟到加入者为服务端收到 Ready 时的当前 tick。客户端收到前不发送输入（缓存），收到后按 `first_tick + 锚点后经过的帧数` 编号并补发缓存。
+`session_assign_msg`（server → client，reliable；会话开始时在场的成员在全员 `session_ready_msg` 到齐后**一起**收到 `first_tick = 会话起始基数 = input_delay + min(ceil(最差成员 RTT_ms × 66 / 1000), 12) + 2`，再夹到 `44 − input_delay`（44 = `rollback.hpp` 的 `max_resim_ticks` 48 减 4 tick 余量，下限 1，`sim/late_tick.hpp` 的 `session_start_tick_base`；起始滞后是基数加 `input_delay`，所以基数必须让这个和留在回滚窗口内），迟到加入者与重同步者即时收到 `first_tick = 服务端当前 tick + 同一前导量`；`session_resync_msg{session, last_full_tick}`（client → server，reliable）由客户端在节拍原点重设、连续 3 次硬置或连续 30 个快照对不上历史时发出，服务端按迟到加入处理：重新分配编号、重发各成员最近的 Physicalize、强制一次全量快照；客户端收到新分配后清空历史，用下一个全量快照一次写入全部刚体）：session u32、first_tick u32——客户端锚点帧对应的服务端 tick 编号（服务端世界自己的编号仍从 0 开始，这个基数只是客户端看到的号）：会话开始时在场的成员为会话起始基数（世界此时还没 tick 过，“当前 tick”项因此为 0），迟到加入者为服务端收到 Ready 时的当前 tick 加同一个前导量。给的是前导量而不是服务端当前 tick，是因为这条可靠消息要过半个 RTT 才到：按当前 tick 分配会让客户端落后半个 RTT，输入赶不上调度截止时刻（首次联调 1380/1380 全 unmatched 正是如此）。客户端收到前不发送输入（缓存），收到后按 `first_tick + 锚点后经过的帧数` 编号，旧编号的缓存帧不再补发、直接丢弃。会话开始也用同一个前导量，是因为锚点是各自关卡加载完成的时刻，成员之间可以相差数秒；不重新编号的成员会一直按自己的锚点编号跑在服务端前面，快照与本地历史的差值（编号偏移 + input_delay + 单程）随加载差增长，超过 `rollback.hpp` 的 `max_resim_ticks = 48` 就变成 too_far → 重同步抖动。
 
 `session_remote_input_msg`（server → client，unreliable no-delay，每模拟一个 tick 发一条，M4 设计 9.1）：session u32、tick u32、count u8、count × {player u32、input_frame（与 `session_input_msg` 的帧布局相同：keys u8、cam_right/cam_up/cam_dir f32×3、ball_type u8、flags u8）}。内容是服务端在该 tick **实际采用**的每个其他成员的输入帧（新鲜的或沿用上一 tick 的），去掉了收件成员自己；客户端用它驱动远端球的本地导航复制（桥接 API v3 `navigation_*`），快照只做校正。晚到的帧不回放，客户端在没有新帧时沿用最近一帧预测。
 
