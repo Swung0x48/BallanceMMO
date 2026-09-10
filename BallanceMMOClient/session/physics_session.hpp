@@ -83,6 +83,11 @@ namespace bmmo::session {
             // re-seeds the rows.  Keeping either would let the applier render a
             // mechanism by dead-reckoning from an old-numbered row (or target a
             // body the new base no longer names) until that snapshot lands.
+            // The fresh histories also carry no commanded pose yet
+            // (have_last_target is false by construction), which is the state
+            // the applier's `elsewhere` test wants after a rebuild: it falls
+            // back to comparing the body itself against the newest row until it
+            // has written once.
             mechanism_authority.clear();
             mechanism_names.clear();
             consecutive_hard = consecutive_unmatched = 0;
@@ -179,6 +184,20 @@ namespace bmmo::session {
                 bool simulated = false;
             };
             std::deque<pose_state> rows;   // ascending tick, newest last, at most kMechanismRows
+            // The pose the applier last commanded for this body.  The applier's
+            // own dead-reckoned write IS the live body pose (measured: the
+            // client's local mechanism pose equals the raw row or the
+            // extrapolated target exactly, nothing in between), so the body
+            // cannot serve as the reference of the `elsewhere` test any more:
+            // one frame after a write it reads back as a body up to
+            // kMechanismMaxExtrapolation ahead of the newest row, the test calls
+            // that "somewhere else", the applier snaps back to the raw row, and
+            // the next frame dead-reckons again - a permanent square wave at the
+            // applier's cadence (9.22 journals, the sandbag flicker).  The
+            // remembered command tells the applier's own pose apart from a pose
+            // somebody else moved the body to.
+            double last_target[3] = {};
+            bool have_last_target = false;
         };
         // 64 covers the worst re-simulated window (48 ticks / 2 ticks per row =
         // 24) with headroom for a degraded cadence - a dropped snapshot lands a

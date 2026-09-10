@@ -34,11 +34,18 @@ namespace {
     // the script-constrained mechanism bodies from the newest authoritative
     // poses instead of predicting them.  A pair further apart than this in one
     // snapshot interval is a teleport (sector change, level reset, re-entry),
-    // and a target further than this from the local pose means our body is
-    // somewhere else entirely: both are followed by a snap, never by a skipped
+    // and a body further than this from the pose the applier itself last
+    // commanded for it is somewhere else entirely (a rebuild, a re-entry, a
+    // level reset moved it): both are followed by a snap, never by a skipped
     // write, so the body can never be left behind at the old pose.
     constexpr double kMechanismSnapTravel = 0.5;   // metres per snapshot pair
-    constexpr double kMechanismSnapJump = 1.0;     // metres from the local pose
+    // The reference is the commanded pose, not the live body: since 9.20 the
+    // applier dead-reckons its write up to kMechanismMaxExtrapolation past the
+    // newest row, so the live body is our own command and is legitimately more
+    // than this far from the row - measuring the row against it made the
+    // applier snap to the raw row and dead-reckon again on the next frame,
+    // forever.
+    constexpr double kMechanismSnapJump = 1.0;     // metres from the last commanded pose
     // The newest row is stale by the input delay plus half the round trip,
     // measured at ~24 ticks (0.36 s) in the session journals, so rendering it
     // as-is puts a moving mechanism that far behind the predicted ball - the
@@ -65,15 +72,17 @@ namespace {
         float linear[3] = {};
         float angular[3] = {};
         bool simulated = false;   // the governing row's wake flag
-        bool snap = false;        // write as a snap: teleport row or a local body elsewhere
+        bool snap = false;        // write as a snap: teleport row or a body elsewhere
     };
 
-    // `elsewhere` is the applier's kMechanismSnapJump test: our local body is
-    // further than that from the authoritative pose (after a resync, or a
-    // sector re-entry), so the exact newer pose is written instead of a lerp or
-    // a dead-reckon, and the write rechecks the contacts.  The live path passes
-    // it, a re-simulation does not: there the local pose is this hook's own
-    // write for the previous tick, so that distance means nothing.
+    // `elsewhere` is the applier's kMechanismSnapJump test: our body is further
+    // than that from the pose the applier itself last commanded for it - a
+    // rebuild, a sector re-entry or a level reset moved it, so the exact newer
+    // pose is written instead of a lerp or a dead-reckon, and the write
+    // rechecks the contacts.  The live path passes it, a re-simulation does not:
+    // there the live pose is this hook's own write for the previous tick and is
+    // refreshed as the command for exactly that reason, so the distance says
+    // nothing about identity - see the poser below.
     mechanism_target mechanism_target_at(const physics_session_state::mechanism_pose_history& history, uint32_t tick,
                                          bool elsewhere) {
         const auto& rows = history.rows;
@@ -178,7 +187,7 @@ namespace {
         const auto& newer = rows[upper];
         copy_pose(newer, out);   // rotation and velocities are the newer row's
         out.snap = teleport(older, newer) || elsewhere;
-        if (out.snap) return out;   // teleport / local body elsewhere: the exact newer pose
+        if (out.snap) return out;   // teleport / body elsewhere: the exact newer pose
         const double span = static_cast<double>(newer.tick - older.tick);
         const double alpha = std::clamp((static_cast<double>(tick) - older.tick) / span, 0.0, 1.0);
         for (int k = 0; k < 3; ++k)
@@ -208,15 +217,23 @@ namespace {
     // authoritative pose is nearest our own local body - and a name this client
     // has no physicalized body for is another sector's instance and is skipped.
     // `history` points into mechanism_authority: nothing removes one mechanism's
-    // entry while the session runs, so it stays valid for the write.
+    // entry while the session runs, so it stays valid for the write and for
+    // recording the pose that write commanded (mechanism_note_command).
     struct mechanism_candidate {
         std::string name;
         bmmo_physics_body_state local{};
-        const physics_session_state::mechanism_pose_history* history = nullptr;
+        physics_session_state::mechanism_pose_history* history = nullptr;
         double distance = 0.0;   // squared, the chosen history's newest row to `local`
+        // Squared distance the applier's `elsewhere` test uses: the live body to
+        // the pose the applier last commanded for it, or - on a history no write
+        // has reached yet - to the newest authoritative row.  `distance` above
+        // has to keep measuring the live pose against the newest row: picking
+        // which of two same-named instances we drive is about where the body
+        // actually is, not about what we last commanded.
+        double elsewhere_distance = 0.0;
     };
 
-    std::vector<mechanism_candidate> mechanism_candidates(const physics_session_state& s,
+    std::vector<mechanism_candidate> mechanism_candidates(physics_session_state& s,
                                                           const bmmo::physics::physics_view& view) {
         std::vector<mechanism_candidate> out;
         if (s.mechanism_names.empty() || s.mechanism_authority.empty()) return out;
@@ -231,7 +248,7 @@ namespace {
             candidate.name = name;
             if (!view.get_body_state(name.c_str(), candidate.local, error)) continue;   // not physicalized here
             for (uint32_t owner: owners) {
-                const auto& history = s.mechanism_authority.at(owner);
+                auto& history = s.mechanism_authority.at(owner);
                 double distance = 0.0;
                 for (int k = 0; k < 3; ++k) {
                     const double d = history.rows.back().position[k] - candidate.local.position[k];
@@ -242,9 +259,39 @@ namespace {
                     candidate.distance = distance;
                 }
             }
+            // The reference of the `elsewhere` test is the applier's own last
+            // command once it has written one.  The live body cannot be it: the
+            // applier's dead-reckoned write IS the live body (a body up to
+            // kMechanismMaxExtrapolation past the newest row, by design), so
+            // reading it back as a body "somewhere else" made the applier snap
+            // to the raw row and dead-reckon again on the very next frame - the
+            // 9.22 journals show the local mechanism poses split between exactly
+            // a raw row and exactly the extrapolated target, mech_snaps ~2 per
+            // tick, above ~2.8 m/s.  A body is somewhere else only when it is no
+            // longer where the applier put it: a rebuild, a re-entry, a level
+            // reset.  With no command recorded yet (a fresh history, which is
+            // what rebase_tick leaves) the newest row is used instead, i.e. the
+            // test this applier had before it ever dead-reckoned.
+            const double* reference = candidate.history->have_last_target
+                    ? candidate.history->last_target : candidate.history->rows.back().position;
+            for (int k = 0; k < 3; ++k) {
+                const double d = reference[k] - candidate.local.position[k];
+                candidate.elsewhere_distance += d * d;
+            }
             out.push_back(std::move(candidate));
         }
         return out;
+    }
+
+    // Record the pose a writer commanded for one mechanism body.  Both writers
+    // call it - the live applier and the re-simulation poser - so the next live
+    // frame's `elsewhere` test asks the applier's own question ("is the body
+    // still where we put it?") and never mistakes the dead-reckoned write it
+    // left behind for a foreign pose.
+    void mechanism_note_command(physics_session_state::mechanism_pose_history& history,
+                                const mechanism_target& target) {
+        for (int k = 0; k < 3; ++k) history.last_target[k] = target.position[k];
+        history.have_last_target = true;
     }
 
     void copy_name(char* out, size_t size, const std::string& text) {
@@ -2016,7 +2063,7 @@ void BallanceMMOClient::physics_session_note_mechanism(uint32_t tick, const bmmo
 // authoritative pose is nearest to ours.  The pose itself comes from the shared
 // helper: a render tick inside a snapshot pair interpolates the pair, past the
 // newest row it is dead-reckoned along that row's authoritative velocity, and a
-// teleport (or a local body somewhere else entirely) is written as a snap, so a
+// teleport (or a body somewhere else entirely) is written as a snap, so a
 // mechanism that lands on a sleeping ball still builds the contact pair instead
 // of resting inside it until the next server correction.
 void BallanceMMOClient::physics_session_apply_mechanism_authority() {
@@ -2024,14 +2071,32 @@ void BallanceMMOClient::physics_session_apply_mechanism_authority() {
     const uint32_t tick = s.current_tick();
     std::string error;
     for (const auto& candidate: mechanism_candidates(s, physics_view_)) {
-        const bool elsewhere = std::sqrt(candidate.distance) > kMechanismSnapJump;
+        // `elsewhere` is measured against the pose this applier last commanded,
+        // never against the live body: the live body IS that command (the
+        // dead-reckon puts it up to kMechanismMaxExtrapolation past the newest
+        // row on purpose), so measuring the row against it made the applier snap
+        // to the raw row and dead-reckon again on the next frame, for as long as
+        // the mechanism moved fast enough to be dead-reckoned at all.
+        const bool elsewhere = std::sqrt(candidate.elsewhere_distance) > kMechanismSnapJump;
         const mechanism_target target = mechanism_target_at(*candidate.history, tick, elsewhere);
         if (target.snap) ++s.mechanism_snaps;
-        if (mechanism_pose_unchanged(candidate.local, target)) continue;
+        if (mechanism_pose_unchanged(candidate.local, target)) {
+            // Already there.  The target is the command all the same, and
+            // recording it keeps the reference from drifting stale behind a body
+            // the engine nudged onto the target after the previous write.
+            mechanism_note_command(*candidate.history, target);
+            continue;
+        }
         if (physics_view_.set_body_state(candidate.name.c_str(), target.position, target.rotation, target.linear,
-                                         target.angular, target.simulated, error, target.snap))
+                                         target.angular, target.simulated, error, target.snap)) {
             ++s.body_writes;
-        else { ++s.body_write_errors; s.last_error = error; }
+            mechanism_note_command(*candidate.history, target);
+        } else {
+            // The body is not where the write wanted it, so the previous command
+            // stands and the next frame still asks the applier's own question.
+            ++s.body_write_errors;
+            s.last_error = error;
+        }
     }
 }
 
@@ -2049,16 +2114,29 @@ void BallanceMMOClient::physics_session_pose_mechanisms(uint32_t tick) {
     auto& s = physics_session_;
     std::string error;
     for (const auto& candidate: mechanism_candidates(s, physics_view_)) {
-        // `elsewhere` is the live applier's local-body test and is deliberately
-        // not passed here: during a re-simulation the local pose is this hook's
-        // own write for the previous tick, so the distance to the newest row
-        // says nothing about identity, only how far the mechanism has travelled.
+        // `elsewhere` is the live applier's test and is deliberately not passed
+        // here: during a re-simulation the live pose is this hook's own write for
+        // the previous tick, not a body somebody else moved.
         const mechanism_target target = mechanism_target_at(*candidate.history, tick, false);
-        if (mechanism_pose_unchanged(candidate.local, target)) continue;
+        if (mechanism_pose_unchanged(candidate.local, target)) {
+            mechanism_note_command(*candidate.history, target);
+            continue;
+        }
         if (physics_view_.set_body_state(candidate.name.c_str(), target.position, target.rotation, target.linear,
-                                         target.angular, target.simulated, error))
+                                         target.angular, target.simulated, error)) {
             ++s.mechanism_resim_writes;
-        else { ++s.body_write_errors; s.last_error = error; }
+            // This hook stops at the current tick, so its last write is where the
+            // live applier left the body before the rollback.  Recording it as
+            // the command is what keeps the next live frame's `elsewhere` test
+            // comparing the body against the applier's own prior state instead of
+            // against a pose the re-simulation has overwritten since - which
+            // would read as "somewhere else" and snap a body that is exactly
+            // where the applier put it.
+            mechanism_note_command(*candidate.history, target);
+        } else {
+            ++s.body_write_errors;
+            s.last_error = error;
+        }
     }
 }
 
