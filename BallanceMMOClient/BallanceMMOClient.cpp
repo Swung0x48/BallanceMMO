@@ -337,6 +337,7 @@ void BallanceMMOClient::OnPostExitLevel() {
     std::string error;
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
     pause_clock_restore();
+    pause_scripts_restore();
     ball_nav_active_ = false;
     countdown_restart_ = false;
     force_hs_calibration_ = false;

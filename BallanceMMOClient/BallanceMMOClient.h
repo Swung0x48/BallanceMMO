@@ -496,6 +496,35 @@ private:
 	bool pause_clock_resolve();
 	void pause_clock_apply(float factor);
 	void pause_clock_restore();
+	// The same two chains also stop and restart the level's gameplay scripts:
+	// "Pause Level" deactivates Gameplay_Events and Gameplay_Ingame, and
+	// "Unpause Level" re-activates both.  A session must not let the menu do
+	// that - the level's per-frame world work, the BallManager death test
+	// included, lives in Gameplay_Ingame - so the target of each of those
+	// blocks is emptied while the session runs.  Both blocks read their target
+	// as an object parameter and act on nothing when it is null, so the chain
+	// itself (its links, its delays, the cursor and music blocks) stays exactly
+	// as retail left it; the retail targets go back when the session ends.
+	struct pause_script_write {
+		CK_ID block = 0;         // the Deactivate/Activate Script block
+		const char* chain = nullptr;   // the pause chain it belongs to
+		int input = 0;           // its "Script" input
+		CK_ID retail = 0;        // the script it pointed at
+		bool applied = false;
+	};
+	static constexpr int PAUSE_SCRIPT_WRITES = 8;
+	pause_script_write pause_scripts_[PAUSE_SCRIPT_WRITES];
+	int pause_scripts_count_ = 0;
+	// A graph the resolver could not fully account for is left alone for the
+	// whole session, with the failure logged once (pause_scripts_resolve).
+	bool pause_scripts_failed_ = false;
+	bool pause_scripts_resolve();
+	void pause_scripts_apply();
+	void pause_scripts_restore();
+	// The automation's read of the above ("pausechain"): the level scripts that
+	// decide whether the world is running, and what each recorded block points
+	// at now.
+	std::string pause_scripts_status();
 	void handle_session_start(bmmo::session_start_msg msg);
 	void handle_session_assign(const bmmo::session_assign_msg& msg);
 	void handle_session_snapshot(bmmo::session_snapshot_msg msg);

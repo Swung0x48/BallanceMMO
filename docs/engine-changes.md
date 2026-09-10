@@ -157,10 +157,15 @@ changes when `BMMO_TRACE_TIMEFACTOR` is set; during a physics session the
 client rewrites the `Physic Time Factor` input of the `Set Physics Globals`
 block in the `Pause Level`/`Unpause Level` chain to the factor currently in
 use, so the pause chain's write is a no-op and the diagnostic prints the
-factor in use; the clock guard, bridge API v8, covers the pass in which the
-menu closes - the pass in which shared scripts such as `Gameplay_Refresh`
-write 2.0 - and every other pass only samples the factor, leaving the level
-scripts in charge).
+factor in use; the level scripts stay in charge of the clock. A session also
+empties the `Script` targets of those two chains' `Deactivate Script` /
+`Activate Script` blocks for `Gameplay_Ingame` and `Gameplay_Events`, so the
+menu keeps the world running instead of stopping it - see the pause section of
+`docs/collision-overhaul-design.md`. The clock guard, bridge API v8, is then
+only a sampler: the script its pause sensor watches is never deactivated in a
+session, so it never holds the factor, and the menu-closing pass it used to
+cover on its own - the pass in which shared scripts such as `Gameplay_Refresh`
+write 2.0 - is no longer singled out).
 
 The retail death sequence resets the current sector: `Gameplay_SectorManager`
 runs the deactivation pass (Unphysicalize of every mechanism of the sector),
@@ -487,8 +492,15 @@ before the retail pause menu opened while `pause_behavior_id`
 (`Gameplay_Ingame`) is inactive - and for the single pass in which the menu
 closes. The pause chain's own write is neutralized on the client by rewriting
 that block's `Physic Time Factor` input to the factor in use (no engine
-change), so the guard only has to cover the menu-closing pass. That one is
-bridge-only and needed no engine change.
+change), so the guard only has to cover the menu-closing pass (9.18). In a
+session the guard's pause sensor is now effectively unreachable: the client
+also empties the pause chains' `Deactivate Script` / `Activate Script` targets
+for `Gameplay_Ingame` and `Gameplay_Events` (see the design doc's pause
+section), so the script the sensor watches is never deactivated and the guard
+neither pins nor writes anything - it is left in place because the mod's own
+frame hook runs after the physics step and could not see a pause in time if
+some other actor ever moved that script again. That one is bridge-only and
+needed no engine change.
 
 Evidence: the new headless regression test "Script wakeups are distinct from
 simulation revival" plus the four existing ones all pass. It creates a sleeping

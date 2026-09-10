@@ -368,6 +368,13 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     }
     if (verb == "scripts") return automation_dump_script({});
     if (verb == "script") return automation_dump_script(rest);
+    if (verb == "pausechain") {
+        // What the session did to the retail pause chains: with the menu open,
+        // ingame_script=1 is the fix (the level's per-frame world work, the
+        // BallManager death test included, keeps running while the world steps),
+        // and every entry's now=0 is a block whose target the session emptied.
+        return "ok " + pause_scripts_status();
+    }
     if (verb == "objects") {
         auto* context = m_bml->GetCKContext();
         const int count = context->GetObjectsCountByClassID(CKCID_3DENTITY);

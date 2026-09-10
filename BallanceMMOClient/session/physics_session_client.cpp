@@ -392,10 +392,16 @@ namespace {
         return script ? script->GetID() : 0;
     }
 
-    // The behavior whose deactivation *is* the retail pause: the Event_handler's
-    // "Pause Level" chain stops Gameplay_Ingame.  The guard reads it inside the
-    // engine's PreSimulate pass, because the mod's own frame hook runs after
-    // the physics step and would see the pause one frame too late.
+    // The behavior the guard used to read as its pause sensor: the Event_handler's
+    // "Pause Level" chain deactivated Gameplay_Ingame, and the guard holds the
+    // time factor whenever the sensor is inactive.  A session no longer lets
+    // that chain stop the script (see pause_scripts_resolve), so the sensor is
+    // never inactive and the guard's hold never fires - it only samples the
+    // factor the level scripts wrote, which is what the server honours too, and
+    // writes nothing.  It stays attached because the mod may not see a pause
+    // inside its own frame hook: the sensor is read in the engine's PreSimulate
+    // pass, and dropping the attachment is an engine-side change with no
+    // benefit while the actor that triggers it has been neutralized.
     uint32_t pause_sensor_behavior_id(IBML* bml) {
         CKBehavior* script = bml->GetScriptByName("Gameplay_Ingame");
         return script ? script->GetID() : 0;
@@ -596,6 +602,9 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     auto& s = physics_session_;
     std::string error;
     pause_clock_restore();
+    // The pause chains' edits go back too: outside a session the menu stops and
+    // starts the world scripts as retail intends.
+    pause_scripts_restore();
     // The clock guard is scoped to the session and must not outlive it, so it
     // is dropped even when there is nothing left to tear down.
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
@@ -715,6 +724,291 @@ void BallanceMMOClient::pause_clock_restore() {
     }
 }
 
+// The level scripts a session must keep running while the menu is open.
+// Gameplay_Ingame carries the world's per-frame work - BallManager's
+// out-of-bounds test, which kills a ball that leaves the level, is one of its
+// blocks - and Gameplay_Events the level's event scripts.  Gameplay_Tutorial is
+// not in this set on purpose: the menu stopping the tutorial is retail
+// behaviour with no consequence for the world, and the unpause chain resumes it
+// without a reset.
+namespace {
+    const char* const kSessionWorldScripts[] = {"Gameplay_Events", "Gameplay_Ingame"};
+    constexpr int kSessionWorldScriptCount = 2;
+
+    bool is_session_world_script(const char* name) {
+        if (!name) return false;
+        for (const char* candidate: kSessionWorldScripts)
+            if (std::strcmp(name, candidate) == 0) return true;
+        return false;
+    }
+
+    // The Deactivate Script / Activate Script blocks of one pause chain, in
+    // graph order.  They are leaves; a group below a chain (the Unpause Level
+    // chain has one) is walked into.
+    struct pause_script_block {
+        const char* chain;
+        CKBehavior* block;
+    };
+
+    void collect_pause_script_blocks(const char* chain, CKBehavior* behavior,
+                                     std::vector<pause_script_block>& out) {
+        const int count = behavior ? behavior->GetSubBehaviorCount() : 0;
+        for (int i = 0; i < count; ++i) {
+            CKBehavior* sub = behavior->GetSubBehavior(i);
+            if (!sub) continue;
+            const char* prototype = sub->IsUsingFunction() ? sub->GetPrototypeName() : nullptr;
+            if (prototype
+                    && (std::strcmp(prototype, "Deactivate Script") == 0
+                        || std::strcmp(prototype, "Activate Script") == 0)) {
+                out.push_back({chain, sub});
+                continue;
+            }
+            collect_pause_script_blocks(chain, sub, out);
+        }
+    }
+
+    // A recorded entry, resolved back into the live graph for the applier and
+    // the restorer.  The context recycles object ids when a level is torn down
+    // (CKObjectManager::RegisterObject), so an id alone is not enough to write
+    // through: the block has to still be a Deactivate/Activate Script block
+    // inside the chain it was found in, holding its "Script" parameter in the
+    // state the session left it in.  A level change that leaves a stale table
+    // behind fails those checks and is skipped until the next anchor resolves
+    // the new graph.
+    CKParameter* pause_script_parameter(CKContext* context, CK_ID block_id, const char* chain, int input_index) {
+        auto* block = CKBehavior::Cast(context->GetObject(block_id));
+        if (!block || !block->IsUsingFunction()) return nullptr;
+        const char* prototype = block->GetPrototypeName();
+        if (!prototype
+                || (std::strcmp(prototype, "Deactivate Script") != 0
+                    && std::strcmp(prototype, "Activate Script") != 0))
+            return nullptr;
+        CKBehavior* parent = block->GetParent();
+        const char* parent_name = parent ? parent->GetName() : nullptr;
+        if (!chain || !parent_name || std::strcmp(parent_name, chain) != 0) return nullptr;
+        CKParameterIn* input = block->GetInputParameter(input_index);
+        if (!input || input->GetGUID() != CKPGUID_SCRIPT) return nullptr;
+        CKParameter* param = input->GetRealSource();
+        if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID))) return nullptr;
+        return param;
+    }
+
+    CK_ID pause_script_value(CKParameter* param) {
+        CK_ID value = 0;
+        if (param) param->GetValue(&value);
+        return value;
+    }
+
+    const char* pause_script_prototype(CKContext* context, CK_ID block_id) {
+        auto* block = CKBehavior::Cast(context->GetObject(block_id));
+        return block && block->IsUsingFunction() ? block->GetPrototypeName() : "?";
+    }
+}
+
+// The retail pause chain also stops and restarts the level's gameplay scripts:
+// "Pause Level" deactivates Gameplay_Events and Gameplay_Ingame, "Unpause
+// Level" re-activates both.  A session must not let the menu do that.  The
+// world it stops is exactly the thing the session keeps simulating, and the
+// death of a ball that leaves the level happens inside Gameplay_Ingame: with
+// the script stopped, the ball crossed the depth it had died at earlier and was
+// never killed (build/manual-test-922-20260910, pause window ticks 7917-14925).
+//
+// The neutralization is the block's target, not the block: the "Script" input's
+// real source is written with a null CK_ID, and both blocks act on nothing when
+// that is what they read.  Deactivate Script hands null to
+// CKScene::DeActivate, which returns without doing anything
+// (submodule/Ballanced/Source/CK2/src/CKScene.cpp:214), and Activate Script
+// skips a null target outright (ActivateScript.cpp:124).  The block still
+// fires, its Out still carries the chain along the same links with the same
+// delays, and the chain's own work - End Music, Mouse On/Off, Start Music, the
+// cursor chain - is untouched, so the menu behaves exactly as it did.
+//
+// A graph that does not match - a missing chain, a target input with no source
+// or a source of another type or size, a target parameter an input other than
+// ours also reads, more targets than the table holds, no target at all - is
+// refused as a whole and logged as an error, because half a fix leaves the world
+// pausing in a way that is far harder to see than the failure itself.  Every
+// level (re)entry brings a new graph, so this runs at each anchor.
+bool BallanceMMOClient::pause_scripts_resolve() {
+    pause_scripts_count_ = 0;
+    const auto refuse = [this](const std::string& why) {
+        pause_scripts_count_ = 0;
+        pause_scripts_failed_ = true;
+        logger_->Error("Physics session: the pause menu's script edits were NOT neutralized (%s): the world "
+                       "will stop while the menu is open", why.c_str());
+        return false;
+    };
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* event_handler = m_bml->GetScriptByName("Event_handler");
+    if (!event_handler) return refuse("Event_handler is missing");
+    static const char* kChains[2] = {"Pause Level", "Unpause Level"};
+    std::vector<pause_script_block> blocks;
+    for (const char* chain_name: kChains) {
+        CKBehavior* chain = ScriptHelper::FindFirstBB(event_handler, chain_name);
+        if (!chain) return refuse(std::string(chain_name) + " is missing");
+        collect_pause_script_blocks(chain_name, chain, blocks);
+    }
+    // A target parameter can be shared: the retail level feeds Gameplay_Events
+    // to the Pause chain's Deactivate Script and to the Unpause chain's
+    // Activate Script through ONE parameter object.  Emptying it is then safe -
+    // both readers are inputs this fix is neutralizing - but only then: a reader
+    // that is not one of ours would lose its target with ours.  So the pass
+    // below first collects every candidate input and then checks that each
+    // target parameter's readers are exactly the candidates that read it.
+    const int behaviors = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+    CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+    const auto describe_readers = [&](CKParameter* param) {
+        std::string text;
+        int readers = 0;
+        for (int b = 0; b < behaviors; ++b) {
+            auto* other = CKBehavior::Cast(context->GetObject(ids[b]));
+            const int other_inputs = other ? other->GetInputParameterCount() : 0;
+            for (int k = 0; k < other_inputs; ++k) {
+                CKParameterIn* in = other->GetInputParameter(k);
+                if (!in || in->GetRealSource() != param) continue;
+                ++readers;
+                if (readers > 8) continue;
+                CKBehavior* owner = other->GetParent();
+                text += std::format("{}{}/{} input {}", text.empty() ? "" : ", ",
+                                    owner && owner->GetName() ? owner->GetName() : "?",
+                                    other->GetName() ? other->GetName() : "?", k);
+            }
+        }
+        return std::make_pair(readers, text);
+    };
+    struct script_target {
+        CKBehavior* block;
+        const char* chain;
+        int input;
+        CKParameter* param;
+        CK_ID retail;
+        const char* name;
+    };
+    std::vector<script_target> candidates;
+    for (const auto& candidate: blocks) {
+        CKBehavior* block = candidate.block;
+        const int inputs = block->GetInputParameterCount();
+        for (int i = 0; i < inputs; ++i) {
+            CKParameterIn* input = block->GetInputParameter(i);
+            // Activate Script's input 0 is its "Reset ?" flag, so an input is a
+            // target when its type says so - the same test the block makes.
+            if (!input || input->GetGUID() != CKPGUID_SCRIPT) continue;
+            CKParameter* param = input->GetRealSource();
+            if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID)))
+                return refuse(std::format("{}/{} input {} has no usable target parameter", candidate.chain,
+                                          block->GetName() ? block->GetName() : "?", i));
+            CK_ID retail = 0;
+            param->GetValue(&retail);
+            auto* target = CKBehavior::Cast(block->GetInputParameterObject(i));
+            if (!target || !is_session_world_script(target->GetName())) continue;
+            candidates.push_back({block, candidate.chain, i, param, retail, target->GetName()});
+        }
+    }
+    if (candidates.empty()) return refuse("no pause chain block targets the world scripts");
+    bool seen[kSessionWorldScriptCount] = {};
+    std::string list;
+    for (const auto& candidate: candidates) {
+        const auto [readers, readers_text] = describe_readers(candidate.param);
+        int mine = 0;
+        for (const auto& other: candidates)
+            if (other.param == candidate.param) ++mine;
+        if (readers != mine)
+            return refuse(std::format("{}/{}'s target {} is read by {} inputs ({})", candidate.chain,
+                                      candidate.block->GetName() ? candidate.block->GetName() : "?",
+                                      candidate.name, readers, readers_text));
+        if (pause_scripts_count_ >= PAUSE_SCRIPT_WRITES)
+            return refuse(std::format("more than {} target inputs", PAUSE_SCRIPT_WRITES));
+        pause_script_write& write = pause_scripts_[pause_scripts_count_++];
+        write.block = candidate.block->GetID();
+        write.chain = candidate.chain;
+        write.input = candidate.input;
+        write.retail = candidate.retail;
+        write.applied = false;
+        for (int s = 0; s < kSessionWorldScriptCount; ++s)
+            if (std::strcmp(kSessionWorldScripts[s], candidate.name) == 0) seen[s] = true;
+        list += std::format("{}{}/{} -> {}", list.empty() ? "" : ", ", candidate.chain,
+                            candidate.block->GetName() ? candidate.block->GetName() : "?", candidate.name);
+    }
+    for (int s = 0; s < kSessionWorldScriptCount; ++s)
+        if (!seen[s]) logger_->Warn("Physics session: no pause chain block targets %s", kSessionWorldScripts[s]);
+    logger_->Info("Physics session: pause menu script edits neutralized: %s", list.c_str());
+    pause_scripts_apply();
+    return true;
+}
+
+// Keeps the edits applied: the resolve neutralizes every target once, and a
+// frame that finds one back in place writes it out again, so nothing can hand
+// the pause back to the retail chain behind the session's back.  Only the exact
+// retail target of a recorded input is ever moved, and only to null: anything
+// else in that parameter is somebody else's value and is left alone.
+void BallanceMMOClient::pause_scripts_apply() {
+    if (!pause_scripts_count_) return;
+    CKContext* context = m_bml->GetCKContext();
+    const CK_ID zero = 0;
+    for (int i = 0; i < pause_scripts_count_; ++i) {
+        pause_script_write& write = pause_scripts_[i];
+        CKParameter* param = pause_script_parameter(context, write.block, write.chain, write.input);
+        const CK_ID current = pause_script_value(param);
+        if (current == 0) {
+            write.applied = true;   // already neutral (this session, or the same graph reloaded)
+            continue;
+        }
+        if (current != write.retail) continue;
+        param->SetValue(&zero, sizeof(CK_ID));
+        if (!write.applied) {
+            write.applied = true;
+            logger_->Info("Physics session: pause chain target %u emptied (input %d)", write.retail, write.input);
+        }
+    }
+}
+
+// Hands the retail targets back and drops the table, so the menu stops and
+// starts the world scripts again exactly as it did before the session.
+void BallanceMMOClient::pause_scripts_restore() {
+    CKContext* context = m_bml->GetCKContext();
+    for (int i = 0; i < pause_scripts_count_; ++i) {
+        pause_script_write& write = pause_scripts_[i];
+        CKParameter* param = pause_script_parameter(context, write.block, write.chain, write.input);
+        if (pause_script_value(param) == 0 && write.retail) {
+            const CK_ID retail = write.retail;
+            param->SetValue(&retail, sizeof(CK_ID));
+        }
+        write = {};
+    }
+    pause_scripts_count_ = 0;
+    pause_scripts_failed_ = false;
+}
+
+// The automation's read ("pausechain"): one line that says whether the menu is
+// open, whether the world scripts are still active, and what each recorded
+// pause-chain block points at now (a target of 0 is a neutralized one, the
+// retail id is a block the session has not emptied).
+std::string BallanceMMOClient::pause_scripts_status() {
+    CKContext* context = m_bml->GetCKContext();
+    const auto active = [](CKBehavior* script) { return script && script->IsActive() ? 1 : 0; };
+    const float factor = [this] {
+        // The engine's scaled factor, the value the level scripts set through
+        // Set Physics Globals (see kTimeFactorScriptScale).
+        float value = 0.0f, delta = 0.0f;
+        std::string error;
+        return physics_view_.get_clock(value, delta, error) ? value : -1.0f;
+    }();
+    std::string out = std::format(
+            "paused={} ingame_script={} events_script={} tutorial_script={} muted={} time_factor={:.6f} "
+            "entries={} failed={}",
+            m_bml->IsPaused() ? 1 : 0, active(m_bml->GetScriptByName("Gameplay_Ingame")),
+            active(m_bml->GetScriptByName("Gameplay_Events")), active(m_bml->GetScriptByName("Gameplay_Tutorial")),
+            physics_session_.input_muted ? 1 : 0, factor, pause_scripts_count_, pause_scripts_failed_ ? 1 : 0);
+    for (int i = 0; i < pause_scripts_count_; ++i) {
+        const pause_script_write& write = pause_scripts_[i];
+        CKParameter* param = pause_script_parameter(context, write.block, write.chain, write.input);
+        out += std::format(" [{}/{} input{} retail={} now={}]", write.chain ? write.chain : "?",
+                           pause_script_prototype(context, write.block), write.input, write.retail,
+                           pause_script_value(param));
+    }
+    return out;
+}
+
 // The anchor frame: session clock reset, world hash, SessionReady.
 void BallanceMMOClient::physics_session_anchor() {
     auto& s = physics_session_;
@@ -731,10 +1025,11 @@ void BallanceMMOClient::physics_session_anchor() {
         physics_session_end_local("session clock reset failed: " + error);
         return;
     }
-    // The retail pause menu stops Gameplay_Ingame and writes the time factor 0;
-    // the guard pins the factor to the value the run had before the menu opened
-    // for as long as it is open, and samples it otherwise, so the level scripts
-    // keep driving the clock exactly as they do on the server.
+    // The retail pause menu stops Gameplay_Ingame and writes the time factor 0.
+    // Neither is allowed to reach the world while the session runs: the pause
+    // chains' script edits are neutralized (pause_scripts_resolve) and the time
+    // factor block is pinned to the factor in use, so the level scripts keep
+    // driving the clock exactly as they do on the server.
     const uint32_t guard_id = clock_guard_behavior_id(m_bml, s);
     const uint32_t pause_id = pause_sensor_behavior_id(m_bml);
     if (!guard_id)
@@ -752,6 +1047,11 @@ void BallanceMMOClient::physics_session_anchor() {
         float factor = 0.0f, delta = 0.0f;
         if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
     }
+    // A level (re)entry brought a new Event_handler graph: drop the previous
+    // table and resolve the pause chains' script edits again (see
+    // pause_scripts_resolve).
+    pause_scripts_restore();
+    pause_scripts_resolve();
     bmmo::physics::world_hash hash;
     if (!physics_view_.capture(hash, error)) {
         physics_session_end_local("world hash failed: " + error);
@@ -893,6 +1193,10 @@ void BallanceMMOClient::physics_session_frame() {
         float factor = 0.0f, delta = 0.0f;
         if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
     }
+    // The pause chains' script edits stay neutralized for as long as the
+    // session runs: the menu may be opened at any tick, and a target a level
+    // reset handed back must be emptied again before the chain can use it.
+    pause_scripts_apply();
 
     // The tick driver restarted its schedule (pause, long stall): our tick
     // numbers no longer line up with the server's.
@@ -992,12 +1296,14 @@ void BallanceMMOClient::physics_session_frame() {
     // executes before the camera scripts of a frame), nav state after this
     // frame's scripts.
 
-    // Pause menu (ESC): the retail scripts stop Gameplay_Ingame, which also
-    // stops the keyboard poll they drive, while the session keeps stepping
-    // (PreSimulate clock guard).  Report zero keys and stop the replica from
-    // polling them, so the ball is not driven by the arrow keys the player
-    // holds while the menu is open.
-    const bool muted = m_bml->IsIngame() && !gameplay_ingame_script_active();
+    // Pause menu (ESC): the menu is the game's paused state, and while it is
+    // open the player's arrow keys must not drive the ball.  The retail scripts
+    // no longer stop Gameplay_Ingame for us (pause_scripts_resolve keeps them
+    // running, so the world keeps stepping), which also means the keyboard poll
+    // they drive keeps reading the held keys: report zero keys and stop the
+    // replica from polling them, exactly as the old "ingame script stopped"
+    // gate did when the menu deactivated it.
+    const bool muted = m_bml->IsIngame() && m_bml->IsPaused();
     if (muted != s.input_muted) {
         logger_->Info("Physics session: input %s (ingame script %d, paused %d)", muted ? "muted" : "live",
                       gameplay_ingame_script_active() ? 1 : 0, m_bml->IsPaused() ? 1 : 0);
