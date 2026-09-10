@@ -517,9 +517,11 @@ private:
 	void physics_session_send_event(bmmo::session_event_msg& event);
 	void physics_session_apply_queues();
 	// Option A: mechanisms are server-authoritative here.  note_* stores a
-	// snapshot row, apply_* renders the stored poses once per frame.
+	// snapshot row, apply_* renders the stored poses once per frame, pose_*
+	// re-poses them for one re-simulated tick (rollback_world::pre_step).
 	void physics_session_note_mechanism(uint32_t tick, const bmmo::session::body_state& body);
 	void physics_session_apply_mechanism_authority();
+	void physics_session_pose_mechanisms(uint32_t tick);
 	void physics_session_cache_ball_row(uint32_t tick, const bmmo::session::body_state& body);
 	void physics_session_apply_event(const bmmo::session_event_msg& event);
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
@@ -530,6 +532,7 @@ private:
 	void physics_session_zero_retail_forces();
 	bmmo::session::rollback_world physics_session_rollback_world();
 	bool physics_session_rollback(const bmmo::session_snapshot_msg& snapshot);
+	void physics_session_check_input_starvation();
 	void physics_session_request_resync(const char* reason);
 	void physics_session_apply_resync(const bmmo::session_snapshot_msg& snapshot);
 	float physics_session_ball_force(uint8_t ball_type) const;

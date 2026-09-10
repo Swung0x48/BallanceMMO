@@ -1097,3 +1097,50 @@ TEST(RollbackEngine, DefaultLimitsCoverTheWorstServerLead) {
     EXPECT_GE(limits.max_resim_ticks, bmmo::session::kInputDelayMaxTicks + 2);
     EXPECT_GE(limits.history_ticks, 2 * static_cast<size_t>(limits.max_resim_ticks));
 }
+
+// The client re-poses the server-authoritative mechanism bodies for every
+// re-simulated tick (rollback_world::pre_step): they are not in the tracked
+// set, so without the hook the replayed ball meets one frozen mechanism pose
+// for the whole replay.  The hook must fire for exactly T+1..current, in
+// ascending order, each call before its own world.step() - and only when a
+// re-simulation actually runs.  Null on the server and in the other tests.
+TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 5, 100, own_inputs);   // clears the call log
+
+    auto w = world.adapter();
+    std::vector<uint32_t> posed;
+    w.pre_step = [&](uint32_t tick) {
+        posed.push_back(tick);
+        world.calls.push_back("pre_step " + std::to_string(tick));
+    };
+
+    // the server had the own ball 0.5 m further at tick 2, while the client is
+    // at tick 5: a real rollback over ticks 3, 4 and 5
+    fake_body server_own;
+    server_own.position[0] = 0.5;
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
+    ASSERT_TRUE(engine.on_snapshot(w, snapshot, 5, entity_of,
+                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    ASSERT_EQ(engine.stats().resim_ticks, 3u);
+    EXPECT_EQ(posed, (std::vector<uint32_t>{3, 4, 5}));   // exactly T+1..current, ascending
+
+    // every re-simulated step was preceded by the hook call for its own tick
+    std::vector<std::string> order;
+    for (const auto& call: world.calls)
+        if (call == "step" || call.rfind("pre_step ", 0) == 0) order.push_back(call);
+    EXPECT_EQ(order, (std::vector<std::string>{"pre_step 3", "step", "pre_step 4", "step", "pre_step 5", "step"}));
+
+    // the hook belongs to the re-simulation alone: a matching snapshot runs no
+    // re-simulation and must not call it again
+    const size_t calls_before = world.calls.size();
+    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(5, {ball_body(1, world.bodies["Own"]),
+                                                       ball_body(2, world.bodies["Remote"])}),
+                                    5, entity_of, [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_EQ(posed, (std::vector<uint32_t>{3, 4, 5}));
+    EXPECT_EQ(world.calls.size(), calls_before);
+}

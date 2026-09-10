@@ -54,6 +54,199 @@ namespace {
     // would only disturb the core's sleep state.
     constexpr double kMechanismWriteEpsilon = 1e-4;
 
+    // The pose one mechanism has to be written with at a given tick, computed
+    // from the stored authoritative rows.  One computation for both writers -
+    // the live applier (the render tick) and the re-simulation poser (every
+    // replayed tick, rollback_world::pre_step) - so a replayed tick renders a
+    // mechanism exactly as the live path would have rendered it.
+    struct mechanism_target {
+        double position[3] = {};
+        double rotation[4] = {0.0, 0.0, 0.0, 1.0};
+        float linear[3] = {};
+        float angular[3] = {};
+        bool simulated = false;   // the governing row's wake flag
+        bool snap = false;        // write as a snap: teleport row or a local body elsewhere
+    };
+
+    // `elsewhere` is the applier's kMechanismSnapJump test: our local body is
+    // further than that from the authoritative pose (after a resync, or a
+    // sector re-entry), so the exact newer pose is written instead of a lerp or
+    // a dead-reckon, and the write rechecks the contacts.  The live path passes
+    // it, a re-simulation does not: there the local pose is this hook's own
+    // write for the previous tick, so that distance means nothing.
+    mechanism_target mechanism_target_at(const physics_session_state::mechanism_pose_history& history, uint32_t tick,
+                                         bool elsewhere) {
+        const auto& rows = history.rows;
+        const auto& newest = rows.back();
+        mechanism_target out;
+        const auto copy_pose = [](const auto& row, mechanism_target& target) {
+            for (int k = 0; k < 3; ++k) {
+                target.position[k] = row.position[k];
+                target.linear[k] = row.linear[k];
+                target.angular[k] = row.angular[k];
+            }
+            for (int k = 0; k < 4; ++k) target.rotation[k] = row.rotation[k];
+            target.simulated = row.simulated;
+        };
+        // A pair further apart than kMechanismSnapTravel is a teleport (sector
+        // change, level reset, re-entry): its two poses are not two ends of one
+        // motion, so the newer one is used exactly, never interpolated across.
+        const auto teleport = [](const auto& older, const auto& newer) {
+            if (older.tick >= newer.tick) return false;
+            double travel = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double d = newer.position[k] - older.position[k];
+                travel += d * d;
+            }
+            return std::sqrt(travel) > kMechanismSnapTravel;
+        };
+        if (tick >= newest.tick) {
+            // The normal case: the newest row is one input delay plus half the
+            // round trip old, so dead-reckon it along its own velocity up to the
+            // render tick.  The session steps 1000/66 ms per tick (world.step
+            // below), hence the lead in ticks.
+            copy_pose(newest, out);
+            const bool jumped = rows.size() >= 2 && teleport(rows[rows.size() - 2], newest);
+            if (jumped) {
+                // The velocity of a row that teleported says nothing about the
+                // jump: write the pose exactly, with a contact recheck.
+                out.snap = true;
+                return out;
+            }
+            double dt = 0.0;
+            if (!elsewhere && newest.simulated) {
+                dt = std::min(static_cast<double>(tick - newest.tick) / 66.0, kMechanismMaxLead);
+                double speed = 0.0, spin = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    speed += static_cast<double>(newest.linear[k]) * newest.linear[k];
+                    spin += static_cast<double>(newest.angular[k]) * newest.angular[k];
+                }
+                speed = std::sqrt(speed);
+                spin = std::sqrt(spin);
+                if (speed > 0.0) dt = std::min(dt, kMechanismMaxExtrapolation / speed);
+                if (spin > 0.0) dt = std::min(dt, kMechanismMaxExtrapolationAngle / spin);
+            }
+            // A frozen row (simulated == false) holds its pose: dt stays 0.
+            out.snap = elsewhere;
+            for (int k = 0; k < 3; ++k) out.position[k] = newest.position[k] + newest.linear[k] * dt;
+            if (dt > 0.0) {
+                // rot_speed is core space (ivp_core.hxx:177; the core carries
+                // the object's orientation for the physicalized props), so it
+                // is rotated into the world frame by the row's own quaternion
+                // (v' = v + 2w (q x v) + 2 q x (q x v)) before the derivative
+                // q' = normalize(q + 1/2 dt (w (x) q)) - the same rotation the
+                // engine integrates with q_new = q (x) q_core_f_core
+                // (ivp_calc_next_psi_solver.cxx:180).
+                const double qx = newest.rotation[0], qy = newest.rotation[1];
+                const double qz = newest.rotation[2], qw = newest.rotation[3];
+                const double tx = 2.0 * (qy * newest.angular[2] - qz * newest.angular[1]);
+                const double ty = 2.0 * (qz * newest.angular[0] - qx * newest.angular[2]);
+                const double tz = 2.0 * (qx * newest.angular[1] - qy * newest.angular[0]);
+                const double wx = newest.angular[0] + qw * tx + (qy * tz - qz * ty);
+                const double wy = newest.angular[1] + qw * ty + (qz * tx - qx * tz);
+                const double wz = newest.angular[2] + qw * tz + (qx * ty - qy * tx);
+                const double h = 0.5 * dt;
+                const double nx = qx + h * (wx * qw + wy * qz - wz * qy);
+                const double ny = qy + h * (-wx * qz + wy * qw + wz * qx);
+                const double nz = qz + h * (wx * qy - wy * qx + wz * qw);
+                const double nw = qw - h * (wx * qx + wy * qy + wz * qz);
+                const double norm = std::sqrt(nx * nx + ny * ny + nz * nz + nw * nw);
+                // A degenerate (non-unit / zero) row keeps its own rotation.
+                if (norm > 1e-9) {
+                    out.rotation[0] = nx / norm;
+                    out.rotation[1] = ny / norm;
+                    out.rotation[2] = nz / norm;
+                    out.rotation[3] = nw / norm;
+                }
+            }
+            return out;
+        }
+        // The newest row with a tick <= `tick`, and the one after it: `tick`
+        // sits inside that pair (or before every retained row).  Rows are
+        // strictly ascending in tick (physics_session_note_mechanism).
+        size_t upper = rows.size() - 1;
+        while (upper > 0 && rows[upper - 1].tick > tick) --upper;
+        if (upper == 0) {
+            // Older than every retained row (a resync that jumped back further
+            // than the history reaches): hold the oldest row's pose rather than
+            // run the body backwards.  Not a snap, exactly as before the
+            // history existed: this is a held pose, not a beam into a contact.
+            copy_pose(rows.front(), out);
+            return out;
+        }
+        const auto& older = rows[upper - 1];
+        const auto& newer = rows[upper];
+        copy_pose(newer, out);   // rotation and velocities are the newer row's
+        out.snap = teleport(older, newer) || elsewhere;
+        if (out.snap) return out;   // teleport / local body elsewhere: the exact newer pose
+        const double span = static_cast<double>(newer.tick - older.tick);
+        const double alpha = std::clamp((static_cast<double>(tick) - older.tick) / span, 0.0, 1.0);
+        for (int k = 0; k < 3; ++k)
+            out.position[k] = older.position[k] + alpha * (newer.position[k] - older.position[k]);
+        return out;
+    }
+
+    // Already there: leave the core (and its sleep state) alone instead of
+    // rewriting the same pose.  Shared by the applier (once per frame) and the
+    // re-simulation poser, where a stationary mechanism would otherwise be
+    // rewritten - and woken - on every replayed tick.
+    bool mechanism_pose_unchanged(const bmmo_physics_body_state& local, const mechanism_target& target) {
+        double dq = 0.0, dp = 0.0, dv = 0.0;
+        for (int k = 0; k < 4; ++k) dq += target.rotation[k] * local.rotation[k];
+        for (int k = 0; k < 3; ++k) {
+            dp += (target.position[k] - local.position[k]) * (target.position[k] - local.position[k]);
+            dv += (target.linear[k] - local.linear[k]) * (target.linear[k] - local.linear[k]);
+        }
+        return std::sqrt(dp) < kMechanismWriteEpsilon && std::sqrt(dv) < kMechanismWriteEpsilon
+            && std::fabs(std::fabs(dq) - 1.0) < kMechanismWriteEpsilon;
+    }
+
+    // The mechanism bodies a pose write can target, resolved once per writer.
+    // A dictionary name can be carried by several server bodies (Level 8 has
+    // two same-named P_Modul_30_Wippe instances 332 m apart in different
+    // sectors), so the owners sharing a name are narrowed to the one whose
+    // authoritative pose is nearest our own local body - and a name this client
+    // has no physicalized body for is another sector's instance and is skipped.
+    // `history` points into mechanism_authority: nothing removes one mechanism's
+    // entry while the session runs, so it stays valid for the write.
+    struct mechanism_candidate {
+        std::string name;
+        bmmo_physics_body_state local{};
+        const physics_session_state::mechanism_pose_history* history = nullptr;
+        double distance = 0.0;   // squared, the chosen history's newest row to `local`
+    };
+
+    std::vector<mechanism_candidate> mechanism_candidates(const physics_session_state& s,
+                                                          const bmmo::physics::physics_view& view) {
+        std::vector<mechanism_candidate> out;
+        if (s.mechanism_names.empty() || s.mechanism_authority.empty()) return out;
+        std::map<std::string, std::vector<uint32_t>> owners_by_name;
+        for (const auto& [owner, name]: s.mechanism_names) {
+            const auto it = s.mechanism_authority.find(owner);
+            if (it != s.mechanism_authority.end() && !it->second.rows.empty()) owners_by_name[name].push_back(owner);
+        }
+        std::string error;
+        for (const auto& [name, owners]: owners_by_name) {
+            mechanism_candidate candidate;
+            candidate.name = name;
+            if (!view.get_body_state(name.c_str(), candidate.local, error)) continue;   // not physicalized here
+            for (uint32_t owner: owners) {
+                const auto& history = s.mechanism_authority.at(owner);
+                double distance = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    const double d = history.rows.back().position[k] - candidate.local.position[k];
+                    distance += d * d;
+                }
+                if (!candidate.history || distance < candidate.distance) {
+                    candidate.history = &history;
+                    candidate.distance = distance;
+                }
+            }
+            out.push_back(std::move(candidate));
+        }
+        return out;
+    }
+
     void copy_name(char* out, size_t size, const std::string& text) {
         std::snprintf(out, size, "%s", text.c_str());
     }
@@ -174,32 +367,52 @@ void BallanceMMOClient::handle_session_assign(const bmmo::session_assign_msg& ms
     utils_.run_on_game_thread([this, session = msg.session, first_tick = msg.first_tick] {
         auto& s = physics_session_;
         if (s.session != session || s.phase != phase_type::running) return;
+        // Both branches below renumber, and a renumber invalidates everything
+        // the server acked under the old numbering: the first snapshot of the
+        // new one sets the starvation detector's baseline again.
+        s.acked_input.reset();
         if (s.assigned) {
             // Resync (design 9.2): tick numbering restarts from the server's
             // current tick, histories are dropped, the next full snapshot
             // rebuilds every body.
-            s.tick_base = first_tick;
-            s.frames_since_anchor = 0;
-            s.input_history.clear();
-            s.own_inputs.clear();
-            s.rollback.invalidate_history();
-            s.corrector.clear();
-            for (auto& [id, remote]: s.remotes) remote.corrector.clear();
+            s.rebase_tick(first_tick);
             s.resync_pending = true;
             s.have_snapshot = false;
-            s.consecutive_hard = s.consecutive_unmatched = 0;
             bmmo::session::client_journal::instance().note(
                     s.tick_base, std::format("resync: reassigned, tick base {}", s.tick_base));
             logger_->Info("Physics session %u: resynced, tick base %u", s.session, s.tick_base);
             return;
         }
         s.assigned = true;
-        s.tick_base = first_tick;
+        if (first_tick != 0) {
+            // A numbered base.  The server hands one out at a session start
+            // (the session's start lead, protocol 2.2) as well as to a late join
+            // or a resync (its current tick plus the same lead), so this is the
+            // ordinary path.  The frames recorded before this assignment carry
+            // OUR numbers - the anchor-relative ones, which name ticks the
+            // server never asked us for - while the server's read cursor starts
+            // at the base.  Keeping them would leave the base's own frames
+            // missing for as long as the anchor ran ahead (the server fills
+            // those ticks with a repeated frame), plus a permanent k-tick extra
+            // lead on top of the input delay that every snapshot arrives that
+            // much further behind.  Renumber here, exactly like the headless
+            // session client (sim/session_client.cpp).
+            const int64_t renumbered = s.frames_since_anchor;
+            s.rebase_tick(first_tick);
+            logger_->Info("Physics session %u: tick base %u assigned (renumbered, %lld anchor-relative frames dropped)",
+                          s.session, s.tick_base, static_cast<long long>(renumbered));
+        } else {
+            // Base 0: a server that still numbers the members present at the
+            // start from their own anchor.  The backlog frames stamped 0..k-1
+            // are valid inputs it is waiting for, and renumbering would relabel
+            // them.
+            s.tick_base = first_tick;
+            logger_->Info("Physics session %u: tick base %u assigned (%lld frames since anchor)", s.session,
+                          s.tick_base, static_cast<long long>(s.frames_since_anchor));
+        }
         s.last_rebases = fixed_tick_.rebases();
         bmmo::session::client_journal::instance().note(
                 s.tick_base, std::format("assigned: tick base {}", s.tick_base));
-        logger_->Info("Physics session %u: tick base %u assigned (%lld frames since anchor)", s.session,
-                      s.tick_base, static_cast<long long>(s.frames_since_anchor));
         physics_session_flush_inputs();
     });
 }
@@ -539,8 +752,10 @@ void BallanceMMOClient::physics_session_anchor() {
 // Opens this session's black box (session/session_journal_client.hpp) at the
 // anchor, where the world the server will hash is finally known.  The tick base
 // is not: it arrives with SessionAssign and goes into a NOTE, so the header's
-// first_tick stays 0.  A journal that cannot be opened is logged once and the
-// session runs without one.
+// first_tick stays 0 - the records before the assignment are numbered from the
+// anchor, and the renumbering (a start member's base included) shows up in the
+// file as a jump, which is what sim_tool's --continue-after-jump is for.  A
+// journal that cannot be opened is logged once and the session runs without one.
 void BallanceMMOClient::physics_session_journal_begin() {
     auto& s = physics_session_;
     auto& journal = bmmo::session::client_journal::instance();
@@ -890,8 +1105,7 @@ void BallanceMMOClient::physics_session_frame() {
     // already in flight will bring the full snapshot this needs.
     const uint64_t too_far_before = s.rollback.stats().too_far;
     const uint64_t frozen_before = s.rollback.stats().frozen;
-    const uint64_t judged_before = s.rollback.stats().snapshots;
-    const uint64_t matched_before = s.rollback.stats().matched;
+    const uint64_t unmatched_before = s.rollback.stats().unmatched;
     physics_session_apply_queues();
     // Option A: after the queue was drained, every mechanism has this
     // snapshot's authority row; render it before the rollback decision below
@@ -901,21 +1115,31 @@ void BallanceMMOClient::physics_session_frame() {
         const auto& rollback = s.rollback.stats();
         // The rollback path returns before the correction ladder of the
         // non-rollback path, so that ladder's resync triggers never run here.
-        // A snapshot the engine judged without a single body matching it - the
-        // tick was missing from the history, or a body kept breaching its
-        // tolerance - is the same loss of usable history, so count it: matched
-        // is the only counter that proves the tick's record was found and
-        // every tracked body agreed.
-        const uint64_t judged = rollback.snapshots - judged_before;
-        if (rollback.matched != matched_before) s.consecutive_unmatched = 0;
-        else if (judged > 0) s.consecutive_unmatched += static_cast<int>(judged);
+        //
+        // Design 9.2 escalates to a resync for a tick-NUMBERING desync, and
+        // the one engine outcome that can mean that is `unmatched` (journal
+        // kind 7): the snapshot's tick was not in our history, or a tracked
+        // body was missing from it, so there was nothing to compare.  A
+        // mismatch (kind 0) or a rollback (kind 1) proves the opposite - the
+        // tick's record was found and every tracked body was compared, which
+        // is exactly what aligned numbering looks like - so a divergence that
+        // keeps being corrected, a mechanism fight or a bad spawn, must not
+        // count towards the escalation.  Counting it did: 30 non-matching
+        // snapshots is 60 ticks of sustained divergence, and every one of them
+        // wiped the history, the inputs and the ball's correction state.
+        const uint64_t unmatched = rollback.unmatched - unmatched_before;
+        if (unmatched == 0) s.consecutive_unmatched = 0;
+        else s.consecutive_unmatched += static_cast<int>(unmatched);
         if (rollback.too_far != too_far_before)
             physics_session_request_resync("rollback lag beyond the re-simulation window");
         else if (rollback.frozen != frozen_before)
             physics_session_request_resync("local physics clock frozen");
         else if (s.consecutive_unmatched >= 30)
-            physics_session_request_resync("30 snapshots without a match");
+            physics_session_request_resync("30 snapshots with no record of their tick");
     }
+    // Input starvation (design 9.2 follow-up): separate from the tick-numbering
+    // desync above, and the one failure that hides behind a healthy session.
+    physics_session_check_input_starvation();
 
     // Continue running blends (own ball and remote balls).
     auto apply_blend = [&](const std::string& name, bmmo::session::body_corrector& corrector) {
@@ -1150,6 +1374,10 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
         ++s.snapshots_stale;
         return;
     }
+    // The snapshot stream is alive as of this frame: the starvation detector
+    // needs to know that a silent acked tick is a numbering hole and not a
+    // stream that stopped (a network outage, a different failure entirely).
+    s.acked_input.snapshot_frame = s.frames_since_anchor;
     for (const auto& body: snapshot.bodies)
         if (body.kind == bmmo::session::body_kind::Ball)
             physics_session_cache_ball_row(snapshot.tick, body);
@@ -1167,14 +1395,25 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
     s.last_snapshot_tick = std::max(s.last_snapshot_tick, snapshot.tick);
     ++s.snapshots_applied;
     // Did the server have our input for the tick it just simulated, or did it
-    // fall back on the last one it had?  Kept out of physics_session_state so
-    // the mod class's layout does not move (see the F3 panel commit).
+    // fall back on the last one it had?  The reported counters are file-scope
+    // so the mod class's layout does not move (see the F3 panel commit); the
+    // starvation detector's own state is a session member, because it has to be
+    // dropped together with the numbering it was measured under.
     if (s.assigned) {
         ++input_freshness.reports;
         input_freshness.last_acked = snapshot.acked_input_tick;
         if (snapshot.acked_input_tick < snapshot.tick) ++input_freshness.starved;
         const uint32_t lag = s.current_tick() > snapshot.tick ? s.current_tick() - snapshot.tick : 0;
         input_freshness.lag_sum += lag;
+        // Input starvation detector: acked_input_tick is the server's read
+        // cursor for us.  The first one of a numbering is the baseline, and
+        // every later change moves it; the frame it last moved at is what
+        // physics_session_check_input_starvation measures against.
+        if (!s.acked_input.have || snapshot.acked_input_tick != s.acked_input.tick) {
+            s.acked_input.have = true;
+            s.acked_input.tick = snapshot.acked_input_tick;
+            s.acked_input.frame = s.frames_since_anchor;
+        }
     }
     const auto own_id = db_.get_client_id();
     CK3dObject* ball = get_current_ball();
@@ -1535,6 +1774,10 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         std::string error;
         return physics_view_.step_physics(1000.0f / 66.0f, error);
     };
+    // Option A: the mechanisms are not in the tracked set, so the re-simulation
+    // would replay the ball against the one pose the frame's applier left them
+    // at - the applier runs once per frame, not once per replayed tick.
+    world.pre_step = [this](uint32_t tick) { physics_session_pose_mechanisms(tick); };
     world.simulating = [this]() {
         float factor = 0.0f, delta = 0.0f;
         std::string error;
@@ -1609,6 +1852,46 @@ bool BallanceMMOClient::physics_session_rollback(const bmmo::session_snapshot_ms
     return rolled;
 }
 
+// Input starvation (design 9.2 follow-up).  Every snapshot carries the tick the
+// server last consumed a FRESH input frame from us for.  If our numbering ever
+// falls behind that per-player read cursor, the server drops every later frame
+// as stale and simulates our ball from the last frame it had - for the rest of
+// the session, because input_buffer::reset() never moves that cursor back and
+// nothing else notices: our snapshot stream keeps arriving and keeps
+// correcting us, it is just correcting a ball steered by stale input (the
+// failure in docs/multiplayer-rollback-retest-20260909.md).  Healing it needs
+// the same re-anchor a tick-numbering desync needs, and the client is the right
+// side to ask for it: it is the only member that knows both its own numbering
+// and what the server acknowledged, and asking costs the server no determinism
+// (design 9.2).
+void BallanceMMOClient::physics_session_check_input_starvation() {
+    auto& s = physics_session_;
+    if (s.phase != phase_type::running || !s.assigned || s.resync_pending) return;
+    // No baseline yet, or no snapshot to judge it against: nothing to fire on.
+    if (!s.have_snapshot || !s.acked_input.have) return;
+    // A stream that has stopped is a network outage, not a numbering hole:
+    // a resync cannot bring the server back, and the reconnect path owns it.
+    constexpr int64_t kSnapshotFreshFrames = 66;   // one full-snapshot cadence
+    if (s.frames_since_anchor - s.acked_input.snapshot_frame > kSnapshotFreshFrames) return;
+    // Two seconds (~132 frames) without the read cursor moving, while the
+    // stream is alive.  acked_input_tick rides EVERY snapshot, delta ones
+    // included (server.cpp on_session_snapshot fills it from the runner's acked
+    // map), so a healthy numbering moves it about every other tick and two
+    // seconds of silence is ~130 snapshots with no fresh frame in any of them.
+    // Had it been carried on the 66-tick full snapshots only, this would have
+    // to be 200 so that two consecutive fulls must both show no advance.
+    constexpr int64_t kStarvedFrames = 132;
+    const int64_t starved = s.frames_since_anchor - s.acked_input.frame;
+    if (starved <= kStarvedFrames) return;
+    logger_->Warn("Physics session %u: server has not consumed a fresh input for %lld ticks (acked %u, our tick %u); "
+                  "tick numbering hole suspected", s.session, static_cast<long long>(starved), s.acked_input.tick,
+                  s.current_tick());
+    physics_session_request_resync("no fresh input consumed for 2 s");
+    // Measure the next window from here: request_resync rate-limits itself, and
+    // a request already in flight brings the re-anchor this needs.
+    s.acked_input.frame = s.frames_since_anchor;
+}
+
 // Resync request (design 9.2), at most one every two seconds.
 void BallanceMMOClient::physics_session_request_resync(const char* reason) {
     auto& s = physics_session_;
@@ -1655,8 +1938,8 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
             if (!body.name.empty()) s.mechanism_names[body.owner] = body.name;
             auto name = s.mechanism_names.find(body.owner);
             if (name == s.mechanism_names.end()) continue;
-            // Option A: the applier renders from the stored pair, so the hard
-            // set below is also the first half of it.
+            // Option A: the applier renders from the stored rows, so the hard
+            // set below is also the newest row of the history.
             physics_session_note_mechanism(snapshot.tick, body);
             target = name->second.c_str();
         }
@@ -1703,22 +1986,18 @@ void BallanceMMOClient::physics_session_cache_ball_row(uint32_t tick, const bmmo
 // snapshot, full or not (the non-full ones carry exactly the simulated bodies,
 // which are the ones that move), and are keyed by the server's owner index -
 // so a row is kept even before its dictionary name is known, and two instances
-// that share one name never mix.
+// that share one name never mix.  The history is bounded (kMechanismRows): a
+// re-simulation re-poses the body from these rows once per replayed tick.
 void BallanceMMOClient::physics_session_note_mechanism(uint32_t tick, const bmmo::session::body_state& body) {
-    auto& authority = physics_session_.mechanism_authority[body.owner];
-    if (authority.have_latest) {
-        if (authority.latest.tick > tick) return;   // a queued older snapshot
-        if (authority.latest.tick < tick) {
-            // A newer interval: the pose that was newest becomes the older half
-            // of the pair.
-            authority.previous = authority.latest;
-            authority.have_previous = true;
-        }
-        // Equal tick: replace the newest pose in place and leave the pair
-        // alone, so the applier keeps the span it had instead of a pair that
-        // collapsed onto one tick.
+    auto& rows = physics_session_.mechanism_authority[body.owner].rows;
+    if (!rows.empty()) {
+        if (rows.back().tick > tick) return;   // a queued older snapshot
+        // Equal tick: a re-sent row of the same tick replaces the newest one,
+        // so the history keeps ascending unique ticks instead of two rows the
+        // interpolation would see as a zero-length interval.
+        if (rows.back().tick == tick) rows.pop_back();
     }
-    auto& pose = authority.latest;
+    auto& pose = rows.emplace_back();
     pose.tick = tick;
     for (int k = 0; k < 3; ++k) {
         pose.position[k] = body.position[k];
@@ -1727,150 +2006,58 @@ void BallanceMMOClient::physics_session_note_mechanism(uint32_t tick, const bmmo
     }
     for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
     pose.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
-    authority.have_latest = true;
+    while (rows.size() > physics_session_state::kMechanismRows) rows.pop_front();
 }
 
 // Option A: render the stored authoritative mechanism poses, once per frame
 // after the snapshot queue was drained.  Only bodies this client actually has
 // are written (a mechanism of another sector is not physicalized here), and a
 // dictionary name carried by several server bodies is driven by the one whose
-// authoritative pose is nearest to ours.  A render tick inside a snapshot pair
-// interpolates the pair; past the newest row the pose is dead-reckoned along
-// that row's authoritative velocity, and a teleport is always written as a
-// snap, so a mechanism that lands on a sleeping ball still builds the contact
-// pair instead of resting inside it until the next server correction.
+// authoritative pose is nearest to ours.  The pose itself comes from the shared
+// helper: a render tick inside a snapshot pair interpolates the pair, past the
+// newest row it is dead-reckoned along that row's authoritative velocity, and a
+// teleport (or a local body somewhere else entirely) is written as a snap, so a
+// mechanism that lands on a sleeping ball still builds the contact pair instead
+// of resting inside it until the next server correction.
 void BallanceMMOClient::physics_session_apply_mechanism_authority() {
     auto& s = physics_session_;
-    if (s.mechanism_names.empty() || s.mechanism_authority.empty()) return;
-    std::map<std::string, std::vector<uint32_t>> candidates;
-    for (const auto& [owner, name]: s.mechanism_names) {
-        const auto it = s.mechanism_authority.find(owner);
-        if (it != s.mechanism_authority.end() && it->second.have_latest) candidates[name].push_back(owner);
-    }
     const uint32_t tick = s.current_tick();
     std::string error;
-    for (const auto& [name, owners]: candidates) {
-        bmmo_physics_body_state local{};
-        if (!physics_view_.get_body_state(name.c_str(), local, error)) continue;   // not physicalized here
-        const physics_session_state::mechanism_pose_pair* history = nullptr;
-        double nearest = 0.0;
-        for (uint32_t owner: owners) {
-            const auto& authority = s.mechanism_authority[owner];
-            double distance = 0.0;
-            for (int k = 0; k < 3; ++k) {
-                const double d = authority.latest.position[k] - local.position[k];
-                distance += d * d;
-            }
-            if (!history || distance < nearest) {
-                history = &authority;
-                nearest = distance;
-            }
-        }
-        if (!history) continue;
-        const auto& latest = history->latest;
-        // A pair further apart than kMechanismSnapTravel is a teleport (sector
-        // change, level reset, re-entry); a newest row further than
-        // kMechanismSnapJump from the local pose means our body is somewhere
-        // else entirely.  Neither may be interpolated or extrapolated across.
-        const bool pair = history->have_previous && history->previous.tick < latest.tick;
-        double travel = 0.0;
-        if (pair)
-            for (int k = 0; k < 3; ++k) {
-                const double d = latest.position[k] - history->previous.position[k];
-                travel += d * d;
-            }
-        const bool teleport = pair && std::sqrt(travel) > kMechanismSnapTravel;
-        const bool elsewhere = std::sqrt(nearest) > kMechanismSnapJump;
-        double position[3];
-        double rotation[4];
-        for (int k = 0; k < 4; ++k) rotation[k] = latest.rotation[k];
-        bool snap = false;
-        if (history->have_previous && history->previous.tick < tick && tick <= latest.tick) {
-            // The render tick sits inside the pair - the post-resync window, in
-            // which current_tick jumps backward: interpolate the two rows.
-            const double span = static_cast<double>(latest.tick - history->previous.tick);
-            double alpha = std::clamp((static_cast<double>(tick) - history->previous.tick) / span, 0.0, 1.0);
-            if (teleport || elsewhere) {
-                alpha = 1.0;   // teleport or a local body elsewhere: snap, never lerp
-                snap = true;
-                ++s.mechanism_snaps;
-            }
-            for (int k = 0; k < 3; ++k)
-                position[k] = history->previous.position[k] + alpha * (latest.position[k] - history->previous.position[k]);
-        } else if (tick >= latest.tick) {
-            // The normal case: the newest row is one input delay plus half the
-            // round trip old, so dead-reckon it along its own velocity up to
-            // the render tick.  The session steps 1000/66 ms per tick
-            // (world.step below), hence the lead in ticks.
-            double dt = 0.0;
-            if (teleport || elsewhere) {
-                // The velocity of a row that teleported says nothing about the
-                // jump: write the pose exactly, with a contact recheck.
-                snap = true;
-                ++s.mechanism_snaps;
-            } else if (latest.simulated) {
-                dt = std::min(static_cast<double>(tick - latest.tick) / 66.0, kMechanismMaxLead);
-                double speed = 0.0, spin = 0.0;
-                for (int k = 0; k < 3; ++k) {
-                    speed += static_cast<double>(latest.linear[k]) * latest.linear[k];
-                    spin += static_cast<double>(latest.angular[k]) * latest.angular[k];
-                }
-                speed = std::sqrt(speed);
-                spin = std::sqrt(spin);
-                if (speed > 0.0) dt = std::min(dt, kMechanismMaxExtrapolation / speed);
-                if (spin > 0.0) dt = std::min(dt, kMechanismMaxExtrapolationAngle / spin);
-            }
-            // A frozen row (simulated == false) holds its pose: dt stays 0.
-            for (int k = 0; k < 3; ++k) position[k] = latest.position[k] + latest.linear[k] * dt;
-            if (dt > 0.0) {
-                // rot_speed is core space (ivp_core.hxx:177; the core carries
-                // the object's orientation for the physicalized props), so it
-                // is rotated into the world frame by the row's own quaternion
-                // (v' = v + 2w (q x v) + 2 q x (q x v)) before the derivative
-                // q' = normalize(q + 1/2 dt (w (x) q)) - the same rotation the
-                // engine integrates with q_new = q (x) q_core_f_core
-                // (ivp_calc_next_psi_solver.cxx:180).
-                const double qx = latest.rotation[0], qy = latest.rotation[1];
-                const double qz = latest.rotation[2], qw = latest.rotation[3];
-                const double tx = 2.0 * (qy * latest.angular[2] - qz * latest.angular[1]);
-                const double ty = 2.0 * (qz * latest.angular[0] - qx * latest.angular[2]);
-                const double tz = 2.0 * (qx * latest.angular[1] - qy * latest.angular[0]);
-                const double wx = latest.angular[0] + qw * tx + (qy * tz - qz * ty);
-                const double wy = latest.angular[1] + qw * ty + (qz * tx - qx * tz);
-                const double wz = latest.angular[2] + qw * tz + (qx * ty - qy * tx);
-                const double h = 0.5 * dt;
-                const double nx = qx + h * (wx * qw + wy * qz - wz * qy);
-                const double ny = qy + h * (-wx * qz + wy * qw + wz * qx);
-                const double nz = qz + h * (wx * qy - wy * qx + wz * qw);
-                const double nw = qw - h * (wx * qx + wy * qy + wz * qz);
-                const double norm = std::sqrt(nx * nx + ny * ny + nz * nz + nw * nw);
-                // A degenerate (non-unit / zero) row keeps its own rotation.
-                if (norm > 1e-9) {
-                    rotation[0] = nx / norm;
-                    rotation[1] = ny / norm;
-                    rotation[2] = nz / norm;
-                    rotation[3] = nw / norm;
-                }
-            }
-        } else {
-            // Older than both rows (a resync that jumped back further than one
-            // interval): hold the newest pose rather than run backwards.
-            for (int k = 0; k < 3; ++k) position[k] = latest.position[k];
-        }
-        double dq = 0.0, dp = 0.0, dv = 0.0;
-        for (int k = 0; k < 4; ++k) dq += rotation[k] * local.rotation[k];
-        for (int k = 0; k < 3; ++k) {
-            dp += (position[k] - local.position[k]) * (position[k] - local.position[k]);
-            dv += (latest.linear[k] - local.linear[k]) * (latest.linear[k] - local.linear[k]);
-        }
-        // Already there: leave the core (and its sleep state) alone instead of
-        // rewriting the same pose every frame.
-        if (std::sqrt(dp) < kMechanismWriteEpsilon && std::sqrt(dv) < kMechanismWriteEpsilon
-                && std::fabs(std::fabs(dq) - 1.0) < kMechanismWriteEpsilon)
-            continue;
-        if (physics_view_.set_body_state(name.c_str(), position, rotation, latest.linear, latest.angular,
-                                         latest.simulated, error, snap))
+    for (const auto& candidate: mechanism_candidates(s, physics_view_)) {
+        const bool elsewhere = std::sqrt(candidate.distance) > kMechanismSnapJump;
+        const mechanism_target target = mechanism_target_at(*candidate.history, tick, elsewhere);
+        if (target.snap) ++s.mechanism_snaps;
+        if (mechanism_pose_unchanged(candidate.local, target)) continue;
+        if (physics_view_.set_body_state(candidate.name.c_str(), target.position, target.rotation, target.linear,
+                                         target.angular, target.simulated, error, target.snap))
             ++s.body_writes;
+        else { ++s.body_write_errors; s.last_error = error; }
+    }
+}
+
+// Option A: re-pose the untracked mechanism bodies for one re-simulated tick
+// (rollback_world::pre_step).  The re-simulation restores the tracked bodies and
+// the navigation replicas, but the mechanisms are server-authoritative and were
+// left at the single pose the live applier wrote at the end of the previous
+// frame: the replayed ball met each of them at the wrong place on every tick,
+// so a rollback near a mechanism could not converge on the server trajectory.
+// The target is the one the live path would render for that tick (the same
+// helper, the same rows); the write has no snap recheck, because this walks the
+// world forward tick by tick rather than beaming a body into a contact, and no
+// mechanism_snaps count, which measures the live applier's snaps.
+void BallanceMMOClient::physics_session_pose_mechanisms(uint32_t tick) {
+    auto& s = physics_session_;
+    std::string error;
+    for (const auto& candidate: mechanism_candidates(s, physics_view_)) {
+        // `elsewhere` is the live applier's local-body test and is deliberately
+        // not passed here: during a re-simulation the local pose is this hook's
+        // own write for the previous tick, so the distance to the newest row
+        // says nothing about identity, only how far the mechanism has travelled.
+        const mechanism_target target = mechanism_target_at(*candidate.history, tick, false);
+        if (mechanism_pose_unchanged(candidate.local, target)) continue;
+        if (physics_view_.set_body_state(candidate.name.c_str(), target.position, target.rotation, target.linear,
+                                         target.angular, target.simulated, error))
+            ++s.mechanism_resim_writes;
         else { ++s.body_write_errors; s.last_error = error; }
     }
 }
@@ -2055,7 +2242,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
     }
     return std::format(
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
-        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} mech_snaps={} amend_failures={} "
+        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} mech_resim_writes={} mech_snaps={} amend_failures={} "
         "events={}/{} phys_resends={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
@@ -2063,7 +2250,8 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.inputs_sent, s.navigation_keys_known ? 1 : 0, s.own_physicalized ? 1 : 0, s.own_group_set ? 1 : 0,
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
         s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,
-        s.mechanism_names.size(), s.mechanism_authority.size(), s.body_writes, s.body_write_errors, s.mechanism_snaps,
+        s.mechanism_names.size(), s.mechanism_authority.size(), s.body_writes, s.body_write_errors,
+        s.mechanism_resim_writes, s.mechanism_snaps,
         s.amend_failures,
         s.events_sent, s.events_received, s.physicalize_resends,
         s.resyncs_sent, s.resyncs_done,

@@ -59,6 +59,11 @@ namespace bmmo::session {
         // (Level 1 tutorial, pause menu): bodies are snapped, nothing is
         // re-simulated.  Optional; missing means "simulating".
         std::function<bool()> simulating;
+        // Called before each re-simulated tick, with the tick about to be stepped.
+        // The client uses it to re-pose the server-authoritative mechanism bodies,
+        // which are not in the tracked set (Option A): without it the resim replays
+        // the ball against one frozen mechanism pose.  Null on the server/tests.
+        std::function<void(uint32_t tick)> pre_step;
         std::function<void(const std::string&)> log;
         // Optional: every decision the engine takes about a snapshot, so the
         // session journal can record it without parsing the log lines.
@@ -412,6 +417,7 @@ namespace bmmo::session {
                         trace += buf;
                     }
                 }
+                if (world.pre_step) world.pre_step(t);   // Option A: re-pose the untracked authoritative bodies
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
                 if (!trace.empty()) {

@@ -8,7 +8,10 @@
 // Timeline: the anchor frame (first OnProcess with Gameplay_Ingame active
 // after the restart) is frame 0; OnProcess of frame f >= 1 represents session
 // tick tick_base + f - 1, where tick_base is the number the server assigns
-// (0 for the members present at the start).
+// (session start: the session's start lead; late join and resync: the server's
+// current tick plus the same lead).  A nonzero base renumbers the client
+// through rebase_tick - the frames stamped under the anchor-relative numbering
+// before the assignment are dropped, not relabelled.
 
 #include <chrono>
 #include <cstdint>
@@ -56,6 +59,33 @@ namespace bmmo::session {
         uint32_t tick_base = 0;
         uint32_t current_tick() const {
             return frames_since_anchor >= 1 ? tick_base + static_cast<uint32_t>(frames_since_anchor - 1) : tick_base;
+        }
+        // Re-anchor the numbering at `first_tick`: the frame after this call is
+        // numbered `first_tick`.  A resync, a late join and a session start
+        // (design 9.2: the server anchors every start member at its start lead,
+        // not at 0) all discard what was stamped under the old base - frames the
+        // server has already consumed or never asked for, the rollback records
+        // keyed by the old numbers (which no incoming snapshot can match, so
+        // every one of them arrives as kind 7 unmatched) and the correction
+        // rings that would otherwise blend across the gap.
+        void rebase_tick(uint32_t first_tick) {
+            tick_base = first_tick;
+            frames_since_anchor = 0;
+            input_history.clear();
+            own_inputs.clear();
+            rollback.invalidate_history();
+            corrector.clear();
+            for (auto& [id, remote]: remotes) remote.corrector.clear();
+            // Option A: the mechanism authority rows are keyed by the tick they
+            // were received at, so every one of them is older than the new base
+            // and unreachable; the dictionary is only ever refilled by the full
+            // snapshot the server sends with a re-anchor, the same one that
+            // re-seeds the rows.  Keeping either would let the applier render a
+            // mechanism by dead-reckoning from an old-numbered row (or target a
+            // body the new base no longer names) until that snapshot lands.
+            mechanism_authority.clear();
+            mechanism_names.clear();
+            consecutive_hard = consecutive_unmatched = 0;
         }
 
         // Inputs: the recent frames (tick, frame), newest last; the backlog
@@ -125,14 +155,21 @@ namespace bmmo::session {
         // Shared mechanisms (Option A, findings/mechanism-strategy-decision.md):
         // the client does not predict the script-constrained bodies (rope,
         // sandbag, see-saw); it renders the server's pose.  Every snapshot row
-        // is kept here as authority, keyed by the server's owner index, with
-        // the two newest poses of that body so the applier can interpolate
-        // inside the pair and dead-reckon past the newest row along its
-        // authoritative velocity.  Holding the received pose instead would
-        // render a moving mechanism input_delay + RTT/2 (~24 ticks, measured
-        // in the journals) behind, and the predicted ball would pass through
-        // it.  Teleports are snapped, never extrapolated across.
-        struct mechanism_pose_pair {
+        // is kept here as authority, keyed by the server's owner index, so the
+        // applier can interpolate inside a pair and dead-reckon past the newest
+        // row along its authoritative velocity.  Holding the received pose
+        // instead would render a moving mechanism input_delay + RTT/2 (~24
+        // ticks, measured in the journals) behind, and the predicted ball
+        // would pass through it.  Teleports are snapped, never extrapolated
+        // across.
+        //
+        // A bounded history rather than the two newest poses: a rollback
+        // re-simulates up to max_resim_ticks (48, rollback_thresholds) ticks,
+        // and the resim loop re-poses these untracked bodies for every one of
+        // them (rollback_world::pre_step).  With the 2-tick snapshot cadence a
+        // full window needs ~24 rows; two poses could not pose any tick but the
+        // last two, so the replayed ball met one frozen mechanism on the way.
+        struct mechanism_pose_history {
             struct pose_state {
                 uint32_t tick = 0;
                 double position[3] = {};
@@ -141,11 +178,16 @@ namespace bmmo::session {
                 float angular[3] = {};
                 bool simulated = false;
             };
-            pose_state latest, previous;
-            bool have_latest = false, have_previous = false;
+            std::deque<pose_state> rows;   // ascending tick, newest last, at most kMechanismRows
         };
-        std::map<uint32_t, mechanism_pose_pair> mechanism_authority;
+        // 64 covers the worst re-simulated window (48 ticks / 2 ticks per row =
+        // 24) with headroom for a degraded cadence - a dropped snapshot lands a
+        // row later, and the ticks a deep re-simulation needs are the oldest
+        // ones, so the cap has to hold the whole window and then some.
+        static constexpr size_t kMechanismRows = 64;
+        std::map<uint32_t, mechanism_pose_history> mechanism_authority;
         uint64_t mechanism_snaps = 0;            // authority writes applied as a snap, not a lerp
+        uint64_t mechanism_resim_writes = 0;     // untracked mechanism re-poses written by a re-simulation
         uint64_t corrections_logged = 0;
         uint64_t amend_failures = 0;             // amend_record calls whose tick was no longer recorded
 
@@ -205,13 +247,33 @@ namespace bmmo::session {
 
         // Resync (design 9.2): after a re-assignment the next full snapshot
         // rebuilds every body; triggers are a tick-driver rebase (pause, long
-        // stall), 3 hard corrections in a row, or 30 unmatched snapshots.
+        // stall), 3 hard corrections in a row, 30 snapshots whose tick could
+        // not be reconciled at all, or the input starvation detector below.
         bool resync_pending = false;
         uint64_t last_rebases = 0;
         int consecutive_hard = 0, consecutive_unmatched = 0;
         uint64_t last_unmatched = 0;
         std::chrono::steady_clock::time_point last_resync_request{};
         uint64_t resyncs_sent = 0, resyncs_done = 0;
+
+        // Input starvation (design 9.2 follow-up): every snapshot carries
+        // acked_input_tick, the last tick the server consumed a FRESH input
+        // frame from us for (protocol 2.2).  If our numbering ever falls behind
+        // the server's per-player read cursor, that cursor drops every later
+        // frame as stale for the rest of the session and simulates our ball
+        // from the last frame it had - nothing else notices, because our own
+        // snapshot stream keeps arriving and keeping us corrected.  `frame` is
+        // the frames_since_anchor the acked tick was last seen moving at,
+        // `snapshot_frame` the one the newest snapshot arrived at: together they
+        // separate a numbering hole from a network stall.
+        struct acked_input_state {
+            bool have = false;             // a baseline exists for the current numbering
+            uint32_t tick = 0;             // last acked_input_tick the server reported
+            int64_t frame = -1;            // frames_since_anchor when `tick` last advanced
+            int64_t snapshot_frame = -1;   // frames_since_anchor of the newest applied snapshot
+            void reset() { *this = acked_input_state{}; }
+        };
+        acked_input_state acked_input;
 
         std::string last_error;
         bool trace = false;         // per-tick diagnostics (automation: session trace on|off); not reset per session
@@ -251,6 +313,7 @@ namespace bmmo::session {
             mechanism_authority.clear();
             latest_ball_rows.clear();
             mechanism_snaps = 0;
+            mechanism_resim_writes = 0;
             corrections_logged = 0;
             amend_failures = 0;
             remotes.clear();
@@ -266,6 +329,7 @@ namespace bmmo::session {
             last_unmatched = 0;
             last_resync_request = {};
             resyncs_sent = resyncs_done = 0;
+            acked_input.reset();
             remote_inputs_received = 0;
             ball_forces.clear();
             rng_last_seed = 0;
