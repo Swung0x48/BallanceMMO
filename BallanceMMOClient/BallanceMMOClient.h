@@ -520,6 +520,7 @@ private:
 	// snapshot row, apply_* renders the stored poses once per frame.
 	void physics_session_note_mechanism(uint32_t tick, const bmmo::session::body_state& body);
 	void physics_session_apply_mechanism_authority();
+	void physics_session_cache_ball_row(uint32_t tick, const bmmo::session::body_state& body);
 	void physics_session_apply_event(const bmmo::session_event_msg& event);
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
 	void physics_session_check_own_body(const bmmo::session_snapshot_msg& snapshot, uint32_t own_id);

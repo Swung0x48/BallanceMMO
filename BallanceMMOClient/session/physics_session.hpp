@@ -144,6 +144,22 @@ namespace bmmo::session {
         uint64_t corrections_logged = 0;
         uint64_t amend_failures = 0;             // amend_record calls whose tick was no longer recorded
 
+        // The freshest ball row per player, kept even while that player has no
+        // mirror yet: a Physicalize event is relayed about an input delay after
+        // the snapshot that already separated the spawned balls, so creating the
+        // mirror at the event's own spawn pose stacks every peer on one spot and
+        // the local solver blows the cluster apart (9.17 feedback, spawn twitch).
+        struct latest_ball_row {
+            bool have = false;
+            uint32_t tick = 0;
+            double position[3] = {};
+            double rotation[4] = {};
+            float linear[3] = {};
+            float angular[3] = {};
+            bool simulated = true;
+        };
+        std::map<uint32_t, latest_ball_row> latest_ball_rows;
+
         // Remote balls: player -> mirrored entity.
         // Remote balls (design 9.1): mirrored entity driven by the bridge
         // navigation from the last relayed input; snapshots correct it through
@@ -228,6 +244,7 @@ namespace bmmo::session {
             corrector.clear();
             hard_sets = blends = 0;
             mechanism_authority.clear();
+            latest_ball_rows.clear();
             mechanism_snaps = 0;
             corrections_logged = 0;
             amend_failures = 0;

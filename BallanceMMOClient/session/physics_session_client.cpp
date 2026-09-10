@@ -106,6 +106,21 @@ namespace {
         return matrix;
     }
 
+    // Snapshot rows carry a quaternion (body_state::rotation), the wire event a
+    // world matrix; a mirror started from a row needs the quaternion form.
+    VxMatrix matrix_from_quaternion(const double position[3], const double rotation[4]) {
+        VxQuaternion quaternion;
+        quaternion.x = static_cast<float>(rotation[0]);
+        quaternion.y = static_cast<float>(rotation[1]);
+        quaternion.z = static_cast<float>(rotation[2]);
+        quaternion.w = static_cast<float>(rotation[3]);
+        VxMatrix matrix;
+        quaternion.ToMatrix(matrix);
+        for (int k = 0; k < 3; ++k) matrix[3][k] = static_cast<float>(position[k]);
+        matrix[3][3] = 1.0f;
+        return matrix;
+    }
+
     // The join order this client mirrors a player with: the roster SessionStart
     // brought, or the last slot for someone who joined after it - the server
     // announces a join to the joiner alone, so nothing on the wire carries a
@@ -961,6 +976,13 @@ void BallanceMMOClient::physics_session_apply_queues() {
         events.swap(s.event_queue);
         inputs.swap(s.remote_input_queue);
     }
+    // The freshest authority rows are in this frame's snapshots: cache them
+    // before the events run so a Physicalize starts its mirror on the row the
+    // rollback is about to compare it against, not on last frame's.
+    for (const auto& snapshot: snapshots)
+        for (const auto& body: snapshot.bodies)
+            if (body.kind == bmmo::session::body_kind::Ball)
+                physics_session_cache_ball_row(snapshot.tick, body);
     for (auto& event: events) physics_session_apply_event(event);
     auto& journal = bmmo::session::client_journal::instance();
     for (const auto& msg: inputs) {
@@ -1032,7 +1054,16 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
             physics_view_.navigation_destroy(remote.entity.c_str(), error);
         }
         remote.navigation = false;
-        entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
+        // The event carries the pose from the tick it was stamped for; the rows
+        // for that player are newer than that by the relay delay and are what
+        // the mirror has to start from (9.17 spawn twitch).
+        const auto cached = s.latest_ball_rows.find(event.player);
+        const bool have_cached = cached != s.latest_ball_rows.end() && cached->second.have
+            && cached->second.tick > event.tick;
+        if (have_cached)
+            entity->SetWorldMatrix(matrix_from_quaternion(cached->second.position, cached->second.rotation));
+        else
+            entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
         const auto recipe = to_bridge_recipe(event.recipe);
         int join_order = 63;
         for (const auto& p: s.players) if (p.id == event.player) join_order = p.join_order;
@@ -1041,6 +1072,14 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
             logger_->Warn("Physics session: physicalize %s: %s", entity->GetName(), error.c_str());
             s.last_error = error;
             return;
+        }
+        if (have_cached) {
+            // Start the mirror on the server's row instead of the spawn pose:
+            // position, rotation and the velocity the server already gave it.
+            if (!physics_view_.set_body_state(entity->GetName(), cached->second.position, cached->second.rotation,
+                                              cached->second.linear, cached->second.angular,
+                                              cached->second.simulated, error))
+                logger_->Warn("Physics session: physicalize %s: %s", entity->GetName(), error.c_str());
         }
         // Queues run after this frame's history capture. The new body (also a
         // same-name respawn) must first be recorded on the NEXT live frame;
@@ -1051,8 +1090,9 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         remote.physicalized = true;
         remote.corrector.clear();
         // Design 9.10: the same spawn kick as our own ball, applied at once -
-        // the body exists here already.
-        if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && s.spawn_impulse > 0.0f) {
+        // the body exists here already.  Skipped when the row above already
+        // carries the server's kick: adding it again would double the speed.
+        if (!have_cached && (event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && s.spawn_impulse > 0.0f) {
             const uint32_t index = bmmo::session::spawn_direction_index(s.seed, static_cast<uint8_t>(join_order), event.tick);
             std::string impulse_error;
             if (!physics_view_.push_impulse(entity->GetName(), bmmo::session::kSpawnDirectionTable[index],
@@ -1099,6 +1139,9 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
         ++s.snapshots_stale;
         return;
     }
+    for (const auto& body: snapshot.bodies)
+        if (body.kind == bmmo::session::body_kind::Ball)
+            physics_session_cache_ball_row(snapshot.tick, body);
     if (s.resync_pending) {
         if (!snapshot.full) return;   // wait for the full snapshot the server forced
         s.have_snapshot = true;
@@ -1625,6 +1668,24 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
     }
     logger_->Info("Physics session %u: resync applied from the full snapshot of tick %u (%zu bodies)", s.session,
                   snapshot.tick, snapshot.bodies.size());
+}
+
+// Keeps the freshest ball row of every player, physicalized here or not: the
+// Physicalize event for a peer arrives about an input delay after the rows
+// that already show the server's spawned balls separated, and the mirror has
+// to start where the server has it, not where the event's spawn pose was.
+void BallanceMMOClient::physics_session_cache_ball_row(uint32_t tick, const bmmo::session::body_state& body) {
+    auto& row = physics_session_.latest_ball_rows[body.owner];
+    if (row.have && row.tick > tick) return;   // a queued older snapshot
+    row.have = true;
+    row.tick = tick;
+    for (int k = 0; k < 3; ++k) {
+        row.position[k] = body.position[k];
+        row.linear[k] = body.linear[k];
+        row.angular[k] = body.angular[k];
+    }
+    for (int k = 0; k < 4; ++k) row.rotation[k] = body.rotation[k];
+    row.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
 }
 
 // Option A: store one authoritative mechanism row.  Rows arrive with every
