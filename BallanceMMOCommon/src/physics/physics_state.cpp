@@ -610,7 +610,7 @@ namespace bmmo::physics {
     bool set_body_state(CKIpionManager* physics, const char* entity_name,
                         const double position[3], const double rotation[4],
                         const float linear[3], const float angular[3], bool wake,
-                        std::string& error) {
+                        std::string& error, bool recheck) {
         error.clear();
         const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
         CK3dEntity* entity = find_entity(physics, name);
@@ -633,7 +633,10 @@ namespace bmmo::physics {
             quaternion.w = rotation[3];
             IVP_U_Point target;
             store3(target, position);
-            real->beam_object_to_new_position(&quaternion, &target, IVP_TRUE);
+            // The optimized path generates no collision when the body lands
+            // inside another one; a snap write needs the recheck (see the
+            // header).
+            real->beam_object_to_new_position(&quaternion, &target, recheck ? IVP_FALSE : IVP_TRUE);
         }
         if (linear) core->speed.set(linear[0], linear[1], linear[2]);
         if (angular) core->rot_speed.set(angular[0], angular[1], angular[2]);

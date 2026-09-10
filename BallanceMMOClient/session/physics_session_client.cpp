@@ -31,7 +31,7 @@ namespace {
     using phase_type = physics_session_state::phase_type;
 
     // Option A (findings/mechanism-strategy-decision.md): the client renders
-    // the script-constrained mechanism bodies from the two newest authoritative
+    // the script-constrained mechanism bodies from the newest authoritative
     // poses instead of predicting them.  A pair further apart than this in one
     // snapshot interval is a teleport (sector change, level reset, re-entry),
     // and a target further than this from the local pose means our body is
@@ -39,6 +39,17 @@ namespace {
     // write, so the body can never be left behind at the old pose.
     constexpr double kMechanismSnapTravel = 0.5;   // metres per snapshot pair
     constexpr double kMechanismSnapJump = 1.0;     // metres from the local pose
+    // The newest row is stale by the input delay plus half the round trip,
+    // measured at ~24 ticks (0.36 s) in the session journals, so rendering it
+    // as-is puts a moving mechanism that far behind the predicted ball - the
+    // ball then passes through it and the next server correction separates the
+    // two.  The render therefore dead-reckons the newest row ahead to the
+    // client's own tick along the row's authoritative velocity, bounded so a
+    // stalled or reset snapshot stream cannot run away; a snap (teleport) row
+    // is never extrapolated, its velocity across the jump means nothing.
+    constexpr double kMechanismMaxLead = 0.6;               // seconds past the newest row
+    constexpr double kMechanismMaxExtrapolation = 1.5;      // metres of extrapolated travel
+    constexpr double kMechanismMaxExtrapolationAngle = 0.5; // radians of extrapolated rotation
     // Below this the body already sits on the target pose: writing it again
     // would only disturb the core's sleep state.
     constexpr double kMechanismWriteEpsilon = 1e-4;
@@ -1723,7 +1734,11 @@ void BallanceMMOClient::physics_session_note_mechanism(uint32_t tick, const bmmo
 // after the snapshot queue was drained.  Only bodies this client actually has
 // are written (a mechanism of another sector is not physicalized here), and a
 // dictionary name carried by several server bodies is driven by the one whose
-// authoritative pose is nearest to ours.
+// authoritative pose is nearest to ours.  A render tick inside a snapshot pair
+// interpolates the pair; past the newest row the pose is dead-reckoned along
+// that row's authoritative velocity, and a teleport is always written as a
+// snap, so a mechanism that lands on a sleeping ball still builds the contact
+// pair instead of resting inside it until the next server correction.
 void BallanceMMOClient::physics_session_apply_mechanism_authority() {
     auto& s = physics_session_;
     if (s.mechanism_names.empty() || s.mechanism_authority.empty()) return;
@@ -1753,26 +1768,97 @@ void BallanceMMOClient::physics_session_apply_mechanism_authority() {
         }
         if (!history) continue;
         const auto& latest = history->latest;
-        double position[3];
-        if (history->have_previous && latest.tick > history->previous.tick) {
-            const double span = static_cast<double>(latest.tick - history->previous.tick);
-            double alpha = std::clamp((static_cast<double>(tick) - history->previous.tick) / span, 0.0, 1.0);
-            double travel = 0.0;
+        // A pair further apart than kMechanismSnapTravel is a teleport (sector
+        // change, level reset, re-entry); a newest row further than
+        // kMechanismSnapJump from the local pose means our body is somewhere
+        // else entirely.  Neither may be interpolated or extrapolated across.
+        const bool pair = history->have_previous && history->previous.tick < latest.tick;
+        double travel = 0.0;
+        if (pair)
             for (int k = 0; k < 3; ++k) {
                 const double d = latest.position[k] - history->previous.position[k];
                 travel += d * d;
             }
-            if (std::sqrt(travel) > kMechanismSnapTravel || std::sqrt(nearest) > kMechanismSnapJump) {
+        const bool teleport = pair && std::sqrt(travel) > kMechanismSnapTravel;
+        const bool elsewhere = std::sqrt(nearest) > kMechanismSnapJump;
+        double position[3];
+        double rotation[4];
+        for (int k = 0; k < 4; ++k) rotation[k] = latest.rotation[k];
+        bool snap = false;
+        if (history->have_previous && history->previous.tick < tick && tick <= latest.tick) {
+            // The render tick sits inside the pair - the post-resync window, in
+            // which current_tick jumps backward: interpolate the two rows.
+            const double span = static_cast<double>(latest.tick - history->previous.tick);
+            double alpha = std::clamp((static_cast<double>(tick) - history->previous.tick) / span, 0.0, 1.0);
+            if (teleport || elsewhere) {
                 alpha = 1.0;   // teleport or a local body elsewhere: snap, never lerp
+                snap = true;
                 ++s.mechanism_snaps;
             }
             for (int k = 0; k < 3; ++k)
                 position[k] = history->previous.position[k] + alpha * (latest.position[k] - history->previous.position[k]);
+        } else if (tick >= latest.tick) {
+            // The normal case: the newest row is one input delay plus half the
+            // round trip old, so dead-reckon it along its own velocity up to
+            // the render tick.  The session steps 1000/66 ms per tick
+            // (world.step below), hence the lead in ticks.
+            double dt = 0.0;
+            if (teleport || elsewhere) {
+                // The velocity of a row that teleported says nothing about the
+                // jump: write the pose exactly, with a contact recheck.
+                snap = true;
+                ++s.mechanism_snaps;
+            } else if (latest.simulated) {
+                dt = std::min(static_cast<double>(tick - latest.tick) / 66.0, kMechanismMaxLead);
+                double speed = 0.0, spin = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    speed += static_cast<double>(latest.linear[k]) * latest.linear[k];
+                    spin += static_cast<double>(latest.angular[k]) * latest.angular[k];
+                }
+                speed = std::sqrt(speed);
+                spin = std::sqrt(spin);
+                if (speed > 0.0) dt = std::min(dt, kMechanismMaxExtrapolation / speed);
+                if (spin > 0.0) dt = std::min(dt, kMechanismMaxExtrapolationAngle / spin);
+            }
+            // A frozen row (simulated == false) holds its pose: dt stays 0.
+            for (int k = 0; k < 3; ++k) position[k] = latest.position[k] + latest.linear[k] * dt;
+            if (dt > 0.0) {
+                // rot_speed is core space (ivp_core.hxx:177; the core carries
+                // the object's orientation for the physicalized props), so it
+                // is rotated into the world frame by the row's own quaternion
+                // (v' = v + 2w (q x v) + 2 q x (q x v)) before the derivative
+                // q' = normalize(q + 1/2 dt (w (x) q)) - the same rotation the
+                // engine integrates with q_new = q (x) q_core_f_core
+                // (ivp_calc_next_psi_solver.cxx:180).
+                const double qx = latest.rotation[0], qy = latest.rotation[1];
+                const double qz = latest.rotation[2], qw = latest.rotation[3];
+                const double tx = 2.0 * (qy * latest.angular[2] - qz * latest.angular[1]);
+                const double ty = 2.0 * (qz * latest.angular[0] - qx * latest.angular[2]);
+                const double tz = 2.0 * (qx * latest.angular[1] - qy * latest.angular[0]);
+                const double wx = latest.angular[0] + qw * tx + (qy * tz - qz * ty);
+                const double wy = latest.angular[1] + qw * ty + (qz * tx - qx * tz);
+                const double wz = latest.angular[2] + qw * tz + (qx * ty - qy * tx);
+                const double h = 0.5 * dt;
+                const double nx = qx + h * (wx * qw + wy * qz - wz * qy);
+                const double ny = qy + h * (-wx * qz + wy * qw + wz * qx);
+                const double nz = qz + h * (wx * qy - wy * qx + wz * qw);
+                const double nw = qw - h * (wx * qx + wy * qy + wz * qz);
+                const double norm = std::sqrt(nx * nx + ny * ny + nz * nz + nw * nw);
+                // A degenerate (non-unit / zero) row keeps its own rotation.
+                if (norm > 1e-9) {
+                    rotation[0] = nx / norm;
+                    rotation[1] = ny / norm;
+                    rotation[2] = nz / norm;
+                    rotation[3] = nw / norm;
+                }
+            }
         } else {
+            // Older than both rows (a resync that jumped back further than one
+            // interval): hold the newest pose rather than run backwards.
             for (int k = 0; k < 3; ++k) position[k] = latest.position[k];
         }
         double dq = 0.0, dp = 0.0, dv = 0.0;
-        for (int k = 0; k < 4; ++k) dq += latest.rotation[k] * local.rotation[k];
+        for (int k = 0; k < 4; ++k) dq += rotation[k] * local.rotation[k];
         for (int k = 0; k < 3; ++k) {
             dp += (position[k] - local.position[k]) * (position[k] - local.position[k]);
             dv += (latest.linear[k] - local.linear[k]) * (latest.linear[k] - local.linear[k]);
@@ -1782,8 +1868,8 @@ void BallanceMMOClient::physics_session_apply_mechanism_authority() {
         if (std::sqrt(dp) < kMechanismWriteEpsilon && std::sqrt(dv) < kMechanismWriteEpsilon
                 && std::fabs(std::fabs(dq) - 1.0) < kMechanismWriteEpsilon)
             continue;
-        if (physics_view_.set_body_state(name.c_str(), position, latest.rotation, latest.linear, latest.angular,
-                                         latest.simulated, error))
+        if (physics_view_.set_body_state(name.c_str(), position, rotation, latest.linear, latest.angular,
+                                         latest.simulated, error, snap))
             ++s.body_writes;
         else { ++s.body_write_errors; s.last_error = error; }
     }

@@ -79,10 +79,21 @@ namespace bmmo::physics {
     // dropped).  Any array may be null to leave that part untouched.  `wake`
     // wakes the body; otherwise a simulated body is frozen.  The CK entity's
     // world matrix is refreshed exactly like CKIpionManager does after a step.
+    // `recheck` beams through the unoptimized IVP path
+    // (IVP_Real_Object::beam_object_to_new_position with
+    // optimize_for_repeated_calls = IVP_FALSE).  The default optimized path is
+    // the one that drops contacts: "if the object penetrates other objects at
+    // the new position, no collisions will be generated !!!"
+    // (ivp_real_object.hxx:294-303), because it skips recheck_ov_element
+    // (ivp_calc_next_psi_solver.cxx:318).  Every per-frame pose write wants
+    // that optimization; a snap teleport of a server-authoritative mechanism
+    // onto a sleeping ball needs the fresh contact pair instead, so only that
+    // caller passes true.  Left false the call is bit-identical to what it has
+    // always done.
     bool set_body_state(CKIpionManager* physics, const char* entity_name,
                         const double position[3], const double rotation[4],
                         const float linear[3], const float angular[3], bool wake,
-                        std::string& error);
+                        std::string& error, bool recheck = false);
     // The retail Physicalize block's recipe path, driven from a POD recipe
     // instead of a behavior graph.  Already-physicalized entities succeed
     // without doing anything (like the block).  `collision_group` is the IVP

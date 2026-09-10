@@ -240,15 +240,17 @@ namespace bmmo::physics {
 
     bool physics_view::set_body_state(const char* entity_name, const double position[3],
                                       const double rotation[4], const float linear[3],
-                                      const float angular[3], bool wake, std::string& error) const {
+                                      const float angular[3], bool wake, std::string& error,
+                                      bool recheck) const {
         error.clear();
         if (!available()) {
             error = "physics bridge is not initialized";
             return false;
         }
         char text[256] = {};
-        if (!api_->set_body_state(manager_, entity_name, position, rotation, linear, angular,
-                                  wake ? 1 : 0, text, sizeof(text))) {
+        const auto beam = recheck ? api_->set_body_state_recheck : api_->set_body_state;
+        if (!beam(manager_, entity_name, position, rotation, linear, angular,
+                  wake ? 1 : 0, text, sizeof(text))) {
             error = text;
             return false;
         }

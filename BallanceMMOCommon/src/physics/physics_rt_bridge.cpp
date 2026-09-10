@@ -393,6 +393,23 @@ namespace {
         return 1;
     }
 
+    int32_t api_set_body_state_recheck(void* manager, const char* entity_name, const double position[3],
+                                       const double rotation[4], const float linear[3],
+                                       const float angular[3], int32_t wake,
+                                       char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_body_state(static_cast<CKIpionManager*>(manager), entity_name,
+                                           position, rotation, linear, angular, wake != 0, text, true)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     const bmmo_physics_api_v2 kApi = {
         sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
@@ -429,6 +446,7 @@ namespace {
         api_random_next,
         api_install_random_block,
         api_set_clock_guard,
+        api_set_body_state_recheck,
     };
 }
 

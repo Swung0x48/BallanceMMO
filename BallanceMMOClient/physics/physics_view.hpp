@@ -41,9 +41,13 @@ namespace bmmo::physics {
                             std::string& error) const;
         // Beam a body and overwrite its core speeds; `wake` wakes it, otherwise
         // a simulated body is frozen.  Any array may be null to skip that part.
+        // `recheck` rechecks the collision pairs at the new pose instead of
+        // taking IVP's optimized per-frame path, which generates no collision
+        // when the body is beamed into another one: the mechanism snap writes
+        // need the contact pair, everyone else wants the default.
         bool set_body_state(const char* entity_name, const double position[3],
                             const double rotation[4], const float linear[3], const float angular[3],
-                            bool wake, std::string& error) const;
+                            bool wake, std::string& error, bool recheck = false) const;
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
                          const char* collision_group, std::string& error) const;

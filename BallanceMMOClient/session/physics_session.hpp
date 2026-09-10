@@ -126,7 +126,12 @@ namespace bmmo::session {
         // the client does not predict the script-constrained bodies (rope,
         // sandbag, see-saw); it renders the server's pose.  Every snapshot row
         // is kept here as authority, keyed by the server's owner index, with
-        // the two newest poses of that body so the applier can interpolate.
+        // the two newest poses of that body so the applier can interpolate
+        // inside the pair and dead-reckon past the newest row along its
+        // authoritative velocity.  Holding the received pose instead would
+        // render a moving mechanism input_delay + RTT/2 (~24 ticks, measured
+        // in the journals) behind, and the predicted ball would pass through
+        // it.  Teleports are snapped, never extrapolated across.
         struct mechanism_pose_pair {
             struct pose_state {
                 uint32_t tick = 0;

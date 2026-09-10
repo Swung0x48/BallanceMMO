@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 8u   /* v8: session clock guard */
+#define BMMO_PHYSICS_API_VERSION 9u   /* v9: contact recheck when beaming a body */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -280,6 +280,24 @@ typedef struct bmmo_physics_api_v2 {
      * starting pin, used if the guard is installed while the menu is open. */
     int32_t (*set_clock_guard)(void* ipion_manager, int32_t enable, float time_factor, uint32_t behavior_id,
                                uint32_t pause_behavior_id, char* error, uint32_t error_size);
+
+    /* ---- v9: new contacts when a body is beamed ---- */
+
+    /* Exactly set_body_state, except that the beam always rechecks the
+     * object's collision pairs: IVP_Real_Object::beam_object_to_new_position
+     * is called with optimize_for_repeated_calls = IVP_FALSE instead of
+     * IVP_TRUE.  The optimized path is documented to generate no collision
+     * when the body is beamed into another one ("if the object penetrates
+     * other objects at the new position, no collisions will be generated !!!",
+     * ivp_real_object.hxx:294-303) because it skips recheck_ov_element
+     * (ivp_calc_next_psi_solver.cxx:318).  The client's snap teleports of
+     * server-authoritative mechanisms are the one writer that must create the
+     * contact pair; the server keeps calling set_body_state, so its
+     * simulation is byte for byte unchanged. */
+    int32_t (*set_body_state_recheck)(void* ipion_manager, const char* entity_name,
+                                      const double position[3], const double rotation[4],
+                                      const float linear[3], const float angular[3], int32_t wake,
+                                      char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested
