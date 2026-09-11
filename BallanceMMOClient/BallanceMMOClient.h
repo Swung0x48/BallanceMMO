@@ -607,6 +607,7 @@ private:
 	// source goes back at session end.
 	struct sector_deactivate_write {
 		CK_ID block = 0;           // the Set Cell block writing IngameParameter[0][2]
+		const char* chain = nullptr;   // the group it sits in, for the log
 		int input = 0;             // its "Value" input
 		CK_ID retail_source = 0;   // the parameter it read (direct source)
 		CK_ID retail_shared = 0;   // or the input it shared its source with
@@ -614,9 +615,18 @@ private:
 		CK_ID zero = 0;            // our constant int parameter, destroyed on restore
 		bool applied = false;
 	};
-	sector_deactivate_write sector_deactivate_{};
+	// [0] the checkpoint's (Gameplay_Events / activate Sektor), [1] the level
+	// reset's (Event_handler / reset Level).  Design 9.28b: the reset writes the
+	// deactivate cell too and then runs Gameplay_SectorManager, which is what
+	// actually tears the sector down - the module MF scripts included, so the
+	// sandbag stops being driven.  Neutralizing only the re-activation left the
+	// sector dead; both halves have to go.
+	static constexpr int SECTOR_DEACTIVATE_WRITES = 2;
+	sector_deactivate_write sector_deactivate_[SECTOR_DEACTIVATE_WRITES];
+	int sector_deactivate_count_ = 0;
 	bool sector_deactivate_failed_ = false;
 	bool sector_deactivate_resolve();
+	bool sector_deactivate_resolve_one(CKBehavior* script, const char* script_name, const char* group_name);
 	void sector_deactivate_apply();
 	void sector_deactivate_restore();
 	void handle_session_start(bmmo::session_start_msg msg);

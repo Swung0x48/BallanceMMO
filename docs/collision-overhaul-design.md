@@ -1159,36 +1159,53 @@ F3 的关系是另一条独立的开销：面板文字里带 tick 号，每帧�
 - **F3 面板限流到 10 Hz**（`apply_pending_ping_text`），整场会话省下每帧一次的字体光栅化。
 - 新增自动化动词 `restart`：直接走玩家那条 `Reset Level` 路径，这样回归测试不必真的把命打光。
 
-**一次把它修坏了的中间版本（留作教训）.** 第一版把 `activate Scripts` 的调用点在锚点处就清空，结果**连会话自己
-那次扇区激活也跳过了**：锚点发生在 `Gameplay_Ingame` 刚被激活的那一刻，此时 `Init Ingame` 的链条还没走到
-`activate Scripts`，于是模块从来没有被 physicalize 过。客户端因此完全不模拟机关——`session` 状态行里是
-`mechanisms=15/0`，journal 里 `P_Modul_26_Sack` **没有任何 LOCAL 行**，只有服务端的 RECEIVED 行。
-机关修正数为 0 当时被误读成"完全同步"，实际上是"本地根本没有可比的东西"。
+**修的过程中错了两次，都记在这里.**
 
-**判断机关是否真的在工作，要看这两个信号，不要看修正数：**
+*第一次（9.28）：把会话自己的扇区激活也跳过了。* 第一版在锚点就清空 `activate Scripts` 的调用点，但锚点发生在
+`Gameplay_Ingame` 刚被激活的那一刻，`Init Ingame` 的链条还没走到那里，于是连会话启动时那次激活也没了——客户端
+从头到尾没有 physicalize 过任何机关：状态行 `mechanisms=15/0`，journal 里 `P_Modul_26_Sack` **没有任何 LOCAL 行**。
+"机关修正 0 次"当时被误读成"完全同步"，实际是"本地根本没有可比的东西"。
+改法：`Deactivate Ball` 那处照旧在锚点立即清空（只可能因死亡触发），其余调用点标记 `deferred`，等到
+`mechanism_tracking.resolved() > 0`（扇区已经起来了）才清空。
 
-1. `session` 状态行的 `mechanisms=<known>/<resolved>`，第二个数是本客户端真正在模拟的机关数，必须是 15；
-2. 客户端 journal 里 `P_Modul_26_Sack` 的 **LOCAL** 行存在且在摆动（`--dump` 里 `flags & 2`）。
+*第二次（9.28a）：只挡了重新激活，没挡拆除。* 上面改完之后机关活了，但重置过的客户端沙袋会稳定偏离服务端约 5 cm。
+定位过程：桥接 `force` 日志显示重置前每 1.5 s 创建一次 ±0.25 的摆动力，**重置之后 17 秒一次都没有**；
+`scripts` 动词显示重置过的客户端上 `P_Modul_26_MF Script@P_Modul_26_MF` **没有 `*`（不活跃）**，没重置的客户端有；
+`array IngameParameter` 显示 `Deactivate Sector = 1`。
+也就是说 `Event_handler :: reset Level` 那处调用（调用点 D）**真的会拆掉扇区**（连模块 MF 脚本一起停掉），
+而调用点 A 正是把它装回来的那一步。之前把 D 读成"deactivate-only 所以无害"是把"只拆不装"误当成了"什么都不做"。
+沙袋因此失去驱动力、只靠惯性滑行，而服务端仍在驱动它——这就是那 5 cm。
 
-**修正后的做法.** `Deactivate Ball` 那处照旧在锚点立即清空（它只可能因死亡触发）；其余调用点标记为
-`deferred`，要等到 `mechanism_tracking.resolved() > 0`（"这个客户端已经在模拟机关了，也就是扇区已经起来了"）
-才清空。会话启动时的那次激活因此照常发生，之后任何一次重置都被挡住。
+**最终做法：两半都挡住.**
 
-**验证（2026-09-11，本机双原版客户端，连续四次关卡重置）.**
+- **N1（表）**：递归遍历 `Gameplay_Ingame`，清空每一个 `Script` 输入指向 `Gameplay_SectorManager` 的
+  `Execute Script`（`Deactivate Ball` 立即生效，其余 `deferred`），少于 2 个就整体拒绝报错。
+- **N2（表）**：`Gameplay_Events :: activate Sektor` 和 `Event_handler :: reset Level` 两处写
+  `IngameParameter[0][2]`（要拆除的扇区）的 `Set Cell`，`Value` 输入都被换成会话自己的常量 0，
+  `Gameplay_SectorManager` 的 `Test (Not Equal, B=0)` 于是跳过整个拆除。会话结束时还原。
+
+净效果：一次关卡重置既不拆扇区也不重建它，模块脚本一直在跑，关节锚点一直是原来的。
+
+**判断机关是否真的在工作，要看这三个信号，不要看修正数：**
+
+1. `session` 的 `mechanisms=<known>/<resolved>`，第二个数必须是 15；
+2. 客户端 journal 里 `P_Modul_26_Sack` 的 **LOCAL** 行（`flags & 2`）存在且在摆动（x 跨度约 12.5 m）；
+3. `scripts` 里 `P_Modul_26_MF Script@P_Modul_26_MF` 带 `*`（活跃）。
+
+**验证（2026-09-11，本机双原版客户端，四次关卡重置：客户端 1 三次、客户端 2 一次）.**
 
 | 检查 | 结果 |
 | --- | --- |
-| `mechanisms` | 全程 `15/15`，四次重置前后都不变 |
-| 客户端 journal 的 LOCAL 沙袋行 | 存在且摆动：x 范围 12.63 m（服务端 12.29 m）；同 tick 对比 mean 0.046 m、max 0.165 m |
-| `pausechain` | `death_reset=2/resolved`，`[activate Scripts=…/applied/now=0]`、`[Deactivate Ball=…/applied/now=0]` |
-| 重置后的沙袋误差 | 稳定在 mean 0.048 m / max 0.053 m，**不增长**（重置1后 0.0481、重置3后 0.0495、最后 0.0482） |
-| 对照（修复前） | 重置后每 1000 tick 约 1030 次修正，`resim=143412`，绳子误差 3.02→4.95 m 且从不收敛 |
+| `pausechain` | `death_reset=2/resolved sector_keep=2/resolved`，`[activate Sektor/keep=applied/now=0]`、`[reset Level/keep=applied/now=0]`、`[activate Scripts=…/applied/now=0]`、`[Deactivate Ball=…/applied/now=0]` |
+| 模块脚本 | 重置前后都带 `*`，与没重置的客户端一致 |
+| `mechanisms` | 全程 `15/15` |
+| 客户端 LOCAL 沙袋 | 摆幅 12.54 m |
+| 机关修正 | **0**（client1 全部 158 次修正都是自己的球和 peer 球） |
+| 回滚 | `snaps=4663 ok=4584 mism=79 resim=155`（client2 `4665/4591/74/133`） |
+| 对照（原缺陷） | 重置后每 1000 tick 约 1030 次修正，`resim=143412`，绳子 3.02→4.95 m |
+| 对照（9.28a 中间版本） | 沙袋稳定偏 5 cm，`mism=3071/4174`，`resim=6590` |
 | 单元测试 | 162/162 |
 
-**残留问题.** 重置过的客户端，它的沙袋会稳定偏离服务端约 5 cm，正好卡在修正阈值上，于是几乎每个快照都要被
-拉回一次（client1 `mism=3071/4174`，`resim=6590`，约每 tick 0.8 个重演步——与缺陷本身的 670 步/秒不是一个量级，
-但也不该有）。误差不增长，说明关节没有被破坏，更像是重置之后本地的机关相位比服务端落后了一点点。尚未定位。
-
 **限制.** 本轮验证是在本机零售双客户端（约 0 延迟）上做的；远端 300 ms 服务器当时没有在监听，而且它部署的
-引擎 build id 比本次构建旧，要复测得先重新部署服务端。存档点那条路（`Gameplay_Events :: activate Sektor`）的
-activate 半边是否也会重建关节仍然没有被测到：两次手动测试里所有玩家都停在 sector 1。
+引擎 build id 比本次构建旧，要复测得先重新部署服务端。存档点那条路的 activate 半边仍然没有被测到：两次手动
+测试里所有玩家都停在 sector 1（N2 现在挡住的是它的 deactivate 半边，这一半与重置那处是同一个机制）。

@@ -971,19 +971,34 @@ void BallanceMMOClient::death_reset_restore() {
 // (a direct source, or the input this one shares its source with) goes back at
 // session end.
 bool BallanceMMOClient::sector_deactivate_resolve() {
-    sector_deactivate_ = {};
-    const auto refuse = [this](const std::string& why) {
-        sector_deactivate_ = {};
+    sector_deactivate_count_ = 0;
+    for (auto& write: sector_deactivate_) write = {};
+    sector_deactivate_failed_ = false;
+    CKBehavior* events = m_bml->GetScriptByName("Gameplay_Events");
+    CKBehavior* handler = m_bml->GetScriptByName("Event_handler");
+    // Both halves must be pinned or neither is useful: with only the checkpoint
+    // pinned a level reset still tears the sector down, and with the sector
+    // reset of Init Ingame neutralized (N1) nothing brings it back.
+    const bool a = sector_deactivate_resolve_one(events, "Gameplay_Events", "activate Sektor");
+    const bool b = sector_deactivate_resolve_one(handler, "Event_handler", "reset Level");
+    return a && b;
+}
+
+// One chain's "Set Cell -> IngameParameter[0][2]".
+bool BallanceMMOClient::sector_deactivate_resolve_one(CKBehavior* script, const char* script_name,
+                                                      const char* group_name) {
+    const auto refuse = [&](const std::string& why) {
         sector_deactivate_failed_ = true;
-        logger_->Error("Physics session: the checkpoint's sector deactivation was NOT neutralized (%s): crossing a "
-                       "checkpoint will reset the previous sector's mechanisms here", why.c_str());
+        logger_->Error("Physics session: the sector deactivation in %s/%s was NOT neutralized (%s): that chain "
+                       "will reset this client's sector and stop its mechanisms", script_name, group_name,
+                       why.c_str());
         return false;
     };
+    if (sector_deactivate_count_ >= SECTOR_DEACTIVATE_WRITES) return refuse("the table is full");
     CKContext* context = m_bml->GetCKContext();
-    CKBehavior* events = m_bml->GetScriptByName("Gameplay_Events");
-    if (!events) return refuse("Gameplay_Events is missing");
-    CKBehavior* chain = ScriptHelper::FindFirstBB(events, "activate Sektor");
-    if (!chain) return refuse("Gameplay_Events/activate Sektor is missing");
+    if (!script) return refuse("the script is missing");
+    CKBehavior* chain = ScriptHelper::FindFirstBB(script, const_cast<CKSTRING>(group_name));
+    if (!chain) return refuse("the group is missing");
     CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
     if (!parameters) return refuse("the IngameParameter array is missing");
     CKBehavior* block = nullptr;
@@ -1007,10 +1022,10 @@ bool BallanceMMOClient::sector_deactivate_resolve() {
         block = sub;
         target_known = target != nullptr;
     }
-    if (!block) return refuse("no Set Cell inside activate Sektor writes IngameParameter[0][2]");
+    if (!block) return refuse("no Set Cell in that group writes IngameParameter[0][2]");
     if (!target_known)
-        logger_->Warn("Physics session: the checkpoint's Set Cell does not name its array here; taking the one "
-                      "writing cell [0][2] of Gameplay_Events/activate Sektor");
+        logger_->Warn("Physics session: the Set Cell of %s/%s does not name its array here; taking the one "
+                      "writing cell [0][2]", script_name, group_name);
     CKParameterIn* input = block->GetInputParameter(2);   // "Value"
     if (!input) return refuse("the Set Cell block has no Value input");
     CKParameter* source = input->GetRealSource();
@@ -1027,16 +1042,17 @@ bool BallanceMMOClient::sector_deactivate_resolve() {
         context->DestroyObject(zero);
         return refuse("the Value input refused the session's constant");
     }
-    sector_deactivate_.block = block->GetID();
-    sector_deactivate_.input = 2;
-    sector_deactivate_.retail_source = direct ? direct->GetID() : 0;
-    sector_deactivate_.retail_shared = shared ? shared->GetID() : 0;
-    sector_deactivate_.retail_real = source->GetID();
-    sector_deactivate_.zero = zero->GetID();
-    sector_deactivate_.applied = true;
-    sector_deactivate_failed_ = false;
-    logger_->Info("Physics session: the checkpoint's sector deactivation (activate Sektor/Set Cell -> "
-                  "IngameParameter[0][2]) is pinned to 0");
+    sector_deactivate_write& write = sector_deactivate_[sector_deactivate_count_++];
+    write.block = block->GetID();
+    write.chain = group_name;
+    write.input = 2;
+    write.retail_source = direct ? direct->GetID() : 0;
+    write.retail_shared = shared ? shared->GetID() : 0;
+    write.retail_real = source->GetID();
+    write.zero = zero->GetID();
+    write.applied = true;
+    logger_->Info("Physics session: the sector deactivation in %s/%s (Set Cell -> IngameParameter[0][2]) is "
+                  "pinned to 0", script_name, group_name);
     return true;
 }
 
@@ -1044,43 +1060,51 @@ bool BallanceMMOClient::sector_deactivate_resolve() {
 // source it had when the session resolved it: anything else in that input
 // belongs to a graph this table no longer describes.
 void BallanceMMOClient::sector_deactivate_apply() {
-    if (!sector_deactivate_.block || !sector_deactivate_.zero) return;
     CKContext* context = m_bml->GetCKContext();
-    CKBehavior* block = session_block(context, sector_deactivate_.block, "Set Cell");
-    CKParameterIn* input = block ? block->GetInputParameter(sector_deactivate_.input) : nullptr;
-    auto* zero = CKParameter::Cast(context->GetObject(sector_deactivate_.zero));
-    if (!input || !zero) return;
-    CKParameter* current = input->GetRealSource();
-    if (current == zero) return;   // still ours
-    if (!current || current->GetID() != sector_deactivate_.retail_real) return;
-    if (input->SetDirectSource(zero) == CK_OK)
-        logger_->Info("Physics session: the checkpoint's sector deactivation was re-pinned to 0");
+    for (int i = 0; i < sector_deactivate_count_; ++i) {
+        sector_deactivate_write& write = sector_deactivate_[i];
+        if (!write.block || !write.zero) continue;
+        CKBehavior* block = session_block(context, write.block, "Set Cell");
+        CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
+        auto* zero = CKParameter::Cast(context->GetObject(write.zero));
+        if (!input || !zero) continue;
+        CKParameter* current = input->GetRealSource();
+        if (current == zero) continue;   // still ours
+        if (!current || current->GetID() != write.retail_real) continue;
+        if (input->SetDirectSource(zero) == CK_OK)
+            logger_->Info("Physics session: the sector deactivation in %s was re-pinned to 0",
+                          write.chain ? write.chain : "?");
+    }
 }
 
 void BallanceMMOClient::sector_deactivate_restore() {
     CKContext* context = m_bml->GetCKContext();
-    CKBehavior* block = sector_deactivate_.block ? session_block(context, sector_deactivate_.block, "Set Cell") : nullptr;
-    CKParameterIn* input = block ? block->GetInputParameter(sector_deactivate_.input) : nullptr;
-    auto* zero = sector_deactivate_.zero ? CKParameter::Cast(context->GetObject(sector_deactivate_.zero)) : nullptr;
-    bool referenced = false;
-    if (input && zero && input->GetRealSource() == zero) {
-        referenced = true;
-        if (sector_deactivate_.retail_shared) {
-            auto* shared = CKParameterIn::Cast(context->GetObject(sector_deactivate_.retail_shared));
-            if (shared && input->ShareSourceWith(shared) == CK_OK) referenced = false;
-        } else {
-            auto* source = CKParameter::Cast(context->GetObject(sector_deactivate_.retail_source));
-            if (source && input->SetDirectSource(source) == CK_OK) referenced = false;
+    for (int i = 0; i < sector_deactivate_count_; ++i) {
+        sector_deactivate_write& write = sector_deactivate_[i];
+        CKBehavior* block = write.block ? session_block(context, write.block, "Set Cell") : nullptr;
+        CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
+        auto* zero = write.zero ? CKParameter::Cast(context->GetObject(write.zero)) : nullptr;
+        bool referenced = false;
+        if (input && zero && input->GetRealSource() == zero) {
+            referenced = true;
+            if (write.retail_shared) {
+                auto* shared = CKParameterIn::Cast(context->GetObject(write.retail_shared));
+                if (shared && input->ShareSourceWith(shared) == CK_OK) referenced = false;
+            } else {
+                auto* source = CKParameter::Cast(context->GetObject(write.retail_source));
+                if (source && input->SetDirectSource(source) == CK_OK) referenced = false;
+            }
+            if (referenced)
+                logger_->Warn("Physics session: the Value input of %s could not be handed back to its retail "
+                              "source; the session's constant is left in place", write.chain ? write.chain : "?");
         }
-        if (referenced)
-            logger_->Warn("Physics session: the checkpoint chain's Value input could not be handed back to its "
-                          "retail source; the session's constant is left in place");
+        // Destroying a parameter an input still points at would leave a dangling
+        // source behind, so the one case that keeps it is the one where the input
+        // still reads it.
+        if (zero && !referenced) context->DestroyObject(zero);
+        write = {};
     }
-    // Destroying a parameter an input still points at would leave a dangling
-    // source behind, so the one case that keeps it is the one where the input
-    // still reads it.
-    if (zero && !referenced) context->DestroyObject(zero);
-    sector_deactivate_ = {};
+    sector_deactivate_count_ = 0;
     sector_deactivate_failed_ = false;
 }
 
@@ -1107,15 +1131,19 @@ std::string BallanceMMOClient::pause_scripts_status() {
     // Design 9.25: the two world resets this session also neutralizes, so one
     // read says whether the client still runs a retail sector reset.
     {
-        int sector_value = -1;
-        if (CKBehavior* block = session_block(context, sector_deactivate_.block, "Set Cell"))
-            if (CKParameterIn* input = block->GetInputParameter(sector_deactivate_.input))
-                if (CKParameter* param = input->GetRealSource())
-                    if (param->GetGUID() == CKPGUID_INT) param->GetValue(&sector_value);
-        out += std::format(" death_reset={}/{} sector_keep={}/{}/now={}", death_reset_count_,
-                           death_reset_failed_ ? "failed" : "resolved", sector_deactivate_.zero,
-                           sector_deactivate_failed_ ? "failed" : (sector_deactivate_.applied ? "applied" : "resolved"),
-                           sector_value);
+        out += std::format(" death_reset={}/{} sector_keep={}/{}", death_reset_count_,
+                           death_reset_failed_ ? "failed" : "resolved", sector_deactivate_count_,
+                           sector_deactivate_failed_ ? "failed" : "resolved");
+        for (int i = 0; i < sector_deactivate_count_; ++i) {
+            const sector_deactivate_write& write = sector_deactivate_[i];
+            int sector_value = -1;
+            if (CKBehavior* block = session_block(context, write.block, "Set Cell"))
+                if (CKParameterIn* input = block->GetInputParameter(write.input))
+                    if (CKParameter* param = input->GetRealSource())
+                        if (param->GetGUID() == CKPGUID_INT) param->GetValue(&sector_value);
+            out += std::format(" [{}/keep={}/now={}]", write.chain ? write.chain : "?",
+                               write.applied ? "applied" : "resolved", sector_value);
+        }
         // One entry per call site: <group>=<retail target>/<applied?>/now=<what
         // the block reads today>, so the read still says whether this client
         // would run a retail sector reset.
@@ -1193,8 +1221,9 @@ void BallanceMMOClient::physics_session_anchor() {
     const bool sector_neutralized = sector_deactivate_resolve();
     if (death_neutralized && sector_neutralized)
         logger_->Info("Physics session: retail world resets neutralized: %d sector reset(s) in Gameplay_Ingame no "
-                      "longer run Gameplay_SectorManager (a death and a level reset), and a checkpoint activates "
-                      "its sector without deactivating the previous one", death_reset_count_);
+                      "longer run Gameplay_SectorManager (a death and a level reset), and %d chain(s) activate a "
+                      "sector without deactivating anything (a checkpoint and a level reset)",
+                      death_reset_count_, sector_deactivate_count_);
     // Design 9.26: the mechanism Sequencers start from the level file's
     // counters, as they do on the server, instead of wherever the play before
     // the restart left them (Level 11's sandbags swing the other way otherwise).

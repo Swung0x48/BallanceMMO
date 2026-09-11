@@ -154,20 +154,38 @@ F3 是另一条独立的固定开销：面板文字里带 tick 号，每帧都�
 - F3 面板更新限流到 10 Hz。
 - 新增自动化动词 `restart`，让回归测试能直接走玩家那条重置路径。
 
-### 一次修坏了的中间版本
+### 修的过程中错了两次
 
-第一版把 `activate Scripts` 的调用点在锚点处就清空，结果连**会话自己那次扇区激活也跳过了**——锚点发生在
-`Gameplay_Ingame` 刚被激活的那一刻，`Init Ingame` 的链条还没走到 `activate Scripts`。客户端因此完全不模拟
-机关：状态行是 `mechanisms=15/0`，journal 里沙袋**没有任何 LOCAL 行**。当时"机关修正 0 次"被误读成完全同步，
-其实是本地根本没有可比的东西。
+**第一次**：在锚点就清空 `activate Scripts`，把会话自己那次扇区激活也跳过了——客户端从头到尾不模拟机关，
+状态行 `mechanisms=15/0`，journal 里沙袋没有任何 LOCAL 行。改成：`Deactivate Ball` 立即生效，其余调用点
+等 `mechanism_tracking.resolved() > 0` 才生效。
 
-改法：`Deactivate Ball` 那处照旧在锚点立即清空；其余调用点要等 `mechanism_tracking.resolved() > 0`
-（扇区已经起来了）才清空，会话启动时的那次激活因此照常发生。
+**第二次**：只挡了"重新激活"，没挡"拆除"。桥接 `force` 日志显示重置前每 1.5 s 创建一次摆动力，重置后 17 秒
+一次都没有；`scripts` 显示重置过的客户端上 `P_Modul_26_MF Script` 不带 `*`（不活跃）；`IngameParameter` 的
+`Deactivate Sector = 1`。原来 `Event_handler :: reset Level` 那处调用**真的会拆掉扇区**（连模块脚本一起停），
+而我挡掉的那处正是把它装回来的那一步。沙袋因此失去驱动力只靠惯性滑行，服务端仍在驱动它——那 5 cm 就是这么来的。
+之前把它读成"deactivate-only 所以无害"，是把"只拆不装"误当成了"什么都不做"。
 
-**判断机关是否真在工作，看这两个信号，不要看修正数**：状态行的 `mechanisms=<known>/<resolved>` 第二个数必须是
-15；客户端 journal 里沙袋的 LOCAL 行必须存在且在摆动。
+**最终做法：两半都挡住。** N1 清空 `Gameplay_Ingame` 里所有指向 `Gameplay_SectorManager` 的 `Execute Script`；
+N2 把 `Gameplay_Events :: activate Sektor` 和 `Event_handler :: reset Level` 两处写"要拆除的扇区"的 `Set Cell`
+都钉成 0。重置于是既不拆扇区也不重建它。
+
+**判断机关是否真在工作，看这三个信号，不要看修正数**：`mechanisms` 第二个数是 15；journal 里沙袋的 LOCAL 行
+在摆动；`scripts` 里 `P_Modul_26_MF Script` 带 `*`。
 
 ### 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| `pausechain` | `death_reset=2/resolved sector_keep=2/resolved`，四处全是 `applied/now=0` |
+| 模块脚本 | 四次重置前后都带 `*` |
+| `mechanisms` | 全程 `15/15` |
+| 客户端 LOCAL 沙袋 | 摆幅 12.54 m |
+| 机关修正 | **0**（158 次修正全是自己的球和 peer 球） |
+| 回滚 | `snaps=4663 ok=4584 mism=79 resim=155` |
+| 对照（原缺陷 / 中间版本） | 每 1000 tick 约 1030 次、`resim=143412`、绳子 3→5 m / 沙袋稳定偏 5 cm、`mism=3071/4174` |
+
+## 验证
 
 | 检查 | 结果 |
 | --- | --- |
