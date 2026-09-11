@@ -1526,7 +1526,7 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                 // The verbs of dispatch_automation_command (client_automation.cpp).
                 if (length == 3)
                     return {"status", "session", "journal", "record", "replay", "level", "entity", "objects",
-                            "physobjs", "physview", "sector", "beam", "explode", "activate", "screenshot", "panel",
+                            "physobjs", "physview", "sector", "restart", "beam", "explode", "activate", "screenshot", "panel",
                             "key", "array", "script", "scripts", "message", "rng", "physlog", "physdump", "fixedtick",
                             "exactframes", "fpu53", "ping", "quit"};
                 const auto sub = boost::algorithm::to_lower_copy(args[2]);

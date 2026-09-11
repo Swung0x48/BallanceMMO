@@ -1,7 +1,8 @@
 # 第 11 关物理会话的穿透、机关互穿与沙袋抽搐：根因与修复（2026-09-11）
 
-用户报告的三个现象——玩家球穿进道具石球后才被弹回、机关之间同样穿透后回弹、玩家球被沙袋
-撞击时沙袋持续抽搐——来自三个互相独立的原因，都已修复并复测。
+用户报告的现象——玩家球穿进道具石球后才被弹回、机关之间同样穿透后回弹、玩家球被沙袋撞击时
+沙袋持续抽搐——来自三个互相独立的原因。修好之后的复测又暴露出第四个：死光所有命重开之后绳子
+和沙袋脱开，并把客户端拖到卡死。四个都已修复并复测。
 
 **结论：三个现象分别由 9.17 起的机关"服务端行死推"（Option A）、会话起始的 tick 相位错位与
 一个会跑行为帧的"暂停"、以及第 11 关沙袋 `Sequencer` 计数跨关卡重开保留造成。** 前两个的表现
@@ -9,14 +10,14 @@
 `mech_max_err=0.0000`；本机两台零售客户端场景跑穿透样本 0、沙袋 0 次回滚；远程服务器两台零售
 客户端重同步 0/0。
 
-三项修复对应设计文档的 9.25、9.26、9.27 小节，本文是面向问题本身的汇总；推导过程、被否掉的
+四项修复对应设计文档的 9.25、9.26、9.27、9.28 小节，本文是面向问题本身的汇总；推导过程、被否掉的
 方案和逐条实现细节见 `collision-overhaul-design.md` 对应小节。
 
 ## 版本与环境
 
-- 仓库：分支 `collision-overhaul`，基线 `6f4e2bad2f93`（9.24），本文的改动在其之上尚未提交。
-- Ballanced：`9cc27f74941a`，分支 `bmmo-collision-overhaul`，含未提交的引擎改动 #15。
-- physics_RT（`Source/BuildingBlocks`）：`0bb5e8ca6caf`，分支 `bmmo-collision-overhaul`，含未提交的引擎改动 #15。
+- 仓库：分支 `collision-overhaul`。9.25–9.27 已提交为 `5870a1a53339`；9.28 在其之上。
+- Ballanced：`79850832d846`，分支 `bmmo-collision-overhaul`（引擎改动 #15 已提交）。
+- physics_RT（`Source/BuildingBlocks`）：`f62897876421`，分支 `bmmo-collision-overhaul`。
 - 物理桥 API：`BMMO_PHYSICS_API_VERSION 10`（保留休眠状态、写入后重算接触的刚体写）。
 - 远程服务器：SSH `mc@lm.okbc.st:46981`，游戏 UDP `lm.okbc.st:46995`，运行目录 `/home/mc/bmmo`。
 - 零售客户端：Windows x86 `Player.exe` + BMLPlus，两台同机运行，只装 BMMO 与运行时依赖。
@@ -112,6 +113,61 @@ PSI 推进，**但行为图里按帧计数的 link 照跑不误**——零售端
 顺带确认：沙袋脚本（`P_Modul_26_MF Script`）里**没有** Proximity 块，它无条件摆动；板子（`P_Modul_25`）、
 推杆（`P_Modul_01`）和桥（`P_Modul_37`）才有 `TT Scaleable Proximity`（距离 50，ObjectA = `Ball_Pos_Frame`）。
 
+## 现象四：关卡重置让绳子脱开，并把客户端拖到卡死（9.28）
+
+9.25–9.27 上线后的五人复测里出现了两个新现象：死光所有命重开之后有概率顿住卡死（关掉 F3 面板有时能缓解），
+之后沙袋的绳子就和沙袋不连接、以奇怪的姿态运动。
+
+### 根因
+
+`Gameplay_Ingame` 有**两处**调用 `Gameplay_SectorManager`，9.25 的 N1 只中和了死亡那一处：
+
+| 调用点 | 触发 | 9.25 状态 |
+| --- | --- | --- |
+| `BallManager / Deactivate Ball`（脚本第 582 行） | 死亡 | 已中和 |
+| `Init Ingame / activate Scripts`（第 249 行） | **关卡重置** | **漏掉了** |
+
+死光命自动重开、以及 ESC 菜单里手动重开，走的都是后者：发 `Reset Level` 消息 → `Event_handler :: reset Level`
+把模块的参考系 `P_Modul_26_Balljoint_oben/unten` 用 `TT Restore IC` 放回初始位姿 → 重新激活 `Gameplay_Ingame`
+→ `Init Ingame` 调用扇区管理器 → 模块脚本重跑 `Set Physics Ball Joint.Create`。body guard 保住了刚体，新的
+关节锚点却建在刚被复位的参考系上，绳子从此永久挂歪。机制与 9.25 修的那个完全相同，只是入口不同。
+
+Journal 精确对上了：重置在 tick 25838，`P_Modul_26_Rope001` 从 tick 25844、`P_Modul_26_Rope` 从 tick 25862
+开始被修正，之后每个快照都修正一次，误差从 3.02 m 涨到 4.95 m 且从不收敛。之前四次普通死亡都没有坏。
+
+### 卡死是它的下游
+
+绳子永久发散意味着每个快照都要回滚重演。那个客户端 48 秒内多跑了 32184 个物理步，约 670 步/秒，而实时只有
+66 步/秒——十倍的物理负载，最后连自己的输入都停供了 2 秒并触发重同步。
+
+F3 是另一条独立的固定开销：面板文字里带 tick 号，每帧都在变，于是 `BGui::Text::SetText` 每帧把整块文字重新
+光栅化一次，整个会话期间一直如此。物理负载翻倍之后这部分正好把帧预算压垮，关掉面板就把它拿回来了。
+没有发现死锁：锚点的阻塞等待只存在于会话启动阶段，关卡重置不会再触发它。
+
+### 修复
+
+- N1 从"按组路径找一个块"改成"递归遍历 `Gameplay_Ingame`，清空每一个指向 `Gameplay_SectorManager` 的
+  `Execute Script`"，找到少于 2 个就整体拒绝并报错。`Gameplay_Events`（存档点，N2 的地盘）和 `Event_handler`
+  的调用点不碰——后者共用 `Level_Init` 发布的共享参数，清掉会波及别处。
+- 跳过重新激活不会把扇区放死：重置的 `deactivate Scripts` 迭代的是 `Logic_Scripts`，实测里面只有 20 个
+  `Gameplay_*` / `Ball*` / `AnimTrafo_*` 脚本，没有任何模块 MF Script，模块脚本从来就没被停过。
+- F3 面板更新限流到 10 Hz。
+- 新增自动化动词 `restart`，让回归测试能直接走玩家那条重置路径。
+
+### 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| `pausechain` | `death_reset=2/resolved`，两处都是 `applied/now=0` |
+| 会话中重置一次（tick 3017） | 机关修正 0 次，`max_err` 维持重置前的 0.3154 m |
+| 连续四次重置（客户端 1 三次、客户端 2 一次） | 两端机关修正 **0** 次，`resim` 合计 103 / 87 |
+| 对照（修复前） | 重置后每 1000 tick 约 1030 次修正，`resim=143412`，绳子误差 3→5 m |
+
+**尚未复测的部分**：本轮是在本机零售双客户端（约 0 延迟）上验证的。远端 300 ms 服务器当时没有监听，且其部署
+的引擎 build id 比本次构建旧，要复测需要先重新部署服务端。这个缺陷本身与延迟无关，但"300 ms 下的手感没有
+变差"尚未在远端确认。存档点那条路的 activate 半边是否也会重建关节同样仍未被测到——两次手动测试里所有玩家
+都停在 sector 1。
+
 ## 验证
 
 | 测试 | 结果 |
@@ -125,7 +181,7 @@ PSI 推进，**但行为图里按帧计数的 link 照跑不误**——零售端
 | 零售双客户端（远程 `lm.okbc.st`） | 重同步 0/0，`held=0/170` 与 `0/185`，穿透样本 0，unmatched 0；`Delayer` 翻转点有少量沙袋纠正（约 8 次 Sack、6 次 Sack001），是真实网络延迟下客户端晚几 tick 看到翻转的预期结果 |
 | 9.27 交错进关（0.75 s / 1.1 s） | 两台都记到 −1、锚点写回 −1，出生力 +0.25、tick 119 翻转 −0.25，与服务端一致；tick 19 位姿哈希三端同为 `9eee2492e417b822` |
 | 服务端 journal 回放 | 9.26 之后新录的 `matched=1314/1314`；SimTool `--restore-at` A/B 残差约 1e-7 m |
-| 自动化 `pausechain` | `death_reset=applied/now=0 sector_keep=applied/now=0` |
+| 自动化 `pausechain` | `death_reset=2/resolved sector_keep=…/applied/now=0`，两处扇区重置都是 `applied/now=0` |
 
 服务端日志会打印一行确认：
 `2 of 2 mechanism Sequencer counter(s) restored to the level file's (P_Modul_26_MF=-1, P_Modul_26_MF001=-1)`。
@@ -153,6 +209,8 @@ PSI 推进，**但行为图里按帧计数的 link 照跑不误**——零售端
 | 文件 | 变更 |
 | --- | --- |
 | `BallanceMMOCommon/include/game/script_state.hpp` | 新增：`Sequencer` 计数的记录与写回 |
+| `BallanceMMOClient/BallanceMMOClient.h` | 9.28：N1 改成一张表；F3 面板更新限流到 10 Hz |
+| `BallanceMMOClient/automation/client_automation.cpp` | 9.28：新增 `restart` 动词 |
 | `BallanceMMOCommon/include/session/mechanism_tracking.hpp` | 新增：机关注册表，零售端与无头端共用 |
 | `BallanceMMOCommon/include/physics/physics_rt_api.h` | 桥 API v10（`set_body_state_ex`、`wake_mode`） |
 | `BallanceMMOCommon/src/physics/physics_state.cpp` | leapfrog 补偿、接触重算、冻结计时器、出生/约束/力/PSI 诊断记录 |

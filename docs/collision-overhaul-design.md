@@ -1106,3 +1106,71 @@ tick 扫一遍、首次见到即记（那时它的脚本还没跑过），原版
 时，出生后前 6 个 PSI 的核心状态与 sim unit 里核心/控制器的顺序）；原版客户端在 `session trace on` 时逐条打日志，
 服务端在 `debug_trace` 时打 `bridge at tick N: ...`；exact 转储窗口 tick 4..12。physics_RT 里对应的
 观察点见引擎改动 #15。
+
+### 9.28 关卡重置也会重建机关关节（沙袋绳子脱开、以及随之而来的"卡死"）
+
+**症状.** 9.27 之后的五人手动测试（`build/manual-test-927-20260911/journal-package-session2-20260911T081744Z`）
+里，用户报告两件事：死光所有命重开之后有概率顿住卡死，而且卡死似乎和 F3 面板有关，关掉 F3 有时能缓解；之后
+沙袋就变得很奇怪，绳子和沙袋不连接，以奇怪的姿态运动。
+
+**根因（journal 精确到 tick）.** 五个客户端里只有 client 5 触发过 `GameOver`（04:10:53 与 04:12:28），也只有它坏了：
+
+- 04:10:56 `PreResetLevel`，自己的球在 **tick 25838** 被 unphysicalize；
+- `P_Modul_26_Rope001` 从 **tick 25844**、`P_Modul_26_Rope` 从 **tick 25862** 开始出现 >1 m 的修正；
+- 此后每个快照都修正一次直到会话结束，误差从 3.02 m 单调涨到 4.95 m，**从不收敛**，`velocity_error` 峰值 49 m/s。
+
+之前的四次普通死亡（tick 2578 / 13570 / 18937 / 22692）都没有坏——那条路被 9.25 的 N1 挡住了。没有重开过的
+client 1–4 机关误差只有 5–7 cm，它们那几千次修正全是对 peer 球的预测修正（最大 2.2 m）。
+
+原因是 `Gameplay_Ingame` 从**两处**调用 `Gameplay_SectorManager`，9.25 的 N1 只中和了其中一处：
+
+| 调用点 | 位置 | 触发 | 9.25 状态 |
+| --- | --- | --- | --- |
+| `BallManager / Deactivate Ball` | `Gameplay_Ingame:582` | 死亡 | 已中和（N1） |
+| `Init Ingame / activate Scripts` | `Gameplay_Ingame:249` | **关卡重置** | **漏掉了** |
+
+重置链（对全部 110 个根脚本 grep `Script=Gameplay_SectorManager` 得到的完整集合）：
+`Menu_Pause / Restart Level` 或 `Menu_Dead` 的重开按钮发 `Reset Level` 消息 → `Event_handler :: reset Level`
+（它自己那处调用先把扇区格写 0，`Gameplay_SectorManager` 的 `Test (Not Equal, B=0)` 会跳过迭代器，所以只
+deactivate、无害）→ `restore Objects` 的 3× `TT Restore IC` + 3× `Restore IC` 把 `P_Modul_26_Balljoint_oben/unten`
+放回 IC → 发 `Start Level` → `Event_handler :: start Level` 激活 `Gameplay_Ingame` → `Init Ingame` → 调用点
+`:249` → `Activate Sector` → 各模块 `*_MF Script` → `Physicalize.Out1 -> Set Physics Ball Joint.Create`。
+body guard 保住了刚体，于是新锚点建在刚被复位的参考系上，绳子永久挂歪。这正是 A2 §5.5 的机制，只是入口不同。
+
+`Gameplay_Events :: activate Sektor:42`（存档点，N2 的地盘）与 `Event_handler :: Exit Level:174` 是另外两处，
+都不在重置路径上；`Event_handler` 的两处共用 `Level_Init` 发布的共享参数，所以**不能**用清参数的办法碰。
+
+**卡死是它的下游.** 绳子永久发散 → 每个快照都回滚重演。client 5 在 48 秒里 `resim` 增加 32184 个 tick，
+即约 670 步/秒，而实时只有 66 步/秒——约 10 倍的物理负载；最后它的输入停供 2 秒触发了一次重同步。
+F3 的关系是另一条独立的开销：面板文字里带 tick 号，每帧都在变，`BGui::Text::SetText` 于是每帧把整块文字
+重新光栅化一次，整个会话期间一直如此。物理负载翻倍后这部分就把帧预算压垮了，关掉面板正好把它拿回来。
+（没有发现死锁：锚点的阻塞等待只存在于 `phase == restarting`，关卡重置不会再触发它。）
+
+**修复.**
+
+- **N1 扩成一张表**：不再按组路径找单个块，而是递归遍历 `Gameplay_Ingame`，把每一个 `Script` 输入指向
+  `Gameplay_SectorManager` 的 `Execute Script` 都记下来并清空（`DEATH_RESET_WRITES` 上限 4，少于 2 个就整体
+  拒绝并报错）。逐块仍做"目标参数只被一个输入读"的安全检查，这也正是 `Event_handler` 那两处被排除在外的原因。
+  会话结束时逐块还原。
+- **不会把扇区放死**：重置的 `deactivate Scripts` 迭代的是 `Logic_Scripts` 数组，实测（`--dump-array Logic_Scripts`）
+  里面只有 20 个 `Gameplay_*` / `Ball*` / `AnimTrafo_*` 脚本，**没有任何模块的 MF Script**——模块脚本从来没被
+  停过，所以跳过重新激活不会让机关变成死的。跳过 `activate Type 1/2/3` 同时也避免了 `Reset PH-Array` 之后把
+  每个模块的世界矩阵重新摆回 PH 位姿。
+- **F3 面板限流到 10 Hz**（`apply_pending_ping_text`），整场会话省下每帧一次的字体光栅化。
+- 新增自动化动词 `restart`：直接走玩家那条 `Reset Level` 路径，这样回归测试不必真的把命打光。
+
+**验证（2026-09-11，本机双原版客户端）.**
+
+| 检查 | 结果 |
+| --- | --- |
+| `pausechain` | `death_reset=2/resolved [activate Scripts=31597/applied/now=0] [Deactivate Ball=31597/applied/now=0]` |
+| 单次会话中重置 | 重置在 tick 3017；机关修正 **0** 次，`max_err` 维持重置前的 0.3154 m（自己的球） |
+| 连续四次重置（客户端 1 三次 tick 1536/3195/4855，客户端 2 一次 tick 6515） | 两端机关修正 **0** 次；client1 `snaps=4338 ok=4285 mism=53 resim=103`，client2 `snaps=4343 ok=4295 mism=48 resim=87`；只有自己的球（≤8 cm）和 peer 球出生瞬态（0.3154 m） |
+| 对照（修复前，manual-test-927 的 client 5） | 重置后每 1000 tick 约 1030 次修正，`resim=143412`，绳子误差 3→5 m |
+| 单元测试 | 162/162 |
+
+**限制.** 本轮验证是在本机零售双客户端（约 0 延迟）上做的；远端 300 ms 服务器当时没有在监听，而且它部署的
+引擎 build id 比本次构建旧，要复测得先重新部署服务端。这个缺陷本身与延迟无关——它取决于 `Set Physics Ball
+Joint.Create` 会不会跑——但"300 ms 下的手感没有变差"这一条尚未在远端复测过。另外，存档点那条路
+（`Gameplay_Events :: activate Sektor`）的 activate 半边是否也会重建关节仍然没有被测到：本次和上次手动测试里
+所有玩家都停在 sector 1，没有人过过存档点。

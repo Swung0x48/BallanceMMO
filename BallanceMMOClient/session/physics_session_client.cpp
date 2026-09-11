@@ -787,60 +787,109 @@ void BallanceMMOClient::pause_scripts_restore() {
 // had swung and IVP removes the violation with an impulse - the convulsion of
 // the user's third symptom (findings/A2 section 5.5).
 //
-// N1, the death reset: Gameplay_Ingame / BallManager / Deactivate Ball runs
+// N1, the sector resets Gameplay_Ingame runs.  Two of its groups call
 // "Execute Script" on Gameplay_SectorManager with Reset? = TRUE, i.e. the whole
-// sector is deactivated and re-activated for one player's death.  The server's
-// world never does this (design section 2: it activates the union of the
-// players' sectors and never resets), so neither may we.  The block's "Script"
-// target is emptied for the session, exactly like the pause chains':
-// Execute Script activates its Out immediately when the script is null
-// (ExecuteScript.cpp:66-70), so "Set Cell.Found -> Execute Script.In ->
+// sector is deactivated and re-activated in one frame:
+//
+//   * BallManager / Deactivate Ball, for one player's death (9.25);
+//   * Init Ingame / activate Scripts, for a level reset (9.28) - the path a
+//     lost last life and the ESC menu's "restart level" both take, through
+//     "Reset Level" -> Event_handler / reset Level -> Activate Script
+//     (Gameplay_Ingame) -> Gameplay_Ingame.Start -> Init Ingame.
+//
+// The server's world never does either (design section 2: it activates the
+// union of the players' sectors and never resets), so neither may we.  Both are
+// found by walking Gameplay_Ingame for the target's name rather than by group
+// path, so a third one would be caught as well; the sibling call sites outside
+// this script are deliberately left alone (Gameplay_Events / activate Sektor is
+// N2's, and Event_handler's two only ever deactivate - they write the sector
+// cell to 0 first, which makes the SectorManager's own Test skip its iterator).
+//
+// Each block's "Script" target is emptied for the session, exactly like the
+// pause chains': Execute Script activates its Out immediately when the script
+// is null (ExecuteScript.cpp:66-70), so "Set Cell.Found -> Execute Script.In ->
 // Deactivate Ball.Ball OFF" keeps its shape, its delays and the respawn behind
-// it.  The visible difference from retail is that a personal death no longer
-// re-shows the sector's collected items - consistent with a shared world.
+// it, and Init Ingame's four Activate Scripts (Gameplay_Events, Sky, Energy and
+// the tutorial test) still run.  Skipping the re-activation cannot leave the
+// sector dead, because a reset never stopped it: "deactivate Scripts" iterates
+// Logic_Scripts, which holds the 20 Gameplay_*/Ball*/AnimTrafo_* scripts and no
+// module MF script (verified with --dump-array Logic_Scripts on Level 11).
+//
+// The visible differences from retail are that a personal death no longer
+// re-shows the sector's collected items, and that a level reset no longer puts
+// the mechanisms back at their start - both consistent with a shared world that
+// keeps running while one player restarts.
 //
 // N2, the checkpoint deactivation: see sector_deactivate_resolve below.
 bool BallanceMMOClient::death_reset_resolve() {
-    death_reset_ = {};
+    death_reset_count_ = 0;
+    for (auto& write: death_reset_) write = {};
     const auto refuse = [this](const std::string& why) {
-        death_reset_ = {};
+        death_reset_count_ = 0;
+        for (auto& write: death_reset_) write = {};
         death_reset_failed_ = true;
-        logger_->Error("Physics session: the retail death reset was NOT neutralized (%s): a death will reset this "
-                       "client's sector and rebuild the mechanisms' joints under the body guard", why.c_str());
+        logger_->Error("Physics session: the retail sector resets were NOT neutralized (%s): a death or a level "
+                       "reset will reset this client's sector and rebuild the mechanisms' joints under the body "
+                       "guard", why.c_str());
         return false;
     };
     CKContext* context = m_bml->GetCKContext();
     CKBehavior* ingame = m_bml->GetScriptByName("Gameplay_Ingame");
     if (!ingame) return refuse("Gameplay_Ingame is missing");
-    CKBehavior* manager = ScriptHelper::FindFirstBB(ingame, "BallManager");
-    if (!manager) return refuse("Gameplay_Ingame/BallManager is missing");
-    CKBehavior* chain = ScriptHelper::FindFirstBB(manager, "Deactivate Ball");
-    if (!chain) return refuse("BallManager/Deactivate Ball is missing");
-    CKBehavior* block = nullptr;
-    const int subs = chain->GetSubBehaviorCount();
-    for (int i = 0; i < subs; ++i) {
-        CKBehavior* sub = chain->GetSubBehavior(i);
-        const char* prototype = sub && sub->IsUsingFunction() ? sub->GetPrototypeName() : nullptr;
-        if (!prototype || std::strcmp(prototype, "Execute Script") != 0) continue;
-        auto* target = CKBehavior::Cast(sub->GetInputParameterObject(1));   // "Script"
-        const char* name = target ? target->GetName() : nullptr;
-        if (!name || std::strcmp(name, "Gameplay_SectorManager") != 0) continue;
-        if (block) return refuse("Deactivate Ball runs Gameplay_SectorManager from more than one block");
-        block = sub;
-    }
-    if (!block) return refuse("no Execute Script inside Deactivate Ball targets Gameplay_SectorManager");
-    CKParameterIn* input = block->GetInputParameter(1);
-    if (!input || input->GetGUID() != CKPGUID_SCRIPT) return refuse("the Execute Script block has no Script input");
-    CKParameter* param = input->GetRealSource();
-    if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID)))
-        return refuse("its Script input has no usable target parameter");
-    const auto [readers, readers_text] = parameter_readers(context, param);
-    if (readers != 1)
-        return refuse(std::format("its target parameter is read by {} inputs ({})", readers, readers_text));
-    death_reset_.block = block->GetID();
-    death_reset_.input = 1;
-    param->GetValue(&death_reset_.retail);
-    death_reset_.applied = false;
+    // Every Execute Script in the script's tree whose "Script" input names
+    // Gameplay_SectorManager, with the group it sits in for the log.
+    std::string trouble;
+    const auto walk = [&](auto&& self, CKBehavior* group) -> void {
+        const int subs = group->GetSubBehaviorCount();
+        for (int i = 0; i < subs; ++i) {
+            CKBehavior* sub = group->GetSubBehavior(i);
+            if (!sub) continue;
+            if (!sub->IsUsingFunction()) { self(self, sub); continue; }
+            const char* prototype = sub->GetPrototypeName();
+            if (!prototype || std::strcmp(prototype, "Execute Script") != 0) continue;
+            auto* target = CKBehavior::Cast(sub->GetInputParameterObject(1));   // "Script"
+            const char* name = target ? target->GetName() : nullptr;
+            if (!name || std::strcmp(name, "Gameplay_SectorManager") != 0) continue;
+            if (death_reset_count_ >= DEATH_RESET_WRITES) {
+                if (trouble.empty()) trouble = "more sector resets than the table holds";
+                return;
+            }
+            CKParameterIn* input = sub->GetInputParameter(1);
+            if (!input || input->GetGUID() != CKPGUID_SCRIPT) {
+                if (trouble.empty()) trouble = "an Execute Script block has no Script input";
+                return;
+            }
+            CKParameter* param = input->GetRealSource();
+            if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID))) {
+                if (trouble.empty()) trouble = "its Script input has no usable target parameter";
+                return;
+            }
+            // Emptying a parameter something else reads would take its value
+            // away too - Event_handler's two call sites share Level_Init's
+            // published one, which is exactly why they are not touched here.
+            const auto [readers, readers_text] = parameter_readers(context, param);
+            if (readers != 1) {
+                if (trouble.empty())
+                    trouble = std::format("the target parameter of {} is read by {} inputs ({})",
+                                          group->GetName() ? group->GetName() : "?", readers, readers_text);
+                return;
+            }
+            death_reset_write& write = death_reset_[death_reset_count_++];
+            write.block = sub->GetID();
+            write.chain = group->GetName() ? group->GetName() : "?";
+            write.input = 1;
+            param->GetValue(&write.retail);
+            write.applied = false;
+        }
+    };
+    walk(walk, ingame);
+    if (!trouble.empty()) return refuse(trouble);
+    // Both known call sites must be there: a graph that lost one is a graph
+    // this fix no longer understands, and half a neutralization is worse than a
+    // loud failure (the level reset one is only reached minutes into a run).
+    if (death_reset_count_ < 2)
+        return refuse(std::format("Gameplay_Ingame runs Gameplay_SectorManager from {} place(s), expected at "
+                                  "least 2 (Deactivate Ball and Init Ingame/activate Scripts)", death_reset_count_));
     death_reset_failed_ = false;
     death_reset_apply();
     return true;
@@ -849,42 +898,49 @@ bool BallanceMMOClient::death_reset_resolve() {
 // Keeps the edit applied, like pause_scripts_apply: a level reset that handed
 // the retail target back has to be caught before the next death runs the chain.
 void BallanceMMOClient::death_reset_apply() {
-    if (!death_reset_.block) return;
     CKContext* context = m_bml->GetCKContext();
-    CKBehavior* block = session_block(context, death_reset_.block, "Execute Script");
-    CKParameterIn* input = block ? block->GetInputParameter(death_reset_.input) : nullptr;
-    CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
-    if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID))) return;
-    CK_ID current = 0;
-    param->GetValue(&current);
-    if (current == 0) {
-        death_reset_.applied = true;   // already neutral (this session, or the same graph reloaded)
-        return;
-    }
-    if (current != death_reset_.retail) return;   // somebody else's value: not ours to move
-    const CK_ID zero = 0;
-    param->SetValue(&zero, sizeof(CK_ID));
-    if (!death_reset_.applied) {
-        death_reset_.applied = true;
-        logger_->Info("Physics session: the death chain's sector reset (Deactivate Ball/Execute Script -> %u) "
-                      "is neutralized", death_reset_.retail);
+    for (int i = 0; i < death_reset_count_; ++i) {
+        death_reset_write& write = death_reset_[i];
+        if (!write.block) continue;
+        CKBehavior* block = session_block(context, write.block, "Execute Script");
+        CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
+        CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
+        if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID))) continue;
+        CK_ID current = 0;
+        param->GetValue(&current);
+        if (current == 0) {
+            write.applied = true;   // already neutral (this session, or the same graph reloaded)
+            continue;
+        }
+        if (current != write.retail) continue;   // somebody else's value: not ours to move
+        const CK_ID zero = 0;
+        param->SetValue(&zero, sizeof(CK_ID));
+        if (!write.applied) {
+            write.applied = true;
+            logger_->Info("Physics session: the sector reset in %s (Execute Script -> %u) is neutralized",
+                          write.chain ? write.chain : "?", write.retail);
+        }
     }
 }
 
 void BallanceMMOClient::death_reset_restore() {
     CKContext* context = m_bml->GetCKContext();
-    CKBehavior* block = death_reset_.block ? session_block(context, death_reset_.block, "Execute Script") : nullptr;
-    CKParameterIn* input = block ? block->GetInputParameter(death_reset_.input) : nullptr;
-    CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
-    if (param && param->GetDataSize() == static_cast<int>(sizeof(CK_ID)) && death_reset_.retail) {
-        CK_ID current = 0;
-        param->GetValue(&current);
-        if (current == 0) {
-            const CK_ID retail = death_reset_.retail;
-            param->SetValue(&retail, sizeof(CK_ID));
+    for (int i = 0; i < death_reset_count_; ++i) {
+        death_reset_write& write = death_reset_[i];
+        CKBehavior* block = write.block ? session_block(context, write.block, "Execute Script") : nullptr;
+        CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
+        CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
+        if (param && param->GetDataSize() == static_cast<int>(sizeof(CK_ID)) && write.retail) {
+            CK_ID current = 0;
+            param->GetValue(&current);
+            if (current == 0) {
+                const CK_ID retail = write.retail;
+                param->SetValue(&retail, sizeof(CK_ID));
+            }
         }
+        write = {};
     }
-    death_reset_ = {};
+    death_reset_count_ = 0;
     death_reset_failed_ = false;
 }
 
@@ -1043,20 +1099,27 @@ std::string BallanceMMOClient::pause_scripts_status() {
     // Design 9.25: the two world resets this session also neutralizes, so one
     // read says whether the client still runs a retail sector reset.
     {
-        CK_ID death_target = 0;
-        if (CKBehavior* block = session_block(context, death_reset_.block, "Execute Script"))
-            if (CKParameterIn* input = block->GetInputParameter(death_reset_.input))
-                if (CKParameter* param = input->GetRealSource()) param->GetValue(&death_target);
         int sector_value = -1;
         if (CKBehavior* block = session_block(context, sector_deactivate_.block, "Set Cell"))
             if (CKParameterIn* input = block->GetInputParameter(sector_deactivate_.input))
                 if (CKParameter* param = input->GetRealSource())
                     if (param->GetGUID() == CKPGUID_INT) param->GetValue(&sector_value);
-        out += std::format(" death_reset={}/{}/now={} sector_keep={}/{}/now={}", death_reset_.retail,
-                           death_reset_failed_ ? "failed" : (death_reset_.applied ? "applied" : "resolved"),
-                           death_target, sector_deactivate_.zero,
+        out += std::format(" death_reset={}/{} sector_keep={}/{}/now={}", death_reset_count_,
+                           death_reset_failed_ ? "failed" : "resolved", sector_deactivate_.zero,
                            sector_deactivate_failed_ ? "failed" : (sector_deactivate_.applied ? "applied" : "resolved"),
                            sector_value);
+        // One entry per call site: <group>=<retail target>/<applied?>/now=<what
+        // the block reads today>, so the read still says whether this client
+        // would run a retail sector reset.
+        for (int i = 0; i < death_reset_count_; ++i) {
+            const death_reset_write& write = death_reset_[i];
+            CK_ID now = 0;
+            if (CKBehavior* block = session_block(context, write.block, "Execute Script"))
+                if (CKParameterIn* input = block->GetInputParameter(write.input))
+                    if (CKParameter* param = input->GetRealSource()) param->GetValue(&now);
+            out += std::format(" [{}={}/{}/now={}]", write.chain ? write.chain : "?", write.retail,
+                               write.applied ? "applied" : "resolved", now);
+        }
     }
     for (int i = 0; i < pause_scripts_count_; ++i) {
         const pause_script_write& write = pause_scripts_[i];
@@ -1121,9 +1184,9 @@ void BallanceMMOClient::physics_session_anchor() {
     const bool death_neutralized = death_reset_resolve();
     const bool sector_neutralized = sector_deactivate_resolve();
     if (death_neutralized && sector_neutralized)
-        logger_->Info("Physics session: retail world resets neutralized: the death chain no longer runs "
-                      "Gameplay_SectorManager, and a checkpoint activates its sector without deactivating the "
-                      "previous one");
+        logger_->Info("Physics session: retail world resets neutralized: %d sector reset(s) in Gameplay_Ingame no "
+                      "longer run Gameplay_SectorManager (a death and a level reset), and a checkpoint activates "
+                      "its sector without deactivating the previous one", death_reset_count_);
     // Design 9.26: the mechanism Sequencers start from the level file's
     // counters, as they do on the server, instead of wherever the play before
     // the restart left them (Level 11's sandbags swing the other way otherwise).

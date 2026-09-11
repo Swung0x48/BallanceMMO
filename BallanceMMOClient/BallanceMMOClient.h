@@ -378,14 +378,25 @@ private:
 	// runs - so the panel is rebuilt whenever either half moved, and not at
 	// all while it is hidden.
 	//
-	// The two cached halves are function-local rather than members on purpose:
+	// Rate-limited to kPanelInterval because BGui::Text::SetText re-rasterizes
+	// the whole block into the sprite's texture: the physics half carries the
+	// tick number, so an unthrottled panel pays that rasterization on every
+	// frame for the whole session.  That cost is what makes closing the panel
+	// visibly relieve a client whose frame budget is already tight (design
+	// 9.28), and no reader can follow these counters at 66 Hz anyway.
+	//
+	// The cached halves are function-local rather than members on purpose:
 	// this class does not survive having members added to it (three launches
 	// with two extra std::strings here hang the engine at startup, three
 	// without them do not), which is a layout-dependent bug living somewhere
 	// else and not something to step on while adding a status panel.
 	void apply_pending_ping_text() { // game thread only
+		static constexpr auto kPanelInterval = std::chrono::milliseconds(100);
 		static std::string connection_half, shown;
+		static std::chrono::steady_clock::time_point next_update{};
 		if (!ping_ || !ping_->visible_) return;
+		const auto now = std::chrono::steady_clock::now();
+		if (now < next_update) return;
 		{
 			std::lock_guard lk(ping_text_mtx_);
 			if (ping_text_pending_) {
@@ -395,7 +406,10 @@ private:
 		}
 		const std::string text = connection_half + physics_session_overlay_text();
 		if (text == shown) return;
-		if (ping_->update(text, false)) shown = text;
+		if (ping_->update(text, false)) {
+			shown = text;
+			next_update = now + kPanelInterval;
+		}
 	}
 
 	BMLVersion loader_version_{}, source_version_{};
@@ -526,22 +540,47 @@ private:
 	// decide whether the world is running, and what each recorded block points
 	// at now.
 	std::string pause_scripts_status();
-	// Design 9.25, neutralization N1: the retail death chain re-runs the whole
-	// sector (Gameplay_Ingame / BallManager / Deactivate Ball -> Execute Script
-	// -> Gameplay_SectorManager).  The server never runs that per-player reset,
-	// so a client must not either: it rebuilt the sandbag's ball joints at the
-	// module's initial anchors while the body guard kept the bodies where the
-	// server has them, and the solver removed the violation with an impulse
-	// (findings/A2 section 5.5).  The block's "Script" target is emptied for the
-	// session exactly like the pause chains' - Execute Script activates its Out
-	// at once on a null script, so the respawn chain behind it runs unchanged.
+	// Design 9.25/9.28, neutralization N1: Gameplay_Ingame runs
+	// Gameplay_SectorManager from two places, and both deactivate and
+	// re-activate the player's whole sector in one frame.  The server never
+	// makes that per-player edit (its world activates the union of everyone's
+	// sectors and deactivates nothing), so a client in a session must not
+	// either: the re-activation re-enters each module's
+	// "Set Physics Ball Joint.Create" while the body guard keeps the bodies
+	// where the server has them, and since the referential entities have just
+	// been put back at their IC the new anchors are wherever the mechanism
+	// started - findings/A2 section 5.5.
+	//
+	//   * BallManager / Deactivate Ball  -> a death resets the sector (9.25).
+	//   * Init Ingame / activate Scripts -> a LEVEL RESET does (9.28).  The
+	//     reset is what a lost last life and the ESC menu's "restart level"
+	//     both reach: Menu_Dead / Menu_Pause send "Reset Level",
+	//     Event_handler / reset Level restores the module referentials to
+	//     their ICs and re-activates Gameplay_Ingame, whose Init Ingame runs
+	//     this block.  Missing it left the Level 11 sandbag's rope hanging off
+	//     its joints for the rest of the session: every snapshot corrected it,
+	//     which cost ten times the normal physics work and read as a freeze
+	//     (build/manual-test-927-20260911, client 5, reset at tick 25838 and
+	//     rope corrections from 25844 on, error growing 3 m -> 5 m).
+	//
+	// Both are found by name rather than by group path, so a third call site in
+	// this script would be neutralized too.  Each block's "Script" target is
+	// emptied for the session exactly like the pause chains' - Execute Script
+	// activates its Out at once on a null script, so the respawn chain behind
+	// the first and the four Activate Scripts behind the second run unchanged.
+	// Sector 1 stays activated across a reset because the modules' MF scripts
+	// are not in Logic_Scripts, the array the reset's "deactivate Scripts"
+	// iterates, so nothing stopped them in the first place.
 	struct death_reset_write {
-		CK_ID block = 0;         // the Execute Script block inside Deactivate Ball
+		CK_ID block = 0;         // an Execute Script block running Gameplay_SectorManager
+		const char* chain = nullptr;   // the group it sits in, for the log and "pausechain"
 		int input = 0;           // its "Script" input
 		CK_ID retail = 0;        // the script it pointed at (Gameplay_SectorManager)
 		bool applied = false;
 	};
-	death_reset_write death_reset_{};
+	static constexpr int DEATH_RESET_WRITES = 4;
+	death_reset_write death_reset_[DEATH_RESET_WRITES];
+	int death_reset_count_ = 0;
 	bool death_reset_failed_ = false;
 	bool death_reset_resolve();
 	void death_reset_apply();

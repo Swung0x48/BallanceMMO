@@ -458,6 +458,16 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         if (rest.find("all") != std::string::npos) return "ok " + physics_view_.describe_physics_objects();
         return "ok " + physics_view_.describe_movable_objects();
     }
+    if (verb == "restart") {
+        // restart: the level reset a player reaches from the ESC menu, or that
+        // a lost last life reaches on its own ("Reset Level" -> Event_handler /
+        // reset Level).  In a session that path used to rebuild the mechanisms'
+        // ball joints under the body guard (design 9.28), so a regression test
+        // needs to reach it without spending the run's lives.
+        if (!m_bml->IsIngame()) return "error not ingame";
+        restart_current_level();
+        return "ok level reset requested";
+    }
     if (verb == "sector") {
         // sector <n>: activate that sector's mechanisms the way the server's
         // world does, so a later sector's bodies exist without playing the
