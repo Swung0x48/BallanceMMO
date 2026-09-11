@@ -577,6 +577,17 @@ private:
 		int input = 0;           // its "Script" input
 		CK_ID retail = 0;        // the script it pointed at (Gameplay_SectorManager)
 		bool applied = false;
+		// Init Ingame's call site is not only the level reset's - it is also
+		// what activates the sector the FIRST time, and the anchor happens when
+		// Gameplay_Ingame starts, before its Init Ingame chain has got that far.
+		// Emptying it at the anchor therefore skipped the session's own sector
+		// activation and left the client with no mechanism bodies at all (a run
+		// whose status line read mechanisms=15/0 and whose journal carried no
+		// LOCAL row for P_Modul_26_Sack).  A deferred write waits until this
+		// client actually simulates a mechanism, which is exactly "the sector
+		// is up, nothing may reset it now".  Deactivate Ball's is not deferred:
+		// it can only run on a death, and 9.25's behaviour is kept as it was.
+		bool deferred = false;
 	};
 	static constexpr int DEATH_RESET_WRITES = 4;
 	death_reset_write death_reset_[DEATH_RESET_WRITES];

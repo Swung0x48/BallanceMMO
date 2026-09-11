@@ -1159,18 +1159,36 @@ F3 的关系是另一条独立的开销：面板文字里带 tick 号，每帧�
 - **F3 面板限流到 10 Hz**（`apply_pending_ping_text`），整场会话省下每帧一次的字体光栅化。
 - 新增自动化动词 `restart`：直接走玩家那条 `Reset Level` 路径，这样回归测试不必真的把命打光。
 
-**验证（2026-09-11，本机双原版客户端）.**
+**一次把它修坏了的中间版本（留作教训）.** 第一版把 `activate Scripts` 的调用点在锚点处就清空，结果**连会话自己
+那次扇区激活也跳过了**：锚点发生在 `Gameplay_Ingame` 刚被激活的那一刻，此时 `Init Ingame` 的链条还没走到
+`activate Scripts`，于是模块从来没有被 physicalize 过。客户端因此完全不模拟机关——`session` 状态行里是
+`mechanisms=15/0`，journal 里 `P_Modul_26_Sack` **没有任何 LOCAL 行**，只有服务端的 RECEIVED 行。
+机关修正数为 0 当时被误读成"完全同步"，实际上是"本地根本没有可比的东西"。
+
+**判断机关是否真的在工作，要看这两个信号，不要看修正数：**
+
+1. `session` 状态行的 `mechanisms=<known>/<resolved>`，第二个数是本客户端真正在模拟的机关数，必须是 15；
+2. 客户端 journal 里 `P_Modul_26_Sack` 的 **LOCAL** 行存在且在摆动（`--dump` 里 `flags & 2`）。
+
+**修正后的做法.** `Deactivate Ball` 那处照旧在锚点立即清空（它只可能因死亡触发）；其余调用点标记为
+`deferred`，要等到 `mechanism_tracking.resolved() > 0`（"这个客户端已经在模拟机关了，也就是扇区已经起来了"）
+才清空。会话启动时的那次激活因此照常发生，之后任何一次重置都被挡住。
+
+**验证（2026-09-11，本机双原版客户端，连续四次关卡重置）.**
 
 | 检查 | 结果 |
 | --- | --- |
-| `pausechain` | `death_reset=2/resolved [activate Scripts=31597/applied/now=0] [Deactivate Ball=31597/applied/now=0]` |
-| 单次会话中重置 | 重置在 tick 3017；机关修正 **0** 次，`max_err` 维持重置前的 0.3154 m（自己的球） |
-| 连续四次重置（客户端 1 三次 tick 1536/3195/4855，客户端 2 一次 tick 6515） | 两端机关修正 **0** 次；client1 `snaps=4338 ok=4285 mism=53 resim=103`，client2 `snaps=4343 ok=4295 mism=48 resim=87`；只有自己的球（≤8 cm）和 peer 球出生瞬态（0.3154 m） |
-| 对照（修复前，manual-test-927 的 client 5） | 重置后每 1000 tick 约 1030 次修正，`resim=143412`，绳子误差 3→5 m |
+| `mechanisms` | 全程 `15/15`，四次重置前后都不变 |
+| 客户端 journal 的 LOCAL 沙袋行 | 存在且摆动：x 范围 12.63 m（服务端 12.29 m）；同 tick 对比 mean 0.046 m、max 0.165 m |
+| `pausechain` | `death_reset=2/resolved`，`[activate Scripts=…/applied/now=0]`、`[Deactivate Ball=…/applied/now=0]` |
+| 重置后的沙袋误差 | 稳定在 mean 0.048 m / max 0.053 m，**不增长**（重置1后 0.0481、重置3后 0.0495、最后 0.0482） |
+| 对照（修复前） | 重置后每 1000 tick 约 1030 次修正，`resim=143412`，绳子误差 3.02→4.95 m 且从不收敛 |
 | 单元测试 | 162/162 |
 
+**残留问题.** 重置过的客户端，它的沙袋会稳定偏离服务端约 5 cm，正好卡在修正阈值上，于是几乎每个快照都要被
+拉回一次（client1 `mism=3071/4174`，`resim=6590`，约每 tick 0.8 个重演步——与缺陷本身的 670 步/秒不是一个量级，
+但也不该有）。误差不增长，说明关节没有被破坏，更像是重置之后本地的机关相位比服务端落后了一点点。尚未定位。
+
 **限制.** 本轮验证是在本机零售双客户端（约 0 延迟）上做的；远端 300 ms 服务器当时没有在监听，而且它部署的
-引擎 build id 比本次构建旧，要复测得先重新部署服务端。这个缺陷本身与延迟无关——它取决于 `Set Physics Ball
-Joint.Create` 会不会跑——但"300 ms 下的手感没有变差"这一条尚未在远端复测过。另外，存档点那条路
-（`Gameplay_Events :: activate Sektor`）的 activate 半边是否也会重建关节仍然没有被测到：本次和上次手动测试里
-所有玩家都停在 sector 1，没有人过过存档点。
+引擎 build id 比本次构建旧，要复测得先重新部署服务端。存档点那条路（`Gameplay_Events :: activate Sektor`）的
+activate 半边是否也会重建关节仍然没有被测到：两次手动测试里所有玩家都停在 sector 1。

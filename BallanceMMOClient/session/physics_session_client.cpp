@@ -880,6 +880,10 @@ bool BallanceMMOClient::death_reset_resolve() {
             write.input = 1;
             param->GetValue(&write.retail);
             write.applied = false;
+            // Everything but the death chain's is on the level-start path too,
+            // so it may only be emptied once the sector it would re-activate
+            // is already up (see death_reset_write::deferred).
+            write.deferred = std::strcmp(write.chain, "Deactivate Ball") != 0;
         }
     };
     walk(walk, ingame);
@@ -899,9 +903,13 @@ bool BallanceMMOClient::death_reset_resolve() {
 // the retail target back has to be caught before the next death runs the chain.
 void BallanceMMOClient::death_reset_apply() {
     CKContext* context = m_bml->GetCKContext();
+    // "The sector is up": this client resolved at least one mechanism of its
+    // own, so nothing may re-activate the sector from here on.
+    const bool sector_up = physics_session_.mechanism_tracking.resolved() > 0;
     for (int i = 0; i < death_reset_count_; ++i) {
         death_reset_write& write = death_reset_[i];
         if (!write.block) continue;
+        if (write.deferred && !sector_up) continue;
         CKBehavior* block = session_block(context, write.block, "Execute Script");
         CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
         CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
