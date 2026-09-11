@@ -9,6 +9,11 @@
 //       [--name <nick>] [--level N] [--record <file.bmrc>] [--journal <file.bmjr>]
 //       [--join-first | --room <id> | --host --expect N]
 //       [--seconds S] [--trace] [--no-correct]
+//       [--start-sector N] [--beam X Y Z TICK]
+//
+// --start-sector activates a later sector at the anchor and --beam puts the own
+// ball at a pose at a given session tick (design 9.25): no level has a movable
+// prop at its resetpoint, so without them a recorded run never touches one.
 //
 // --journal writes a client-kind session journal (design 9.15): the same
 // records the retail mod's black box writes - own and relayed inputs, own and
@@ -29,6 +34,7 @@
 #include <entity/version.hpp>
 #include <game/menu_driver.hpp>
 #include <game/navigation_graph.hpp>
+#include <game/script_state.hpp>
 #include <message/message_all.hpp>
 #include <physics/ball_navigation.hpp>
 #include <physics/physics_state.hpp>
@@ -38,6 +44,7 @@
 #include <role/role.hpp>
 #include <session/correction.hpp>
 #include <session/journal.hpp>
+#include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
 #include <session/spawn_impulse.hpp>
 
@@ -59,6 +66,12 @@
 namespace {
     using clock_type = std::chrono::steady_clock;
 
+    // How long the world waits at the anchor for SessionAssign before it starts
+    // stepping anyway (design 9.25 phase alignment).  The assignment is one
+    // reliable round trip behind SessionReady, so this is a fault timeout, not
+    // a schedule: a server that never answers must not freeze the client.
+    constexpr std::chrono::seconds kAnchorHoldTimeout{10};
+
     struct arguments {
         std::string root;
         std::string server = "127.0.0.1:26676";
@@ -78,12 +91,23 @@ namespace {
         int anchor_timeout = 3000;
         int64_t pause_at = -1;        // test knob: stop ticking at this tick ...
         int pause_ms = 0;             // ... for this long (design 9.2 resync path)
+        // Harness knobs (design 9.25): no level has a mechanism at its
+        // resetpoint, so a recorded run that keeps the ball near the spawn
+        // never touches one.  --start-sector activates a later sector at the
+        // anchor (the automation's `sector` verb), --beam drops the own ball at
+        // a pose at a given session tick (the `beam` verb) - together they put
+        // a ball on a mechanism in a few seconds instead of a minute of driving.
+        int start_sector = 0;
+        bool beam = false;
+        double beam_position[3] = {};
+        uint32_t beam_tick = 0;
     };
 
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
-                  "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]");
+                  "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
+                  "       [--start-sector N] [--beam X Y Z TICK]");
     }
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -108,6 +132,16 @@ namespace {
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
             else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
             else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
+            else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
+            else if (arg == "--beam") {
+                for (int k = 0; k < 3; ++k) {
+                    if (!(v = next())) return false;
+                    out.beam_position[k] = std::atof(v);
+                }
+                if (!(v = next())) return false;
+                out.beam_tick = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+                out.beam = true;
+            }
             else return false;
         }
         if (out.root.empty()) return false;
@@ -378,6 +412,13 @@ namespace {
                     corrector_.clear();
                     for (auto& [name, corrector]: mechanism_correctors_) corrector.clear();
                     for (auto& [id, remote]: remotes_) remote.corrector.clear();
+                    // A renumbering makes every record unreachable: no incoming
+                    // snapshot can match a tick of the old base (design 9.25 -
+                    // the retail mod does this in rebase_tick).  The registry
+                    // goes with it: its rows are keyed by the old numbers.
+                    rollback_.invalidate_history();
+                    own_inputs_.clear();
+                    mechanism_tracking_.clear();
                     resync_pending_ = true;
                     have_snapshot_ = false;
                     origin_ = clock_type::now();
@@ -397,9 +438,24 @@ namespace {
                 if (msg.first_tick != 0) {
                     frames_since_anchor_ = 0;
                     input_history_.clear();
+                    // Same as the resync above: the frames recorded under the
+                    // anchor-relative numbering name ticks the server never
+                    // asked us for, and nothing can match them again.
+                    rollback_.invalidate_history();
+                    own_inputs_.clear();
+                    mechanism_tracking_.clear();
                     origin_ = clock_type::now();
                 }
                 tick_base_ = msg.first_tick;
+                // The anchor hold ends here: the next frame is the world's
+                // first step and it is numbered `tick_base_`, exactly like the
+                // server's own first step (design 9.25 phase alignment).
+                if (held_) {
+                    held_ = false;
+                    origin_ = clock_type::now();
+                    logf("anchor hold released after %d polls: the first frame is tick %u", hold_polls_, tick_base_);
+                    journal_note("anchor hold released at tick base " + std::to_string(tick_base_));
+                }
                 logf("tick base %u assigned (%lld frames since anchor)", tick_base_, static_cast<long long>(frames_since_anchor_));
                 journal_note("assigned: tick base " + std::to_string(tick_base_) + " ("
                              + std::to_string(frames_since_anchor_) + " frames since the anchor)");
@@ -576,6 +632,8 @@ namespace {
                  own_join_order_, seed_);
             // Fresh runtime state.
             assigned_ = false;
+            held_ = false;
+            hold_polls_ = 0;
             tick_base_ = 0;
             frames_since_anchor_ = -1;
             input_history_.clear();
@@ -583,7 +641,10 @@ namespace {
             navigation_known_ = false;
             corrector_.clear();
             mechanism_correctors_.clear();
-            mechanism_names_.clear();
+            mechanism_tracking_.clear();
+            generations_.clear();
+            amend_failures_ = 0;
+            beam_done_ = false;
             remotes_.clear();
             own_group_set_ = false;
             own_physicalized_ = false;
@@ -602,6 +663,7 @@ namespace {
             engine_->clear_keys();
             engine_->request_level(level_);
             load_waited_ = 0;
+            level_sequencers_.clear();
             phase_ = phase::loading;
         }
 
@@ -616,6 +678,11 @@ namespace {
                 ended_ = true;
                 return;
             }
+            // Design 9.26: the mechanism Sequencer counters as the level file
+            // has them, recorded on first sight while the level loads.
+            if (const int recorded = level_sequencers_.capture_new(engine_->context()); recorded > 0)
+                logf("%d mechanism Sequencer counter(s) recorded from the level file (%s)", recorded,
+                     level_sequencers_.describe().c_str());
             if (++load_waited_ > args_.anchor_timeout) {
                 logf("Gameplay_Ingame never activated");
                 ended_ = true;
@@ -628,6 +695,13 @@ namespace {
             std::string error;
             CKIpionManager* physics = engine_->physics();
             if (!bmmo::physics::reset_session_clock(physics, seed_, error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
+            {
+                // Design 9.26: the mechanisms start from the level file's
+                // Sequencer counters on every side.
+                const int restored = level_sequencers_.restore(engine_->context());
+                logf("%d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)", restored,
+                     level_sequencers_.size(), level_sequencers_.describe().c_str());
+            }
             bmmo::physics::world_hash hash;
             if (!bmmo::physics::capture_world_hash(physics, hash, error)) { logf("hash: %s", error.c_str()); ended_ = true; return; }
             if (!bmmo::physics::install_player_collision_filter(physics, "P#", error)) logf("collision filter: %s", error.c_str());
@@ -636,10 +710,30 @@ namespace {
             if (CKDataArray* level = engine_->data_array("CurrentLevel"))
                 level->GetElementValue(0, 3, &spawn_matrix_);
             anchor_hash_ = hash.pose;
+            // --start-sector (design 9.25 harness): the same three writes the
+            // retail client's `sector` automation verb makes - deactivate
+            // nothing, activate sector N, run Gameplay_SectorManager - so the
+            // level's later mechanisms exist and the resetpoint is that
+            // sector's.  AFTER the world hash: the server's own world has not
+            // activated anything yet and SessionReady's hash has to match it
+            // (server.cpp ends the session on a world mismatch).  The Sector
+            // event this client reports on its first frame makes the server
+            // activate the same sector, a relay behind us.
+            if (args_.start_sector > 0) start_sector(args_.start_sector);
             frames_since_anchor_ = 0;
             phase_ = phase::running;
             origin_ = clock_type::now();
             rebases_ = 0;
+            // Hold the world here until the tick base arrives (design 9.25
+            // phase alignment): the first frame this client steps must be the
+            // first frame the server's world steps, the one both of them number
+            // with the start base.  The network keeps being polled while we
+            // wait; nothing else in the frame runs, so no input, no journal
+            // TICK record and no rollback record is made for a tick that does
+            // not exist.
+            held_ = true;
+            hold_polls_ = 0;
+            hold_deadline_ = clock_type::now() + kAnchorHoldTimeout;
             bmmo::session_ready_msg ready;
             ready.session = session_;
             ready.first_tick = 0;
@@ -655,6 +749,60 @@ namespace {
             // The box starts where the session does: at the anchor the server
             // has to agree with, before the tick base is known.
             open_journal(hash);
+        }
+
+        // The automation `sector` verb, headless (client_automation.cpp:461-476).
+        void start_sector(int sector) {
+            CKDataArray* parameters = engine_->data_array("IngameParameter");
+            CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager");
+            if (!parameters || !manager) {
+                logf("--start-sector %d: IngameParameter or Gameplay_SectorManager is missing", sector);
+                return;
+            }
+            int none = 0;
+            parameters->SetElementValue(0, 2, &none, sizeof(none));
+            parameters->SetElementValue(0, 1, &sector, sizeof(sector));
+            if (CKScene* scene = engine_->context()->GetCurrentScene()) scene->Activate(manager, TRUE);
+            logf("--start-sector %d activated at the anchor (the server follows on our first Sector event)", sector);
+        }
+
+        // The automation `beam` verb, headless: the own ball at `position`,
+        // upright and at rest.  The server's copy is moved by re-reporting the
+        // ball's life at that pose - a plain repeat Physicalize would not move
+        // it, because physicalize() of an entity that already has a body is a
+        // no-op (physics_state.cpp:741), so the pair the retail death sends is
+        // used instead.
+        void beam_own_ball(uint32_t tick) {
+            CK3dEntity* ball = current_ball();
+            const std::string name = ball && ball->GetName() ? ball->GetName() : "";
+            if (name.empty() || !own_physicalized_) {
+                logf("--beam at tick %u: no own body to beam", tick);
+                return;
+            }
+            const double rotation[4] = {0.0, 0.0, 0.0, 1.0};
+            const float still[3] = {0.0f, 0.0f, 0.0f};
+            std::string error;
+            if (!bmmo::physics::set_body_state(engine_->physics(), name.c_str(), args_.beam_position, rotation,
+                                               still, still, true, error)) {
+                logf("--beam at tick %u: %s", tick, error.c_str());
+                return;
+            }
+            ++generations_[name];   // the server rebuilds its copy: a new lifetime
+            bmmo::session_event_msg down;
+            down.tick = tick + 1;
+            down.type = bmmo::session::event_type::Unphysicalize;
+            send_event(down);
+            bmmo::session_event_msg up;
+            up.tick = tick + 1;
+            up.type = bmmo::session::event_type::Physicalize;
+            up.ball_type = static_cast<uint8_t>(std::max(ball_type_of(name), 0));
+            for (int k = 0; k < 3; ++k) up.position[k] = static_cast<float>(args_.beam_position[k]);
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) up.rotation[r * 3 + k] = r == k ? 1.0f : 0.0f;
+            fill_retail_recipe(ball_type_of(name), up.recipe);
+            send_event(up);
+            logf("--beam: %s put at (%.3f,%.3f,%.3f) at tick %u, re-reported to the server for tick %u", name.c_str(),
+                 args_.beam_position[0], args_.beam_position[1], args_.beam_position[2], tick, tick + 1);
         }
 
         void read_ball_rows() {
@@ -756,11 +904,31 @@ namespace {
         }
 
         void pace_and_frame() {
-            // Frames run from the anchor, not from the assignment, like the
-            // retail mod: the server starts its own schedule when SessionReady
-            // arrives (one trip after the anchor), so a client that waits for
-            // the assignment to come back starts a further trip late and every
-            // input it sends is for a tick the server has already simulated.
+            // Design 9.25 phase alignment: the world stands at the anchor until
+            // SessionAssign arrives.  Its first step and the server world's
+            // first step are then the same tick number, so the two worlds are
+            // the same number of steps from their anchors at every tick of the
+            // session and a script-driven mechanism runs in phase on both.
+            // (The frames this used to run were renumbered away by the
+            // assignment anyway - they cost inputs the server never asked for
+            // and bought nothing but the offset.)  A bounded wait: if the
+            // assignment never comes the client runs on rather than sitting
+            // here for ever, and says so.
+            if (held_) {
+                ++hold_polls_;
+                if (clock_type::now() < hold_deadline_) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    return;   // poll the network, step nothing
+                }
+                held_ = false;
+                origin_ = clock_type::now();
+                logf("anchor hold: no tick base after %.1f s; running anyway (the world will be out of phase with "
+                     "the server's)", std::chrono::duration<double>(kAnchorHoldTimeout).count());
+                journal_note("anchor hold timed out; running without a tick base");
+            }
+            // Frames run from the assignment, and the server's world starts at
+            // the same tick: a client that stepped between its anchor and the
+            // assignment would be that many steps ahead of the world for good.
             // Inputs before the assignment queue up and flush_inputs() sends
             // them when the tick base lands.
             const uint64_t next_frame = static_cast<uint64_t>(frames_since_anchor_ + 1);
@@ -867,8 +1035,9 @@ namespace {
             }
             own_physicalized_ = physicalized;
 
-            // Mechanism states after this tick.
-            for (const auto& [index, name]: mechanism_names_) {
+            // Mechanism states after this tick (the legacy blending path;
+            // with the rollback engine on, the engine keeps its own records).
+            for (const auto& name: mechanism_tracking_.tracked_entities()) {
                 bmmo_physics_body_state local{};
                 if (!bmmo::physics::get_body_state(physics, name.c_str(), local, error)) continue;
                 bmmo::session::ball_pose pose;
@@ -887,6 +1056,60 @@ namespace {
                 for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
                 remote.corrector.record(pose);
             }
+
+            // Lifecycle events from the bridge's object log, read before the
+            // rollback record below: a body created or deleted during this
+            // frame is already in the world that record describes, so the new
+            // lifetime generation belongs on THAT record (design 9.25).
+            const std::string events = bmmo::physics::drain_event_log(physics);
+            std::set<std::string> revived_reported;
+            size_t pos = 0;
+            while (pos < events.size()) {
+                const size_t end = events.find(';', pos);
+                if (end == std::string::npos) break;
+                std::string entry = events.substr(pos, end - pos);
+                pos = end + 1;
+                // "t=<time> <kind> <name>"
+                const size_t space1 = entry.find(' ');
+                if (space1 == std::string::npos) continue;
+                const size_t space2 = entry.find(' ', space1 + 1);
+                if (space2 == std::string::npos) continue;
+                const std::string kind = entry.substr(space1 + 1, space2 - space1 - 1);
+                const std::string name = entry.substr(space2 + 1);
+                if (kind == "created" || kind == "deleted") {
+                    // The body behind a tracked name changed: a new lifetime for
+                    // it, and the mechanism registry has to ask the world again.
+                    if (!name.empty()) {
+                        ++generations_[name];
+                        mechanism_tracking_.mark_dirty();
+                    }
+                }
+                if (kind == "created" && !ball_name.empty() && name == ball_name) {
+                    report_physicalize(ball, ball_name, ball_type, tick, own);
+                } else if (kind == "deleted" && !ball_name.empty() && name == ball_name) {
+                    bmmo::session_event_msg event;
+                    event.tick = tick;
+                    event.type = bmmo::session::event_type::Unphysicalize;
+                    send_event(event);
+                    own_group_set_ = false;
+                    logf("own ball unphysicalized at tick %u", tick);
+                } else if (kind == "script_wakeup" && !name.empty() && name.rfind("Ball_", 0) != 0
+                           && name.find("_BMMO_") == std::string::npos && !revived_reported.count(name)) {
+                    revived_reported.insert(name);
+                    bmmo::session_event_msg event;
+                    event.tick = tick;
+                    event.type = bmmo::session::event_type::BodyRevived;
+                    event.name = name;
+                    send_event(event);
+                }
+            }
+            // Which mechanism rows are about one of our bodies, before the
+            // record: the tracked set of a tick has to name bodies it contains.
+            if (mechanism_tracking_.due(tick))
+                mechanism_tracking_.resolve(tick, [physics](const char* entity, bmmo_physics_body_state& out) {
+                    std::string probe_error;
+                    return bmmo::physics::get_body_state(physics, entity, out, probe_error);
+                });
 
             // Input for this tick.
             bmmo::session::input_frame input{};
@@ -934,7 +1157,11 @@ namespace {
                         tracked.remote_entities.push_back(remote.entity);
                         applied[remote.entity] = remote.applied;
                     }
-                for (const auto& [index, name]: mechanism_names_) tracked.mechanisms.push_back(name);
+                // Design 9.25: only the mechanism names this client has a body
+                // for - a tracked name with no body is dropped by every
+                // capture, which used to change the tracked set every tick.
+                for (const auto& name: mechanism_tracking_.tracked_entities()) tracked.mechanisms.push_back(name);
+                tracked.generations = generations_;
                 rollback_.record(rollback_world(), tick, tracked, applied);
             }
             if (assigned_) {
@@ -950,41 +1177,6 @@ namespace {
                 input_history_.pop_front();
             }
 
-            // Lifecycle events from the bridge's object log.
-            const std::string events = bmmo::physics::drain_event_log(physics);
-            std::set<std::string> revived_reported;
-            size_t pos = 0;
-            while (pos < events.size()) {
-                const size_t end = events.find(';', pos);
-                if (end == std::string::npos) break;
-                std::string entry = events.substr(pos, end - pos);
-                pos = end + 1;
-                // "t=<time> <kind> <name>"
-                const size_t space1 = entry.find(' ');
-                if (space1 == std::string::npos) continue;
-                const size_t space2 = entry.find(' ', space1 + 1);
-                if (space2 == std::string::npos) continue;
-                const std::string kind = entry.substr(space1 + 1, space2 - space1 - 1);
-                const std::string name = entry.substr(space2 + 1);
-                if (kind == "created" && !ball_name.empty() && name == ball_name) {
-                    report_physicalize(ball, ball_name, ball_type, tick, own);
-                } else if (kind == "deleted" && !ball_name.empty() && name == ball_name) {
-                    bmmo::session_event_msg event;
-                    event.tick = tick;
-                    event.type = bmmo::session::event_type::Unphysicalize;
-                    send_event(event);
-                    own_group_set_ = false;
-                    logf("own ball unphysicalized at tick %u", tick);
-                } else if (kind == "script_wakeup" && !name.empty() && name.rfind("Ball_", 0) != 0
-                           && name.find("_BMMO_") == std::string::npos && !revived_reported.count(name)) {
-                    revived_reported.insert(name);
-                    bmmo::session_event_msg event;
-                    event.tick = tick;
-                    event.type = bmmo::session::event_type::BodyRevived;
-                    event.name = name;
-                    send_event(event);
-                }
-            }
             // Sector: the sector the retail scripts last activated.
             if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
                 int sector = 0;
@@ -1017,6 +1209,20 @@ namespace {
                 if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), keys, remote.input.cam_right,
                                                      remote.input.cam_up, remote.input.cam_dir, active, error))
                     logf("remote navigation input %s: %s", remote.entity.c_str(), error.c_str());
+            }
+            // --beam (design 9.25 harness): at its tick, once.
+            if (args_.beam && !beam_done_ && tick >= args_.beam_tick) {
+                beam_done_ = true;
+                beam_own_ball(tick);
+            }
+            // The record for this tick was captured before the corrections
+            // above, so a rollback to it would restore the divergent pose and
+            // lose the correction on the first re-simulated tick.  Re-capture
+            // it now, exactly like the retail mod (design 9.25 item 4 of
+            // findings/A5 section 3.1: the headless client never did).
+            if (args_.rollback && !rollback_.amend_record(rollback_world(), tick)) {
+                if (amend_failures_++ == 0)
+                    logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
             }
             if (args_.trace && trace_frames_ > 0) {
                 --trace_frames_;
@@ -1149,6 +1355,23 @@ namespace {
                 have_snapshot_ = true;
                 last_snapshot_tick_ = snapshot.tick;
                 ++snapshots_applied_;
+                // A hard world overwrite: the records collected while we waited
+                // for this snapshot describe the world it is about to replace.
+                rollback_.invalidate_history();
+                // The dictionary and the newest rows first, then one resolve
+                // pass - this is the moment the registry knows the most about a
+                // world that has just been rebuilt (design 9.25).
+                for (const auto& body: snapshot.bodies)
+                    if (body.kind == bmmo::session::body_kind::Mechanism) {
+                        if (!body.name.empty()) mechanism_tracking_.note_name(body.owner, body.name);
+                        mechanism_tracking_.note_row(snapshot.tick, body);
+                    }
+                mechanism_tracking_.mark_dirty();
+                mechanism_tracking_.resolve(snapshot.tick, [physics](const char* entity, bmmo_physics_body_state& out) {
+                    std::string probe_error;
+                    return bmmo::physics::get_body_state(physics, entity, out, probe_error);
+                });
+                std::string mechanism_entity;
                 for (const auto& body: snapshot.bodies) {
                     const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
                     const char* target = nullptr;
@@ -1162,10 +1385,9 @@ namespace {
                             target = it->second.entity.c_str();
                         }
                     } else {
-                        if (!body.name.empty()) mechanism_names_[body.owner] = body.name;
-                        auto name = mechanism_names_.find(body.owner);
-                        if (name == mechanism_names_.end()) continue;
-                        target = name->second.c_str();
+                        mechanism_entity = mechanism_tracking_.entity_of(body.owner);
+                        if (mechanism_entity.empty()) continue;   // another sector's instance
+                        target = mechanism_entity.c_str();
                     }
                     bmmo::physics::set_body_state(physics, target, body.position, body.rotation, body.linear, body.angular,
                                                   body.owner == own_id_ ? true : wake, error);
@@ -1182,10 +1404,11 @@ namespace {
             last_snapshot_tick_ = snapshot.tick;
             ++snapshots_applied_;
             if (args_.rollback) {
-                if (snapshot.full)
-                    for (const auto& body: snapshot.bodies)
-                        if (body.kind == bmmo::session::body_kind::Mechanism && !body.name.empty())
-                            mechanism_names_[body.owner] = body.name;
+                for (const auto& body: snapshot.bodies)
+                    if (body.kind == bmmo::session::body_kind::Mechanism) {
+                        if (snapshot.full && !body.name.empty()) mechanism_tracking_.note_name(body.owner, body.name);
+                        mechanism_tracking_.note_row(snapshot.tick, body);
+                    }
                 auto entity_of = [&](const bmmo::session::body_state& body) -> std::string {
                     if (body.kind == bmmo::session::body_kind::Ball) {
                         if (body.owner == own_id_) return own_physicalized_ && own_navigation_ ? own_nav_entity_ : std::string();
@@ -1193,19 +1416,24 @@ namespace {
                         if (it == remotes_.end() || !it->second.physicalized || !it->second.navigation) return {};
                         return it->second.entity;
                     }
-                    auto name = mechanism_names_.find(body.owner);
-                    return name == mechanism_names_.end() ? std::string() : name->second;
+                    // Design 9.25: the resolved local body, "" when this client
+                    // has none (another sector) or the identity guard refused
+                    // the pick - the mod does exactly the same.
+                    return mechanism_tracking_.entity_of(body.owner);
                 };
+                // Only an exact hit counts, like the mod: the engine feeds a
+                // relayed frame instead of the recorded prediction when this
+                // succeeds, and a frame from an earlier tick would replay a key
+                // edge the tick did not have (findings/A5 section 3.1 item 5).
                 auto input_at = [&](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
                     const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
                     if (entity == own_nav_entity_) inputs = &own_inputs_;
                     else
                         for (const auto& [id, remote]: remotes_)
                             if (remote.entity == entity) inputs = &remote.inputs;
-                    if (!inputs || inputs->empty()) return false;
-                    auto it = inputs->upper_bound(tick);
-                    if (it == inputs->begin()) return false;
-                    --it;
+                    if (!inputs) return false;
+                    auto it = inputs->find(tick);
+                    if (it == inputs->end()) return false;
                     out = it->second;
                     return true;
                 };
@@ -1278,28 +1506,31 @@ namespace {
                     else ++remote_writes_;
                     continue;
                 }
-                if (snapshot.full && !body.name.empty()) mechanism_names_[body.owner] = body.name;
-                auto name = mechanism_names_.find(body.owner);
-                if (name == mechanism_names_.end()) continue;
+                // The legacy blending path (--no-rollback): the row corrects the
+                // locally simulated mechanism through a body_corrector instead.
+                if (snapshot.full && !body.name.empty()) mechanism_tracking_.note_name(body.owner, body.name);
+                mechanism_tracking_.note_row(snapshot.tick, body);
+                const std::string entity = mechanism_tracking_.entity_of(body.owner);
+                if (entity.empty()) continue;
                 const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
                 bmmo_physics_body_state local{};
-                if (!bmmo::physics::get_body_state(physics, name->second.c_str(), local, error)) continue;
+                if (!bmmo::physics::get_body_state(physics, entity.c_str(), local, error)) continue;
                 bmmo::session::ball_pose pose;
                 pose.tick = snapshot.tick;
                 for (int k = 0; k < 3; ++k) { pose.position[k] = body.position[k]; pose.linear[k] = body.linear[k]; pose.angular[k] = body.angular[k]; }
                 for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
-                auto& corrector = mechanism_correctors_[name->second];
+                auto& corrector = mechanism_correctors_[entity];
                 const auto step = corrector.compare(pose);
                 if (step.action == bmmo::session::correction_step::kind::hard) {
                     ++mechanism_hard_;
-                    logf("hard correction of %s for tick %u (error %.4f m)", name->second.c_str(), snapshot.tick, corrector.stats().last_error);
-                    journal_body_correction(2, name->second, snapshot.tick, corrector.stats().last_error, body.position);
-                    if (args_.correct) bmmo::physics::set_body_state(physics, name->second.c_str(), step.target.position, step.target.rotation,
+                    logf("hard correction of %s for tick %u (error %.4f m)", entity.c_str(), snapshot.tick, corrector.stats().last_error);
+                    journal_body_correction(2, entity, snapshot.tick, corrector.stats().last_error, body.position);
+                    if (args_.correct) bmmo::physics::set_body_state(physics, entity.c_str(), step.target.position, step.target.rotation,
                                                                      step.target.linear, step.target.angular, wake, error);
                 } else if (step.action == bmmo::session::correction_step::kind::blend) {
                     ++mechanism_blends_;
-                    logf("blend correction of %s for tick %u (error %.4f m)", name->second.c_str(), snapshot.tick, corrector.stats().last_error);
-                    journal_body_correction(3, name->second, snapshot.tick, corrector.stats().last_error, body.position);
+                    logf("blend correction of %s for tick %u (error %.4f m)", entity.c_str(), snapshot.tick, corrector.stats().last_error);
+                    journal_body_correction(3, entity, snapshot.tick, corrector.stats().last_error, body.position);
                 }
             }
         }
@@ -1334,8 +1565,10 @@ namespace {
                 auto& remote = remotes_[event.player];
                 if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 remote.navigation = false;
-                if (remote.physicalized && remote.entity != entity->GetName())
+                if (remote.physicalized && remote.entity != entity->GetName()) {
+                    ++generations_[remote.entity];   // a trafo: the old mirror's lifetime ends here
                     bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
+                }
                 entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
                 const auto recipe = to_bridge_recipe(event.recipe);
                 int join_order = 63;
@@ -1345,6 +1578,9 @@ namespace {
                     logf("remote physicalize %s: %s", entity->GetName(), error.c_str());
                     return;
                 }
+                // The mirror's body is new: a new lifetime, so no record of the
+                // previous one can restore it (design 9.25).
+                ++generations_[entity->GetName()];
                 remote.entity = entity->GetName();
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
@@ -1368,7 +1604,10 @@ namespace {
                 if (it == remotes_.end()) return;
                 if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
                 it->second.navigation = false;
-                if (it->second.physicalized) bmmo::physics::unphysicalize(engine_->physics(), it->second.entity.c_str(), error);
+                if (it->second.physicalized) {
+                    ++generations_[it->second.entity];   // the body goes: a new lifetime
+                    bmmo::physics::unphysicalize(engine_->physics(), it->second.entity.c_str(), error);
+                }
                 it->second.physicalized = false;
                 logf("remote player %u unphysicalized at tick %u", event.player, event.tick);
                 break;
@@ -1458,10 +1697,16 @@ namespace {
                 std::string error;
                 return bmmo::physics::get_body_state(physics, entity.c_str(), out, error);
             };
-            world.set_body = [physics](const std::string& entity, const bmmo_physics_body_state& state, bool wake) {
+            // Design 9.25: the engine decides the sleep handling and the
+            // contact recheck per write (see the mod's adapter for why).
+            world.set_body = [physics](const std::string& entity, const bmmo_physics_body_state& state,
+                                       bmmo::session::wake_mode mode, bool recheck) {
                 std::string error;
+                const auto bridge_mode = mode == bmmo::session::wake_mode::wake   ? bmmo::physics::wake_mode::wake
+                                       : mode == bmmo::session::wake_mode::freeze ? bmmo::physics::wake_mode::freeze
+                                                                                  : bmmo::physics::wake_mode::keep;
                 return bmmo::physics::set_body_state(physics, entity.c_str(), state.position, state.rotation, state.linear,
-                                                     state.angular, wake, error);
+                                                     state.angular, bridge_mode, recheck, error);
             };
             world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
                 std::string error;
@@ -1777,20 +2022,22 @@ namespace {
             }
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
-            logf("status: phase=%d session=%u tick=%u assigned=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
-                 "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f rebases=%d resyncs=%llu/%llu "
+            logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
+                 "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
-                 static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, static_cast<long long>(frames_since_anchor_),
+                 static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
+                 static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
                  static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(snapshots_received_),
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
                  own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
                  static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
-                 mechanism_names_.size(),
-                 static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max, rebases_,
+                 mechanism_tracking_.known(), mechanism_tracking_.resolved(),
+                 static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max,
+                 static_cast<unsigned long long>(amend_failures_), rebases_,
                  static_cast<unsigned long long>(resyncs_sent_), static_cast<unsigned long long>(resyncs_done_),
                  static_cast<unsigned long long>(rs.snapshots), static_cast<unsigned long long>(rs.matched),
                  static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
@@ -1837,6 +2084,18 @@ namespace {
         int load_waited_ = 0;
         uint64_t anchor_hash_ = 0;
         bool assigned_ = false;
+        // Design 9.25 phase alignment: between the anchor and the assignment
+        // the world does not step.  The server's world takes its own first step
+        // under the start base it hands out, so a client that ran k frames in
+        // that window would be k steps further from the anchor at every tick
+        // number for the rest of the session - the phase offset that made every
+        // script-driven mechanism (Level 11's sandbags) fight the rollback
+        // engine.  Bounded: the game must not freeze for ever if the assignment
+        // never comes.
+        bool held_ = false;
+        clock_type::time_point hold_deadline_{};
+        int hold_polls_ = 0;
+        bmmo::game::sequencer_state level_sequencers_;
         uint32_t tick_base_ = 0;
         int64_t frames_since_anchor_ = -1;
         clock_type::time_point origin_;
@@ -1857,7 +2116,14 @@ namespace {
         int trace_frames_ = 0;
         bmmo::session::body_corrector corrector_;
         std::map<std::string, bmmo::session::body_corrector> mechanism_correctors_;
-        std::map<uint32_t, std::string> mechanism_names_;
+        // Design 9.25: the mechanisms are tracked bodies of this client's own
+        // world again, so a row has to be resolved onto one of its bodies
+        // (mechanism_tracking.hpp), and every tracked name carries the
+        // generation of the body behind it.
+        bmmo::session::mechanism_registry mechanism_tracking_;
+        std::map<std::string, uint32_t> generations_;
+        uint64_t amend_failures_ = 0;
+        bool beam_done_ = false;
         std::map<uint32_t, remote_ball> remotes_;
         bool have_snapshot_ = false;
         uint32_t last_snapshot_tick_ = 0;

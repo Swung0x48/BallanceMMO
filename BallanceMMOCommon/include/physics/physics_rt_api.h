@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 9u   /* v9: contact recheck when beaming a body */
+#define BMMO_PHYSICS_API_VERSION 10u  /* v10: sleep-preserving, contact-rechecking body writes */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -298,6 +298,26 @@ typedef struct bmmo_physics_api_v2 {
                                       const double position[3], const double rotation[4],
                                       const float linear[3], const float angular[3], int32_t wake,
                                       char* error, uint32_t error_size);
+
+    /* ---- v10: sleep-state-preserving, contact-rechecking body writes ---- */
+
+    /* The write a rollback restore wants.  wake_mode: 0 = keep (never touch
+     * the body's sleep state), 1 = wake (ensure_in_simulation only when the
+     * body is NOT simulated, so an awake body's freeze timers are left
+     * alone - the old entries call it unconditionally and re-arm them),
+     * 2 = freeze (disable_simulation when the body is simulated).
+     * recheck != 0 beams with optimize_for_repeated_calls = IVP_FALSE, i.e.
+     * exactly like set_body_state_recheck.  A beam through any of these
+     * entries also restores the core's leapfrog delta
+     * (delta_world_f_core_psis) from `linear`: IVP integrates the position
+     * of a PSI from the delta written at the PREVIOUS one, and
+     * IVP_Calc_Next_PSI_Solver::set_transformation zeroes it, so without the
+     * restore every beam costs the body one PSI of translation (|v|/66 m).
+     * See physics_state.cpp. */
+    int32_t (*set_body_state_ex)(void* ipion_manager, const char* entity_name,
+                                 const double position[3], const double rotation[4],
+                                 const float linear[3], const float angular[3],
+                                 int32_t wake_mode, int32_t recheck, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

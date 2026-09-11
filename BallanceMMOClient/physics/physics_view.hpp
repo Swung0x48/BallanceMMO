@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <physics/physics_rt_api.h>
+#include <physics/physics_state.hpp>   // bmmo::physics::wake_mode
 #include <physics/world_hash.hpp>
 
 class CKContext;
@@ -48,6 +49,18 @@ namespace bmmo::physics {
         bool set_body_state(const char* entity_name, const double position[3],
                             const double rotation[4], const float linear[3], const float angular[3],
                             bool wake, std::string& error, bool recheck = false) const;
+        // ---- bridge API v10 (design 9.25) ----
+        // The same write with the sleep state and the contact recheck decided
+        // separately: `keep` leaves the body's simulation state (and its freeze
+        // timers) alone, which the plain call cannot do - it always calls
+        // ensure_in_simulation or disable_simulation, and ensure_in_simulation
+        // re-arms the resting detection of a body that was already awake
+        // (engine change #14).  A rollback restore writes the pose of most
+        // bodies without wanting to touch either, and rechecks the contacts
+        // only when the write actually moved the body.
+        bool set_body_state(const char* entity_name, const double position[3],
+                            const double rotation[4], const float linear[3], const float angular[3],
+                            bmmo::physics::wake_mode mode, bool recheck, std::string& error) const;
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
                          const char* collision_group, std::string& error) const;

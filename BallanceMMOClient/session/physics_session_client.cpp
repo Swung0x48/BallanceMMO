@@ -1,7 +1,8 @@
 // Client side of a physics session (design section 8.5): restart-and-anchor
 // on SessionStart, one input per tick, own-ball lifecycle events from the BML
-// physicalize hooks, mirrored remote balls and mechanism bodies from the
-// server's snapshots, and correction of the predicted own ball.
+// physicalize hooks, mirrored remote balls, locally simulated shared
+// mechanisms (design 9.25) and correction of every predicted body through the
+// rollback engine.
 //
 // Network-thread entry points (handle_session_*) only queue or post to the
 // game thread; everything that touches the engine runs from OnProcess.
@@ -13,6 +14,7 @@
 #include <format>
 #include <memory>
 #include <sstream>
+#include <thread>
 
 #include <session/spawn_impulse.hpp>
 
@@ -30,269 +32,14 @@ namespace {
     using bmmo::session::physics_session_state;
     using phase_type = physics_session_state::phase_type;
 
-    // Option A (findings/mechanism-strategy-decision.md): the client renders
-    // the script-constrained mechanism bodies from the newest authoritative
-    // poses instead of predicting them.  A pair further apart than this in one
-    // snapshot interval is a teleport (sector change, level reset, re-entry),
-    // and a body further than this from the pose the applier itself last
-    // commanded for it is somewhere else entirely (a rebuild, a re-entry, a
-    // level reset moved it): both are followed by a snap, never by a skipped
-    // write, so the body can never be left behind at the old pose.
-    constexpr double kMechanismSnapTravel = 0.5;   // metres per snapshot pair
-    // The reference is the commanded pose, not the live body: since 9.20 the
-    // applier dead-reckons its write up to kMechanismMaxExtrapolation past the
-    // newest row, so the live body is our own command and is legitimately more
-    // than this far from the row - measuring the row against it made the
-    // applier snap to the raw row and dead-reckon again on the next frame,
-    // forever.
-    constexpr double kMechanismSnapJump = 1.0;     // metres from the last commanded pose
-    // The newest row is stale by the input delay plus half the round trip,
-    // measured at ~24 ticks (0.36 s) in the session journals, so rendering it
-    // as-is puts a moving mechanism that far behind the predicted ball - the
-    // ball then passes through it and the next server correction separates the
-    // two.  The render therefore dead-reckons the newest row ahead to the
-    // client's own tick along the row's authoritative velocity, bounded so a
-    // stalled or reset snapshot stream cannot run away; a snap (teleport) row
-    // is never extrapolated, its velocity across the jump means nothing.
-    constexpr double kMechanismMaxLead = 0.6;               // seconds past the newest row
-    constexpr double kMechanismMaxExtrapolation = 1.5;      // metres of extrapolated travel
-    constexpr double kMechanismMaxExtrapolationAngle = 0.5; // radians of extrapolated rotation
-    // Below this the body already sits on the target pose: writing it again
-    // would only disturb the core's sleep state.
-    constexpr double kMechanismWriteEpsilon = 1e-4;
-
-    // The pose one mechanism has to be written with at a given tick, computed
-    // from the stored authoritative rows.  One computation for both writers -
-    // the live applier (the render tick) and the re-simulation poser (every
-    // replayed tick, rollback_world::pre_step) - so a replayed tick renders a
-    // mechanism exactly as the live path would have rendered it.
-    struct mechanism_target {
-        double position[3] = {};
-        double rotation[4] = {0.0, 0.0, 0.0, 1.0};
-        float linear[3] = {};
-        float angular[3] = {};
-        bool simulated = false;   // the governing row's wake flag
-        bool snap = false;        // write as a snap: teleport row or a body elsewhere
-    };
-
-    // `elsewhere` is the applier's kMechanismSnapJump test: our body is further
-    // than that from the pose the applier itself last commanded for it - a
-    // rebuild, a sector re-entry or a level reset moved it, so the exact newer
-    // pose is written instead of a lerp or a dead-reckon, and the write
-    // rechecks the contacts.  The live path passes it, a re-simulation does not:
-    // there the live pose is this hook's own write for the previous tick and is
-    // refreshed as the command for exactly that reason, so the distance says
-    // nothing about identity - see the poser below.
-    mechanism_target mechanism_target_at(const physics_session_state::mechanism_pose_history& history, uint32_t tick,
-                                         bool elsewhere) {
-        const auto& rows = history.rows;
-        const auto& newest = rows.back();
-        mechanism_target out;
-        const auto copy_pose = [](const auto& row, mechanism_target& target) {
-            for (int k = 0; k < 3; ++k) {
-                target.position[k] = row.position[k];
-                target.linear[k] = row.linear[k];
-                target.angular[k] = row.angular[k];
-            }
-            for (int k = 0; k < 4; ++k) target.rotation[k] = row.rotation[k];
-            target.simulated = row.simulated;
-        };
-        // A pair further apart than kMechanismSnapTravel is a teleport (sector
-        // change, level reset, re-entry): its two poses are not two ends of one
-        // motion, so the newer one is used exactly, never interpolated across.
-        const auto teleport = [](const auto& older, const auto& newer) {
-            if (older.tick >= newer.tick) return false;
-            double travel = 0.0;
-            for (int k = 0; k < 3; ++k) {
-                const double d = newer.position[k] - older.position[k];
-                travel += d * d;
-            }
-            return std::sqrt(travel) > kMechanismSnapTravel;
-        };
-        if (tick >= newest.tick) {
-            // The normal case: the newest row is one input delay plus half the
-            // round trip old, so dead-reckon it along its own velocity up to the
-            // render tick.  The session steps 1000/66 ms per tick (world.step
-            // below), hence the lead in ticks.
-            copy_pose(newest, out);
-            const bool jumped = rows.size() >= 2 && teleport(rows[rows.size() - 2], newest);
-            if (jumped) {
-                // The velocity of a row that teleported says nothing about the
-                // jump: write the pose exactly, with a contact recheck.
-                out.snap = true;
-                return out;
-            }
-            double dt = 0.0;
-            if (!elsewhere && newest.simulated) {
-                dt = std::min(static_cast<double>(tick - newest.tick) / 66.0, kMechanismMaxLead);
-                double speed = 0.0, spin = 0.0;
-                for (int k = 0; k < 3; ++k) {
-                    speed += static_cast<double>(newest.linear[k]) * newest.linear[k];
-                    spin += static_cast<double>(newest.angular[k]) * newest.angular[k];
-                }
-                speed = std::sqrt(speed);
-                spin = std::sqrt(spin);
-                if (speed > 0.0) dt = std::min(dt, kMechanismMaxExtrapolation / speed);
-                if (spin > 0.0) dt = std::min(dt, kMechanismMaxExtrapolationAngle / spin);
-            }
-            // A frozen row (simulated == false) holds its pose: dt stays 0.
-            out.snap = elsewhere;
-            for (int k = 0; k < 3; ++k) out.position[k] = newest.position[k] + newest.linear[k] * dt;
-            if (dt > 0.0) {
-                // rot_speed is core space (ivp_core.hxx:177; the core carries
-                // the object's orientation for the physicalized props), so it
-                // is rotated into the world frame by the row's own quaternion
-                // (v' = v + 2w (q x v) + 2 q x (q x v)) before the derivative
-                // q' = normalize(q + 1/2 dt (w (x) q)) - the same rotation the
-                // engine integrates with q_new = q (x) q_core_f_core
-                // (ivp_calc_next_psi_solver.cxx:180).
-                const double qx = newest.rotation[0], qy = newest.rotation[1];
-                const double qz = newest.rotation[2], qw = newest.rotation[3];
-                const double tx = 2.0 * (qy * newest.angular[2] - qz * newest.angular[1]);
-                const double ty = 2.0 * (qz * newest.angular[0] - qx * newest.angular[2]);
-                const double tz = 2.0 * (qx * newest.angular[1] - qy * newest.angular[0]);
-                const double wx = newest.angular[0] + qw * tx + (qy * tz - qz * ty);
-                const double wy = newest.angular[1] + qw * ty + (qz * tx - qx * tz);
-                const double wz = newest.angular[2] + qw * tz + (qx * ty - qy * tx);
-                const double h = 0.5 * dt;
-                const double nx = qx + h * (wx * qw + wy * qz - wz * qy);
-                const double ny = qy + h * (-wx * qz + wy * qw + wz * qx);
-                const double nz = qz + h * (wx * qy - wy * qx + wz * qw);
-                const double nw = qw - h * (wx * qx + wy * qy + wz * qz);
-                const double norm = std::sqrt(nx * nx + ny * ny + nz * nz + nw * nw);
-                // A degenerate (non-unit / zero) row keeps its own rotation.
-                if (norm > 1e-9) {
-                    out.rotation[0] = nx / norm;
-                    out.rotation[1] = ny / norm;
-                    out.rotation[2] = nz / norm;
-                    out.rotation[3] = nw / norm;
-                }
-            }
-            return out;
-        }
-        // The newest row with a tick <= `tick`, and the one after it: `tick`
-        // sits inside that pair (or before every retained row).  Rows are
-        // strictly ascending in tick (physics_session_note_mechanism).
-        size_t upper = rows.size() - 1;
-        while (upper > 0 && rows[upper - 1].tick > tick) --upper;
-        if (upper == 0) {
-            // Older than every retained row (a resync that jumped back further
-            // than the history reaches): hold the oldest row's pose rather than
-            // run the body backwards.  Not a snap, exactly as before the
-            // history existed: this is a held pose, not a beam into a contact.
-            copy_pose(rows.front(), out);
-            return out;
-        }
-        const auto& older = rows[upper - 1];
-        const auto& newer = rows[upper];
-        copy_pose(newer, out);   // rotation and velocities are the newer row's
-        out.snap = teleport(older, newer) || elsewhere;
-        if (out.snap) return out;   // teleport / body elsewhere: the exact newer pose
-        const double span = static_cast<double>(newer.tick - older.tick);
-        const double alpha = std::clamp((static_cast<double>(tick) - older.tick) / span, 0.0, 1.0);
-        for (int k = 0; k < 3; ++k)
-            out.position[k] = older.position[k] + alpha * (newer.position[k] - older.position[k]);
-        return out;
-    }
-
-    // Already there: leave the core (and its sleep state) alone instead of
-    // rewriting the same pose.  Shared by the applier (once per frame) and the
-    // re-simulation poser, where a stationary mechanism would otherwise be
-    // rewritten - and woken - on every replayed tick.
-    bool mechanism_pose_unchanged(const bmmo_physics_body_state& local, const mechanism_target& target) {
-        double dq = 0.0, dp = 0.0, dv = 0.0;
-        for (int k = 0; k < 4; ++k) dq += target.rotation[k] * local.rotation[k];
-        for (int k = 0; k < 3; ++k) {
-            dp += (target.position[k] - local.position[k]) * (target.position[k] - local.position[k]);
-            dv += (target.linear[k] - local.linear[k]) * (target.linear[k] - local.linear[k]);
-        }
-        return std::sqrt(dp) < kMechanismWriteEpsilon && std::sqrt(dv) < kMechanismWriteEpsilon
-            && std::fabs(std::fabs(dq) - 1.0) < kMechanismWriteEpsilon;
-    }
-
-    // The mechanism bodies a pose write can target, resolved once per writer.
-    // A dictionary name can be carried by several server bodies (Level 8 has
-    // two same-named P_Modul_30_Wippe instances 332 m apart in different
-    // sectors), so the owners sharing a name are narrowed to the one whose
-    // authoritative pose is nearest our own local body - and a name this client
-    // has no physicalized body for is another sector's instance and is skipped.
-    // `history` points into mechanism_authority: nothing removes one mechanism's
-    // entry while the session runs, so it stays valid for the write and for
-    // recording the pose that write commanded (mechanism_note_command).
-    struct mechanism_candidate {
-        std::string name;
-        bmmo_physics_body_state local{};
-        physics_session_state::mechanism_pose_history* history = nullptr;
-        double distance = 0.0;   // squared, the chosen history's newest row to `local`
-        // Squared distance the applier's `elsewhere` test uses: the live body to
-        // the pose the applier last commanded for it, or - on a history no write
-        // has reached yet - to the newest authoritative row.  `distance` above
-        // has to keep measuring the live pose against the newest row: picking
-        // which of two same-named instances we drive is about where the body
-        // actually is, not about what we last commanded.
-        double elsewhere_distance = 0.0;
-    };
-
-    std::vector<mechanism_candidate> mechanism_candidates(physics_session_state& s,
-                                                          const bmmo::physics::physics_view& view) {
-        std::vector<mechanism_candidate> out;
-        if (s.mechanism_names.empty() || s.mechanism_authority.empty()) return out;
-        std::map<std::string, std::vector<uint32_t>> owners_by_name;
-        for (const auto& [owner, name]: s.mechanism_names) {
-            const auto it = s.mechanism_authority.find(owner);
-            if (it != s.mechanism_authority.end() && !it->second.rows.empty()) owners_by_name[name].push_back(owner);
-        }
-        std::string error;
-        for (const auto& [name, owners]: owners_by_name) {
-            mechanism_candidate candidate;
-            candidate.name = name;
-            if (!view.get_body_state(name.c_str(), candidate.local, error)) continue;   // not physicalized here
-            for (uint32_t owner: owners) {
-                auto& history = s.mechanism_authority.at(owner);
-                double distance = 0.0;
-                for (int k = 0; k < 3; ++k) {
-                    const double d = history.rows.back().position[k] - candidate.local.position[k];
-                    distance += d * d;
-                }
-                if (!candidate.history || distance < candidate.distance) {
-                    candidate.history = &history;
-                    candidate.distance = distance;
-                }
-            }
-            // The reference of the `elsewhere` test is the applier's own last
-            // command once it has written one.  The live body cannot be it: the
-            // applier's dead-reckoned write IS the live body (a body up to
-            // kMechanismMaxExtrapolation past the newest row, by design), so
-            // reading it back as a body "somewhere else" made the applier snap
-            // to the raw row and dead-reckon again on the very next frame - the
-            // 9.22 journals show the local mechanism poses split between exactly
-            // a raw row and exactly the extrapolated target, mech_snaps ~2 per
-            // tick, above ~2.8 m/s.  A body is somewhere else only when it is no
-            // longer where the applier put it: a rebuild, a re-entry, a level
-            // reset.  With no command recorded yet (a fresh history, which is
-            // what rebase_tick leaves) the newest row is used instead, i.e. the
-            // test this applier had before it ever dead-reckoned.
-            const double* reference = candidate.history->have_last_target
-                    ? candidate.history->last_target : candidate.history->rows.back().position;
-            for (int k = 0; k < 3; ++k) {
-                const double d = reference[k] - candidate.local.position[k];
-                candidate.elsewhere_distance += d * d;
-            }
-            out.push_back(std::move(candidate));
-        }
-        return out;
-    }
-
-    // Record the pose a writer commanded for one mechanism body.  Both writers
-    // call it - the live applier and the re-simulation poser - so the next live
-    // frame's `elsewhere` test asks the applier's own question ("is the body
-    // still where we put it?") and never mistakes the dead-reckoned write it
-    // left behind for a foreign pose.
-    void mechanism_note_command(physics_session_state::mechanism_pose_history& history,
-                                const mechanism_target& target) {
-        for (int k = 0; k < 3; ++k) history.last_target[k] = target.position[k];
-        history.have_last_target = true;
-    }
+    // How long the world waits at the anchor for SessionAssign before it starts
+    // stepping anyway (design 9.25 phase alignment).  The assignment is one
+    // reliable round trip behind SessionReady plus the slowest member's
+    // remaining level load, which the start barrier already caps at 8 s
+    // (sim/late_tick.hpp kStartBarrierTimeout); this is the fault timeout
+    // behind that, so a server that never answers costs a phase offset and a
+    // warning instead of a frozen game.
+    constexpr std::chrono::seconds kAnchorHoldTimeout{10};
 
     void copy_name(char* out, size_t size, const std::string& text) {
         std::snprintf(out, size, "%s", text.c_str());
@@ -416,58 +163,86 @@ void BallanceMMOClient::handle_session_start(bmmo::session_start_msg msg) {
     utils_.run_on_game_thread([this, shared] { physics_session_begin(*shared); });
 }
 
+// Network thread: only queued.  The game thread applies it at its next frame
+// boundary - or inside the anchor hold's own polling loop, which is why this
+// does not go through run_on_game_thread(): that defers through BML's timer
+// queue, which runs between frames, and the hold waits inside one.
 void BallanceMMOClient::handle_session_assign(const bmmo::session_assign_msg& msg) {
-    utils_.run_on_game_thread([this, session = msg.session, first_tick = msg.first_tick] {
-        auto& s = physics_session_;
-        if (s.session != session || s.phase != phase_type::running) return;
-        // Both branches below renumber, and a renumber invalidates everything
-        // the server acked under the old numbering: the first snapshot of the
-        // new one sets the starvation detector's baseline again.
-        s.acked_input.reset();
-        if (s.assigned) {
-            // Resync (design 9.2): tick numbering restarts from the server's
-            // current tick, histories are dropped, the next full snapshot
-            // rebuilds every body.
-            s.rebase_tick(first_tick);
-            s.resync_pending = true;
-            s.have_snapshot = false;
-            bmmo::session::client_journal::instance().note(
-                    s.tick_base, std::format("resync: reassigned, tick base {}", s.tick_base));
-            logger_->Info("Physics session %u: resynced, tick base %u", s.session, s.tick_base);
-            return;
-        }
-        s.assigned = true;
-        if (first_tick != 0) {
-            // A numbered base.  The server hands one out at a session start
-            // (the session's start lead, protocol 2.2) as well as to a late join
-            // or a resync (its current tick plus the same lead), so this is the
-            // ordinary path.  The frames recorded before this assignment carry
-            // OUR numbers - the anchor-relative ones, which name ticks the
-            // server never asked us for - while the server's read cursor starts
-            // at the base.  Keeping them would leave the base's own frames
-            // missing for as long as the anchor ran ahead (the server fills
-            // those ticks with a repeated frame), plus a permanent k-tick extra
-            // lead on top of the input delay that every snapshot arrives that
-            // much further behind.  Renumber here, exactly like the headless
-            // session client (sim/session_client.cpp).
-            const int64_t renumbered = s.frames_since_anchor;
-            s.rebase_tick(first_tick);
-            logger_->Info("Physics session %u: tick base %u assigned (renumbered, %lld anchor-relative frames dropped)",
-                          s.session, s.tick_base, static_cast<long long>(renumbered));
-        } else {
-            // Base 0: a server that still numbers the members present at the
-            // start from their own anchor.  The backlog frames stamped 0..k-1
-            // are valid inputs it is waiting for, and renumbering would relabel
-            // them.
-            s.tick_base = first_tick;
-            logger_->Info("Physics session %u: tick base %u assigned (%lld frames since anchor)", s.session,
-                          s.tick_base, static_cast<long long>(s.frames_since_anchor));
-        }
-        s.last_rebases = fixed_tick_.rebases();
+    auto& s = physics_session_;
+    std::lock_guard lk(s.queue_mutex);
+    s.assign_queue.push_back({msg.session, msg.first_tick});
+}
+
+// Game thread: every queued assignment, in arrival order.
+void BallanceMMOClient::physics_session_drain_assignments() {
+    auto& s = physics_session_;
+    std::deque<physics_session_state::assign_notice> pending;
+    {
+        std::lock_guard lk(s.queue_mutex);
+        pending.swap(s.assign_queue);
+    }
+    for (const auto& notice: pending) physics_session_apply_assign(notice.session, notice.first_tick);
+}
+
+void BallanceMMOClient::physics_session_apply_assign(uint32_t session, uint32_t first_tick) {
+    auto& s = physics_session_;
+    if (s.session != session || s.phase != phase_type::running) return;
+    // Both branches below renumber, and a renumber invalidates everything
+    // the server acked under the old numbering: the first snapshot of the
+    // new one sets the starvation detector's baseline again.
+    s.acked_input.reset();
+    if (s.assigned) {
+        // Resync (design 9.2): tick numbering restarts from the server's
+        // current tick, histories are dropped, the next full snapshot
+        // rebuilds every body.
+        s.rebase_tick(first_tick);
+        s.resync_pending = true;
+        s.have_snapshot = false;
         bmmo::session::client_journal::instance().note(
-                s.tick_base, std::format("assigned: tick base {}", s.tick_base));
-        physics_session_flush_inputs();
-    });
+                s.tick_base, std::format("resync: reassigned, tick base {}", s.tick_base));
+        logger_->Info("Physics session %u: resynced, tick base %u", s.session, s.tick_base);
+        return;
+    }
+    s.assigned = true;
+    if (first_tick != 0) {
+        // A numbered base.  The server hands one out at a session start
+        // (the session's start lead, protocol 2.2) as well as to a late join
+        // or a resync (its current tick plus the same lead), so this is the
+        // ordinary path.  The frames recorded before this assignment carry
+        // OUR numbers - the anchor-relative ones, which name ticks the
+        // server never asked us for - while the server's read cursor starts
+        // at the base.  Keeping them would leave the base's own frames
+        // missing for as long as the anchor ran ahead (the server fills
+        // those ticks with a repeated frame), plus a permanent k-tick extra
+        // lead on top of the input delay that every snapshot arrives that
+        // much further behind.  Renumber here, exactly like the headless
+        // session client (sim/session_client.cpp).
+        const int64_t renumbered = s.frames_since_anchor;
+        s.rebase_tick(first_tick);
+        // Design 9.25 phase alignment: with the hold in place `renumbered`
+        // is 0 - the world has not stepped since the anchor, and the step
+        // it takes next is the one the server's world takes under this very
+        // number.  A non-zero count here means the hold timed out.
+        physics_session_release_hold("tick base assigned");
+        logger_->Info("Physics session %u: tick base %u assigned (renumbered, %lld anchor-relative frames dropped)",
+                      s.session, s.tick_base, static_cast<long long>(renumbered));
+    } else {
+        // Base 0: a server that still numbers the members present at the
+        // start from their own anchor.  The backlog frames stamped 0..k-1
+        // are valid inputs it is waiting for, and renumbering would relabel
+        // them.
+        s.tick_base = first_tick;
+        // Base 0 leaves the numbering alone, but the world still has to
+        // start: an old server that numbers from the anchor gets the world
+        // running here rather than at the hold's timeout.
+        physics_session_release_hold("tick base 0 assigned (anchor numbering)");
+        logger_->Info("Physics session %u: tick base %u assigned (%lld frames since anchor)", s.session,
+                      s.tick_base, static_cast<long long>(s.frames_since_anchor));
+    }
+    s.last_rebases = fixed_tick_.rebases();
+    bmmo::session::client_journal::instance().note(
+            s.tick_base, std::format("assigned: tick base {}", s.tick_base));
+    physics_session_flush_inputs();
 }
 
 void BallanceMMOClient::handle_session_snapshot(bmmo::session_snapshot_msg msg) {
@@ -603,8 +378,11 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     std::string error;
     pause_clock_restore();
     // The pause chains' edits go back too: outside a session the menu stops and
-    // starts the world scripts as retail intends.
+    // starts the world scripts as retail intends, a death resets the sector
+    // again and a checkpoint deactivates the one behind it (design 9.25).
     pause_scripts_restore();
+    death_reset_restore();
+    sector_deactivate_restore();
     // The clock guard is scoped to the session and must not outlive it, so it
     // is dropped even when there is nothing left to tear down.
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
@@ -631,6 +409,9 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
 // Called at the start of every OnProcess, after the fixed-tick pacing.
 void BallanceMMOClient::process_physics_session() {
     auto& s = physics_session_;
+    // The tick assignment is applied here, at the frame boundary, whatever the
+    // phase (one that arrives outside `running` is dropped, as before).
+    physics_session_drain_assignments();
     switch (s.phase) {
     case phase_type::idle:
     case phase_type::ended:
@@ -803,6 +584,43 @@ namespace {
         auto* block = CKBehavior::Cast(context->GetObject(block_id));
         return block && block->IsUsingFunction() ? block->GetPrototypeName() : "?";
     }
+
+    // How many behavior inputs read one parameter, and which ones: the
+    // shared-reader safety check every chain neutralization below makes -
+    // emptying a parameter that something else reads would take its value away
+    // too.
+    std::pair<int, std::string> parameter_readers(CKContext* context, CKParameter* param) {
+        std::string text;
+        int readers = 0;
+        if (!context || !param) return {0, text};
+        const int behaviors = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+        CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+        for (int b = 0; b < behaviors; ++b) {
+            auto* other = CKBehavior::Cast(context->GetObject(ids[b]));
+            const int inputs = other ? other->GetInputParameterCount() : 0;
+            for (int k = 0; k < inputs; ++k) {
+                CKParameterIn* in = other->GetInputParameter(k);
+                if (!in || in->GetRealSource() != param) continue;
+                ++readers;
+                if (readers > 8) continue;
+                CKBehavior* owner = other->GetParent();
+                text += std::format("{}{}/{} input {}", text.empty() ? "" : ", ",
+                                    owner && owner->GetName() ? owner->GetName() : "?",
+                                    other->GetName() ? other->GetName() : "?", k);
+            }
+        }
+        return {readers, text};
+    }
+
+    // A recorded block, resolved back into the live graph: the context recycles
+    // object ids when a level is torn down, so the id alone is not enough to
+    // write through (see pause_script_parameter).
+    CKBehavior* session_block(CKContext* context, CK_ID id, const char* prototype) {
+        auto* block = CKBehavior::Cast(context->GetObject(id));
+        if (!block || !block->IsUsingFunction()) return nullptr;
+        const char* name = block->GetPrototypeName();
+        return name && std::strcmp(name, prototype) == 0 ? block : nullptr;
+    }
 }
 
 // The retail pause chain also stops and restarts the level's gameplay scripts:
@@ -855,27 +673,6 @@ bool BallanceMMOClient::pause_scripts_resolve() {
     // that is not one of ours would lose its target with ours.  So the pass
     // below first collects every candidate input and then checks that each
     // target parameter's readers are exactly the candidates that read it.
-    const int behaviors = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
-    CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
-    const auto describe_readers = [&](CKParameter* param) {
-        std::string text;
-        int readers = 0;
-        for (int b = 0; b < behaviors; ++b) {
-            auto* other = CKBehavior::Cast(context->GetObject(ids[b]));
-            const int other_inputs = other ? other->GetInputParameterCount() : 0;
-            for (int k = 0; k < other_inputs; ++k) {
-                CKParameterIn* in = other->GetInputParameter(k);
-                if (!in || in->GetRealSource() != param) continue;
-                ++readers;
-                if (readers > 8) continue;
-                CKBehavior* owner = other->GetParent();
-                text += std::format("{}{}/{} input {}", text.empty() ? "" : ", ",
-                                    owner && owner->GetName() ? owner->GetName() : "?",
-                                    other->GetName() ? other->GetName() : "?", k);
-            }
-        }
-        return std::make_pair(readers, text);
-    };
     struct script_target {
         CKBehavior* block;
         const char* chain;
@@ -908,7 +705,7 @@ bool BallanceMMOClient::pause_scripts_resolve() {
     bool seen[kSessionWorldScriptCount] = {};
     std::string list;
     for (const auto& candidate: candidates) {
-        const auto [readers, readers_text] = describe_readers(candidate.param);
+        const auto [readers, readers_text] = parameter_readers(context, candidate.param);
         int mine = 0;
         for (const auto& other: candidates)
             if (other.param == candidate.param) ++mine;
@@ -979,6 +776,250 @@ void BallanceMMOClient::pause_scripts_restore() {
     pause_scripts_failed_ = false;
 }
 
+// Design 9.25, the two retail chains a session must not let run.  Both are
+// per-player world edits the server never makes, and both tear down bodies the
+// server keeps simulating - which is what the body guard (engine change #6) was
+// already fighting, one level deeper than it can reach: it keeps the body, but
+// the module's script rebuilds the CONSTRAINTS around it from the referential
+// entities' initial poses (PhysicsBallJoint.cpp:105-149 anchors at the
+// referential's current world position, and the module's TT Restore IC has just
+// put that back at its IC), so the sandbag's joint is violated by however far it
+// had swung and IVP removes the violation with an impulse - the convulsion of
+// the user's third symptom (findings/A2 section 5.5).
+//
+// N1, the death reset: Gameplay_Ingame / BallManager / Deactivate Ball runs
+// "Execute Script" on Gameplay_SectorManager with Reset? = TRUE, i.e. the whole
+// sector is deactivated and re-activated for one player's death.  The server's
+// world never does this (design section 2: it activates the union of the
+// players' sectors and never resets), so neither may we.  The block's "Script"
+// target is emptied for the session, exactly like the pause chains':
+// Execute Script activates its Out immediately when the script is null
+// (ExecuteScript.cpp:66-70), so "Set Cell.Found -> Execute Script.In ->
+// Deactivate Ball.Ball OFF" keeps its shape, its delays and the respawn behind
+// it.  The visible difference from retail is that a personal death no longer
+// re-shows the sector's collected items - consistent with a shared world.
+//
+// N2, the checkpoint deactivation: see sector_deactivate_resolve below.
+bool BallanceMMOClient::death_reset_resolve() {
+    death_reset_ = {};
+    const auto refuse = [this](const std::string& why) {
+        death_reset_ = {};
+        death_reset_failed_ = true;
+        logger_->Error("Physics session: the retail death reset was NOT neutralized (%s): a death will reset this "
+                       "client's sector and rebuild the mechanisms' joints under the body guard", why.c_str());
+        return false;
+    };
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* ingame = m_bml->GetScriptByName("Gameplay_Ingame");
+    if (!ingame) return refuse("Gameplay_Ingame is missing");
+    CKBehavior* manager = ScriptHelper::FindFirstBB(ingame, "BallManager");
+    if (!manager) return refuse("Gameplay_Ingame/BallManager is missing");
+    CKBehavior* chain = ScriptHelper::FindFirstBB(manager, "Deactivate Ball");
+    if (!chain) return refuse("BallManager/Deactivate Ball is missing");
+    CKBehavior* block = nullptr;
+    const int subs = chain->GetSubBehaviorCount();
+    for (int i = 0; i < subs; ++i) {
+        CKBehavior* sub = chain->GetSubBehavior(i);
+        const char* prototype = sub && sub->IsUsingFunction() ? sub->GetPrototypeName() : nullptr;
+        if (!prototype || std::strcmp(prototype, "Execute Script") != 0) continue;
+        auto* target = CKBehavior::Cast(sub->GetInputParameterObject(1));   // "Script"
+        const char* name = target ? target->GetName() : nullptr;
+        if (!name || std::strcmp(name, "Gameplay_SectorManager") != 0) continue;
+        if (block) return refuse("Deactivate Ball runs Gameplay_SectorManager from more than one block");
+        block = sub;
+    }
+    if (!block) return refuse("no Execute Script inside Deactivate Ball targets Gameplay_SectorManager");
+    CKParameterIn* input = block->GetInputParameter(1);
+    if (!input || input->GetGUID() != CKPGUID_SCRIPT) return refuse("the Execute Script block has no Script input");
+    CKParameter* param = input->GetRealSource();
+    if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID)))
+        return refuse("its Script input has no usable target parameter");
+    const auto [readers, readers_text] = parameter_readers(context, param);
+    if (readers != 1)
+        return refuse(std::format("its target parameter is read by {} inputs ({})", readers, readers_text));
+    death_reset_.block = block->GetID();
+    death_reset_.input = 1;
+    param->GetValue(&death_reset_.retail);
+    death_reset_.applied = false;
+    death_reset_failed_ = false;
+    death_reset_apply();
+    return true;
+}
+
+// Keeps the edit applied, like pause_scripts_apply: a level reset that handed
+// the retail target back has to be caught before the next death runs the chain.
+void BallanceMMOClient::death_reset_apply() {
+    if (!death_reset_.block) return;
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* block = session_block(context, death_reset_.block, "Execute Script");
+    CKParameterIn* input = block ? block->GetInputParameter(death_reset_.input) : nullptr;
+    CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
+    if (!param || param->GetDataSize() != static_cast<int>(sizeof(CK_ID))) return;
+    CK_ID current = 0;
+    param->GetValue(&current);
+    if (current == 0) {
+        death_reset_.applied = true;   // already neutral (this session, or the same graph reloaded)
+        return;
+    }
+    if (current != death_reset_.retail) return;   // somebody else's value: not ours to move
+    const CK_ID zero = 0;
+    param->SetValue(&zero, sizeof(CK_ID));
+    if (!death_reset_.applied) {
+        death_reset_.applied = true;
+        logger_->Info("Physics session: the death chain's sector reset (Deactivate Ball/Execute Script -> %u) "
+                      "is neutralized", death_reset_.retail);
+    }
+}
+
+void BallanceMMOClient::death_reset_restore() {
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* block = death_reset_.block ? session_block(context, death_reset_.block, "Execute Script") : nullptr;
+    CKParameterIn* input = block ? block->GetInputParameter(death_reset_.input) : nullptr;
+    CKParameter* param = input && input->GetGUID() == CKPGUID_SCRIPT ? input->GetRealSource() : nullptr;
+    if (param && param->GetDataSize() == static_cast<int>(sizeof(CK_ID)) && death_reset_.retail) {
+        CK_ID current = 0;
+        param->GetValue(&current);
+        if (current == 0) {
+            const CK_ID retail = death_reset_.retail;
+            param->SetValue(&retail, sizeof(CK_ID));
+        }
+    }
+    death_reset_ = {};
+    death_reset_failed_ = false;
+}
+
+// N2, the checkpoint deactivation.  Crossing a checkpoint runs
+// Gameplay_Events / activate Sektor, which writes IngameParameter[0][1] (the
+// sector to activate) and IngameParameter[0][2] (the sector to deactivate) and
+// then runs Gameplay_SectorManager, whose "Deactivate Sector" group resets and
+// hides everything of the named sector - bodies the server keeps, because its
+// world activates the union of every player's sectors and deactivates nothing
+// (physics_world::update_sectors).  A client that deactivated its previous
+// sector would unphysicalize and re-pose the shared mechanisms of a sector
+// somebody else is still playing in.
+//
+// The deactivate write is fed a session-owned constant 0 instead of whatever
+// the chain computes: the SectorManager's own "Test (Not Equal, B = 0)" then
+// skips the whole deactivation, which is exactly what the automation's `sector`
+// verb and the headless --start-sector write by hand.  The source is swapped
+// rather than emptied because the two Set Cell blocks of the chain read the
+// same kind of parameter and one of them must keep working; the original source
+// (a direct source, or the input this one shares its source with) goes back at
+// session end.
+bool BallanceMMOClient::sector_deactivate_resolve() {
+    sector_deactivate_ = {};
+    const auto refuse = [this](const std::string& why) {
+        sector_deactivate_ = {};
+        sector_deactivate_failed_ = true;
+        logger_->Error("Physics session: the checkpoint's sector deactivation was NOT neutralized (%s): crossing a "
+                       "checkpoint will reset the previous sector's mechanisms here", why.c_str());
+        return false;
+    };
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* events = m_bml->GetScriptByName("Gameplay_Events");
+    if (!events) return refuse("Gameplay_Events is missing");
+    CKBehavior* chain = ScriptHelper::FindFirstBB(events, "activate Sektor");
+    if (!chain) return refuse("Gameplay_Events/activate Sektor is missing");
+    CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
+    if (!parameters) return refuse("the IngameParameter array is missing");
+    CKBehavior* block = nullptr;
+    bool target_known = false;
+    const int subs = chain->GetSubBehaviorCount();
+    for (int i = 0; i < subs; ++i) {
+        CKBehavior* sub = chain->GetSubBehavior(i);
+        const char* prototype = sub && sub->IsUsingFunction() ? sub->GetPrototypeName() : nullptr;
+        if (!prototype || std::strcmp(prototype, "Set Cell") != 0) continue;
+        int row = -1, column = -1;
+        sub->GetInputParameterValue(0, &row);
+        sub->GetInputParameterValue(1, &column);
+        if (row != 0 || column != 2) continue;   // [0][1] is the activate write: it stays
+        // A block that demonstrably writes another array is not ours; one whose
+        // target cannot be read here (it is bound through a parameter this pass
+        // cannot resolve) still counts, because the chain and the cell already
+        // identify it - the ambiguity is reported below.
+        CKBeObject* target = sub->GetTarget();
+        if (target && target != static_cast<CKBeObject*>(parameters)) continue;
+        if (block) return refuse("more than one Set Cell writes IngameParameter[0][2]");
+        block = sub;
+        target_known = target != nullptr;
+    }
+    if (!block) return refuse("no Set Cell inside activate Sektor writes IngameParameter[0][2]");
+    if (!target_known)
+        logger_->Warn("Physics session: the checkpoint's Set Cell does not name its array here; taking the one "
+                      "writing cell [0][2] of Gameplay_Events/activate Sektor");
+    CKParameterIn* input = block->GetInputParameter(2);   // "Value"
+    if (!input) return refuse("the Set Cell block has no Value input");
+    CKParameter* source = input->GetRealSource();
+    if (!source) return refuse("its Value input has no source");
+    if (source->GetGUID() != CKPGUID_INT || source->GetDataSize() != static_cast<int>(sizeof(int)))
+        return refuse("its Value input is not an int parameter");
+    auto* zero = context->CreateCKParameterLocal(const_cast<CKSTRING>("BMMO_SectorKeep"), CKPGUID_INT, TRUE);
+    if (!zero) return refuse("could not create the session's constant");
+    const int none = 0;
+    zero->SetValue(&none, sizeof(none));
+    CKParameterIn* shared = input->GetSharedSource();
+    CKParameter* direct = input->GetDirectSource();
+    if (input->SetDirectSource(zero) != CK_OK) {
+        context->DestroyObject(zero);
+        return refuse("the Value input refused the session's constant");
+    }
+    sector_deactivate_.block = block->GetID();
+    sector_deactivate_.input = 2;
+    sector_deactivate_.retail_source = direct ? direct->GetID() : 0;
+    sector_deactivate_.retail_shared = shared ? shared->GetID() : 0;
+    sector_deactivate_.retail_real = source->GetID();
+    sector_deactivate_.zero = zero->GetID();
+    sector_deactivate_.applied = true;
+    sector_deactivate_failed_ = false;
+    logger_->Info("Physics session: the checkpoint's sector deactivation (activate Sektor/Set Cell -> "
+                  "IngameParameter[0][2]) is pinned to 0");
+    return true;
+}
+
+// Only ever moves the input back onto our own constant, and only from the
+// source it had when the session resolved it: anything else in that input
+// belongs to a graph this table no longer describes.
+void BallanceMMOClient::sector_deactivate_apply() {
+    if (!sector_deactivate_.block || !sector_deactivate_.zero) return;
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* block = session_block(context, sector_deactivate_.block, "Set Cell");
+    CKParameterIn* input = block ? block->GetInputParameter(sector_deactivate_.input) : nullptr;
+    auto* zero = CKParameter::Cast(context->GetObject(sector_deactivate_.zero));
+    if (!input || !zero) return;
+    CKParameter* current = input->GetRealSource();
+    if (current == zero) return;   // still ours
+    if (!current || current->GetID() != sector_deactivate_.retail_real) return;
+    if (input->SetDirectSource(zero) == CK_OK)
+        logger_->Info("Physics session: the checkpoint's sector deactivation was re-pinned to 0");
+}
+
+void BallanceMMOClient::sector_deactivate_restore() {
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* block = sector_deactivate_.block ? session_block(context, sector_deactivate_.block, "Set Cell") : nullptr;
+    CKParameterIn* input = block ? block->GetInputParameter(sector_deactivate_.input) : nullptr;
+    auto* zero = sector_deactivate_.zero ? CKParameter::Cast(context->GetObject(sector_deactivate_.zero)) : nullptr;
+    bool referenced = false;
+    if (input && zero && input->GetRealSource() == zero) {
+        referenced = true;
+        if (sector_deactivate_.retail_shared) {
+            auto* shared = CKParameterIn::Cast(context->GetObject(sector_deactivate_.retail_shared));
+            if (shared && input->ShareSourceWith(shared) == CK_OK) referenced = false;
+        } else {
+            auto* source = CKParameter::Cast(context->GetObject(sector_deactivate_.retail_source));
+            if (source && input->SetDirectSource(source) == CK_OK) referenced = false;
+        }
+        if (referenced)
+            logger_->Warn("Physics session: the checkpoint chain's Value input could not be handed back to its "
+                          "retail source; the session's constant is left in place");
+    }
+    // Destroying a parameter an input still points at would leave a dangling
+    // source behind, so the one case that keeps it is the one where the input
+    // still reads it.
+    if (zero && !referenced) context->DestroyObject(zero);
+    sector_deactivate_ = {};
+    sector_deactivate_failed_ = false;
+}
+
 // The automation's read ("pausechain"): one line that says whether the menu is
 // open, whether the world scripts are still active, and what each recorded
 // pause-chain block points at now (a target of 0 is a neutralized one, the
@@ -999,6 +1040,24 @@ std::string BallanceMMOClient::pause_scripts_status() {
             m_bml->IsPaused() ? 1 : 0, active(m_bml->GetScriptByName("Gameplay_Ingame")),
             active(m_bml->GetScriptByName("Gameplay_Events")), active(m_bml->GetScriptByName("Gameplay_Tutorial")),
             physics_session_.input_muted ? 1 : 0, factor, pause_scripts_count_, pause_scripts_failed_ ? 1 : 0);
+    // Design 9.25: the two world resets this session also neutralizes, so one
+    // read says whether the client still runs a retail sector reset.
+    {
+        CK_ID death_target = 0;
+        if (CKBehavior* block = session_block(context, death_reset_.block, "Execute Script"))
+            if (CKParameterIn* input = block->GetInputParameter(death_reset_.input))
+                if (CKParameter* param = input->GetRealSource()) param->GetValue(&death_target);
+        int sector_value = -1;
+        if (CKBehavior* block = session_block(context, sector_deactivate_.block, "Set Cell"))
+            if (CKParameterIn* input = block->GetInputParameter(sector_deactivate_.input))
+                if (CKParameter* param = input->GetRealSource())
+                    if (param->GetGUID() == CKPGUID_INT) param->GetValue(&sector_value);
+        out += std::format(" death_reset={}/{}/now={} sector_keep={}/{}/now={}", death_reset_.retail,
+                           death_reset_failed_ ? "failed" : (death_reset_.applied ? "applied" : "resolved"),
+                           death_target, sector_deactivate_.zero,
+                           sector_deactivate_failed_ ? "failed" : (sector_deactivate_.applied ? "applied" : "resolved"),
+                           sector_value);
+    }
     for (int i = 0; i < pause_scripts_count_; ++i) {
         const pause_script_write& write = pause_scripts_[i];
         CKParameter* param = pause_script_parameter(context, write.block, write.chain, write.input);
@@ -1052,6 +1111,27 @@ void BallanceMMOClient::physics_session_anchor() {
     // pause_scripts_resolve).
     pause_scripts_restore();
     pause_scripts_resolve();
+    // Design 9.25: the same for the two retail chains that reset this client's
+    // sector behind the server's back - the death reset and the checkpoint's
+    // deactivation.  Each logs its own error and the session runs on: a session
+    // that refuses to start because one level's graph is unusual is worse than
+    // one that plays with a known difference.
+    death_reset_restore();
+    sector_deactivate_restore();
+    const bool death_neutralized = death_reset_resolve();
+    const bool sector_neutralized = sector_deactivate_resolve();
+    if (death_neutralized && sector_neutralized)
+        logger_->Info("Physics session: retail world resets neutralized: the death chain no longer runs "
+                      "Gameplay_SectorManager, and a checkpoint activates its sector without deactivating the "
+                      "previous one");
+    // Design 9.26: the mechanism Sequencers start from the level file's
+    // counters, as they do on the server, instead of wherever the play before
+    // the restart left them (Level 11's sandbags swing the other way otherwise).
+    {
+        const int restored = level_sequencers_.restore(m_bml->GetCKContext());
+        logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
+                      restored, level_sequencers_.size(), level_sequencers_.describe().c_str());
+    }
     bmmo::physics::world_hash hash;
     if (!physics_view_.capture(hash, error)) {
         physics_session_end_local("world hash failed: " + error);
@@ -1064,6 +1144,16 @@ void BallanceMMOClient::physics_session_anchor() {
     s.anchored = true;
     s.frames_since_anchor = 0;
     s.phase = phase_type::running;
+    // Design 9.26 phase alignment: stand still here until the server numbers
+    // our first step (physics_session_hold_until_assigned, at the end of this
+    // frame).  The frames this used to run were renumbered away by the
+    // assignment anyway, and they left this world that many steps further from
+    // the anchor than the server's at every tick number of the session.
+    s.hold_active = true;
+    s.hold_polls = 0;
+    s.hold_timed_out = false;
+    s.hold_deadline = std::chrono::steady_clock::now() + kAnchorHoldTimeout;
+    fixed_tick_.set_hold(true);
     s.corrector.clear();
     physics_view_.drain_event_log();   // install the listener, discard history
     s.ball_forces.clear();
@@ -1093,7 +1183,68 @@ void BallanceMMOClient::physics_session_anchor() {
                   hash.time_factor, physics_view_.describe_movable_objects().c_str());
     logger_->Info("Physics session anchor bodies: %s", physics_view_.describe_physics_objects().substr(0, 900).c_str());
     physics_session_journal_begin();
+    bmmo::session::client_journal::instance().note(0, "anchor hold: the world stands still until the tick base arrives");
     SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
+    physics_session_hold_until_assigned();
+}
+
+// The anchor hold (design 9.26 phase alignment).  Waits inside the anchor
+// frame's OnProcess until the server has numbered our first step, polling the
+// assignment the network thread queued - the headless client's loop
+// (sim/session_client.cpp), and nothing else: no behaviour frame runs
+// meanwhile, no input is recorded or sent, no rollback record is made and no
+// TICK record goes into the black box, so the next frame is the world's first
+// step and the box holds exactly the ticks the session has.
+//
+// A frame with a near-zero delta was tried first and is not still enough: it
+// stops the script timers and IVP, but not the frame-counted links of the
+// level graphs (a link with a delay of n frames fires after n frames whatever
+// the delta), so the sector's scripts ran that many frames ahead of the
+// server's and Level 11's sandbags were out of phase from the first tick
+// (retail run of 2026-09-11: 62 such frames, a sandbag correction every 6
+// ticks for the whole session).
+//
+// The picture stays on the last rendered frame for the wait - the slowest
+// member's SessionReady plus one reliable round trip, which the server's start
+// barrier caps at 8 s; kAnchorHoldTimeout bounds it here, so a server that
+// never answers costs a warning and a phase offset instead of a frozen game.
+void BallanceMMOClient::physics_session_hold_until_assigned() {
+    auto& s = physics_session_;
+    while (s.hold_active) {
+        physics_session_drain_assignments();   // releases the hold on a start assignment
+        if (!s.hold_active) break;
+        if (!connected()) {
+            physics_session_release_hold("the connection was lost");
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= s.hold_deadline) {
+            s.hold_timed_out = true;
+            physics_session_release_hold("no tick assignment arrived");
+            logger_->Warn("Physics session %u: no tick assignment after %lld s; the world starts anyway and will be "
+                          "out of phase with the server's", s.session,
+                          static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(kAnchorHoldTimeout).count()));
+            SendIngameMessage("Physics session: the server did not assign a tick base; starting out of phase.",
+                              bmmo::ansi::BrightYellow);
+            break;
+        }
+        ++s.hold_polls;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void BallanceMMOClient::physics_session_release_hold(const char* why) {
+    auto& s = physics_session_;
+    if (!s.hold_active) return;
+    s.hold_active = false;
+    fixed_tick_.set_hold(false);
+    // The driver's schedule continues where the hold interrupted it, so the
+    // wait is not lag: `rebases` must not move, or the next frame asks for a
+    // resync.
+    s.last_rebases = fixed_tick_.rebases();
+    bmmo::session::client_journal::instance().note(s.tick_base,
+            std::format("anchor hold released after {} polls: {}", s.hold_polls, why));
+    logger_->Info("Physics session %u: anchor hold released after %llu polls (%s); the first step is tick %u",
+                  s.session, static_cast<unsigned long long>(s.hold_polls), why, s.tick_base);
 }
 
 // Opens this session's black box (session/session_journal_client.hpp) at the
@@ -1197,6 +1348,10 @@ void BallanceMMOClient::physics_session_frame() {
     // session runs: the menu may be opened at any tick, and a target a level
     // reset handed back must be emptied again before the chain can use it.
     pause_scripts_apply();
+    // The same for the death reset and the checkpoint deactivation (9.25):
+    // both chains can fire at any tick.
+    death_reset_apply();
+    sector_deactivate_apply();
 
     // The tick driver restarted its schedule (pause, long stall): our tick
     // numbers no longer line up with the server's.
@@ -1291,6 +1446,68 @@ void BallanceMMOClient::physics_session_frame() {
         remote.corrector.record(pose);
     }
 
+    // The bridge's object log for this frame, read before the record below: a
+    // body created or deleted during this frame's scripts and PSIs is already
+    // in the world the record describes, so its new lifetime generation has to
+    // be stamped on THAT record (design 9.25) - a generation that arrived one
+    // tick late would make the engine treat the record as the previous body's
+    // and restore from the wrong lifetime.  Two readings of the same log:
+    //
+    //  * created / deleted: a body behind a tracked name changed, so its
+    //    generation moves on and the mechanism registry re-resolves (the name
+    //    may now have a local body, or have lost the one it had);
+    //  * script_wakeup: only explicit script wake-ups belong on the
+    //    authoritative timeline.  IVP's generic revived events also include
+    //    predicted collisions and rollback restores: sending those back would
+    //    wake the server's bodies again and feed the next correction.
+    s.revived_reported_this_frame.clear();
+    {
+        const std::string events = physics_view_.drain_event_log();
+        size_t pos = 0;
+        while (pos < events.size()) {
+            const size_t end = events.find(';', pos);
+            if (end == std::string::npos) break;
+            const std::string entry = events.substr(pos, end - pos);
+            pos = end + 1;
+            // "t=<seconds> <kind> <name>" (physics_state.cpp); anything else
+            // (the listener's own "listener installed") has no name and is
+            // skipped by the same test.
+            const size_t first = entry.find(' ');
+            if (first == std::string::npos) continue;
+            const size_t second = entry.find(' ', first + 1);
+            if (second == std::string::npos) continue;
+            const std::string kind = entry.substr(first + 1, second - first - 1);
+            const std::string name = entry.substr(second + 1);
+            if (name.empty()) continue;
+            if (kind == "created" || kind == "deleted") {
+                ++s.generations[name];
+                s.mechanism_tracking.mark_dirty();
+                continue;
+            }
+            if (kind == "constraint" || kind == "birth" || kind == "psi" || kind == "force") {
+                // Bridge diagnostics (design 9.26): what a body was born as, the
+                // constraints and forces the scripts built, the first PSIs of a
+                // watched body (BMMO_PSI_PROBE).  Logged under `session trace`.
+                if (s.trace) logger_->Info("Physics session: %s %s at tick %u", kind.c_str(), name.c_str(), tick);
+                continue;
+            }
+            if (kind != "script_wakeup") continue;
+            if (name.rfind("Ball_", 0) == 0 || name == ball_name || name.find("_Peer_") != std::string::npos
+                    || s.revived_reported_this_frame.count(name))
+                continue;
+            s.revived_reported_this_frame.insert(name);
+            bmmo::session_event_msg event;
+            event.session = s.session;
+            event.tick = tick;
+            event.type = bmmo::session::event_type::BodyRevived;
+            event.name = name;
+            physics_session_send_event(event);
+        }
+    }
+    // The mechanisms this client can be corrected on, resolved before the
+    // record: the tracked set of a tick has to name bodies that exist in it.
+    physics_session_resolve_mechanisms(tick);
+
     // Input for this tick: keys polled at this frame's PreProcess, camera
     // basis from the END of the previous frame (the retail Ball Navigation
     // executes before the camera scripts of a frame), nav state after this
@@ -1376,6 +1593,14 @@ void BallanceMMOClient::physics_session_frame() {
                 tracked.remote_entities.push_back(remote.entity);
                 applied[remote.entity] = remote.applied;
             }
+        // Design 9.25: the shared mechanisms are ordinary tracked bodies again.
+        // Only the names this client has a body for - a tracked name with no
+        // body is dropped by every capture, which used to change the tracked
+        // set on every tick.
+        for (const auto& name: s.mechanism_tracking.tracked_entities()) tracked.mechanisms.push_back(name);
+        // The lifetime of every tracked name, so a record of an earlier body
+        // under the same name is never used to restore the current one.
+        tracked.generations = s.generations;
         s.rollback.record(physics_session_rollback_world(), tick, tracked, applied);
     }
     if (s.assigned) {
@@ -1426,31 +1651,6 @@ void BallanceMMOClient::physics_session_frame() {
         }
     }
 
-    // Only explicit script wake-ups belong on the authoritative timeline.
-    // IVP's generic revived events also include predicted collisions and
-    // rollback restores: sending those back would wake the server's bodies
-    // again and feed the next correction.
-    s.revived_reported_this_frame.clear();
-    const std::string events = physics_view_.drain_event_log();
-    size_t pos = 0;
-    while ((pos = events.find("script_wakeup ", pos)) != std::string::npos) {
-        pos += 14;
-        const size_t end = events.find(';', pos);
-        if (end == std::string::npos) break;
-        const std::string name = events.substr(pos, end - pos);
-        pos = end + 1;
-        if (name.empty() || name.rfind("Ball_", 0) == 0 || name == ball_name || name.find("_Peer_") != std::string::npos
-                || s.revived_reported_this_frame.count(name))
-            continue;
-        s.revived_reported_this_frame.insert(name);
-        bmmo::session_event_msg event;
-        event.session = s.session;
-        event.tick = tick;
-        event.type = bmmo::session::event_type::BodyRevived;
-        event.name = name;
-        physics_session_send_event(event);
-    }
-
     // A too_far or frozen decision sets the bodies and truncates the history
     // without re-simulating, so the world stays on the snapshot while our tick
     // counter runs on: the two timelines no longer line up.  Re-anchor instead
@@ -1460,10 +1660,6 @@ void BallanceMMOClient::physics_session_frame() {
     const uint64_t frozen_before = s.rollback.stats().frozen;
     const uint64_t unmatched_before = s.rollback.stats().unmatched;
     physics_session_apply_queues();
-    // Option A: after the queue was drained, every mechanism has this
-    // snapshot's authority row; render it before the rollback decision below
-    // (which may restore the world) and before the blends continue.
-    physics_session_apply_mechanism_authority();
     if (s.rollback_enabled && !s.resync_pending) {
         const auto& rollback = s.rollback.stats();
         // The rollback path returns before the correction ladder of the
@@ -1635,7 +1831,10 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         const uint32_t previous_type = remote.physicalized && remote.entity != entity->GetName()
             ? remote.ball_type : std::numeric_limits<uint32_t>::max();
         if (remote.physicalized && remote.entity != entity->GetName()) {
-            s.rollback.invalidate_history();
+            // The mirror of the old ball is about to go: a new lifetime for
+            // that name, so no record of it can restore the body of the next
+            // one (design 9.25 - this used to throw the whole history away).
+            ++s.generations[remote.entity];
             if (remote.navigation) physics_view_.navigation_destroy(remote.entity.c_str(), error);
             physics_view_.unphysicalize(remote.entity.c_str(), error);
         } else if (remote.navigation) {
@@ -1669,10 +1868,12 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
                                               cached->second.simulated, error))
                 logger_->Warn("Physics session: physicalize %s: %s", entity->GetName(), error.c_str());
         }
-        // Queues run after this frame's history capture. The new body (also a
-        // same-name respawn) must first be recorded on the NEXT live frame;
-        // older snapshots cannot safely rewind the current world through it.
-        s.rollback.invalidate_history();
+        // Queues run after this frame's history capture, so the new body (also
+        // a same-name respawn) is first recorded on the NEXT live frame.  Its
+        // generation moves on here: the engine then restores it from its own
+        // first record instead of from a record of the body that was there
+        // before, and every OTHER body keeps its history (design 9.25).
+        ++s.generations[entity->GetName()];
         remote.entity = entity->GetName();
         remote.ball_type = event.ball_type;
         remote.physicalized = true;
@@ -1703,7 +1904,7 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
     case bmmo::session::event_type::Unphysicalize: {
         auto it = s.remotes.find(event.player);
         if (it == s.remotes.end()) return;
-        if (it->second.physicalized || it->second.navigation) s.rollback.invalidate_history();
+        if (it->second.physicalized) ++s.generations[it->second.entity];   // the body goes: a new lifetime
         if (it->second.navigation) physics_view_.navigation_destroy(it->second.entity.c_str(), error);
         it->second.navigation = false;
         if (it->second.physicalized) physics_view_.unphysicalize(it->second.entity.c_str(), error);
@@ -1776,10 +1977,11 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
     if (s.rollback_enabled) {
         for (const auto& body: snapshot.bodies)
             if (body.kind == bmmo::session::body_kind::Mechanism) {
-                if (snapshot.full && !body.name.empty()) s.mechanism_names[body.owner] = body.name;
-                // Option A: the row is not compared or restored, it is stored
-                // as authority for the frame's applier.
-                physics_session_note_mechanism(snapshot.tick, body);
+                // The dictionary (full snapshots only) and the newest pose, for
+                // the identity guard; the row itself is compared and restored
+                // by the rollback engine like any other tracked body (9.25).
+                if (snapshot.full && !body.name.empty()) s.mechanism_tracking.note_name(body.owner, body.name);
+                s.mechanism_tracking.note_row(snapshot.tick, body);
             }
         physics_session_rollback(snapshot);
         return;
@@ -1866,10 +2068,12 @@ void BallanceMMOClient::physics_session_apply_snapshot(const bmmo::session_snaps
             else { ++s.body_write_errors; s.last_error = error; }
             continue;
         }
-        // Mechanism (Option A): no local prediction, no comparison - the row
-        // is stored as authority and rendered by the frame's applier.
-        if (snapshot.full && !body.name.empty()) s.mechanism_names[body.owner] = body.name;
-        physics_session_note_mechanism(snapshot.tick, body);
+        // Mechanism, with the rollback engine switched off (automation:
+        // "session rollback off"): the body is simulated locally like every
+        // other one and nothing corrects it, so the row only keeps the
+        // dictionary and the identity guard up to date.
+        if (snapshot.full && !body.name.empty()) s.mechanism_tracking.note_name(body.owner, body.name);
+        s.mechanism_tracking.note_row(snapshot.tick, body);
     }
 }
 
@@ -1920,6 +2124,56 @@ void BallanceMMOClient::physics_session_check_own_body(const bmmo::session_snaps
         SendIngameMessage("Physics session: the server did not take our ball; reporting it again.", bmmo::ansi::BrightYellow);
 }
 
+// The automation `beam` verb inside a physics session (design 9.25 follow-up).
+// The local write alone moves this client's ball only: the server keeps its own
+// copy where it was and the next snapshot drags the ball back, which is what
+// made `beam` useless for a contact test in a session.  The server's copy is
+// moved the way the retail death chain moves it - Unphysicalize, then
+// Physicalize at the new pose with the last reported recipe and WITHOUT the
+// spawn flag (a spawn flag would kick the re-created body on every side while
+// this one, beamed by hand, was not kicked).  A bare repeat Physicalize would
+// not do: the server's apply_event moves the entity and then calls physicalize,
+// which returns early for an entity that already has a body, and the body drives
+// the entity back on the next PSI (physics_state.cpp, headless --beam).
+// Returns what the caller should append to its answer.
+std::string BallanceMMOClient::physics_session_report_beam(const std::string& entity, const double position[3]) {
+    auto& s = physics_session_;
+    if (s.phase != phase_type::running || !s.assigned) return " (no running physics session: local only)";
+    if (!s.own_physicalized || !s.last_physicalize.valid)
+        return " (no physicalized own ball in the session: local only)";
+    // The tick the events are stamped for is the one this frame's physics step
+    // will be numbered with, exactly like the Physicalize the BML hooks send.
+    const uint32_t tick = s.current_tick() + 1;
+    // A new lifetime under the same name: the server rebuilds its body, so no
+    // record of the old one may be used to restore this one (design 9.25).
+    ++s.generations[entity];
+    bmmo::session_event_msg down;
+    down.tick = tick;
+    down.type = bmmo::session::event_type::Unphysicalize;
+    physics_session_send_event(down);
+    bmmo::session_event_msg up;
+    up.tick = tick;
+    up.type = bmmo::session::event_type::Physicalize;
+    up.ball_type = s.last_physicalize.ball_type;
+    up.flags = static_cast<uint8_t>(s.last_physicalize.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
+    for (int k = 0; k < 3; ++k) up.position[k] = static_cast<float>(position[k]);
+    for (int r = 0; r < 3; ++r)
+        for (int k = 0; k < 3; ++k) up.rotation[r * 3 + k] = r == k ? 1.0f : 0.0f;   // upright, like the local write
+    up.recipe = s.last_physicalize.recipe;
+    physics_session_send_event(up);
+    // Keep the resend copy in step with what the server now has, and drop the
+    // correction ring: it describes a ball that no longer exists on either side.
+    s.last_physicalize.flags = up.flags;
+    for (int k = 0; k < 3; ++k) s.last_physicalize.position[k] = up.position[k];
+    for (int k = 0; k < 9; ++k) s.last_physicalize.rotation[k] = up.rotation[k];
+    s.corrector.clear();
+    s.snapshots_without_own = 0;
+    s.own_group_set = false;
+    logger_->Info("Physics session: beam of %s re-reported to the server (Unphysicalize + Physicalize at tick %u)",
+                  entity.c_str(), tick);
+    return std::format(" (server told: Unphysicalize+Physicalize at tick {})", tick);
+}
+
 // ---------------------------------------------------------------- BML hooks
 
 void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
@@ -1939,10 +2193,13 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
                           target->GetName() ? target->GetName() : "?", s.current_tick() + 1, convexCnt, ballCnt, concaveCnt);
         return;
     }
-    // BML calls this before body creation/PreSimulate. Discard old lifetimes
-    // now; this frame's post-physics record captures the newly created body.
-    // In particular, a same-name respawn is not the body in the old history.
-    s.rollback.invalidate_history();
+    // BML calls this before body creation/PreSimulate, so this frame's
+    // post-physics record already captures the new body.  A same-name respawn
+    // is not the body the old records describe: its generation moves on here
+    // (design 9.25), which is what keeps a snapshot from restoring the fresh
+    // ball to the pose the previous one had - without dropping the history of
+    // every other body, as the invalidation this replaces did.
+    ++s.generations[target->GetName() ? target->GetName() : ""];
     bmmo::session_event_msg event;
     event.tick = s.current_tick() + 1;   // this frame's physics step is still ahead
     event.type = bmmo::session::event_type::Physicalize;
@@ -2037,7 +2294,7 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
     if (s.phase != phase_type::running || !target) return;
     CK3dObject* ball = get_current_ball();
     if (!ball || target != static_cast<CK3dEntity*>(ball)) return;
-    s.rollback.invalidate_history();
+    ++s.generations[target->GetName() ? target->GetName() : ""];   // the body goes: a new lifetime
     bmmo::session_event_msg event;
     event.tick = s.current_tick() + 1;
     event.type = bmmo::session::event_type::Unphysicalize;
@@ -2095,9 +2352,20 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         std::string error;
         return physics_view_.get_body_state(entity.c_str(), out, error);
     };
-    world.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state, bool wake) {
+    // Design 9.25: the engine decides the sleep handling and the contact
+    // recheck per write.  `keep` is the common case - most restores move a body
+    // that is already in the state the server reports, and ensure_in_simulation
+    // would re-arm its freeze timers (engine change #14); `recheck` is asked for
+    // only when the write actually moved the body, because the optimized beam
+    // builds no contact when it lands one body inside another.
+    world.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state,
+                            bmmo::session::wake_mode mode, bool recheck) {
         std::string error;
-        if (physics_view_.set_body_state(entity.c_str(), state.position, state.rotation, state.linear, state.angular, wake, error))
+        const auto bridge_mode = mode == bmmo::session::wake_mode::wake   ? bmmo::physics::wake_mode::wake
+                               : mode == bmmo::session::wake_mode::freeze ? bmmo::physics::wake_mode::freeze
+                                                                          : bmmo::physics::wake_mode::keep;
+        if (physics_view_.set_body_state(entity.c_str(), state.position, state.rotation, state.linear, state.angular,
+                                         bridge_mode, recheck, error))
             return true;
         physics_session_.last_error = error;
         return false;
@@ -2127,10 +2395,9 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         std::string error;
         return physics_view_.step_physics(1000.0f / 66.0f, error);
     };
-    // Option A: the mechanisms are not in the tracked set, so the re-simulation
-    // would replay the ball against the one pose the frame's applier left them
-    // at - the applier runs once per frame, not once per replayed tick.
-    world.pre_step = [this](uint32_t tick) { physics_session_pose_mechanisms(tick); };
+    // No pre_step hook since 9.25: the mechanisms are tracked bodies and the
+    // re-simulation steps them like everything else.  The hook stays in the
+    // engine for the script-edge replay of findings/A5 section 2j.
     world.simulating = [this]() {
         float factor = 0.0f, delta = 0.0f;
         std::string error;
@@ -2174,11 +2441,11 @@ bool BallanceMMOClient::physics_session_rollback(const bmmo::session_snapshot_ms
             if (it == s.remotes.end() || !it->second.physicalized || !it->second.navigation) return {};
             return it->second.entity;
         }
-        // Mechanisms are not tracked by the rollback engine (Option A): they
-        // are server-authoritative, so no snapshot row may restore or
-        // re-simulate them.  An empty entity makes on_snapshot skip the row
-        // (rollback.hpp), and rollback_tracked no longer lists them either.
-        return std::string();
+        // Design 9.25: a mechanism row names one of our bodies again - the one
+        // the registry resolved for that owner.  Empty when this client has no
+        // body of that name (another sector) or when the identity guard refused
+        // the pick; on_snapshot then skips the row (rollback.hpp).
+        return s.mechanism_tracking.entity_of(body.owner);
     };
     // Only an exact hit counts: the engine feeds a relayed frame instead of the
     // recorded prediction when this succeeds, and a frame from an earlier tick
@@ -2270,11 +2537,27 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
     auto& s = physics_session_;
     // A hard world overwrite also invalidates records collected while we
     // waited for this full snapshot, not just those dropped on reassignment.
+    // The only explicit invalidation left in the client since 9.25: a body's
+    // lifetime is a generation now, not a reason to forget every other body -
+    // but the records between the re-assignment and this snapshot describe a
+    // world this call is about to replace, and nothing can replay across that.
     s.rollback.invalidate_history();
     std::string error;
     const auto own_id = db_.get_client_id();
     CK3dObject* ball = get_current_ball();
     const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
+    // The dictionary and the newest rows first, then one resolve pass: this is a
+    // full snapshot of a world that was just rebuilt, so it is both the moment
+    // the registry knows the most and the moment its old answers are worth the
+    // least (9.25).
+    for (const auto& body: snapshot.bodies)
+        if (body.kind == bmmo::session::body_kind::Mechanism) {
+            if (!body.name.empty()) s.mechanism_tracking.note_name(body.owner, body.name);
+            s.mechanism_tracking.note_row(snapshot.tick, body);
+        }
+    s.mechanism_tracking.mark_dirty();
+    physics_session_resolve_mechanisms(snapshot.tick);
+    std::string mechanism_entity;
     for (const auto& body: snapshot.bodies) {
         const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
         const char* target = nullptr;
@@ -2288,13 +2571,9 @@ void BallanceMMOClient::physics_session_apply_resync(const bmmo::session_snapsho
                 target = it->second.entity.c_str();
             }
         } else {
-            if (!body.name.empty()) s.mechanism_names[body.owner] = body.name;
-            auto name = s.mechanism_names.find(body.owner);
-            if (name == s.mechanism_names.end()) continue;
-            // Option A: the applier renders from the stored rows, so the hard
-            // set below is also the newest row of the history.
-            physics_session_note_mechanism(snapshot.tick, body);
-            target = name->second.c_str();
+            mechanism_entity = s.mechanism_tracking.entity_of(body.owner);
+            if (mechanism_entity.empty()) continue;   // another sector's instance
+            target = mechanism_entity.c_str();
         }
         if (physics_view_.set_body_state(target, body.position, body.rotation, body.linear, body.angular,
                                          body.owner == own_id ? true : wake, error))
@@ -2335,115 +2614,20 @@ void BallanceMMOClient::physics_session_cache_ball_row(uint32_t tick, const bmmo
     row.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
 }
 
-// Option A: store one authoritative mechanism row.  Rows arrive with every
-// snapshot, full or not (the non-full ones carry exactly the simulated bodies,
-// which are the ones that move), and are keyed by the server's owner index -
-// so a row is kept even before its dictionary name is known, and two instances
-// that share one name never mix.  The history is bounded (kMechanismRows): a
-// re-simulation re-poses the body from these rows once per replayed tick.
-void BallanceMMOClient::physics_session_note_mechanism(uint32_t tick, const bmmo::session::body_state& body) {
-    auto& rows = physics_session_.mechanism_authority[body.owner].rows;
-    if (!rows.empty()) {
-        if (rows.back().tick > tick) return;   // a queued older snapshot
-        // Equal tick: a re-sent row of the same tick replaces the newest one,
-        // so the history keeps ascending unique ticks instead of two rows the
-        // interpolation would see as a zero-length interval.
-        if (rows.back().tick == tick) rows.pop_back();
-    }
-    auto& pose = rows.emplace_back();
-    pose.tick = tick;
-    for (int k = 0; k < 3; ++k) {
-        pose.position[k] = body.position[k];
-        pose.linear[k] = body.linear[k];
-        pose.angular[k] = body.angular[k];
-    }
-    for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
-    pose.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
-    while (rows.size() > physics_session_state::kMechanismRows) rows.pop_front();
-}
-
-// Option A: render the stored authoritative mechanism poses, once per frame
-// after the snapshot queue was drained.  Only bodies this client actually has
-// are written (a mechanism of another sector is not physicalized here), and a
-// dictionary name carried by several server bodies is driven by the one whose
-// authoritative pose is nearest to ours.  The pose itself comes from the shared
-// helper: a render tick inside a snapshot pair interpolates the pair, past the
-// newest row it is dead-reckoned along that row's authoritative velocity, and a
-// teleport (or a body somewhere else entirely) is written as a snap, so a
-// mechanism that lands on a sleeping ball still builds the contact pair instead
-// of resting inside it until the next server correction.
-void BallanceMMOClient::physics_session_apply_mechanism_authority() {
+// Design 9.25: which of this client's bodies each mechanism row is about.
+// The dictionary names bodies of every sector the server runs, this client has
+// only the ones its own sectors activated, and one name can be carried by
+// several server owners - so the answer is a probe per distinct name, not per
+// row.  Re-resolved when the registry says so: a new dictionary entry, a body
+// created or deleted here (the bridge's event log marks it dirty), or once a
+// second as a safety net.
+void BallanceMMOClient::physics_session_resolve_mechanisms(uint32_t tick) {
     auto& s = physics_session_;
-    const uint32_t tick = s.current_tick();
-    std::string error;
-    for (const auto& candidate: mechanism_candidates(s, physics_view_)) {
-        // `elsewhere` is measured against the pose this applier last commanded,
-        // never against the live body: the live body IS that command (the
-        // dead-reckon puts it up to kMechanismMaxExtrapolation past the newest
-        // row on purpose), so measuring the row against it made the applier snap
-        // to the raw row and dead-reckon again on the next frame, for as long as
-        // the mechanism moved fast enough to be dead-reckoned at all.
-        const bool elsewhere = std::sqrt(candidate.elsewhere_distance) > kMechanismSnapJump;
-        const mechanism_target target = mechanism_target_at(*candidate.history, tick, elsewhere);
-        if (target.snap) ++s.mechanism_snaps;
-        if (mechanism_pose_unchanged(candidate.local, target)) {
-            // Already there.  The target is the command all the same, and
-            // recording it keeps the reference from drifting stale behind a body
-            // the engine nudged onto the target after the previous write.
-            mechanism_note_command(*candidate.history, target);
-            continue;
-        }
-        if (physics_view_.set_body_state(candidate.name.c_str(), target.position, target.rotation, target.linear,
-                                         target.angular, target.simulated, error, target.snap)) {
-            ++s.body_writes;
-            mechanism_note_command(*candidate.history, target);
-        } else {
-            // The body is not where the write wanted it, so the previous command
-            // stands and the next frame still asks the applier's own question.
-            ++s.body_write_errors;
-            s.last_error = error;
-        }
-    }
-}
-
-// Option A: re-pose the untracked mechanism bodies for one re-simulated tick
-// (rollback_world::pre_step).  The re-simulation restores the tracked bodies and
-// the navigation replicas, but the mechanisms are server-authoritative and were
-// left at the single pose the live applier wrote at the end of the previous
-// frame: the replayed ball met each of them at the wrong place on every tick,
-// so a rollback near a mechanism could not converge on the server trajectory.
-// The target is the one the live path would render for that tick (the same
-// helper, the same rows); the write has no snap recheck, because this walks the
-// world forward tick by tick rather than beaming a body into a contact, and no
-// mechanism_snaps count, which measures the live applier's snaps.
-void BallanceMMOClient::physics_session_pose_mechanisms(uint32_t tick) {
-    auto& s = physics_session_;
-    std::string error;
-    for (const auto& candidate: mechanism_candidates(s, physics_view_)) {
-        // `elsewhere` is the live applier's test and is deliberately not passed
-        // here: during a re-simulation the live pose is this hook's own write for
-        // the previous tick, not a body somebody else moved.
-        const mechanism_target target = mechanism_target_at(*candidate.history, tick, false);
-        if (mechanism_pose_unchanged(candidate.local, target)) {
-            mechanism_note_command(*candidate.history, target);
-            continue;
-        }
-        if (physics_view_.set_body_state(candidate.name.c_str(), target.position, target.rotation, target.linear,
-                                         target.angular, target.simulated, error)) {
-            ++s.mechanism_resim_writes;
-            // This hook stops at the current tick, so its last write is where the
-            // live applier left the body before the rollback.  Recording it as
-            // the command is what keeps the next live frame's `elsewhere` test
-            // comparing the body against the applier's own prior state instead of
-            // against a pose the re-simulation has overwritten since - which
-            // would read as "somewhere else" and snap a body that is exactly
-            // where the applier put it.
-            mechanism_note_command(*candidate.history, target);
-        } else {
-            ++s.body_write_errors;
-            s.last_error = error;
-        }
-    }
+    if (!s.mechanism_tracking.due(tick)) return;
+    s.mechanism_tracking.resolve(tick, [this](const char* entity, bmmo_physics_body_state& out) {
+        std::string error;
+        return physics_view_.get_body_state(entity, out, error);
+    });
 }
 
 // Design 9.6: the own ball's forces come from the shared replica (polling the
@@ -2625,17 +2809,25 @@ std::string BallanceMMOClient::physics_session_status_text() {
         remote_hard += rs.hard;
     }
     return std::format(
-        "session={} phase={} impulse={:.3f} tick={} base={} assigned={} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
-        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} mech_resim_writes={} mech_snaps={} amend_failures={} "
+        "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
+        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
         "events={}/{} phys_resends={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
-        s.session, phase, s.spawn_impulse, s.current_tick(), s.tick_base, s.assigned ? 1 : 0, static_cast<long long>(s.frames_since_anchor),
+        // held=<holding now>/<1 ms polls the hold took>[+timeout]: the anchor
+        // hold of design 9.26 - the wait between the anchor and the tick base,
+        // in which no frame runs at all.
+        s.session, phase, s.spawn_impulse, s.current_tick(), s.tick_base, s.assigned ? 1 : 0,
+        s.hold_active ? 1 : 0, s.hold_polls, s.hold_timed_out ? "+timeout" : "",
+        static_cast<long long>(s.frames_since_anchor),
         s.inputs_sent, s.navigation_keys_known ? 1 : 0, s.own_physicalized ? 1 : 0, s.own_group_set ? 1 : 0,
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
         s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,
-        s.mechanism_names.size(), s.mechanism_authority.size(), s.body_writes, s.body_write_errors,
-        s.mechanism_resim_writes, s.mechanism_snaps,
+        // mechanisms=<in the dictionary>/<tracked here> (design 9.25: the
+        // second number is how many of them this client simulates and can be
+        // corrected on), generations=<tracked names with a lifetime counter>
+        s.mechanism_tracking.known(), s.mechanism_tracking.resolved(), s.body_writes, s.body_write_errors,
+        s.generations.size(),
         s.amend_failures,
         s.events_sent, s.events_received, s.physicalize_resends,
         s.resyncs_sent, s.resyncs_done,

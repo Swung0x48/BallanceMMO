@@ -1,6 +1,6 @@
-// Unit tests for the client-side rollback engine (design 9.6) over a fake
-// world: bodies move by their velocity each step, a navigated ball gains
-// +1 m/s on x per step while key 0 is held, and every adapter call is
+// Unit tests for the client-side rollback engine (design 9.6, restore rules of
+// 9.25) over a fake world: bodies move by their velocity each step, a navigated
+// ball gains +1 m/s on x per step while key 0 is held, and every adapter call is
 // recorded so the tests can check what the engine did to the world.
 
 #include <gtest/gtest.h>
@@ -24,6 +24,7 @@ namespace {
     using bmmo::session::rollback_engine;
     using bmmo::session::rollback_tracked;
     using bmmo::session::rollback_world;
+    using bmmo::session::wake_mode;
 
     constexpr double kDt = 1.0 / 66.0;
 
@@ -32,6 +33,10 @@ namespace {
         float linear[3] = {};
         bool simulated = true;
     };
+
+    const char* mode_name(wake_mode mode) {
+        return mode == wake_mode::wake ? "wake" : mode == wake_mode::freeze ? "freeze" : "keep";
+    }
 
     struct fake_world {
         std::map<std::string, fake_body> bodies;
@@ -55,14 +60,18 @@ namespace {
                 out.simulated = it->second.simulated;
                 return true;
             };
-            w.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state, bool wake) {
-                calls.push_back("set_body " + entity + (wake ? " wake" : " freeze"));
+            // The call log carries the mode and the recheck request, in that
+            // order, so a count() prefix can ask for either one or both.
+            w.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state,
+                                wake_mode mode, bool recheck) {
+                calls.push_back("set_body " + entity + " " + mode_name(mode) + (recheck ? " recheck" : ""));
                 auto& body = bodies[entity];
                 for (int k = 0; k < 3; ++k) {
                     body.position[k] = state.position[k];
                     body.linear[k] = state.linear[k];
                 }
-                body.simulated = wake;
+                if (mode == wake_mode::wake) body.simulated = true;
+                else if (mode == wake_mode::freeze) body.simulated = false;
                 return true;
             };
             w.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
@@ -122,6 +131,20 @@ namespace {
         return out;
     }
 
+    // A shared-mechanism row that names its own entity, the way the client's
+    // registry resolves one.
+    body_state mechanism_row(const std::string& name, double x, float v, bool simulated) {
+        body_state out;
+        out.kind = body_kind::Mechanism;
+        out.owner = 7;
+        out.name = name;
+        out.position[0] = x;
+        out.linear[0] = v;
+        out.rotation[3] = 1.0;
+        out.flags = simulated ? bmmo::session::BODY_FLAG_SIMULATED : 0;
+        return out;
+    }
+
     bmmo::session_snapshot_msg snapshot_of(uint32_t tick, const std::vector<body_state>& bodies) {
         bmmo::session_snapshot_msg msg;
         msg.tick = tick;
@@ -136,6 +159,14 @@ namespace {
         if (body.kind != body_kind::Ball) return {};
         return body.owner == 1 ? "Own" : body.owner == 2 ? "Remote" : "";
     }
+
+    // The same, plus mechanism rows that carry their entity name.
+    std::string entity_of_named(const body_state& body) {
+        if (body.kind == body_kind::Mechanism) return body.name;
+        return entity_of(body);
+    }
+
+    bool no_input(const std::string&, uint32_t, input_frame&) { return false; }
 
     // Records ticks 1..last: the own ball holds key 0 from `key_from` on.
     void run_ticks(fake_world& world, rollback_engine& engine, uint32_t last, uint32_t key_from,
@@ -158,6 +189,16 @@ namespace {
         world.calls.clear();
         world.steps = 0;
     }
+
+    // Steps and records ticks first..last with one tracked set, no inputs.
+    void record_ticks(fake_world& world, rollback_engine& engine, const rollback_tracked& tracked,
+                      uint32_t first, uint32_t last) {
+        auto w = world.adapter();
+        for (uint32_t tick = first; tick <= last; ++tick) {
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+    }
 }
 
 TEST(RollbackEngine, MatchingSnapshotIsNotARollback) {
@@ -173,8 +214,7 @@ TEST(RollbackEngine, MatchingSnapshotIsNotARollback) {
     fake_body own_at_2 = world.bodies["Own"];
     own_at_2.position[0] = 2.0 * kDt;
     const auto snapshot = snapshot_of(2, {ball_body(1, own_at_2), ball_body(2, world.bodies["Remote"])});
-    const bool rolled = engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                           [&](const std::string&, uint32_t, input_frame&) { return false; });
+    const bool rolled = engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input);
     EXPECT_FALSE(rolled);
     EXPECT_EQ(engine.stats().matched, 1u);
     EXPECT_EQ(engine.stats().mismatched, 0u);
@@ -190,8 +230,7 @@ TEST(RollbackEngine, UnmatchedTickIsCounted) {
     std::map<uint32_t, input_frame> own_inputs;
     run_ticks(world, engine, 3, 100, own_inputs);
     const auto snapshot = snapshot_of(9, {ball_body(1, world.bodies["Own"])});
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 3, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 3, entity_of, no_input));
     EXPECT_EQ(engine.stats().unmatched, 1u);
     EXPECT_EQ(world.steps, 0);
 }
@@ -243,8 +282,7 @@ TEST(RollbackEngine, MismatchRestoresAndResimulatesWithRecordedInputs) {
     // snapshot of tick 4 is not a mismatch
     fake_body own_at_4 = world.bodies["Own"];
     const auto later = snapshot_of(4, {ball_body(1, own_at_4), ball_body(2, world.bodies["Remote"])});
-    EXPECT_FALSE(engine.on_snapshot(w, later, 4, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(w, later, 4, entity_of, no_input));
     EXPECT_EQ(engine.stats().matched, 1u);
 }
 
@@ -293,8 +331,7 @@ TEST(RollbackEngine, RelayedRemoteInputsReplacePredictionsAndConverge) {
     server_remote.position[0] = 2.0;
     server_remote.linear[0] = 0.0f;
     const auto revised = snapshot_of(2, {ball_body(2, server_remote)});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), revised, 5, entity_of,
-                                   [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), revised, 5, entity_of, no_input));
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
     EXPECT_NEAR(world.bodies["Remote"].position[0], 2.0 + 4.0 * kDt, 1e-9);
 }
@@ -316,8 +353,7 @@ TEST(RollbackEngine, MissingRelayKeepsRecordedRemotePrediction) {
     fake_body server_remote;
     server_remote.position[0] = 1.0;
     const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
-    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of,
-                                   [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of, no_input));
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
     EXPECT_NEAR(world.bodies["Remote"].position[0], 1.0 + 3.0 * kDt, 1e-9);
 }
@@ -342,8 +378,7 @@ TEST(RollbackEngine, CorrectionCallbackReportsEveryDecision) {
     fake_body server_own;
     server_own.position[0] = 0.5;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of, no_input));
     ASSERT_EQ(corrections.size(), 2u);
     EXPECT_EQ(corrections[0].kind, 0);
     EXPECT_EQ(corrections[0].tick, 2u);
@@ -359,8 +394,7 @@ TEST(RollbackEngine, CorrectionCallbackReportsEveryDecision) {
     EXPECT_NEAR(corrections[1].error_m, 0.5, 1e-9);
 
     const auto missing = snapshot_of(99, {ball_body(1, server_own)});
-    EXPECT_FALSE(engine.on_snapshot(w, missing, 4, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(w, missing, 4, entity_of, no_input));
     ASSERT_EQ(corrections.size(), 3u);
     EXPECT_EQ(corrections[2].kind, 7);
     EXPECT_EQ(corrections[2].tick, 99u);
@@ -390,8 +424,7 @@ TEST(RollbackEngine, VelocityOnlyMismatchNamesTheOffendingBody) {
     fake_body server_remote = world.bodies["Remote"];
     server_remote.linear[0] = 1.0f;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, server_remote)});
-    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of, no_input));
     ASSERT_EQ(corrections.size(), 2u);
     for (const auto& c: corrections) {
         EXPECT_EQ(c.entity, "Remote");
@@ -416,8 +449,7 @@ TEST(RollbackEngine, FrozenClockSnapsWithoutResimulation) {
     server_remote.position[0] = 7.0;
     server_remote.linear[0] = 3.0f;
     const auto snapshot = snapshot_of(2, {ball_body(1, world.bodies["Own"]), ball_body(2, server_remote)});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input));
     EXPECT_EQ(engine.stats().frozen, 1u);
     EXPECT_EQ(engine.stats().rollbacks, 0u);
     EXPECT_EQ(engine.stats().mismatched, 1u);
@@ -440,8 +472,7 @@ TEST(RollbackEngine, LagBeyondLimitSetsBodiesWithoutResimulation) {
     fake_body server_own;
     server_own.position[2] = 1.0;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
     EXPECT_EQ(engine.stats().too_far, 1u);
     EXPECT_EQ(engine.stats().rollbacks, 1u);
     EXPECT_EQ(world.steps, 0);
@@ -450,8 +481,7 @@ TEST(RollbackEngine, LagBeyondLimitSetsBodiesWithoutResimulation) {
     // tick 8 is unmatched now
     EXPECT_EQ(engine.history_size(), 0u);
     const auto later = snapshot_of(8, {ball_body(1, world.bodies["Own"])});
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), later, 8, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), later, 8, entity_of, no_input));
     EXPECT_EQ(engine.stats().unmatched, 1u);
 }
 
@@ -473,13 +503,11 @@ TEST(RollbackEngine, LagBeyondLimitLeavesNoHistoryToMatch) {
     fake_body server_own;
     server_own.position[2] = 1.0;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
     EXPECT_EQ(engine.stats().too_far, 1u);
     EXPECT_EQ(engine.history_size(), 0u);
     // the applied tick itself is gone too: the caller has to re-anchor
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
     EXPECT_EQ(engine.stats().unmatched, 1u);
     EXPECT_EQ(engine.stats().matched, 0u);
 }
@@ -516,8 +544,7 @@ TEST(RollbackEngine, AmendRecordReplacesTheTickStateWithoutTouchingInputs) {
     fake_body server_own;
     server_own.position[0] = 0.25;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input));
     EXPECT_EQ(engine.stats().matched, 1u);
     EXPECT_EQ(engine.stats().mismatched, 0u);
 
@@ -563,8 +590,7 @@ TEST(RollbackEngine, CorrectionOfTheCurrentTickSurvivesARollbackOnlyWhenAmended)
         fake_body server_own;
         server_own.position[0] = 0.5;
         const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-        const bool rolled = engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                              [&](const std::string&, uint32_t, input_frame&) { return false; });
+        const bool rolled = engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input);
         EXPECT_EQ(rolled, !amend);
         EXPECT_EQ(engine.stats().mismatched, amend ? 0u : 1u);
         EXPECT_EQ(engine.stats().rollbacks, amend ? 0u : 1u);
@@ -582,14 +608,16 @@ TEST(RollbackEngine, HistoryIsBounded) {
     run_ticks(world, engine, 20, 100, own_inputs);
     EXPECT_EQ(engine.history_size(), 5u);
     const auto old = snapshot_of(10, {ball_body(1, world.bodies["Own"])});
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), old, 20, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), old, 20, entity_of, no_input));
     EXPECT_EQ(engine.stats().unmatched, 1u);
 }
 
-// This adapter cannot recreate the ball destroyed by a trafo. Reject the old
-// window entirely, then resume correction once a new lifetime has history.
-TEST(RollbackEngine, TrafoInvalidatesHistoryInsteadOfReplayingDestroyedBall) {
+// 9.25 rule 4, the trafo case: the ball of the window's first ticks is gone, so
+// nothing restores it (it is skipped, not an excuse to drop the window), and
+// the ball the trafo created never existed at T.  It is parked at the pose it
+// was born with, held there while the earlier ticks replay, and put back on its
+// birth pose right before its own first tick is stepped.
+TEST(RollbackEngine, TrafoBallIsHeldAtItsBirthPoseAndReposedAtItsBirthTick) {
     fake_world world;
     world.bodies["OwnOld"];
     world.bodies["Remote"].position[0] = 5.0;
@@ -610,20 +638,23 @@ TEST(RollbackEngine, TrafoInvalidatesHistoryInsteadOfReplayingDestroyedBall) {
             world.bodies.erase("OwnOld");
             world.navs.erase("OwnOld");
             world.bodies["OwnNew"].position[0] = 10.0;
+            world.bodies["OwnNew"].linear[0] = 3.0f;
             world.navs["OwnNew"] = {};
         }
         const std::string own = tick >= 4 ? "OwnNew" : "OwnOld";
         input_frame frame{};
-        frame.keys = 1;
         world.pending_keys[own] = frame.keys;
         w.step();
         engine.record(w, tick, tick >= 4 ? after : before, {{own, frame}, {"Remote", input_frame{}}});
     }
     world.calls.clear();
     world.steps = 0;
+    // the birth record of the new ball is the state after its first step
+    const double born_at = 10.0 + 3.0 * kDt;
+    ASSERT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 
-    // The server runs behind: its snapshot of tick 2 still carries the ball
-    // the trafo replaced, and it disagrees with what we recorded.
+    // The server runs behind: its snapshot of tick 2 disagrees about the remote
+    // ball and still carries the player-1 ball the trafo has since replaced.
     fake_body server_remote = world.bodies["Remote"];
     server_remote.position[0] += 1.0;
     fake_body server_own;
@@ -635,30 +666,26 @@ TEST(RollbackEngine, TrafoInvalidatesHistoryInsteadOfReplayingDestroyedBall) {
         return body.owner == 1 ? "OwnNew" : body.owner == 2 ? "Remote" : "";
     };
 
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot, 6, entity_now,
-                                   [&](const std::string& entity, uint32_t, input_frame& out) {
-                                       out = {};
-                                       return entity != "Remote";   // stale own fallback, never preferred
-                                   }));
-    EXPECT_EQ(engine.history_size(), 3u);
-    EXPECT_EQ(engine.stats().unmatched, 1u);
-    EXPECT_EQ(world.count("set_body"), 0);
-    EXPECT_EQ(world.count("set_nav"), 0);
-    EXPECT_EQ(world.count("nav_input"), 0);
-    EXPECT_EQ(world.count("nav_poll"), 0);
-    EXPECT_EQ(world.steps, 0);
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+    // the window survived the lifecycle change: ticks 3..6 were replayed
+    EXPECT_EQ(engine.stats().unmatched, 0u);
+    EXPECT_EQ(engine.history_size(), 6u);
+    EXPECT_EQ(engine.stats().resim_ticks, 4u);
+    // the destroyed ball is skipped, the new one is never written to the row of
+    // the ball it replaced (-99 m)
+    EXPECT_EQ(world.count("set_body OwnOld"), 0);
     EXPECT_FALSE(world.bodies.contains("OwnOld"));
-    EXPECT_GT(world.bodies["OwnNew"].position[0], 0.0);
-    const auto current = snapshot_of(5, {ball_body(1, server_own)});
-    EXPECT_TRUE(engine.on_snapshot(w, current, 6, entity_now,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
-    EXPECT_EQ(world.count("nav_input OwnNew keys=1"), 1);
-    EXPECT_EQ(world.count("nav_input OwnOld"), 0);
-    EXPECT_EQ(world.count("nav_poll OwnNew off"), 1);
-    EXPECT_EQ(world.count("nav_poll OwnNew on"), 1);
+    // twice: parked at T, re-posed right after tick 4's step
+    EXPECT_EQ(world.count("set_body OwnNew wake recheck"), 2);
+    // held through ticks 3 and 4, put back on its birth record after tick 4's
+    // step, then stepped at 5 and 6: exactly the state the live frames left
+    EXPECT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 }
 
-TEST(RollbackEngine, LateRemoteCreationRejectsWholeSnapshotBeforeNextRecord) {
+// 9.25 rule 1: a row for a body we have no record of at T is not a rejection.
+// The body exists now, so the row is the best pose anyone has for it at T and
+// the restore uses it; the snapshot corrects the rest of the world as usual.
+TEST(RollbackEngine, RowForAnUnrecordedBodyRestoresFromTheRowInsteadOfRejectingTheSnapshot) {
     fake_world world;
     world.bodies["Own"].position[0] = 3.0;
     rollback_engine engine;
@@ -666,27 +693,28 @@ TEST(RollbackEngine, LateRemoteCreationRejectsWholeSnapshotBeforeNextRecord) {
     tracked.own_entity = "Own";
     auto w = world.adapter();
     engine.record(w, 218, tracked, {});
-    // Like the retail queue: creation happens after record(218). Even if a
-    // lifecycle hook were missed, no partial restore may advance this body.
+    // Like the retail queue: creation happens after record(218), so the remote
+    // ball has no record at all and its live state is whatever it was created
+    // with - which is exactly what the row is there to replace.
     world.bodies["Remote"].position[0] = 900.0;
     world.bodies["Remote"].linear[0] = 1171.0f;
     fake_body server_own, server_remote;
     server_remote.position[0] = 37.0;
     const auto snapshot = snapshot_of(218, {ball_body(1, server_own), ball_body(2, server_remote)});
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot, 234, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
-    EXPECT_EQ(engine.history_size(), 0u);
-    EXPECT_EQ(engine.stats().unmatched, 1u);
-    EXPECT_EQ(engine.stats().rollbacks, 0u);
-    EXPECT_EQ(world.count("set_body"), 0);
-    EXPECT_EQ(world.count("set_nav"), 0);
-    EXPECT_EQ(world.steps, 0);
-    EXPECT_DOUBLE_EQ(world.bodies["Own"].position[0], 3.0);
-    EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 900.0);
-    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 1171.0f);
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 234, entity_of, no_input));
+    EXPECT_EQ(engine.stats().unmatched, 0u);
+    EXPECT_EQ(engine.stats().rollbacks, 1u);
+    EXPECT_EQ(world.steps, 16);
+    EXPECT_EQ(world.count("set_body Remote wake recheck"), 1);
+    EXPECT_DOUBLE_EQ(world.bodies["Own"].position[0], 0.0);
+    EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 37.0);
+    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 0.0f);
 }
 
-TEST(RollbackEngine, RecordedBodyCreationOrDeletionStartsANewHistory) {
+// 9.25 rule 5: the tracked set changing from one tick to the next is not a
+// reason to throw the window away.  A body that joined it mid-window simply has
+// no record at T - it is held at its birth pose and released at its birth tick.
+TEST(RollbackEngine, ABodyJoiningTheTrackedSetKeepsTheHistory) {
     fake_world world;
     world.bodies["Own"];
     rollback_engine engine;
@@ -697,23 +725,36 @@ TEST(RollbackEngine, RecordedBodyCreationOrDeletionStartsANewHistory) {
     world.bodies["Remote"].position[0] = 900.0;
     tracked.remote_entities = {"Remote"};
     engine.record(w, 2, tracked, {});
-    EXPECT_EQ(engine.history_size(), 1u);
+    EXPECT_EQ(engine.history_size(), 2u);
+    world.calls.clear();
+    world.steps = 0;
+
+    // The delayed server snapshot of tick 1 does not list the new remote yet
+    // and disagrees about the own ball.
     fake_body server_own;
     server_own.position[0] = 1.0;
-    // The delayed server snapshot does not even list the new remote yet.
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(1, {ball_body(1, server_own)}), 2, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot_of(1, {ball_body(1, server_own)}), 2, entity_of, no_input));
+    EXPECT_EQ(engine.stats().unmatched, 0u);
+    EXPECT_EQ(engine.history_size(), 2u);
+    EXPECT_EQ(world.steps, 1);
+    EXPECT_EQ(world.count("set_body Own wake recheck"), 1);
+    // the remote is put back on its birth pose instead of being replayed from
+    // wherever the replayed tick left it
+    EXPECT_EQ(world.count("set_body Remote wake recheck"), 2);
+    EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 900.0);
+
+    // and a body leaving the tracked set does not drop the window either
     world.bodies.erase("Remote");
     tracked.remote_entities.clear();
     engine.record(w, 3, tracked, {});
-    EXPECT_EQ(engine.history_size(), 1u);
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(2, {ball_body(1, server_own)}), 3, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
-    EXPECT_EQ(world.count("set_body"), 0);
-    EXPECT_EQ(world.steps, 0);
+    EXPECT_EQ(engine.history_size(), 3u);
 }
 
-TEST(RollbackEngine, DeletedBodyAfterLastRecordPreventsAnyPartialRestore) {
+// 9.25 rule 4: a recorded body the world no longer has is skipped - the engine
+// cannot recreate it - and the rest of the world is still corrected.  The old
+// rule rejected the whole snapshot here, which cost the session every
+// correction until the next re-anchor.
+TEST(RollbackEngine, VanishedBodyIsSkippedWithoutRejectingTheSnapshot) {
     fake_world world;
     world.bodies["Own"];
     world.bodies["Remote"];
@@ -723,87 +764,86 @@ TEST(RollbackEngine, DeletedBodyAfterLastRecordPreventsAnyPartialRestore) {
     world.bodies.erase("Remote");
     fake_body server_own;
     server_own.position[0] = 1.0;
-    // Even when only Own appears in the snapshot, the history restoration
-    // would otherwise try to write the deleted Remote after changing Own.
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 4, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
-    EXPECT_EQ(engine.history_size(), 0u);
-    EXPECT_EQ(engine.stats().unmatched, 1u);
-    EXPECT_EQ(world.count("set_body"), 0);
-    EXPECT_EQ(world.count("set_nav"), 0);
-    EXPECT_EQ(world.steps, 0);
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 4, entity_of,
+                                   no_input));
+    EXPECT_EQ(engine.stats().unmatched, 0u);
+    EXPECT_EQ(engine.stats().rollbacks, 1u);
+    EXPECT_EQ(engine.history_size(), 4u);
+    EXPECT_EQ(world.count("set_body Remote"), 0);
+    EXPECT_EQ(world.count("set_body Own wake recheck"), 1);
+    EXPECT_EQ(world.steps, 2);
     EXPECT_FALSE(world.bodies.contains("Remote"));
 }
 
-TEST(RollbackEngine, SameNameRespawnInvalidatesHistoryAndPreservesSessionStats) {
-    for (const std::string entity: {"Own", "Remote"}) {
-        SCOPED_TRACE(entity);
-        fake_world world;
-        world.bodies["Own"];
-        world.bodies["Remote"];
-        rollback_engine engine;
-        auto w = world.adapter();
-        std::map<uint32_t, input_frame> own_inputs;
-        run_ticks(world, engine, 4, 100, own_inputs);
-        fake_body server_own;
-        server_own.position[0] = 1.0;
-        const auto old = snapshot_of(2, {ball_body(1, server_own)});
-        ASSERT_TRUE(engine.on_snapshot(w, old, 4, entity_of,
-            [](const std::string&, uint32_t, input_frame&) { return false; }));
-        const auto previous = engine.stats();
-        // Own hooks run before PreSimulate; remote hooks run after this
-        // frame's record. Both need an explicit boundary for reused names.
-        engine.invalidate_history();
-        world.bodies.erase(entity);
-        engine.invalidate_history();
-        world.bodies[entity].position[0] = 900.0;
-        rollback_tracked tracked;
-        tracked.own_entity = "Own";
-        tracked.remote_entities = {"Remote"};
-        engine.record(w, 5, tracked, {});
-        EXPECT_EQ(engine.stats().snapshots, previous.snapshots);
-        EXPECT_EQ(engine.stats().mismatched, previous.mismatched);
-        EXPECT_EQ(engine.stats().rollbacks, previous.rollbacks);
-        EXPECT_EQ(engine.stats().resim_ticks, previous.resim_ticks);
-        EXPECT_EQ(engine.stats().max_error, previous.max_error);
-        EXPECT_EQ(engine.stats().last_mismatch, previous.last_mismatch);
-        world.calls.clear();
-        world.steps = 0;
-        EXPECT_FALSE(engine.on_snapshot(w, old, 5, entity_of,
-            [](const std::string&, uint32_t, input_frame&) { return false; }));
-        EXPECT_EQ(world.count("set_body"), 0);
-        EXPECT_EQ(world.count("set_nav"), 0);
-        EXPECT_EQ(world.steps, 0);
-        EXPECT_DOUBLE_EQ(world.bodies[entity].position[0], 900.0);
-    }
+// 9.25 lifetime generations: a respawn reuses the entity name, so only the
+// generation the caller bumps tells the engine that the records before it
+// describe another body.  The new ball is never restored from them (nor from a
+// server row for the old one): it goes back to its own birth record.
+TEST(RollbackEngine, SameNameRespawnWithANewGenerationIsNotRestoredFromTheOldLifetime) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    rollback_engine engine;
+    auto w = world.adapter();
+    rollback_tracked first;
+    first.own_entity = "Own";
+    first.remote_entities = {"Remote"};
+    first.generations = {{"Own", 1}, {"Remote", 1}};
+    record_ticks(world, engine, first, 1, 4);
+
+    // the ball dies and is physicalized again under the same name
+    world.bodies.erase("Own");
+    world.bodies["Own"].position[0] = 900.0;
+    rollback_tracked second = first;
+    second.generations["Own"] = 2;
+    record_ticks(world, engine, second, 5, 5);
+    world.calls.clear();
+    world.steps = 0;
+
+    // The server is still behind: its snapshot of tick 2 carries the dead
+    // ball's pose and disagrees about the remote one.
+    fake_body server_own;
+    server_own.position[0] = -50.0;
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, server_remote)});
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 5, entity_of, no_input));
+    EXPECT_EQ(engine.stats().unmatched, 0u);
+    // neither the old record (0 m) nor the old lifetime's row (-50 m) touched
+    // the new ball: it is held at its birth pose and released at tick 5
+    EXPECT_EQ(world.count("set_body Own wake recheck"), 2);
+    EXPECT_DOUBLE_EQ(world.bodies["Own"].position[0], 900.0);
+    EXPECT_NEAR(world.bodies["Remote"].position[0], server_remote.position[0], 1e-9);
 }
 
-TEST(RollbackEngine, FirstOwnPhysicalizeRecordsOnlyTheNewLifetime) {
+// 9.25 rule 1, the other half: a row we cannot compare is not a breach either.
+// A snapshot whose only news is about a body born after its own tick leaves the
+// session alone - the pre-9.25 engine rejected it and wiped the window.
+TEST(RollbackEngine, ARowForABodyBornAfterTheSnapshotTickIsNotABreach) {
     fake_world world;
     rollback_engine engine;
     auto w = world.adapter();
+    rollback_tracked none;
+    engine.record(w, 203, none, {});
+    // the own ball is physicalized during frame 204 and recorded after its step
     rollback_tracked tracked;
-    engine.record(w, 203, tracked, {});
-    // BML OnPhysicalize invalidates before the body exists; PreSimulate then
-    // creates/moves it, and the normal post-physics record starts the history.
-    engine.invalidate_history();
     tracked.own_entity = "Own";
     world.bodies["Own"].linear[0] = 3.0f;
-    w.step();
-    engine.record(w, 204, tracked, {});
+    record_ticks(world, engine, tracked, 204, 204);
     world.calls.clear();
     world.steps = 0;
+
     fake_body server_own;
-    const auto old = snapshot_of(203, {ball_body(1, server_own)});
-    EXPECT_FALSE(engine.on_snapshot(w, old, 204, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
+    server_own.position[0] = 77.0;
+    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(203, {ball_body(1, server_own)}), 204, entity_of, no_input));
+    EXPECT_EQ(engine.stats().matched, 1u);
+    EXPECT_EQ(engine.stats().mismatched, 0u);
     EXPECT_EQ(world.count("set_body"), 0);
     EXPECT_EQ(world.steps, 0);
-    EXPECT_EQ(engine.history_size(), 1u);
+    EXPECT_EQ(engine.history_size(), 2u);
     const auto current = snapshot_of(204, {ball_body(1, world.bodies["Own"])});
-    EXPECT_FALSE(engine.on_snapshot(w, current, 204, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
-    EXPECT_EQ(engine.stats().matched, 1u);
+    EXPECT_FALSE(engine.on_snapshot(w, current, 204, entity_of, no_input));
+    EXPECT_EQ(engine.stats().matched, 2u);
 }
 
 TEST(RollbackEngine, ResyncDiscardsBothOldNumberingAndPreOverwriteRecords) {
@@ -823,58 +863,153 @@ TEST(RollbackEngine, ResyncDiscardsBothOldNumberingAndPreOverwriteRecords) {
     engine.invalidate_history();    // full snapshot overwrites the world
     world.bodies["Own"].position[0] = 5.0;
     const auto snapshot = snapshot_of(2, {ball_body(1, world.bodies["Own"])});
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot, 2, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(w, snapshot, 2, entity_of, no_input));
     EXPECT_EQ(world.count("set_body"), 0);
     EXPECT_EQ(world.steps, 0);
     EXPECT_DOUBLE_EQ(world.bodies["Own"].position[0], 5.0);
     engine.record(w, 3, tracked, {});
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(3, {ball_body(1, world.bodies["Own"])}), 3, entity_of,
-        [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(3, {ball_body(1, world.bodies["Own"])}), 3, entity_of, no_input));
     EXPECT_EQ(engine.stats().matched, 1u);
     EXPECT_EQ(engine.stats().unmatched, 1u);
 }
 
-// Only a body that breached its own tolerance is snapped to the server pose.
-// An in-tolerance body is restored from its own record for T, so neither the
-// server's sub-tolerance pose nor its wake flag reaches the world.
-TEST(RollbackEngine, RestoreWritesOnlyTheBodyThatBreached) {
+// 9.25 rule 4, the rope-and-sack case: restoring only the body that breached
+// tore a constrained pair apart, because its partner stayed on the pose the
+// prediction had left it at.  Every body the snapshot carries a row for goes
+// back to its own row - a sub-tolerance partner included - so the pair lands at
+// the server's relative pose and the replay starts from one consistent world.
+TEST(RollbackEngine, SubTolerancePartnerOfABreachingBodyIsRestoredFromItsOwnRow) {
     fake_world world;
     world.bodies["Own"];
-    world.bodies["Remote"].position[0] = 5.0;
-    world.bodies["Remote"].linear[0] = 2.0f;
-    world.navs["Own"] = {};
-    world.navs["Remote"] = {};
+    world.bodies["Sack"].position[0] = 20.0;
+    world.bodies["Sack"].linear[0] = 0.5f;
     rollback_engine engine;
-    std::map<uint32_t, input_frame> own_inputs;
-    run_ticks(world, engine, 4, 100, own_inputs);
-    const double step = 2.0 * kDt;
-    const double remote_at_2 = 5.0 + 2.0 * step;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Sack"};
+    record_ticks(world, engine, tracked, 1, 4);
+    world.calls.clear();
+    world.steps = 0;
+    const double sack_at_2 = 20.0 + 2.0 * 0.5 * kDt;
 
-    // the server had the own ball 0.5 m further at tick 2; the remote row is
-    // 0.5 mm off, inside the ball tolerance - and the server reports it frozen
+    // the own ball breaches; the sack row is 20 mm off, well inside its pair
     fake_body server_own;
     server_own.position[0] = 0.5;
-    fake_body server_remote = world.bodies["Remote"];
-    server_remote.position[0] = remote_at_2 + 0.0005;
-    server_remote.simulated = false;
-    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, server_remote)});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
-    // the re-simulation still ran over both bodies
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own),
+                                          mechanism_row("Sack", sack_at_2 + 0.02, 0.5f, true)});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of_named, no_input));
     EXPECT_EQ(engine.stats().rollbacks, 1u);
-    EXPECT_EQ(engine.stats().resim_ticks, 2u);
-    EXPECT_EQ(world.steps, 2);
-    // the breaching ball was written from the server pose
-    EXPECT_EQ(world.count("set_body Own wake"), 1);
-    EXPECT_NEAR(world.bodies["Own"].position[0], 0.5, 1e-9);
-    // the remote ball came back from its own record for tick 2 and was
-    // re-simulated from there: the server's 0.5 mm and its freeze flag are
-    // both absent (a server-pose write would leave 5.0 + 4*step + 0.0005)
-    EXPECT_EQ(world.count("set_body Remote wake"), 1);
-    EXPECT_TRUE(world.bodies["Remote"].simulated);
-    EXPECT_NEAR(world.bodies["Remote"].position[0], 5.0 + 4.0 * step, 1e-9);
-    EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
+    // an awake row is written with mode wake, and it moves the body, so the
+    // contacts are rechecked
+    EXPECT_EQ(world.count("set_body Sack wake recheck"), 1);
+    EXPECT_TRUE(world.bodies["Sack"].simulated);
+    // from the row, not from the record: the 20 mm are still there after the
+    // two replayed steps (the record would have left it at sack_at_2 + 2 steps)
+    EXPECT_NEAR(world.bodies["Sack"].position[0], sack_at_2 + 0.02 + 2.0 * 0.5 * kDt, 1e-9);
+}
+
+// 9.25 rule 2: a sleeping row inside the tolerance is no news.  Copying it
+// would put the server's sleep flag on our body - which re-arms the freeze
+// timer of a mechanism on every snapshot - so the body rewinds from its own
+// record with mode keep, and its sleep state is left alone.  A sleeping row
+// that breaches still restores and freezes.
+TEST(RollbackEngine, SleepingRowInsideToleranceLeavesTheLocalSleepStateAlone) {
+    for (const bool breaching: {false, true}) {
+        SCOPED_TRACE(breaching ? "breaching" : "inside tolerance");
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Wippe"].position[0] = 30.0;
+        rollback_engine engine;
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Wippe"};
+        record_ticks(world, engine, tracked, 1, 4);
+        world.calls.clear();
+        world.steps = 0;
+
+        fake_body server_own;
+        server_own.position[0] = 0.5;   // the ball breaches, so a rollback runs
+        const auto snapshot = snapshot_of(2, {ball_body(1, server_own),
+                                              mechanism_row("Wippe", breaching ? 30.4 : 30.0, 0.0f, false)});
+        EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of_named, no_input));
+        if (breaching) {
+            EXPECT_EQ(world.count("set_body Wippe freeze recheck"), 1);
+            EXPECT_FALSE(world.bodies["Wippe"].simulated);
+            EXPECT_DOUBLE_EQ(world.bodies["Wippe"].position[0], 30.4);
+        } else {
+            // restored from its own record, which is where it already is: no
+            // sleep-state change and no contact recheck
+            EXPECT_EQ(world.count("set_body Wippe keep"), 1);
+            EXPECT_EQ(world.count("set_body Wippe keep recheck"), 0);
+            EXPECT_EQ(world.count("set_body Wippe wake"), 0);
+            EXPECT_EQ(world.count("set_body Wippe freeze"), 0);
+            EXPECT_TRUE(world.bodies["Wippe"].simulated);
+            EXPECT_DOUBLE_EQ(world.bodies["Wippe"].position[0], 30.0);
+        }
+    }
+}
+
+// 9.25 rule 3: a tracked body the snapshot says nothing about gets no opinion.
+// It rewinds with the group from its own record - the world has to be one
+// consistent state at T - but with mode keep, so a body the client froze stays
+// frozen and an awake one keeps its freeze timers.
+TEST(RollbackEngine, TrackedBodyWithNoRowIsRestoredFromItsRecordWithModeKeep) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Wippe"].position[0] = 30.0;
+    world.bodies["Wippe"].simulated = false;   // the client has it asleep
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Wippe"};
+    record_ticks(world, engine, tracked, 1, 4);
+    world.calls.clear();
+    world.steps = 0;
+
+    fake_body server_own;
+    server_own.position[0] = 0.5;
+    // a delta snapshot that carries the ball alone
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 4,
+                                   entity_of_named, no_input));
+    EXPECT_EQ(world.count("set_body Wippe keep"), 1);
+    EXPECT_EQ(world.count("set_body Wippe keep recheck"), 0);   // it never moved
+    EXPECT_FALSE(world.bodies["Wippe"].simulated);
+    EXPECT_DOUBLE_EQ(world.bodies["Wippe"].position[0], 30.0);
+}
+
+// The contact recheck is asked for only when the write actually moves the body:
+// a restore that puts a body back where it already is cannot touch anything
+// new, and the mindist recheck it would trigger is not free.
+TEST(RollbackEngine, OnlyAWriteThatMovesTheBodyAsksForAContactRecheck) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Post"].position[0] = 40.0;   // a mechanism at rest, unmoved since T
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Post"};
+    record_ticks(world, engine, tracked, 1, 4);
+    world.calls.clear();
+    world.steps = 0;
+
+    fake_body server_own;
+    server_own.position[0] = 0.5;              // 0.5 m: the ball is moved
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own),
+                                          mechanism_row("Post", 40.0, 0.0f, true)});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of_named, no_input));
+    EXPECT_EQ(world.count("set_body Own wake recheck"), 1);
+    EXPECT_EQ(world.count("set_body Post wake"), 1);
+    EXPECT_EQ(world.count("set_body Post wake recheck"), 0);
+
+    // the same row 2 mm away does ask for one (the ball has to breach again:
+    // the first rollback made the server pose of tick 2 our record)
+    world.calls.clear();
+    fake_body server_own_again;
+    server_own_again.position[0] = 1.5;
+    const auto moved = snapshot_of(2, {ball_body(1, server_own_again),
+                                       mechanism_row("Post", 40.002, 0.0f, true)});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), moved, 4, entity_of_named, no_input));
+    EXPECT_EQ(world.count("set_body Post wake recheck"), 1);
 }
 
 // A shared mechanism row and a ball row are judged by the same tolerance:
@@ -899,9 +1034,9 @@ TEST(RollbackEngine, MechanismAndBallRowsShareTheSameTolerance) {
     };
     body_state row;
     row.kind = body_kind::Mechanism;
+    row.flags = bmmo::session::BODY_FLAG_SIMULATED;
     row.position[0] = 0.005;   // 5 mm
-    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(2, {row}), 3, mechanism_of,
-                                    [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(2, {row}), 3, mechanism_of, no_input));
     EXPECT_EQ(engine.stats().matched, 1u);
     EXPECT_EQ(engine.stats().mismatched, 0u);
     EXPECT_EQ(world.count("set_body"), 0);
@@ -915,20 +1050,19 @@ TEST(RollbackEngine, MechanismAndBallRowsShareTheSameTolerance) {
     run_ticks(ball_world, ball_engine, 3, 100, own_inputs);
     fake_body server_own;
     server_own.position[0] = 0.005;
-    EXPECT_FALSE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3, entity_of,
-                                         [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3,
+                                         entity_of, no_input));
     EXPECT_EQ(ball_engine.stats().mismatched, 0u);
 
     // past the tolerance both rows are mismatches
     body_state beyond = row;
     beyond.position[0] = 0.06;
-    EXPECT_TRUE(engine.on_snapshot(w, snapshot_of(2, {beyond}), 3, mechanism_of,
-                                   [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot_of(2, {beyond}), 3, mechanism_of, no_input));
     EXPECT_EQ(engine.stats().mismatched, 1u);
 
     server_own.position[0] = 0.06;
-    EXPECT_TRUE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3, entity_of,
-                                        [](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(ball_engine.on_snapshot(ball_world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 3,
+                                        entity_of, no_input));
     EXPECT_EQ(ball_engine.stats().mismatched, 1u);
 }
 
@@ -1009,13 +1143,11 @@ TEST(RollbackEngine, FrozenClockLeavesNoHistoryAndLaterSnapshotsAreUnmatched) {
     fake_body server_remote = world.bodies["Remote"];
     server_remote.position[0] = 7.0;
     const auto snapshot = snapshot_of(2, {ball_body(1, world.bodies["Own"]), ball_body(2, server_remote)});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input));
     EXPECT_EQ(engine.stats().frozen, 1u);
     EXPECT_EQ(engine.history_size(), 0u);
     // the applied tick is gone too: the caller has to re-anchor
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                    [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input));
     EXPECT_EQ(engine.stats().unmatched, 1u);
     EXPECT_EQ(engine.stats().matched, 0u);
 }
@@ -1039,8 +1171,7 @@ TEST(RollbackEngine, AmendRecordDropsAVanishedNavigationReplica) {
     fake_body server_own;
     server_own.position[0] = 1.0;   // past the 0.05 m pair: a real rollback
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input));
     EXPECT_EQ(world.count("set_nav Remote"), 0);
     EXPECT_EQ(world.count("set_nav Own"), 1);
 }
@@ -1064,8 +1195,7 @@ TEST(RollbackEngine, AmendRecordDropsAVanishedBodyReplica) {
     fake_body server_own;
     server_own.position[0] = 1.0;   // past the 0.05 m pair: a real rollback
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own)});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of, no_input));
     EXPECT_EQ(world.count("set_body Remote"), 0);
     EXPECT_EQ(world.count("set_body Own"), 1);
 }
@@ -1098,12 +1228,10 @@ TEST(RollbackEngine, DefaultLimitsCoverTheWorstServerLead) {
     EXPECT_GE(limits.history_ticks, 2 * static_cast<size_t>(limits.max_resim_ticks));
 }
 
-// The client re-poses the server-authoritative mechanism bodies for every
-// re-simulated tick (rollback_world::pre_step): they are not in the tracked
-// set, so without the hook the replayed ball meets one frozen mechanism pose
-// for the whole replay.  The hook must fire for exactly T+1..current, in
-// ascending order, each call before its own world.step() - and only when a
-// re-simulation actually runs.  Null on the server and in the other tests.
+// The pre_step hook is the caller's chance to re-pose something the engine does
+// not track.  It must fire for exactly T+1..current, in ascending order, each
+// call before its own world.step() - and only when a re-simulation actually
+// runs.  Null on the server and in the other tests.
 TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
     fake_world world;
     world.bodies["Own"];
@@ -1124,8 +1252,7 @@ TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
     fake_body server_own;
     server_own.position[0] = 0.5;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    ASSERT_TRUE(engine.on_snapshot(w, snapshot, 5, entity_of,
-                                   [&](const std::string&, uint32_t, input_frame&) { return false; }));
+    ASSERT_TRUE(engine.on_snapshot(w, snapshot, 5, entity_of, no_input));
     ASSERT_EQ(engine.stats().resim_ticks, 3u);
     EXPECT_EQ(posed, (std::vector<uint32_t>{3, 4, 5}));   // exactly T+1..current, ascending
 
@@ -1140,7 +1267,7 @@ TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
     const size_t calls_before = world.calls.size();
     EXPECT_FALSE(engine.on_snapshot(w, snapshot_of(5, {ball_body(1, world.bodies["Own"]),
                                                        ball_body(2, world.bodies["Remote"])}),
-                                    5, entity_of, [&](const std::string&, uint32_t, input_frame&) { return false; }));
+                                    5, entity_of, no_input));
     EXPECT_EQ(posed, (std::vector<uint32_t>{3, 4, 5}));
     EXPECT_EQ(world.calls.size(), calls_before);
 }

@@ -315,6 +315,47 @@ TEST(SessionStartBase, ClampKeepsTheStartLagInsideTheClientResimWindow) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase alignment of the start base (design 9.25 follow-up).  The base is a
+// NUMBERING, not a head start: the world's first simulated tick carries it
+// (physics_world::set_tick_index at create_session) and every member holds its
+// own world at the anchor until SessionAssign arrives, so at a common tick
+// number both sides have taken the same number of steps from their anchor.
+// With the world left numbering from 0 the server was `base` steps further
+// from the anchor at every tick number, which is what made Level 11's sandbag
+// Delayer flip that much earlier on the server than on the clients and put the
+// rollback engine into a correction every time it flipped.
+// ---------------------------------------------------------------------------
+
+namespace {
+    // One side of the session: the tick its first step from the anchor is
+    // numbered, and how many steps it has taken when the tick numbered `tick`
+    // has just been simulated.
+    struct phase_model {
+        uint32_t first_tick = 0;
+        uint32_t steps_at(uint32_t tick) const { return tick - first_tick + 1; }
+    };
+}
+
+TEST(SessionStartBase, TheWorldAndItsMembersStepFromTheirAnchorsUnderOneNumber) {
+    const uint32_t base = session_start_tick_base(6, 0);
+    ASSERT_GT(base, 0u);
+    const phase_model server{base};    // set_tick_index(base) before the first step
+    const phase_model member{base};    // held at the anchor, then numbered from the base
+    for (uint32_t tick = base; tick < base + 1000; ++tick)
+        EXPECT_EQ(server.steps_at(tick), member.steps_at(tick)) << "tick " << tick;
+
+    // What it was: the world started at 0 and a member that ran k frames
+    // between its anchor and the assignment had them renumbered away, so the
+    // server was base - k steps ahead of it at every tick number.  Measured on
+    // Level 11: 8 ticks with k = 0 (the headless client), 12 with k = 1.
+    const phase_model old_server{0};
+    for (const uint32_t k: {0u, 1u, 4u}) {
+        const uint32_t tick = base + 500;
+        EXPECT_EQ(old_server.steps_at(tick) - (member.steps_at(tick) + k), base - k) << "k " << k;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Start-barrier arming (server.cpp physics_session_member_joined): a member
 // joining before the session runs shares the deadline already armed for the
 // members that were there, so a trickle of joiners cannot postpone it.

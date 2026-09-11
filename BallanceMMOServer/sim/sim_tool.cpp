@@ -6,6 +6,7 @@
 //   BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S] [--spawn-ball T]
 //       [--ticks K] [--report-every R]
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK [--ticks N]
+//   BallanceMMOSimTool --root <game dir> --level N --level-at T --restore-at TICK [ENTITY] [--ticks N]
 //
 // Replay mode boots base.cmo, loads the recorded level, waits for the retail
 // Gameplay_Ingame script to activate (the record's frame 0 anchor), performs
@@ -164,6 +165,19 @@ namespace {
         // so a free run can check what the guard does to the level's bodies.
         std::string body_guard_entity;
         long long body_guard_tick = -1;
+        // --restore-at TICK [ENTITY], repeatable: right after that tick's step
+        // read every movable body's state (or only ENTITY's) and write it
+        // straight back through the v10 body write with wake_mode keep and no
+        // recheck.  A rollback restore does exactly this to the bodies it
+        // corrects, so a free run with and without it measures what the write
+        // itself costs the simulation: without the leapfrog restore the run
+        // diverges from the untouched one by one PSI of motion per body per
+        // restore (design 9.25 / findings A3).
+        std::vector<std::pair<long long, std::string>> restores;
+        // --track ENTITY, repeatable: that body's pose and velocity after
+        // every tick, one line each, so two runs can be subtracted body by
+        // body instead of only compared by hash.
+        std::vector<std::string> tracked;
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -269,6 +283,17 @@ namespace {
             else if (arg == "--body-guard") {
                 if (!(v = next())) return false; out.body_guard_entity = v;
                 if (!(v = next())) return false; out.body_guard_tick = std::atoll(v);
+            }
+            else if (arg == "--track") { if (!(v = next())) return false; out.tracked.emplace_back(v); }
+            else if (arg == "--restore-at") {
+                if (!(v = next())) return false;
+                const long long tick = std::atoll(v);
+                // The entity is optional (every movable body when it is
+                // missing), so only take the next argument when it is not the
+                // next option.
+                std::string entity;
+                if (i + 1 < argc && std::string_view(argv[i + 1]).substr(0, 2) != "--") entity = argv[++i];
+                out.restores.emplace_back(tick, std::move(entity));
             }
             else return false;
         }
@@ -570,6 +595,54 @@ namespace {
         std::fflush(stdout);
     }
 
+    // --track ENTITY: one line per tick with that body's state, printed wide
+    // enough (nine decimals, sub-micrometre) that two runs can be subtracted
+    // body by body instead of only compared by hash.
+    void track_body(const bmmo::sim::headless_engine& engine, const std::string& entity) {
+        bmmo::physics::body_state body;
+        std::string error;
+        if (!bmmo::physics::get_body_state(engine.physics(), entity.c_str(), body, error)) {
+            std::printf("track tick=%llu %s unavailable: %s\n",
+                        static_cast<unsigned long long>(engine.ticks()), entity.c_str(), error.c_str());
+            std::fflush(stdout);
+            return;
+        }
+        std::printf("track tick=%llu %s sim=%d pos=(%.9f,%.9f,%.9f) rot=(%.9f,%.9f,%.9f,%.9f)"
+                    " lin=(%.9f,%.9f,%.9f) ang=(%.9f,%.9f,%.9f)\n",
+                    static_cast<unsigned long long>(engine.ticks()), entity.c_str(), body.simulated ? 1 : 0,
+                    body.position[0], body.position[1], body.position[2],
+                    body.rotation[0], body.rotation[1], body.rotation[2], body.rotation[3],
+                    body.linear[0], body.linear[1], body.linear[2],
+                    body.angular[0], body.angular[1], body.angular[2]);
+        // Like every other diagnostic here: the tail of a fully buffered
+        // stdout does not survive the engine's exit.
+        std::fflush(stdout);
+    }
+
+    // --restore-at: what a rollback restore does to the bodies it corrects,
+    // with the correction itself removed - every movable body (or only
+    // `entity`) is written back to the state it is already in, through the
+    // v10 path with wake_mode keep and recheck false.  Returns the number of
+    // bodies written, -1 on an error.
+    int restore_bodies(bmmo::sim::headless_engine& engine, const std::string& entity, std::string& error) {
+        std::vector<bmmo::physics::body_state> bodies(
+            static_cast<size_t>(bmmo::physics::list_bodies(engine.physics(), nullptr, 0)));
+        const int count = bmmo::physics::list_bodies(engine.physics(), bodies.data(),
+                                                     static_cast<int>(bodies.size()));
+        bodies.resize(static_cast<size_t>(std::max(0, std::min(count, static_cast<int>(bodies.size())))));
+        int written = 0;
+        for (const auto& body: bodies) {
+            if (!body.movable) continue;
+            if (!entity.empty() && entity != body.name) continue;
+            if (!bmmo::physics::set_body_state(engine.physics(), body.name, body.position, body.rotation,
+                                               body.linear, body.angular, bmmo::physics::wake_mode::keep,
+                                               false, error))
+                return -1;
+            ++written;
+        }
+        return written;
+    }
+
     // Part B / spec A.9: root script name of a trafo explosion by --explode's
     // TYPE argument, null if TYPE is not one of wood|paper|stone.
     const char* explosion_script_name(const std::string& type) {
@@ -668,6 +741,19 @@ namespace {
                 std::fprintf(stderr, "tick %d failed: %s\n", i, error.c_str());
                 return 1;
             }
+            for (const auto& [tick, entity]: args.restores) {
+                if (static_cast<long long>(i) != tick) continue;
+                const int written = restore_bodies(engine, entity, error);
+                if (written < 0) {
+                    std::fprintf(stderr, "restore failed at tick %d: %s\n", i, error.c_str());
+                    return 2;
+                }
+                const std::string what = entity.empty() ? "every movable body" : entity;
+                std::fprintf(stderr, "restore: %d bodies written back at tick %d (%s)\n", written, i,
+                             what.c_str());
+            }
+            // After the restore: the state the tick really ends with.
+            for (const auto& entity: args.tracked) track_body(engine, entity);
             if (explode_ticks_left > 0) {
                 bmmo::physics::world_hash hash;
                 std::string hash_error;
@@ -1809,6 +1895,27 @@ namespace {
         uint32_t last_sim_tick = journal.ticks.front().tick;
         for (const auto& group: journal.ticks)
             if (group.has_tick || !group.inputs.empty() || !group.events.empty()) last_sim_tick = group.tick;
+        // Where the recording's world took its FIRST step.  A session numbers
+        // its world from the members' start base (design 9.25 phase alignment),
+        // so a server journal's first simulated tick is that base and the
+        // groups before it carry only notes and PLAYER records - not a hole in
+        // the recording.  The replayed world is renamed to it before the first
+        // step, exactly as the runner renames the live one, so the tick numbers
+        // printed here are the recording's and no gap is reported.  A journal
+        // whose world did start at 0 (every file written before this change,
+        // and every client journal, whose anchor era is numbered from 0) is
+        // unaffected: the first simulated group is at 0 and nothing is set.
+        uint32_t replay_first_tick = journal.ticks.front().tick;
+        for (const auto& group: journal.ticks)
+            if (group.has_tick || !group.inputs.empty() || !group.events.empty()) {
+                replay_first_tick = group.tick;
+                break;
+            }
+        if (replay_first_tick != world->tick_index()) {
+            std::printf("the journal's world starts at tick %u (header first_tick=%u); numbering the replay from there\n",
+                replay_first_tick, header.first_tick);
+            world->set_tick_index(replay_first_tick);
+        }
 
         size_t simulated = 0, matched = 0, compared = 0, checkpoints = 0, checkpoint_mismatches = 0;
         long long first_divergence = -1, first_checkpoint_divergence = -1;
@@ -2137,7 +2244,8 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, args)) {
         std::fprintf(stderr,
             "usage: BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N] "
-            "[--report-every N] [--list-bodies-at N] [--dump-surfaces-at N] [--verbose]\n"
+            "[--report-every N] [--list-bodies-at N] [--dump-surfaces-at N] [--restore-at TICK [ENTITY]] "
+            "[--track ENTITY] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
             "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjr> [--list] [--ticks N]\n"

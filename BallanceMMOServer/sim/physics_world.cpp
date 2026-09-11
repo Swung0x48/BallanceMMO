@@ -137,6 +137,12 @@ namespace bmmo::sim {
                 error = "Gameplay_Ingame never activated";
                 return false;
             }
+            // Design 9.26: each mechanism Sequencer is recorded on the tick it
+            // appears, before its script ran - the counter the level file has.
+            const int recorded = level_sequencers_.capture_new(engine_->context());
+            if (recorded > 0)
+                log("world: " + std::to_string(recorded) + " mechanism Sequencer counter(s) recorded from the level file ("
+                    + level_sequencers_.describe() + ")");
             if (!engine_->tick(error)) return false;
         }
         log("world: anchor reached after " + std::to_string(waited) + " ticks (engine tick "
@@ -148,6 +154,13 @@ namespace bmmo::sim {
         CKContext* context = engine_->context();
         CKIpionManager* manager = engine_->physics();
         if (!bmmo::physics::reset_session_clock(manager, options_.seed, error)) return false;
+        // Design 9.26: the mechanisms start from the level file's Sequencer
+        // counters on every side (the boot's own first play advanced them).
+        {
+            const int restored = level_sequencers_.restore(context);
+            log("world: " + std::to_string(restored) + " of " + std::to_string(level_sequencers_.size())
+                + " mechanism Sequencer counter(s) restored to the level file's (" + level_sequencers_.describe() + ")");
+        }
         bmmo::physics::world_hash hash;
         if (!bmmo::physics::capture_world_hash(manager, hash, error)) return false;
         // The handshake compares the movable-core pose hash: the full hash
@@ -925,7 +938,7 @@ namespace bmmo::sim {
         }
         if (options_.trace) {
             const uint32_t done = tick_ - 1;   // the tick just simulated (client numbering)
-            const bool window = (done >= 4 && done <= 12);
+            const bool window = (done >= 4 && done <= 60);
             if (exact_log_ticks_ > 0 || window) {
                 if (exact_log_ticks_ > 0) --exact_log_ticks_;
                 const std::string exact = bmmo::physics::describe_cores_exact(physics());
@@ -944,6 +957,21 @@ namespace bmmo::sim {
                                   static_cast<double>(h.physics_delta_time), static_cast<double>(h.time_factor));
                     log(text);
                 }
+            }
+        }
+        if (options_.trace) {
+            // Design 9.26 diagnostics: the constraints the retail scripts built
+            // this tick, in creation order, as the client logs them.
+            const std::string events = bmmo::physics::drain_event_log(physics());
+            size_t pos = 0;
+            while (pos < events.size()) {
+                const size_t end = events.find(';', pos);
+                if (end == std::string::npos) break;
+                const std::string entry = events.substr(pos, end - pos);
+                pos = end + 1;
+                if (entry.find(" constraint ") != std::string::npos || entry.find(" birth ") != std::string::npos
+                        || entry.find(" psi ") != std::string::npos || entry.find(" force ") != std::string::npos)
+                    log("bridge at tick " + std::to_string(tick_ - 1) + ": " + entry);
             }
         }
         return true;
@@ -1019,6 +1047,7 @@ namespace bmmo::sim {
             if (p.physicalized && p.ball && p.ball->GetName()) ball_owner[p.ball->GetName()] = id;
 
         std::set<std::string> current_set;
+        std::unordered_map<std::string, bool> current_simulated;
         size_t unnumbered = 0;
         for (const auto& body: bodies) {
             if (!body.movable) continue;
@@ -1040,7 +1069,17 @@ namespace bmmo::sim {
             }
             if (name == retail_name || name.find(kPlayerNameTag) != std::string::npos) continue;
             current_set.insert(name);
-            if (!full && !body.simulated) continue;
+            current_simulated[name] = body.simulated;
+            // A delta snapshot carries the simulated bodies only.  The one
+            // exception is the tick a body goes to sleep on: without that row
+            // a client keeps predicting a mechanism the server has stopped,
+            // and only the next full snapshot (up to 98 ticks later) tells it
+            // otherwise - so the transition awake -> asleep is reported once,
+            // with BODY_FLAG_SIMULATED clear (design 9.25).
+            if (!full && !body.simulated) {
+                auto previous = last_simulated_.find(name);
+                if (previous == last_simulated_.end() || !previous->second) continue;
+            }
             auto index = body_index_.find(name);
             if (index == body_index_.end() && bookkeeping)
                 index = body_index_.emplace(name, static_cast<uint16_t>(body_index_.size())).first;
@@ -1054,6 +1093,7 @@ namespace bmmo::sim {
         if (!bookkeeping) return;
         body_set_changed_ = current_set != last_body_set_;
         last_body_set_ = std::move(current_set);
+        last_simulated_ = std::move(current_simulated);
     }
 
     std::string physics_world::describe() const {

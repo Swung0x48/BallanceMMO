@@ -510,6 +510,94 @@ script intent, that `WakeUpFromScript` reports its target (also when the body is
 already awake), and that a fixed body reports nothing. The production Level 8
 journal still replays tick-identical.
 
+## 15. Creation observers (physics_RT, diagnostic only)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.h` / `.cpp` (two
+observer members appended after `m_ScriptWakeupObserver`, plus the
+`m_ProcessingQueuedCallbacks` counter), `PhysicsCallback.cpp`
+(`PhysicsCallbackContainer::Process()` raises the counter while it retries the
+queued callbacks), `Behaviors/PhysicsBallJoint.cpp` and
+`Behaviors/PhysicsForce.cpp` (one call each, after the constraint / force
+controller is built).
+
+Nothing in the simulation changes: the observers are null by default and the
+retail game never sets them. BallanceMMO's bridge installs recorders that append
+`constraint <reference>|<attached>|<immediate|deferred>|cw=..|mxcsr=..;` and
+`force <name>|f=..|p=..|<immediate|deferred>;` to its event log, next to the
+`birth` record the bridge's own object listener now writes for every body
+(pose, speeds, mass, inertia, damping, clock fields, compact-surface hash, FPU
+words) and the optional `psi` probe (`BMMO_PSI_PROBE=<name prefix>`: the first
+six PSIs of every body born with that prefix, with its sim unit's core and
+controller order). "Deferred" means the block's callback returned 0 when the
+block ran (a body was missing) and the pre-simulate pass built the object
+later.
+
+Why: the Level 11 sandbag divergence of design 9.27 was invisible to every
+state comparison - bodies, constraints, hulls and FPU state were bit-identical
+at birth on the two sides that then diverged in the first PSI. The force
+observer showed the two sides had built opposite `SetPhysicsForce` actuators,
+which led to the script-side cause (a Sequencer counter that survives the level
+restart). The hooks stay because that class of question ("what did the scripts
+build, and when") comes back with every mechanism.
+
+## Bridge notes: restoring a body's leapfrog state (no engine change)
+
+Not a numbered engine change: nothing under `submodule/Ballanced` changed for
+it except the regression test. The bridge's body write (API v10
+`set_body_state_ex`, `bmmo::physics::set_body_state` with a `wake_mode`) now
+puts back what `IVP_Calc_Next_PSI_Solver::set_transformation` drops, and asks
+for the body's sleep state explicitly.
+
+IVP integrates with a leapfrog. At every PSI, `calc_next_PSI_matrix`
+(`ivp_calc_next_psi_solver.cxx:174-181`) first advances the position by the
+delta written at the *previous* PSI
+(`pos_world_f_core_last_psi.add_multiple(&delta_world_f_core_psis, d_last_time)`)
+and only then sets `delta_world_f_core_psis` to the core's current speed;
+likewise it takes the rotation of this PSI from the `q_world_f_core_next_psi`
+predicted at the previous one. `set_transformation` (`:242-331`) zeroes the
+delta, sets `q_world_f_core_next_psi` to the pose it is given and zeroes
+`speed`. So a body beamed to the state it is already in loses exactly one PSI
+of translation (|v|/66 m) and one PSI of rotation - which is what a rollback
+restore does to every body it corrects. The write therefore takes
+`q_world_f_core_last_psi^-1 * q_world_f_core_next_psi` before the beam, puts
+that increment back on the new pose afterwards, and rewrites
+`delta_world_f_core_psis` from the velocity the caller installs (at a PSI
+boundary, which is where a snapshot is read, that is the value
+`calc_next_PSI_matrix` had put there). The pre-v10 entries `set_body_state` /
+`set_body_state_recheck` are deliberately left byte-identical.
+
+Measured with the new SimTool diagnostic `--restore-at TICK [ENTITY]`, which
+reads every movable body after that tick and writes it straight back
+(Level 11, `--level 11 --level-at 400 --ticks 1200 --report-every 66`, one
+restore at tick 700, the sandbag `P_Modul_26_Sack` swinging at 3.5 m/s):
+without the restore the sack is 53.7 mm off the untouched run on the next
+tick; with the delta alone 0.44 mm; with delta and rotation increment 0.24 µm.
+That last residual is not integration loss and does not grow (0.24 µm again
+500 ticks later): it is exactly `(current_time - time_of_last_psi) * |v|`, the
+same 6.7e-8 s for every body (rope 1.0e-7 m at 1.5 m/s, sack 2.4e-7 m at
+3.5 m/s), because a caller reads the *interpolated* pose at the environment's
+current time - which sits that rounding remainder past the last PSI - and the
+beam makes it the new last-PSI pose, from which the restored leapfrog then
+extrapolates again. Restoring every movable body on every tick for 100 ticks:
+3.02 m of error without the restore, 14.5 µm with it.
+
+`wake_mode` is the second half of the same write, for a second defect of the
+old one: `IVP_Real_Object::ensure_in_simulation`
+on an *awake* body is not a no-op, it calls `reset_freeze_check_values()`
+(`ivp_object.cxx:1318-1330`), so a per-tick correction through the old
+unconditional wake would keep a mechanism from ever falling asleep. v10's
+`wake` only revives a body that is frozen, `freeze` only freezes one that is
+simulated, and `keep` leaves the sleep state alone.
+
+Evidence: two more headless regression tests in
+`physics_RT/tests/test_physics_regressions.cpp` - "Beaming a body to its own
+pose keeps its leapfrog state" (three falling, spinning probes: untouched,
+restored with the leapfrog state, restored without it; the restored one
+follows the untouched one to under 0.1 mm while the naive one visibly lags)
+and "Waking an already simulated body restarts its freeze check"
+(`time_of_calm_reference` moves on `ensure_in_simulation()` of an awake body).
+All seven tests pass.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

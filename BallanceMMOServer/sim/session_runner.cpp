@@ -164,9 +164,10 @@ namespace bmmo::sim {
 
     void session_runner::create_session(uint32_t session, int level,
                                         const std::vector<std::pair<uint32_t, uint8_t>>& players,
-                                        uint32_t input_delay, float spawn_impulse, const std::string& note,
-                                        std::vector<std::string> names) {
-        post([this, session, level, players, input_delay, spawn_impulse, note, names = std::move(names)] {
+                                        uint32_t input_delay, uint32_t start_base, float spawn_impulse,
+                                        const std::string& note, std::vector<std::string> names) {
+        post([this, session, level, players, input_delay, start_base, spawn_impulse, note,
+              names = std::move(names)] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
@@ -205,9 +206,21 @@ namespace bmmo::sim {
                 if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
                 return;
             }
+            // Design 9.25 phase alignment: the world's first simulated tick is
+            // the members' start base, not 0.  Set before anything reads
+            // tick_index() - the journal header's first_tick, the PLAYER
+            // records, the input buffers and the cross-thread view all take
+            // their number from here, so a journal still says where its first
+            // TICK record is and replays without a hole.
+            if (start_base != 0) s->world->set_tick_index(start_base);
+            s->start_base = start_base;
             const uint32_t first_tick = s->world->tick_index();
             open_journal(*s, spawn_impulse, s->world->anchor_hash(), s->world->anchor_surfaces(), first_tick);
             if (!note.empty()) s->journal.note(first_tick, "start: " + note);
+            // An explicit signal for a reader that only has the file: the world
+            // is at its anchor and its first step is numbered `first_tick`.
+            s->journal.note(first_tick, "start base " + std::to_string(first_tick)
+                    + ": the world's first simulated tick (design 9.25 phase alignment)");
             for (size_t i = 0; i < players.size(); ++i) {
                 const auto [player, join_order] = players[i];
                 std::string add_error;
@@ -217,7 +230,7 @@ namespace bmmo::sim {
                 }
                 s->players.insert(player);
                 s->join_orders[player] = join_order;
-                s->inputs[player].reset(0);
+                s->inputs[player].reset(first_tick);
                 s->journal.player(first_tick, player, join_order, true,
                                   i < names.size() ? names[i] : std::string{});
             }
@@ -296,7 +309,12 @@ namespace bmmo::sim {
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
-                s.scheduler.start(clock::now(), s.world->tick_index(), s.input_delay);
+                // Design 9.26: the first step (tick start_base) is due start_base
+                // periods from now - where a world counting from 0 reached it - so
+                // the members keep the wall-clock lead the base gives them.
+                s.scheduler.start(clock::now() + std::chrono::duration_cast<clock::duration>(
+                        std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0)),
+                        s.world->tick_index(), s.input_delay);
                 s.running = true;
                 {
                     std::lock_guard lk(view_mutex_);
@@ -323,7 +341,12 @@ namespace bmmo::sim {
             s.inputs[player].reset(first_tick);
             if (s.running) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
-                s.scheduler.start(clock::now(), s.world->tick_index(), s.input_delay);
+                // Design 9.26: the first step (tick start_base) is due start_base
+                // periods from now - where a world counting from 0 reached it - so
+                // the members keep the wall-clock lead the base gives them.
+                s.scheduler.start(clock::now() + std::chrono::duration_cast<clock::duration>(
+                        std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0)),
+                        s.world->tick_index(), s.input_delay);
                 s.running = true;
                 {
                     std::lock_guard lk(view_mutex_);

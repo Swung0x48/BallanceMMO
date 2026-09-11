@@ -235,6 +235,12 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
     if (isMap) {
         logger_->Info("Initializing peer objects...");
         objects_.init_players();
+        // Design 9.26: the mechanism Sequencer counters as loaded, before any
+        // of the level's scripts ran; the session anchor restores them.  The
+        // behaviours are not enumerable from this hook yet, so the next
+        // frames record them (capture_level_sequencers).
+        level_sequencers_.clear();
+        level_sequencers_frames_ = 30;
         boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).[cn]mo$", boost::regex::icase);
         std::string path(filename);
         boost::smatch matched;
@@ -329,6 +335,21 @@ void BallanceMMOClient::on_sector_changed() {
 }
 
 void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
+
+// Design 9.26: the frames right after a map load, until the level's mechanism
+// Sequencers have been seen once (their counters are the file's until the
+// sector scripts run, which happens after Gameplay_Ingame's init).
+void BallanceMMOClient::capture_level_sequencers() {
+    if (level_sequencers_frames_ <= 0) return;
+    --level_sequencers_frames_;
+    const int recorded = level_sequencers_.capture_new(m_bml->GetCKContext());
+    if (recorded > 0) {
+        logger_->Info("Physics session: %d mechanism Sequencer counter(s) recorded from the level file (%s)",
+                      recorded, level_sequencers_.describe().c_str());
+    } else if (level_sequencers_frames_ == 0 && level_sequencers_.size() == 0) {
+        logger_->Info("Physics session: no mechanism Sequencer in this level");
+    }
+}
 
 void BallanceMMOClient::OnPostExitLevel() {
     physics_session_end_local("left the level");
@@ -432,6 +453,7 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
+    capture_level_sequencers();
     process_command_file();
     fixed_tick_.on_process(m_bml);
     process_physics_session();

@@ -94,6 +94,29 @@ namespace bmmo::physics {
                         const double position[3], const double rotation[4],
                         const float linear[3], const float angular[3], bool wake,
                         std::string& error, bool recheck = false);
+    // What a restore wants of the body's sleep state (bridge API v10; the
+    // values are the wake_mode argument of set_body_state_ex).
+    enum class wake_mode : int {
+        keep = 0,    // never touch it: the caller is only correcting a pose
+        wake = 1,    // ensure_in_simulation(), but only when the body is not
+                     // simulated - on an awake body the call re-arms IVP's
+                     // freeze counters, which the bool overload does and a
+                     // per-tick correction must not
+        freeze = 2,  // disable_simulation() when the body is simulated
+    };
+    // The same write with the sleep state under the caller's control, and the
+    // one a rollback restore wants: a beam through this overload also carries
+    // the core's leapfrog state across (the per-PSI translation delta
+    // delta_world_f_core_psis, rewritten from `linear`, and the predicted
+    // rotation of the next PSI), which IVP's set_transformation throws away -
+    // without it every restore costs the body one PSI of motion, |v|/66 m.
+    // The bool overload is this one with `wake ? <unconditional wake> :
+    // freeze` and no leapfrog restore, byte-identical to what it has always
+    // done.
+    bool set_body_state(CKIpionManager* physics, const char* entity_name,
+                        const double position[3], const double rotation[4],
+                        const float linear[3], const float angular[3], wake_mode mode,
+                        bool recheck, std::string& error);
     // The retail Physicalize block's recipe path, driven from a POD recipe
     // instead of a behavior graph.  Already-physicalized entities succeed
     // without doing anything (like the block).  `collision_group` is the IVP

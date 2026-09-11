@@ -110,13 +110,21 @@ namespace bmmo::sim {
         // the same number session_start_msg carries to every member, so the
         // world is built with what the clients were told.  The runner has no
         // copy of its own: there is nowhere else for the world to get it.
+        // `start_base` is the tick number the members present at the start are
+        // numbered from (server.cpp start_tick_base, sim/late_tick.hpp): the
+        // world's FIRST simulated tick carries it, so the world and every
+        // member take their first step from their anchor under one number
+        // (design 9.25 phase alignment).  0 keeps the old numbering from tick
+        // 0.  It is passed here rather than set later because everything a
+        // session derives from tick_index() - the input buffers, the journal
+        // header, the cross-thread views - is fixed at the world's boot.
         // `note` goes into the journal as `start: <note>` (the room and its
         // members: what a human needs to recognise the recording later) and
         // `names` are the players' display names, parallel to `players` -
         // either the same length or empty.
         void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
-                            uint32_t input_delay, float spawn_impulse, const std::string& note = {},
-                            std::vector<std::string> names = {});
+                            uint32_t input_delay, uint32_t start_base, float spawn_impulse,
+                            const std::string& note = {}, std::vector<std::string> names = {});
         // `reason` goes into the journal as `end: <reason>` before it closes.
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.
@@ -172,6 +180,15 @@ namespace bmmo::sim {
             std::map<uint32_t, uint32_t> acked;
             std::vector<pending_event> events;   // sorted by tick on insertion
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs
+            // Design 9.26: the start base B the members are numbered from.  The
+            // world's first step is numbered B, and it is DUE B tick periods
+            // after the assignment goes out - where a world counting from 0
+            // used to reach B - so the members keep the wall-clock lead the
+            // base gives them (their first frame happens half a round trip
+            // after the assignment; stepping B at once made every input late
+            // by the round trip and the starvation detector resynced everyone
+            // two seconds into a real-network session).
+            uint32_t start_base = 0;
             bmmo::session::tick_scheduler scheduler;
             bmmo::session::snapshot_cadence cadence;
             bool running = false;

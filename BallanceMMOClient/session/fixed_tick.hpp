@@ -30,6 +30,15 @@ namespace bmmo::session {
         // enable).  Applies the delta clamp and the wall-clock pacing.
         uint64_t on_process(IBML* bml);
 
+        // The anchor hold (design 9.26 phase alignment): the session waits
+        // inside the anchor frame, so no frame reaches on_process while held
+        // (if one did, it is neither counted nor paced).  Releasing moves the
+        // schedule's origin forward by the time the hold took, so the wait is
+        // not lag the pacing tries to catch up with (which would count as a
+        // rebase and ask the session for a resync).
+        void set_hold(bool hold);
+        bool held() const { return held_; }
+
         uint64_t ticks() const { return ticks_; }
         // Diagnostics for the last frame.
         float last_delta_ms() const { return last_delta_ms_; }
@@ -42,6 +51,7 @@ namespace bmmo::session {
 
     private:
         bool enabled_ = false;
+        bool held_ = false;
         uint64_t ticks_ = 0;
         std::chrono::steady_clock::time_point origin_{};
         float last_delta_ms_ = 0.0f;

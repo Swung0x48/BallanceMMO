@@ -257,6 +257,31 @@ namespace bmmo::physics {
         return true;
     }
 
+    // API v10 (design 9.25): sleep state and contact recheck decided by the
+    // caller.  The bridge also restores the core's leapfrog delta here, which
+    // the plain beam zeroes - see physics_state.cpp.
+    bool physics_view::set_body_state(const char* entity_name, const double position[3],
+                                      const double rotation[4], const float linear[3],
+                                      const float angular[3], bmmo::physics::wake_mode mode,
+                                      bool recheck, std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_body_state_ex) {
+            error = "the physics_RT bridge lacks set_body_state_ex";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_body_state_ex(manager_, entity_name, position, rotation, linear, angular,
+                                     static_cast<int32_t>(mode), recheck ? 1 : 0, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
     bool physics_view::physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
                                    const char* collision_group, std::string& error) const {
         error.clear();

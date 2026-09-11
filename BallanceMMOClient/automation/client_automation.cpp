@@ -478,7 +478,9 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "beam") {
         // beam <x> <y> <z>: put the current ball there at rest, so it falls
         // onto a mechanism.  The headless replay does the same with --beam at
-        // the same frame.
+        // the same frame.  In a physics session the server's copy of the ball
+        // is moved with it (physics_session_report_beam), or the next snapshot
+        // would simply drag this one back.
         std::istringstream args(rest);
         double x = 0, y = 0, z = 0;
         if (!(args >> x >> y >> z)) return "error usage: beam <x> <y> <z>";
@@ -492,8 +494,9 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         const float still[3] = {0.0f, 0.0f, 0.0f};
         if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))
             return "error " + error;
-        return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}", ball->GetName(), x, y, z,
-                           record_frames_);
+        const std::string reported = physics_session_report_beam(ball->GetName(), position);
+        return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}{}", ball->GetName(), x, y, z,
+                           record_frames_, reported);
     }
     if (verb == "array") {
         // array <name>: every cell of a CKDataArray (diagnostics).

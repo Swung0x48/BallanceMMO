@@ -31,6 +31,7 @@
 
 #include <entity/session.hpp>
 #include <game/navigation_graph.hpp>
+#include <game/script_state.hpp>
 #include <physics/physics_rt_api.h>
 
 #include "headless_engine.hpp"
@@ -120,6 +121,19 @@ namespace bmmo::sim {
         // The Physicalize_GameBall rows in row order (= ball type order).
         const std::vector<ball_row>& ball_rows() const { return ball_rows_; }
         uint32_t tick_index() const { return tick_; }
+        // Numbers the world's FIRST simulated tick (design 9.25 phase
+        // alignment).  A session's members are numbered from a common start
+        // base B (sim/late_tick.hpp session_start_tick_base) and each of them
+        // steps its own world for the first time under that number, so the
+        // world has to step for the first time under it too: with the counter
+        // left at 0 the server's world was B steps further from the anchor
+        // than every client's at the same tick number, and every script-driven
+        // mechanism (Level 11's sandbag Delayer) flipped B ticks early on this
+        // side.  Ticks below the base are never simulated - nothing is skipped,
+        // the first step is only renamed.  Call once, before the first step:
+        // the input buffers, the scheduler, the snapshot cadence and the
+        // journal all take their first tick from tick_index().
+        void set_tick_index(uint32_t tick) { tick_ = tick; }
         int level() const { return options_.level; }
         const bmmo::game::navigation_graph& navigation() const { return navigation_; }
         // Force value of a ball type (Physicalize_GameBall "Force"), 0 if unknown.
@@ -241,6 +255,9 @@ namespace bmmo::sim {
         uint32_t tick_ = 0;
         bmmo::game::navigation_graph navigation_;
         bool navigation_keys_known_ = false;
+        // The mechanism Sequencer counters as the level file has them (design
+        // 9.26): recorded while the level loads, written back at the anchor.
+        bmmo::game::sequencer_state level_sequencers_;
         std::vector<ball_row> ball_rows_;             // Physicalize_GameBall rows
         VxMatrix spawn_matrix_{};
         CK_ID retail_ball_ = 0;
@@ -273,6 +290,13 @@ namespace bmmo::sim {
         CK_ID ball_pos_frame_ = 0;
         std::unordered_map<std::string, uint16_t> body_index_;
         std::set<std::string> last_body_set_;
+        // Whether each mechanism was simulated when the last snapshot was
+        // taken: a delta snapshot carries the simulated bodies only, so a body
+        // that falls asleep between two of them would otherwise leave the
+        // clients with the pose of its last moving tick and no word that it
+        // stopped (design 9.25).  The transition awake -> asleep puts one more
+        // row (simulated = 0) into the next delta snapshot.
+        std::unordered_map<std::string, bool> last_simulated_;
         bool body_set_changed_ = true;
         void* filter_environment_ = nullptr;
         int rng_cursor_ = 0;

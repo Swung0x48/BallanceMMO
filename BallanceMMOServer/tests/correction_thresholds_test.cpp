@@ -228,14 +228,19 @@ namespace {
                 out.simulated = it->second.simulated;
                 return true;
             };
-            w.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state, bool wake) {
-                calls.push_back("set_body " + entity + (wake ? " wake" : " freeze"));
+            w.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state,
+                                bmmo::session::wake_mode mode, bool recheck) {
+                calls.push_back("set_body " + entity + " "
+                                + (mode == bmmo::session::wake_mode::wake ? "wake"
+                                   : mode == bmmo::session::wake_mode::freeze ? "freeze" : "keep")
+                                + (recheck ? " recheck" : ""));
                 auto& body = bodies[entity];
                 for (int k = 0; k < 3; ++k) {
                     body.position[k] = state.position[k];
                     body.linear[k] = state.linear[k];
                 }
-                body.simulated = wake;
+                if (mode == bmmo::session::wake_mode::wake) body.simulated = true;
+                else if (mode == bmmo::session::wake_mode::freeze) body.simulated = false;
                 return true;
             };
             w.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };

@@ -21,6 +21,7 @@
 #include "physics/physics_view.hpp"
 #include "session/physics_session.hpp"
 #include <game/menu_driver.hpp>
+#include <game/script_state.hpp>
 #include <fstream>
 #include <physics/tick_record.hpp>
 #include <map>
@@ -525,6 +526,49 @@ private:
 	// decide whether the world is running, and what each recorded block points
 	// at now.
 	std::string pause_scripts_status();
+	// Design 9.25, neutralization N1: the retail death chain re-runs the whole
+	// sector (Gameplay_Ingame / BallManager / Deactivate Ball -> Execute Script
+	// -> Gameplay_SectorManager).  The server never runs that per-player reset,
+	// so a client must not either: it rebuilt the sandbag's ball joints at the
+	// module's initial anchors while the body guard kept the bodies where the
+	// server has them, and the solver removed the violation with an impulse
+	// (findings/A2 section 5.5).  The block's "Script" target is emptied for the
+	// session exactly like the pause chains' - Execute Script activates its Out
+	// at once on a null script, so the respawn chain behind it runs unchanged.
+	struct death_reset_write {
+		CK_ID block = 0;         // the Execute Script block inside Deactivate Ball
+		int input = 0;           // its "Script" input
+		CK_ID retail = 0;        // the script it pointed at (Gameplay_SectorManager)
+		bool applied = false;
+	};
+	death_reset_write death_reset_{};
+	bool death_reset_failed_ = false;
+	bool death_reset_resolve();
+	void death_reset_apply();
+	void death_reset_restore();
+	// Design 9.25, neutralization N2: crossing a checkpoint runs
+	// Gameplay_Events / activate Sektor, which writes both IngameParameter[0][1]
+	// (activate) and [0][2] (deactivate the previous sector).  The server's world
+	// is activate-only - it unions the sectors of every player
+	// (physics_world::update_sectors) - so the client's deactivation would tear
+	// down and rebuild bodies the server keeps simulating.  The deactivate write
+	// is fed a session-owned constant 0 instead ("deactivate nothing": the
+	// SectorManager's own Test skips the whole chain on 0), and its original
+	// source goes back at session end.
+	struct sector_deactivate_write {
+		CK_ID block = 0;           // the Set Cell block writing IngameParameter[0][2]
+		int input = 0;             // its "Value" input
+		CK_ID retail_source = 0;   // the parameter it read (direct source)
+		CK_ID retail_shared = 0;   // or the input it shared its source with
+		CK_ID retail_real = 0;     // what GetRealSource() answered before we moved it
+		CK_ID zero = 0;            // our constant int parameter, destroyed on restore
+		bool applied = false;
+	};
+	sector_deactivate_write sector_deactivate_{};
+	bool sector_deactivate_failed_ = false;
+	bool sector_deactivate_resolve();
+	void sector_deactivate_apply();
+	void sector_deactivate_restore();
 	void handle_session_start(bmmo::session_start_msg msg);
 	void handle_session_assign(const bmmo::session_assign_msg& msg);
 	void handle_session_snapshot(bmmo::session_snapshot_msg msg);
@@ -539,22 +583,42 @@ private:
 	void physics_session_end_local(const std::string& reason);
 	void process_physics_session();
 	void physics_session_anchor();
+	// The mechanism Sequencer counters as the level file has them (design 9.26):
+	// recorded on the first frames after the map loads (the load hook runs
+	// before the level's behaviours can be enumerated), written back at the
+	// anchor.  `level_sequencers_frames_` counts the frames still allowed to
+	// look; the level's mechanism scripts run only after Gameplay_Ingame's init,
+	// long after that.
+	bmmo::game::sequencer_state level_sequencers_;
+	int level_sequencers_frames_ = 0;
+	void capture_level_sequencers();
 	// The session black box: session/session_journal_client.hpp.
 	void physics_session_journal_begin();
+	// Design 9.26 phase alignment: the world stands at the anchor until the
+	// tick base arrives, so its first step and the server world's first step
+	// carry the same tick number.  hold_until_assigned() waits inside the
+	// anchor frame (no frame runs meanwhile), polling the queued assignment;
+	// release_hold() ends it, from the assignment or from the deadline.
+	void physics_session_hold_until_assigned();
+	void physics_session_release_hold(const char* why);
+	// SessionAssign is queued by the network thread and applied by the game
+	// thread at a frame boundary (or inside the hold's own loop).
+	void physics_session_drain_assignments();
+	void physics_session_apply_assign(uint32_t session, uint32_t first_tick);
 	void physics_session_frame();
 	void physics_session_flush_inputs();
 	void physics_session_send_event(bmmo::session_event_msg& event);
 	void physics_session_apply_queues();
-	// Option A: mechanisms are server-authoritative here.  note_* stores a
-	// snapshot row, apply_* renders the stored poses once per frame, pose_*
-	// re-poses them for one re-simulated tick (rollback_world::pre_step).
-	void physics_session_note_mechanism(uint32_t tick, const bmmo::session::body_state& body);
-	void physics_session_apply_mechanism_authority();
-	void physics_session_pose_mechanisms(uint32_t tick);
+	// Design 9.25: which local body a mechanism row names, re-resolved when the
+	// dictionary or the local body set changed (mechanism_tracking.hpp).
+	void physics_session_resolve_mechanisms(uint32_t tick);
 	void physics_session_cache_ball_row(uint32_t tick, const bmmo::session::body_state& body);
 	void physics_session_apply_event(const bmmo::session_event_msg& event);
 	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
 	void physics_session_check_own_body(const bmmo::session_snapshot_msg& snapshot, uint32_t own_id);
+	// The automation `beam` verb inside a session: re-report the own ball's life
+	// at the new pose so the server's copy moves too (design 9.25 follow-up).
+	std::string physics_session_report_beam(const std::string& entity, const double position[3]);
 	void physics_session_drive_remotes();
 	void physics_session_attach_remote_navigation(uint32_t player);
 	void physics_session_attach_own_navigation(const std::string& ball_name, uint8_t ball_type);

@@ -26,6 +26,7 @@
 #include <game/navigation_graph.hpp>
 #include <message/message_all.hpp>
 #include <session/correction.hpp>
+#include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
 
 namespace bmmo::session {
@@ -56,6 +57,22 @@ namespace bmmo::session {
 
         // Tick base from SessionAssign.
         bool assigned = false;
+        // Design 9.26 phase alignment: between the anchor and the assignment
+        // no frame runs at all - the anchor frame's OnProcess waits, polling
+        // the assignment (physics_session_hold_until_assigned) - instead of
+        // running frames the assignment would renumber away.  The server's
+        // world takes its own first step under the base it hands out, so a
+        // client that ran k frames in that window stayed k steps further from
+        // the anchor at every tick number for the rest of the session - the
+        // offset that made every script-driven mechanism (Level 11's sandbag
+        // Delayer) run out of phase and be corrected at every flip.  A frame
+        // with a near-zero delta is not still enough (the graphs' frame-counted
+        // links still fire), hence the wait.  `hold_deadline` bounds it: a
+        // server that never assigns must not freeze the game.
+        bool hold_active = false;
+        std::chrono::steady_clock::time_point hold_deadline{};
+        uint64_t hold_polls = 0;   // 1 ms polls the wait took
+        bool hold_timed_out = false;
         uint32_t tick_base = 0;
         uint32_t current_tick() const {
             return frames_since_anchor >= 1 ? tick_base + static_cast<uint32_t>(frames_since_anchor - 1) : tick_base;
@@ -76,20 +93,15 @@ namespace bmmo::session {
             rollback.invalidate_history();
             corrector.clear();
             for (auto& [id, remote]: remotes) remote.corrector.clear();
-            // Option A: the mechanism authority rows are keyed by the tick they
-            // were received at, so every one of them is older than the new base
-            // and unreachable; the dictionary is only ever refilled by the full
-            // snapshot the server sends with a re-anchor, the same one that
-            // re-seeds the rows.  Keeping either would let the applier render a
-            // mechanism by dead-reckoning from an old-numbered row (or target a
-            // body the new base no longer names) until that snapshot lands.
-            // The fresh histories also carry no commanded pose yet
-            // (have_last_target is false by construction), which is the state
-            // the applier's `elsewhere` test wants after a rebuild: it falls
-            // back to comparing the body itself against the newest row until it
-            // has written once.
-            mechanism_authority.clear();
-            mechanism_names.clear();
+            // The mechanism dictionary is a property of the world, not of the
+            // numbering, but the identity guard's rows are keyed by the tick
+            // they were received at and the server always sends a full snapshot
+            // with a re-anchor - the one that refills both.  Dropping the
+            // registry keeps a stale row from deciding which of two same-named
+            // instances we drive; the cost is that mechanisms are uncorrected
+            // (but still simulated locally, design 9.25) until that snapshot
+            // lands.
+            mechanism_tracking.clear();
             consecutive_hard = consecutive_unmatched = 0;
         }
 
@@ -157,56 +169,22 @@ namespace bmmo::session {
         std::map<uint32_t, input_frame> own_inputs;
         static constexpr size_t kInputRing = 128;
 
-        // Shared mechanisms (Option A, findings/mechanism-strategy-decision.md):
-        // the client does not predict the script-constrained bodies (rope,
-        // sandbag, see-saw); it renders the server's pose.  Every snapshot row
-        // is kept here as authority, keyed by the server's owner index, so the
-        // applier can interpolate inside a pair and dead-reckon past the newest
-        // row along its authoritative velocity.  Holding the received pose
-        // instead would render a moving mechanism input_delay + RTT/2 (~24
-        // ticks, measured in the journals) behind, and the predicted ball
-        // would pass through it.  Teleports are snapped, never extrapolated
-        // across.
-        //
-        // A bounded history rather than the two newest poses: a rollback
-        // re-simulates up to max_resim_ticks (48, rollback_thresholds) ticks,
-        // and the resim loop re-poses these untracked bodies for every one of
-        // them (rollback_world::pre_step).  With the 2-tick snapshot cadence a
-        // full window needs ~24 rows; two poses could not pose any tick but the
-        // last two, so the replayed ball met one frozen mechanism on the way.
-        struct mechanism_pose_history {
-            struct pose_state {
-                uint32_t tick = 0;
-                double position[3] = {};
-                double rotation[4] = {0.0, 0.0, 0.0, 1.0};
-                float linear[3] = {};
-                float angular[3] = {};
-                bool simulated = false;
-            };
-            std::deque<pose_state> rows;   // ascending tick, newest last, at most kMechanismRows
-            // The pose the applier last commanded for this body.  The applier's
-            // own dead-reckoned write IS the live body pose (measured: the
-            // client's local mechanism pose equals the raw row or the
-            // extrapolated target exactly, nothing in between), so the body
-            // cannot serve as the reference of the `elsewhere` test any more:
-            // one frame after a write it reads back as a body up to
-            // kMechanismMaxExtrapolation ahead of the newest row, the test calls
-            // that "somewhere else", the applier snaps back to the raw row, and
-            // the next frame dead-reckons again - a permanent square wave at the
-            // applier's cadence (9.22 journals, the sandbag flicker).  The
-            // remembered command tells the applier's own pose apart from a pose
-            // somebody else moved the body to.
-            double last_target[3] = {};
-            bool have_last_target = false;
-        };
-        // 64 covers the worst re-simulated window (48 ticks / 2 ticks per row =
-        // 24) with headroom for a degraded cadence - a dropped snapshot lands a
-        // row later, and the ticks a deep re-simulation needs are the oldest
-        // ones, so the cap has to hold the whole window and then some.
-        static constexpr size_t kMechanismRows = 64;
-        std::map<uint32_t, mechanism_pose_history> mechanism_authority;
-        uint64_t mechanism_snaps = 0;            // authority writes applied as a snap, not a lerp
-        uint64_t mechanism_resim_writes = 0;     // untracked mechanism re-poses written by a re-simulation
+        // Shared mechanisms (design 9.25): the client simulates the
+        // script-constrained bodies (rope, sandbag, see-saw) itself, like every
+        // other body of its world, and the rollback engine corrects them from
+        // the snapshot rows.  Option A (9.17) rendered them from the server's
+        // rows instead; it is gone, with its dead-reckoning, its teleport snaps
+        // and its per-replayed-tick re-poser - what is left of it is the
+        // dictionary and one row per owner, which is all the identity guard
+        // needs to say which local body a row is about.
+        mechanism_registry mechanism_tracking;
+        // Lifetime generation per tracked entity (own ball, remote mirrors,
+        // mechanisms): bumped whenever the body behind a name is created or
+        // destroyed, so the rollback engine can tell a record of an earlier
+        // body under the same name from one of the body that is there now
+        // instead of throwing the whole history away (findings/A5 section 2b:
+        // 6 % of the 9.24 session was uncorrectable for that reason).
+        std::map<std::string, uint32_t> generations;
         uint64_t corrections_logged = 0;
         uint64_t amend_failures = 0;             // amend_record calls whose tick was no longer recorded
 
@@ -247,8 +225,6 @@ namespace bmmo::session {
         std::map<uint32_t, remote_body> remotes;
         std::vector<float> ball_forces;      // Physicalize_GameBall "Force" per ball type (row order)
 
-        // Mechanism dictionary from full snapshots.
-        std::map<uint32_t, std::string> mechanism_names;
         uint32_t last_snapshot_tick = 0;
         bool have_snapshot = false;
         uint64_t snapshots_received = 0, snapshots_applied = 0, snapshots_stale = 0;
@@ -261,6 +237,11 @@ namespace bmmo::session {
         std::deque<session_snapshot_msg> snapshot_queue;
         std::deque<session_event_msg> event_queue;
         std::deque<session_remote_input_msg> remote_input_queue;
+        // SessionAssign, from the network thread (handle_session_assign).  Not
+        // a run_on_game_thread() post: the anchor hold polls this from inside
+        // a frame, where BML's timer queue does not run.
+        struct assign_notice { uint32_t session = 0, first_tick = 0; };
+        std::deque<assign_notice> assign_queue;
         uint64_t remote_inputs_received = 0;
         static constexpr size_t kMaxQueuedSnapshots = 64;
 
@@ -307,6 +288,10 @@ namespace bmmo::session {
             frames_since_anchor = -1;
             anchor_hash = anchor_surfaces = 0;
             assigned = false;
+            hold_active = false;
+            hold_deadline = {};
+            hold_polls = 0;
+            hold_timed_out = false;
             tick_base = 0;
             input_history.clear();
             previous_cam_valid = false;
@@ -329,14 +314,12 @@ namespace bmmo::session {
             last_physicalize_resend = {};
             corrector.clear();
             hard_sets = blends = 0;
-            mechanism_authority.clear();
+            mechanism_tracking.clear();
+            generations.clear();
             latest_ball_rows.clear();
-            mechanism_snaps = 0;
-            mechanism_resim_writes = 0;
             corrections_logged = 0;
             amend_failures = 0;
             remotes.clear();
-            mechanism_names.clear();
             last_snapshot_tick = 0;
             have_snapshot = false;
             snapshots_received = snapshots_applied = snapshots_stale = 0;
@@ -360,6 +343,7 @@ namespace bmmo::session {
             snapshot_queue.clear();
             event_queue.clear();
             remote_input_queue.clear();
+            assign_queue.clear();
         }
     };
 }

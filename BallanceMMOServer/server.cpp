@@ -760,9 +760,15 @@ public:
                     static_cast<unsigned>(m), static_cast<unsigned>(s.join_orders[m]));
         }
         const uint32_t input_delay = s.input_delay;
+        const uint32_t start_base = s.start_tick_base;
         const float spawn_impulse = s.spawn_impulse;
         physics_sessions_.emplace(id, std::move(s));
-        runner_->create_session(id, map.level, players, input_delay, spawn_impulse, note, std::move(names));
+        // The world is numbered from the same base its members are (design 9.25
+        // phase alignment): its first simulated tick is `start_base`, so the
+        // server and every client take their first step from their anchor under
+        // one tick number instead of the server being `start_base` steps ahead
+        // of them at every number for the rest of the session.
+        runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names));
         return id;
     }
 

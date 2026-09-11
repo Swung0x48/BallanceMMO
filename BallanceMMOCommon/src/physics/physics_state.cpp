@@ -10,6 +10,7 @@
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
 #include "ivp_listener_object.hxx"
+#include "ivp_listener_psi.hxx"
 #include "ivp_sim_unit.hxx"
 #include "ivp_debug_manager.hxx"
 #include "ivp_surface_manager.hxx"
@@ -28,6 +29,24 @@
 #include <vector>
 
 int ivp_srand_read();
+
+#if defined(_WIN32)
+#include <float.h>
+#include <xmmintrin.h>
+#endif
+
+// Diagnostic (design 9.26): the floating-point environment of the calling
+// thread - x87 control word and SSE MXCSR - as "cw=<hex>|mxcsr=<hex>".
+static void bmmo_fp_env_text(char* out, size_t size) {
+#if defined(_WIN32)
+    unsigned int cw = 0;
+    _controlfp_s(&cw, 0, 0);
+    const unsigned int mxcsr = _mm_getcsr();
+    snprintf(out, size, "cw=%08x|mxcsr=%08x", cw, mxcsr);
+#else
+    snprintf(out, size, "cw=-|mxcsr=-");
+#endif
+}
 
 namespace bmmo::physics {
 
@@ -195,6 +214,63 @@ namespace bmmo::physics {
     }
 
     namespace {
+        // Design 9.26 diagnostics: bodies whose first PSIs are dumped
+        // (BMMO_PSI_PROBE=<name prefix>).
+        struct psi_watch {
+            IVP_Real_Object* object;
+            std::string name;
+            int remaining;
+        };
+        std::vector<psi_watch>& psi_watches() {
+            static std::vector<psi_watch>* v = new std::vector<psi_watch>();
+            return *v;
+        }
+        void psi_watch_forget(IVP_Real_Object* object) {
+            auto& v = psi_watches();
+            v.erase(std::remove_if(v.begin(), v.end(), [object](const psi_watch& w) { return w.object == object; }), v.end());
+        }
+        std::string describe_core_for_psi(const IVP_Real_Object* object) {
+            const IVP_Core* core = object ? object->get_core() : nullptr;
+            if (!core) return "?";
+            char line[1200];
+            std::snprintf(line, sizeof(line),
+                "pos=%a,%a,%a|ql=%a,%a,%a,%a|qn=%a,%a,%a,%a|v=%a,%a,%a|w=%a,%a,%a|dv=%a,%a,%a|dw=%a,%a,%a|dpsi=%a,%a,%a|tlast=%a|idt=%a|st=%d",
+                core->pos_world_f_core_last_psi.k[0], core->pos_world_f_core_last_psi.k[1], core->pos_world_f_core_last_psi.k[2],
+                core->q_world_f_core_last_psi.x, core->q_world_f_core_last_psi.y, core->q_world_f_core_last_psi.z, core->q_world_f_core_last_psi.w,
+                core->q_world_f_core_next_psi.x, core->q_world_f_core_next_psi.y, core->q_world_f_core_next_psi.z, core->q_world_f_core_next_psi.w,
+                static_cast<double>(core->speed.k[0]), static_cast<double>(core->speed.k[1]), static_cast<double>(core->speed.k[2]),
+                static_cast<double>(core->rot_speed.k[0]), static_cast<double>(core->rot_speed.k[1]), static_cast<double>(core->rot_speed.k[2]),
+                static_cast<double>(core->speed_change.k[0]), static_cast<double>(core->speed_change.k[1]), static_cast<double>(core->speed_change.k[2]),
+                static_cast<double>(core->rot_speed_change.k[0]), static_cast<double>(core->rot_speed_change.k[1]), static_cast<double>(core->rot_speed_change.k[2]),
+                core->delta_world_f_core_psis.k[0], core->delta_world_f_core_psis.k[1], core->delta_world_f_core_psis.k[2],
+                core->time_of_last_psi.get_seconds(), static_cast<double>(core->i_delta_time), static_cast<int>(core->movement_state));
+            std::string out = line;
+            IVP_Simulation_Unit* unit = const_cast<IVP_Core*>(core)->sim_unit_of_core;
+            if (!unit) return out + "|unit=-";
+            out += "|unit=";
+            for (int i = 0; i < unit->sim_unit_cores.len(); ++i) {
+                IVP_Core* c = unit->sim_unit_cores.element_at(i);
+                IVP_Real_Object* o = c && c->objects.len() ? c->objects.element_at(0) : nullptr;
+                if (i) out += ',';
+                out += o && o->get_name() ? o->get_name() : "?";
+            }
+            out += "|ctrl=";
+            for (int i = 0; i < unit->controller_cores.len(); ++i) {
+                IVP_Sim_Unit_Controller_Core_List* entry = unit->controller_cores.element_at(i);
+                if (i) out += ',';
+                out += std::to_string(static_cast<int>(entry->l_controller->get_controller_priority()));
+                out += '(';
+                for (int k = 0; k < entry->cores_controlled_by.len(); ++k) {
+                    IVP_Core* c = entry->cores_controlled_by.element_at(k);
+                    IVP_Real_Object* o = c && c->objects.len() ? c->objects.element_at(0) : nullptr;
+                    if (k) out += '+';
+                    out += o && o->get_name() ? o->get_name() : "?";
+                }
+                out += ')';
+            }
+            return out;
+        }
+
         class event_log_listener : public IVP_Listener_Object {
         public:
             std::string text;
@@ -211,9 +287,59 @@ namespace bmmo::physics {
                 text += event->real_object && event->real_object->get_name() ? event->real_object->get_name() : "?";
                 text += ';';
             }
-            void event_object_deleted(IVP_Event_Object* event) override { record("deleted", event); }
+            // Design 9.26 diagnostics: the state a body is born with, before
+            // its first PSI - "t=<s> birth <name>|pos=..|q=..|v=..|w=..|m=..|I=..|damp=..|tlast=..|surface=..".
+            void record_birth(IVP_Event_Object* event) {
+                IVP_Real_Object* object = event ? event->real_object : nullptr;
+                const IVP_Core* core = object ? object->get_core() : nullptr;
+                if (!core || text.size() > 256 * 1024) return;
+                uint64_t surface = 0;
+                if (IVP_SurfaceManager* manager = object->get_surface_manager()) {
+                    if (manager->get_type() == IVP_SURMAN_POLYGON) {
+                        const IVP_Compact_Surface* compact =
+                            static_cast<IVP_SurfaceManager_Polygon*>(manager)->get_compact_surface();
+                        if (compact) {
+                            fnv1a64 hasher;
+                            hasher.feed(compact, static_cast<size_t>(compact->get_size()));
+                            surface = hasher.value;
+                        }
+                    }
+                }
+                char fp[48];
+                bmmo_fp_env_text(fp, sizeof(fp));
+                char line[960];
+                std::snprintf(line, sizeof(line),
+                    "t=%.6f birth %s|pos=%a,%a,%a|q=%a,%a,%a,%a|v=%a,%a,%a|w=%a,%a,%a|m=%a|I=%a,%a,%a|damp=%a,%a,%a,%a"
+                    "|tlast=%a|idt=%a|st=%d|surface=%016llx|%s;",
+                    event->environment ? event->environment->get_current_time().get_seconds() : -1.0,
+                    object->get_name() ? object->get_name() : "?",
+                    core->pos_world_f_core_last_psi.k[0], core->pos_world_f_core_last_psi.k[1], core->pos_world_f_core_last_psi.k[2],
+                    core->q_world_f_core_last_psi.x, core->q_world_f_core_last_psi.y, core->q_world_f_core_last_psi.z,
+                    core->q_world_f_core_last_psi.w,
+                    static_cast<double>(core->speed.k[0]), static_cast<double>(core->speed.k[1]), static_cast<double>(core->speed.k[2]),
+                    static_cast<double>(core->rot_speed.k[0]), static_cast<double>(core->rot_speed.k[1]), static_cast<double>(core->rot_speed.k[2]),
+                    static_cast<double>(core->get_mass()),
+                    static_cast<double>(core->get_rot_inertia()->k[0]), static_cast<double>(core->get_rot_inertia()->k[1]),
+                    static_cast<double>(core->get_rot_inertia()->k[2]),
+                    static_cast<double>(core->speed_damp_factor), static_cast<double>(core->rot_speed_damp_factor.k[0]),
+                    static_cast<double>(core->rot_speed_damp_factor.k[1]), static_cast<double>(core->rot_speed_damp_factor.k[2]),
+                    core->time_of_last_psi.get_seconds(), static_cast<double>(core->i_delta_time),
+                    static_cast<int>(core->movement_state), static_cast<unsigned long long>(surface), fp);
+                text += line;
+            }
+            void event_object_deleted(IVP_Event_Object* event) override {
+                record("deleted", event);
+                if (event && event->real_object) psi_watch_forget(event->real_object);
+            }
             void event_object_created(IVP_Event_Object* event) override {
                 record("created", event);
+                record_birth(event);
+                // BMMO_PSI_PROBE=<name prefix>: the first PSIs of every body
+                // born with that prefix go into the event log as "psi" entries.
+                static const char* probe = std::getenv("BMMO_PSI_PROBE");
+                if (probe && *probe && event && event->real_object && event->real_object->get_name()
+                        && std::strncmp(event->real_object->get_name(), probe, std::strlen(probe)) == 0)
+                    psi_watches().push_back({event->real_object, event->real_object->get_name(), 6});
                 // Diagnostics: BMMO_SIM_ALLOC_PERTURB=1 leaks a pseudo-random block after
                 // every body creation so later heap addresses land elsewhere; any change
                 // in the physics then proves a dependence on pointer values.
@@ -234,6 +360,32 @@ namespace bmmo::physics {
         // process exit and would call into a dead listener.
         event_log_listener& g_event_log = *new event_log_listener();
 
+        // Fires at the beginning of every PSI: the watched bodies' state as
+        // the PSI finds them, i.e. the result of the previous PSI.
+        class psi_probe : public IVP_Listener_PSI {
+        public:
+            IVP_Environment* environment = nullptr;
+            void event_PSI(IVP_Event_PSI* event) override {
+                auto& v = psi_watches();
+                if (v.empty() || g_event_log.text.size() > 256 * 1024) return;
+                char stamp[64];
+                std::snprintf(stamp, sizeof(stamp), "t=%.6f ", event && event->environment
+                    ? event->environment->get_current_time().get_seconds() : -1.0);
+                for (auto& w: v) {
+                    g_event_log.text += stamp;
+                    g_event_log.text += "psi ";
+                    g_event_log.text += w.name;
+                    g_event_log.text += '|';
+                    g_event_log.text += describe_core_for_psi(w.object);
+                    g_event_log.text += ';';
+                    --w.remaining;
+                }
+                v.erase(std::remove_if(v.begin(), v.end(), [](const psi_watch& w) { return w.remaining <= 0; }), v.end());
+            }
+            void environment_will_be_deleted(IVP_Environment*) override { environment = nullptr; psi_watches().clear(); }
+        };
+        psi_probe& g_psi_probe = *new psi_probe();
+
         // The engine calls this only for an explicit script wake-up; the
         // environment check already happened in CKIpionManager. It shares the
         // listener's log so the entries keep one format and one drain point.
@@ -249,6 +401,39 @@ namespace bmmo::physics {
             g_event_log.text += object->get_name() ? object->get_name() : "?";
             g_event_log.text += ';';
         }
+
+        // A SetPhysicsForce block built its controller (design 9.26
+        // diagnostics): "t=<s> force <name>|f=..|p=..|<immediate|deferred>".
+        void record_force(IVP_Real_Object* object, const IVP_U_Point* force, const IVP_U_Point* pos, int deferred) {
+            if (!object || !force || !pos || g_event_log.text.size() > 256 * 1024) return;
+            IVP_Environment* environment = object->get_environment();
+            char line[400];
+            std::snprintf(line, sizeof(line), "t=%.6f force %s|f=%a,%a,%a|p=%a,%a,%a|%s;",
+                environment ? environment->get_current_time().get_seconds() : -1.0,
+                object->get_name() ? object->get_name() : "?", force->k[0], force->k[1], force->k[2],
+                pos->k[0], pos->k[1], pos->k[2], deferred ? "deferred" : "immediate");
+            g_event_log.text += line;
+        }
+
+        // A Set Physics Ball Joint built its constraint (design 9.26
+        // diagnostics): "t=<s> constraint <reference>|<attached>|<immediate|deferred>".
+        void record_constraint(IVP_Real_Object* reference, IVP_Real_Object* attached, int deferred) {
+            if (!reference || g_event_log.text.size() > 256 * 1024) return;
+            IVP_Environment* environment = reference->get_environment();
+            char stamp[64];
+            std::snprintf(stamp, sizeof(stamp), "t=%.6f ", environment
+                ? environment->get_current_time().get_seconds() : -1.0);
+            g_event_log.text += stamp;
+            g_event_log.text += "constraint ";
+            g_event_log.text += reference->get_name() ? reference->get_name() : "?";
+            g_event_log.text += '|';
+            g_event_log.text += attached && attached->get_name() ? attached->get_name() : "?";
+            g_event_log.text += deferred ? "|deferred|" : "|immediate|";
+            char fp[48];
+            bmmo_fp_env_text(fp, sizeof(fp));
+            g_event_log.text += fp;
+            g_event_log.text += ';';
+        }
     }
 
     std::string drain_event_log(CKIpionManager* physics) {
@@ -258,10 +443,18 @@ namespace bmmo::physics {
             g_event_log.environment = environment;
             g_event_log.text += "listener installed;";
         }
+        if (environment && g_psi_probe.environment != environment) {
+            environment->add_listener_PSI(&g_psi_probe);
+            g_psi_probe.environment = environment;
+        }
         // The observer is a manager member, so a new environment or manager
         // needs its own hook even though the log itself is shared.
         if (physics && physics->m_ScriptWakeupObserver != &record_script_wakeup)
             physics->m_ScriptWakeupObserver = &record_script_wakeup;
+        if (physics && physics->m_ConstraintObserver != &record_constraint)
+            physics->m_ConstraintObserver = &record_constraint;
+        if (physics && physics->m_ForceObserver != &record_force)
+            physics->m_ForceObserver = &record_force;
         std::string out;
         out.swap(g_event_log.text);
         return out;
@@ -607,49 +800,141 @@ namespace bmmo::physics {
         return true;
     }
 
+    namespace {
+        // What a body write does to the sleep state.  `legacy_wake` is the
+        // unconditional ensure_in_simulation() of the pre-v10 entries: on an
+        // already simulated body that call re-arms IVP's freeze counters, so
+        // v10's `wake` only revives a body that is actually frozen.
+        enum class sleep_action { legacy_wake, wake_if_frozen, freeze_if_simulated, keep };
+
+        bool write_body_state(CKIpionManager* physics, const char* entity_name,
+                              const double position[3], const double rotation[4],
+                              const float linear[3], const float angular[3],
+                              sleep_action action, bool recheck, bool restore_psi_state,
+                              std::string& error) {
+            error.clear();
+            const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+            CK3dEntity* entity = find_entity(physics, name);
+            if (!entity) {
+                error = "no 3D entity named '" + name + "'";
+                return false;
+            }
+            PhysicsObject* object = physics->GetPhysicsObject(entity);
+            IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+            IVP_Core* core = real ? real->get_core() : nullptr;
+            if (!core) {
+                error = "'" + name + "' is not physicalized";
+                return false;
+            }
+            bool beamed = false;
+            // IVP integrates with a leapfrog: at every PSI the core's position
+            // is advanced by the delta written at the PREVIOUS one, and the
+            // rotation of the next PSI was predicted at this one.  The beam
+            // (IVP_Calc_Next_PSI_Solver::set_transformation) zeroes the delta
+            // and collapses q_world_f_core_next_psi onto the pose it is given,
+            // so a body beamed to the state it is already in still loses one
+            // PSI of translation (|v|/66 m) and one PSI of rotation.  A
+            // restore-style write keeps both: the per-PSI rotation increment
+            // is taken across the beam, and the delta is rewritten from the
+            // velocity the caller installs (which at a PSI boundary is what
+            // calc_next_PSI_matrix put there).
+            IVP_U_Quat psi_rotation_step;
+            psi_rotation_step.init();
+            if (restore_psi_state)
+                psi_rotation_step.set_invert_mult(&core->q_world_f_core_last_psi,
+                                                  &core->q_world_f_core_next_psi);
+            if (position && rotation) {
+                IVP_U_Quat quaternion;
+                quaternion.x = rotation[0];
+                quaternion.y = rotation[1];
+                quaternion.z = rotation[2];
+                quaternion.w = rotation[3];
+                IVP_U_Point target;
+                store3(target, position);
+                // The optimized path generates no collision when the body lands
+                // inside another one; a snap write needs the recheck (see the
+                // header).
+                real->beam_object_to_new_position(&quaternion, &target, recheck ? IVP_FALSE : IVP_TRUE);
+                beamed = true;
+            }
+            if (linear) core->speed.set(linear[0], linear[1], linear[2]);
+            if (angular) core->rot_speed.set(angular[0], angular[1], angular[2]);
+            if (restore_psi_state && beamed) {
+                if (linear) core->delta_world_f_core_psis.set(&core->speed);
+                // The pose the caller hands in is what get_body_state reads
+                // back: the core interpolated to the environment's current
+                // time (IVP_Core::inline_calc_at_position / _quaternion), a
+                // fraction f of a PSI past the anchor the beam just set the
+                // core on (core->time_of_last_psi).  The beam stored that
+                // reading AS the anchor, so read back it would already have
+                // moved on by f of a PSI - a body written with the state it
+                // was just read in ends one PSI ahead of itself when f is 1,
+                // which is where the client's frames leave the clock (the
+                // server's world sits on the boundary, f = 0, and never saw
+                // it).  Move the anchor back to where the reading came from,
+                // so a restore is idempotent whatever the phase.
+                IVP_Environment* env = real->get_environment();
+                const IVP_DOUBLE f_t = env->get_current_time() - core->time_of_last_psi;
+                core->pos_world_f_core_last_psi.add_multiple(&core->delta_world_f_core_psis, -f_t);
+                core->m_world_f_core_last_psi.get_position()->set(&core->pos_world_f_core_last_psi);
+                // The rotation reading interpolates last -> next by f; at
+                // either end it is one of the two exactly, and the frames only
+                // ever leave the clock at an end (f = 0 on the server's
+                // boundary, f = 1 on the client's).  Whichever end the reading
+                // is, the other is one carried PSI step away.
+                const IVP_DOUBLE f = f_t * env->get_inv_delta_PSI_time();
+                const IVP_U_Quat reading = core->q_world_f_core_last_psi;
+                if (f > 0.5) {
+                    core->q_world_f_core_next_psi = reading;
+                    core->q_world_f_core_last_psi.set_div_unit_quat(&reading, &psi_rotation_step);
+                    core->q_world_f_core_last_psi.fast_normize_quat();
+                    core->q_world_f_core_last_psi.set_matrix(&core->m_world_f_core_last_psi);
+                } else {
+                    core->q_world_f_core_next_psi.inline_set_mult_quat(&reading, &psi_rotation_step);
+                    core->q_world_f_core_next_psi.fast_normize_quat();
+                }
+            }
+            // A hard set replaces the motion, so pushes queued for the next PSI
+            // must not survive it (design 8.4).
+            core->speed_change.set_to_zero();
+            core->rot_speed_change.set_to_zero();
+            switch (action) {
+                case sleep_action::legacy_wake: real->ensure_in_simulation(); break;
+                case sleep_action::wake_if_frozen:
+                    if (!IVP_MTIS_SIMULATED(core->movement_state)) real->ensure_in_simulation();
+                    break;
+                case sleep_action::freeze_if_simulated:
+                    if (IVP_MTIS_SIMULATED(core->movement_state)) real->disable_simulation();
+                    break;
+                case sleep_action::keep: break;
+            }
+            // Same refresh the manager does after every step, so the render side
+            // follows a body that was moved between ticks.
+            CKIpionManager::UpdateObjectWorldMatrix(real);
+            return true;
+        }
+    }
+
     bool set_body_state(CKIpionManager* physics, const char* entity_name,
                         const double position[3], const double rotation[4],
                         const float linear[3], const float angular[3], bool wake,
                         std::string& error, bool recheck) {
-        error.clear();
-        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
-        CK3dEntity* entity = find_entity(physics, name);
-        if (!entity) {
-            error = "no 3D entity named '" + name + "'";
-            return false;
-        }
-        PhysicsObject* object = physics->GetPhysicsObject(entity);
-        IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
-        IVP_Core* core = real ? real->get_core() : nullptr;
-        if (!core) {
-            error = "'" + name + "' is not physicalized";
-            return false;
-        }
-        if (position && rotation) {
-            IVP_U_Quat quaternion;
-            quaternion.x = rotation[0];
-            quaternion.y = rotation[1];
-            quaternion.z = rotation[2];
-            quaternion.w = rotation[3];
-            IVP_U_Point target;
-            store3(target, position);
-            // The optimized path generates no collision when the body lands
-            // inside another one; a snap write needs the recheck (see the
-            // header).
-            real->beam_object_to_new_position(&quaternion, &target, recheck ? IVP_FALSE : IVP_TRUE);
-        }
-        if (linear) core->speed.set(linear[0], linear[1], linear[2]);
-        if (angular) core->rot_speed.set(angular[0], angular[1], angular[2]);
-        // A hard set replaces the motion, so pushes queued for the next PSI
-        // must not survive it (design 8.4).
-        core->speed_change.set_to_zero();
-        core->rot_speed_change.set_to_zero();
-        if (wake) real->ensure_in_simulation();
-        else if (IVP_MTIS_SIMULATED(core->movement_state)) real->disable_simulation();
-        // Same refresh the manager does after every step, so the render side
-        // follows a body that was moved between ticks.
-        CKIpionManager::UpdateObjectWorldMatrix(real);
-        return true;
+        // Byte for byte what this entry has always done: the unconditional
+        // wake, and no leapfrog restore.
+        return write_body_state(physics, entity_name, position, rotation, linear, angular,
+                                wake ? sleep_action::legacy_wake : sleep_action::freeze_if_simulated,
+                                recheck, false, error);
+    }
+
+    bool set_body_state(CKIpionManager* physics, const char* entity_name,
+                        const double position[3], const double rotation[4],
+                        const float linear[3], const float angular[3], wake_mode mode,
+                        bool recheck, std::string& error) {
+        sleep_action action = sleep_action::keep;
+        if (mode == wake_mode::wake) action = sleep_action::wake_if_frozen;
+        else if (mode == wake_mode::freeze) action = sleep_action::freeze_if_simulated;
+        return write_body_state(physics, entity_name, position, rotation, linear, angular,
+                                action, recheck, true, error);
     }
 
     bool physicalize(CKIpionManager* physics, const char* entity_name, const ball_recipe& recipe,
