@@ -622,6 +622,12 @@ protected:
                     << "; minimum: " << bmmo::minimum_client_version.to_string() << ").";
             nReason = bmmo::connection_end::OutdatedClient;
         }
+        // verify client version not too new
+        else if (msg.version.major > bmmo::current_version.major) {
+            reason << "Client version is too new (client: " << msg.version.to_string()
+                    << "; server: " << bmmo::current_version.to_string() << ").";
+            nReason = bmmo::connection_end::NewerClient;
+        }
         // check if name exists
         else if (username_.contains(bmmo::string_utils::to_lower(msg.nickname))) {
             reason << "A player with the same username \"" << msg.nickname << "\" already exists on this server.";
