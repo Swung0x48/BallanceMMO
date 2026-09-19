@@ -93,11 +93,14 @@ jobs:
       # Setup MSVC command prompt environment vars
       - uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Set VCPKG_ROOT
+        run: echo "VCPKG_ROOT=${{github.workspace}}/submodule/vcpkg" >> $env:GITHUB_ENV
+
       - name: Restore artifacts, setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: b322364f06308bdd24823f9d8f03fe0cc86fd46f
-          vcpkgDirectory: '${{env.VCPKG_ROOT}}'
+          vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+          vcpkgDirectory: '${{github.workspace}}/submodule/vcpkg'
           vcpkgJsonGlob: vcpkg.json
           runVcpkgInstall: false
 
@@ -115,7 +118,7 @@ jobs:
       - name: Configure CMake
         run: |
           echo "`nfile(WRITE version.txt `${BMMO_VER})" | Out-File CMakeLists.txt -Encoding "UTF8" -Append
-          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{env.VCPKG_ROOT}}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
+          cmake -G Ninja -B ${{github.workspace}}/build -S ${{github.workspace}} -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_TOOLCHAIN_FILE="${{github.workspace}}/submodule/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR="${{github.workspace}}" -DYAML_BUILD_SHARED_LIBS=ON -DBUILD_SERVER=ON -DBUILD_CLIENT=OFF
           echo "BMMO_VER=$(cat version.txt)" >> $env:GITHUB_ENV
           echo "SHA_SHORT=$(git rev-parse --short ${{github.sha}})" >> $env:GITHUB_ENV
 
