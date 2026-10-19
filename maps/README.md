@@ -42,30 +42,43 @@ Two of the elements are **relocated** rather than given a bay of their own:
 `P_Modul_41` tilting block, so a run exercises mechanism-against-loose-body
 contact without anyone having to drive into them.
 
-The road is one unbroken slab of solid 5-unit-thick Ballance floor blocks
-(surface at z = 0, underside at z = -5), and **every mechanism stands entirely
-on top of it**.
+The road is solid 5-unit-thick Ballance floor blocks (surface at z = 0,
+underside at z = -5), and **every mechanism sits at its retail height**, with
+an opening cut in the road under the part of it that goes below the surface.
 
-That last part is a deliberate departure from retail. Almost every `P_Modul_*`
-mesh reaches exactly 5 units below its mount point, because the retail levels
-bury its base plate inside a 5-thick floor block. Reproducing that faithfully
-needs either a hole in the road under each mechanism — which the balls fall
-into — or a thickness-less floor, which lets those base plates stick up through
-the road so every mechanism begins the session interpenetrating a static body.
-The first version of this map did the latter, and it was wrong: a mechanism in
-permanent contact with the road settles nonsense, and anything measured from
-that settle is nonsense too. Standing them on the surface beats both: nothing
-clips, nothing can be fallen into, and every mechanism is fully visible.
+Getting that right took three tries, and the two wrong ones are worth knowing:
 
-`build_arena_map.py` has a `check_clipping()` that compares every component
-against every floor block and reports real overlaps; it returns zero for the
-map as committed.
+1. **Thickness-less floor plates.** Almost every `P_Modul_*` mesh reaches 5
+   units below its mount point, because retail buries its base plate inside a
+   5-thick floor block. On plates with no thickness those base plates stick up
+   through the road, so every such mechanism begins the session interpenetrating
+   a static body — it settles nonsense, and anything measured from that settle
+   is nonsense too.
+2. **Standing them all on the surface.** Lifting each mechanism until its
+   lowest point clears the road fixes the clipping, but it raises the mechanism
+   by however deep its buried base is — 5 units for most, 10 for `P_Modul_17`,
+   15.8 for `P_Modul_03` — which carries the *working* parts up with it, out of
+   reach of a rolling ball. The contact measurements caught it: `P_Modul_26`'s
+   sack never came within 8.9 m of a ball and `Modul17`'s arms within 5.0 m.
 
-`PE_Balloon` is lifted clear of the road with the rest, so its pad floats a
-little above the slab. That does *not* stop the level being finished: a human
-playing the arena reached the end and the session recorded a `Finish` event at
-tick 5887, so the balloon's trigger volume is reached without standing on its
-pad.
+What works is the retail height plus a hole sized to the **buried part only**
+(`sunken_footprint()`), not to the mechanism's whole footprint. A swing's post
+is about a metre across though the swing spans 25; cutting the whole 25 would
+leave a hole a ball could drop through. The only gap left is the
+`RECESS_MARGIN` ring of 0.6 units, far narrower than a ball (radius 2).
+
+Two checks in `build_arena_map.py` keep it that way, and both are clean for the
+map as committed:
+
+- `check_clipping()` — every component vertex below the road against every
+  floor block, **per vertex, not per bounding box**: a mechanism legitimately
+  has a box that spans floor blocks its geometry never touches, so a box test
+  reports phantom overlaps here. Returns zero.
+- `check_reach()` — how many components have geometry in the band a rolling
+  ball sweeps (z = 0 .. 4.5). Returns 32/32.
+
+A human playing the arena reached the end and the session recorded a `Finish`
+event at tick 5887, so the level completes.
 
 ### Mount heights
 

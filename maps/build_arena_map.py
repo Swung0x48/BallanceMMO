@@ -171,13 +171,51 @@ def element_bbox(type_name):
 
 
 def mount_dz(type_name):
-    """Where this element's origin goes above the road surface.
+    """Where this element's origin goes above the road surface: the retail
+    height, unchanged.
 
-    The retail height, except for the mechanisms that retail sinks into the
-    floor block: those are lifted until their lowest point rests on the
-    surface, so the road can stay solid and unbroken."""
-    z0 = element_bbox(type_name)[4]
-    return max(MOUNT_DZ[type_name], -z0)
+    An earlier version lifted every mechanism until its lowest point cleared
+    the road, so the road could stay unbroken.  That is wrong, and the contact
+    measurements showed it: a mechanism gets lifted by however deep its buried
+    base is - 5 units for most, 10 for P_Modul_17, 15.8 for P_Modul_03 - which
+    carries the *working* parts that far up too, out of reach of a rolling
+    ball.  P_Modul_26's sack never came within 8.9 m of a ball, Modul17's arms
+    within 5.0 m.  The parts retail buries get a hole instead."""
+    return MOUNT_DZ[type_name]
+
+
+def sunken_footprint(type_name, rz_deg=0.0):
+    """XY bounds of the geometry that sits below the road at the retail height,
+    or None when the element sits entirely on top of it.
+
+    Only that part needs an opening - not the element's whole footprint.  A
+    swing's post is a metre across even though the swing itself spans 25, and
+    cutting the whole 25 would leave a hole a ball could drop through."""
+    dz = MOUNT_DZ[type_name]
+    with PROP_ballance_element.BallanceElementsHelper(scene()) as creator:
+        me = creator.get_element(BET[type_name])
+        below = [(v.co.x, v.co.y) for v in me.vertices if v.co.z + dz < -0.05]
+    if not below:
+        return None
+    a = math.radians(rz_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    xs = [x * ca - y * sa for x, y in below]
+    ys = [x * sa + y * ca for x, y in below]
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def recess_for(type_name, cx, cy, rz_deg=0.0):
+    """The floor opening this element needs at (cx, cy), or None.
+
+    Sized to the geometry that goes below the road, plus a margin.  That margin
+    is the only gap left around the element, and at RECESS_MARGIN it is far
+    narrower than a ball (radius 2), so nothing can drop through."""
+    foot = sunken_footprint(type_name, rz_deg)
+    if foot is None:
+        return None
+    x0, x1, y0, y1 = foot
+    m = RECESS_MARGIN
+    return (cx + x0 - m, cx + x1 + m, cy + y0 - m, cy + y1 + m)
 
 
 def add_component(type_name, sector, loc, rz_deg=0.0, name=None):
@@ -248,16 +286,21 @@ def build():
     x_end = x_last + BAY_SPAN / 2
     y0 = 0.0
 
-    # --- the road: one unbroken slab from the start apron to the end -------
+    # --- the road: solid slab, with an opening under each buried base ------
     x_balloon = x_end + BAY_SPAN * 0.75
     road_x0 = x_start - BAY_SPAN
     road_x1 = x_end + BAY_SPAN * 1.5
-    # tiled rather than one huge quad so no single floor mesh is absurdly big
-    span = BAY_SPAN * 4
-    x = road_x0
-    while x < road_x1 - 1e-6:
-        add_floor_block(x, y0, min(span, road_x1 - x), ARENA_WIDTH)
-        x += span
+    # the start apron carries nothing sunken
+    add_floor_block(road_x0, y0, x_start - BAY_SPAN / 2 - road_x0, ARENA_WIDTH)
+    for i, type_name in enumerate(BAYS):
+        cx = i * BAY_SPAN
+        # a relocated element stands on its host's mechanism, so this bay only
+        # has to open up for what the bay's own mechanism buries
+        host = RELOCATE.get(type_name)
+        floor_with_recess(cx - BAY_SPAN / 2, y0, BAY_SPAN, ARENA_WIDTH,
+                          None if host is not None else recess_for(type_name, cx, MECH_Y))
+    floor_with_recess(x_end, y0, road_x1 - x_end, ARENA_WIDTH,
+                      recess_for('PE_Balloon', x_balloon, PLAY_Y, -180.0))
 
     # --- level start + its resetpoint --------------------------------------
     add_component('PS_FourFlames', 1, (x_start, PLAY_Y, mount_dz('PS_FourFlames')),
@@ -307,36 +350,73 @@ def build():
 
 
 def check_clipping():
-    """Every mechanism against every floor block: report real overlaps.
+    """Every component vertex that is below the road, against every floor block.
 
-    A mechanism may sit *in* a recess, so only an actual intersection of the
-    two bounding boxes counts, and a shared face (the body resting on the
-    surface) does not."""
+    Bounding boxes are no good here.  A mechanism sits in a hole cut to the
+    footprint of its *buried* part only, so its box legitimately spans floor
+    blocks that its geometry never touches - P_Modul_30 is 9.7 units deep
+    overall but only 5 of that goes below the road.  So the test is per vertex:
+    any vertex below the road surface that falls inside a floor block's
+    footprint is real interpenetration."""
     floors, comps = [], []
     for ob in bpy.data.objects:
         if ob.type != 'MESH':
             continue
         with PROP_virtools_group.VirtoolsGroupsHelper(ob) as gp:
             groups = set(gp.iterate_groups())
-        co = [ob.matrix_world @ v.co for v in ob.data.vertices]
-        box = (min(c.x for c in co), max(c.x for c in co),
-               min(c.y for c in co), max(c.y for c in co),
-               min(c.z for c in co), max(c.z for c in co))
         if 'Phys_Floors' in groups and ob.name.startswith('A_Floor'):
-            floors.append((ob.name, box))
+            co = [ob.matrix_world @ v.co for v in ob.data.vertices]
+            floors.append((ob.name, min(c.x for c in co), max(c.x for c in co),
+                           min(c.y for c in co), max(c.y for c in co),
+                           min(c.z for c in co), max(c.z for c in co)))
         elif any(g.startswith(('P_', 'PC_', 'PE_', 'PS_', 'PR_')) for g in groups):
-            comps.append((ob.name, box))
+            comps.append((ob.name, [ob.matrix_world @ v.co for v in ob.data.vertices]))
 
-    # 2 mm: a body resting on the surface shares a face with it, and float
-    # rounding puts that shared face a few microns either side of z = 0.
     eps = 2e-3
-    hits = []
-    for cname, c in comps:
-        for fname, f in floors:
-            ox = min(c[1], f[1]) - max(c[0], f[0])
-            oy = min(c[3], f[3]) - max(c[2], f[2])
-            oz = min(c[5], f[5]) - max(c[4], f[4])
-            if ox > eps and oy > eps and oz > eps:
-                hits.append({'component': cname, 'floor': fname,
-                             'overlap': [round(ox, 3), round(oy, 3), round(oz, 3)]})
-    return {'floors': len(floors), 'components': len(comps), 'clipping': hits}
+    hits = {}
+    for cname, verts in comps:
+        for c in verts:
+            if c.z > -eps:
+                continue                      # on or above the road: fine
+            for (fname, x0, x1, y0, y1, z0, z1) in floors:
+                if x0 + eps < c.x < x1 - eps and y0 + eps < c.y < y1 - eps \
+                        and z0 - eps < c.z < z1 + eps:
+                    key = (cname, fname)
+                    hits[key] = hits.get(key, 0) + 1
+                    break
+    return {'floors': len(floors), 'components': len(comps),
+            'clipping': [{'component': c, 'floor': f, 'vertices_inside': n}
+                         for (c, f), n in sorted(hits.items())]}
+
+
+# A ball of radius 2 rolling on the road sweeps z = 0 .. 4; give it a little
+# slack for bounces and for riding up on something.
+BALL_SWEEP_Z = 4.5
+
+
+def check_reach():
+    """Which mechanisms a rolling ball could actually touch.
+
+    The point of the map is contact, so a mechanism whose geometry is all above
+    the band a ball sweeps is dead weight - that is exactly what lifting them
+    clear of the road did to P_Modul_26, P_Modul_17 and P_Modul_03.  Elements
+    that are *meant* to be out of reach (a balloon, a sack hanging from a rope)
+    will still show up here; the number to watch is how many of the 23 bays
+    have something in the band, not whether every body does."""
+    out = []
+    for ob in bpy.data.objects:
+        if ob.type != 'MESH' or ob.name.startswith(('A_Floor', 'A_Rail')):
+            continue
+        zs = [(ob.matrix_world @ v.co).z for v in ob.data.vertices]
+        in_band = [z for z in zs if -0.05 <= z <= BALL_SWEEP_Z]
+        out.append({
+            'name': ob.name,
+            'z': [round(min(zs), 2), round(max(zs), 2)],
+            'reachable': bool(in_band),
+        })
+    out.sort(key=lambda r: r['name'])
+    return {
+        'reachable': sum(1 for r in out if r['reachable']),
+        'total': len(out),
+        'out_of_reach': [f"{r['name']} z={r['z'][0]}..{r['z'][1]}" for r in out if not r['reachable']],
+    }

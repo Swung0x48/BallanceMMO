@@ -173,7 +173,7 @@ def run_case(args, sector, case_dir):
         f'  spawn_impulse: {args.spawn_impulse}\n'
         f'  journal_dir: {str(journals).replace(chr(92), "/")}\n'
         '  journal_max_mb: 64\n'
-        '  journal_checkpoint_ticks: 660\n'
+        f'  journal_checkpoint_ticks: {args.checkpoint_ticks}\n'
         'auto_flush_log: true\n'
     )
     (case_dir / 'config.yml').write_text(config, encoding='utf8')
@@ -218,14 +218,19 @@ def run_case(args, sector, case_dir):
                 if args.beam_bays == 'auto':
                     # the bays of the sector this run has active: a mechanism in
                     # any other sector is not physicalized, so beaming a ball at
-                    # it would meet nothing
-                    bays = [min((sector - 1) * BAYS_PER_SECTOR + k, N_BAYS - 1)
+                    # it would meet nothing.  --beam-offset rotates the choice so
+                    # a second pass reaches the bays the first pass did not.
+                    in_sector = list(range((sector - 1) * BAYS_PER_SECTOR,
+                                           min(sector * BAYS_PER_SECTOR, N_BAYS)))
+                    bays = [in_sector[(args.beam_offset + k) % len(in_sector)]
                             for k in range(args.players)]
                 else:
                     bays = [int(b) for b in args.beam_bays.split(',')]
                 bay = bays[i % len(bays)]
-                cmd += ['--beam', repr(bay * BAY_SPAN - 9.0), repr(4.0), repr(MECH_Y),
-                        str(args.beam_tick)]
+                # spread the landing points along the lane: without this two
+                # clients sent to the same bay materialise inside each other
+                cmd += ['--beam', repr(bay * BAY_SPAN - 9.0 - i * args.beam_spread),
+                        repr(4.0), repr(MECH_Y), str(args.beam_tick)]
             cmd += ['--host', '--expect', str(args.players)] if i == 0 else ['--join-first']
             p = subprocess.Popen(cmd, cwd=client_dir, stdin=subprocess.DEVNULL,
                                  stdout=cf, stderr=subprocess.STDOUT, creationflags=FLAGS)
@@ -332,6 +337,13 @@ def main():
                     help='"auto" (the bays of the active sector) or comma-separated bay indices; '
                          'client i is beamed just short of bay[i] '
                          'so it meets that mechanism without driving the whole arena')
+    ap.add_argument('--beam-spread', type=float, default=3.0,
+                    help='metres between the beam landing points of successive clients')
+    ap.add_argument('--beam-offset', type=int, default=0,
+                    help='rotate which bays of the sector --beam-bays auto picks')
+    ap.add_argument('--checkpoint-ticks', type=int, default=660,
+                    help='ticks between full body checkpoints in the journals; small '
+                         'values make contact measurable with collision_report.py')
     ap.add_argument('--beam-tick', type=int, default=700,
                     help='session tick at which --beam-bays fires')
     ap.add_argument('--out', default=str(REPO / 'maps/arena-test'))
