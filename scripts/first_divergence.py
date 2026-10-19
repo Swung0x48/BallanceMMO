@@ -28,19 +28,31 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import journal_trace as jt
 
+KIND_BALL = 0
 LOCAL = 2       # JOURNAL_CHECKPOINT_LOCAL
 RECEIVED = 4    # JOURNAL_CHECKPOINT_RECEIVED
 
 
-def worlds(journal, want_local, prefix=''):
-    """tick -> {name: position}, from the checkpoints of the kind asked for.
+def key_of(body):
+    """The identity of a body that means the same thing on every side.
 
-    `prefix` restricts it to bodies whose name starts with it, which is how you
-    compare two CLIENTS: a player's own ball is named `Ball_<type>` locally on
-    every client, so the same name means a different physical ball on each one
-    and comparing by name is meaningless for them.  The map's own bodies - the
-    mechanisms and props, `P_*` - carry the same name everywhere and are the
-    shared world worth comparing.
+    A ball is its OWNER.  Names cannot do it: the server records a ball by
+    owner and leaves the name empty, a client calls its own ball `Ball_<type>`
+    whatever its id, and a mirror's `Ball_<type>_BMMO_<id>` has its trailing
+    digits bumped by Virtools whenever CopyObject has to uniquify it, so the id
+    in the name drifts.  A mechanism or prop is its name, which the map gives
+    it and every side agrees on.
+    """
+    if body['kind'] == KIND_BALL:
+        return ('ball', body['owner'])
+    return ('body', body['name'])
+
+
+def worlds(journal, want_local, prefix=''):
+    """tick -> {key: position}, from the checkpoints of the kind asked for.
+
+    `prefix` keeps only map bodies whose name starts with it (and drops the
+    balls), for when you want the shared world alone.
     """
     out = {}
     for cp in journal.checkpoints():
@@ -51,9 +63,19 @@ def worlds(journal, want_local, prefix=''):
             continue
         row = out.setdefault(cp['tick'], {})
         for b in cp['bodies']:
-            if b['name'] and b['name'].startswith(prefix):
-                row[b['name']] = b['position']
+            key = key_of(b)
+            if prefix and not (key[0] == 'body' and str(key[1]).startswith(prefix)):
+                continue
+            if key[0] == 'body' and not b['name']:
+                continue
+            if key[0] == 'ball' and not b['owner']:
+                continue   # a client that did not know the owner: not comparable
+            row[key] = b['position']
     return out
+
+
+def show(key):
+    return 'ball of %u' % key[1] if key[0] == 'ball' else str(key[1])
 
 
 def compare(server, client, tolerance):
@@ -66,14 +88,14 @@ def compare(server, client, tolerance):
         a, b = server[tick], client[tick]
         only = (set(a) - set(b)) | (set(b) - set(a))
         if only:
-            missing.append((tick, sorted(only)))
+            missing.append((tick, sorted(show(k) for k in only)))
         worst_name, worst = None, 0.0
         for name in set(a) & set(b):
             d = max(abs(a[name][k] - b[name][k]) for k in range(3))
             if d > worst:
                 worst, worst_name = d, name
         if worst > tolerance and first is None:
-            first = (tick, worst_name, worst)
+            first = (tick, show(worst_name), worst)
     return first, len(shared), missing
 
 
@@ -84,8 +106,8 @@ def main():
     ap.add_argument('--tolerance', type=float, default=0.05,
                     help='metres on any axis before a body counts as diverged')
     ap.add_argument('--prefix', default='',
-                    help="only bodies whose name starts with this; use P_ to compare the "
-                         "map's own bodies, whose names mean the same thing on every side")
+                    help="only MAP bodies whose name starts with this, dropping the balls; "
+                         "use P_ to look at the shared world on its own")
     args = ap.parse_args()
 
     server = worlds(jt.read_journal(args.server), want_local=False, prefix=args.prefix)

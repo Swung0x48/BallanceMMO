@@ -1594,9 +1594,17 @@ namespace {
                                    const bmmo::session::input_frame& relayed) {
             if (!args_.rollback || entity.empty() || tick == 0) return;
             if (static_cast<int32_t>(tick - current_tick()) > 0) return;   // not simulated yet
+            if (!rollback_.knows_tick(tick)) return;   // outside the history: nothing to replay from
+            // No record of an input for this body at this tick is NEWS, not a
+            // reason to do nothing: we stepped that tick without driving the
+            // body at all.  It is the normal state of a mirror that was just
+            // rewound into existence - the replay could only feed it the frames
+            // that had arrived by then, which for most of the birth window is
+            // none - so skipping it here was stopping those balls from ever
+            // converging.
             bmmo::session::input_frame predicted{};
-            if (!rollback_.recorded_input(entity, tick, predicted)) return;  // no opinion of our own
-            if (same_frame(predicted, relayed)) return;                     // the prediction was right
+            if (rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, relayed))
+                return;   // the prediction was right
             if (!input_rewind_pending_ || static_cast<int32_t>(tick - input_rewind_tick_) < 0) {
                 input_rewind_pending_ = true;
                 input_rewind_tick_ = tick;
@@ -1746,7 +1754,6 @@ namespace {
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
                 remote.corrector.clear();
-                rewind_for_lifecycle(event);
                 if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && spawn_impulse_ > 0.0f) {
                     const uint32_t idx = bmmo::session::spawn_direction_index(seed_, static_cast<uint8_t>(join_order), event.tick);
                     std::string impulse_error;
@@ -1759,6 +1766,14 @@ namespace {
                 attach_remote_navigation(event.player, remote);
                 logf("remote player %u physicalized (%s) at tick %u%s", event.player, remote.entity.c_str(), event.tick,
                      remote.navigation ? ", predicted" : ", mirrored");
+                // LAST, once the body is fully set up.  The replay only drives
+                // and records a remote that is physicalized AND navigated (see
+                // the tracked set in frame()), and the spawn impulse above is
+                // part of the state the owner had at the stamp tick - rewinding
+                // before either left the mirror outside the rollback entirely,
+                // undriven and unkicked, and the balls ran away instead of
+                // converging (2.2 m at birth to 11 m twenty ticks later).
+                rewind_for_lifecycle(event);
                 break;
             }
             case bmmo::session::event_type::Unphysicalize: {
@@ -2126,9 +2141,20 @@ namespace {
         }
 
         // This client's own world, from the bridge's body list: the balls
-        // (every entity named Ball_*) and the mechanisms it is running.  No
-        // owner is known here, so the name is the identity.
+        // (every entity named Ball_*) and the mechanisms it is running.
+        //
+        // Balls carry the OWNER, because the name cannot be an identity across
+        // sides.  The server records a ball by owner and leaves the name empty;
+        // this client names its own ball Ball_<type> whatever its id, and names
+        // a mirror Ball_<type>_BMMO_<id> - except CopyObject is asked for
+        // CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME, so Virtools increments the
+        // trailing digits whenever that name is already taken by an earlier
+        // lifetime, and the id in the name drifts away from the real one (it
+        // was observed one and then two higher).  The owner is known here for
+        // every ball, so record it and let the comparison use it.
         void journal_local_checkpoint(uint32_t tick) {
+            CK3dEntity* own = current_ball();
+            const std::string own_name = own && own->GetName() ? own->GetName() : std::string();
             std::vector<bmmo_physics_body_state> bodies(256);
             int count = bmmo::physics::list_bodies(engine_->physics(), bodies.data(), static_cast<int>(bodies.size()));
             if (count > static_cast<int>(bodies.size())) {
@@ -2144,6 +2170,12 @@ namespace {
                 state.kind = std::strncmp(body.name, "Ball_", 5) == 0 ? bmmo::session::body_kind::Ball
                                                                      : bmmo::session::body_kind::Mechanism;
                 state.owner = 0;
+                if (state.kind == bmmo::session::body_kind::Ball) {
+                    if (!own_name.empty() && own_name == body.name) state.owner = own_id_;
+                    else
+                        for (const auto& [id, remote]: remotes_)
+                            if (remote.physicalized && remote.entity == body.name) { state.owner = id; break; }
+                }
                 state.name = body.name;
                 for (int k = 0; k < 3; ++k) {
                     state.position[k] = body.position[k];

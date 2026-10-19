@@ -625,6 +625,13 @@ namespace bmmo::session {
         // is the rollback trigger lockstep runs on - the authoritative snapshot
         // is only the fallback for a correction that arrives too late to
         // replay.
+        // Whether `tick` is still in the history at all, i.e. whether there is
+        // anything to replay from it.  Distinguishing this from "that body had
+        // no input recorded at that tick" matters: the second case is news, not
+        // a reason to do nothing - we simulated the tick with no input for a
+        // body that in fact had one.
+        bool knows_tick(uint32_t tick) const { return find_const(tick) != nullptr; }
+
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
             if (!at) return false;

@@ -293,6 +293,85 @@ this from guessing into an answer in one command. What it needs next is the
 ball identity mapping, so the player balls can be compared too - right now the
 only bodies that can be are the map's own.
 
+## What converges, what does not, and the one structural blocker
+
+With the input-driven rollback in and the comparison able to see every body,
+the picture is finally clear, and it splits cleanly in two.
+
+**The balls converge.** Traced against the server tick by tick, a mirror
+appears ~0.5-2.5 m out (which is just the ~21 ticks of its input that have not
+arrived yet), diverges for a few dozen ticks, and then comes back: by the end
+of the session **every ball agrees with the server to 0.00 m**. That is lockstep
+working. A ball's state is a function of the shared inputs, so replaying with
+the inputs re-derives it exactly, and it does.
+
+**The mechanisms do not stay converged.** A plate of `P_Modul_29` agrees
+*exactly* - 0.000 m - for the first ~700 ticks, then creeps: 0.12 m at tick
+736, 9.9 m by the end on the worst client. The errors ramp along the row
+(Platte01 1.06 m, 02 2.65, 03 5.13, 04 7.29, 05 9.81, 06 11.74) rather than
+jumping, and no time shift aligns the two traces, so it is not a phase offset
+and not a joint rebuild - there is no death or reset in these runs at all.
+
+**The blocker is in `rollback.hpp`'s own description of itself:** the replay
+re-simulates *"physics + navigation only, no scripts"*. A ball is navigation; a
+mechanism is a script. So a rollback restores a mechanism from our own record
+and then steps it without the script that drives it, and each rollback perturbs
+it a little. Nothing re-derives it, because unlike a ball it has no input to be
+re-derived from - only an authoritative row can repair it, which is exactly the
+snapshot path being demoted.
+
+The measurement that pins it: the perturbation scales with the rollback count.
+
+| | rollbacks per client | resim ticks | audits disagreeing |
+|---|---|---|---|
+| 300 ms round trip | 109-185 | 1 522-4 850 | 6 / 10 / 9 / **31** |
+| no latency | 16-21 | 23-54 | 7 / 6 / 7 / **8** |
+
+The worst client's disagreements fall from 31 to 8 and the spread across clients
+vanishes, purely by removing the rollbacks. Its 3x penalty was never about
+joining last - it was that it rolled back the most.
+
+So: **lockstep recovers a body whose evolution is a function of the shared
+inputs, and cannot recover one whose evolution depends on a history that has
+already been perturbed.** Closing the remaining gap needs the replay to re-run
+the scripts, or mechanisms to be driven by something replayable. That is an
+engine question, not a protocol one, and it is where this now stands.
+
+## Four bugs found on the way, all real
+
+1. **The missing trigger.** The client only rolled back when a snapshot
+   disagreed, never when a relayed remote input for an already-simulated tick
+   differed from the prediction. That is the GGPO trigger and the whole reason
+   snapshots can be demoted.
+2. **"No recorded input" was treated as "no opinion".** For a mirror just
+   rewound into existence the replay could only feed it the frames that had
+   arrived, which for most of the birth window is none - so there was no
+   recorded input to compare against, the correction was skipped, and those
+   balls could never converge. A missing record is news, not silence.
+3. **The lifecycle rewind ran too early.** It was called before
+   `attach_remote_navigation` and before the spawn impulse, and a remote only
+   enters the tracked set when physicalized **and** navigated - so the replay
+   ran with the mirror untracked, undriven and unkicked. The balls ran away
+   (2.2 m at birth to 11 m twenty ticks later) instead of converging.
+4. **`rewind_to` bumped `stats_.mismatched`.** That counter means "snapshots
+   this client disagreed with" and is read as the distance from the server, so
+   a caller-requested rewind polluted the one metric being used to judge the
+   work, and made a measurement look three times worse than it was.
+
+## Still open
+
+* The prop ball `P_Ball_Paper_MF` disappears from one side's body set after
+  tick ~1 270 and stays missing for the rest of the session. A real
+  asymmetry, not yet explained.
+* `mechanisms: 14/13` in every run: one dictionary entry never resolves to a
+  local body. Harmless here (it is another instance's) but unverified.
+* The name-to-index dictionary is delivered **only in full snapshots**
+  (`mechanism_registry::note_name`, "a delta row carries no name"). If
+  snapshots are to be demoted, that dictionary has to arrive some other way -
+  once at session start, or derived from the map on both sides.
+* `mism` has a floor of 6-8 per client even at zero latency with snapshots
+  off, which nothing above explains.
+
 ## Not covered
 
 Every run here was **single-sector**, with all four players in one bay, so the
