@@ -66,6 +66,7 @@ bool config_manager::load() {
         physics_enabled = yaml_load_value(physics, "enabled", physics_enabled);
         physics_game_root = yaml_load_value(physics, "game_root", physics_game_root);
         physics_snapshot_interval = yaml_load_value(physics, "snapshot_interval", physics_snapshot_interval);
+        physics_full_snapshot_interval = yaml_load_value(physics, "full_snapshot_interval", physics_full_snapshot_interval);
         physics_input_delay = yaml_load_value(physics, "input_delay", physics_input_delay);
         maximum_physics_rooms = yaml_load_value(physics, "maximum_physics_rooms", maximum_physics_rooms);
         physics_debug_trace = yaml_load_value(physics, "debug_trace", physics_debug_trace);
@@ -81,6 +82,7 @@ bool config_manager::load() {
         // compares engine revisions instead.  Drop it from files that have it.
         physics.remove("require_physics_sha");
         if (physics_snapshot_interval == 0) physics_snapshot_interval = 1;
+        if (physics_full_snapshot_interval == 0) physics_full_snapshot_interval = 1;
     }
 
     std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
@@ -207,7 +209,8 @@ void config_manager::save(bool reload_values) {
                    "# - Ban list style: \"uuid: reason\".\n"
                    "# - Mute list style: \"- uuid\".\n"
                    "# - Physics sessions (collision-overhaul): enabled, game_root (directory containing base.cmo),\n"
-                   "#   snapshot_interval (ticks), maximum_physics_rooms, allowed_mods (\"mod id: version\"),\n"
+                   "#   snapshot_interval (ticks), full_snapshot_interval (ticks), maximum_physics_rooms,\n"
+                   "#   allowed_mods (\"mod id: version\"),\n"
                    "#   input_delay (ticks; the FLOOR only - each session sizes its own from the worst\n"
                    "#     round trip among its members when it starts),\n"
                    "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\"),\n"

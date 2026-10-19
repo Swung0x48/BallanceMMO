@@ -50,6 +50,12 @@ public:
     bool physics_enabled = false;
     std::string physics_game_root;                 // directory containing base.cmo
     uint32_t physics_snapshot_interval = 2;        // ticks between snapshots
+    // Ticks between FULL snapshots, which the delta interval above does not
+    // govern: the cadence sends one regardless, and one more whenever the body
+    // set changes (session/timeline.hpp snapshot_cadence::decide).  Raising
+    // both is how a session is run with the snapshot path all but off, holding
+    // the relayed input stream alone responsible for keeping clients in step.
+    uint32_t physics_full_snapshot_interval = 66;
     uint32_t physics_input_delay = 6;              // floor for the per-session input delay;
                                                    // the value itself comes from the members' ping
     uint32_t maximum_physics_rooms = 1;

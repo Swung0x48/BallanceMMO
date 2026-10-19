@@ -34,6 +34,7 @@ import argparse
 import collections
 import json
 import pathlib
+import random
 import re
 import shutil
 import struct
@@ -53,12 +54,17 @@ import threading
 
 class DelayProxy:
     """A UDP relay that holds every datagram for `latency_ms` before passing it
-    on, so a client can be given a worse link than the rest of the field.
+    on, and drops `loss_pct` of them, so a client can be given a worse link
+    than the rest of the field.
 
-    Lifted from scripts/probe.py, which has used it for the same purpose.
+    The delay half is lifted from scripts/probe.py, which has used it for the
+    same purpose.  The loss half matters for any test of what the session does
+    when a message never arrives: loopback does not drop, so an unreliable
+    message path passes such a test by accident and proves nothing about a real
+    link.  Loss applies per datagram in both directions; `dropped` counts them.
     """
 
-    def __init__(self, listen_port, server_addr, latency_ms):
+    def __init__(self, listen_port, server_addr, latency_ms, loss_pct=0.0):
         self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.front.bind(('127.0.0.1', listen_port))
         self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -66,6 +72,11 @@ class DelayProxy:
         self.target = server_addr
         self.client = None
         self.delay = latency_ms / 1000.0
+        # Seeded, so two runs of one case drop the same datagrams.
+        self.loss = loss_pct / 100.0
+        self.rng = random.Random(0x10CC + listen_port)
+        self.dropped = 0
+        self.passed = 0
         self.running = True
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
@@ -86,6 +97,10 @@ class DelayProxy:
                     out, dest = self.front, self.client
                 else:
                     continue
+                if self.loss > 0.0 and self.rng.random() < self.loss:
+                    self.dropped += 1
+                    continue
+                self.passed += 1
                 seq += 1
                 heapq.heappush(queue, (time.monotonic() + self.delay, seq, out, dest, data))
             while queue and queue[0][0] <= time.monotonic():
@@ -243,6 +258,7 @@ def run_case(args, sector, case_dir):
 
     bindir = pathlib.Path(args.bin).resolve()
     handles, children, clients, proxies = [], [], [], []
+    proxy_stats = {}
     server = None
     # --external-server points the clients at a server someone else is running
     # (the Arch WSL one, say).  Its journal still has to land somewhere this
@@ -267,9 +283,9 @@ def run_case(args, sector, case_dir):
             cf = open(case_dir / f'client{i}.log', 'wb')
             handles.append(cf)
             connect_host, connect_port = server_addr
-            if args.latency_ms > 0 and (not laggy or i in laggy):
+            if (args.latency_ms > 0 or args.loss_pct > 0) and (not laggy or i in laggy):
                 pport = args.port + 400 + i
-                proxies.append(DelayProxy(pport, server_addr, args.latency_ms))
+                proxies.append(DelayProxy(pport, server_addr, args.latency_ms, args.loss_pct))
                 connect_host, connect_port = '127.0.0.1', pport
             cmd = [str(bindir / f'BallanceMMOSessionClient{EXE}'),
                    '--root', args.root,
@@ -338,10 +354,21 @@ def run_case(args, sector, case_dir):
                 p.terminate()
         for h in handles:
             h.close()
+        # Prove the loss actually happened: a run that claims to survive
+        # dropped datagrams has to show that some were dropped.  Counted here,
+        # while the proxies are alive; attached to the result once it exists.
+        if any(q.loss for q in proxies):
+            proxy_stats['dropped'] = sum(q.dropped for q in proxies)
+            proxy_stats['passed'] = sum(q.passed for q in proxies)
         for q in proxies:
             q.close()
 
     result = {'sector': sector, 'dir': str(case_dir), 'clients': []}
+    if proxy_stats:
+        result['proxy_dropped'] = proxy_stats['dropped']
+        result['proxy_passed'] = proxy_stats['passed']
+        print('  proxy dropped %d of %d datagrams'
+              % (proxy_stats['dropped'], proxy_stats['dropped'] + proxy_stats['passed']))
     for i, p in enumerate(clients):
         text = (case_dir / f'client{i}.log').read_text(errors='replace')
         statuses = [s for s in text.splitlines() if s.startswith('status:')]
@@ -432,6 +459,9 @@ def main():
                     help='HOST:PORT of a server to use instead of starting one')
     ap.add_argument('--latency-ms', type=float, default=0.0,
                     help='each way delay added to the affected clients links')
+    ap.add_argument('--loss-pct', type=float, default=0.0,
+                    help='percentage of datagrams the proxy drops, each way; on its own it '
+                         'puts a lossless-latency proxy in the path with loss only')
     ap.add_argument('--latency-clients', default='',
                     help='client indices to put behind the delay proxy; empty = all')
     ap.add_argument('--stall-client', type=int, default=-1,

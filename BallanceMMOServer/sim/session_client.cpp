@@ -491,12 +491,20 @@ namespace {
                     auto it = remotes_.find(entry.player);
                     if (it == remotes_.end()) continue;
                     auto& remote = it->second;
-                    if (remote.have_input && msg.tick < remote.input_tick) continue;
+                    // A reordered frame is still authoritative for its
+                    // historical tick: keep it for the rollback without
+                    // letting it replace the live predictor with an older
+                    // input.  The retail mod has always done it in this order
+                    // (physics_session_client.cpp); doing the guard first, as
+                    // this client used to, dropped a late frame on the floor
+                    // and left the rollback replaying a prediction the server
+                    // had already corrected.
+                    remote.inputs[msg.tick] = entry.frame;
+                    while (remote.inputs.size() > 128) remote.inputs.erase(remote.inputs.begin());
+                    if (remote.have_input && msg.tick < remote.input_tick) continue;   // out of order
                     remote.input = entry.frame;
                     remote.input_tick = msg.tick;
                     remote.have_input = true;
-                    remote.inputs[msg.tick] = entry.frame;
-                    while (remote.inputs.size() > 128) remote.inputs.erase(remote.inputs.begin());
                 }
                 break;
             }

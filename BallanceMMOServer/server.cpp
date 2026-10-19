@@ -627,6 +627,7 @@ public:
         rc.game_root = root;
         rc.input_delay = config_.physics_input_delay;
         rc.snapshot_interval = std::max<uint32_t>(1, config_.physics_snapshot_interval);
+        rc.full_snapshot_interval = std::max<uint32_t>(1, config_.physics_full_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
@@ -649,8 +650,9 @@ public:
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, journal %s).", config_.physics_game_root, config_.physics_input_delay,
-               rc.snapshot_interval, rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string());
+               "snapshot interval %u, full every %u, journal %s).", config_.physics_game_root,
+               config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
+               rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string());
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -855,7 +857,27 @@ public:
 
     // Simulation thread: fan a snapshot out to the room.
     // Relay of the inputs the world applied at `tick` (design 9.1): every
-    // member gets the other members' frames, unreliable, one message per tick.
+    // member gets the other members' frames, one message per tick.
+    //
+    // Reliable, not unreliable.  This stream is what every client replays to
+    // reproduce the shared world - it is the same stream --replay-session
+    // rebuilds a room from, bit for bit - so a frame that never arrives is a
+    // divergence that nothing but a snapshot can repair.  The message carries
+    // one tick and no redundancy, so unreliably it survived zero packet loss;
+    // it only looked harmless because a snapshot lands every other tick and
+    // overwrites the consequence.
+    //
+    // A redundancy window would have been the other way to close it, and it is
+    // the wrong one here: at 39 bytes a frame this relay already costs
+    // 83 KB/s per client in a 30-player room (N clients x N-1 frames x 66/s,
+    // so O(N^2) in the room), and a window multiplies exactly that.  Reliable
+    // delivery costs nothing in the steady state and spends only latency on
+    // loss - which is what the client's prediction is for, and what its
+    // rollback window absorbs up to rollback_thresholds::history_ticks.
+    //
+    // Being reliable also puts the relay in the same ordered stream as the
+    // lifecycle events, which is what lockstep wants: a client cannot now see
+    // an event before the inputs of the ticks that preceded it.
     void on_session_inputs(uint32_t session, uint32_t tick,
                            const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied) {
         std::lock_guard lk(state_mutex_);
@@ -875,7 +897,7 @@ public:
             }
             if (msg.entries.empty()) continue;
             msg.serialize();
-            send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+            send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         }
     }
 
