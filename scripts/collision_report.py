@@ -63,6 +63,7 @@ def main():
     pair_min = {}
     pair_hits = collections.Counter()
     mech_min = {}
+    lift = {}
     mech_live = collections.Counter()   # near a ball AND moving
     ball_names = {}
 
@@ -80,6 +81,13 @@ def main():
             if len(balls) < 1:
                 continue
             samples += 1
+            for label, b in balls:
+                y = b['position'][1]
+                kind = label.split('_BMMO_')[0] if '_BMMO_' in label else label
+                entry = lift.setdefault(label, [y, b['position'][0], set()])
+                entry[2].add(kind)
+                if y > entry[0]:
+                    entry[0], entry[1] = y, b['position'][0]
             for i in range(len(balls)):
                 for j in range(i + 1, len(balls)):
                     (na, ba), (nb, bb) = balls[i], balls[j]
@@ -108,6 +116,12 @@ def main():
         print(f'  {mark}  {key[0]} <-> {key[1]}: closest {pair_min[key]:.2f} m, '
               f'{hits} ticks in contact')
     print(f'  pairs that made contact: {sum(1 for k in pair_min if pair_hits[k])}/{len(pair_min)}')
+
+    print('\nball height (y is up; a ball resting on the road sits at 2.0):')
+    for name in sorted(lift, key=lambda n: -lift[n][0]):
+        top, at_x, types = lift[name]
+        print(f'  {name}: highest {top:.2f} at x={at_x:.0f}'
+              + (f'; ball types seen: {", ".join(sorted(types))}' if types else ''))
 
     print('\nball against mechanism (closest approach, and ticks moving while a ball was within %.0f m):'
           % args.near)

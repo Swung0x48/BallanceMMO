@@ -57,7 +57,7 @@ BAYS_PER_SECTOR = 6
 N_BAYS = 23
 
 
-def write_drive_record(path, level, ticks, player, steer=False):
+def write_drive_record(path, level, ticks, player, steer=False, stop_tick=0):
     """An input record that rolls the ball down the arena, into the mechanisms.
 
     Holding "up" walks the ball along the bay centre line, one mechanism after
@@ -78,7 +78,13 @@ def write_drive_record(path, level, ticks, player, steer=False):
         start = 120 + 40 * player
         for tick in range(ticks):
             keys = bytearray(256)
-            if tick >= start:
+            # stop_tick releases the controls: a ball then coasts to a stop
+            # where it is, which is how a mechanism that acts on a *resting*
+            # ball gets tested - a ventilator cannot lift a ball that crosses
+            # its column at 15 units a second.
+            if stop_tick and tick >= stop_tick:
+                pass
+            elif tick >= start:
                 braking = player == 0 and (tick - start) % 500 < 25
                 keys[DIK_DOWN if braking else DIK_UP] = 1
                 if steer:
@@ -207,7 +213,8 @@ def run_case(args, sector, case_dir):
                 cmd += ['--start-sector', str(sector)]
             if args.drive:
                 record = case_dir / f'input{i}.bmrc'
-                write_drive_record(record, args.level, args.seconds * 66 + 200, i, args.steer)
+                write_drive_record(record, args.level, args.seconds * 66 + 200, i,
+                                   args.steer, args.drive_stop)
                 cmd += ['--record', str(record)]
             if args.beam_bays:
                 # Put each ball just short of a mechanism of its own, so the run
@@ -337,6 +344,8 @@ def main():
                     help='"auto" (the bays of the active sector) or comma-separated bay indices; '
                          'client i is beamed just short of bay[i] '
                          'so it meets that mechanism without driving the whole arena')
+    ap.add_argument('--drive-stop', type=int, default=0,
+                    help='tick at which the clients stop driving and coast to a halt')
     ap.add_argument('--beam-spread', type=float, default=3.0,
                     help='metres between the beam landing points of successive clients')
     ap.add_argument('--beam-offset', type=int, default=0,
@@ -347,6 +356,8 @@ def main():
     ap.add_argument('--beam-tick', type=int, default=700,
                     help='session tick at which --beam-bays fires')
     ap.add_argument('--out', default=str(REPO / 'maps/arena-test'))
+    ap.add_argument('--gap', type=float, default=6.0,
+                    help='seconds to wait between cases so the last session fully exits')
     ap.add_argument('--label', default=time.strftime('%Y%m%d%H%M%S'))
     args = ap.parse_args()
 
@@ -388,6 +399,15 @@ def main():
         print(f'  VERDICT: {"PASS" if not problems else "FAIL - " + "; ".join(problems)}',
               flush=True)
         (base / 'summary.json').write_text(json.dumps(results, indent=2), encoding='utf8')
+        # Let the previous session's processes actually go before the next
+        # server binds.  One server plus N headless clients is N+1 full
+        # Ballance engines stepping at 66 Hz; starting the next set while the
+        # last is still tearing down starves the new clients of CPU, and a
+        # client that cannot step its own physics (frames far below tick)
+        # reports input starvation and re-anchors.  That is a host capacity
+        # limit, not a protocol fault - the server's journal still replayed
+        # bit-exact through it - but it makes the suite flap, so leave a gap.
+        time.sleep(args.gap)
 
     print(f'\n{len(results) - failed}/{len(results)} sectors passed; wrote '
           + str(base / 'summary.json'))

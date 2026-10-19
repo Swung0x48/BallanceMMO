@@ -220,22 +220,54 @@ Knobs worth knowing:
 
 ## Results (2026-10-19, VS 18 build in `build-agent/`)
 
-**Broad run — 4 sectors x 4 players x 60 s: 4/4 PASS.** Every journal bit-exact
-(3692-3698 ticks each), `hard=0`, `mech_hard=0`, `resyncs=0`, `starved=0`,
-`mechanisms` resolved N/N in every sector (3, 12, 7 and 30). Across the four
-sectors the clients predicted and had corrected **26 distinct mechanism
-bodies** — all nine `P_Modul_29` plates, all seven `P_Modul_03` walls plus its
-floor and gate, `P_Modul_08_Schaukel`, `P_Modul_19_Flaps`, `P_Modul_25_Bridge`,
-`P_Modul_34_Kiste`/`_Schiebestein`, `P_Modul_01_Pusher`, `P_Ball_*_MF` — and
-8-12 peer balls per sector. All three ball types were physicalized (stone,
-wood and paper), so every trafo fired.
+Every run below passed, and in every one of them the server's journal replayed
+bit for bit with `checkpoint_ticks: 2` — 1350-1520 full body checkpoints per
+session, **0 bodies differing** — with `hard=0`, `mech_hard=0` throughout.
 
-**Deep run — 2 players driving the whole arena: PASS** (with 5 starved ticks in
-3681 on one client, 0.14 %, noted as a warning). Both balls crossed all three
-checkpoints, 24 mechanism bodies were corrected, 18 mechanisms revived, journal
-bit-exact.
+**Regression, 4 sectors x 4 players x 50 s: 4/4 PASS.**
 
-**Solo control — 1 player, same drive: PASS**, whole-run max error 0.086 m.
+**Ball against ball.** Measured with `collision_report.py` over nine
+4-player sessions: **54/54 ball pairs made contact**, 2754 contact ticks,
+closest approach **0.14 m** — two radius-2 balls squeezed almost concentric, so
+these are real collisions, not near misses.
+
+**Ball against mechanism.** Across the regression plus the targeted runs,
+**27 distinct mechanism bodies over 12 mechanism types** were predicted locally
+and reconciled with the server. Four-ball pile-ups onto the two multi-body
+mechanisms both pass with every body involved:
+
+| run | bodies touched | peer balls corrected |
+| --- | --- | --- |
+| 4 balls onto `P_Modul_29` | all 9 plates + `P_Modul_30_Wippe` | 8 |
+| 4 balls onto `P_Modul_03` | all 9 (floor, gate, 7 walls) | 8 |
+
+**The ventilator, with a paper ball.** `P_Trafo_Paper` sits 6 units upstream of
+`P_Modul_18`, so a ball crossing it turns to paper and then meets the fan —
+one ventilator lifts paper, and only paper (six are needed for wood,
+thirty-two for stone). With `--drive-stop` releasing the controls so the ball
+halts in the column instead of crossing it at 15 units a second, the paper ball
+**rose to y = 9.00** against a resting height of 2.0. `BallanceMMOSimTool
+--drop P_Modul_18_01 0` shows the same thing from the other side:
+`P_Modul_18_Particle Script` becomes active the moment the paper ball arrives.
+
+**Deep run — 2 players driving the whole arena: PASS.** Both balls crossed all
+three checkpoints, 24 mechanism bodies corrected, 18 mechanisms revived.
+
+**Solo control — 1 player: PASS**, whole-run max error 0.086 m.
+
+### One failure, and what it was
+
+One sector-3 run in a back-to-back suite failed with resyncs and up to 46 %
+input starvation. It is a host capacity limit, not a protocol fault, and the
+numbers say so plainly: the worst client reported `frames=414` against
+`tick=2983` — it was not stepping its own physics at all — while the server's
+journal still replayed `3034 matched`, 1517 checkpoints, 0 differing, and no
+client took a hard correction. One server plus four headless clients is five
+full Ballance engines at 66 Hz on one box, and sector 3 carries the
+`P_Modul_26` rope-and-sack joint chain. Run alone, the same case passes twice
+out of two. The harness now waits `--gap` seconds between cases so the previous
+session's processes are gone before the next server binds; with that, the
+regression is 4/4.
 
 ### What the runs turned up
 

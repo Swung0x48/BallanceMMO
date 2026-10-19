@@ -74,22 +74,32 @@ BAYS = [
     'P_Modul_08', 'P_Modul_19', 'P_Modul_03', 'P_Dome', 'P_Ball_Stone',
 ]
 
-# Loose bodies parked on top of a moving mechanism, so the run exercises
-# mechanism-against-mechanism contact without anyone having to drive into them.
-# These are RELOCATIONS, not copies: the element still owns its bay index (and
-# so its sector), it is simply placed on the host mechanism instead of on its
-# own patch of road, and its own bay is left as empty road.
+# Elements that are moved off their own bay onto (or next to) another bay's
+# mechanism, so a run exercises contact that would otherwise need luck:
+# type -> (host bay, dx, dy, placement).
 #
-# Do not turn these into extra instances.  The game names a component's body
-# after its element type, so two P_Ball_Wood in one level mean two bodies both
-# called P_Ball_Wood_MF, and the session has to guess which of ours a snapshot
-# row means.  An earlier version of this map did that, 320 m apart, and the
-# runs duly produced a phantom 320.004 m correction on P_Ball_Wood_MF - the
-# exact distance between the two - even though mechanism_tracking.hpp's
-# identity guard is supposed to drop a pick beyond 20 m.
+#   'on_top'  rest it on the host mechanism's highest point
+#   'road'    stand it on the road at its own mount height, dx/dy from the bay
+#
+# These are RELOCATIONS, not copies: the element keeps one instance and takes
+# the host's sector, and its own bay is left as empty road.  Do not turn them
+# into extra instances - the game names a component's body after its element
+# type, so two P_Ball_Wood mean two bodies both called P_Ball_Wood_MF and the
+# session has to guess which of ours a snapshot row means.  An earlier version
+# did that, 320 m apart, and produced a phantom 320.004 m correction on
+# P_Ball_Wood_MF, the exact distance between the two.
 RELOCATE = {
-    'P_Box': 10,        # rests on the P_Modul_30 see-saw (bay 10)
-    'P_Ball_Wood': 3,   # rests on the P_Modul_41 tilting block (bay 3)
+    # on the tilting block, so the block carries a loose body
+    'P_Ball_Wood': (3, 0.0, 0.0, 'on_top'),
+    # beside the see-saw rather than on it: perched on top at z 3.81 the crate
+    # sat above the band a rolling ball sweeps (0 .. 4.5) and no ball could
+    # ever reach it.  On the road a ball can hit it AND shove it into the
+    # see-saw, which is the interaction that was wanted in the first place.
+    'P_Box': (10, -16.0, 0.0, 'road'),
+    # immediately upstream of the ventilator: a ball crossing it turns to paper
+    # and then meets the fan, which is the only ball type one ventilator can
+    # lift (six are needed for wood, thirty-two for stone).
+    'P_Trafo_Paper': (2, -6.0, 0.0, 'road'),
 }
 
 BAY_SPAN = 40.0          # > the widest footprint (P_Modul_03, ~32 units)
@@ -294,11 +304,12 @@ def build():
     add_floor_block(road_x0, y0, x_start - BAY_SPAN / 2 - road_x0, ARENA_WIDTH)
     for i, type_name in enumerate(BAYS):
         cx = i * BAY_SPAN
-        # a relocated element stands on its host's mechanism, so this bay only
-        # has to open up for what the bay's own mechanism buries
-        host = RELOCATE.get(type_name)
+        # a relocated element is not on this bay, so this bay only has to open
+        # up for what its own mechanism buries - and nothing at all when its
+        # element moved away
         floor_with_recess(cx - BAY_SPAN / 2, y0, BAY_SPAN, ARENA_WIDTH,
-                          None if host is not None else recess_for(type_name, cx, MECH_Y))
+                          None if type_name in RELOCATE
+                          else recess_for(type_name, cx, MECH_Y))
     floor_with_recess(x_end, y0, road_x1 - x_end, ARENA_WIDTH,
                       recess_for('PE_Balloon', x_balloon, PLAY_Y, -180.0))
 
@@ -310,17 +321,20 @@ def build():
 
     # --- the mechanisms ----------------------------------------------------
     for i, type_name in enumerate(BAYS):
-        host = RELOCATE.get(type_name)
-        if host is None:
+        move = RELOCATE.get(type_name)
+        if move is None:
             sector = i // BAYS_PER_SECTOR + 1
             pos = (i * BAY_SPAN, MECH_Y, mount_dz(type_name))
         else:
-            # on top of its host mechanism, and in the host's sector so the two
-            # are activated together
+            host, dx, dy, how = move
+            # the host's sector, so the two are activated together
             sector = host // BAYS_PER_SECTOR + 1
-            host_top = element_bbox(BAYS[host])[5] + mount_dz(BAYS[host])
-            z0 = element_bbox(type_name)[4]
-            pos = (host * BAY_SPAN, MECH_Y, host_top - z0 + 0.05)
+            if how == 'on_top':
+                host_top = element_bbox(BAYS[host])[5] + mount_dz(BAYS[host])
+                z = host_top - element_bbox(type_name)[4] + 0.05
+            else:
+                z = mount_dz(type_name)
+            pos = (host * BAY_SPAN + dx, MECH_Y + dy, z)
         add_component(type_name, sector, pos, 0.0, f'{type_name}_01')
 
     # --- checkpoint + resetpoint on each sector boundary -------------------
