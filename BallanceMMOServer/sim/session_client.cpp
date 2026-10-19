@@ -1337,6 +1337,7 @@ namespace {
                 if (bmmo::physics::capture_world_hash(physics, hash, hash_error))
                     journal_.tick(tick, hash, journal_ms());
                 if (journal_checkpoint_due(tick)) journal_local_checkpoint(tick);
+            if (args_.trace && tick % 200 == 0) report_queued_impulses(tick);
             }
         }
 
@@ -1729,6 +1730,48 @@ namespace {
                 names.emplace_back(body.name);
             }
             return names;
+        }
+
+        // How many bodies have an impulse queued for the next PSI at the moment
+        // the rollback captures state (--trace, every 200 ticks)?
+        //
+        // Written to settle whether core->speed_change could be the replay'''s
+        // remaining infidelity: it is hashed (world_hash.hpp feeds it), it is
+        // NOT in bmmo_physics_body_state, and write_body_state zeroes it on
+        // every write (design 8.4), so if it were non-zero at capture time
+        // every restore would drop real motion.
+        //
+        // ANSWER: it is zero for essentially every body - 0 of 10 to 14 at
+        // almost every sample over a 1700-tick solo session, with only
+        // P_Modul_25_Bridge occasionally carrying a constant |dv| of 1.2121.
+        // So there is nothing meaningful to carry and growing the bridge struct
+        // would buy nothing.  Kept because it answers a recurring class of
+        // question cheaply: is some IVP per-step state non-zero when we snap?
+        void report_queued_impulses(uint32_t tick) {
+            const std::string dump = bmmo::physics::describe_cores_exact(engine_->physics());
+            int bodies = 0, queued = 0;
+            std::string worst_name;
+            double worst = 0.0;
+            size_t pos = 0;
+            while ((pos = dump.find("dv=", pos)) != std::string::npos) {
+                ++bodies;
+                // the name is the start of this body's entry: back to the
+                // previous separator
+                const size_t entry = dump.rfind(0x0a, pos);
+                const size_t start = entry == std::string::npos ? 0 : entry + 1;
+                std::string name = dump.substr(start, dump.find(' ', start) - start);
+                double v[3] = {0, 0, 0};
+                if (std::sscanf(dump.c_str() + pos + 3, "%la,%la,%la", &v[0], &v[1], &v[2]) == 3) {
+                    const double mag = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                    if (mag > 0.0) {
+                        ++queued;
+                        if (mag > worst) { worst = mag; worst_name = name; }
+                    }
+                }
+                pos += 3;
+            }
+            logf("queued impulses at tick %u: %d of %d bodies, worst %s |dv|=%.9f",
+                 tick, queued, bodies, worst_name.empty() ? "-" : worst_name.c_str(), worst);
         }
 
         // The input a navigated ball had at `tick`, for a re-simulation.  Only

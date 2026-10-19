@@ -572,12 +572,26 @@ nothing, because the next step re-applies its navigation force - which is
 exactly why the ball replays to 1.2 mm. For a plate in a hinged chain under
 contact, the queued impulse *is* its motion and nothing re-applies it.
 
-So the next change is to extend the captured body state with
-`speed_change`/`rot_speed_change` and restore them instead of zeroing them on a
-replay restore (the zeroing is right for a *hard set* of a ball, which is what
-design 8.4 was about - the two cases need separating). Note that
-`bmmo_physics_body_state` is the bridge struct the retail mod also uses, so
-this touches that ABI and both sides have to be rebuilt together.
+**And that hypothesis is false.** Measured before touching the ABI, with a
+`--trace` diagnostic that counts bodies carrying a queued impulse at the moment
+the rollback captures state (`report_queued_impulses`): it is **zero for
+essentially every body** - 0 of 10 to 14 at almost every sample over a
+1700-tick solo session, with only `P_Modul_25_Bridge` occasionally holding a
+constant |dv| of 1.2121. There is nothing meaningful being dropped, so growing
+the captured state would buy nothing and the bridge ABI stays as it is.
+
+Worth recording how that went wrong: the hypothesis was inferred from two true
+facts - the capture omits `speed_change`, and `write_body_state` zeroes it -
+without ever measuring the quantity itself. The premise was reachable with a
+ten-line diagnostic and an existing dump function (`describe_cores_exact`,
+whose `dv=` field is exactly this). Measure the premise before proposing a
+change to a shared struct.
+
+So the residual is still unexplained. What is left to look at, in rough order of
+how likely they are to carry per-step state that a pose+velocity restore misses
+while barely affecting a force-driven free body: the contact point caches and
+mindist structures, the sleeping/freeze counters, `hk_Local_Constraint_System`
+as a system rather than the individual constraints, and IVP'''s controllers.
 
 ### BallanceTAS has nothing to lend here
 
