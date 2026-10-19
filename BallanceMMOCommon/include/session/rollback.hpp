@@ -132,6 +132,31 @@ namespace bmmo::session {
         // double pose, one substep of phase) no longer rolls the session back.
         double mechanism_position = 0.05;   // metres
         double mechanism_velocity = 0.5;    // m/s
+        // The pairs above are sized for a prediction a tenth of a second old.
+        // A body the client predicted WITHOUT the input that drove it - every
+        // remote ball, every mechanism - is predicted blind for the whole
+        // window between the snapshot's tick and the live one, and that window
+        // is input_delay plus a trip: 20 ticks (0.3 s) at a 300 ms round trip,
+        // three times the horizon the pair was chosen for.  Judging such a body
+        // by the 0.1 s pair asks for accuracy the client has no information
+        // for, and every trip costs a full re-simulation of the window.
+        //
+        // Measured over a 4-player session at a 300 ms round trip
+        // (maps/arena-test, --latency-ms 150): 242 of 417 mismatches were
+        // remote balls whose position agreed to within 5 cm and which breached
+        // on velocity alone, and they carried 58% of all the re-simulation
+        // work.  That is the component that grows with the player count, so it
+        // is the one a 30-player room cannot afford.
+        //
+        // So the pair is widened by how old the prediction is, measured in
+        // those same tenths of a second (7 ticks at 66 Hz): never below 1, so a
+        // short window keeps exactly today's behaviour, and never above the
+        // cap, so a pathological window cannot switch correction off.  The own
+        // ball is never widened - its prediction used the player's own exact
+        // inputs, so an error there is a real divergence rather than news that
+        // has not arrived yet.
+        uint32_t blind_reference_ticks = 7;   // the pair's own horizon, in ticks
+        double blind_scale_max = 4.0;
         // The server's base lead is the input delay (at most 40 ticks,
         // timeline.hpp kInputDelayMaxTicks) plus the round-trip allowance plus
         // a 2-tick margin, so the client's lag can exceed the old 40-tick resim
@@ -261,6 +286,12 @@ namespace bmmo::session {
                 return &it->second;
             };
 
+            // How deep the window is.  Needed before the compare pass, which
+            // judges a blind-predicted body by a tolerance widened for it, and
+            // again below to decide whether the window may be re-simulated.
+            const uint32_t window = current_tick > snapshot.tick ? current_tick - snapshot.tick : 0;
+            const double blind_window_scale = blind_scale(window);
+
             // 1. compare every row we can compare
             bool mismatch = false;
             double worst = 0.0;        // largest position error: the log lines and the stats
@@ -283,10 +314,14 @@ namespace bmmo::session {
                     rows[entity] = ref;
                     continue;
                 }
-                // Each row is judged by the tolerance of its own kind: a
+                // Each row is judged by the tolerance of its own kind - a
                 // mechanism row at the same error as a ball is not a
-                // divergence.
-                const tolerance tol = tolerance_for(body.kind);
+                // divergence - widened by how long we have been predicting it
+                // blind.  The own ball is the one body whose prediction used
+                // the exact inputs that drove it, so it keeps the unwidened
+                // pair (rollback_thresholds, blind_reference_ticks).
+                const bool blind = entity != at->tracked.own_entity;
+                const tolerance tol = tolerance_for(body.kind, blind ? blind_window_scale : 1.0);
                 double dp = 0.0, dv = 0.0;
                 for (int k = 0; k < 3; ++k) {
                     dp += (body.position[k] - recorded->position[k]) * (body.position[k] - recorded->position[k]);
@@ -416,7 +451,7 @@ namespace bmmo::session {
             for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
 
             // 3. re-simulate T+1 .. current with the recorded inputs
-            const uint32_t lag = current_tick > snapshot.tick ? current_tick - snapshot.tick : 0;
+            const uint32_t lag = window;
             if (frozen) {
                 // the scripts stopped the local clock: the authoritative
                 // states stand until the clock runs again.  No re-simulation
@@ -653,10 +688,20 @@ namespace bmmo::session {
             double velocity = 0.0;
         };
 
-        tolerance tolerance_for(body_kind kind) const {
-            if (kind == body_kind::Mechanism)
-                return {thresholds_.mechanism_position, thresholds_.mechanism_velocity};
-            return {thresholds_.position, thresholds_.velocity};
+        tolerance tolerance_for(body_kind kind, double scale) const {
+            const tolerance base = kind == body_kind::Mechanism
+                ? tolerance{thresholds_.mechanism_position, thresholds_.mechanism_velocity}
+                : tolerance{thresholds_.position, thresholds_.velocity};
+            return {base.position * scale, base.velocity * scale};
+        }
+
+        // How far to widen the pair for a body predicted without the input that
+        // drove it, over a window `lag` ticks deep (rollback_thresholds).
+        double blind_scale(uint32_t lag) const {
+            if (thresholds_.blind_reference_ticks == 0) return 1.0;
+            const double s = static_cast<double>(lag) / thresholds_.blind_reference_ticks;
+            if (s < 1.0) return 1.0;
+            return s > thresholds_.blind_scale_max ? thresholds_.blind_scale_max : s;
         }
 
         rollback_thresholds thresholds_;

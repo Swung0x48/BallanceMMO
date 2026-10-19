@@ -436,6 +436,92 @@ TEST(RollbackEngine, VelocityOnlyMismatchNamesTheOffendingBody) {
     EXPECT_EQ(engine.stats().last_mismatch, "Own");
 }
 
+// Every body except the own ball is predicted WITHOUT the input that drove it,
+// and the deeper the window the longer that guess has had to drift.  So the
+// pair those bodies are judged by is widened in proportion to the window, and
+// a velocity-only disagreement that is news over two ticks is not news over
+// twenty-two: re-simulating the window on its account would cost the whole
+// window's physics to fix a velocity the next snapshot will carry anyway.
+TEST(RollbackEngine, ABlindRemoteBallIsJudgedByAPairWidenedForTheWindow) {
+    fake_world deep;
+    deep.bodies["Own"];
+    deep.bodies["Remote"].position[0] = 5.0;
+    rollback_engine deep_engine;
+    std::map<uint32_t, input_frame> deep_inputs;
+    run_ticks(deep, deep_engine, 24, 100, deep_inputs);
+    const int deep_steps = deep.steps;
+
+    // the remote ball is exactly where the client has it, moving 1 m/s faster
+    fake_body fast_remote = deep.bodies["Remote"];
+    fast_remote.linear[0] = 1.0f;
+    const auto deep_snapshot = snapshot_of(2, {ball_body(1, deep.bodies["Own"]), ball_body(2, fast_remote)});
+    // window 22 ticks: 22/7 widens 0.5 m/s past 1 m/s, so this is not news
+    EXPECT_FALSE(deep_engine.on_snapshot(deep.adapter(), deep_snapshot, 24, entity_of, no_input));
+    EXPECT_EQ(deep_engine.stats().matched, 1u);
+    EXPECT_EQ(deep_engine.stats().mismatched, 0u);
+    EXPECT_EQ(deep.steps, deep_steps);
+
+    // the same disagreement over a two-tick window is still a rollback
+    fake_world shallow;
+    shallow.bodies["Own"];
+    shallow.bodies["Remote"].position[0] = 5.0;
+    rollback_engine shallow_engine;
+    std::map<uint32_t, input_frame> shallow_inputs;
+    run_ticks(shallow, shallow_engine, 4, 100, shallow_inputs);
+    fake_body same_remote = shallow.bodies["Remote"];
+    same_remote.linear[0] = 1.0f;
+    const auto shallow_snapshot = snapshot_of(2, {ball_body(1, shallow.bodies["Own"]), ball_body(2, same_remote)});
+    EXPECT_TRUE(shallow_engine.on_snapshot(shallow.adapter(), shallow_snapshot, 4, entity_of, no_input));
+    EXPECT_EQ(shallow_engine.stats().mismatched, 1u);
+}
+
+// The own ball is the exception: its prediction used the player's own exact
+// inputs, so a disagreement there is a real divergence rather than news that
+// has not arrived yet, and the window's depth buys it no slack.
+TEST(RollbackEngine, TheOwnBallKeepsTheUnwidenedPairHoweverDeepTheWindow) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 24, 100, own_inputs);
+
+    std::vector<bmmo::session::rollback_correction> corrections;
+    auto w = world.adapter();
+    w.on_correction = [&](const bmmo::session::rollback_correction& c) { corrections.push_back(c); };
+    fake_body fast_own = world.bodies["Own"];
+    fast_own.linear[0] = 1.0f;
+    const auto snapshot = snapshot_of(2, {ball_body(1, fast_own), ball_body(2, world.bodies["Remote"])});
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 24, entity_of, no_input));
+    EXPECT_EQ(engine.stats().mismatched, 1u);
+    ASSERT_FALSE(corrections.empty());
+    EXPECT_EQ(corrections.front().entity, "Own");
+}
+
+// The widening is capped, so however deep the window gets there is always a
+// disagreement big enough to correct.
+TEST(RollbackEngine, TheBlindPairIsCappedSoCorrectionNeverStops) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 42, 100, own_inputs);
+
+    // window 40 ticks is 5.7x at face value but 4x after the cap, so the pair
+    // stands at 2 m/s and a remote ball 2.5 m/s off is still news.
+    std::vector<bmmo::session::rollback_correction> corrections;
+    auto w = world.adapter();
+    w.on_correction = [&](const bmmo::session::rollback_correction& c) { corrections.push_back(c); };
+    fake_body very_fast = world.bodies["Remote"];
+    very_fast.linear[0] = 2.5f;
+    const auto snapshot = snapshot_of(2, {ball_body(1, world.bodies["Own"]), ball_body(2, very_fast)});
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 42, entity_of, no_input));
+    EXPECT_EQ(engine.stats().mismatched, 1u);
+    ASSERT_FALSE(corrections.empty());
+    EXPECT_EQ(corrections.front().entity, "Remote");
+}
+
 TEST(RollbackEngine, FrozenClockSnapsWithoutResimulation) {
     fake_world world;
     world.bodies["Own"];
