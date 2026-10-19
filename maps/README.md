@@ -116,7 +116,7 @@ plays: the ball spawns as `Ball_Stone`, rolls onto `P_Trafo_Wood_01` at x = 0
 and becomes `Ball_Wood`, then runs the arena at ~15.8 units/s at a steady height
 of 2.02, crossing the checkpoints (`world: sector +2 at tick 1067`).
 
-### One thing worth following up
+### What the runs turned up
 
 In three of the four runs the host client took a single one-tick rollback on
 `P_Modul_29`, about 100 ticks **after its sector was activated** — not at the
@@ -130,8 +130,12 @@ rollback to tick 1167 (P_Modul_29_Platte05 off by 3.328804 m), re-simulated 1 ti
 The client had already started the plate row's drop (local y -1.14, -2.12,
 -2.99 along the row) while the server still had every plate at -0.770: a
 mechanism **phase** offset that grows with plate index, not a position error.
-Rollback absorbed it in one tick and the following ticks are back to
-0.014-0.046 m, so it never became a hard correction and the server's own
-journal is still bit-exact. Design 9.25-9.27 aligned the mechanism start phase
-at the session anchor; this is the same class of thing one sector-activation
-later, and the arena reproduces it on demand.
+
+That was run down to its cause and half of it fixed — see
+[docs/mechanism-phase-at-sector-activation.md](../docs/mechanism-phase-at-sector-activation.md).
+In short: the server runs the union of its players' sectors while each client
+runs only its own, so the player who crosses a checkpoint second starts that
+sector's mechanisms tens of ticks after the server did. The numbers above are
+from before that fix; re-running the harness now gives 0.046 m on the
+`--start-sector 1` run and an unchanged 2.965 m on `--start-sector 3`, which is
+the residual the doc describes.
