@@ -298,6 +298,8 @@ def run_case(args, sector, case_dir):
                    # the client's own world at the same cadence as the server's,
                    # so the two can be compared body by body at the same ticks
                    '--checkpoint-ticks', str(args.checkpoint_ticks)]
+            if args.client_arg:
+                cmd.extend(args.client_arg)
             if sector > 1:
                 cmd += ['--start-sector', str(sector)]
             if args.drive:
@@ -462,6 +464,8 @@ def main():
                     help='HOST:PORT of a server to use instead of starting one')
     ap.add_argument('--latency-ms', type=float, default=0.0,
                     help='each way delay added to the affected clients links')
+    ap.add_argument('--client-arg', action='append', default=[],
+                    help='extra argument passed straight to every session client; repeatable')
     ap.add_argument('--loss-pct', type=float, default=0.0,
                     help='percentage of datagrams the proxy drops, each way; on its own it '
                          'puts a lossless-latency proxy in the path with loss only')

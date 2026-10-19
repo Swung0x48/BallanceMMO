@@ -85,6 +85,15 @@ namespace {
         // with the server, it has to be dense enough to bisect - pass 2, the
         // same as the server's journal_checkpoint_ticks.
         uint32_t checkpoint_ticks = 660;
+        // --force-rollback <every>:<depth>: rewind `depth` ticks every `every`
+        // ticks, with no network reason to.  Isolates how faithful a replay is
+        // from everything else: in a solo session the world is a pure function
+        // of the recorded inputs, so a run with forced rollbacks must produce
+        // the same per-tick hashes as one without.  Whatever differs is state
+        // the replay does not restore - which is the question to answer before
+        // trying to make the scripts replayable.
+        uint32_t force_rollback_every = 0;
+        uint32_t force_rollback_depth = 12;
         bool join_first = false;
         uint32_t room = 0;
         bool host = false;
@@ -127,6 +136,15 @@ namespace {
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
             else if (arg == "--record") { if (!(v = next())) return false; out.record = v; }
             else if (arg == "--journal") { if (!(v = next())) return false; out.journal = v; }
+            else if (arg == "--force-rollback") {
+                if (!(v = next())) return false;
+                const std::string spec = v;
+                const size_t colon = spec.find(':');
+                out.force_rollback_every = static_cast<uint32_t>(std::atoi(spec.substr(0, colon).c_str()));
+                if (colon != std::string::npos)
+                    out.force_rollback_depth = static_cast<uint32_t>(std::atoi(spec.substr(colon + 1).c_str()));
+                if (out.force_rollback_depth == 0) out.force_rollback_depth = 1;
+            }
             else if (arg == "--checkpoint-ticks") {
                 if (!(v = next())) return false;
                 out.checkpoint_ticks = static_cast<uint32_t>(std::max(1, std::atoi(v)));
@@ -1019,6 +1037,7 @@ namespace {
             // After the events, so a birth and an input correction in the same
             // frame leave the world replayed from the earlier of the two.
             replay_corrected_inputs();
+            maybe_force_rollback();
             if (!engine_->tick(error)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             frames_since_anchor_ = f;
             const uint32_t tick = current_tick();
@@ -1610,6 +1629,23 @@ namespace {
                 input_rewind_tick_ = tick;
                 input_rewind_entity_ = entity;
             }
+        }
+
+        // Rewind for no reason at all, on a fixed cadence (--force-rollback).
+        // A solo session's world is a pure function of its recorded inputs, so
+        // the hashes of a run with these must equal those of a run without; any
+        // difference is state the replay failed to restore.
+        void maybe_force_rollback() {
+            if (!args_.rollback || args_.force_rollback_every == 0) return;
+            const uint32_t now = current_tick();
+            if (now < args_.force_rollback_depth + 2) return;
+            if (now % args_.force_rollback_every != 0) return;
+            auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
+                return recorded_input_at(name, tick, out);
+            };
+            const uint32_t anchor = now - args_.force_rollback_depth;
+            if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) ++forced_rollbacks_;
+            else ++forced_rollbacks_missed_;
         }
 
         // One replay for every input correction this frame collected.
@@ -2226,7 +2262,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
-                 "life=%llu/%llu inrew=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -2237,6 +2273,7 @@ namespace {
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
                  static_cast<unsigned long long>(life_rewinds_), static_cast<unsigned long long>(life_rewinds_missed_),
                  static_cast<unsigned long long>(input_rewinds_), static_cast<unsigned long long>(input_rewinds_missed_),
+                 static_cast<unsigned long long>(forced_rollbacks_), static_cast<unsigned long long>(forced_rollbacks_missed_),
                  own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
                  static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
@@ -2276,6 +2313,7 @@ namespace {
         uint8_t snapshot_interval_ = 2, input_delay_ = 6;
         uint64_t life_rewinds_ = 0, life_rewinds_missed_ = 0;
         uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
+        uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;

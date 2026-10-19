@@ -371,6 +371,75 @@ simply stops *evaluating* a body it does not track, so the counter improved
 while the world got slightly worse. The second time in this session that a
 change quietly removed the metric being used to judge it.)
 
+## The replay, measured in isolation: faithful for balls, not for mechanisms
+
+Everything above was measured through the network, where latency, birth windows
+and four clients all move at once. `--force-rollback <every>:<depth>` takes all
+of that away: it rewinds on a fixed cadence with no network reason to, so in a
+**solo** session - where the world is a pure function of one recorded input
+track - a run with forced rollbacks must produce the same per-tick hashes as a
+run without. Anything that differs is state the replay failed to restore, and
+nothing else.
+
+It differs immediately. Forty rewinds of depth 12, solo:
+
+```
+hash: matched=33/1632 first_divergence=41
+```
+
+Tick 40 is the first forced rewind. Everything before it matches, nothing after
+- one depth-12 replay permanently changes the world.
+
+Split by body kind, against the same solo run without the rewinds:
+
+| | first difference | mean | max |
+|---|---|---|---|
+| the ball | tick 242 | **0.0017 m** | **0.0050 m** |
+| the mechanisms (`P_Modul*`) | tick 42 | **23.3 m** | 310 m |
+
+**The replay is faithful for a navigated body to within 5 mm, and
+catastrophically unfaithful for a script-driven one on the very first rewind.**
+That is the whole blocker, in one measurement, with no network involved.
+
+The mechanism is mechanical and visible in the numbers: the replay's `step()`
+steps the **whole** physics world, and a mechanism's script does not run during
+a replay, so the plates get `depth` steps with nothing holding them and simply
+fall - 2.1 m on the first rewind, peaking at 2.4 m, then decaying as the live
+script pulls them back. It also explains why taking them out of the tracked set
+changed nothing: not being *restored* does not stop them being *stepped*.
+
+### Putting them back afterwards does not work either
+
+The tempting shortcut - capture the mechanisms before the rewind and write them
+back after, on the grounds that their script is the authority anyway - makes it
+worse, not better: mean error 24.3 m becomes 47.1 m. The balls have been
+replayed to new positions meanwhile, so a plate put back can be inside one, and
+the contact recheck launches it. Tried, measured, reverted.
+
+### So the remaining work is exactly: run the scripts during the replay
+
+What that needs, in the order the obstacles bite:
+
+1. **Behaviour state at the anchor tick.** A progression block mid-animation is
+   at its live state, not its tick-T state, so replaying from it produces the
+   wrong motion. `CKSaveObjectState` on a `CKBehavior` returns only the base
+   chunk unless `CK_STATESAVE_BEHAVIORONLY` - the full graph serialization is
+   file-oriented - so this needs either that flag to be made to work for a
+   round trip, or the specific driving blocks' state captured by hand. Finding
+   *which* blocks drive `P_Modul_29` is the next concrete step
+   (`--debug-frames` on the SimTool gives a block-level execution trace).
+2. **The behaviour clock.** `headless_engine::tick()` is `context_->Process()`,
+   which advances `CKTimeManager`. Replaying N ticks advances it N further, so
+   anything reading absolute time sees the future. The fixed delta means the
+   per-tick *deltas* stay right, which may be enough - worth checking before
+   building anything.
+3. **Suppressing the frame's other side effects** during a replay: the level
+   request advance, `drain_player_commands`, the Random-block re-patch.
+
+None of that is reachable from the rollback engine alone; it is an engine
+change, which is what the measurement above was for - it says the work is
+worth it, and it says the balls do not need it.
+
 ## Four bugs found on the way, all real
 
 1. **The missing trigger.** The client only rolled back when a snapshot
