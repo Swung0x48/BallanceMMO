@@ -64,6 +64,7 @@ def main():
     pair_hits = collections.Counter()
     mech_min = {}
     lift = {}
+    busiest = (0, None, 0, 0)   # total, tick, ball pairs, mechanism bodies
     mech_live = collections.Counter()   # near a ball AND moving
     ball_names = {}
 
@@ -97,12 +98,22 @@ def main():
                         pair_min[key] = d
                     if d < args.contact:
                         pair_hits[key] += 1
+            tick_pairs = 0
+            for i in range(len(balls)):
+                for j in range(i + 1, len(balls)):
+                    if dist(balls[i][1]['position'], balls[j][1]['position']) < args.contact:
+                        tick_pairs += 1
+            tick_mechs = 0
             for mname, mb in mechs:
                 nearest = min(dist(mb['position'], b['position']) for _, b in balls)
                 if mname not in mech_min or nearest < mech_min[mname]:
                     mech_min[mname] = nearest
                 if nearest < args.near and speed(mb['linear']) > args.moving:
                     mech_live[mname] += 1
+                    tick_mechs += 1
+            total = tick_pairs + tick_mechs
+            if total > busiest[0]:
+                busiest = (total, tick, tick_pairs, tick_mechs)
 
     print(f'{pathlib.Path(args.journal).name}: {samples} sampled checkpoint ticks, '
           f'{len(ball_names)} balls, {len(mech_min)} mechanism bodies')
@@ -116,6 +127,10 @@ def main():
         print(f'  {mark}  {key[0]} <-> {key[1]}: closest {pair_min[key]:.2f} m, '
               f'{hits} ticks in contact')
     print(f'  pairs that made contact: {sum(1 for k in pair_min if pair_hits[k])}/{len(pair_min)}')
+
+    if busiest[1] is not None:
+        print(f'\nbusiest single tick: {busiest[0]} simultaneous contacts at tick {busiest[1]} '
+              f'({busiest[2]} ball pairs touching, {busiest[3]} mechanism bodies moving near a ball)')
 
     print('\nball height (y is up; a ball resting on the road sits at 2.0):')
     for name in sorted(lift, key=lambda n: -lift[n][0]):

@@ -245,6 +245,38 @@ Knobs worth knowing:
   into each other. Do not add `--steer`: a pre-recorded steer has no feedback,
   so the lateral input accumulates and the balls end up 15-20 units off line.
 
+### Multi-body pile-ups
+
+Sending every client to the *same* bay with a small `--beam-spread` puts four
+balls and a multi-body mechanism in contact at once, which is the case a
+one-ball-one-mechanism run never reaches. Three of them, all passing with the
+journal bit-exact:
+
+```bash
+# four balls onto P_Modul_29's nine plates (plus the see-saw next door)
+python scripts/arena_map_test.py --bin build-agent/BallanceMMOServer \
+    --root "<game>" --level 13 --sectors 2 --players 4 --seconds 50 \
+    --drive --beam-bays 9,9,9,9 --beam-spread 2 --checkpoint-ticks 2
+
+# four balls onto P_Modul_03's nine bodies
+... --sectors 4 --beam-bays 20,20,20,20 --beam-spread 2
+
+# four balls and the crate onto the see-saw
+... --sectors 2 --beam-bays 10,10,10,10 --beam-spread 2
+```
+
+`collision_report.py` reports the busiest single tick of each run, which is
+what says the contacts really were simultaneous rather than one after another:
+
+| scenario | bodies touched | busiest tick |
+| --- | --- | --- |
+| 4 balls -> `P_Modul_29` | all 9 plates + `P_Modul_30_Wippe` | **9 mechanism bodies moving near a ball at once** |
+| 4 balls -> `P_Modul_03` | all 9 (floor, gate, 7 walls) | **6 ball pairs touching at once** — every pair of 4 balls |
+| 4 balls + crate -> see-saw | `P_Box_MF`, `P_Modul_30_Wippe`, 5 plates | 6 ball pairs at once |
+
+All three report 6/6 ball pairs in contact over the run and 7-8 peer balls
+corrected.
+
 ## Results (2026-10-19, VS 18 build in `build-agent/`)
 
 Every run below passed, and in every one of them the server's journal replayed
