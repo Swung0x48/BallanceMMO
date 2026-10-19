@@ -94,7 +94,11 @@ RELOCATE = {
     # a player ball that arrives has something of its own mass to shove: the
     # stone prop is 10 kg against the paper ball's 0.2.
     'P_Ball_Wood': (3, 0.0, 0.0, 'on_top'),     # on the tilting block
-    'P_Ball_Stone': (10, 0.0, 0.0, 'on_top'),   # on the see-saw
+    # on the road just east of the see-saw, not on top of it: perched on the
+    # plank it sat at z 3.81, above the band a rolling ball sweeps, so only
+    # the see-saw itself could ever move it.  Here a player can hit it, and
+    # shove it back onto the plank.
+    'P_Ball_Stone': (10, 16.0, 0.0, 'road'),
     'P_Ball_Paper': (9, 0.0, 0.0, 'on_top'),    # on P_Modul_29's plate row
     # beside the see-saw rather than on it: perched on top at z 3.81 the crate
     # sat above the band a rolling ball sweeps (0 .. 4.5) and no ball could

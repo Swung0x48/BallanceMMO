@@ -310,7 +310,7 @@ def run_case(args, sector, case_dir):
                 # the driving lane (the checkpoints and resetpoints live there,
                 # 28 units off the mechanism row - beaming at a checkpoint and
                 # aiming at the mechanism row simply misses it)
-                cmd += ['--beam', repr(bay * BAY_SPAN - 9.0 - i * args.beam_spread),
+                cmd += ['--beam', repr(bay * BAY_SPAN + args.beam_dx - i * args.beam_spread),
                         repr(4.0), repr(args.beam_y if args.beam_y >= 0 else MECH_Y),
                         str(args.beam_tick)]
             if args.stall_client == i and args.stall_ms > 0:
@@ -447,6 +447,8 @@ def main():
     ap.add_argument('--checkpoint-ticks', type=int, default=660,
                     help='ticks between full body checkpoints in the journals; small '
                          'values make contact measurable with collision_report.py')
+    ap.add_argument('--beam-dx', type=float, default=-9.0,
+                    help='offset from the bay centre for the first beam landing; the default puts the ball just short of the bay mechanism')
     ap.add_argument('--beam-y', type=float, default=-1.0,
                     help='lane to beam onto: %g for the mechanism row, %g for the '
                          'driving lane; default is the mechanism row' % (MECH_Y, PLAY_Y))

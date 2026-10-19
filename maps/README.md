@@ -277,6 +277,33 @@ what says the contacts really were simultaneous rather than one after another:
 All three report 6/6 ball pairs in contact over the run and 7-8 peer balls
 corrected.
 
+### Prop balls
+
+`P_Ball_*_MF` are real movable bodies, so they are placed where something can
+actually act on them:
+
+| prop | where | why |
+| --- | --- | --- |
+| `P_Ball_Wood` | on the tilting block | the block carries it |
+| `P_Ball_Paper` | on `P_Modul_29`'s plate row | the plates carry it |
+| `P_Ball_Stone` | on the road east of the see-saw | 10 kg, and a player can hit it |
+
+The stone one started on top of the see-saw, which was wrong: perched on the
+plank it sat at z 3.81, above the band a rolling ball sweeps, so only the
+see-saw could ever move it. On the road it is at z 0..4 and
+`collision_report.py` measures a player ball closing to **2.88 m** of it —
+contact for two radius-2 bodies is 4.0 — and disturbing it for 178 ticks.
+
+**Known limitation.** A ball cannot roll off the see-saw's plank onto the road
+to the east: driven that way it stops about 0.8 m short. The opening under the
+see-saw is cut from `sunken_footprint()`, which measures the PH placeholder in
+its *authored, tilted* pose, while at runtime the stoppers hold the plank
+level — so the hole is wider than it needs to be and the plank ends short of
+the road, leaving a lip. Retail leaves a narrower gap (its floor reaches to
+±7.4 of the see-saw centre, against ±13 here). Aiming the beam with
+`--beam-dx` reaches the stone prop regardless, but a ball cannot *drive* across
+the see-saw and off the far side.
+
 ### Against a Linux server (Arch WSL)
 
 The server does not have to be the Windows one. Built in Arch WSL (gcc 16.2.1,
