@@ -45,6 +45,60 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 EXE = '.exe' if sys.platform == 'win32' else ''
 
+import heapq
+import select
+import socket
+import threading
+
+
+class DelayProxy:
+    """A UDP relay that holds every datagram for `latency_ms` before passing it
+    on, so a client can be given a worse link than the rest of the field.
+
+    Lifted from scripts/probe.py, which has used it for the same purpose.
+    """
+
+    def __init__(self, listen_port, server_addr, latency_ms):
+        self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.front.bind(('127.0.0.1', listen_port))
+        self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.back.bind(('127.0.0.1', 0))
+        self.target = server_addr
+        self.client = None
+        self.delay = latency_ms / 1000.0
+        self.running = True
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def run(self):
+        queue, seq = [], 0
+        while self.running:
+            due = max(0, queue[0][0] - time.monotonic()) if queue else 0.01
+            for sock in select.select([self.front, self.back], [], [], min(0.01, due))[0]:
+                try:
+                    data, addr = sock.recvfrom(65535)
+                except ConnectionResetError:
+                    continue      # Windows reports ICMP port-unreachable after an exit
+                if sock is self.front:
+                    self.client = addr
+                    out, dest = self.back, self.target
+                elif self.client is not None:
+                    out, dest = self.front, self.client
+                else:
+                    continue
+                seq += 1
+                heapq.heappush(queue, (time.monotonic() + self.delay, seq, out, dest, data))
+            while queue and queue[0][0] <= time.monotonic():
+                _, _, out, dest, data = heapq.heappop(queue)
+                out.sendto(data, dest)
+
+    def close(self):
+        self.running = False
+        self.thread.join(timeout=1)
+        self.front.close()
+        self.back.close()
+
+
 DIK_UP, DIK_DOWN, DIK_LEFT, DIK_RIGHT = 200, 208, 203, 205
 
 # the arena's own geometry, from maps/build_arena_map.py.  The driving lane and
@@ -165,7 +219,10 @@ def journal_events(args, journal):
 
 def run_case(args, sector, case_dir):
     case_dir.mkdir(parents=True, exist_ok=False)
-    journals = case_dir / 'journals'
+    # an external server writes its journal wherever its own config says;
+    # --journal-dir points the replay check at it
+    journals = (pathlib.Path(args.journal_dir).resolve() if args.journal_dir
+               else case_dir / 'journals')
     config = (
         'rooms_enabled: true\n'
         'maximum_members: 8\n'
@@ -185,25 +242,38 @@ def run_case(args, sector, case_dir):
     (case_dir / 'config.yml').write_text(config, encoding='utf8')
 
     bindir = pathlib.Path(args.bin).resolve()
-    handles, children, clients = [], [], []
+    handles, children, clients, proxies = [], [], [], []
+    server = None
+    # --external-server points the clients at a server someone else is running
+    # (the Arch WSL one, say).  Its journal still has to land somewhere this
+    # side can read, which is what journal_dir in its own config decides.
+    host, _, port = (args.external_server or f'127.0.0.1:{args.port}').partition(':')
+    server_addr = (host, int(port))
     try:
-        sf = open(case_dir / 'server.log', 'wb')
-        handles.append(sf)
-        server = subprocess.Popen(
-            [str(bindir / f'BallanceMMOServer{EXE}'), '--port', str(args.port)],
-            cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
-            stderr=subprocess.STDOUT, creationflags=FLAGS)
-        children.append(server)
-        time.sleep(1.5)
+        if not args.external_server:
+            sf = open(case_dir / 'server.log', 'wb')
+            handles.append(sf)
+            server = subprocess.Popen(
+                [str(bindir / f'BallanceMMOServer{EXE}'), '--port', str(args.port)],
+                cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
+                stderr=subprocess.STDOUT, creationflags=FLAGS)
+            children.append(server)
+            time.sleep(1.5)
 
+        laggy = {int(x) for x in args.latency_clients.split(',') if x.strip()}
         for i in range(args.players):
             client_dir = case_dir / f'client{i}'
             client_dir.mkdir()
             cf = open(case_dir / f'client{i}.log', 'wb')
             handles.append(cf)
+            connect_host, connect_port = server_addr
+            if args.latency_ms > 0 and (not laggy or i in laggy):
+                pport = args.port + 400 + i
+                proxies.append(DelayProxy(pport, server_addr, args.latency_ms))
+                connect_host, connect_port = '127.0.0.1', pport
             cmd = [str(bindir / f'BallanceMMOSessionClient{EXE}'),
                    '--root', args.root,
-                   '--server', f'127.0.0.1:{args.port}',
+                   '--server', f'{connect_host}:{connect_port}',
                    '--name', f'Arena{i}',
                    '--level', str(args.level),
                    '--seconds', str(args.seconds),
@@ -236,8 +306,15 @@ def run_case(args, sector, case_dir):
                 bay = bays[i % len(bays)]
                 # spread the landing points along the lane: without this two
                 # clients sent to the same bay materialise inside each other
+                # --beam-y picks the line: MECH_Y for a mechanism, PLAY_Y for
+                # the driving lane (the checkpoints and resetpoints live there,
+                # 28 units off the mechanism row - beaming at a checkpoint and
+                # aiming at the mechanism row simply misses it)
                 cmd += ['--beam', repr(bay * BAY_SPAN - 9.0 - i * args.beam_spread),
-                        repr(4.0), repr(MECH_Y), str(args.beam_tick)]
+                        repr(4.0), repr(args.beam_y if args.beam_y >= 0 else MECH_Y),
+                        str(args.beam_tick)]
+            if args.stall_client == i and args.stall_ms > 0:
+                cmd += ['--pause-at', str(args.stall_at), '--pause-ms', str(args.stall_ms)]
             cmd += ['--host', '--expect', str(args.players)] if i == 0 else ['--join-first']
             p = subprocess.Popen(cmd, cwd=client_dir, stdin=subprocess.DEVNULL,
                                  stdout=cf, stderr=subprocess.STDOUT, creationflags=FLAGS)
@@ -247,19 +324,22 @@ def run_case(args, sector, case_dir):
 
         for p in clients:
             p.wait(timeout=args.seconds + 180)
-        server.stdin.write(b'sessions\nstop\n')
-        server.stdin.flush()
-        try:
-            server.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            server.terminate()
-            server.wait(timeout=10)
+        if server is not None:
+            server.stdin.write(b'sessions\nstop\n')
+            server.stdin.flush()
+            try:
+                server.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                server.terminate()
+                server.wait(timeout=10)
     finally:
         for p in children:
             if p.poll() is None:
                 p.terminate()
         for h in handles:
             h.close()
+        for q in proxies:
+            q.close()
 
     result = {'sector': sector, 'dir': str(case_dir), 'clients': []}
     for i, p in enumerate(clients):
@@ -346,6 +426,20 @@ def main():
                          'so it meets that mechanism without driving the whole arena')
     ap.add_argument('--drive-stop', type=int, default=0,
                     help='tick at which the clients stop driving and coast to a halt')
+    ap.add_argument('--journal-dir', default='',
+                    help="where the server writes journals, when it is not ours")
+    ap.add_argument('--external-server', default='',
+                    help='HOST:PORT of a server to use instead of starting one')
+    ap.add_argument('--latency-ms', type=float, default=0.0,
+                    help='each way delay added to the affected clients links')
+    ap.add_argument('--latency-clients', default='',
+                    help='client indices to put behind the delay proxy; empty = all')
+    ap.add_argument('--stall-client', type=int, default=-1,
+                    help='client index to freeze mid-session')
+    ap.add_argument('--stall-at', type=int, default=1200,
+                    help='session tick at which that client freezes')
+    ap.add_argument('--stall-ms', type=int, default=0,
+                    help='how long it freezes for, in milliseconds')
     ap.add_argument('--beam-spread', type=float, default=3.0,
                     help='metres between the beam landing points of successive clients')
     ap.add_argument('--beam-offset', type=int, default=0,
@@ -353,6 +447,9 @@ def main():
     ap.add_argument('--checkpoint-ticks', type=int, default=660,
                     help='ticks between full body checkpoints in the journals; small '
                          'values make contact measurable with collision_report.py')
+    ap.add_argument('--beam-y', type=float, default=-1.0,
+                    help='lane to beam onto: %g for the mechanism row, %g for the '
+                         'driving lane; default is the mechanism row' % (MECH_Y, PLAY_Y))
     ap.add_argument('--beam-tick', type=int, default=700,
                     help='session tick at which --beam-bays fires')
     ap.add_argument('--out', default=str(REPO / 'maps/arena-test'))

@@ -89,8 +89,13 @@ BAYS = [
 # did that, 320 m apart, and produced a phantom 320.004 m correction on
 # P_Ball_Wood_MF, the exact distance between the two.
 RELOCATE = {
-    # on the tilting block, so the block carries a loose body
-    'P_Ball_Wood': (3, 0.0, 0.0, 'on_top'),
+    # Prop balls parked on a mechanism.  These are real movable bodies
+    # (P_Ball_*_MF, movable=1), so a mechanism that moves has to carry one, and
+    # a player ball that arrives has something of its own mass to shove: the
+    # stone prop is 10 kg against the paper ball's 0.2.
+    'P_Ball_Wood': (3, 0.0, 0.0, 'on_top'),     # on the tilting block
+    'P_Ball_Stone': (10, 0.0, 0.0, 'on_top'),   # on the see-saw
+    'P_Ball_Paper': (9, 0.0, 0.0, 'on_top'),    # on P_Modul_29's plate row
     # beside the see-saw rather than on it: perched on top at z 3.81 the crate
     # sat above the band a rolling ball sweeps (0 .. 4.5) and no ball could
     # ever reach it.  On the road a ball can hit it AND shove it into the
@@ -485,7 +490,9 @@ def check_reach():
     have something in the band, not whether every body does."""
     out = []
     for ob in bpy.data.objects:
-        if ob.type != 'MESH' or ob.name.startswith(('A_Floor', 'A_Rail')):
+        # stoppers live below the road on purpose - they are what a mechanism
+        # rests against, not something a ball is meant to reach
+        if ob.type != 'MESH' or ob.name.startswith(('A_Floor', 'A_Rail', 'A_Stopper')):
             continue
         zs = [(ob.matrix_world @ v.co).z for v in ob.data.vertices]
         in_band = [z for z in zs if -0.05 <= z <= BALL_SWEEP_Z]

@@ -277,6 +277,59 @@ what says the contacts really were simultaneous rather than one after another:
 All three report 6/6 ball pairs in contact over the run and 7-8 peer balls
 corrected.
 
+### Against a Linux server (Arch WSL)
+
+The server does not have to be the Windows one. Built in Arch WSL (gcc 16.2.1,
+system openssl/protobuf, no vcpkg) it runs the same physics sessions for
+Windows clients, and its journal replays bit-for-bit in the **Windows**
+SimTool, which is a cross-platform determinism check for free.
+
+Two things to get right:
+
+- **The engine half of the build id must match the clients'**, so pass it:
+  `-DBMMO_BUILD_ID=ballanced-<engine sha12>+bmmo-<anything>`. The server only
+  compares the `ballanced-` half.
+- **Point `journal_dir` at `/mnt/d/...`** so the Windows side can replay the
+  journal without copying it, and give the harness
+  `--external-server HOST:PORT --journal-dir <that path>`.
+
+WSL2 mirrored networking means the clients reach it on `127.0.0.1`.
+
+### Latency and stalled clients
+
+`--latency-ms` puts the named clients behind a UDP delay proxy;
+`--stall-client/--stall-at/--stall-ms` freezes one mid-session. Four players on
+the Arch server, the delay applied to clients 1 and 3 only:
+
+| added latency each way | resyncs | hard corrections | worst client's resim ticks | journal |
+| --- | --- | --- | --- | --- |
+| 0 ms | 0 | 0 | 7 | bit-exact |
+| 150 ms | 0 | 0 | 2086 | bit-exact |
+| 300 ms | 0 | 0 | 4411 | bit-exact |
+
+Latency does not cost correctness — no resyncs, no hard corrections, every
+journal bit-exact. What it costs is **re-simulation**, and not only for the
+slow players: at 150 ms the two *direct* clients were also re-simulating
+hundreds of ticks, because everyone has to roll back to take the late inputs.
+One bad link raises the CPU cost for the whole room.
+
+A client **freezing** is different from a slow link. A 700 ms stall
+(`--stall-ms 700`, about 46 ticks) put that client past the rollback window and
+it re-anchored: one resync, which is the designed recovery. The other three
+were unaffected and the journal still replayed bit-exact.
+
+### Trafo fragments and checkpoints
+
+Four players beamed onto the wood trafo together transform at the same moment,
+which is the case the fragment work (design 9.10/9.14) is about:
+`ball types physicalized: {'1': 9, '2': 4, '0': 4}` — nine stone spawns, then
+four wood and four paper transformations — with **16 peer balls corrected**
+across all three ball types, and the journal bit-exact.
+
+Four players crossing all three checkpoints together (beamed onto the driving
+lane with `--beam-y 15`, since the checkpoints are 28 units off the mechanism
+row) also passes bit-exact, reaching `sectors entered: 1, 2, 3, 4`.
+
 ## Results (2026-10-19, VS 18 build in `build-agent/`)
 
 Every run below passed, and in every one of them the server's journal replayed
