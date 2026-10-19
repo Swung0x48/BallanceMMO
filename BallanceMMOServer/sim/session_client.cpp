@@ -1236,7 +1236,24 @@ namespace {
                 // Design 9.25: only the mechanism names this client has a body
                 // for - a tracked name with no body is dropped by every
                 // capture, which used to change the tracked set every tick.
-                for (const auto& name: mechanism_tracking_.tracked_entities()) tracked.mechanisms.push_back(name);
+                // Every movable body this client has, not only the ones the
+                // server has named and the registry resolved.
+                //
+                // A body missing from the tracked set is not recorded and so
+                // not restored - but the replay's step() still steps it, so
+                // every rollback advances it by the replay's depth.  Measured
+                // solo with forced rewinds: a P_Modul_29 plate, which hangs
+                // from physics hinges and swings continuously, came out of a
+                // depth-12 rewind at exactly the pose the un-rewound run had
+                // 12 ticks LATER - not displaced, phase-shifted by the depth.
+                // `mechanisms=22/12` had been in every run all along: ten of
+                // the client's own bodies were being stepped by every replay
+                // and restored by none.
+                //
+                // So the tracked set is the client's own world, which is what
+                // the replay has to put back. A body the snapshot says nothing
+                // about is restored from our own record, which is right.
+                for (const auto& name: movable_body_names()) tracked.mechanisms.push_back(name);
                 tracked.generations = generations_;
                 rollback_.record(rollback_world(), tick, tracked, applied);
             }
@@ -1693,6 +1710,25 @@ namespace {
             if (input_rewinds_missed_ < 8)
                 logf("input correction for %s at tick %u is outside the rollback history at local tick %u: "
                      "a snapshot has to re-anchor it", entity.c_str(), anchor, now);
+        }
+
+        // Every movable body in this client's world except the balls, which
+        // the tracked set carries separately as own/remote entities.
+        std::vector<std::string> movable_body_names() {
+            std::vector<bmmo_physics_body_state> bodies(256);
+            int count = bmmo::physics::list_bodies(engine_->physics(), bodies.data(), static_cast<int>(bodies.size()));
+            if (count > static_cast<int>(bodies.size())) {
+                bodies.resize(static_cast<size_t>(count));
+                count = bmmo::physics::list_bodies(engine_->physics(), bodies.data(), static_cast<int>(bodies.size()));
+            }
+            std::vector<std::string> names;
+            for (int i = 0; i < count && i < static_cast<int>(bodies.size()); ++i) {
+                const auto& body = bodies[static_cast<size_t>(i)];
+                if (!body.movable || !body.name[0]) continue;
+                if (std::strncmp(body.name, "Ball_", 5) == 0) continue;   // own and remote balls are tracked by entity
+                names.emplace_back(body.name);
+            }
+            return names;
         }
 
         // The input a navigated ball had at `tick`, for a re-simulation.  Only
