@@ -102,6 +102,32 @@ RELOCATE = {
     'P_Trafo_Paper': (2, -6.0, 0.0, 'road'),
 }
 
+# Stoppers (Phys_FloorStopper).  A mechanism with a moving plank needs them:
+# without the stoppers the plank has nothing to come to rest against, which is
+# why the see-saw sat tilted into its own trench instead of lying level.
+#
+# Measured the same way as MOUNT_DZ - every Phys_FloorStopper vertex within
+# 18 units of each mechanism in the 13 retail levels, clustered into slabs and
+# rotated into the mechanism's own frame.  Retail merges every stopper in a
+# level into ONE object, so the bounding box says nothing; the geometry has to
+# be clustered.  Three mechanisms have them in nearly every instance:
+# P_Modul_30 the see-saw (17/18), P_Modul_25 (29/30) and P_Modul_37 (21/23);
+# P_Modul_19 has them in 7 of 8.  P_Modul_41 and P_Modul_03 never do.
+#
+# Each slab is the same part: a vertical quad 1 unit long and 0.5 tall with no
+# thickness.  'x' / 'y' is the axis it runs along.
+STOPPER_LENGTH = 1.0
+STOPPER_HEIGHT = 0.5
+STOPPERS = {
+    'P_Modul_30': [((6.9, 2.5, -0.25), 'x'), ((6.9, -2.5, -0.25), 'x'),
+                   ((-6.9, 2.5, -0.25), 'x'), ((-6.9, -2.5, -0.25), 'x')],
+    'P_Modul_25': [((-9.6, 2.5, -0.75), 'x'), ((-9.6, -2.5, -0.75), 'x')],
+    'P_Modul_37': [((-11.3, 4.2, -0.75), 'y'), ((-11.3, -4.2, -0.75), 'y'),
+                   ((-16.3, 4.2, -0.75), 'y'), ((-16.3, -4.2, -0.75), 'y')],
+    'P_Modul_19': [((2.8, -7.5, -0.75), 'x'), ((2.8, -12.5, -0.75), 'x'),
+                   ((-8.6, 2.5, -0.75), 'x'), ((-8.6, 7.5, -0.75), 'x')],
+}
+
 BAY_SPAN = 40.0          # > the widest footprint (P_Modul_03, ~32 units)
 BAYS_PER_SECTOR = 6
 ARENA_WIDTH = 60.0
@@ -228,6 +254,43 @@ def recess_for(type_name, cx, cy, rz_deg=0.0):
     return (cx + x0 - m, cx + x1 + m, cy + y0 - m, cy + y1 + m)
 
 
+_stopper_n = 0
+
+
+def add_stopper(cx, cy, cz, axis):
+    """One Phys_FloorStopper slab: a vertical quad, 1 long and 0.5 tall."""
+    global _stopper_n
+    import bmesh
+    from bl_ext.user_default.bbp_ng import PROP_bme_material
+
+    half_l, half_h = STOPPER_LENGTH / 2, STOPPER_HEIGHT / 2
+    if axis == 'x':
+        pts = [(-half_l, 0.0, -half_h), (half_l, 0.0, -half_h),
+               (half_l, 0.0, half_h), (-half_l, 0.0, half_h)]
+    else:
+        pts = [(0.0, -half_l, -half_h), (0.0, half_l, -half_h),
+               (0.0, half_l, half_h), (0.0, -half_l, half_h)]
+
+    bm = bmesh.new()
+    verts = [bm.verts.new(q) for q in pts]
+    bm.faces.new(verts)
+    mesh = bpy.data.meshes.new('Stopper')
+    bm.to_mesh(mesh)
+    bm.free()
+    with PROP_bme_material.BMEMaterialsHelper(scene()) as bmemtl:
+        mesh.materials.clear()
+        mesh.materials.append(bmemtl.get_material('FloorSide'))
+        mesh.validate_material_indices()
+
+    obj = bpy.data.objects.new('A_Stopper', mesh)
+    NC.VirtoolsGroupConvention.set_to_object(obj, Info.create_from_others(BT.STOPPER), None)
+    scene().collection.objects.link(obj)
+    obj.matrix_world = mathutils.Matrix.Translation((cx, cy, cz))
+    _stopper_n += 1
+    obj.name = f'A_Stopper_{_stopper_n:02d}'
+    return obj
+
+
 def add_component(type_name, sector, loc, rz_deg=0.0, name=None):
     ty = BET[type_name]
     if ty is BET.PS_FourFlames:
@@ -286,9 +349,10 @@ def add_rail(name, x0, y, length):
 
 
 def build():
-    global _floor_n
+    global _floor_n, _stopper_n
     reset()
     _floor_n = 0
+    _stopper_n = 0
 
     sector_count = (len(BAYS) + BAYS_PER_SECTOR - 1) // BAYS_PER_SECTOR
     x_last = (len(BAYS) - 1) * BAY_SPAN
@@ -336,6 +400,8 @@ def build():
                 z = mount_dz(type_name)
             pos = (host * BAY_SPAN + dx, MECH_Y + dy, z)
         add_component(type_name, sector, pos, 0.0, f'{type_name}_01')
+        for (sx, sy, sz), axis in STOPPERS.get(type_name, ()):
+            add_stopper(pos[0] + sx, pos[1] + sy, pos[2] + sz, axis)
 
     # --- checkpoint + resetpoint on each sector boundary -------------------
     for s in range(2, sector_count + 1):

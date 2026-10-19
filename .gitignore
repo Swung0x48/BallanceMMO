@@ -32,3 +32,5 @@
 /CMakePresets.json*
 /maps/arena-test/
 *.blend1
+/scripts/retail/
+__pycache__/

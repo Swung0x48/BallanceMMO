@@ -80,6 +80,33 @@ map as committed:
 A human playing the arena reached the end and the session recorded a `Finish`
 event at tick 5887, so the level completes.
 
+### Stoppers
+
+Three mechanisms need `Phys_FloorStopper` slabs and will not sit right without
+them. The see-saw is the obvious one: with nothing to come to rest against, its
+plank simply falls into its own opening — measured over a session, the plank's
+height ranged over **4.02 m** (0.04 .. 4.06) and it was moving for 201 sampled
+ticks at up to 10 m/s. With the stoppers in place the same run keeps it at
+**0.10 m** of range (3.96 .. 4.06), moving for 72 ticks and only when a ball
+actually rides it.
+
+`STOPPERS` was measured the same way as `MOUNT_DZ`: every `Phys_FloorStopper`
+vertex within 18 units of each mechanism across the 13 retail levels, clustered
+into slabs and rotated into the mechanism's own frame. Retail merges every
+stopper in a level into **one** object, so its bounding box says nothing and
+the geometry has to be clustered.
+
+| mechanism | instances with stoppers | slabs, in the mechanism's frame |
+| --- | --- | --- |
+| `P_Modul_30` (see-saw) | 17/18 | (±6.9, ±2.5, −0.25), along x |
+| `P_Modul_25` (倒板) | 29/30 | (−9.6, ±2.5, −0.75), along x |
+| `P_Modul_37` (T板) | 21/23 | (−11.3 and −16.3, ±4.2, −0.75), along y |
+| `P_Modul_19` | 7/8 | 4 slabs at z −0.75 |
+
+`P_Modul_41` and `P_Modul_03` never have them in retail, and do not get them
+here. Every slab is the same part: a vertical quad 1 unit long and 0.5 tall
+with no thickness.
+
 ### Mount heights
 
 `MOUNT_DZ` in the generator is not guesswork. It was measured out of the 13
