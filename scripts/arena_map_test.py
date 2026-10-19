@@ -294,7 +294,10 @@ def run_case(args, sector, case_dir):
                    '--level', str(args.level),
                    '--seconds', str(args.seconds),
                    '--trace',
-                   '--journal', str(case_dir / f'client{i}.bmjr')]
+                   '--journal', str(case_dir / f'client{i}.bmjr'),
+                   # the client's own world at the same cadence as the server's,
+                   # so the two can be compared body by body at the same ticks
+                   '--checkpoint-ticks', str(args.checkpoint_ticks)]
             if sector > 1:
                 cmd += ['--start-sector', str(sector)]
             if args.drive:

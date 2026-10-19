@@ -189,6 +189,98 @@ python scripts/journal_trace.py maps/arena-test/snapoff/sector2/client0.bmjr \
                                maps/arena-test/snapoff/sector2/client1.bmjr --diff
 ```
 
+## The missing rollback trigger, and where that got us
+
+The three attempts above all addressed *birth*. The thing actually missing was
+the rollback trigger lockstep runs on, and it had nothing to do with births.
+
+A remote ball is predicted forward with its last known input frame. The frame
+the server actually applied for it arrives `input_delay` + a trip later - ~21
+ticks at a 300 ms round trip. The client stored that frame for a future replay
+and updated its live predictor, **but nothing ever replayed the ticks it had
+already simulated from the wrong input.** The only thing that re-simulated them
+was an authoritative snapshot disagreeing. That is why turning the snapshot path
+off left the clients tens of metres out: the correction was only ever arriving
+through the mechanism we were trying to demote.
+
+So each relayed frame is now compared against the one the engine recorded as
+applied at that tick (`rollback_engine::recorded_input`). Equal means the
+prediction was right, which is the common case because a held key predicts
+perfectly. Different means that tick and every tick after it ran on the wrong
+input, so `rewind_to` replays from there - coalesced to one rewind per frame at
+the earliest corrected tick, since several remotes' frames arrive together.
+`Unphysicalize` gained the same rewind as `Physicalize`, since a ball that died
+or trafo'd at its owner's tick T was being removed ~21 ticks late everywhere
+else.
+
+Measured, deltas off and one full snapshot a second as the server's audit:
+
+| | audits disagreeing, per client | resim ticks |
+|---|---|---|
+| before | 11 / 18 / 18 / 36 | 228 / 371 / 372 / 743 |
+| input-driven rollback | **5 / 9 / 9 / 29** | 740 / 4317 / 4317 / 4263 |
+
+The disagreement roughly halved, at a cost of ~1.9 extra physics steps per tick
+- which is simply what lockstep costs at this latency. The rewinds fire 81-158
+times per client with **none** falling outside the rollback history
+(`inrew=.../0`), so the 96-tick window is comfortably deep enough at 300 ms.
+
+Two notes on reading those numbers. `rewind_to` must not bump
+`stats_.mismatched` - that counter means "snapshots this client disagreed with"
+and is the measure of how far it is from the server, so a rewind the caller
+asked for polluted it and made the first run of this look three times worse
+than it was. And the server's audit is the right frame for it: under a design
+where the server simulates to **catch cheating** rather than to keep clients in
+step, an honest client's disagreement count is the false-positive rate, and it
+has to reach zero for a different reason than synchronisation.
+
+## Where it actually stands: the mechanisms are in lockstep
+
+With both journals checkpointing the same ticks (below), restricted to the
+map's own bodies - the ones whose names mean the same thing on every side -
+**exactly one body ever diverges**:
+
+| comparison | first divergence |
+|---|---|
+| client vs client | tick 292-668, `P_Ball_Paper_MF`, 0.07-0.10 m |
+| client vs server | tick 274, `P_Ball_Paper_MF`, 0.06 m |
+| all 13 mechanisms | agree within 5 cm across ~1 100 checkpoints |
+
+So the script-driven mechanisms *are* in lockstep, client to client and client
+to server, with the snapshot path essentially off. The one body that is not is
+the loose prop ball: a free body with no input of its own, so the input-driven
+rollback has nothing to correct it with directly, and it is hit by the player
+balls - which are exactly what still disagrees during the ~21 ticks between a
+ball's birth and the rest of the field hearing about it. It amplifies the
+residual rather than causing it.
+
+## Comparing the two sides at all took fixing
+
+Worth recording because it wasted two cycles.
+
+A client journal **does** carry its own world body by body
+(`JOURNAL_CHECKPOINT_LOCAL`, every movable body with name, pose and
+velocities). An earlier pass through this concluded it was hash-only, because
+the first two checkpoints in the file are at a tick before any movable body
+exists. Check more than the first record.
+
+Its cadence was the hardcoded `kJournalCheckpointTicks = 660`, one checkpoint
+every ten seconds: a black box, not a trace. It is now `--checkpoint-ticks`,
+which the harness passes alongside the server's `journal_checkpoint_ticks`.
+
+And the first dense run still compared nothing at all - 1 055 client and 1 320
+server checkpoints with **zero ticks in common** - because the client's rule was
+"every N ticks since the last one", which drifts onto the opposite parity from
+the server's `tick % N == 0` and then never coincides. The client now uses the
+server's rule.
+
+Finally, names are not a cross-side identity for player balls. A player's own
+ball is `Ball_<type>` on its own client whatever its id, so the same name means
+a different physical ball on each client, and the server names them all by id.
+`scripts/first_divergence.py --prefix P_` restricts the comparison to the map's
+own bodies for that reason; comparing balls needs an id mapping that is not
+written yet.
+
 ## The next step is an instrument, not another fix
 
 Three hypotheses were tested one at a time against a measurement that takes a
@@ -196,13 +288,10 @@ build and a 40 s run, and all three came back "still diverging". That is the
 signature of either several simultaneous causes or one that has not been
 isolated, and guessing again is the wrong move.
 
-What is missing is the ability to localise a divergence **per body per tick**.
-Today a client journal carries hash-only checkpoints, so when a client stops
-agreeing with the server there is no way to ask *which* body went first. The
-server's journal has full body checkpoints; the clients' do not. Giving the
-client journal the same body checkpoints the server's has — behind the existing
-`journal_checkpoint_ticks` knob — would turn this from hypothesis-guessing into
-a bisection: find the first tick, name the body, and only then reason about why.
+That instrument is now `scripts/first_divergence.py`, and building it turned
+this from guessing into an answer in one command. What it needs next is the
+ball identity mapping, so the player balls can be compared too - right now the
+only bodies that can be are the map's own.
 
 ## Not covered
 

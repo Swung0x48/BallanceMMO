@@ -170,6 +170,7 @@ namespace bmmo::session {
 
     struct rollback_stats {
         uint64_t snapshots = 0, matched = 0, mismatched = 0, rollbacks = 0, resim_ticks = 0;
+        uint64_t rewinds = 0;          // re-anchors the caller asked for (rewind_to), not snapshot disagreements
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
@@ -613,6 +614,26 @@ namespace bmmo::session {
         }
 
     public:
+        // The input this engine recorded as APPLIED for `entity` at `tick`.
+        //
+        // The caller needs it to decide whether a relayed remote input is news:
+        // a remote ball is predicted with its last known frame, and the frame
+        // the server actually applied arrives input_delay + a trip later.  If
+        // it equals what the prediction used, the prediction was right and
+        // nothing has to be replayed; if it differs, every tick from there on
+        // was simulated from the wrong input and has to be re-simulated.  That
+        // is the rollback trigger lockstep runs on - the authoritative snapshot
+        // is only the fallback for a correction that arrives too late to
+        // replay.
+        bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
+            const tick_state* at = find_const(tick);
+            if (!at) return false;
+            const auto it = at->inputs.find(entity);
+            if (it == at->inputs.end()) return false;
+            out = it->second;
+            return true;
+        }
+
         // Re-anchor on a tick in the past because the WORLD changed there, not
         // because an authoritative snapshot disagreed: the caller has created a
         // body for a lifecycle event stamped at `anchor` that arrived late (a
@@ -632,7 +653,11 @@ namespace bmmo::session {
                 ++stats_.unmatched;
                 return false;
             }
-            ++stats_.mismatched;
+            // NOT stats_.mismatched: that counts authoritative snapshots this
+            // engine disagreed with, and it is read as the measure of how far
+            // the client is from the server.  A rewind the caller asked for is
+            // not a disagreement with a snapshot and must not pollute it.
+            ++stats_.rewinds;
             const std::map<std::string, row_ref> no_rows;
             auto no_report = [](uint8_t) {};
             return restore_and_replay(world, anchor, current_tick, no_rows, input_at, no_report, reason);
@@ -688,6 +713,11 @@ namespace bmmo::session {
 
         // The oldest record that carries `entity` in its current lifetime: the
         // tick the body we have now was born at, as far as the history knows.
+        const tick_state* find_const(uint32_t tick) const {
+            for (const auto& state: history_) if (state.tick == tick) return &state;
+            return nullptr;
+        }
+
         const tick_state* birth_record(const std::string& entity, uint32_t after, uint32_t generation) const {
             for (const auto& state: history_) {
                 if (state.bodies.find(entity) == state.bodies.end()) continue;
