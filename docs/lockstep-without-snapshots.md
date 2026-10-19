@@ -408,13 +408,37 @@ fall - 2.1 m on the first rewind, peaking at 2.4 m, then decaying as the live
 script pulls them back. It also explains why taking them out of the tracked set
 changed nothing: not being *restored* does not stop them being *stepped*.
 
-### Putting them back afterwards does not work either
+### Four ways to treat them in a replay, and the current one is the best
 
-The tempting shortcut - capture the mechanisms before the rewind and write them
-back after, on the grounds that their script is the authority anyway - makes it
-worse, not better: mean error 24.3 m becomes 47.1 m. The balls have been
-replayed to new positions meanwhile, so a plate put back can be inside one, and
-the contact recheck launches it. Tried, measured, reverted.
+All measured the same way - solo, 40 forced rewinds of depth 12, mean error
+against the same run without them:
+
+| what the replay does with the mechanisms | ball | mechanisms |
+|---|---|---|
+| **steps them, as it does today** | 0.0017 m | **23.3 m** |
+| freezes them for the replay, wakes them after | 0.0009 m | 48.0 m |
+| captures them before and writes them back after | - | 47.1 m |
+| runs the whole frame so the scripts drive them | 24.0 m | 103.3 m |
+
+Every intervention is worse than doing nothing, and the reasons differ:
+
+* **Freezing** them means the replayed ball meets plates at the pose they
+  really held at the anchor, which is why it is the best row for the ball - but
+  the freeze/wake cycle perturbs IVP's own freeze timers (a known gap, see the
+  mechanism Option A postmortem) and the mechanisms end up twice as far out.
+* **Writing them back** puts a plate at its live pose in a world whose balls
+  are at replayed poses, so a plate can land inside a ball and the contact
+  recheck launches it.
+* **Running the whole frame** re-runs scripts for ticks they already ran, so
+  one-shot actions fire twice; the behaviour clock advances by the replay's
+  depth on top of the live frames; and the retail navigation script fights the
+  bridge's own `nav_input` for the ball, which is why it ruins the one body
+  kind that was already faithful.
+
+So mechanism replay fidelity cannot be bought from outside the engine. The
+first and third of those are kept as flags (`--force-rollback`,
+`--replay-scripts`) with their numbers in the comments so the experiments are
+repeatable; the other two are reverted rather than left as dead config.
 
 ### So the remaining work is exactly: run the scripts during the replay
 
@@ -437,8 +461,17 @@ What that needs, in the order the obstacles bite:
    request advance, `drain_player_commands`, the Random-block re-patch.
 
 None of that is reachable from the rollback engine alone; it is an engine
-change, which is what the measurement above was for - it says the work is
-worth it, and it says the balls do not need it.
+change, which is what the measurements above were for. They say three things
+worth keeping separate:
+
+* **the balls do not need it** - they are already in lockstep, 0.00 m against
+  the server over a network and under 2 mm under forced rewinds;
+* **nothing short of it helps** - all four cheap treatments were measured and
+  the status quo won;
+* **and it must be selective.** Running the frame wholesale is not a smaller
+  version of the right fix, it is a different and worse thing: the mechanism
+  behaviours have to be executed on their own, with their state rewound, while
+  the navigation scripts and the one-shot actions stay out of it.
 
 ## Four bugs found on the way, all real
 
