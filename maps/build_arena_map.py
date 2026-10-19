@@ -111,6 +111,27 @@ RELOCATE = {
     'P_Trafo_Paper': (2, -6.0, 0.0, 'road'),
 }
 
+# How wide an opening the floor needs under a mechanism, measured from the 13
+# retail levels: for every instance, how close its own floor comes to the
+# mechanism's origin in the mechanism's frame.  Only the half-width along x is
+# taken from retail (its mechanisms sit in narrow corridors, so there is no
+# floor beside them to measure y against); the y half-width is the mechanism's
+# own buried footprint.
+#
+# The answer is that retail cuts a hole for exactly three mechanisms.  Every
+# other one has floor right up to its origin - its base plate is simply BURIED
+# in the 5-thick block, which is fine and is what check_clipping reports.
+#
+# This replaces deriving the opening from sunken_footprint(), which measured
+# the PH placeholder in its authored, tilted pose and so cut +-13 for the
+# see-saw where retail cuts +-7.4 - wide enough that the plank ended short of
+# the road and a ball could not roll off it.
+RECESS_GAP_X = {
+    'P_Modul_30': 7.40,   # see-saw, 11 of 16 instances
+    'P_Modul_08': 7.50,   # swing
+    'P_Modul_29': 6.86,   # plate row, 10 of 14
+}
+
 # Stoppers (Phys_FloorStopper).  A mechanism with a moving plank needs them:
 # without the stoppers the plank has nothing to come to rest against, which is
 # why the see-saw sat tilted into its own trench instead of lying level.
@@ -125,6 +146,7 @@ RELOCATE = {
 #
 # Each slab is the same part: a vertical quad 1 unit long and 0.5 tall with no
 # thickness.  'x' / 'y' is the axis it runs along.
+
 STOPPER_LENGTH = 1.0
 STOPPER_HEIGHT = 0.5
 STOPPERS = {
@@ -252,15 +274,22 @@ def sunken_footprint(type_name, rz_deg=0.0):
 def recess_for(type_name, cx, cy, rz_deg=0.0):
     """The floor opening this element needs at (cx, cy), or None.
 
-    Sized to the geometry that goes below the road, plus a margin.  That margin
-    is the only gap left around the element, and at RECESS_MARGIN it is far
-    narrower than a ball (radius 2), so nothing can drop through."""
-    foot = sunken_footprint(type_name, rz_deg)
-    if foot is None:
+    Retail's own gap along x, and the element's buried footprint along y.  The
+    margin is the only slack around it, and at RECESS_MARGIN it is far narrower
+    than a ball (radius 2), so nothing can drop through."""
+    gap_x = RECESS_GAP_X.get(type_name)
+    if gap_x is None:
         return None
-    x0, x1, y0, y1 = foot
+    foot = sunken_footprint(type_name, 0.0)
+    half_y = max((foot[3] - foot[2]) / 2 if foot else 0.0, 2.5)
+    a = math.radians(rz_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    xs, ys = [], []
+    for px, py in ((-gap_x, -half_y), (gap_x, -half_y), (-gap_x, half_y), (gap_x, half_y)):
+        xs.append(px * ca - py * sa)
+        ys.append(px * sa + py * ca)
     m = RECESS_MARGIN
-    return (cx + x0 - m, cx + x1 + m, cy + y0 - m, cy + y1 + m)
+    return (cx + min(xs) - m, cx + max(xs) + m, cy + min(ys) - m, cy + max(ys) + m)
 
 
 _stopper_n = 0
@@ -439,14 +468,17 @@ def build():
 
 
 def check_clipping():
-    """Every component vertex that is below the road, against every floor block.
+    """Component geometry against the floor blocks, split into two kinds.
 
-    Bounding boxes are no good here.  A mechanism sits in a hole cut to the
-    footprint of its *buried* part only, so its box legitimately spans floor
-    blocks that its geometry never touches - P_Modul_30 is 9.7 units deep
-    overall but only 5 of that goes below the road.  So the test is per vertex:
-    any vertex below the road surface that falls inside a floor block's
-    footprint is real interpenetration."""
+    Reports, per component, how many vertices sit strictly inside a floor
+    block.  That is **expected**, not a fault: retail cuts a hole for only
+    three mechanisms and buries every other base plate in the 5-thick block,
+    so this map does the same.  It is here to catch a change that buries
+    something retail leaves clear - compare the counts, do not demand zero.
+    The guard with a right answer is check_reach().
+
+    Per vertex rather than per bounding box, and a vertex resting ON the
+    surface shares the top face rather than interpenetrating it."""
     floors, comps = [], []
     for ob in bpy.data.objects:
         if ob.type != 'MESH':
@@ -462,20 +494,19 @@ def check_clipping():
             comps.append((ob.name, [ob.matrix_world @ v.co for v in ob.data.vertices]))
 
     eps = 2e-3
-    hits = {}
+    buried = {}
     for cname, verts in comps:
         for c in verts:
-            if c.z > -eps:
-                continue                      # on or above the road: fine
             for (fname, x0, x1, y0, y1, z0, z1) in floors:
+                # strictly inside the block: a vertex resting ON the surface
+                # shares the top face and interpenetrates nothing
                 if x0 + eps < c.x < x1 - eps and y0 + eps < c.y < y1 - eps \
-                        and z0 - eps < c.z < z1 + eps:
-                    key = (cname, fname)
-                    hits[key] = hits.get(key, 0) + 1
+                        and z0 + eps < c.z < z1 - eps:
+                    buried[cname] = buried.get(cname, 0) + 1
                     break
     return {'floors': len(floors), 'components': len(comps),
-            'clipping': [{'component': c, 'floor': f, 'vertices_inside': n}
-                         for (c, f), n in sorted(hits.items())]}
+            'buried': [{'component': k, 'vertices': v} for k, v in sorted(buried.items())],
+            'buried_total': sum(buried.values())}
 
 
 # A ball of radius 2 rolling on the road sweeps z = 0 .. 4; give it a little

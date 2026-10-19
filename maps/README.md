@@ -294,15 +294,26 @@ see-saw could ever move it. On the road it is at z 0..4 and
 `collision_report.py` measures a player ball closing to **2.88 m** of it —
 contact for two radius-2 bodies is 4.0 — and disturbing it for 178 ticks.
 
-**Known limitation.** A ball cannot roll off the see-saw's plank onto the road
-to the east: driven that way it stops about 0.8 m short. The opening under the
-see-saw is cut from `sunken_footprint()`, which measures the PH placeholder in
-its *authored, tilted* pose, while at runtime the stoppers hold the plank
-level — so the hole is wider than it needs to be and the plank ends short of
-the road, leaving a lip. Retail leaves a narrower gap (its floor reaches to
-±7.4 of the see-saw centre, against ±13 here). Aiming the beam with
-`--beam-dx` reaches the stone prop regardless, but a ball cannot *drive* across
-the see-saw and off the far side.
+**The openings come from retail, not from the placeholder mesh.** They used to
+be cut from `sunken_footprint()`, which measures the PH placeholder in its
+*authored, tilted* pose while at runtime the stoppers hold the plank level. The
+see-saw's hole came out at ±13 where retail cuts ±7.4, so the plank ended short
+of the road and left a lip: a ball driven east off the see-saw stopped about
+0.8 m short, and only `--beam-dx` could reach the stone prop beyond it.
+
+`RECESS_GAP_X` now carries retail's own gap, harvested the same way as
+`MOUNT_DZ` — for every mechanism instance in the 13 levels, how close its own
+floor comes to the mechanism's origin in the mechanism's frame. The answer is
+that retail cuts a hole for **three** mechanisms (`P_Modul_30` 7.40,
+`P_Modul_08` 7.50, `P_Modul_29` 6.86) and buries every other base plate in the
+5-thick floor block, so this map does the same. `check_clipping()` reports
+those buried vertices rather than failing on them; the guard with a right
+answer is `check_reach()`.
+
+With the narrower hole a ball drives across the see-saw and off the far side:
+the stone prop's closest approach goes from 4.82 m with no contact to 4.01 m
+and 43 disturbed ticks (contact is 4.0), and the see-saw itself from 20 to 77
+disturbed ticks — without `--beam-dx`.
 
 ### Against a Linux server (Arch WSL)
 
