@@ -158,7 +158,7 @@ Knobs worth knowing:
   into each other. Do not add `--steer`: a pre-recorded steer has no feedback,
   so the lateral input accumulates and the balls end up 15-20 units off line.
 
-## Results (2026-10-19, HEAD + the Sector-snapshot change, VS 18 build in `build-agent/`)
+## Results (2026-10-19, VS 18 build in `build-agent/`)
 
 **Broad run — 4 sectors x 4 players x 60 s: 4/4 PASS.** Every journal bit-exact
 (3692-3698 ticks each), `hard=0`, `mech_hard=0`, `resyncs=0`, `starved=0`,
@@ -184,9 +184,10 @@ it, that client takes one rollback of 0.6-2.7 m on a mechanism of the sector it
 just entered — and the solo control, crossing the same checkpoints, never does.
 The cause is that the server runs the union of its players' sectors while each
 client runs only its own, so the second player starts that sector's mechanisms
-tens of ticks late. It is written up, with the A/B that shows what the
-server-side change for it is and is not worth, in
-[docs/mechanism-phase-at-sector-activation.md](../docs/mechanism-phase-at-sector-activation.md).
+tens of ticks late. It is written up — together with the A/B that led to a
+server-side change for it being measured, found to buy nothing, and reverted —
+in [docs/mechanism-phase-at-sector-activation.md](../docs/mechanism-phase-at-sector-activation.md).
+No fix for it is in the tree.
 
 One map-design trap worth repeating: the game names a component's physics body
 after its **element type**, so two instances of one type are two bodies with

@@ -850,19 +850,19 @@ namespace bmmo::sim {
         }
         case event_type::Sector:
             // The sector union follows the players (update_sectors).
+            //
+            // Deliberately the one event that does NOT mark body_set_changed_.
+            // Asking for a full snapshot here is tempting - a player entering a
+            // sector another player is already in leaves the union unchanged,
+            // so update_sectors() returns early and nothing asks for one, at
+            // exactly the tick that player's client starts the sector's
+            // mechanisms from their IC pose.  It was tried and measured: on
+            // deterministic runs the mechanism errors come out byte-identical
+            // with and without it, because the leading ball keeps those
+            // mechanisms awake and their rows are in every delta snapshot
+            // anyway.  See docs/mechanism-phase-at-sector-activation.md before
+            // adding it back.
             p.sector = event.sector;
-            // ... but a player entering a sector another player is already in
-            // leaves the union unchanged, so update_sectors() returns early and
-            // nothing asks for a full snapshot.  That is exactly the tick this
-            // player's own client starts the sector's mechanisms from their IC
-            // pose - tens of ticks after the server started them for whoever
-            // crossed first, by which time the server's copies have settled and
-            // gone to sleep.  A delta snapshot carries only the simulated
-            // bodies (collect_bodies), so without this the trailing client has
-            // nothing to correct against until the next periodic full snapshot
-            // up to 98 ticks later, and its mechanism drifts metres out of
-            // phase meanwhile (P_Modul_29's nine-plate row: 3.33 m, maps/README.md).
-            body_set_changed_ = true;
             return true;
         case event_type::Finish:
             p.finished = true;

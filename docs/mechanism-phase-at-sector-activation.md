@@ -58,22 +58,21 @@ The solo client crosses the same three checkpoints at 817, 1311 and 1804 and
 never diverges, because the only sector the server runs is the one that client
 is in. Nothing else about the two runs differs.
 
-## What the fix is worth
+## A server-side fix was tried, measured, and reverted
 
-`physics_world::apply_event` marked `body_set_changed_` — which makes the next
+`physics_world::apply_event` marks `body_set_changed_` — which makes the next
 snapshot a full one — on every event except `Sector`. For the *first* player
 into a sector that is covered anyway, because `update_sectors()` changes the
 union and sets the flag itself; for the second the union is unchanged,
 `update_sectors()` returns early on its `desired == active_sectors_` guard, and
-nothing asks for a full snapshot. That matters when the server's copies of that
-sector's mechanisms have gone to sleep, because `collect_bodies` puts only
+nothing asks for a full snapshot. That would matter if the server's copies of
+that sector's mechanisms had gone to sleep, because `collect_bodies` puts only
 *simulated* bodies in a delta snapshot: the trailing client would then have no
 rows at all for the bodies it is getting wrong.
 
-That gap is real in the code, and the one-line change closes it. **But it has
-no measured effect on this map.** An A/B with the line disabled, on
-deterministic runs with identical crossing ticks, gives byte-identical
-mechanism errors:
+So the obvious one-liner is to mark the flag there too. **It has no measured
+effect.** An A/B with the line present and absent, on deterministic runs with
+identical crossing ticks, gives byte-identical mechanism errors:
 
 | | `P_Box_MF` | `P_Modul_26_Sack` | `P_Modul_08_Schaukel` | `P_Modul_34_Schiebestein` |
 | --- | --- | --- | --- | --- |
@@ -82,10 +81,18 @@ mechanism errors:
 
 The reason is that the sleeping regime it addresses does not arise here: the
 leading ball keeps the sector's mechanisms awake, so their rows are in every
-delta snapshot and the forced full snapshot adds nothing. The change is kept
-because the gap it closes is real and costs one full snapshot per checkpoint
-crossing, **not** because it was measured to help. The earlier claim that it
-took 3.329 m down to 0.046 m came from the flawed map and does not reproduce.
+delta snapshot and a forced full snapshot adds nothing. The earlier claim that
+the change took 3.329 m down to 0.046 m came from the flawed map and does not
+reproduce.
+
+**It was reverted.** A change that buys nothing measurable is not worth the
+full snapshot per checkpoint crossing per player that it costs, and leaving it
+in would have left the next person reading a fix where there is only a plausible
+story. The `Sector` case now carries a comment saying it was tried and what the
+measurement was, so the idea does not have to be rediscovered — if a future
+scenario *does* put the trailing client in the sleeping regime (a longer gap,
+or a mechanism the leader never disturbs), this is the line to add back, with a
+measurement that shows it helping.
 
 ## A client-side seed was tried, and is unresolved
 
