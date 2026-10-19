@@ -94,6 +94,30 @@ namespace {
         // trying to make the scripts replayable.
         uint32_t force_rollback_every = 0;
         uint32_t force_rollback_depth = 12;
+        // --replay-scripts: step a replayed tick with the WHOLE frame
+        // (context_->Process(), i.e. behaviours and managers) instead of the
+        // physics alone.
+        //
+        // The replay is faithful for a navigated body to 5 mm and ruins a
+        // script-driven one on the first rewind, because a mechanism's script
+        // does not run in a replay and the plates take unscripted steps and
+        // fall.  Running the whole frame is the direct answer to that; what it
+        // cannot fix by itself is behaviour state, which is still at its live
+        // value rather than the anchor tick's, and the behaviour clock, which
+        // this advances by the replay's depth on top of the live frames.  So
+        // this is a measurement, not a finished feature.
+        //
+        // MEASURED, and it is far worse, not better.  Solo, 40 forced rewinds
+        // of depth 12, mean error against the same run without them:
+        //   physics-only replay   ball 0.0017 m   mechanisms  23.3 m
+        //   whole-frame replay    ball 24.0   m   mechanisms 103.3 m
+        // It ruins the one thing that worked.  The scripts re-run for ticks
+        // they already ran so one-shot actions fire twice, the behaviour clock
+        // advances by the replay's depth on top of the live frames, and the
+        // retail navigation script fights the bridge's own nav_input for the
+        // ball.  Kept only so the experiment is repeatable; do not turn it on
+        // expecting it to help.
+        bool replay_scripts = false;
         bool join_first = false;
         uint32_t room = 0;
         bool host = false;
@@ -136,6 +160,7 @@ namespace {
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
             else if (arg == "--record") { if (!(v = next())) return false; out.record = v; }
             else if (arg == "--journal") { if (!(v = next())) return false; out.journal = v; }
+            else if (arg == "--replay-scripts") out.replay_scripts = true;
             else if (arg == "--force-rollback") {
                 if (!(v = next())) return false;
                 const std::string spec = v;
@@ -1943,6 +1968,13 @@ namespace {
             };
             world.step = [this, physics]() {
                 std::string error;
+                if (args_.replay_scripts) {
+                    // The whole frame, so the scripts that drive the mechanisms
+                    // run for the replayed tick too.
+                    const bool ok = engine_->tick(error);
+                    if (!ok) logf("replay frame: %s", error.c_str());
+                    return ok;
+                }
                 const bool diag = args_.trace && step_diag_ < 24;
                 if (diag)
                     for (const auto& [id, remote]: remotes_)
