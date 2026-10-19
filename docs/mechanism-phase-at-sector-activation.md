@@ -2,135 +2,133 @@
 
 Found 2026-10-19 on `maps/BMMO_Mechanism_Arena.nmo` (see
 [maps/README.md](../maps/README.md)), reproducible on demand with
-`scripts/arena_map_test.py`. It is a client-side defect, not a server
-correctness one: every server journal in every run below replays bit for bit.
+`scripts/arena_map_test.py`. It is a client-side artefact, not a server
+correctness one: every server journal in every run below replays bit for bit,
+with no hard corrections and no resyncs.
+
+> **The numbers in this document are the second set.** The first measurement
+> was taken on a version of the arena whose mechanisms interpenetrated the
+> road, so they settled against a static body and slept abnormally. Everything
+> derived from that — including a 3.3 m figure and an apparent before/after for
+> the server-side change below — did not survive remeasurement on the corrected
+> map. Section "What the fix is worth" says what that cost.
 
 ## What it looks like
 
-In a two-player session, about a second after the *second* player crosses a
-checkpoint, that player's client takes one large rollback on a mechanism in the
-sector they just entered:
+Two players drive down the arena, one ahead of the other. At **every** sector
+boundary, about 6 ticks after the *trailing* player crosses it, that player's
+client takes one rollback on a mechanism of the sector it has just entered:
 
-```
-mismatch at tick 1167 (local 1168): P_Modul_29_Platte01 dp=0.4501 local=(354.014,-1.144,30.211) server=(354.264,-0.770,30.211)z
-                                    P_Modul_29_Platte02 dp=1.3741 local=(355.630,-2.117,30.211) server=(355.903,-0.770,30.211)z
-                                    P_Modul_29_Platte03 dp=2.2352 local=(357.322,-2.994,30.211) server=(357.542,-0.770,30.211)z
-rollback to tick 1167 (P_Modul_29_Platte05 off by 3.328804 m), re-simulated 1 ticks
-```
+| sector | leader crosses | server activates | trailing crosses | lag | correction |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 768 | 776 | 832 | 56 | `P_Box_MF` 2.747 m at 838 |
+| 3 | 1213 | 1221 | 1326 | 105 | `P_Modul_26_Sack` 2.017 m at 1332 |
+| 4 | 1657 | 1665 | 1819 | 154 | `P_Modul_08_Schaukel` 1.838 m at 1826 |
 
-The error grows along the plate row, and the trailing `z` says the server's
-copies are asleep while the client's are still moving: this is a **phase**
-difference, not a position error. The client's row is mid-sag; the server's has
-already settled. Afterwards the same bodies sit at 0.014-0.046 m, so one
-rollback ends it and `mech_hard` stays 0.
+Three activations, three corrections, each one 6-7 ticks behind its activation.
+`P_Box_MF` is the crate parked on the see-saw, so the first row is a loose body
+that had been pushed somewhere else entirely on the server while the trailing
+client still had it at rest.
 
 ## Why it happens
 
-Three things compound, and all three are needed:
+The two sides use different rules for which sectors run. The retail
+`Gameplay_SectorManager` knows one ball, so each client runs only the sector
+*its own* ball is in. The server has many balls, so
+`physics_world::update_sectors` runs the **union** of its players' sectors —
+"every one of them, and only those". The moment one player is a checkpoint
+ahead, the server is simulating a sector the trailing client is not, and has
+been for as long as the gap: 56, then 105, then 154 ticks in the run above.
 
-1. **The two sides use different rules for which sectors run.** The retail
-   `Gameplay_SectorManager` knows one ball, so each client runs only the sector
-   *its own* ball is in. The server has many balls, so
-   `physics_world::update_sectors` runs the **union** of its players' sectors
-   ("every one of them, and only those"). The moment one player is a checkpoint
-   ahead of another, the server is simulating a sector that the trailing client
-   is not.
-
-2. **The trailing client then starts that sector's mechanisms from their IC
-   pose**, tens of ticks after the server started them. The journal shows every
-   mechanism waking twice, once per client, at different ticks:
-
-   | body | client1 | client0 | gap |
-   | --- | --- | --- | --- |
-   | `P_Modul_01_Pusher` | 759 | 780 | 21 |
-   | sector 2 entered | 1059 | 1099 | 40 |
-   | `P_Modul_25_Bridge` | 1171 | 1224 | 53 |
-   | `P_Modul_29_Platte04` | 1200 | 1237 | 37 |
-   | `P_Modul_30_Wippe` | 1340 | 1406 | 66 |
-
-3. **Nothing corrects it for up to 98 ticks.** By the time the trailing client
-   joins, the server's copies have settled and gone to sleep, and
-   `physics_world::collect_bodies` puts only *simulated* bodies in a delta
-   snapshot. So the trailing client has no server rows for exactly the bodies
-   it is getting wrong, and keeps predicting alone until the next periodic full
-   snapshot.
-
-Point 3 splits the problem in two, and how bad it gets depends on which regime
-the trailing client lands in:
-
-- **The server's copies are already asleep** when the trailing client joins
-  (its gap is longer than the mechanism's settle). The client then has *no*
-  server rows at all for those bodies and runs blind until the next full
-  snapshot. This is the expensive one, and it is a plain omission:
-  in `physics_world::apply_event`, every other event marks
-  `body_set_changed_` — which makes the next snapshot a full one — and the
-  `Sector` event did not. For the *first* player to enter a sector that did
-  not matter, because `update_sectors()` changes the union and sets the flag
-  itself. For the second player the union is unchanged, `update_sectors()`
-  returns early at its `desired == active_sectors_` guard, and nothing asks
-  for a full snapshot at the one tick the trailing client most needs one.
-- **The server's copies are still awake.** The trailing client does get rows
-  every snapshot, but it has just created its own bodies at their IC pose and
-  predicts them forward, so it is genuinely N ticks behind in the settle. The
-  error grows until it crosses the rollback threshold and is then fixed in one
-  tick. Nothing is missing here; the client is simply predicting a mechanism
-  it has no business predicting yet.
+When that client finally crosses, its copy of the sector's mechanisms starts
+from their IC pose, while the server's have been running (and being shoved
+around by the leading ball) all along. The client predicts its fresh bodies
+forward, the error opens, and the rollback engine closes it in a tick.
 
 ## The evidence that it is the activation lag
 
-Four runs of the same map, differing only in which sector the clients start in,
-plus a solo control. The error tracks the gap between the two clients' sector
-activations and nothing else:
+A solo run, same map, same drive, same checkpoints — one player instead of two:
 
-| run | client0 enters sector 2 | client1 | gap | max `P_Modul_29` error |
+| run | sectors entered | worst mechanism rollback |
+| --- | --- | --- |
+| 2 players | 1, 2, 3, 4 | **2.747 m** |
+| 1 player | 1, 2, 3, 4 | **none above 0.3 m** (whole-run max error 0.086 m) |
+
+The solo client crosses the same three checkpoints at 817, 1311 and 1804 and
+never diverges, because the only sector the server runs is the one that client
+is in. Nothing else about the two runs differs.
+
+## What the fix is worth
+
+`physics_world::apply_event` marked `body_set_changed_` — which makes the next
+snapshot a full one — on every event except `Sector`. For the *first* player
+into a sector that is covered anyway, because `update_sectors()` changes the
+union and sets the flag itself; for the second the union is unchanged,
+`update_sectors()` returns early on its `desired == active_sectors_` guard, and
+nothing asks for a full snapshot. That matters when the server's copies of that
+sector's mechanisms have gone to sleep, because `collect_bodies` puts only
+*simulated* bodies in a delta snapshot: the trailing client would then have no
+rows at all for the bodies it is getting wrong.
+
+That gap is real in the code, and the one-line change closes it. **But it has
+no measured effect on this map.** An A/B with the line disabled, on
+deterministic runs with identical crossing ticks, gives byte-identical
+mechanism errors:
+
+| | `P_Box_MF` | `P_Modul_26_Sack` | `P_Modul_08_Schaukel` | `P_Modul_34_Schiebestein` |
 | --- | --- | --- | --- | --- |
-| `--start-sector 1` | 1099 | 1059 | 40 | 3.329 m |
-| `--start-sector 3` | 989 | 965 | 24 | 2.965 m |
-| `--start-sector 4` | 989 | 965 | 24 | 2.965 m |
-| `--start-sector 2` | 8 | 8 | **0** | **0.093 m** |
-| solo, 1 player | 1062 | — | **n/a** | **no rollback at all** |
+| with the change | 2.747408 | 2.016606 | 1.838182 | 0.648123 |
+| without it | 2.747408 | 2.016606 | 1.838182 | 0.648123 |
 
-The solo control is the decisive one: one player crossing the same checkpoint
-mid-session, the same mechanism, the same map — and the client never diverges,
-because the only sector the server runs is the one that client is in.
+The reason is that the sleeping regime it addresses does not arise here: the
+leading ball keeps the sector's mechanisms awake, so their rows are in every
+delta snapshot and the forced full snapshot adds nothing. The change is kept
+because the gap it closes is real and costs one full snapshot per checkpoint
+crossing, **not** because it was measured to help. The earlier claim that it
+took 3.329 m down to 0.046 m came from the flawed map and does not reproduce.
 
-## The fix, and what it does and does not do
+## A client-side seed was tried, and is unresolved
 
-One line, in the `Sector` handler of `physics_world::apply_event`: mark
-`body_set_changed_`, so any player's sector change forces a full snapshot on
-the next send. The leading player's crossing already got one through
-`update_sectors()`; the trailing player's now gets one too, carrying the
-sleeping mechanism bodies it needs. The cost is one full snapshot per
-checkpoint crossing per player.
+The obvious completion is to stop the trailing client predicting a mechanism it
+has only just created, and seed it from the server instead. The formulation
+tried was: in `rollback.hpp`, treat a **sleeping** server row as news when
+*our* copy of that body is still awake, instead of ignoring it while the two
+poses still agree —
 
-The two runs below are deterministic — identical activation ticks before and
-after, so this is a like-for-like comparison:
+```cpp
+const bool parked_by_server = recorded->simulated && !ref.simulated;
+ref.authoritative = ref.breached || ref.simulated || parked_by_server;
+```
 
-| run | gap | server activates | regime | before | after |
-| --- | --- | --- | --- | --- | --- |
-| `--start-sector 1` | 40 | 1067 | asleep by the time client0 joins at 1099 | 3.329 m | **0.046 m** |
-| `--start-sector 3` | 24 | 973 | still awake when client0 joins at 989 | 2.965 m | 2.965 m |
+On the flawed map it made things worse (3.329 m where the baseline was 0.046 m)
+and it fails `RollbackEngine.SleepingRowInsideToleranceLeavesTheLocalSleepStateAlone`,
+which encodes the existing rule deliberately. It was reverted.
 
-That split is itself the confirmation: the change removes the asleep-body
-regime completely and leaves the awake one byte-for-byte identical, which is
-exactly what the diagnosis predicts. All four sectors still pass the harness
-(mechanisms tracked N/N, `hard=0`, `resyncs=0`, journals bit-exact).
+**Both of those results need redoing.** The measurement was taken on the flawed
+map, so it carries no more weight than the fix measurement it sat next to; only
+the unit-test failure stands on its own, and that test is a design decision, not
+an accident — the comment it guards explains that copying a sleeping row re-arms
+a mechanism's freeze timer.
+
+The formulation that matches the symptom better has not been tried at all: key
+it on **body birth** rather than sleep state, and hold a mechanism body created
+by a sector activation out of prediction entirely until one snapshot comparison
+has matched it. That is a change to the mechanism tracking the Option A
+postmortem and the 9.28 joint work both warn is delicate, and it needs its own
+measurement run on the corrected map.
 
 ## What is left
 
-**The awake regime is not fixed**, and cannot be from the server side: the
-trailing client has the server's rows and is choosing to predict over them. The
-fix belongs in the client's correction policy — when a sector activation
-creates a mechanism body locally, that body should be *seeded* from the next
-server snapshot rather than predicted forward from its IC pose, until one
-comparison has matched. That is a change to the mechanism tracking the
-Option A postmortem and the 9.28 joint work both warn is delicate, so it is
-left as a separate piece of work rather than bolted on here. The residual cost
-today is about 0.36 s of a visibly wrong mechanism for the trailing player,
-ended by a single one-tick rollback, with no hard correction.
-
-**Untested:** the arena puts `P_Modul_29` 140 units past the checkpoint, so the
-ball is never standing on the mechanism when it snaps — the artefact here is
-visual only. On a map where a mechanism sits at a checkpoint, a trailing player
-could have it move under their ball. If that needs testing, the session
-client's `--beam X Y Z TICK` can put a ball on the mechanism at a chosen tick.
+- Re-try the client-side seed, birth-keyed, on the corrected map.
+- **Untested:** the arena keeps its mechanisms off the driving lane, so a ball
+  is never standing on one when it snaps — the artefact here is visual only. On
+  a map where a mechanism sits where a player stands, a trailing player could
+  have it move under their ball. The harness's `--beam-bays` can put a ball on
+  a mechanism at a chosen tick if that needs testing.
+- A separate oddity the arena turned up and then designed away: two instances
+  of one element type give two physics bodies with the same name (the game
+  names a body after its element type), and a run with two `P_Ball_Wood` 320 m
+  apart produced a phantom `P_Ball_Wood_MF` correction of 320.004 m — the exact
+  distance between them — although `mechanism_tracking.hpp`'s identity guard is
+  meant to drop a pick beyond 20 m. Retail Level 8 has the same situation with
+  two `P_Modul_30_Wippe`, so this is worth a look on its own.

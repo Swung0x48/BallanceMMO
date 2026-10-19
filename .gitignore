@@ -31,3 +31,4 @@
 /BallanceMMOCommon/include/config/version_config.h
 /CMakePresets.json*
 /maps/arena-test/
+*.blend1

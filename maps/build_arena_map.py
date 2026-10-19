@@ -5,6 +5,21 @@ arena so nothing overlaps anything else.
 Mount heights (MOUNT_DZ) are not invented: they were measured from the 13
 retail levels - the z of each component's origin above the floor surface
 directly beneath it, taking the mode over ~1250 placements.
+
+The floor is solid 5-unit-thick Ballance floor blocks (surface at z = 0,
+underside at z = -5) and is **unbroken**: every mechanism is lifted so that it
+stands completely on top of the road instead of being sunk into it.
+
+That is a deliberate departure from the retail levels, where almost every
+P_Modul_* mesh reaches exactly z = -5 below its mount point because its base
+plate is buried in a 5-thick floor block.  Reproducing that faithfully needs
+either a hole in the floor under each mechanism (which the balls fall into) or
+a thickness-less floor (which lets the base plates stick through the road, so
+every mechanism starts the session interpenetrating a static body and its
+settling physics is meaningless).  For a test bench, standing them on the
+surface is better than both: nothing clips, nothing can be fallen into, and
+every mechanism is fully visible.  MOUNT_DZ below is still the measured retail
+height; mount_dz() raises it only where the mechanism would otherwise sink.
 """
 import bpy
 import math
@@ -58,11 +73,42 @@ BAYS = [
     'P_Trafo_Paper', 'P_Modul_34', 'P_Modul_37', 'P_Modul_26', 'P_Modul_17', 'P_Ball_Paper',
     'P_Modul_08', 'P_Modul_19', 'P_Modul_03', 'P_Dome', 'P_Ball_Stone',
 ]
+
+# Loose bodies parked on top of a moving mechanism, so the run exercises
+# mechanism-against-mechanism contact without anyone having to drive into them.
+# These are RELOCATIONS, not copies: the element still owns its bay index (and
+# so its sector), it is simply placed on the host mechanism instead of on its
+# own patch of road, and its own bay is left as empty road.
+#
+# Do not turn these into extra instances.  The game names a component's body
+# after its element type, so two P_Ball_Wood in one level mean two bodies both
+# called P_Ball_Wood_MF, and the session has to guess which of ours a snapshot
+# row means.  An earlier version of this map did that, 320 m apart, and the
+# runs duly produced a phantom 320.004 m correction on P_Ball_Wood_MF - the
+# exact distance between the two - even though mechanism_tracking.hpp's
+# identity guard is supposed to drop a pick beyond 20 m.
+RELOCATE = {
+    'P_Box': 10,        # rests on the P_Modul_30 see-saw (bay 10)
+    'P_Ball_Wood': 3,   # rests on the P_Modul_41 tilting block (bay 3)
+}
+
 BAY_SPAN = 40.0          # > the widest footprint (P_Modul_03, ~32 units)
 BAYS_PER_SECTOR = 6
-LANE_Y = 30.0            # arena centre line
 ARENA_WIDTH = 60.0
-PLATE_SPAN = 200.0
+# The mechanisms stand on the road rather than sunk into it, which makes them
+# walls: a ball driven along a lane through them simply stops at the first one.
+# So the driving lane and the mechanism row are separate.  PLAY_Y carries the
+# start, the checkpoints, the resetpoints and the level end - a ball can drive
+# the whole arena and cross every checkpoint without being blocked - and MECH_Y
+# carries the 23 mechanisms, close enough to reach (the harness beams a ball to
+# a bay when it wants contact) and far enough not to foul the lane: the deepest
+# footprint, P_Modul_19's, still clears PLAY_Y by more than 12 units.
+PLAY_Y = 15.0
+MECH_Y = 43.0
+RAIL_Y = 29.0
+RECESS_MARGIN = 0.6      # clearance between a mechanism and the floor around it
+FLOOR_THICKNESS = 5.0
+MIN_STRIP = 0.35         # drop slivers rather than emit degenerate blocks
 
 
 def scene():
@@ -76,22 +122,62 @@ def reset():
         v.preset_ioport_encodings()
 
 
-def add_floor_plate(name, x0, y0, length, width):
-    """A flat Ballance floor: a single top-facing quad, surface at z = 0.
+_floor_n = 0
 
-    Flat (thickness-less) plates are what the retail maps use for open areas,
-    and they keep the mechanisms that mount *below* the surface (the
-    ventilator sinks 4.6 units) from intersecting a floor block.
-    """
+
+def add_floor_block(x0, y0, length, width):
+    """A solid Ballance floor block: surface at z = 0, 5 units thick."""
+    global _floor_n
+    if length < MIN_STRIP or width < MIN_STRIP:
+        return None
     obj = UTIL_bme.create_bme_struct_wrapper('floor_flat', {
-        'height_': 5.0, 'length_': length, 'width_': width,
-        'face_': (True, False, False, False, False, False), 'is_sink_': False,
+        'height_': FLOOR_THICKNESS, 'length_': length, 'width_': width,
+        'face_': (True, True, True, True, True, True), 'is_sink_': False,
     })
     NC.VirtoolsGroupConvention.set_to_object(obj, Info.create_from_others(BT.FLOOR), None)
     scene().collection.objects.link(obj)
     obj.matrix_world = mathutils.Matrix.Translation((x0, y0, 0.0))
-    obj.name = name
+    _floor_n += 1
+    obj.name = f'A_Floor_{_floor_n:03d}'
     return obj
+
+
+def floor_with_recess(x0, y0, length, width, recess):
+    """Tile [x0,x0+length] x [y0,y0+width] with solid blocks, leaving `recess`
+    (an (rx0, rx1, ry0, ry1) rectangle, or None) open."""
+    x1, y1 = x0 + length, y0 + width
+    if recess is None:
+        add_floor_block(x0, y0, length, width)
+        return
+    rx0, rx1, ry0, ry1 = recess
+    rx0, rx1 = max(rx0, x0), min(rx1, x1)
+    ry0, ry1 = max(ry0, y0), min(ry1, y1)
+    if rx1 <= rx0 or ry1 <= ry0:
+        add_floor_block(x0, y0, length, width)
+        return
+    add_floor_block(x0, y0, rx0 - x0, width)            # west of the recess
+    add_floor_block(rx1, y0, x1 - rx1, width)           # east
+    add_floor_block(rx0, y0, rx1 - rx0, ry0 - y0)       # south
+    add_floor_block(rx0, ry1, rx1 - rx0, y1 - ry1)      # north
+
+
+def element_bbox(type_name):
+    with PROP_ballance_element.BallanceElementsHelper(scene()) as creator:
+        me = creator.get_element(BET[type_name])
+        xs = [v.co.x for v in me.vertices]
+        ys = [v.co.y for v in me.vertices]
+        zs = [v.co.z for v in me.vertices]
+    return (min(xs), max(xs), min(ys), max(ys), min(zs), max(zs))
+
+
+def mount_dz(type_name):
+    """Where this element's origin goes above the road surface.
+
+    The retail height, except for the mechanisms that retail sinks into the
+    floor block: those are lifted until their lowest point rests on the
+    surface, so the road can stay solid and unbroken."""
+    z0 = element_bbox(type_name)[4]
+    return max(MOUNT_DZ[type_name], -z0)
 
 
 def add_component(type_name, sector, loc, rz_deg=0.0, name=None):
@@ -130,7 +216,6 @@ def add_rail(name, x0, y, length):
     from bl_ext.user_default.bbp_ng import UTIL_rail_creator, PROP_bme_material
 
     bm = bmesh.new()
-    # retail rail section: radius 0.35, span 3.75; grows along local +Y
     UTIL_rail_creator.create_straight_rail(bm, False, 0.35, 3.75, length, 0, True, True)
     mesh = bpy.data.meshes.new('Rail')
     bm.to_mesh(mesh)
@@ -153,52 +238,64 @@ def add_rail(name, x0, y, length):
 
 
 def build():
+    global _floor_n
     reset()
+    _floor_n = 0
 
     sector_count = (len(BAYS) + BAYS_PER_SECTOR - 1) // BAYS_PER_SECTOR
-    x_first = 0.0
     x_last = (len(BAYS) - 1) * BAY_SPAN
-    x_start = x_first - BAY_SPAN / 2
+    x_start = -BAY_SPAN / 2
     x_end = x_last + BAY_SPAN / 2
+    y0 = 0.0
 
-    # --- floor: flat plates spanning the whole arena -----------------------
-    plate_x0 = x_start - BAY_SPAN
-    plate_x1 = x_end + BAY_SPAN
-    n_plates = int(math.ceil((plate_x1 - plate_x0) / PLATE_SPAN))
-    for i in range(n_plates):
-        x0 = plate_x0 + i * PLATE_SPAN
-        length = min(PLATE_SPAN, plate_x1 - x0)
-        add_floor_plate(f'A_Floor_{i + 1:02d}', x0, LANE_Y - ARENA_WIDTH / 2,
-                        length, ARENA_WIDTH)
+    # --- the road: one unbroken slab from the start apron to the end -------
+    x_balloon = x_end + BAY_SPAN * 0.75
+    road_x0 = x_start - BAY_SPAN
+    road_x1 = x_end + BAY_SPAN * 1.5
+    # tiled rather than one huge quad so no single floor mesh is absurdly big
+    span = BAY_SPAN * 4
+    x = road_x0
+    while x < road_x1 - 1e-6:
+        add_floor_block(x, y0, min(span, road_x1 - x), ARENA_WIDTH)
+        x += span
 
     # --- level start + its resetpoint --------------------------------------
-    add_component('PS_FourFlames', 1, (x_start, LANE_Y, MOUNT_DZ['PS_FourFlames']),
+    add_component('PS_FourFlames', 1, (x_start, PLAY_Y, mount_dz('PS_FourFlames')),
                   90.0, 'PS_FourFlames_01')
     # the start pair sits 3.65 up, not 3.326 - that is how the retail start reads
-    add_component('PR_Resetpoint', 1, (x_start, LANE_Y, 3.65), 180.0, 'PR_Resetpoint_01')
+    add_component('PR_Resetpoint', 1, (x_start, PLAY_Y, 3.65), 180.0, 'PR_Resetpoint_01')
 
-    # --- one mechanism per bay ---------------------------------------------
-    counts = {}
+    # --- the mechanisms ----------------------------------------------------
     for i, type_name in enumerate(BAYS):
-        sector = i // BAYS_PER_SECTOR + 1
-        counts[type_name] = counts.get(type_name, 0) + 1
-        add_component(type_name, sector,
-                      (i * BAY_SPAN, LANE_Y, MOUNT_DZ[type_name]), 0.0,
-                      f'{type_name}_{counts[type_name]:02d}')
+        host = RELOCATE.get(type_name)
+        if host is None:
+            sector = i // BAYS_PER_SECTOR + 1
+            pos = (i * BAY_SPAN, MECH_Y, mount_dz(type_name))
+        else:
+            # on top of its host mechanism, and in the host's sector so the two
+            # are activated together
+            sector = host // BAYS_PER_SECTOR + 1
+            host_top = element_bbox(BAYS[host])[5] + mount_dz(BAYS[host])
+            z0 = element_bbox(type_name)[4]
+            pos = (host * BAY_SPAN, MECH_Y, host_top - z0 + 0.05)
+        add_component(type_name, sector, pos, 0.0, f'{type_name}_01')
 
     # --- checkpoint + resetpoint on each sector boundary -------------------
     for s in range(2, sector_count + 1):
         boundary = (s - 1) * BAYS_PER_SECTOR * BAY_SPAN - BAY_SPAN / 2
-        add_component('PC_TwoFlames', s - 1, (boundary, LANE_Y, MOUNT_DZ['PC_TwoFlames']),
+        add_component('PC_TwoFlames', s - 1, (boundary, PLAY_Y, mount_dz('PC_TwoFlames')),
                       0.0, f'PC_TwoFlames_{s - 1:02d}')
-        add_component('PR_Resetpoint', s, (boundary, LANE_Y, MOUNT_DZ['PR_Resetpoint']),
+        add_component('PR_Resetpoint', s, (boundary, PLAY_Y, mount_dz('PR_Resetpoint')),
                       180.0, f'PR_Resetpoint_{s:02d}')
 
     # --- rails: a side lane so the test exercises Phys_FloorRails ----------
-    add_rail('A_Rail_01', x_first, LANE_Y - 20.0, 160.0)
+    add_rail('A_Rail_01', 0.0, RAIL_Y, 160.0)
 
     # --- level end ---------------------------------------------------------
-    add_component('PE_Balloon', sector_count, (x_end, LANE_Y, MOUNT_DZ['PE_Balloon']),
+    # Lifted clear of the road like everything else, so its pillar does not run
+    # through the slab; the balloon therefore floats and the level cannot
+    # actually be finished, which no test here depends on.
+    add_component('PE_Balloon', sector_count, (x_balloon, PLAY_Y, mount_dz('PE_Balloon')),
                   -180.0, 'PE_Balloon_01')
 
     info = PROP_ballance_map_info.get_raw_ballance_map_info(scene())
@@ -208,17 +305,37 @@ def build():
     return sector_count
 
 
-def inventory():
-    groups = {}
-    objs = []
+def check_clipping():
+    """Every mechanism against every floor block: report real overlaps.
+
+    A mechanism may sit *in* a recess, so only an actual intersection of the
+    two bounding boxes counts, and a shared face (the body resting on the
+    surface) does not."""
+    floors, comps = [], []
     for ob in bpy.data.objects:
         if ob.type != 'MESH':
             continue
         with PROP_virtools_group.VirtoolsGroupsHelper(ob) as gp:
-            gs = sorted(gp.iterate_groups())
-        for g in gs:
-            groups[g] = groups.get(g, 0) + 1
-        loc = ob.matrix_world.translation
-        objs.append({'name': ob.name, 'groups': gs, 'polys': len(ob.data.polygons),
-                     'loc': [round(loc.x, 3), round(loc.y, 3), round(loc.z, 3)]})
-    return {'groups': groups, 'objects': objs}
+            groups = set(gp.iterate_groups())
+        co = [ob.matrix_world @ v.co for v in ob.data.vertices]
+        box = (min(c.x for c in co), max(c.x for c in co),
+               min(c.y for c in co), max(c.y for c in co),
+               min(c.z for c in co), max(c.z for c in co))
+        if 'Phys_Floors' in groups and ob.name.startswith('A_Floor'):
+            floors.append((ob.name, box))
+        elif any(g.startswith(('P_', 'PC_', 'PE_', 'PS_', 'PR_')) for g in groups):
+            comps.append((ob.name, box))
+
+    # 2 mm: a body resting on the surface shares a face with it, and float
+    # rounding puts that shared face a few microns either side of z = 0.
+    eps = 2e-3
+    hits = []
+    for cname, c in comps:
+        for fname, f in floors:
+            ox = min(c[1], f[1]) - max(c[0], f[0])
+            oy = min(c[3], f[3]) - max(c[2], f[2])
+            oz = min(c[5], f[5]) - max(c[4], f[4])
+            if ox > eps and oy > eps and oz > eps:
+                hits.append({'component': cname, 'floor': fname,
+                             'overlap': [round(ox, 3), round(oy, 3), round(oz, 3)]})
+    return {'floors': len(floors), 'components': len(comps), 'clipping': hits}
