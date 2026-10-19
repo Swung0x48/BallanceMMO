@@ -473,6 +473,91 @@ worth keeping separate:
   behaviours have to be executed on their own, with their state rewound, while
   the navigation scripts and the one-shot actions stay out of it.
 
+## The bug that was hiding behind all of it: stepped but never restored
+
+The rollback's tracked set was built from `mechanism_tracking_::tracked_entities`
+- the bodies the server has named in a full snapshot **and** the registry has
+resolved to a local body. Everything else in the client's own world was left
+out of the records, so a replay never restored it. But the replay's `step()`
+steps the **whole** physics world, so those bodies were stepped by every replay
+and restored by none.
+
+The signature is unmistakable once you look for it. `P_Modul_29`'s plates hang
+from physics hinges - the script is `Physicalize` + `Set Physics Hinge` x10 +
+`TT Scaleable Proximity`, so IVP carries them rather than a per-frame script -
+and they swing continuously. Coming out of a solo depth-12 forced rewind, a
+plate sat at **exactly** the pose the un-rewound run held 12 ticks *later*: not
+displaced, phase-shifted by precisely the replay depth, because it took 12
+extra steps that nothing undid.
+
+And `mechanisms=22/12` had been in the status line of every run all session.
+Ten of the client's own bodies, in that state.
+
+The tracked set is now every movable body the bridge reports, minus the balls
+which it already carries as own/remote entities. Solo, 40 forced rewinds of
+depth 12:
+
+| | before | after |
+|---|---|---|
+| mechanisms, mean | 23.34 m | **3.28 m** |
+| mechanisms, p90 | 73.9 m | 15.5 m |
+| mechanisms, max | 310 m | **20.4 m** |
+| ball, mean | 0.0017 m | 0.0012 m |
+
+Seven times better, and the ball improves too. In the networked single-sector
+runs it changes little - 7.67 m stays 7.67 m on the worst client - because
+there only *one* body was unresolved rather than ten. The win scales with how
+much of the world the server had not named, which depends on the map and the
+sector.
+
+### It also invalidated one of the earlier conclusions
+
+The "taking the mechanisms out of the rollback changes nothing, so the rollback
+is not what perturbs them" result above is **wrong**, and wrong for this exact
+reason: removing a body from the tracked set never stopped it being stepped, it
+only stopped it being restored. Both arms of that experiment were measuring a
+body nothing restored.
+
+Re-measured properly, with the whole world tracked, the rollback count clearly
+does drive it:
+
+| mechanisms vs the server, mean worst-body error | client0 | client3 | rewinds |
+|---|---|---|---|
+| no latency | 0.069 m | 0.398 m | 17-22 |
+| 300 ms round trip | 0.158 m | 7.67 m | 109-185 |
+
+So each rollback still perturbs a mechanism even when it is properly restored
+and replayed, and that residual is now the whole remaining problem.
+
+### Which points at the hinges, not the scripts
+
+The plates are not position-animated by a script; they hang from ten physics
+hinges and IVP carries them. The restore puts each body back by pose and
+velocity - and nothing puts back the **constraint** state. A chain of ten
+hinged bodies restored one at a time can land in a configuration the hinges
+disagree with, and the solver's correction is not gentle.
+
+That reframes the engine change: it is not "make the Virtools behaviours
+replayable" (which the whole-frame experiment showed is the wrong shape
+anyway), it is **restore IVP's constraint state across a rewind**. The bridge
+has a `m_ConstraintObserver` hook for design 9.26 diagnostics but no
+capture/restore, so this needs new bridge functions reaching into the IVP
+constraint objects - and the first question to answer is whether IVP's hinges
+carry integration state at all (accumulated impulses for warm-starting) or are
+solved afresh each step, because if they are stateless the residual is
+somewhere else again, most likely the contact caches or the freeze timers the
+Option A postmortem already names.
+
+### BallanceTAS has nothing to lend here
+
+Checked, since it is the other project that replays Ballance deterministically:
+it is behind this one. It says outright that IVP physics determinism is **not**
+enforced, has no savestates, and its fixed-timestep layer was removed. The one
+transferable idea - validating frame by frame against a reference trace -
+already exists here as the journal replay and is stronger, comparing a full
+world hash rather than the ball. Useful mainly as confirmation that nobody has
+a Virtools savestate to borrow.
+
 ## Four bugs found on the way, all real
 
 1. **The missing trigger.** The client only rolled back when a snapshot
