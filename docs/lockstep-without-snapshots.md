@@ -333,9 +333,43 @@ joining last - it was that it rolled back the most.
 
 So: **lockstep recovers a body whose evolution is a function of the shared
 inputs, and cannot recover one whose evolution depends on a history that has
-already been perturbed.** Closing the remaining gap needs the replay to re-run
-the scripts, or mechanisms to be driven by something replayable. That is an
-engine question, not a protocol one, and it is where this now stands.
+already been perturbed.**
+
+### It is not the rollback that perturbs them
+
+That was the obvious next hypothesis and it is wrong. Keeping the mechanisms out
+of the rollback entirely - never restoring or replaying them, letting their own
+deterministic script timeline carry them - changes their agreement with the
+server by **nothing**:
+
+| mechanisms only (`P_Modul*`), mean worst-body error | client0 | client3 |
+|---|---|---|
+| 300 ms, mechanisms in the rollback | 0.16 m | **7.66 m** |
+| 300 ms, mechanisms out of the rollback | 0.15 m | **7.29 m** |
+| no latency, in the rollback | 0.62 m | 0.86 m |
+
+Two things to read off that. The rollback is neutral for mechanisms, so the
+"replay does not re-run the scripts" problem is real but not what is hurting
+them here. And the damage is **not uniform across clients at the same
+latency**: client0 at a 300 ms round trip is fine at 0.16 m while client3 is at
+7.66 m. The difference is which balls actually reach the plate row - client3's
+does, during the window when its view of the other balls is still wrong, and a
+ball that displaces a plate while it is itself in the wrong place displaces it
+permanently, because the plate has no input to be re-derived from.
+
+So it comes back to the transient after all, and the measurement says what to
+aim at: **a mirror must not be able to touch anything while its inputs have not
+caught up.** It does not have to be in the right place - it is a remote player
+at 300 ms - it only has to be unable to do irreversible damage. Creating the
+mirror with collision disabled and enabling it once its input history has
+caught up would cost nothing in protocol or in anyone's own latency, which is
+the next thing to try.
+
+(That measurement also cost a lesson: `mism` dropped from 31 to 6 when the
+mechanisms left the rollback, which looked like a win and was not - the engine
+simply stops *evaluating* a body it does not track, so the counter improved
+while the world got slightly worse. The second time in this session that a
+change quietly removed the metric being used to judge it.)
 
 ## Four bugs found on the way, all real
 
