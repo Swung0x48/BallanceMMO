@@ -179,6 +179,15 @@ namespace bmmo::session {
 
     class rollback_engine {
     public:
+        // One snapshot row that maps to a local entity, and what the compare
+        // pass concluded about it.
+        struct row_ref {
+            const body_state* row = nullptr;
+            bool simulated = false;      // BODY_FLAG_SIMULATED
+            bool breached = false;       // past the tolerance of its kind
+            bool authoritative = false;  // the row is the restore source for this body
+        };
+
         explicit rollback_engine(rollback_thresholds thresholds = {}) : thresholds_(thresholds) {}
 
         // Drops every record.  Lifecycle events no longer need this - a body
@@ -388,6 +397,37 @@ namespace bmmo::session {
                 world.log("mismatch at tick " + std::to_string(snapshot.tick) + " (local " + std::to_string(current_tick) + "):"
                           + detail);
 
+            return restore_and_replay(world, snapshot.tick, current_tick, rows, input_at, report,
+                                      worst_entity + " off by " + std::to_string(worst) + " m");
+        }
+
+    private:
+        // Put every recorded body back to `anchor` and re-simulate
+        // anchor+1 .. current_tick from the recorded inputs.  Steps 2 and 3 of
+        // on_snapshot, which is the only caller that has `rows` to restore
+        // from; rewind_to() calls it with none.  Returns true when the caller
+        // must treat the history as re-anchored (it always does today: either
+        // the window was replayed, or it was dropped and a resync is due).
+        bool restore_and_replay(const rollback_world& world, uint32_t anchor, uint32_t current_tick,
+                                const std::map<std::string, row_ref>& rows,
+                                const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
+                                const std::function<void(uint8_t)>& report, const std::string& reason) {
+            tick_state* at = find(anchor);
+            if (!at) return false;
+            const bool frozen = world.simulating && !world.simulating();
+            const auto generation_now = [&](const std::string& entity) -> uint32_t {
+                for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+                    auto found = it->tracked.generations.find(entity);
+                    if (found != it->tracked.generations.end()) return found->second;
+                }
+                return 0;
+            };
+            const auto record_at = [&](const std::string& entity) -> const bmmo_physics_body_state* {
+                auto it = at->bodies.find(entity);
+                if (it == at->bodies.end()) return nullptr;
+                if (generation_in(*at, entity) != generation_now(entity)) return nullptr;
+                return &it->second;
+            };
             // 2. restore tick T.  The world is one interacting system: a body
             //    left where it is while the others rewind meets the replayed
             //    ball at the wrong pose and pushes it out (the rope-and-sack
@@ -398,13 +438,13 @@ namespace bmmo::session {
             //    about is left alone rather than guessed at.
             const rollback_tracked tracked = at->tracked;
             std::map<std::string, restore> plan;
-            for (const auto& entity: restore_candidates(snapshot.tick, rows)) {
+            for (const auto& entity: restore_candidates(anchor, rows)) {
                 const auto row = rows.find(entity);
                 const bmmo_physics_body_state* recorded = record_at(entity);
                 // A body born after T outranks its row: the row describes the
                 // body this one replaced (or one the server does not have yet).
                 const tick_state* birth = recorded ? nullptr
-                                                   : birth_record(entity, snapshot.tick, generation_now(entity));
+                                                   : birth_record(entity, anchor, generation_now(entity));
                 restore item;
                 if (birth) {
                     // It did not exist at T: it was created during the window
@@ -451,7 +491,7 @@ namespace bmmo::session {
             for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
 
             // 3. re-simulate T+1 .. current with the recorded inputs
-            const uint32_t lag = window;
+            const uint32_t lag = current_tick > anchor ? current_tick - anchor : 0;
             if (frozen) {
                 // the scripts stopped the local clock: the authoritative
                 // states stand until the clock runs again.  No re-simulation
@@ -489,9 +529,9 @@ namespace bmmo::session {
                 world.nav_poll(t.own_entity, false);
             };
             stop_polling(tracked);
-            for (uint32_t t = snapshot.tick + 1; t <= current_tick; ++t)
+            for (uint32_t t = anchor + 1; t <= current_tick; ++t)
                 if (tick_state* recorded = find(t)) stop_polling(recorded->tracked);
-            for (uint32_t t = snapshot.tick + 1; t <= current_tick; ++t) {
+            for (uint32_t t = anchor + 1; t <= current_tick; ++t) {
                 tick_state* recorded = find(t);
                 const rollback_tracked& step_tracked = recorded ? recorded->tracked : tracked;
                 std::map<std::string, input_frame> inputs;
@@ -566,10 +606,36 @@ namespace bmmo::session {
             }
             for (const auto& entity: polled) world.nav_poll(entity, true);
             if (world.log)
-                world.log("rollback to tick " + std::to_string(snapshot.tick) + " (" + worst_entity + " off by "
-                          + std::to_string(worst) + " m), re-simulated " + std::to_string(lag) + " ticks");
+                world.log("rollback to tick " + std::to_string(anchor) + " (" + reason + "), re-simulated "
+                          + std::to_string(lag) + " ticks");
             report(1);
             return true;
+        }
+
+    public:
+        // Re-anchor on a tick in the past because the WORLD changed there, not
+        // because an authoritative snapshot disagreed: the caller has created a
+        // body for a lifecycle event stamped at `anchor` that arrived late (a
+        // remote ball is relayed a round trip after it was born).  The new body
+        // is in no record at `anchor`, so the restore leaves it exactly where
+        // the caller put it and the replay steps it from there, which is what
+        // makes every client's body set agree tick for tick without waiting for
+        // a snapshot to notice.
+        //
+        // `anchor` must still be in the history; too late and there is nothing
+        // to rewind to, which is the point at which a snapshot or a resync has
+        // to take over.  Returns false then, and the caller must re-anchor.
+        bool rewind_to(const rollback_world& world, uint32_t anchor, uint32_t current_tick,
+                       const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
+                       const std::string& reason) {
+            if (!find(anchor)) {
+                ++stats_.unmatched;
+                return false;
+            }
+            ++stats_.mismatched;
+            const std::map<std::string, row_ref> no_rows;
+            auto no_report = [](uint8_t) {};
+            return restore_and_replay(world, anchor, current_tick, no_rows, input_at, no_report, reason);
         }
 
     private:
@@ -581,14 +647,6 @@ namespace bmmo::session {
             std::map<std::string, input_frame> inputs;   // applied at this tick, per navigated ball
         };
 
-        // One snapshot row that maps to a local entity, and what the compare
-        // pass concluded about it.
-        struct row_ref {
-            const body_state* row = nullptr;
-            bool simulated = false;      // BODY_FLAG_SIMULATED
-            bool breached = false;       // past the tolerance of its kind
-            bool authoritative = false;  // the row is the restore source for this body
-        };
 
         // One body's part in the restore of tick T.
         struct restore {

@@ -1443,17 +1443,8 @@ namespace {
                 // relayed frame instead of the recorded prediction when this
                 // succeeds, and a frame from an earlier tick would replay a key
                 // edge the tick did not have (findings/A5 section 3.1 item 5).
-                auto input_at = [&](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
-                    const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
-                    if (entity == own_nav_entity_) inputs = &own_inputs_;
-                    else
-                        for (const auto& [id, remote]: remotes_)
-                            if (remote.entity == entity) inputs = &remote.inputs;
-                    if (!inputs) return false;
-                    auto it = inputs->find(tick);
-                    if (it == inputs->end()) return false;
-                    out = it->second;
-                    return true;
+                auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+                    return recorded_input_at(entity, tick, out);
                 };
                 const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
                 if (rolled && args_.trace && rollback_diag_++ < 16)
@@ -1572,6 +1563,23 @@ namespace {
             return clone;
         }
 
+        // The input a navigated ball had at `tick`, for a re-simulation.  Only
+        // an exact hit counts, like the mod: the engine feeds a relayed frame
+        // instead of the recorded prediction when this succeeds, and a frame
+        // from an earlier tick would replay a key edge the tick did not have.
+        bool recorded_input_at(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) const {
+            const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
+            if (entity == own_nav_entity_) inputs = &own_inputs_;
+            else
+                for (const auto& [id, remote]: remotes_)
+                    if (remote.entity == entity) inputs = &remote.inputs;
+            if (!inputs) return false;
+            auto it = inputs->find(tick);
+            if (it == inputs->end()) return false;
+            out = it->second;
+            return true;
+        }
+
         // Every queued event stamped at or before `tick`, in the one order
         // the server also uses.  Called from frame() immediately before the
         // engine steps, which is where session_runner::step applies them:
@@ -1608,6 +1616,38 @@ namespace {
             for (const auto& event: due) apply_event(event);
         }
 
+        // A ball is born at its owner's tick and relayed, so this client hears
+        // about it input_delay + a trip later.  Creating it at the tick we have
+        // reached would leave our body set disagreeing with the owner's for
+        // that whole window, and with the snapshot path demoted nothing would
+        // repair it: the clients' own per-tick hashes matched every tick before
+        // the first ball and none after
+        // (docs/lockstep-without-snapshots.md).
+        //
+        // So put the world back to the tick before the stamp and replay forward
+        // with the ball present.  The owner had the body before that tick's
+        // step, so the anchor is stamp - 1 and the replay steps the newborn at
+        // the stamp tick too, exactly as the owner did.  A stamp older than the
+        // rollback history has nothing to rewind to, and then the snapshot path
+        // takes over - which is what it is the fallback for.
+        void rewind_for_birth(const bmmo::session_event_msg& event) {
+            if (!args_.rollback || event.tick == 0) return;
+            const uint32_t now = current_tick();
+            if (static_cast<int32_t>(event.tick - now) > 0) return;   // not late: nothing to replay
+            auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+                return recorded_input_at(entity, tick, out);
+            };
+            const std::string reason = "ball of " + std::to_string(event.player) + " born at tick "
+                                     + std::to_string(event.tick);
+            if (rollback_.rewind_to(rollback_world(), event.tick - 1, now, input_at, reason)) {
+                ++birth_rewinds_;
+                return;
+            }
+            ++birth_rewinds_missed_;
+            logf("physicalize of %u stamped tick %u is outside the rollback history at local tick %u: "
+                 "the body set disagrees until a snapshot re-anchors it", event.player, event.tick, now);
+        }
+
         void apply_event(const bmmo::session_event_msg& event) {
             if (event.player == 0 || event.player == own_id_) return;
             journal_lifecycle_event(event.player, event);
@@ -1639,6 +1679,7 @@ namespace {
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
                 remote.corrector.clear();
+                rewind_for_birth(event);
                 if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && spawn_impulse_ > 0.0f) {
                     const uint32_t idx = bmmo::session::spawn_direction_index(seed_, static_cast<uint8_t>(join_order), event.tick);
                     std::string impulse_error;
@@ -2077,7 +2118,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
-                 "own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "births=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -2086,6 +2127,7 @@ namespace {
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
                  static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(snapshots_received_),
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
+                 static_cast<unsigned long long>(birth_rewinds_), static_cast<unsigned long long>(birth_rewinds_missed_),
                  own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
                  static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
@@ -2123,6 +2165,7 @@ namespace {
         phase phase_ = phase::idle;
         uint32_t session_ = 0;
         uint8_t snapshot_interval_ = 2, input_delay_ = 6;
+        uint64_t birth_rewinds_ = 0, birth_rewinds_missed_ = 0;
         // Lifecycle events waiting for the tick they are due at (drain_due_events).
         std::vector<bmmo::session_event_msg> pending_events_;
         int32_t seed_ = 1;

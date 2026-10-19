@@ -95,6 +95,50 @@ network arrival order. That is a real latent bug and it is now fixed
 (`drain_due_events`), but fixing it moved the first divergence by exactly
 nothing: still 231, still `matched=204`.
 
+## Driving the rollback from the event instead: built, and not enough
+
+The obvious reading of the above is that lifecycle events need an absolute
+`apply_tick` everyone agrees on, so the body sets match. That costs a wire
+change and makes a player's own ball appear a round trip after they earned it.
+There is a cheaper option that reuses machinery already here, so it was built
+first: **let a late event drive the rollback**. The restore-and-replay half of
+`on_snapshot` already puts every recorded body back to an earlier tick and
+replays forward, and already holds a body born mid-window at its birth pose and
+releases it at its birth tick (`birth_record` / `repose_tick`). The only thing
+missing was a way in that did not need a snapshot to disagree first.
+
+`rollback_engine::rewind_to()` is that way in, and the client calls it when a
+remote `Physicalize` arrives late: anchor at `stamp - 1`, replay forward with
+the ball present, so the body set matches the owner's tick for tick with no
+protocol change and no delay on anyone's own ball. It works mechanically — the
+clients report `births=6/0`, six rewinds and none out of history.
+
+**It did not fix the divergence.** Nor did two other things that looked like
+the cause:
+
+| tried | result |
+|---|---|
+| align the client's event application with the server (before the step, join order) | first divergence unchanged: still 231, still `matched=204` |
+| rewind on a late birth (`rewind_to`) | fires 6/0, first divergence unchanged |
+| report the owner's actual pre-step birth pose instead of the canonical resetpoint | mismatch count unchanged, `max_err` worse (2955 m vs 48 m) — reverted |
+
+And the instrument has a floor worth knowing about: a client journal records
+each tick's hash **as the live frame completes it**, so a birth tick is always
+recorded before any later rewind re-simulates it. `first_divergence=231` is
+therefore partly an artefact of when the hash is sampled, not only of the final
+world. Client-vs-client hash comparison cannot validate a fix that works by
+re-simulating the past.
+
+So the audit was changed to let one full snapshot per second through
+(`snapshot_interval 600`, `full_snapshot_interval 66`) — deltas still off, but
+~37 chances for the server to check each client over 2 200 ticks. Of those,
+**11 to 41 disagreed**, with errors of tens of metres, and no amount of the
+above moved it.
+
+The conclusion that matters: **the snapshot path is not covering rare events,
+it is doing continuous corrective work every couple of ticks.** Demoting it to
+a fallback is not one fix away.
+
 ## What is actually needed
 
 Lifecycle events have to be applied at an **absolute tick every participant
@@ -144,6 +188,21 @@ python scripts/arena_map_test.py --bin build-agent/BallanceMMOServer \
 python scripts/journal_trace.py maps/arena-test/snapoff/sector2/client0.bmjr \
                                maps/arena-test/snapoff/sector2/client1.bmjr --diff
 ```
+
+## The next step is an instrument, not another fix
+
+Three hypotheses were tested one at a time against a measurement that takes a
+build and a 40 s run, and all three came back "still diverging". That is the
+signature of either several simultaneous causes or one that has not been
+isolated, and guessing again is the wrong move.
+
+What is missing is the ability to localise a divergence **per body per tick**.
+Today a client journal carries hash-only checkpoints, so when a client stops
+agreeing with the server there is no way to ask *which* body went first. The
+server's journal has full body checkpoints; the clients' do not. Giving the
+client journal the same body checkpoints the server's has — behind the existing
+`journal_checkpoint_ticks` knob — would turn this from hypothesis-guessing into
+a bisection: find the first tick, name the body, and only then reason about why.
 
 ## Not covered
 
