@@ -538,15 +538,46 @@ hinged bodies restored one at a time can land in a configuration the hinges
 disagree with, and the solver's correction is not gentle.
 
 That reframes the engine change: it is not "make the Virtools behaviours
-replayable" (which the whole-frame experiment showed is the wrong shape
-anyway), it is **restore IVP's constraint state across a rewind**. The bridge
-has a `m_ConstraintObserver` hook for design 9.26 diagnostics but no
-capture/restore, so this needs new bridge functions reaching into the IVP
-constraint objects - and the first question to answer is whether IVP's hinges
-carry integration state at all (accumulated impulses for warm-starting) or are
-solved afresh each step, because if they are stateless the residual is
-somewhere else again, most likely the contact caches or the freeze timers the
-Option A postmortem already names.
+replayable", which the whole-frame experiment showed is the wrong shape anyway.
+
+### Two candidates ruled out by reading, and the one that is left
+
+**Not the hinge constraints.** `hk_Hinge_Constraint` holds the hinge axes
+(`m_axis_os`, `m_axis_perp_os`) and static parameters (`m_tau`, `m_strength`,
+`m_limit`), and its per-step working memory is handed in as scratch -
+`get_vmq_storage_size()` / `setup_and_step_constraint(pi, void* mem, ...)`.
+There are no accumulated impulses and no warm-start cache, so a hinge is solved
+afresh each PSI from the bodies' poses and velocities. Restoring pose and
+velocity is enough for it.
+
+**Not the leapfrog delta either**, though it was the prime suspect from the
+Option A postmortem's list of IVP restore gaps. `write_body_state` has a
+`restore_psi_state` path that takes the per-PSI rotation increment across the
+beam, rewrites `delta_world_f_core_psis` from the installed velocity, and moves
+`pos_world_f_core_last_psi` back by the interpolation fraction - its comment
+says, and means, "so a restore is idempotent whatever the phase". `set_body_state`,
+which is what the rollback calls, passes it `true`.
+
+**What is left is the queued impulses.** `bmmo_physics_body_state` carries
+position, rotation, `linear` (`core->speed`) and `angular` (`core->rot_speed`)
+- and not `core->speed_change` / `rot_speed_change`, the impulses IVP has
+queued for the next PSI. So the capture never records them, and
+`write_body_state` *zeroes* them on every write, deliberately: "A hard set
+replaces the motion, so pushes queued for the next PSI must not survive it
+(design 8.4)".
+
+Every restore therefore drops whatever was queued at the anchor tick and
+discards whatever is queued now. For a navigated ball that costs almost
+nothing, because the next step re-applies its navigation force - which is
+exactly why the ball replays to 1.2 mm. For a plate in a hinged chain under
+contact, the queued impulse *is* its motion and nothing re-applies it.
+
+So the next change is to extend the captured body state with
+`speed_change`/`rot_speed_change` and restore them instead of zeroing them on a
+replay restore (the zeroing is right for a *hard set* of a ball, which is what
+design 8.4 was about - the two cases need separating). Note that
+`bmmo_physics_body_state` is the bridge struct the retail mod also uses, so
+this touches that ABI and both sides have to be rebuilt together.
 
 ### BallanceTAS has nothing to lend here
 
