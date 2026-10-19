@@ -473,7 +473,12 @@ namespace {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
                 ++events_received_;
-                if (msg.session == session_ && phase_ == phase::running) apply_event(msg);
+                // Queued, not applied here: an event applied on arrival lands
+                // at an arbitrary point relative to this client's physics step
+                // and in network arrival order, while the server applies every
+                // due event before its step in the members' join order.  The
+                // drain in frame() matches the server; see drain_due_events.
+                if (msg.session == session_ && phase_ == phase::running) pending_events_.push_back(std::move(msg));
                 break;
             }
             case bmmo::SessionRemoteInput: {
@@ -995,6 +1000,11 @@ namespace {
                     }
                 }
             }
+            // Where the server applies them: after this tick's inputs and
+            // before its physics step (session_runner::step).  current_tick()
+            // is not advanced to this frame yet, so name the tick the engine is
+            // about to simulate - the same one the spawn callback above uses.
+            drain_due_events(tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0)));
             if (!engine_->tick(error)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             frames_since_anchor_ = f;
             const uint32_t tick = current_tick();
@@ -1562,6 +1572,42 @@ namespace {
             return clone;
         }
 
+        // Every queued event stamped at or before `tick`, in the one order
+        // the server also uses.  Called from frame() immediately before the
+        // engine steps, which is where session_runner::step applies them:
+        //
+        //   * stamp <= tick, so an event that arrived after its own tick is
+        //     applied now rather than dropped - the server does the same, and
+        //     lateness is never a reason to drop a lifecycle event.
+        //   * stable_sort by join order, because two balls created in one tick
+        //     are created in that order and the order changes the world.  An
+        //     unknown player sorts after every known one, as on the server.
+        //
+        // The event keeps its own stamped tick: the spawn impulse direction is
+        // derived from that field (spawn_direction_index), and the server
+        // derives it from the stamp too, so the two must not be re-stamped
+        // with their differing consumption ticks.
+        void drain_due_events(uint32_t tick) {
+            if (pending_events_.empty()) return;
+            std::vector<bmmo::session_event_msg> due;
+            auto keep = pending_events_.begin();
+            for (auto it = pending_events_.begin(); it != pending_events_.end(); ++it) {
+                if (static_cast<int32_t>(it->tick - tick) <= 0) due.push_back(std::move(*it));
+                else *keep++ = std::move(*it);
+            }
+            pending_events_.erase(keep, pending_events_.end());
+            if (due.empty()) return;
+            const auto join_rank = [this](uint32_t player) {
+                for (const auto& p: players_) if (p.id == player) return static_cast<uint32_t>(p.join_order);
+                return 256u;
+            };
+            std::stable_sort(due.begin(), due.end(),
+                             [&join_rank](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
+                                 return join_rank(a.player) < join_rank(b.player);
+                             });
+            for (const auto& event: due) apply_event(event);
+        }
+
         void apply_event(const bmmo::session_event_msg& event) {
             if (event.player == 0 || event.player == own_id_) return;
             journal_lifecycle_event(event.player, event);
@@ -2077,6 +2123,8 @@ namespace {
         phase phase_ = phase::idle;
         uint32_t session_ = 0;
         uint8_t snapshot_interval_ = 2, input_delay_ = 6;
+        // Lifecycle events waiting for the tick they are due at (drain_due_events).
+        std::vector<bmmo::session_event_msg> pending_events_;
         int32_t seed_ = 1;
         int level_ = 1;
         std::vector<bmmo::session::player_entry> players_;
