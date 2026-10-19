@@ -61,9 +61,11 @@ clips, nothing can be fallen into, and every mechanism is fully visible.
 against every floor block and reports real overlaps; it returns zero for the
 map as committed.
 
-The cost is that the level cannot be finished — `PE_Balloon` is lifted clear of
-the road with the rest, so its pad floats and the ball can never reach it. No
-test here depends on finishing.
+`PE_Balloon` is lifted clear of the road with the rest, so its pad floats a
+little above the slab. That does *not* stop the level being finished: a human
+playing the arena reached the end and the session recorded a `Finish` event at
+tick 5887, so the balloon's trigger volume is reached without standing on its
+pad.
 
 ### Mount heights
 
@@ -112,6 +114,51 @@ headless engine's active-roots list once the level is in game.
 Note that the level slot decides the starting ball: in slot 13 the ball spawns
 as `Ball_Stone`.
 
+
+## Playing it yourself, alongside the headless clients
+
+A real game client can join a session on this map, but three things have to be
+right and none of them is obvious.
+
+1. **The mod needs BMLPlus 0.3.12.** A game copy running plain BML 0.3.10
+   silently *skips* the mod — the only sign is one line in `ModLoader.log`:
+   `Mod BallanceMMOClient[BallanceMMOClient] requires BML 0.3.12`. The matching
+   runtime ships in the SDK at `<sdk>/bin/BMLPlus.dll` (file version
+   `0.3.12+6c9a693`); drop it into the game's `BuildingBlocks`.
+2. **Run only the BMMO mod.** With BMLPlus 0.3.12, a `DebugUtilities` built
+   for 0.3.10 fails to register a command and mod init stops there — the game
+   never reaches the start menu and leaves no crash dump. Move the other
+   `.bmodp` files out of `ModLoader/Mods` and put the mod's four runtime DLLs
+   (`GameNetworkingSockets`, `abseil_dll`, `libcrypto-3`, `libprotobuf`) in
+   there beside it.
+3. **The server only starts a physics room on a hash-verified original level**
+   (`server.cpp`, `is_original_level()`), and all room members must report the
+   same map. The headless clients fabricate the canonical hash for their
+   `--level`; a real client computes the file's hash honestly, so the two
+   disagree and the room is refused. For a local play session, point slot 13's
+   entry in `original_map_hashes` (`BallanceMMOCommon/include/entity/map.hpp`)
+   at this map's hash and rebuild the server and session client:
+
+   ```
+   md5sum "<game>/3D Entities/Level/Level_13.NMO"   # c8aa5801d5afc60fb4e61666735decee
+   ```
+
+   **Keep that edit local.** It is a test convenience, not a feature.
+
+Then start a server and some bots (one of them `--host --expect N`, counting
+yourself), and in game:
+
+```
+/mmo connect 127.0.0.1:26676
+/mmo auto level 13      # drives the menus into the slot, no level unlock needed
+/mmo room list
+/mmo room join <id>
+/mmo room ready         # last - the host starts the moment everyone is ready
+```
+
+Load the level **before** readying: the host sends Start as soon as the last
+member readies, and if you are still in the menu the map check rejects it — and
+the headless host does not retry.
 
 ## Testing the server with it
 

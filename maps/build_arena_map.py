@@ -293,8 +293,9 @@ def build():
 
     # --- level end ---------------------------------------------------------
     # Lifted clear of the road like everything else, so its pillar does not run
-    # through the slab; the balloon therefore floats and the level cannot
-    # actually be finished, which no test here depends on.
+    # through the slab.  The pad floats a little as a result, which does not
+    # stop the level being finished - a human playing it reached the end and
+    # the session recorded a Finish event.
     add_component('PE_Balloon', sector_count, (x_balloon, PLAY_Y, mount_dz('PE_Balloon')),
                   -180.0, 'PE_Balloon_01')
 

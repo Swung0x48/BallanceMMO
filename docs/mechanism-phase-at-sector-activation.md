@@ -124,6 +124,30 @@ has matched it. That is a change to the mechanism tracking the Option A
 postmortem and the 9.28 joint work both warn is delicate, and it needs its own
 measurement run on the corrected map.
 
+## Confirmed with a human in the loop
+
+2026-10-19, a real game client (BMLPlus 0.3.12, the mod built from the same
+commit as the server) joined three headless bots on the arena for a 229-second
+session — 14 904 ticks, 22 full checkpoints. The player was join order 3 and
+crossed every checkpoint *behind* the bots, which is exactly the trailing-client
+case:
+
+| the player's crossing | correction in their own journal | offset |
+| --- | --- | --- |
+| sector 2 at tick 1243 | `P_Box_MF` 1.304 m at 1252 | +9 ticks |
+| sector 3 at tick 2828 | none above 0.07 m | — |
+| sector 4 at tick 4017 | `P_Modul_08_Schaukel` 2.087 m at 4016 | at the crossing |
+
+Two of the three crossings produced the signature; the third did not, which
+fits the mechanism — the size depends on whether that sector's mechanism is
+actually mid-motion when the trailing client starts it. Of the 1619 corrections
+in the player's journal, those two are the **only** ones above 0.07 m.
+
+The session is nonetheless completely consistent: the server's journal replays
+`ticks=14904 matched=14904 first_divergence=-1`, with all 22 checkpoints
+reporting 0 bodies differing. So the artefact is exactly what this document
+says it is — a transient the rollback engine absorbs, not a divergence.
+
 ## What is left
 
 - Re-try the client-side seed, birth-keyed, on the corrected map.
