@@ -251,6 +251,7 @@ namespace bmmo::sim {
                 info.spawn_rotation[2] = rotation.z;
                 info.spawn_rotation[3] = rotation.w;
             }
+            info.resetpoints = s->world->resetpoints();
             if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
         });
     }

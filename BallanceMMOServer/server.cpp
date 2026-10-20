@@ -561,6 +561,9 @@ public:
         bool start_barrier_armed = false;
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         float spawn_position[3] = {}, spawn_rotation[4] = {0, 0, 0, 1};
+        // Every resetpoint of the level (physics_world::resetpoints): where the
+        // event validation expects a spawn or a respawn.
+        std::vector<VxVector> resetpoints;
         // Spawn kick speed sent in this session's SessionStart (design 9.10):
         // fixed at on_world_ready so a late joiner gets the same value.
         float spawn_impulse = 0;
@@ -860,6 +863,7 @@ public:
         s.ball_rows = info.ball_rows;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
         for (int k = 0; k < 4; ++k) s.spawn_rotation[k] = info.spawn_rotation[k];
+        s.resetpoints = info.resetpoints;
         // s.spawn_impulse was fixed in start_physics_session, together with
         // the world's, and does not move for the session's lifetime.
         for (const auto m: s.members) send_session_start(s, m, 0);
@@ -1284,7 +1288,13 @@ public:
                     return std::sqrt(d);
                 };
                 const double pos[3] = {msg.position[0], msg.position[1], msg.position[2]};
-                const bool near_spawn = distance(pos, s.spawn_position) <= 2.5;
+                // A respawn is at the resetpoint of the last checkpoint the
+                // player's own ball took, which can be any of the level's.
+                bool near_spawn = distance(pos, s.spawn_position) <= 2.5;
+                for (const VxVector& reset: s.resetpoints) {
+                    const float at[3] = {reset.x, reset.y, reset.z};
+                    near_spawn = near_spawn || distance(pos, at) <= 2.5;
+                }
                 bool near_last = false;
                 if (guard.have_position) {
                     const float last[3] = {static_cast<float>(guard.last_position[0]),
@@ -1293,7 +1303,7 @@ public:
                     near_last = distance(pos, last) <= 5.0;
                 }
                 if (!near_spawn && !near_last)
-                    flag("Physicalize pose far from every spawn slot and from the player's last known position");
+                    flag("Physicalize pose far from every resetpoint of the level and from the player's last known position");
             } else if (msg.type == bmmo::session::event_type::Sector) {
                 if (msg.sector < 1 || msg.sector > guard.sector + 1)
                     flag("sector " + std::to_string(msg.sector) + " after sector " + std::to_string(guard.sector));

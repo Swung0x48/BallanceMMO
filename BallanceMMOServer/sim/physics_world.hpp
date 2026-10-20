@@ -142,6 +142,14 @@ namespace bmmo::sim {
         float force_value(uint8_t ball_type) const;
         // Retail spawn matrix of the level (CurrentLevel[0,3] at the anchor).
         const VxMatrix& spawn_matrix() const { return spawn_matrix_; }
+        // Every resetpoint of the level, in checkpoint order: the ResetPoints
+        // array, whose row k Gameplay_Events copies into CurrentLevel[0,3]
+        // when the ball takes the k-th checkpoint (row 0 is the spawn).  A
+        // player's own world respawns its ball at the row of the last
+        // checkpoint IT took, so any of them is a legitimate Physicalize
+        // pose (design 9.4's validation).  The spawn alone when the level
+        // has no such array.
+        const std::vector<VxVector>& resetpoints() const { return resetpoints_; }
 
         // `join_order` is the player's slot when free (kMaxSlots stays 64: it
         // is also the nocoll group index and the spawn direction table's
@@ -264,6 +272,7 @@ namespace bmmo::sim {
         bmmo::game::sequencer_state level_sequencers_;
         std::vector<ball_row> ball_rows_;             // Physicalize_GameBall rows
         VxMatrix spawn_matrix_{};
+        std::vector<VxVector> resetpoints_;
         CK_ID retail_ball_ = 0;
         bool retail_parked_ = false;
         bool callback_pending_ = false;

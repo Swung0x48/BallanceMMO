@@ -143,8 +143,8 @@ physics:
 - The server validates client-reported physics events at the rate/shape
   level (design section 9.4): more than `event_rate_limit` events/second per
   player are dropped, malformed `Physicalize` payloads are rejected outright,
-  and suspicious-but-plausible ones (pose far from the level's resetpoint
-  (2.5 m) and from the player's last known position (5 m), non-monotonic
+  and suspicious-but-plausible ones (pose far from every resetpoint of the
+  level (2.5 m) and from the player's last known position (5 m), non-monotonic
   sector) are only logged and counted — check the console
   `sessions` command for `flagged`/`rejected` counters. The cap defaults to
   20; `event_rate_limit: 0` turns it off, which is worth doing on levels
