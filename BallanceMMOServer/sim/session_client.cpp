@@ -326,28 +326,30 @@ namespace {
 
     class session_client;
 
-    // Own-ball spawn impulse (design 9.10): a PreSimulate callback anchored to
-    // Ball Navigation, like physics_world::tick_callback - the container
-    // executes it immediately (this only arms it) and again from inside
-    // Simulate(), after this tick's scripts and before the PSIs, which is
-    // when the retail script's Physicalize block (if it ran this tick) has
-    // already created the body.  Execute() is defined after session_client
-    // (it needs the full class).
-    class own_spawn_callback final : public PhysicsCallback {
+    // Own-ball Physicalize capture (design 9.10): a PreSimulate callback
+    // anchored to Ball Navigation, like physics_world::tick_callback - the
+    // container executes it immediately (this only arms it) and again from
+    // inside Simulate(), after this tick's scripts and before the PSIs, which
+    // is when the retail script's Physicalize block (if it ran this tick) has
+    // already created the body and nothing has moved it yet.  Execute() is
+    // defined after session_client (it needs the full class).
+    class own_physicalize_callback final : public PhysicsCallback {
     public:
-        own_spawn_callback(CKIpionManager* manager, CKBehavior* behavior, session_client* client, uint32_t tick)
-            : PhysicsCallback(manager, behavior, 2), client_(client), tick_(tick) {}
+        own_physicalize_callback(CKIpionManager* manager, CKBehavior* behavior, session_client* client,
+                                 uint64_t serial, uint32_t tick)
+            : PhysicsCallback(manager, behavior, 2), client_(client), serial_(serial), tick_(tick) {}
         int Execute() override;
     private:
         session_client* client_;
-        uint32_t tick_;
+        uint64_t serial_;   // the live tick it was armed for (session_client::live_tick_serial_)
+        uint32_t tick_;     // the session tick that live tick steps
         bool armed_ = false;
     };
 
     class session_client : public role {
-        // Needs try_own_spawn_impulse() (design 9.10); kept private like the
+        // Needs capture_own_physicalize() (design 9.10); kept private like the
         // rest of the frame-loop internals.
-        friend class own_spawn_callback;
+        friend class own_physicalize_callback;
     public:
         explicit session_client(arguments args) : args_(std::move(args)) {}
 
@@ -803,7 +805,8 @@ namespace {
             remotes_.clear();
             own_group_set_ = false;
             own_physicalized_ = false;
-            own_spawn_callback_pending_ = false;
+            own_body_entity_.clear();
+            own_capture_.valid = false;
             start_sector_pending_ = false;
             sectors_.reset();
             sectors_requested_.clear();
@@ -867,8 +870,6 @@ namespace {
             if (!bmmo::physics::install_player_collision_filter(physics, "P#", error)) logf("collision filter: %s", error.c_str());
             bmmo::physics::drain_event_log(physics);
             read_ball_rows();
-            if (CKDataArray* level = engine_->data_array("CurrentLevel"))
-                level->GetElementValue(0, 3, &spawn_matrix_);
             anchor_hash_ = hash.pose;
             // Sectors are inputs to the whole session (session/sector_union.hpp):
             // the level's own checkpoint chain no longer runs the manager here
@@ -1066,29 +1067,57 @@ namespace {
             return CK3dEntity::Cast(level->GetElementObject(0, 1));
         }
 
-        // Own-ball spawn impulse (design 9.10): called from own_spawn_callback's
-        // PreSimulate pass, i.e. after this tick's scripts (so a Physicalize
-        // block that ran this tick already created the body) and before the
-        // PSIs - the same timing a retail client gets from its OnPhysicalize
-        // hook.  `tick` is the tick report_physicalize will use for this same
-        // frame (frame()'s local `f`, not current_tick(), which is not
-        // updated yet at PreSimulate time).
-        void try_own_spawn_impulse(uint32_t tick) {
-            own_spawn_callback_pending_ = false;
-            if (own_physicalized_ || spawn_impulse_ <= 0.0f || own_join_order_ < 0) return;
+        // Arms own_physicalize_callback for the live tick `serial`, which
+        // steps session tick `tick`: every tick, because a spawn, a respawn
+        // and a trafo all create the own ball's body inside a frame's scripts.
+        void arm_own_physicalize_capture(uint64_t serial, uint32_t tick) {
+            if (!navigation_known_) return;
+            CKIpionManager* physics = engine_->physics();
+            if (!physics || !physics->m_PreSimulateCallbacks) return;
+            if (auto* behavior = CKBehavior::Cast(engine_->context()->GetObject(navigation_.ball_navigation)))
+                physics->m_PreSimulateCallbacks->Process(new own_physicalize_callback(physics, behavior, this, serial, tick));
+        }
+
+        // The own ball's Physicalize as the retail script made it (design
+        // 9.10), from own_physicalize_callback's PreSimulate pass of the live
+        // tick: after this tick's scripts, so a Physicalize block that ran
+        // this tick has already created the body, and before the PSIs, so
+        // neither the body nor the entity has moved since (balls born on one
+        // point have pushed each other apart by the end of the tick, and a
+        // kicked one has rolled).  What a retail client sends from its
+        // OnPhysicalize hook (physics_session_client.cpp): the entity's world
+        // matrix, flagged a spawn when it is the level's resetpoint
+        // CurrentLevel[0,3] as it is NOW - a respawn is at the resetpoint of
+        // the last checkpoint crossed, not at the level's first.  The own kick
+        // follows the flag, so this ball and every other side's copy of it get
+        // the same impulse or none.  `tick` is the tick report_physicalize
+        // sends the capture with, once the event log confirms the birth.
+        void capture_own_physicalize(uint32_t tick) {
             CK3dEntity* ball = current_ball();
             if (!ball || !ball->GetName()) return;
+            const std::string name = ball->GetName();
+            if (name == own_body_entity_) return;   // the body was there before this tick
             bmmo_physics_body_state state{};
             std::string error;
-            if (!bmmo::physics::get_body_state(engine_->physics(), ball->GetName(), state, error)) return;   // no body yet
-            double distance = 0.0;
-            for (int k = 0; k < 3; ++k) {
-                const double d = state.position[k] - spawn_matrix_[3][k];
-                distance += d * d;
+            if (!bmmo::physics::get_body_state(engine_->physics(), name.c_str(), state, error)) return;   // no body yet
+            own_capture_.valid = true;
+            own_capture_.tick = tick;
+            own_capture_.entity = name;
+            own_capture_.pose = ball->GetWorldMatrix();
+            own_capture_.spawn = false;
+            if (CKDataArray* level = engine_->data_array("CurrentLevel")) {
+                VxMatrix reset;
+                if (level->GetElementValue(0, 3, &reset)) {
+                    const float dx = own_capture_.pose[3][0] - reset[3][0];
+                    const float dy = own_capture_.pose[3][1] - reset[3][1];
+                    const float dz = own_capture_.pose[3][2] - reset[3][2];
+                    own_capture_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+                }
             }
-            if (distance >= 0.05 * 0.05) return;   // not at the resetpoint: a trafo, not a spawn
-            const uint32_t idx = bmmo::session::spawn_direction_index(seed_, static_cast<uint8_t>(own_join_order_), tick);
-            if (!bmmo::physics::push_impulse(engine_->physics(), ball->GetName(), bmmo::session::kSpawnDirectionTable[idx],
+            if (!own_capture_.spawn || spawn_impulse_ <= 0.0f) return;
+            const uint8_t join_order = static_cast<uint8_t>(own_join_order_ < 0 ? 63 : own_join_order_);
+            const uint32_t idx = bmmo::session::spawn_direction_index(seed_, join_order, tick);
+            if (!bmmo::physics::push_impulse(engine_->physics(), name.c_str(), bmmo::session::kSpawnDirectionTable[idx],
                         spawn_impulse_, 0, error))
                 logf("spawn impulse: %s", error.c_str());
             else
@@ -1167,30 +1196,12 @@ namespace {
             } else {
                 engine_->clear_keys();
             }
-            // Own-ball spawn impulse (design 9.10): register a PreSimulate
-            // callback anchored to Ball Navigation, like
-            // physics_world::tick_callback, so it fires after this tick's
-            // scripts (a Physicalize block that runs this tick already made
-            // the body) and before the PSIs - the same frame a retail client
-            // applies its kick from OnPhysicalize.  Re-armed every tick while
-            // the own ball is down, so a later respawn gets one too.
-            if (!own_physicalized_ && navigation_known_ && spawn_impulse_ > 0.0f && own_join_order_ >= 0
-                    && !own_spawn_callback_pending_) {
-                if (CKIpionManager* physics = engine_->physics(); physics && physics->m_PreSimulateCallbacks) {
-                    if (auto* behavior = CKBehavior::Cast(engine_->context()->GetObject(navigation_.ball_navigation))) {
-                        // Matches current_tick() once frames_since_anchor_ is
-                        // advanced to f below: the tick report_physicalize
-                        // will send for this very frame.
-                        const uint32_t tick_of_this_frame = tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
-                        physics->m_PreSimulateCallbacks->Process(new own_spawn_callback(physics, behavior, this, tick_of_this_frame));
-                        own_spawn_callback_pending_ = true;
-                    }
-                }
-            }
             // Where the server applies them: after this tick's inputs and
             // before its physics step (session_runner::step).  current_tick()
             // is not advanced to this frame yet, so name the tick the engine is
-            // about to simulate - the same one the spawn callback above uses.
+            // about to simulate - the one current_tick() returns once
+            // frames_since_anchor_ is advanced to f below, and so the tick
+            // report_physicalize sends for this very frame.
             const uint32_t frame_tick = tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
             // A held --start-sector: on the first frame the session is assigned
             // (tick base and lead known), stamp it `lead` ticks ahead like any
@@ -1227,7 +1238,15 @@ namespace {
             // frame leave the world replayed from the earlier of the two.
             replay_corrected_inputs();
             maybe_force_rollback();
-            if (!engine_->tick(error)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
+            // The own ball's Physicalize is captured inside this tick's
+            // Simulate(), before the PSIs (capture_own_physicalize).  Armed
+            // here, after the rewinds above: a replayed step runs the
+            // PreSimulate pass too, and only the live tick may capture.
+            live_tick_serial_ = ++live_ticks_;
+            arm_own_physicalize_capture(live_tick_serial_, frame_tick);
+            const bool ticked = engine_->tick(error);
+            live_tick_serial_ = 0;
+            if (!ticked) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             frames_since_anchor_ = f;
             const uint32_t tick = current_tick();
             CKIpionManager* physics = engine_->physics();
@@ -1274,6 +1293,7 @@ namespace {
                 own_group_set_ = false;
             }
             own_physicalized_ = physicalized;
+            own_body_entity_ = physicalized ? ball_name : std::string();
 
             // Mechanism states after this tick (the legacy blending path;
             // with the rollback engine on, the engine keeps its own records).
@@ -1325,7 +1345,7 @@ namespace {
                     }
                 }
                 if (kind == "created" && !ball_name.empty() && name == ball_name) {
-                    report_physicalize(ball, ball_name, ball_type, tick, own);
+                    report_physicalize(ball, ball_name, ball_type, tick);
                 } else if (kind == "deleted" && !ball_name.empty() && name == ball_name) {
                     bmmo::session_event_msg event;
                     event.tick = tick;
@@ -1518,32 +1538,33 @@ namespace {
             }
         }
 
-        void report_physicalize(CK3dEntity* ball, const std::string& ball_name, int ball_type, uint32_t tick,
-                                const bmmo_physics_body_state& state) {
+        void report_physicalize(CK3dEntity* ball, const std::string& ball_name, int ball_type, uint32_t tick) {
             bmmo::session_event_msg event;
             event.tick = tick;
             event.type = bmmo::session::event_type::Physicalize;
             event.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);
-            // Pose the retail script physicalized at: the level's resetpoint
-            // (design 9.10 - every player spawns there, no ring) when the
-            // body is still there, else the entity now.
-            const VxMatrix& expected = spawn_matrix_;
-            double distance = 0.0;
-            for (int k = 0; k < 3; ++k) distance += (state.position[k] - expected[3][k]) * (state.position[k] - expected[3][k]);
-            const bool at_spawn = distance < 0.05 * 0.05;
-            const VxMatrix& world = ball ? ball->GetWorldMatrix() : expected;
-            const VxMatrix& used = at_spawn ? expected : world;
-            if (&used == &world) logf("warning: physicalize pose taken from the entity after the tick (%.3f m from the resetpoint)", std::sqrt(distance));
+            // The pose the retail script physicalized at and the spawn flag
+            // (design 9.10), both taken before the step moved the body
+            // (capture_own_physicalize).  Without a capture of this birth -
+            // no Ball Navigation yet to anchor the callback to - the entity
+            // after the tick is all there is, and it is never flagged: no
+            // kick was applied here, so none may be applied anywhere else.
+            const bool captured = own_capture_.valid && own_capture_.tick == tick && own_capture_.entity == ball_name;
+            const VxMatrix& used = captured ? own_capture_.pose : ball->GetWorldMatrix();
+            if (!captured) logf("warning: physicalize pose taken from the entity after the tick (no capture before the step)");
             for (int k = 0; k < 3; ++k) event.position[k] = used[3][k];
             for (int r = 0; r < 3; ++r)
                 for (int k = 0; k < 3; ++k) event.rotation[r * 3 + k] = used[r][k];
-            if (at_spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+            const bool spawn = captured && own_capture_.spawn;
+            if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+            own_capture_.valid = false;
             fill_retail_recipe(ball_type, event.recipe);
             send_event(event);
             own_group_set_ = false;
             if (args_.trace) trace_frames_ = 12;
-            logf("own ball %s physicalized at tick %u (type %d) pos=%a,%a,%a", ball_name.c_str(), tick, ball_type,
-                 static_cast<double>(event.position[0]), static_cast<double>(event.position[1]), static_cast<double>(event.position[2]));
+            logf("own ball %s physicalized at tick %u (type %d%s) pos=%a,%a,%a", ball_name.c_str(), tick, ball_type,
+                 spawn ? ", spawn" : "", static_cast<double>(event.position[0]), static_cast<double>(event.position[1]),
+                 static_cast<double>(event.position[2]));
         }
 
         void send_event(bmmo::session_event_msg& event) {
@@ -2753,8 +2774,21 @@ namespace {
         float spawn_position_[3] = {};
         bool spawn_known_ = false;
         float spawn_impulse_ = 0.0f;             // SessionStart::spawn_impulse (design 9.10)
-        bool own_spawn_callback_pending_ = false; // own_spawn_callback already queued this tick
-        VxMatrix spawn_matrix_;
+        // The own ball's last Physicalize as capture_own_physicalize() saw it
+        // before the step: what report_physicalize sends (design 9.10).
+        struct {
+            bool valid = false;
+            uint32_t tick = 0;
+            std::string entity;
+            VxMatrix pose;
+            bool spawn = false;                  // at CurrentLevel[0,3] then: flagged, and kicked
+        } own_capture_;
+        std::string own_body_entity_;            // the own ball entity that had a body after the last frame
+        // The engine_->tick() frame() is running, numbered from 1, and 0
+        // outside it - a replayed step runs the PreSimulate pass too, and only
+        // the live tick an own_physicalize_callback was armed for may capture.
+        uint64_t live_tick_serial_ = 0;
+        uint64_t live_ticks_ = 0;
         std::string own_group_;
         bool own_group_set_ = false;
         bool own_physicalized_ = false;
@@ -2835,12 +2869,15 @@ namespace {
         std::set<uint32_t> journal_announced_;   // ids that already have a PLAYER record
     };
 
-    int own_spawn_callback::Execute() {
+    int own_physicalize_callback::Execute() {
         if (!armed_) {
             armed_ = true;
             return 0;
         }
-        client_->try_own_spawn_impulse(tick_);
+        // Only inside the live tick it was armed for: a rewind's replayed
+        // steps run this pass too, and a tick that never reached its
+        // Simulate() leaves a stale callback behind.
+        if (client_->live_tick_serial_ == serial_) client_->capture_own_physicalize(tick_);
         return 1;
     }
 }

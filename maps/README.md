@@ -193,17 +193,21 @@ enough to bounce off each other. Eight paper balls spawned in one tick is the
 one case the plate does not hold, and no session produces it: slot 13 spawns
 every ball as stone.
 
-**The harness does not kick most spawns.** The headless session client flags
-a Physicalize as a spawn only if its ball is still within 0.05 m of the
-resetpoint when it reports it (`report_physicalize`, `session_client.cpp`),
-and with four balls spawning in the same tick it has already moved ~0.09 m by
-then (the client logs `physicalize pose taken from the entity after the tick
-(0.091 m from the resetpoint)`), so in a 4-player harness run the four initial
-spawns carry no kick at all - only a lone respawn at the start does (it
-compares against the level's first resetpoint, so a respawn further on is
-never kicked). A real client reports
-before the body exists (`physics_session_client.cpp`) and always flags. That
-is why the plate is measured with the SimTool rather than with harness runs.
+**Harness spawns are kicked the way real ones are.** The headless session
+client used to flag a Physicalize as a spawn only if its ball was still within
+0.05 m of the level's *first* resetpoint after the tick. By then same-tick
+spawns (and its own kick) had moved it ~0.09 m, so the server kicked none of
+a 4-player run's spawns while each client kicked its own ball, and no respawn
+further on was ever flagged. It now does what a real client's OnPhysicalize
+hook does (`physics_session_client.cpp`): in the PreSimulate pass of the tick
+the body is born in, before anything has moved it, it takes the entity's world
+matrix and flags it when it is `CurrentLevel[0,3]` as it is then
+(`capture_own_physicalize`, `session_client.cpp`); the own kick follows the
+flag. The 4-player drive run now kicks all four tick-212 spawns and every
+respawn on the server, on the ball's own client and on its peers, at x = -20,
+460 and 700 (and 220 with two balls beamed just short of that checkpoint),
+each reported at the resetpoint to the bit. The SimTool roll-outs above remain
+the controlled measurement of the plate.
 
 ## Rebuilding the map
 
