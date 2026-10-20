@@ -144,6 +144,16 @@ namespace {
         // rotation quaternion from the LIVE rotation step, as it did before
         // v11.  The other half of the same A/B.
         bool restore_quaternions = true;
+        // --restore-clock: put the IVP environment's clock back to the anchor
+        // before the body writes (bmmo_physics_clock_state).  OPT-IN: measured
+        // on the solo probe it removed the one-tick time_of_last_psi offset of
+        // every replayed step (85/85 cores) and changed the body error not at
+        // all (3.823e-3 -> 3.815e-3 m), and IVP's hull manager keeps
+        // time-anchored state (last_vpsi_time) a rewound clock turns into
+        // negative deltas; one null dereference in the mindist minimizer
+        // appeared in four clock-on networked runs against none in eight
+        // without.  Not proven to be the cause, not worth the risk for no gain.
+        bool restore_clock = false;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -208,6 +218,7 @@ namespace {
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
             else if (arg == "--no-restore-impulses") out.restore_impulses = false;
             else if (arg == "--no-restore-quats") out.restore_quaternions = false;
+            else if (arg == "--restore-clock") out.restore_clock = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -710,6 +721,7 @@ namespace {
             rollback_.set_recheck_on_restore(args_.restore_recheck);
             rollback_.set_restore_impulses(args_.restore_impulses);
             rollback_.set_restore_quaternions(args_.restore_quaternions);
+            rollback_.set_restore_clock(args_.restore_clock);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
@@ -1720,10 +1732,12 @@ namespace {
             const uint32_t anchor = now - args_.force_rollback_depth;
             std::string before;
             float factor_before = 0.0f, delta_before = 0.0f, factor_after = 0.0f, delta_after = 0.0f;
+            bmmo_physics_clock_state clock_before{}, clock_after{};
             std::string clock_error;
             if (args_.trace_restore) {
                 before = bmmo::physics::describe_cores_exact(engine_->physics());
                 bmmo::physics::get_clock(engine_->physics(), factor_before, delta_before, clock_error);
+                bmmo::physics::get_clock_state(engine_->physics(), clock_before, clock_error);
             }
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) ++forced_rollbacks_;
             else ++forced_rollbacks_missed_;
@@ -1731,6 +1745,17 @@ namespace {
                 ++restore_traces_;
                 const std::string after = bmmo::physics::describe_cores_exact(engine_->physics());
                 bmmo::physics::get_clock(engine_->physics(), factor_after, delta_after, clock_error);
+                bmmo::physics::get_clock_state(engine_->physics(), clock_after, clock_error);
+                // Its own line, with every argument cast: the status line's
+                // printf taught what one missing specifier costs.
+                logf("restore trace: clock before t=%a tlast=%a tnext=%a base=%a last=%a nmc=%d q=%d qmin=%a",
+                     clock_before.current_time, clock_before.time_of_last_psi, clock_before.time_of_next_psi,
+                     clock_before.base_time, clock_before.last_time, static_cast<int>(clock_before.next_movement_check),
+                     static_cast<int>(clock_before.queued_events), static_cast<double>(clock_before.queue_min));
+                logf("restore trace: clock after  t=%a tlast=%a tnext=%a base=%a last=%a nmc=%d q=%d qmin=%a",
+                     clock_after.current_time, clock_after.time_of_last_psi, clock_after.time_of_next_psi,
+                     clock_after.base_time, clock_after.last_time, static_cast<int>(clock_after.next_movement_check),
+                     static_cast<int>(clock_after.queued_events), static_cast<double>(clock_after.queue_min));
                 int changed = 0;
                 const std::string fields = diff_core_dumps(before, after, changed);
                 // CKIpionManager::SetDeltaTime is an exponential moving average
@@ -2142,6 +2167,16 @@ namespace {
                 world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
                     std::string error;
                     return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
+                };
+            }
+            if (args_.restore_clock) {
+                world.get_clock = [physics](bmmo_physics_clock_state& out) {
+                    std::string error;
+                    return bmmo::physics::get_clock_state(physics, out, error);
+                };
+                world.set_clock = [physics](const bmmo_physics_clock_state& state) {
+                    std::string error;
+                    return bmmo::physics::set_clock_state(physics, state, error);
                 };
             }
             world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {

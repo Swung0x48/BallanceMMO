@@ -42,6 +42,11 @@ namespace bmmo::physics {
                         bmmo_physics_core_extra& out, std::string& error);
     bool set_core_extra(CKIpionManager* physics, const char* entity_name,
                         const bmmo_physics_core_extra& in, std::string& error);
+    // The environment's clock and time-manager state, for a rollback restore
+    // to put back BEFORE it writes the bodies (the beam stamps each core with
+    // the environment's time_of_last_psi).  See bmmo_physics_clock_state.
+    bool get_clock_state(CKIpionManager* physics, bmmo_physics_clock_state& out, std::string& error);
+    bool set_clock_state(CKIpionManager* physics, const bmmo_physics_clock_state& in, std::string& error);
 
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
     // Engine change #6: while enabled, the retail Unphysicalize block keeps

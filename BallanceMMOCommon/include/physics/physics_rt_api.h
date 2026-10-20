@@ -106,6 +106,34 @@ typedef struct bmmo_physics_core_extra {
     double q_next_psi[4];      /* core->q_world_f_core_next_psi, x y z w */
 } bmmo_physics_core_extra;
 
+/* The environment's clock, which a rollback restore has to put back too.
+ *
+ * The bodies are restored, but IVP's time is not, so every replayed tick runs
+ * at an absolute time one tick later than the tick it replaces - and absolute
+ * time is read by the freeze logic (psi_time - time_of_calm_reference), by
+ * every event the time manager schedules, and by the beam itself, which stamps
+ * a core with the environment's time_of_last_psi.  Measured with an otherwise
+ * exact restore, time_of_last_psi moved on 85 of 85 cores across a depth-1
+ * rewind, by exactly one tick, and was the only field to move on bodies that
+ * did not then diverge.
+ *
+ * Queued events are stored relative to base_time, so a caller that moves the
+ * base shifts every queued value by the same amount to keep each event at the
+ * absolute time it was scheduled for, and repositions the PSI event - the one
+ * queued event whose time the record knows - at time_of_next_psi.
+ *
+ * C++ entry points only until the effect is measured; no v-table entry yet. */
+typedef struct bmmo_physics_clock_state {
+    double current_time;         /* IVP_Environment::current_time [s] */
+    double time_of_last_psi;     /* IVP_Environment::time_of_last_psi */
+    double time_of_next_psi;     /* IVP_Environment::time_of_next_psi */
+    double base_time;            /* IVP_Time_Manager::base_time */
+    double last_time;            /* IVP_Time_Manager::last_time, relative to base_time */
+    int32_t next_movement_check; /* IVP_Environment::next_movement_check */
+    int32_t queued_events;       /* diagnostic: how many events the manager holds */
+    float queue_min;             /* diagnostic: the earliest queued time, relative */
+} bmmo_physics_clock_state;
+
 /* The full parameter set of the retail Physicalize block, which is also what
  * BMLPlus reports through IMod::OnPhysicalize.  Meshes and the collision
  * surface are named, not pointed at, so a recipe survives the network. */

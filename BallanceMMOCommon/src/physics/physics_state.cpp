@@ -9,6 +9,8 @@
 #include "ivp_real_object.hxx"
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
+#include <ivp_time.hxx>
+#include <ivu_min_list.hxx>
 #include "ivp_listener_object.hxx"
 #include "ivp_listener_psi.hxx"
 #include "ivp_sim_unit.hxx"
@@ -1123,6 +1125,60 @@ namespace bmmo::physics {
             qn.z = in.q_next_psi[2]; qn.w = in.q_next_psi[3];
             core->q_world_f_core_last_psi.set_matrix(&core->m_world_f_core_last_psi);
         }
+        return true;
+    }
+
+    bool get_clock_state(CKIpionManager* physics, bmmo_physics_clock_state& out, std::string& error) {
+        error.clear();
+        out = bmmo_physics_clock_state{};
+        IVP_Environment* env = physics ? physics->GetEnvironment() : nullptr;
+        if (!env) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        namespace access = bmmo::physics::ivp_access;
+        IVP_Time_Manager* tm = access::time_manager(*env);
+        out.current_time = env->get_current_time().get_seconds();
+        out.time_of_last_psi = env->get_old_time_of_last_PSI().get_seconds();
+        out.time_of_next_psi = env->get_next_PSI_time().get_seconds();
+        out.base_time = tm->base_time.get_seconds();
+        out.last_time = tm->last_time;
+        out.next_movement_check = access::next_movement_check(*env);
+        out.queued_events = tm->min_hash->counter;
+        out.queue_min = tm->min_hash->has_elements() ? tm->min_hash->find_min_value() : 0.0f;
+        return true;
+    }
+
+    bool set_clock_state(CKIpionManager* physics, const bmmo_physics_clock_state& in, std::string& error) {
+        error.clear();
+        IVP_Environment* env = physics ? physics->GetEnvironment() : nullptr;
+        if (!env) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        namespace access = bmmo::physics::ivp_access;
+        IVP_Time_Manager* tm = access::time_manager(*env);
+        // Queued events are relative to base_time.  Moving the base alone
+        // would move every event with it, so shift the values the other way
+        // and each event stays at the absolute time it was scheduled for -
+        // the same rebase IVP_Time_Manager::reset_time performs.
+        const double shift = tm->base_time.get_seconds() - in.base_time;
+        if (shift != 0.0 && tm->min_hash->has_elements()) {
+            IVP_U_Min_List_Enumerator enumerator(tm->min_hash);
+            while (IVP_U_Min_List_Element* h = enumerator.get_next_element_header())
+                h->value += static_cast<IVP_U_MINLIST_FIXED_POINT>(shift);
+            tm->min_hash->min_value += static_cast<IVP_U_MINLIST_FIXED_POINT>(shift);
+        }
+        tm->base_time = IVP_Time(in.base_time);
+        tm->last_time = in.last_time;
+        access::current_time(*env) = IVP_Time(in.current_time);
+        access::time_of_last_psi(*env) = IVP_Time(in.time_of_last_psi);
+        access::time_of_next_psi(*env) = IVP_Time(in.time_of_next_psi);
+        access::next_movement_check(*env) = static_cast<short>(in.next_movement_check);
+        // The PSI event is the one queued event whose time the record knows:
+        // it is due at the anchor's next PSI, not at the live one.
+        if (tm->psi_event && tm->psi_event->index != IVP_U_MINLIST_UNUSED)
+            tm->update_event(tm->psi_event, IVP_Time(in.time_of_next_psi));
         return true;
     }
 

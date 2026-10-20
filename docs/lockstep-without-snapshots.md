@@ -858,6 +858,83 @@ one.
   feeds neither the environment nor `time_of_last_psi`, diverges at exactly the
   same tick, so the measurements stand as made.
 
+## The environment clock: restored, measured null, left opt-in
+
+With the restore bit-exact, `--trace-restore` at depth 1 brackets one replayed
+step: "before" is live tick N from a full frame, "after" is the same tick from
+an exact restore to N-1 plus one physics-only step. The one field that differed
+on **every** core (85 of 85) was `time_of_last_psi`, by exactly one tick - the
+rollback restores bodies but never the environment's clock, so every replayed
+step runs one tick late in IVP time, and every rollback leaves the clock
+permanently ahead by its depth.
+
+`bmmo_physics_clock_state` records the environment's three times, the time
+manager's `base_time`/`last_time` and `next_movement_check`; the restore puts
+them back **before** the body writes (the beam stamps each core with the
+environment's `time_of_last_psi`), shifts every queued event so it keeps its
+absolute time, and repositions the PSI event at the anchor's `time_of_next_psi`.
+All of it from outside IVP, through public members and the existing access shim.
+It works as a mechanism - `tlast` differences fell from 85 to 4 - and the body
+error at depth 1 did not move: 3.823e-03 -> 3.815e-03 m on the worst plate,
+pose hash still diverging at tick 41. The `st`/`idt` signals it exposed turned
+out to be artefacts of the rechecking beam with no effect on the outcome
+(recheck on/off identical to four significant figures, again).
+
+It stays **opt-in** (`--restore-clock`): no measured benefit, and IVP's hull
+manager keeps time-anchored state (`last_vpsi_time`) that a rewound clock turns
+into negative deltas. One null dereference in the mindist minimizer appeared in
+four clock-on networked runs against none in eight without; not proven, not
+worth the risk for nothing.
+
+So after impulses, quaternions and clock, what a physics-only replayed step
+still gets wrong is confined to bodies in contact (`Wippe` and `Bridge`, hinged
+but touching nothing moving, stay bit-exact) and is not the recheck. The
+candidates left are the per-pair structures - friction contact points and
+mindists - whose state is `protected` but reachable with the existing
+access-shim pattern, without touching IVP. Before building that, the networked
+measurement below says how much it would be worth.
+
+## What actually limits the mechanisms in a networked session
+
+Measured against the **server**, 4 players, 300 ms, every mechanism in sector 2,
+client0 and client3 identically:
+
+| body | first tick off the server by > 1e-4 m | by how much |
+|---|---|---|
+| `P_Ball_Paper_MF` | **26** (the first comparable tick) | 0.43 m |
+| `P_Modul_29_Platte01..09` | **26** | 0.07 - 0.26 m |
+| `P_Box_MF`, `P_Ball_Stone_MF` | **26** | 0.03 - 0.05 m |
+| first rollback on the client | 90 | |
+
+Every plate is already a quarter of a metre off the server sixty ticks before
+the client's first rollback. The Paper ball's error then *oscillates* - 0.4, 1.6,
+0.2, 1.6 m with the plates' period - which is what a time shift of a periodic
+motion looks like, and the logs say where the shift comes from: the clients
+activate sector 2 locally at tick **12** and the server at tick **21**, on
+*receipt* of the client's Sector event, one-way latency later (tick 14 in an
+earlier run; it moves with the network). The journals agree: the server's first
+checkpoint carrying the mechanisms is tick 26 against the client's 18-20, and
+the Paper ball first moves at server tick 28 against client tick 20. Everything
+in the sector is physicalized and released at a different session tick on the
+two sides.
+
+It is not a pure shift either: the best alignment (k = -6 ticks) halves the mean
+error (0.42 -> 0.23 m on the Paper ball) and does not remove it, because the
+Paper ball falls under gravity from its spawn whether or not the plates have
+started, so a later start is a different motion, not a delayed copy.
+
+This is the architectural item the original plan called the sector phase
+offset, and it is two to three orders of magnitude above the rollback residual
+(1e-3 m per rewind). Rollback fidelity is not what limits the mechanisms in a
+real session; the activation tick is.
+
+One tool note: against a server journal the server start has since wiped,
+`first_divergence.py` had reported the first mechanism divergence at tick 258
+for the run before this one, while a direct scan of the same pair showed 0.38 m
+at tick 236. On the surviving pair the two agree (tick 26). Unresolved, so the
+harness scripts now copy each run's server journal beside its client journals
+(`server.bmjr`) and a claim like that can be re-checked.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the

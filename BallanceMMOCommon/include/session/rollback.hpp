@@ -78,6 +78,13 @@ namespace bmmo::session {
         // queue after that point.
         std::function<bool(const std::string& entity, bmmo_physics_core_extra& out)> get_body_extra;
         std::function<bool(const std::string& entity, const bmmo_physics_core_extra& state)> set_body_extra;
+        // The environment's clock (bmmo_physics_clock_state).  Optional.  A
+        // restore puts it back BEFORE the bodies, because the beam stamps each
+        // core with the environment's time_of_last_psi; without it every
+        // replayed tick runs one tick later in IVP time than the tick it
+        // replaces, which the freeze logic and the event queue both read.
+        std::function<bool(bmmo_physics_clock_state& out)> get_clock;
+        std::function<bool(const bmmo_physics_clock_state& state)> set_clock;
         std::function<bool(const std::string& entity, bmmo_physics_nav_state& out)> get_nav;
         std::function<bool(const std::string& entity, const bmmo_physics_nav_state& state)> set_nav;
         // explicit input for the next physics step of a navigated ball
@@ -183,6 +190,7 @@ namespace bmmo::session {
         uint64_t snapshots = 0, matched = 0, mismatched = 0, rollbacks = 0, resim_ticks = 0;
         uint64_t rewinds = 0;          // re-anchors the caller asked for (rewind_to), not snapshot disagreements
         uint64_t impulses_restored = 0;  // body writes that put a recorded queued impulse back (v11)
+        uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
@@ -501,6 +509,18 @@ namespace bmmo::session {
                 }
                 plan[entity] = item;
             }
+            // The clock first: the beam below stamps every restored core with
+            // the environment's time_of_last_psi, so the environment has to be
+            // at T before any body is.  Only when a replay will follow - a
+            // frozen clock or a too-far window sets the bodies and drops the
+            // history, and a clock left behind with nothing to advance it
+            // would stay behind.
+            const uint32_t window = current_tick > anchor ? current_tick - anchor : 0;
+            if (restore_clock_ && at->have_clock && world.set_clock && !frozen
+                    && window <= thresholds_.max_resim_ticks) {
+                world.set_clock(at->clock);
+                ++stats_.clock_rewinds;
+            }
             for (auto& [entity, item]: plan) {
                 bmmo_physics_body_state live{};
                 // A body destroyed after its last record simply has nothing to
@@ -688,6 +708,7 @@ namespace bmmo::session {
         // runs disagree by more than the effect does.
         void set_restore_impulses(bool enable) { restore_impulses_ = enable; }
         void set_restore_quaternions(bool enable) { restore_quaternions_ = enable; }
+        void set_restore_clock(bool enable) { restore_clock_ = enable; }
 
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
@@ -737,6 +758,10 @@ namespace bmmo::session {
             // authoritative snapshot row describes does not, and the absence
             // is the information that tells the restore which it is holding.
             std::map<std::string, bmmo_physics_core_extra> extras;
+            // The environment's clock at the end of this tick, when the world
+            // provides it.
+            bmmo_physics_clock_state clock{};
+            bool have_clock = false;
             std::map<std::string, bmmo_physics_nav_state> navs;
             std::map<std::string, input_frame> inputs;   // applied at this tick, per navigated ball
         };
@@ -839,6 +864,9 @@ namespace bmmo::session {
             };
             grab_nav(state.tracked.own_entity);
             for (const auto& remote: state.tracked.remote_entities) grab_nav(remote);
+            bmmo_physics_clock_state clock{};
+            state.have_clock = world.get_clock && world.get_clock(clock);
+            if (state.have_clock) state.clock = clock;
         }
 
         tick_state* find(uint32_t tick) {
@@ -877,5 +905,6 @@ namespace bmmo::session {
         bool recheck_on_restore_ = true;
         bool restore_impulses_ = true;
         bool restore_quaternions_ = true;
+        bool restore_clock_ = true;
     };
 }

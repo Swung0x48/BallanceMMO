@@ -51,6 +51,7 @@ namespace {
         std::vector<std::string> calls;
         bool clock_running = true;
         int steps = 0;
+        double clock = 0.0;   // the environment's time, advanced by each step
 
         rollback_world adapter() {
             rollback_world w;
@@ -106,6 +107,18 @@ namespace {
                 if (state.fields & BMMO_PHYSICS_EXTRA_QUATS) body.q_last_w = state.q_last_psi[3];
                 return true;
             };
+            w.get_clock = [this](bmmo_physics_clock_state& out) {
+                out = {};
+                out.current_time = clock;
+                out.time_of_last_psi = clock;
+                out.time_of_next_psi = clock + kDt;
+                return true;
+            };
+            w.set_clock = [this](const bmmo_physics_clock_state& state) {
+                calls.push_back("set_clock");
+                clock = state.current_time;
+                return true;
+            };
             w.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
                 auto it = navs.find(entity);
                 if (it == navs.end()) return false;
@@ -129,6 +142,7 @@ namespace {
             w.step = [this]() {
                 calls.push_back("step");
                 ++steps;
+                clock += kDt;
                 for (auto& [name, body]: bodies) {
                     if (!body.simulated) continue;
                     auto keys = pending_keys.find(name);
@@ -1261,6 +1275,79 @@ TEST(RollbackEngine, AWorldWithoutTheV11CallbacksStillRewinds) {
     EXPECT_EQ(world.count("set_body_extra"), 0);
     EXPECT_EQ(engine.stats().impulses_restored, 0u);
     EXPECT_GT(world.count("set_body Plate"), 0);
+}
+
+// The environment's clock goes back to the anchor BEFORE any body does, and a
+// replay then brings it forward to exactly where the live frames had left it:
+// the rewind is invisible to IVP's notion of time.  Before this, the clock was
+// never rewound, so every replayed tick ran one tick late and every rollback
+// left the clock permanently ahead by its depth.
+TEST(RollbackEngine, ARewindPutsTheClockBackBeforeTheBodiesAndTheReplayCatchesUp) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Plate"].position[0] = 40.0;
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Plate"};
+    auto adapter = world.adapter();
+    // Record after the step, as the client does: the record of tick t holds
+    // the clock the live frame left at the end of t.
+    for (uint32_t tick = 1; tick <= 4; ++tick) {
+        adapter.step();
+        engine.record(adapter, tick, tracked, {});
+    }
+    const double live_clock = world.clock;        // 4 * kDt
+    world.calls.clear();
+
+    EXPECT_TRUE(engine.rewind_to(adapter, 2, 4, no_input, "test"));
+    ASSERT_EQ(world.count("set_clock"), 1);
+    // Order: the clock before the first body write.
+    size_t clock_at = 0, body_at = 0;
+    for (size_t i = 0; i < world.calls.size(); ++i) {
+        if (world.calls[i] == "set_clock" && !clock_at) clock_at = i + 1;
+        if (world.calls[i].rfind("set_body ", 0) == 0 && !body_at) body_at = i + 1;
+    }
+    ASSERT_GT(clock_at, 0u);
+    ASSERT_GT(body_at, 0u);
+    EXPECT_LT(clock_at, body_at);
+    // Two replayed ticks from the anchor's clock land exactly on the live one.
+    EXPECT_NEAR(world.clock, live_clock, 1e-12);
+    EXPECT_EQ(engine.stats().clock_rewinds, 1u);
+}
+
+TEST(RollbackEngine, TheClockRestoreHasItsOwnSwitchAndAWorldWithoutAClockStillRewinds) {
+    {
+        fake_world world;
+        world.bodies["Own"];
+        rollback_engine engine;
+        engine.set_restore_clock(false);
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        record_ticks(world, engine, tracked, 1, 4);
+        world.calls.clear();
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+        EXPECT_EQ(world.count("set_clock"), 0);
+        EXPECT_EQ(engine.stats().clock_rewinds, 0u);
+    }
+    {
+        fake_world world;
+        world.bodies["Own"];
+        rollback_engine engine;
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        auto adapter = world.adapter();
+        adapter.get_clock = nullptr;
+        adapter.set_clock = nullptr;
+        for (uint32_t tick = 1; tick <= 4; ++tick) {
+            engine.record(adapter, tick, tracked, {});
+            adapter.step();
+        }
+        world.calls.clear();
+        EXPECT_TRUE(engine.rewind_to(adapter, 2, 4, no_input, "test"));
+        EXPECT_EQ(world.count("set_clock"), 0);
+        EXPECT_GT(world.count("set_body Own"), 0);
+    }
 }
 
 TEST(RollbackEngine, MechanismAndBallRowsShareTheSameTolerance) {
