@@ -284,7 +284,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
             if (player_ball_ != nullptr) {
                 local_state_handler_->poll_and_send_state_forced(player_ball_);
             }
-            on_sector_changed();
+            on_sector_changed(false, true);
             send_current_map();
         };
         map_enter_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
@@ -328,7 +328,10 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
 // `checkpoint`: the change is a crossed checkpoint (OnPostCheckpointReached),
 // the one sector change a physics session treats as an input; the others (a
 // level start, the counter, a map entry) only report.
-void BallanceMMOClient::on_sector_changed(bool checkpoint) {
+void BallanceMMOClient::on_sector_changed(bool checkpoint, bool own_cell) {
+    // The own checkpoint chain writes the cell before its (held) manager run,
+    // and the level's own start writes sector 1: the cell is ours again.
+    if (checkpoint || own_cell) sector_cell_is_own_ = true;
     if (!update_current_sector()) return;
     max_sector_ = std::max(current_sector_.load(), max_sector_.load());
     if (connected()) send_current_sector();
@@ -371,7 +374,7 @@ void BallanceMMOClient::OnPostExitLevel() {
         level_finished_ = false;
         compensation_lives_label_.reset();
     }
-    on_sector_changed();
+    on_sector_changed(false, true);
     if (spectator_label_) spectator_label_->update("[Spectator Mode]");
 }
 

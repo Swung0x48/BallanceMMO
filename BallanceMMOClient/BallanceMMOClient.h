@@ -237,7 +237,12 @@ private:
 
 	void on_fatal_error(char* extra_text);
 
-	inline void on_sector_changed(bool checkpoint = false);
+	// `checkpoint`: a crossed checkpoint (OnPostCheckpointReached); `own_cell`:
+	// the sector cell was written by this client's own game (a level start,
+	// a map entry).  Neither: a report (the counter, a calibration), which in a
+	// physics session reads the cell only if it still holds this ball's own
+	// sector (see update_current_sector).
+	inline void on_sector_changed(bool checkpoint = false, bool own_cell = false);
 
 	std::unique_ptr<text_sprite> player_list_display_;
 	struct player_status_list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
@@ -767,6 +772,12 @@ private:
 	bmmo::level_mode current_level_mode_ = bmmo::level_mode::Speedrun, countdown_mode_{};
 	float counter_start_timestamp_ = 0;
 	std::atomic_int32_t current_sector_ = 0, max_sector_ = 0;
+	// Whether IngameParameter[0][1] holds THIS ball's sector.  In a physics
+	// session the cell is shared: the sector union's pass writes the sector a
+	// peer entered (physics_session_run_sector), and a respawn's or a
+	// calibration's read of the cell would report that as our own.  The own
+	// checkpoint chain and the level's own start make the cell ours again.
+	std::atomic_bool sector_cell_is_own_ = true;
 	std::atomic_int64_t current_sector_timestamp_ = 0;
 	std::unordered_map<std::string, std::string> map_names_;
 	std::mutex map_names_mtx_;
@@ -914,6 +925,11 @@ private:
 	bool update_current_sector() { // true if changed
 		int sector = 0;
 		if (ingame_parameter_array_ != 0) {
+			// A union pass wrote a peer's sector into the cell and nothing of
+			// ours has since: not a change of this ball's sector.
+			if (!sector_cell_is_own_
+					&& physics_session_.phase == bmmo::session::physics_session_state::phase_type::running)
+				return false;
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
 			if (sector == current_sector_) return false;
 		} else if (current_sector_ == 0) return false;

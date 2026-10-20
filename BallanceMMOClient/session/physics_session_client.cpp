@@ -2715,6 +2715,8 @@ void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, co
     parameters->SetElementValue(0, 2, &none, sizeof(none));
     parameters->SetElementValue(0, 1, &sector, sizeof(sector));
     s.sector_cell = sector;
+    // A peer's sector in the cell is not this ball's (update_current_sector).
+    if (sector != current_sector_) sector_cell_is_own_ = false;
     if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
     bmmo::session::client_journal::instance().note(s.current_tick(), std::format("sector {} activated for tick {} ({})", sector, tick, how));
     logger_->Info("Physics session: sector %d activated for tick %u (%s)", sector, tick, how);

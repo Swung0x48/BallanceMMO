@@ -974,6 +974,13 @@ replica`，服务端 journal 里有 215 条 `keys=01` 的输入，回滚跟踪�
      `Deactivate Sector` 组第一个块就是 `Test(Not Equal, B = 0)`，读到 0 直接跳过整段停用。这与服务端世界
      的"分节并集、只激活不停用"（`physics_world::update_sectors`）一致，也正是自动化动词 `sector` 与无头
      客户端 `--start-sector` 手写的那三个值。
+   - **分节并集写的格子不是自己的分节**（2026-10-20）：并集的 pass 会把**别人**进入的分节写进
+     `IngameParameter[0][1]`（`physics_session_run_sector`），而 `update_current_sector()` 在每个分节变化
+     钩子上都读这个格子——关卡开始、进图、过存档点，以及 `OnCounterActive`，也就是每次复活。落后的玩家
+     死后复活会把别人的分节当成自己的上报（`send_current_sector`、分节时间戳、一条非 held 的 Sector 事件），
+     下一次自己过存档点反而上报更小的分节。现在只在自己的游戏写过格子时才信它：过存档点的钩子
+     （链在 held 的 manager 之前先写格子）和关卡自己的开始/进图把格子标为"自己的"，并集 pass 写入不同
+     分节时标为"别人的"，期间的上报什么都不读。会话之外行为不变。
 6. **无头客户端补齐**（`BallanceMMOServer/sim/session_client.cpp`）：和 mod 共用注册表与世代号；
    `entity_of` 走注册表（此前无条件返回字典名，Level 8 上会驱动错的那个 `Wippe`）；`input_at` 改成**精确
    tick**命中（此前取"不晚于该 tick 的最近一帧"，会把该 tick 并不存在的按键边沿重放进去）；补上每帧的
