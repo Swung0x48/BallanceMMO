@@ -480,7 +480,15 @@ namespace bmmo::session {
                 // engine cannot recreate it, and the caller's next record will
                 // stop carrying it.)
                 if (!world.get_body(entity, live)) continue;
-                const bool recheck = item.force_recheck || write_moves_body(live, item.state);
+                // A write that moves a body normally asks IVP to recheck its
+                // contacts, because the optimized beam generates no collision
+                // when a body lands inside another one.  But the recheck
+                // rebuilds the body's mindist/hull bookkeeping, which is state
+                // the rollback does not record - so it is also a candidate
+                // CAUSE of a replay's infidelity, and this flag is how that is
+                // measured rather than argued about.
+                const bool recheck = recheck_on_restore_
+                                   && (item.force_recheck || write_moves_body(live, item.state));
                 world.set_body(entity, item.state, item.mode, recheck);
                 // What we wrote from a row is the authoritative state of T now:
                 // without this the next snapshot of T compares against the
@@ -631,6 +639,9 @@ namespace bmmo::session {
         // a reason to do nothing - we simulated the tick with no input for a
         // body that in fact had one.
         bool knows_tick(uint32_t tick) const { return find_const(tick) != nullptr; }
+
+        // Diagnostic only (see the recheck comment in restore_and_replay).
+        void set_recheck_on_restore(bool enable) { recheck_on_restore_ = enable; }
 
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
@@ -805,5 +816,6 @@ namespace bmmo::session {
         uint32_t detailed_logs_ = 0;   // mismatch detail lines logged (capped)
         uint32_t resim_traces_ = 0;    // re-simulation trace lines logged (capped)
         bool verbose_ = false;
+        bool recheck_on_restore_ = true;
     };
 }

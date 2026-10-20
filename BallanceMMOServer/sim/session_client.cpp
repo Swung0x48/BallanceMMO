@@ -124,6 +124,16 @@ namespace {
         int expect = 2;
         double seconds = 180.0;
         bool trace = false;
+        // --trace-restore: dump every IVP core field (describe_cores_exact,
+        // hex floats, so the comparison is exact) on both sides of a forced
+        // rewind and log only the fields that moved.  Names the state the
+        // restore fails to put back, per body and per field, instead of
+        // inferring it from a hash that diverged forty ticks later.
+        bool trace_restore = false;
+        // --no-restore-recheck: do not ask IVP to recheck contacts for a
+        // body the restore moved.  Isolates the recheck's own cost to
+        // replay fidelity from everything else.
+        bool restore_recheck = true;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -168,7 +178,11 @@ namespace {
                 out.force_rollback_every = static_cast<uint32_t>(std::atoi(spec.substr(0, colon).c_str()));
                 if (colon != std::string::npos)
                     out.force_rollback_depth = static_cast<uint32_t>(std::atoi(spec.substr(colon + 1).c_str()));
-                if (out.force_rollback_depth == 0) out.force_rollback_depth = 1;
+                // depth 0 is meaningful and is the sharpest probe there is:
+                // restore the record for the CURRENT tick over a world that
+                // already holds exactly that state and replay nothing.  A
+                // pure capture->restore round trip, so any difference is the
+                // write path and not the re-simulation.
             }
             else if (arg == "--checkpoint-ticks") {
                 if (!(v = next())) return false;
@@ -180,6 +194,8 @@ namespace {
             else if (arg == "--expect") { if (!(v = next())) return false; out.expect = std::atoi(v); }
             else if (arg == "--seconds") { if (!(v = next())) return false; out.seconds = std::atof(v); }
             else if (arg == "--trace") out.trace = true;
+            else if (arg == "--trace-restore") out.trace_restore = true;
+            else if (arg == "--no-restore-recheck") out.restore_recheck = false;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -679,6 +695,7 @@ namespace {
             // before begin_session resets the tick base under it.
             close_journal("a new session started");
             rollback_.set_verbose(args_.trace);
+            rollback_.set_recheck_on_restore(args_.restore_recheck);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
@@ -1687,8 +1704,35 @@ namespace {
                 return recorded_input_at(name, tick, out);
             };
             const uint32_t anchor = now - args_.force_rollback_depth;
+            std::string before;
+            float factor_before = 0.0f, delta_before = 0.0f, factor_after = 0.0f, delta_after = 0.0f;
+            std::string clock_error;
+            if (args_.trace_restore) {
+                before = bmmo::physics::describe_cores_exact(engine_->physics());
+                bmmo::physics::get_clock(engine_->physics(), factor_before, delta_before, clock_error);
+            }
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) ++forced_rollbacks_;
             else ++forced_rollbacks_missed_;
+            if (args_.trace_restore && restore_traces_ < 8) {
+                ++restore_traces_;
+                const std::string after = bmmo::physics::describe_cores_exact(engine_->physics());
+                bmmo::physics::get_clock(engine_->physics(), factor_after, delta_after, clock_error);
+                int changed = 0;
+                const std::string fields = diff_core_dumps(before, after, changed);
+                // CKIpionManager::SetDeltaTime is an exponential moving average
+                // over a PERSISTENT m_DeltaTime, and Simulate() calls it every
+                // time: so every replayed step moves the smoothed delta that
+                // governs the integration, and nothing puts it back.  Printing
+                // it exactly is the difference between suspecting that and
+                // knowing it.
+                logf("restore trace: forced rewind %u -> %u (depth %u) moved %d cores, "
+                     "physics delta %a -> %a (%s, factor %a -> %a):%s",
+                     now, anchor, args_.force_rollback_depth, changed,
+                     static_cast<double>(delta_before), static_cast<double>(delta_after),
+                     delta_before == delta_after ? "UNCHANGED" : "MOVED",
+                     static_cast<double>(factor_before), static_cast<double>(factor_after),
+                     fields.empty() ? " none" : fields.c_str());
+            }
         }
 
         // One replay for every input correction this frame collected.
@@ -1747,6 +1791,52 @@ namespace {
         // So there is nothing meaningful to carry and growing the bridge struct
         // would buy nothing.  Kept because it answers a recurring class of
         // question cheaply: is some IVP per-step state non-zero when we snap?
+        // Which named fields of which cores differ between two
+        // describe_cores_exact dumps.  Both are "name field=... field=..." per
+        // line, sorted by name, so this is a token-wise compare keyed on the
+        // name - and it reports the fields rather than a hash, which is the
+        // whole point: a hash says "something moved", this says what.
+        static std::string diff_core_dumps(const std::string& before, const std::string& after,
+                                           int& bodies_changed) {
+            const auto split = [](const std::string& text) {
+                std::map<std::string, std::vector<std::string>> out;
+                size_t pos = 0;
+                while (pos < text.size()) {
+                    const size_t end = text.find(0x0a, pos);
+                    const std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+                    pos = end == std::string::npos ? text.size() : end + 1;
+                    if (line.empty()) continue;
+                    std::vector<std::string> tokens;
+                    size_t t = 0;
+                    while (t < line.size()) {
+                        const size_t space = line.find(' ', t);
+                        tokens.push_back(line.substr(t, space == std::string::npos ? std::string::npos : space - t));
+                        t = space == std::string::npos ? line.size() : space + 1;
+                    }
+                    if (!tokens.empty()) out[tokens[0]] = std::move(tokens);
+                }
+                return out;
+            };
+            const auto a = split(before), b = split(after);
+            std::string out;
+            bodies_changed = 0;
+            for (const auto& [name, tokens]: a) {
+                const auto other = b.find(name);
+                if (other == b.end()) { out += "\n    " + name + " GONE"; ++bodies_changed; continue; }
+                std::string fields;
+                for (size_t i = 1; i < tokens.size() && i < other->second.size(); ++i) {
+                    if (tokens[i] == other->second[i]) continue;
+                    fields += " " + tokens[i] + "->" + other->second[i];
+                }
+                if (fields.empty()) continue;
+                out += "\n    " + name + fields;
+                ++bodies_changed;
+            }
+            for (const auto& [name, tokens]: b)
+                if (a.find(name) == a.end()) { out += "\n    " + name + " NEW"; ++bodies_changed; }
+            return out;
+        }
+
         void report_queued_impulses(uint32_t tick) {
             const std::string dump = bmmo::physics::describe_cores_exact(engine_->physics());
             int bodies = 0, queued = 0;
@@ -2425,6 +2515,7 @@ namespace {
         uint64_t life_rewinds_ = 0, life_rewinds_missed_ = 0;
         uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
         uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
+        int restore_traces_ = 0;
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;

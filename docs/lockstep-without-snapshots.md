@@ -603,6 +603,191 @@ already exists here as the journal replay and is stronger, comparing a full
 world hash rather than the ball. Useful mainly as confirmation that nobody has
 a Virtools savestate to borrow.
 
+## The cause, found: the restore re-derives IVP state it never recorded
+
+Everything above hunted the *replay*. The replay was never the problem.
+
+### The probe that settled it: a rewind of depth 0
+
+`--force-rollback <every>:0` restores the record for the **current** tick over a
+world that already holds exactly that state, and replays nothing: `lag` is 0 and
+the re-simulation loop runs zero times. A pure capture-and-restore round trip.
+If the restore were faithful it would be a no-op.
+
+It is not. The pose hash - the clock-free one, `feed_core_pose`, which is the
+right instrument here because the world hash also feeds `current_time` and the
+rollback never rewinds the IVP clock - diverges at tick 41 after the first
+rewind at tick 40, exactly as a depth-12 run does:
+
+| | matched | first divergence |
+|---|---|---|
+| depth 12 vs no rewinds | 33/1730 | tick 41 |
+| **depth 0** vs no rewinds | **33/1730** | **tick 41** |
+
+Zero replay steps, same divergence. So the write is lossy, and every one of the
+four "how should a replay treat a mechanism" experiments was aimed at the wrong
+half of the problem.
+
+### What the write actually changes, per field
+
+`--trace-restore` dumps every IVP core field on both sides of a forced rewind
+with `describe_cores_exact` (hex floats, so the comparison is exact) and logs
+only the fields that moved. Over eight depth-0 rewinds, 10-11 cores moved every
+time, and the fields are not a surprise once seen:
+
+| field | times changed | size |
+|---|---|---|
+| `q_world_f_core_last_psi` | 84 / 84 | ~2e-10 rad |
+| `q_world_f_core_next_psi` | 84 / 84 | ~2e-10 rad |
+| `pos_world_f_core_last_psi` | 3 | 1 ULP |
+| `speed_change` | 1 | **1.212 m/s** |
+
+Never `speed`, `rot_speed`, `delta_world_f_core_psis`, `i_delta_time` or
+`time_of_last_psi`. The loss is entirely in the rotation - plus one queued
+impulse.
+
+### Why, in the code
+
+`read_body_state` captures the pose with
+`real->calc_at_quaternion(environment->get_current_time(), ...)`: **one**
+quaternion, the pose interpolated to the current time, which is what the
+renderer sees. IVP's integrator state is **two** quaternions, `q_..._last_psi`
+and `q_..._next_psi`.
+
+So `write_body_state` has to re-derive the second from the first. It does it by
+taking the PSI rotation step off the **live** core before the beam -
+
+    psi_rotation_step.set_invert_mult(&core->q_world_f_core_last_psi,
+                                     &core->q_world_f_core_next_psi);
+
+\- beaming the body to the captured quaternion, and then carrying that step
+forward or backward depending on the interpolation fraction, through
+`fast_normize_quat()`.
+
+Two separate errors follow, and the depth ladder separates them.
+
+### Cause 1: the contact recheck, which fires only when a body moves
+
+`restore_and_replay` passes `recheck = write_moves_body(live, item.state)`, so
+the recheck fires for every body the restore actually moves - which is every
+body on every real rollback, and **no** body at depth 0, because at depth 0 the
+record and the live world agree. That routes
+`beam_object_to_new_position(..., IVP_FALSE)`, the un-optimized path, which
+rebuilds the body's mindist and hull bookkeeping. That bookkeeping is state the
+rollback does not record and cannot restore, so rebuilding it leaves the body in
+a *different* collision state than the un-rewound run.
+
+Measured with `--no-restore-recheck`, solo, 40 rewinds, against the same run
+with no rewinds at all:
+
+| arm | mechanisms mean | p90 | max | the ball |
+|---|---|---|---|---|
+| depth 1, recheck on | 20.89 m | 97.7 m | 167.2 m | 0.0000 m |
+| **depth 1, recheck off** | **0.064 m** | 0.144 m | **0.767 m** | 0.0000 m |
+| depth 12, recheck on | 8.75 m | 37.1 m | 99.3 m | 0.0000 m |
+| depth 12, recheck off | 1.99 m | 10.1 m | 20.0 m | 0.0000 m |
+
+**325x on the mean at depth 1**, 218x on the max, and it lands back on the
+depth-0 floor. The bodies it wrecks are the ones in persistent contact: the ten
+hinged `P_Modul_29` plates, the `P_Modul_26` rope-and-sack pair, and
+`P_Ball_Paper_MF`, the lightest body on the map, thrown 167 m.
+
+The recheck is not a bug to delete. Its comment is right: "The optimized path
+generates no collision when the body lands inside another one; a snap write
+needs the recheck." A **hard set** of a ball to an authoritative pose does need
+it. A **replay restore** of a body to a pose it genuinely occupied a few ticks
+ago does not - the contacts it had are the contacts it should have. The two
+operations are wearing one function, which is the same confusion as
+`speed_change`: zeroing a queued impulse is right for a hard set (design 8.4)
+and wrong for a replay restore.
+
+### Cause 2: the rotation step is taken from the live core, not the anchor
+
+`psi_rotation_step` is the rotation increment the body has **now**, not the one
+it had at the anchor tick. The restore uses it to reconstruct the anchor's
+missing quaternion, so the reconstructed rotational phase is wrong by however
+much the body's angular velocity changed over the rewind. That error must grow
+with depth, and with the recheck suppressed so it can be seen alone, it does -
+measured as the very first difference at the very first rewind, before chaos has
+anything to amplify:
+
+| depth | first difference |
+|---|---|
+| 0 | 2.12e-08 m |
+| 1 | 1.57e-02 m |
+| 12 | 1.21e-01 m |
+
+At depth 0 the live increment *is* the anchor's, so all that is left is
+`fast_normize_quat`'s rounding, ~2e-10 rad - the bit-exactness floor. At depth
+12 a swinging plate's increment is 12 ticks stale and the restored phase is
+12 cm out immediately. This is why depth-12 does not come down to the depth-1
+floor when the recheck is suppressed.
+
+### So the root cause is one thing
+
+`bmmo_physics_body_state` describes a body the way the wire and the renderer
+need it - an interpolated pose and a velocity. It is not the integrator's state.
+Every restore therefore has to **re-derive** the integrator's state, and the
+re-derivation needs three things the record does not carry: the anchor's PSI
+rotation increment, the body's contact set, and its queued impulses. Each one it
+has to invent, and each invention is a divergence.
+
+The ball escapes all of it - 0.0000 m in every arm, bit-identical - because it
+is force-driven and friction-damped, re-asserted by its navigation every tick,
+and its orientation does not feed back into its trajectory. A hinged plate in
+contact has none of those protections.
+
+### What this says about the fix (not done here)
+
+A faithful rollback needs the record to hold IVP's own core fields -
+`pos_world_f_core_last_psi`, **both** quaternions, `delta_world_f_core_psis`,
+`speed`, `rot_speed`, both `*_change`, `time_of_last_psi`, `i_delta_time` - and
+to write them back directly rather than through
+`beam_object_to_new_position`. That is a **local savestate**, which is what
+GGPO's `save_game_state`/`load_game_state` always were; it never goes on the
+wire, so it is not a snapshot and does not touch the shared
+`bmmo_physics_body_state` ABI. It is a second, local struct.
+
+The cheap half can be had first and separately: stop rechecking contacts on a
+replay restore (325x at depth 1), which needs no new state at all - only the
+distinction between a hard set and a replay restore that the code already needs
+for `speed_change`.
+
+## Two things the earlier write-ups got wrong
+
+* **`hk_Hinge_Constraint` is the wrong class.** `Set Physics Hinge` builds an
+  `IVP_Template_Constraint` and calls `CKIpionManager::CreateConstraint`, which
+  is `IVP_Controller_Factory::create_constraint` -> `IVP_Constraint_Local`.
+  `hk_Local_Constraint_System` is never in the loop. The conclusion survives for
+  the right class - `IVP_Constraint_Local` holds geometry and parameters, and its
+  one mutable member is rewritten every PSI before use - but the citation was
+  wrong.
+* **"`speed_change` is zero for essentially every body" was undersampled.** It
+  was measured every 200 ticks, which is eight moments out of 1700, and a queued
+  impulse is a rare event: the impact solver parks a delayed push on the core
+  with the larger `virt_mass`, which is the plate rather than the ball. The
+  depth-0 field trace caught one at 1.212 m/s. The hypothesis was dropped for a
+  good reason - it was never measured - but it was dropped too hard.
+
+## Also ruled out, by measurement
+
+* **The IVP clock is not the instrument bug it looked like.** The world hash does
+  feed `current_time`, and the rollback never rewinds the IVP clock, so the
+  `hash` field genuinely cannot match again after a rewind. But the `pose` hash,
+  which feeds neither the environment nor `time_of_last_psi`, diverges at exactly
+  the same tick - so the measurement stands as made.
+* **The physics delta-time filter is not it.** `CKIpionManager::SetDeltaTime` is a
+  stateful exponential moving average, `m_DeltaTime = (m_DeltaTime * 3 + delta) / 4`,
+  and `Simulate()` calls it on every call including every replayed step - so a
+  replay does mutate integration state that nothing restores. Measured across
+  forced rewinds, `m_PhysicsDeltaTime` is **UNCHANGED** in exact hex at both
+  depth 0 and depth 1: with a fixed `kFixedDeltaMs` the filter has reached its
+  float fixed point, where `(d * 3 + d) / 4 == d` exactly. Worth re-checking the
+  day the delta stops being fixed.
+* **Not the frame's scripts, by elimination.** Suppressing the recheck brings a
+  depth-1 replay to 0.064 m while the mechanism scripts still do not run during
+  it, so their absence is not what was costing metres.
+
 ## Four bugs found on the way, all real
 
 1. **The missing trigger.** The client only rolled back when a snapshot
