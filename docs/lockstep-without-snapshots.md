@@ -965,32 +965,115 @@ appears after that is 1-6 mm at tick 258 and 1-3 cm by tick 300: the per-rewind
 contact-state residual, accumulating under frequent rollbacks at a 600 ms round
 trip, and now cleanly separated from everything else.
 
-### The 2-tick residual is the server's guard
+### The 2-tick guard, fixed - and the pacer it hid
 
 In both led runs the server activated exactly two ticks after the stamp
-(45 -> 47, 62 -> 64), whatever `Gameplay_SectorManager` had been doing.
-`physics_world::update_sectors()` returns early while `desired ==
-active_sectors_`, and only *then* runs `sector_idle_ticks_ = IsActive() ? 0 :
-+1; if (< 3) return;` - so the idle counter never accumulates while the sets
-agree and always needs three passes once they differ. A fixed two-tick delay on
-every activation, invisible while the server was already a one-way trip late.
-`--sector-skew 2` reproduces it on the client for the measurement; the fix is to
-count idle ticks every tick (move the counter above the early return), which is
-server code, not IVP, and is not done here.
+(45 -> 47, 62 -> 64). `physics_world::update_sectors()` returned early while
+`desired == active_sectors_` and only *then* ran its idle counter, so the
+counter never accumulated while the sets agreed and always needed three passes
+once they differed. It now counts every tick (`session/sector_pacer.hpp`, five
+tests): a pass may start when the manager has been idle for three ticks, the
+rule the comment always described.
 
-### What it means for the retail client
+That made the stamped tick land at lead 33 (45 -> 45), and exposed the rule
+itself. At lead 1 and lead 8 the server still came out one tick late (13 -> 14,
+20 -> 21): the level's own sector-1 walk at session start had not been idle for
+three ticks yet. **The pacer is part of the simulation.** Its input, whether
+`Gameplay_SectorManager` is active, is the same on every side of a lockstep
+session, so each client now counts the same pacer at the same point - once per
+step, before it - and runs a held sector at the first tick at or after its stamp
+the pacer allows. Same batch, 4 players, 300 ms:
 
-The headless client can defer `--start-sector` trivially. A retail client's
-sector is activated by the level's own scripts when the ball crosses the sector
-boundary, and the mod observes it after the fact; deferring it means hooking the
-activate chain (`physics_session_client.cpp` already instruments
-`Gameplay_SectorManager`'s call sites and the `Set Cell -> IngameParameter`
-blocks) and holding it `input_delay + 1` frames while sending the stamped event
-at once. The gameplay consequence: a sector's mechanisms exist `lead` ticks
-after the ball enters it - but the ball's own inputs are already delayed by the
-same lead, so the timing between ball and mechanism is preserved. That is the
-decision this measurement was for, and it is complementary to the sector-union
-question (which sectors each side runs), not an alternative to it.
+| lead | stamped | server | client | bodies appearing at different ticks | worst before the first rollback |
+|---|---|---|---|---|---|
+| 1, pacer mirrored | 13 | 14 | 14 | 0 | **0.00000 m** |
+| 8, pacer mirrored | 20 | 21 | 21 | 0 | **0.00000 m** |
+| 8, `--no-sector-pacer` | 20 | 21 | 20 | 3 | 0.281 m |
+| input_delay + 1 (33), twice | 45 | 45 | 45 | 0 | **0.00000 m** |
+
+The one-tick miss also moved the first rollback from tick 215 to tick 90: a
+mechanism one tick out of phase is caught by the first full snapshot that
+carries it.
+
+### The server ran the level's own checkpoint chain
+
+The first retail run that crossed a checkpoint for real (beamed onto
+`PC_TwoFlames`) found a second activation path. The stamped Sector event and
+the server's pass agreed (633 = 633), and yet the server's sector-2 bodies
+appeared at tick 624 and the client's at 638 - the same trajectory, shifted by
+14 ticks - and the server's sector-1 bodies vanished at 620 while the client
+kept them.
+
+The server's world runs the level's scripts, and `rewire_proximity_probes()`
+points every `TT Scaleable Proximity` that watches `Ball_Pos_Frame` at the
+nearest player's clone, the checkpoint flames' included. So a clone that
+reaches a checkpoint fires `Gameplay_Events / activate Sektor` in the server's
+world, which runs `Gameplay_SectorManager` on its own cells: the next sector
+**and the deactivation of the previous one**, at the tick the server's clone got
+there, behind `update_sectors()`'s back. In a multi-player room that tears down
+a sector other players are still in.
+
+The level's own manager run is now held in **every** world
+(`game/sector_activation.hpp`): the chain's `Execute Script` is fed a parameter
+holding no script. Execute Script activates its Out at once on a null script,
+so the chain, its two `Set Cell`s and whatever hangs behind it keep their
+shape; only the manager run is gone. The server's `update_sectors()` is then the
+only path that runs the manager there, and each client runs it for the sectors
+it enters, at the stamped tick.
+
+### The protocol, as built
+
+* **Every world holds the checkpoint's manager run**: the server's world and
+  the headless client's with the shared helper, the retail client's with its
+  own copy (neutralization N3), which hands the original source back at
+  session end like N1 and N2.
+* **A sector a client enters is an input.** Its Sector event is stamped
+  `input_delay + 1` ticks ahead of the step after the crossing and sent at once;
+  the client runs the manager (deactivating nothing, like N2) at the end of the
+  frame before that step - or the first one after it the mirrored pacer allows.
+  The server applies the event before that step and its pass runs right after,
+  under the same pacer.
+* **Two ways to see a crossing, deduplicated.** The retail client takes it from
+  `OnPostCheckpointReached` and from a poll of `IngameParameter[0][1]` in
+  `physics_session_frame`. On the arena the poll saw it first: the hook sits
+  at the end of the checkpoint chain, which finishes a frame after its
+  `Set Cell`. A sector is an input once per session.
+* **The automation's `sector` verb** goes through the same hold during a
+  session.
+* **The headless client** does all of it by default (`--sector-lead -1`); `0` is
+  the old behaviour, kept as the control.
+
+### Measured: real crossings, headless and retail
+
+Solo, driving the whole arena through all three checkpoints, 300 ms, 50 s:
+
+| | sector 2 / 3 / 4 (client) | server | bodies appearing at different ticks | rollbacks | worst body |
+|---|---|---|---|---|---|
+| **as built** | 855 / 1349 / 1842 | 855 / 1349 / 1842 | **0 of 52** | **0** | **0.00000 m** over 1375 checkpoints |
+| `--sector-lead 0` | 821 / 1315 / 1808 | 821 / 1315 / 1809 | 17 | 1 | 0.297 m |
+
+The control is worth a second look. Its event arrived in time and the server's
+pass ran on the client's tick (821 = 821), and its bodies still came out two
+ticks late. The client's chain starts the manager in the middle of a frame,
+from inside the script graph; the server's pass starts it before the frame. An
+event that is merely on time is not enough: both sides have to start the
+manager from the same point of the frame.
+
+The retail client, solo on the arena against the Arch server: a real
+checkpoint crossing held for 583 and run for 583, the `sector 3` verb held for
+1287 and run for 1287, the server's passes on both ticks. All 23 bodies appear
+on the same tick on both sides. Every sector-2 and sector-3 body is
+**0.00000 m** over the whole session, 350 and 331 checkpoints, with one
+exception that is a recording artefact, not a divergence (see the measurement
+traps).
+
+### What it does not cover
+
+* **The sector union across players.** A client still runs only the sectors
+  *it* enters. The server runs every player's, so a trailing player's world
+  lacks the leader's sector until it crosses too (see "Not covered").
+* **Rollbacks while a new sector's bodies are untracked.** See "Still open":
+  measured at 0.2-0.6 m, and the next thing to fix.
 
 ## Checked on the real networked path, and two things found there
 
@@ -1066,6 +1149,13 @@ early tick window, one rewind wide, and report per body - `scripts/worst_bodies.
 and the `early` window of `scripts/client_divergence.py`. The first difference
 at the first rewind is the clean signal; everything after it is Lyapunov growth.
 
+
+* **A `journal mark` checkpoint is labelled one tick early.** The mark records
+  the bodies from inside the automation handler, after the frame's step but
+  under the previous tick's number, so a comparison against the server shows a
+  fake error at exactly that tick (the sandbag, 0.050 m at 1948, exact at 1946
+  and 1950). Read the mark tick out of a comparison.
+
 ## Four bugs found on the way, all real
 
 1. **The missing trigger.** The client only rolled back when a snapshot
@@ -1088,6 +1178,29 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
    work, and made a measurement look three times worse than it was.
 
 ## Still open
+
+* **A new sector's bodies are untracked until the server's dictionary
+  arrives**, and a rollback in that window leaves them live and steps them
+  again. The client records a mechanism only once `mechanism_registry` has
+  resolved it, and the registry learns names only from full snapshots, which
+  reach the client an input delay plus a trip after the birth. Until then a
+  restore has no record of the bodies ("no opinion"), so the replay steps them
+  another `depth` times. One forced rewind across the sector-2 activation
+  (`--force-rollback 880:40`, solo, otherwise exact) put every sector-2 body
+  0.2-0.6 m off on the next tick, caught only by the next full snapshot. The
+  item below about the dictionary is the cause; a client that runs a sector
+  activation itself knows those bodies before the server can name them, so it
+  can record them from their birth.
+* After the same forced rewinds, `P_Modul_26_Sack` and `P_Modul_08_Schaukel`
+  diverged by 0.95 m and 1.78 m on rewinds that crossed no activation. Those
+  are the script-driven mechanisms the replay does not run (see "So the
+  remaining work is exactly: run the scripts during the replay").
+* The server's journal replay failed at `matched=689 first_divergence=701` in
+  6 of this round's 11 4-player runs, at the same tick every time: 5 of the 9
+  led runs and neither of the 2 lead-0 controls. A pre-v11 control failed the
+  same way in the earlier round, so it predates this work, but two controls
+  are not a base rate. The solo crossing runs all replayed exactly. It is the
+  other thing to fix next.
 
 * The prop ball `P_Ball_Paper_MF` disappears from one side's body set after
   tick ~1 270 and stays missing for the rest of the session. A real
