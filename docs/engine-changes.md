@@ -4,6 +4,18 @@ Every change to the engine sources under `submodule/Ballanced` is listed here
 with the reason and the evidence. The rule for the collision overhaul is: no
 engine change unless proven necessary, and every change recorded.
 
+**One macro for the IVP changes.** Every BallanceMMO change inside the IVP
+sources - the scalar vector-FPU path (1), the portable transcendental entry
+points (3), the per-unit movement check (5), the ball-ball synapse order (7),
+the merged compact-surface layout (12) and the overlap-grid rounding (16) -
+compiles only when the build defines `IVP_PORTABLE_BMMO`. Without it each file is the upstream code, platform
+branches included. BallanceMMO's CMake defines the macro on every IVP target
+it builds, the headless server's and the client plugin's alike
+(`bmmo_apply_portable_math` in `cmake/PortableMath.cmake`, with
+`BMMO_PHYSICS_PORTABLE_MATH`, which every BallanceMMO build turns on). The
+physics_RT and CK2 changes are not behind it; they live in the plugin and the
+engine, not in IVP.
+
 ## 1. Platform-independent vector-FPU block size (physics_RT / IVP)
 
 File: `Source/BuildingBlocks/physics_RT/ivp/ivp_physics/ivp_great_matrix.hxx`
@@ -26,6 +38,9 @@ every platform use the scalar path the original 32-bit physics_RT ran.
 
 The alignment mask is written as `~((uintp)7)` so it is correct for 64-bit
 addresses (the old 32-bit literal would have truncated them).
+
+Compiles only under `IVP_PORTABLE_BMMO` (see the note at the top); without
+it the header keeps upstream's 64-bit branch.
 
 ## 2. Deterministic quicksort for engine arrays (VxMath) and qhull
 
@@ -75,7 +90,7 @@ and pow with its own polynomials and tables, so the same IVP source gives
 different last bits on MSVC, glibc and bionic. The physics now calls these
 functions only through `ivp_libm::` wrappers. By default they forward to
 the C library (upstream behaviour). When the build defines
-`IVP_PORTABLE_LIBM`, the wrappers call `ivp_libm_*` symbols that the build
+`IVP_PORTABLE_BMMO`, the wrappers call `ivp_libm_*` symbols that the build
 must provide; BallanceMMO provides them from the vendored OpenLibm subset
 (`BallanceMMOCommon/src/physics/ivp_libm_portable.cpp`). sqrt, fabs, floor,
 ceil and fmod are exact operations and stay on the C library.
@@ -577,6 +592,10 @@ at one checkpoint is the case that matters in play.
 The Windows retail game is the reference, so the float variant is the one
 every platform keeps. Inert for the simulation on Windows (its own build was
 already this); on Linux it changes only ties of this kind.
+
+Like every BallanceMMO change inside IVP, this compiles only under
+`IVP_PORTABLE_BMMO` (see the note at the top); without it the file is the
+upstream code with its platform branches.
 
 ## Bridge notes: restoring a body's leapfrog state (no engine change)
 

@@ -2,7 +2,7 @@
 # BallanceMMOCommon/third_party/openlibm/bmmo_portable_math.c).  The IVP
 # sources call their transcendental functions through ivp_libm
 # (ivu_libm.hxx in the engine); with BMMO_PHYSICS_PORTABLE_MATH on, the IVP
-# targets are compiled with IVP_PORTABLE_LIBM and the ivp_libm_* symbols are
+# targets are compiled with IVP_PORTABLE_BMMO and the ivp_libm_* symbols are
 # provided by this library (ivp_libm_portable.cpp -> OpenLibm subset).
 
 # The IVP targets live in the submodule's directory scope.
@@ -66,7 +66,13 @@ function(bmmo_apply_portable_math target)
         return()
     endif ()
     bmmo_ensure_portable_math_target()
-    target_compile_definitions(${target} PRIVATE IVP_PORTABLE_LIBM)
+    # IVP_PORTABLE_BMMO is the one macro every BallanceMMO change inside IVP
+    # compiles under (docs/engine-changes.md): the scalar vector-FPU path
+    # (change 1), the portable libm entry points (3), the per-unit movement
+    # check (5), the ball-ball synapse order (7), the merged compact-surface
+    # layout (12) and the overlap-grid rounding (16).  Without it the IVP
+    # sources are the upstream code.
+    target_compile_definitions(${target} PRIVATE IVP_PORTABLE_BMMO)
 endfunction()
 
 # The IVP static libraries are exported by their own CMake tree, so they

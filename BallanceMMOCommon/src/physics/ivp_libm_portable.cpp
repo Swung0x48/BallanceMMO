@@ -1,5 +1,5 @@
 // Platform-independent implementations of the IVP transcendental entry
-// points (ivu_libm.hxx, built with IVP_PORTABLE_LIBM).  Every one forwards
+// points (ivu_libm.hxx, built with IVP_PORTABLE_BMMO).  Every one forwards
 // to the vendored OpenLibm subset, so the physics computes the same bits on
 // MSVC, glibc and bionic.
 #include <physics/portable_math.h>
