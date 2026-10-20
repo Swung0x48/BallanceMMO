@@ -1859,11 +1859,20 @@ void BallanceMMOClient::physics_session_frame() {
                 tracked.remote_entities.push_back(remote.entity);
                 applied[remote.entity] = remote.applied;
             }
-        // Design 9.25: the shared mechanisms are ordinary tracked bodies again.
-        // Only the names this client has a body for - a tracked name with no
-        // body is dropped by every capture, which used to change the tracked
-        // set on every tick.
-        for (const auto& name: s.mechanism_tracking.tracked_entities()) tracked.mechanisms.push_back(name);
+        // Every movable body this client has, not only the ones the server has
+        // named and the registry resolved - the headless client's fd74a59,
+        // which never reached this file.  A body missing from the tracked set
+        // is not recorded and so not restored, but the replay's step() steps
+        // the whole world, so every rollback advanced it by the replay's depth:
+        // a new sector's bodies until the next full snapshot named them, and
+        // any body the server never names at all.  Only bodies that exist are
+        // listed, so the set does not churn (design 9.25's concern).  The balls
+        // are tracked by entity above.
+        for (const auto& body: physics_view_.list_bodies()) {
+            if (!body.movable || !body.name[0]) continue;
+            if (std::strncmp(body.name, "Ball_", 5) == 0) continue;
+            tracked.mechanisms.emplace_back(body.name);
+        }
         // The lifetime of every tracked name, so a record of an earlier body
         // under the same name is never used to restore the current one.
         tracked.generations = s.generations;
