@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 11u  /* v11: the core's queued impulses, for a rollback restore */
+#define BMMO_PHYSICS_API_VERSION 11u  /* v11: the core's integrator state, for a rollback restore */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -82,9 +82,28 @@ typedef struct bmmo_physics_body_state {
  * This never goes on the wire.  It is a LOCAL savestate, which is what GGPO's
  * save_game_state always was, and it is deliberately a separate struct so that
  * the shared bmmo_physics_body_state ABI does not grow. */
+/* Which members of a bmmo_physics_core_extra are meaningful.  A caller fills
+ * the mask; set_core_extra writes only what is named.  This is what lets the two
+ * halves be measured against each other in one binary, which matters because
+ * two builds' runs differ by more than either half is worth. */
+#define BMMO_PHYSICS_EXTRA_IMPULSES 1u /* speed_change, rot_speed_change */
+#define BMMO_PHYSICS_EXTRA_QUATS    2u /* q_last_psi, q_next_psi */
+
 typedef struct bmmo_physics_core_extra {
+    uint32_t fields;           /* BMMO_PHYSICS_EXTRA_* */
     float speed_change[3];     /* core->speed_change, world space [m/s] */
     float rot_speed_change[3]; /* core->rot_speed_change, core space [rad/s] */
+    /* IVP integrates a core's rotation between two quaternions, the pose at the
+     * last PSI and the predicted pose at the next one.  A body state carries
+     * neither: read_body_state captures calc_at_quaternion, ONE quaternion
+     * interpolated to the current time, which is the pose the renderer wants.
+     * So write_body_state has to re-derive the second, and it does it from the
+     * rotation step of the LIVE core - which at a rewind of depth d is d ticks
+     * away from the step the anchor had, leaving the restored rotational phase
+     * wrong by however much the body's angular velocity moved.  Recording both
+     * removes the derivation, and with it the depth-scaling error. */
+    double q_last_psi[4];      /* core->q_world_f_core_last_psi, x y z w */
+    double q_next_psi[4];      /* core->q_world_f_core_next_psi, x y z w */
 } bmmo_physics_core_extra;
 
 /* The full parameter set of the retail Physicalize block, which is also what
@@ -340,9 +359,10 @@ typedef struct bmmo_physics_api_v2 {
                                  const float linear[3], const float angular[3],
                                  int32_t wake_mode, int32_t recheck, char* error, uint32_t error_size);
 
-    /* ---- v11: the core's queued impulses, for a rollback restore ---- */
+    /* ---- v11: the core's integrator state, for a rollback restore ---- */
 
-    /* Read / write core->speed_change and rot_speed_change.  See
+    /* Read / write the integrator state a body state does not carry: the
+     * queued impulses and the two rotation quaternions.  See
      * bmmo_physics_core_extra for why a rollback needs them.
      *
      * set_core_extra is meant to run AFTER a set_body_state_ex that restored

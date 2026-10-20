@@ -692,8 +692,9 @@ struct the retail mod shares - a second, local struct keeps that ABI untouched.
 
 ## The fix, as built (bridge API v11)
 
-`bmmo_physics_core_extra` is a **new** struct carrying `speed_change` and
-`rot_speed_change`; `bmmo_physics_body_state` is byte-identical to before,
+`bmmo_physics_core_extra` is a **new** struct carrying `speed_change`,
+`rot_speed_change` and both PSI quaternions, with a `fields` mask saying which
+of them a caller means; `bmmo_physics_body_state` is byte-identical to before,
 because it is what the wire and the renderer need and the retail mod shares it.
 Two v11 entries, appended to the v-table, read and write the queue
 (`get_core_extra` / `set_core_extra`), and `rollback.hpp` carries the values in
@@ -738,21 +739,75 @@ At depth 0 the restore is now essentially exact - 1.8e-08 m is the quaternion
 floor below, not the queue. The win shrinks with depth because a second term
 takes over.
 
-### What is left, and it is not staleness
+### Both quaternions as well, which makes the restore exact
 
-Restoring the anchor's queue at depth 1 gives **1.046e-03 m**, which is
-bit-identical to what keeping the *live* queue gave. So one tick of staleness
-costs nothing - the queue is near-constant between ticks - and the residual is
-the other loss the field trace found: `write_body_state` reconstructs the
-missing quaternion from the **live** PSI rotation step, not the anchor's, so the
-restored rotational phase is wrong by however much the body's angular velocity
-changed over the rewind. That is depth-scaling, which is exactly the shape of
-the table above, and it is the next thing to fix: the same local savestate
-should carry **both** quaternions instead of re-deriving one.
+The same local struct also carries `q_world_f_core_last_psi` and
+`q_world_f_core_next_psi`, under its own bit of the field mask
+(`BMMO_PHYSICS_EXTRA_QUATS`, switched by `--no-restore-quats`). The reason is
+the floor above: `read_body_state` captures **one** quaternion, so
+`write_body_state` re-derives the other from the live rotation step through
+`fast_normize_quat`. Recording both removes the derivation.
 
-Two other bodies say the same thing. `P_Box_MF` (2.978e-04 m) and
-`P_Ball_Stone_MF` (7.498e-05 m) are unchanged by the queue fix at depth 1 and
-exactly 0 at depth 0, so their error is the replay's, not the queue's.
+It was added on a hypothesis that the measurement then **refuted**: that the
+derivation uses the *live* rotation step rather than the anchor's, and so would
+explain the depth-scaling residual. It does not. All four mask combinations at
+depth 1, same batch:
+
+| worst plate at depth 1 | nothing | impulses | quaternions | both |
+|---|---|---|---|---|
+| `P_Modul_29_Platte08` | 3.811e-02 | 1.046e-03 | 3.811e-02 | 1.046e-03 |
+| `P_Modul_29_Platte05` | 2.955e-02 | 1.464e-03 | 2.955e-02 | 1.464e-03 |
+
+The quaternion column is **identical to doing nothing**, and `both` is identical
+to `impulses`. The quaternion half buys exactly zero at depth 1, and the same at
+depth 12.
+
+What it does buy is at depth 0, and it is worth having:
+
+| worst body, depth 0 | impulses only | both |
+|---|---|---|
+| `P_Modul_29_Platte02` | 1.589e-07 m | **0** |
+| `P_Modul_29_Platte01` | 1.300e-07 m | **0** |
+| every other body | 1.7e-08 .. 7.6e-08 m | **0** |
+
+Exactly zero, on every body. And by the pose hash, which is stricter than the
+per-body comparison:
+
+| | matched | first divergence |
+|---|---|---|
+| two plain runs (the floor) | 80 | tick 88 |
+| depth 0, pre-v11 restore | 33 | tick 41 |
+| depth 0, impulses only | 33 | tick 41 |
+| **depth 0, both** | **80** | **tick 88** |
+
+A depth-0 forced rollback is now indistinguishable from the run-to-run floor:
+the divergence moves off the first rewind (tick 40) and onto tick 88, which is
+where two *plain* runs part company anyway. **The capture-and-restore round trip
+is bit-exact to the limit of what the harness can measure.**
+
+### So the restore is solved, and what is left is the replay
+
+| worst plate | depth 0 | depth 1 | depth 12 |
+|---|---|---|---|
+| pre-v11 | 3.62e-02 m | 3.81e-02 m | 1.37e-01 m |
+| + queued impulses | 1.81e-08 m | 1.05e-03 m | 7.39e-02 m |
+| + both quaternions | **0** | 1.05e-03 m | 7.40e-02 m |
+
+This inverts where the problem now lives, and it is worth being precise about
+the order of the two claims, because they look contradictory and are not:
+
+* **Before the fix**, a depth-0 rewind diverged, which proved the restore was
+  lossy and that the replay-treatment experiments were aimed at the wrong half.
+* **After it**, a depth-0 rewind is at the floor, so the restore is no longer a
+  source of error at all - and every remaining metre is injected by the replayed
+  steps.
+
+The residual is not the queue (restored) and not the rotation (restored, and
+measured to change nothing at depth >= 1). Two bodies point at where it is:
+`P_Box_MF` (2.978e-04 m) and `P_Ball_Stone_MF` (7.498e-05 m) are **exactly 0 at
+depth 0** and unchanged by either half of the fix at depth 1 - bodies whose only
+error is the replay's. The next question is what a physics-only replayed step
+does that a live frame's step does not, now that it is the only variable left.
 
 ### The floor underneath: the quaternion round trip
 

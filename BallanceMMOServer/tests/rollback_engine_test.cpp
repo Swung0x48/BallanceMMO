@@ -32,8 +32,12 @@ namespace {
         double position[3] = {};
         float linear[3] = {};
         bool simulated = true;
-        // The queue IVP would carry into the next PSI (bridge API v11).
+        // The integrator state a body state does not carry (bridge API v11):
+        // the queue IVP would take into the next PSI, and one component of the
+        // last-PSI rotation, which is enough to tell a restored quaternion from
+        // a re-derived one.
         float speed_change[3] = {};
+        double q_last_w = 1.0;
     };
 
     const char* mode_name(wake_mode mode) {
@@ -75,21 +79,31 @@ namespace {
                 if (mode == wake_mode::wake) body.simulated = true;
                 else if (mode == wake_mode::freeze) body.simulated = false;
                 // Design 8.4, which is the behaviour the v11 restore works
-                // around: a pose write drops whatever was queued.
+                // around: a pose write drops whatever was queued, and
+                // re-derives the rotation rather than restoring it.
                 for (int k = 0; k < 3; ++k) body.speed_change[k] = 0.0f;
+                body.q_last_w = -1.0;   // "whatever the derivation produced"
                 return true;
             };
             w.get_body_extra = [this](const std::string& entity, bmmo_physics_core_extra& out) {
                 auto it = bodies.find(entity);
                 if (it == bodies.end()) return false;
                 out = {};
+                // Both bits, as the bridge's get_core_extra reports them: the
+                // engine clears what the caller does not want.
+                out.fields = BMMO_PHYSICS_EXTRA_IMPULSES | BMMO_PHYSICS_EXTRA_QUATS;
                 for (int k = 0; k < 3; ++k) out.speed_change[k] = it->second.speed_change[k];
+                out.q_last_psi[3] = it->second.q_last_w;
                 return true;
             };
+            // The call log carries the mask, so a test can pin which halves of
+            // the integrator state a restore asked for.
             w.set_body_extra = [this](const std::string& entity, const bmmo_physics_core_extra& state) {
-                calls.push_back("set_body_extra " + entity + " dv=" + std::to_string(state.speed_change[0]));
+                calls.push_back("set_body_extra " + entity + " fields=" + std::to_string(state.fields));
                 auto& body = bodies[entity];
-                for (int k = 0; k < 3; ++k) body.speed_change[k] = state.speed_change[k];
+                if (state.fields & BMMO_PHYSICS_EXTRA_IMPULSES)
+                    for (int k = 0; k < 3; ++k) body.speed_change[k] = state.speed_change[k];
+                if (state.fields & BMMO_PHYSICS_EXTRA_QUATS) body.q_last_w = state.q_last_psi[3];
                 return true;
             };
             w.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
@@ -1140,9 +1154,37 @@ TEST(RollbackEngine, ARewindRestoresTheQueuedImpulseOfABodyItRecordedItself) {
     // A rewind with no snapshot behind it: every body is restored from our own
     // record, so every body's queue is ours to put back.
     EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
-    EXPECT_EQ(world.count("set_body_extra Plate"), 1);
+    EXPECT_EQ(world.count("set_body_extra Plate fields=3"), 1);
     EXPECT_FLOAT_EQ(world.bodies["Plate"].speed_change[0], 1.212f);
-    EXPECT_EQ(engine.stats().impulses_restored, 2u);   // Own and Plate
+    EXPECT_DOUBLE_EQ(world.bodies["Plate"].q_last_w, 1.0);   // restored, not re-derived
+    EXPECT_EQ(engine.stats().impulses_restored, 2u);         // Own and Plate
+}
+
+// Each half of the integrator state has its own switch, and they meet in the
+// mask rather than in the call - which is what lets one binary measure the
+// queued impulses against the quaternions.
+TEST(RollbackEngine, EachHalfOfTheIntegratorStateHasItsOwnSwitch) {
+    const auto mask_after = [](bool impulses, bool quats) {
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Plate"].speed_change[0] = 1.212f;
+        rollback_engine engine;
+        engine.set_restore_impulses(impulses);
+        engine.set_restore_quaternions(quats);
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Plate"};
+        record_ticks(world, engine, tracked, 1, 4);
+        world.calls.clear();
+        engine.rewind_to(world.adapter(), 2, 4, no_input, "test");
+        return world.count("set_body_extra Plate fields=3")   * 3
+             + world.count("set_body_extra Plate fields=2")   * 2
+             + world.count("set_body_extra Plate fields=1");
+    };
+    EXPECT_EQ(mask_after(true, true), 3);
+    EXPECT_EQ(mask_after(false, true), 2);
+    EXPECT_EQ(mask_after(true, false), 1);
+    EXPECT_EQ(mask_after(false, false), 0);   // nothing is written at all
 }
 
 // ...and does NOT put one back on a body an authoritative row describes.  A row
@@ -1170,18 +1212,20 @@ TEST(RollbackEngine, ARowRestoreLeavesTheQueueZeroedBecauseItIsAHardSet) {
     // write's zeroing stands.
     EXPECT_EQ(world.count("set_body_extra Plate"), 0);
     EXPECT_FLOAT_EQ(world.bodies["Plate"].speed_change[0], 0.0f);
+    EXPECT_DOUBLE_EQ(world.bodies["Plate"].q_last_w, -1.0);   // re-derived, as a hard set should
 }
 
-// The switch that makes the measurement honest: one binary, both behaviours, so
-// an A/B never compares two builds (whose plain runs disagree by more than this
-// effect is worth).
-TEST(RollbackEngine, TheImpulseRestoreCanBeTurnedOffToReproduceTheOldBehaviour) {
+// With both halves off a restore is exactly what it was before v11, so an A/B
+// never has to compare two builds - whose plain runs disagree by more than
+// either half is worth.
+TEST(RollbackEngine, BothSwitchesOffReproducesThePreV11Restore) {
     fake_world world;
     world.bodies["Own"];
     world.bodies["Plate"].position[0] = 40.0;
     world.bodies["Plate"].speed_change[0] = 1.212f;
     rollback_engine engine;
     engine.set_restore_impulses(false);
+    engine.set_restore_quaternions(false);
     rollback_tracked tracked;
     tracked.own_entity = "Own";
     tracked.mechanisms = {"Plate"};

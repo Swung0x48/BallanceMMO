@@ -139,6 +139,10 @@ namespace {
         // measured against itself in ONE binary - two builds' plain runs
         // disagree by more than this effect is worth.
         bool restore_impulses = true;
+        // --no-restore-quats: let write_body_state re-derive the second
+        // rotation quaternion from the LIVE rotation step, as it did before
+        // v11.  The other half of the same A/B.
+        bool restore_quaternions = true;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -202,6 +206,7 @@ namespace {
             else if (arg == "--trace-restore") out.trace_restore = true;
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
             else if (arg == "--no-restore-impulses") out.restore_impulses = false;
+            else if (arg == "--no-restore-quats") out.restore_quaternions = false;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -703,6 +708,7 @@ namespace {
             rollback_.set_verbose(args_.trace);
             rollback_.set_recheck_on_restore(args_.restore_recheck);
             rollback_.set_restore_impulses(args_.restore_impulses);
+            rollback_.set_restore_quaternions(args_.restore_quaternions);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;

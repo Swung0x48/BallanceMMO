@@ -519,9 +519,17 @@ namespace bmmo::session {
                                    && (item.force_recheck || write_moves_body(live, item.state));
                 world.set_body(entity, item.state, item.mode, recheck);
                 // After the pose write, which zeroed the queue.
-                if (item.have_extra && world.set_body_extra && restore_impulses_) {
-                    world.set_body_extra(entity, item.extra);
-                    ++stats_.impulses_restored;
+                if (item.have_extra && world.set_body_extra) {
+                    // The caller's two switches, applied to the mask rather
+                    // than to the call, so each half can be measured on its own
+                    // in one binary.
+                    bmmo_physics_core_extra extra = item.extra;
+                    if (!restore_impulses_) extra.fields &= ~BMMO_PHYSICS_EXTRA_IMPULSES;
+                    if (!restore_quaternions_) extra.fields &= ~BMMO_PHYSICS_EXTRA_QUATS;
+                    if (extra.fields != 0) {
+                        world.set_body_extra(entity, extra);
+                        ++stats_.impulses_restored;
+                    }
                 }
                 // What we wrote from a row is the authoritative state of T now:
                 // without this the next snapshot of T compares against the
@@ -679,6 +687,7 @@ namespace bmmo::session {
         // is the only honest way to measure this, because two builds' plain
         // runs disagree by more than the effect does.
         void set_restore_impulses(bool enable) { restore_impulses_ = enable; }
+        void set_restore_quaternions(bool enable) { restore_quaternions_ = enable; }
 
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
@@ -867,5 +876,6 @@ namespace bmmo::session {
         bool verbose_ = false;
         bool recheck_on_restore_ = true;
         bool restore_impulses_ = true;
+        bool restore_quaternions_ = true;
     };
 }

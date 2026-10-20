@@ -1084,10 +1084,17 @@ namespace bmmo::physics {
         out = bmmo_physics_core_extra{};
         IVP_Core* core = core_for(physics, entity_name, error);
         if (!core) return false;
+        out.fields = BMMO_PHYSICS_EXTRA_IMPULSES | BMMO_PHYSICS_EXTRA_QUATS;
         for (int k = 0; k < 3; ++k) {
             out.speed_change[k] = static_cast<float>(core->speed_change.k[k]);
             out.rot_speed_change[k] = static_cast<float>(core->rot_speed_change.k[k]);
         }
+        const auto& ql = core->q_world_f_core_last_psi;
+        const auto& qn = core->q_world_f_core_next_psi;
+        out.q_last_psi[0] = ql.x; out.q_last_psi[1] = ql.y;
+        out.q_last_psi[2] = ql.z; out.q_last_psi[3] = ql.w;
+        out.q_next_psi[0] = qn.x; out.q_next_psi[1] = qn.y;
+        out.q_next_psi[2] = qn.z; out.q_next_psi[3] = qn.w;
         return true;
     }
 
@@ -1096,8 +1103,26 @@ namespace bmmo::physics {
         error.clear();
         IVP_Core* core = core_for(physics, entity_name, error);
         if (!core) return false;
-        core->speed_change.set(in.speed_change[0], in.speed_change[1], in.speed_change[2]);
-        core->rot_speed_change.set(in.rot_speed_change[0], in.rot_speed_change[1], in.rot_speed_change[2]);
+        if (in.fields & BMMO_PHYSICS_EXTRA_IMPULSES) {
+            core->speed_change.set(in.speed_change[0], in.speed_change[1], in.speed_change[2]);
+            core->rot_speed_change.set(in.rot_speed_change[0], in.rot_speed_change[1], in.rot_speed_change[2]);
+        }
+        if (in.fields & BMMO_PHYSICS_EXTRA_QUATS) {
+            // Both halves of the rotation, replacing whatever
+            // write_body_state's restore_psi_state path re-derived from the
+            // live rotation step.  The matrix is refreshed the same way that
+            // path does it: the IVP_U_Matrix3 overload of set_matrix writes
+            // only the 3x3, so the position the beam just set is preserved.
+            // Member-wise, like write_body_state: IVP_U_Quat::set takes three
+            // Euler angles, not four components.
+            auto& ql = core->q_world_f_core_last_psi;
+            auto& qn = core->q_world_f_core_next_psi;
+            ql.x = in.q_last_psi[0]; ql.y = in.q_last_psi[1];
+            ql.z = in.q_last_psi[2]; ql.w = in.q_last_psi[3];
+            qn.x = in.q_next_psi[0]; qn.y = in.q_next_psi[1];
+            qn.z = in.q_next_psi[2]; qn.w = in.q_next_psi[3];
+            core->q_world_f_core_last_psi.set_matrix(&core->m_world_f_core_last_psi);
+        }
         return true;
     }
 
