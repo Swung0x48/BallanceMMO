@@ -173,8 +173,9 @@ namespace {
         bool restore_contacts = true;
         // --contact-flags N: BMMO_PHYSICS_CONTACT_* bits (1..16 = the recorded
         // fields to copy onto a re-created point, 256 = only for a body with no
-        // contact left, 512 = only against static geometry; the default is
-        // 768, the measured one).
+        // contact left, 512 = only against static geometry, 1024 = wake a
+        // sleeping movable partner as an impact would instead of leaving that
+        // pair to IVP; the default is 768, the measured one).
         uint32_t contact_flags = BMMO_PHYSICS_CONTACT_DEFAULT;
         // The script replay (game/script_replay.hpp): the mechanism scripts'
         // state travels with the records and every replayed tick runs their

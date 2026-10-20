@@ -722,6 +722,18 @@ still has is left alone with its own state; one the record lacks is left to
 IVP, which drops a contact whose distance has grown. `--no-restore-contacts`
 and `--contact-flags` on the headless client are the A/B switches.
 
+The movable-partner crash, read from a minidump: the impact system pulled a
+sleeping core (`movement_state == IVP_MT_NOT_SIM`) in through the new pair and
+dereferenced `tmp_null.old_sync_info`, which it allocates only for a simulated
+core. IVP never gets there because an impact revives both objects before
+`try_to_generate_managed_friction` runs, so the movable cores of a friction
+system are always all simulated or all asleep. The bridge now keeps that
+precondition itself: a pair whose two movable cores differ in simulation state
+is left to IVP, or - with `BMMO_PHYSICS_CONTACT_REVIVE` (1024) - the sleeper is
+woken first through `IVP_Core::ensure_core_to_be_in_simulation`, the public
+entry an impact uses. Still no change under `submodule/Ballanced`: the
+precondition is reachable from outside, which is the test.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

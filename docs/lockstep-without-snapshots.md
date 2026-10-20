@@ -1454,8 +1454,8 @@ got exact: the point IVP makes at the next impact is consistent with the
 `tmp_contact_info` the solver rebuilds, and one carrying another moment's gap
 and spans is not), and re-creating a point between two movable bodies - two
 player balls, a ball on a plate - crashed the next impact solve
-(`IVP_Impact_System::test_loop_all_pairs`, a null friction structure) on one of
-four networked clients. So the default is the last row but one: a fresh point,
+(`IVP_Impact_System::test_loop_all_pairs`, a null pointer; read from a dump
+below) on one of four networked clients. So the default is the last row but one: a fresh point,
 only for a body that has no contact left, only against static geometry - the
 measured case and nothing more; the recorded fields stay in the record for the
 diagnostic.
@@ -1470,6 +1470,101 @@ ball column 7 / 5 / 5 / 6 against 7 / 7 / 8 / 8, the server journal bit-exact.
 The 12 contact-restore failures each client logs there are the remote balls'
 records restored while their body is unphysicalized, which is nothing to
 restore. The 189 unit tests pass.
+
+### Movable partners: what the crash was, and the precondition IVP never states
+
+The movable-partner crash reproduced on demand (`--contact-flags 0`, the
+four-client swing bay at 150 ms: one client of four, at tick 424-735, in the
+start pile, in two of three runs) and was read from a full-memory minidump
+(`BMMO_CRASH_DUMP=1`, a Python walk of the registers with the class layouts
+MSVC reports under `/d1reportAllClassLayout` - the Windows Kits debugger on
+this machine does not start). The faulting instruction is
+`core_was_already_pushed_in_system(core)`: the impact system reads
+`core->tmp_null.old_sync_info->was_pushed_during_i_s`, and the pushed core -
+`Ball_Stone_BMMO_3813333153`, another player's ball, in a friction system
+with the own ball and the floor, in the own ball's simulation unit - has
+`old_sync_info == NULL`. It is NULL because the core's `movement_state` is
+`IVP_MT_NOT_SIM`: the ball was asleep, and the impact system synchronizes
+(allocates that record for) a core it pulls in only `if
+(IVP_MTIS_SIMULATED(movement_state))`.
+
+IVP never meets that case, and the reason is a precondition the engine keeps
+without stating it: **a contact point is created only by an impact, and an
+impact revives both objects first** (`IVP_Mindist::do_impact` calls
+`revive_object_for_simulation` on both, then `synchronize_with_rot_z` on each
+simulated core, before `do_impact_of_two_objects` creates the point). So the
+movable cores of one friction system are all simulated, or all asleep - they
+share one simulation unit, and the unit sleeps as a whole. The v15 restore
+broke that from the outside: it created a point between the own ball, awake,
+and a ball the restore had asleep, and the first impact that reached the pair
+through the own ball dereferenced the record no one had made for the sleeper.
+A static partner never shows it (an unmovable core is never pushed, never
+synchronized), which is why the default was safe.
+
+Two ways to respect the precondition, both from outside IVP. The default now
+is the conservative one: a pair whose two movable cores differ in simulation
+state is left to IVP (its own impact will create the point when they meet,
+reviving both). `BMMO_PHYSICS_CONTACT_REVIVE` (1024) is the other: wake the
+sleeper the way the impact would (`ensure_core_to_be_in_simulation`, which
+revives its unit) and then create the point. Either way a pair of two awake
+cores or two asleep ones is created as before.
+
+**Measured where the piles are** (the lane-kept four-client drive at 150 ms,
+60 s, the server's snapshots off so nothing but the 17 lifecycle snapshots
+ever pulls a client back; two runs per policy; `scripts/server_client_drift.py`
+per 600-tick window; the host is the ball the other three spawn into):
+
+| movable-partner policy (`--contact-flags`) | crashes | contacts re-created per client | host's own ball vs server, ticks 0-599 / 600-1199 | every own ball, 1200-1799 (max) | own balls, respawn pile 2400-2999 |
+|---|---|---|---|---|---|
+| left to IVP (768, the default) | 0 / 2 runs | 30-94 | 11.0 / 6.7 m, 11.0 / 8.8 m | 0.35 m | 0.01-6.1 m |
+| mixed pair left to IVP, awake pairs made (0) | 0 / 2 | 531-959 | 12.0 / 9.9 m, 11.8 / 9.3 m | 0.70 m | 0.2-5.1 m |
+| sleeper woken, pair made (1024) | 0 / 2 | 463-915 | 11.8 / 9.6 m, 17.2 / 13.6 m | 0.76 m | 0.04-4.3 m |
+
+(And the four-client swing bay that produced the crash in two runs of three
+with the old code ran clean twice with policy 0.) So the precondition holds -
+five hundred to a thousand points a minute per client between player balls,
+no crash in six runs - and **the piles do not care**: the host's ball is 11-17
+m from the server's through the start pile under every policy, every ball is
+within 0.8 m once the field strings out, and the respawn pile scatters them
+by metres again under every policy. The contact points were not what a pile
+lost in the restore, so the default stays at 768 - the narrow rule that was
+measured on the road edge, nothing else gained - and 0 / 1024 stay as the
+switches. What the table does say is where to look next: the ball that
+suffers is the one the others spawn into, in the ticks when a kicked remote
+ball meets it under a prediction that still has 20 ticks of its inputs wrong,
+and the last joiner, which no ball spawns into, is within 2-3 m. That points
+at the prediction window around a remote spawn rather than at the restore.
+The restore side of the same question - does a rewind across a ball shoving
+movable bodies come back exact when nothing is predicted? - is the probe
+below.
+
+**The solo probe across the prop cluster** (`--force-rollback 870:12`: one
+rewind of depth 12, anchor 858, while the ball is shoving the prop balls and
+the box - they first move at tick 834-836 in the control - against the
+same-batch control over ticks 830-1300, no prediction anywhere):
+
+| rewind (anchor) | policy | contacts re-created at the restore | `P_Ball_Paper_MF` | `P_Box_MF` | plates `P_Modul_29` | first difference |
+|---|---|---|---|---|---|---|
+| 850 (838) | 768 | 0 | 0.048 m | 0.058 m | 0.005-0.007 m | tick 852, 0.057 m on the box |
+| 850 (838) | 0 | 2 | **0.170 m** | 0.058 m | 0.011-0.017 m | tick 852, 0.057 m |
+| 850 (838) | 1024 | 2 | **0.170 m** | 0.058 m | 0.011-0.017 m | tick 852, 0.057 m |
+| 870 (858) | 768 | 0 | 0.290 m | - | 0.012-0.019 m | tick 872, 0.060 m on the Paper ball |
+| 870 (858) | 0 | 4 | 0.290 m | - | 0.014-0.021 m | tick 872, 0.060 m |
+| 870 (858) | 1024 | 4 | 0.299 m | - | 0.023-0.035 m | tick 872, 0.060 m |
+
+The points the two movable policies re-create (on the prop bodies; the own
+ball had only its floor contact at both rewinds, kept alive through them)
+never help: at the earlier anchor they cost the Paper ball 12 cm and the
+plates a centimetre, at the later one they change nothing on the Paper ball
+and cost the plates a centimetre - the same lesson as copying the recorded
+fields, that a point made at the restore is not the point IVP would have
+had, and the default stays at 768 for the second reason too. And the
+residual's shape says what it is not: the box is 5.7 cm off at the first
+checkpoint after the replay under every policy, the Paper ball matches the
+control at its rewind tick and is 6 cm off two ticks later - a 4 m/s
+difference appearing in one live tick, i.e. an impact that lands in one
+world and not the other, not a contact point missing from the restore.
+Which is the next thing to read from a trace, and the one the piles share.
 
 ## Without snapshots: what the input stream alone sustains
 
@@ -1540,6 +1635,48 @@ clients take 350 corrections a minute and re-simulate 20-25 thousand ticks in
 60 s - most of them on the balloon chain (`PE_Balloon_Ballon02` 106-212 per
 client), which a row restores without its queue and extras and so disagrees
 again two ticks later.
+
+**The snapshot interval, swept.** The same four-client swing bay (150 ms,
+60 s), a full snapshot every 66 ticks throughout, the interval between the
+incremental ones 2 (the row above), 8, 22 and 66. The server's journal
+replayed bit-exact in all four runs (3258-3352 ticks, no checkpoint mismatch),
+every client ended with `hard=0`, `resyncs=0`, and the input-corrected rewinds
+(`rb` less the corrections) stayed at 400-800 per client whatever the
+interval - they are the relayed inputs' doing, not the snapshots':
+
+| interval | snapshots per client | corrections per client (on balls + on mechanisms) | ticks re-simulated | own ball vs server, last 900 ticks | mechanisms, last 900 ticks |
+|---|---|---|---|---|---|
+| 2 | 1767-1793 | 353 / 144 / 365 / 370 (102+251 / 126+18 / 103+262 / 88+282) | 19-25 k | 0.010 / 0.013 m | 0.23 / 0.17 m |
+| 8 | 450-460 | 84 / 33 / 104 / 101 (28+56 / 26+7 / 36+68 / 28+73) | 10-15 k | 0.0003 / 0.0008 m | 0.34 / 0.24 m |
+| 22 | 197-201 | 39 / 18 / 46 / 53 (12+27 / 15+3 / 15+31 / 16+37) | 10-15 k | 0.014 / 0.009 m | 0.49 / 0.45 m |
+| 66 | 109-112 | 24 / 15 / 31 / 33 (8+16 / 13+2 / 11+20 / 11+22) | 11-15 k | 0.053 / 0.015 m | 1.15 / 0.46 m |
+
+(own ball and mechanisms: `scripts/server_client_drift.py` on clients 0 and 3,
+the window 2700-3599 where the balloon chain is lifting; the mechanism
+corrections are `scripts/classify_rollbacks.py`'s count, 70-80 % of them on
+`PE_Balloon_Ballon02..04` at every interval.)
+
+Three things the sweep settles. Corrections fall with the snapshots, a little
+faster than in proportion - a correction needs a snapshot to disagree with,
+and a chain just corrected disagrees again at the next one. The re-simulation
+halves from interval 2 to 8 and then stops falling: the floor, 10-15 thousand
+ticks a minute per client, is the input-corrected rewinds, which no interval
+touches. And the own ball is as close to the server's at 66 as at 2 - it is
+the replay that keeps it there, not the snapshots. What the snapshots buy is
+the mechanisms: the level-end balloon chain, 0.2 m off at interval 2, is 1.1 m
+off at 66, because a chain that has come apart from the server's is pulled
+back only when a snapshot arrives and stays wrong until then. So the interval
+trades a client's CPU for the mechanisms' fidelity in the seconds a player is
+watching them, and 2 stays deployed: its cost is ten thousand re-simulated
+ticks a minute more than 8 would take, its gain is the balloons where the
+server has them. (8 is the compromise if that CPU ever matters: the same own
+ball, a quarter of the corrections, half the re-simulation, 0.1 m more on the
+chain.) What would move the trade is a correction that holds: the restore
+puts every body the snapshot carries back together, yet the chain disagrees
+again within two ticks (149 of client3's 212 balloon corrections at interval 2
+came exactly two ticks apart), so whatever drives it apart is not in the rows
+- which is the same open item as the piles below, state between movable
+bodies that the record does not carry.
 
 Where the own ball loses the server without snapshots is instructive. In the
 lane run, client2's own ball sits **within a millimetre** of the server's from
@@ -1779,9 +1916,17 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
 * Without snapshots the replay does not converge under multi-ball play: the
   own ball ends 0.03-2.7 m off the server after the balls pile up, and under
   10 % packet loss corrections fall past the rollback window and the world
-  comes apart ("Without snapshots" above). The two pieces named there - the
-  contacts between movable bodies, the sector setup window - are the work
-  left for a client that could run on inputs alone.
+  comes apart ("Without snapshots" above). Of the two pieces named there,
+  the sector setup window is closed (the script replay) and the contacts
+  between movable bodies are re-creatable without the crash (the sleeping-
+  partner precondition, "Movable partners" above) - and re-creating them
+  changes nothing in the piles. What the piles lose is elsewhere: the ball
+  the others spawn into is metres off through the start pile under every
+  contact policy, while the last joiner is within 2-3 m, which points at the
+  prediction around a remote spawn; and the solo prop probe shows a free body
+  matching at the rewind tick and 6 cm off two ticks later, an impact that
+  lands in one world and not the other. Those two are the work left for a
+  client that could run on inputs alone.
 
 ## Not covered
 

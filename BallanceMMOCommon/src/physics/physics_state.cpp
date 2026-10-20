@@ -1063,12 +1063,31 @@ namespace bmmo::physics {
                 if (std::strcmp(partner, in[i].partner) != 0) continue;
                 if (!best || md->get_length() < best->get_length()) best = md;
             }
-            if (best && (flags & BMMO_PHYSICS_CONTACT_STATIC_ONLY)) {
+            if (best) {
                 IVP_Real_Object* a = best->get_synapse(0)->get_object();
                 IVP_Real_Object* b = best->get_synapse(1)->get_object();
                 IVP_Real_Object* other = a == real ? b : a;
                 IVP_Core* other_core = other ? other->get_core() : nullptr;
-                if (!other_core || !other_core->physical_unmoveable) continue;   // a movable partner: left to IVP
+                if (!other_core) continue;
+                if ((flags & BMMO_PHYSICS_CONTACT_STATIC_ONLY) && !other_core->physical_unmoveable) continue;   // a movable partner: left to IVP
+                // IVP makes a contact point only at an impact, and an impact
+                // revives both objects first - so the movable cores of a
+                // friction system are all simulated, or none is.  A point
+                // made here between a simulated core and a sleeping one
+                // breaks that: the next impact system pulls the sleeper in
+                // through the pair, skips its synchronization (done only for
+                // a simulated core) and dereferences the sync record it never
+                // made (test_loop_all_pairs, old_sync_info == NULL).  So wake
+                // the sleeper the way the impact would, or leave the pair to
+                // IVP.
+                if (!other_core->physical_unmoveable) {
+                    const bool live = IVP_MTIS_SIMULATED(core->movement_state) && !core->pinned;
+                    const bool other_live = IVP_MTIS_SIMULATED(other_core->movement_state) && !other_core->pinned;
+                    if (live != other_live) {
+                        if (!(flags & BMMO_PHYSICS_CONTACT_REVIVE) || core->pinned || other_core->pinned) continue;
+                        (live ? other_core : core)->ensure_core_to_be_in_simulation();
+                    }
+                }
             }
             if (!best) {
                 int exact = 0;

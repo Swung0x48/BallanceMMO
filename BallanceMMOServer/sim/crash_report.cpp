@@ -87,6 +87,30 @@ namespace bmmo::sim {
                 print_frame(process, reinterpret_cast<DWORD64>(frames[i]), i);
         }
 
+        // With BMMO_CRASH_DUMP set in the environment, a full-memory minidump
+        // of the crashing process is written to the working directory, so the
+        // state behind a backtrace can be inspected afterwards (a debugger, or
+        // a minidump reader walking the structures by their layouts).  Off
+        // by default: a full dump of a client is hundreds of megabytes.
+        void write_minidump(EXCEPTION_POINTERS* info) {
+            char enabled[8];
+            if (!GetEnvironmentVariableA("BMMO_CRASH_DUMP", enabled, sizeof enabled)) return;
+            char path[64];
+            std::snprintf(path, sizeof path, "crash-%lu.dmp", GetCurrentProcessId());
+            HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) {
+                std::fprintf(stderr, "[crash] could not create %s\n", path);
+                return;
+            }
+            MINIDUMP_EXCEPTION_INFORMATION exception{GetCurrentThreadId(), info, FALSE};
+            const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo);
+            const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, &exception,
+                                                   nullptr, nullptr);
+            CloseHandle(file);
+            std::fprintf(stderr, written ? "[crash] minidump written to %s\n" : "[crash] minidump %s failed (%lu)\n", path,
+                         GetLastError());
+        }
+
         LONG WINAPI on_unhandled_exception(EXCEPTION_POINTERS* info) {
             const auto* record = info->ExceptionRecord;
             std::fprintf(stderr, "\n[crash] unhandled exception 0x%08lx at %p", record->ExceptionCode, record->ExceptionAddress);
@@ -95,7 +119,11 @@ namespace bmmo::sim {
                              reinterpret_cast<void*>(record->ExceptionInformation[1]));
             }
             std::fprintf(stderr, "\n");
-            print_backtrace_from_context(info->ContextRecord);
+            // StackWalk64 unwinds the context it is given in place; the dump
+            // must see the registers as they were at the fault.
+            CONTEXT walked = *info->ContextRecord;
+            print_backtrace_from_context(&walked);
+            write_minidump(info);
             std::fflush(stderr);
             return EXCEPTION_EXECUTE_HANDLER;
         }

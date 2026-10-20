@@ -167,6 +167,8 @@ typedef struct bmmo_physics_contact {
 #define BMMO_PHYSICS_CONTACT_ALL_FIELDS 31u
 #define BMMO_PHYSICS_CONTACT_ONLY_WHEN_NONE 256u   /* re-create only for a body with no contact left */
 #define BMMO_PHYSICS_CONTACT_STATIC_ONLY    512u   /* re-create only contacts with an unmovable partner (a floor) */
+#define BMMO_PHYSICS_CONTACT_REVIVE         1024u  /* a movable pair with one core asleep: wake it as an impact would,
+                                                      instead of leaving the pair to IVP */
 /* The default the rollback uses - measured (docs/lockstep-without-snapshots.md,
  * "The one the ball still had"): a fresh point, only for a body with no
  * contact left, only against static geometry.  Copying the recorded fields
