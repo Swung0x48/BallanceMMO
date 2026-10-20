@@ -307,6 +307,8 @@ def run_case(args, sector, case_dir):
                 write_drive_record(record, args.level, args.seconds * 66 + 200, i,
                                    args.steer, args.drive_stop)
                 cmd += ['--record', str(record)]
+                if args.keep_lane:
+                    cmd += ['--keep-lane', '15']
             if args.beam_bays:
                 # Put each ball just short of a mechanism of its own, so the run
                 # does not depend on anyone driving the full length of the arena
@@ -452,6 +454,9 @@ def main():
                     help='feed the clients staggered input records that roll the balls through the bays')
     ap.add_argument('--steer', action='store_true',
                     help='add alternating left/right (drifts the balls off the bays)')
+    ap.add_argument('--keep-lane', action='store_true',
+                    help='close the loop on the drive: the clients add LEFT/RIGHT to hold their balls on the '
+                         'lane centre (z = 15), so every ball takes every checkpoint and respawns at its sector')
     ap.add_argument('--beam-bays', default='',
                     help='"auto" (the bays of the active sector) or comma-separated bay indices; '
                          'client i is beamed just short of bay[i] '

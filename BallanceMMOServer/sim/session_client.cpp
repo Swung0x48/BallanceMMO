@@ -205,13 +205,32 @@ namespace {
         bool beam = false;
         double beam_position[3] = {};
         uint32_t beam_tick = 0;
+        // --keep-lane Z: a closed-loop steer that holds the own ball on the
+        // lane z = Z while the record drives (UP or DOWN held): LEFT or RIGHT
+        // from the ball's sideways error and rate, a PD rule with a deadband,
+        // added to the record's keys before they are injected - so the
+        // navigation replica, the SessionInput mask and the journal replay
+        // all see them.  The undriven record keeps the lateral line the spawn
+        // kick gave the ball, and a ball more than 6.5 off the lane centre
+        // never takes a checkpoint (maps/README.md, "Checkpoints are taken on
+        // the lane centre"); --drive-stop still coasts, as the steer stops
+        // with the record's keys.
+        bool keep_lane = false;
+        double keep_lane_z = 0.0;
     };
+
+    // The record's keys (scripts/arena_map_test.py write_drive_record) are
+    // DirectInput codes, the ones the level's Key Event blocks wait for.
+    constexpr int kKeyUp = 200, kKeyDown = 208;
+    // The steer: push while |error + damping * rate| exceeds the deadband.
+    constexpr double kLaneDamping = 0.8;    // seconds of lateral rate weighed against the error
+    constexpr double kLaneDeadband = 0.3;   // metres
 
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
-                  "       [--start-sector N] [--beam X Y Z TICK]");
+                  "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]");
     }
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -248,6 +267,7 @@ namespace {
             else if (arg == "--host") out.host = true;
             else if (arg == "--expect") { if (!(v = next())) return false; out.expect = std::atoi(v); }
             else if (arg == "--seconds") { if (!(v = next())) return false; out.seconds = std::atof(v); }
+            else if (arg == "--keep-lane") { if (!(v = next())) return false; out.keep_lane = true; out.keep_lane_z = std::atof(v); }
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--trace-restore") out.trace_restore = true;
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
@@ -1260,6 +1280,41 @@ namespace {
             frame();
         }
 
+        // --keep-lane: the record's keys of this frame with LEFT or RIGHT added
+        // while the own ball is off the lane (arguments::keep_lane).  The
+        // sideways axis is the world's z, the lane's normal on the arena; the
+        // key that pushes the right way is the navigation leaf whose force,
+        // taken through the camera reference the replica uses, points that
+        // way - so a camera the record turned still steers towards the lane.
+        const unsigned char* keep_lane(const unsigned char* keys) {
+            std::memcpy(lane_keys_, keys, sizeof(lane_keys_));
+            const bool driving = keys[kKeyUp] || keys[kKeyDown];
+            if (!driving || !own_physicalized_ || own_body_entity_.empty() || !navigation_known_ || !previous_cam_valid_)
+                return lane_keys_;
+            bmmo_physics_body_state body{};
+            std::string error;
+            if (!bmmo::physics::get_body_state(engine_->physics(), own_body_entity_.c_str(), body, error)) return lane_keys_;
+            const double error_z = body.position[2] - args_.keep_lane_z;
+            const double a = error_z + kLaneDamping * static_cast<double>(body.linear[2]);
+            if (std::fabs(a) < kLaneDeadband) return lane_keys_;
+            const double push = a < 0.0 ? 1.0 : -1.0;   // the z direction the ball needs
+            int best_key = -1;
+            double best = 0.0;
+            for (const auto& leaf: navigation_.leaves) {
+                if (leaf.key == kKeyUp || leaf.key == kKeyDown || leaf.key < 0 || leaf.key >= 256) continue;
+                const double z = leaf.direction.x * previous_cam_[0][2] + leaf.direction.y * previous_cam_[1][2]
+                               + leaf.direction.z * previous_cam_[2][2];
+                if (z * push > best) { best = z * push; best_key = leaf.key; }
+            }
+            if (best_key >= 0) {
+                lane_keys_[best_key] = 1;
+                if (args_.trace && lane_steers_++ < 4)
+                    logf("keep-lane: ball z=%.2f (lane %.2f) rate %.2f -> key %d", body.position[2], args_.keep_lane_z,
+                         static_cast<double>(body.linear[2]), best_key);
+            }
+            return lane_keys_;
+        }
+
         void frame() {
             std::string error;
             const int64_t f = frames_since_anchor_ + 1;
@@ -1267,6 +1322,7 @@ namespace {
             const unsigned char* keyboard = nullptr;
             if (!record_.frames.empty() && f >= 0 && static_cast<size_t>(f) < record_.frames.size()) {
                 keyboard = record_.frames[static_cast<size_t>(f)].keys.data();
+                if (args_.keep_lane) keyboard = keep_lane(keyboard);
                 engine_->set_keyboard_state(keyboard);
             } else {
                 engine_->clear_keys();
@@ -3052,6 +3108,8 @@ namespace {
         std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
         float previous_cam_[3][3] = {};
         bool previous_cam_valid_ = false;
+        unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added
+        int lane_steers_ = 0;
         // Input freshness as the server saw it (session_snapshot_msg.acked_input_tick).
         uint64_t input_reports_ = 0, input_starved_ = 0;
         uint32_t worst_starved_ = 0;

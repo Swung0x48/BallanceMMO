@@ -246,6 +246,19 @@ after a checkpoint as a "suspicious event", because it checked a respawn
 against the level's first resetpoint only; it now checks every row of
 `ResetPoints`.
 
+When the test needs every ball to take every checkpoint, the headless client
+can close the loop on the drive: `--keep-lane 15` (the harness's `--keep-lane`
+passes it to every client) adds LEFT or RIGHT to the record's keys each frame
+from the ball's sideways error and rate against the lane centre (a PD rule with
+a 0.3 m deadband, only while the record holds UP or DOWN, so `--drive-stop`
+still coasts), before the keys are injected - the navigation replica, the
+SessionInput mask the server simulates from and the journal replay all see the
+same keys. The key that pushes towards the lane is found from the navigation
+leaves' force directions through the camera reference, so a camera the record
+turned still steers the right way. The default drive stays as it was (open
+loop, the balls fan out), because that spread is what makes them meet the
+mechanisms off the lane centre.
+
 ## Rebuilding the map
 
 With Blender running and `bbp_ng` enabled (its **Ballance texture folder**
