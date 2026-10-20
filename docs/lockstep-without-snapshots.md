@@ -1228,8 +1228,17 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   to it is already order-independent, a sum of per-body hashes. Doing the same
   for the cores would fix the replay check, but it changes every hash value,
   in journals and at the anchor exchange, so it is a decision, not a fix in
-  passing. Not chased further: the order itself is not known to matter to the
-  simulation.
+  passing.
+
+  Confirmed with a temporary probe (not committed) on a fresh run that joined
+  0132: the live server and the replay logged the `m_MovableObjects` order and
+  an order-independent pose hash (a sum of per-core hashes) at ticks 699-702.
+  Through 700 both agree on both. At 701 and 702 the order-independent hash
+  is identical on the two sides (`744eee1924070b01`, `e3fadb147b556967`)
+  while the order is not: the live list holds the four balls as A, C, D, B and
+  the replay as A, D, B, C. Identical state, different list order. What
+  orders the list after the recreations was not chased; the checkpoints say
+  it does not reach the simulation.
 
 * The prop ball `P_Ball_Paper_MF` disappears from one side's body set after
   tick ~1 270 and stays missing for the rest of the session. A real
