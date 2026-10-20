@@ -734,6 +734,28 @@ woken first through `IVP_Core::ensure_core_to_be_in_simulation`, the public
 entry an impact uses. Still no change under `submodule/Ballanced`: the
 precondition is reachable from outside, which is the test.
 
+## Bridge notes: the restore's collision recheck as a pass of its own (bridge API v16, no engine change)
+
+`body_recheck` (`IVP_Real_Object::recheck_collision_filter`, the recheck a
+non-optimized beam runs right after its pose write) lets a restore write every
+pose with the optimized beam and then recheck every moved body once all the
+poses are in, so no body's pairs are rebuilt against a partner still at its
+live pose. Measured on the solo prop probe it is no better than rechecking at
+each write (`docs/lockstep-without-snapshots.md`, "What the trace shows"):
+the recheck decides which pairs exist, not what they hold - a beam leaves the
+friction contact points and the mindists' lengths at the live tick's values
+either way - so it stays an A/B switch (`--two-pass-recheck`), off by
+default. The same trace produced the two further contact policies of
+`contacts_set`: `BMMO_PHYSICS_CONTACT_PRUNE` (2048) deletes, through
+`IVP_Real_Object::unlink_contact_points_for_object`, every live contact whose
+partner the anchor's record does not name before the recorded ones are
+re-created, and `BMMO_PHYSICS_CONTACT_REVIVE` (1024) wakes a sleeping partner
+as an impact would. Neither beats the narrow default on the probe: what the
+restore still lacks is state IVP builds only by running the impacts
+themselves (a second contact point on the same plate from an impact in the
+anchor tick, the pair's last-impact time and easing countdown, the mindists'
+lengths before the next PSI). Nothing under `submodule/Ballanced` changed.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

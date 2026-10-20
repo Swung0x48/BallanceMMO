@@ -1566,6 +1566,82 @@ difference appearing in one live tick, i.e. an impact that lands in one
 world and not the other, not a contact point missing from the restore.
 Which is the next thing to read from a trace, and the one the piles share.
 
+### What the trace shows: a restore keeps IVP's live collision state
+
+`--trace-body P_Ball_Paper_MF --trace-ticks 856 880` on the headless client
+logs the prop ball's core (movement state, velocities, queued changes), its
+contacts, the friction pairs it is in (the easing countdown, the integrated
+anti-energy, the time since the pair's last impact) and its exact mindists
+(status, length, IVP's collision-distance selector and decrease counter,
+the angular hull time) after every live tick, before every replayed tick and
+after the rewind; `scratchpad`'s `trace_diff.py` lines the rewound run up
+against the traced control tick by tick. Read across the rewind at 870
+(anchor 858):
+
+* **Before the rewind the two runs are identical** to the last digit, in
+  every field.
+* **At the anchor, the live world had two contact points on `Platte04`** -
+  one just made by an impact in that very tick (gap 0.0100 m, pressure 0,
+  pull 0), one established (gap 0.01077 m, pressure 8.03) - and one exact
+  mindist to it (0.0100 m); its contact with `Platte05` had ended.
+* **The restored anchor still has the live tick's contacts**: one point on
+  `Platte05` (gap 0.0225 m, pull -4, pressure 7.29 - the values of tick
+  870) and none on `Platte04`; its exact mindists are the live ones too,
+  `Platte04` at 0.0456 m, the distance of tick 870, not 0.0100. A beam -
+  with or without IVP's collision recheck - moves the core and leaves the
+  friction contact points and the mindists' lengths where they were; the
+  recheck rebuilds which pairs exist, not what they hold, and the lengths
+  are recomputed only at the next PSI.
+* **So the first replayed step already differs** (0.03 m/s), the impacts
+  of ticks 865-868 land differently, and after the rewind the ball is
+  0.36 m/s off - the 6 cm two ticks later.
+
+Three ways to put the collision state right, all from outside IVP, all
+measured on the same probe (`rc_*`, `pn_*` runs against the same control;
+the baseline is the narrow default, 768):
+
+| what the restore does about it | anchor 858: `P_Ball_Paper_MF` | anchor 838: Paper / box |
+|---|---|---|
+| nothing beyond the narrow default (768) | 0.290 m | 0.048 / 0.058 m |
+| every pose written first, then every moved body rechecked (`--two-pass-recheck`, bridge API v16 `body_recheck`) | 0.290 m | 0.155 / 0.058 m |
+| the live contacts the record does not name deleted first, the recorded ones re-created fresh (`--contact-flags 2048`, PRUNE) | 0.278 m | 0.143 / 0.058 m |
+| the same, with the recorded fields copied onto the new points (2079) | 0.288 m | 0.178 / 0.058 m |
+
+With PRUNE the restored anchor has the right partner - one point on
+`Platte04`, the `Platte05` point gone - and still not the live anchor's
+state: one point where the live world had two (the second came from an
+impact *in* the anchor tick, on a ledge that has no exact mindist any
+more, so IVP's creation path cannot make it), the pair's "time since last
+impact" at zero, the mindist lengths still the live tick's until the next
+PSI. The first replayed step differs by the same 0.03 m/s, and the
+sequence ends 0.28 m off instead of 0.29. The box is 5.7 cm off at the
+first checkpoint under every row: whatever it is, it is not in anything a
+contact record can carry.
+
+So the pose + velocity + queue + freeze + contacts record is not a
+savestate of IVP's collision state for a body in multi-body contact, and
+the pieces it lacks - which ledge pairs have points, points made by the
+anchor tick's own impacts, per-pair easing and anti-energy, the mindists'
+lengths and distance selectors - are IVP's internal structures, writable
+only by re-running the impacts that made them. Every variant stays as an
+A/B switch; the default is unchanged, and the prop residual (5-30 cm on a
+free prop, 1-2 cm on the plates, bounded by the next snapshot) is accepted
+as the floor of a rewind through contacts between movable bodies.
+
+PRUNE on the four-client lane piles (snapshots off, two runs, the same
+measure as the table above) closes the case the hard way: one run had the
+host's ball 3.4 / 2.9 m from the server's through the start pile - the best
+host figure of any policy - and the other 12.6 / 9.9 m, the usual; the
+other three balls sat where they sit under every policy (2.2-6.8 m). And
+the second run tore `P_Modul_03`'s walls off their floor on two clients
+(walls 245-1196 m out, the mechanism mean 1.9-21.6 m): the walls rest on
+the floor asleep, their contacts with it are not in the ball's record, and
+deleting a contact wakes its cores (`delete_friction_distance` resets the
+freeze check, `unlink_contact_points` revives), so a stack that slept
+through the whole control came apart at the first rewind that reached it.
+A contact set cannot be pruned per body: the record names the partners a
+body touched, not the partners every other body may keep.
+
 ## Without snapshots: what the input stream alone sustains
 
 The design never let the server depend on a snapshot - its world is the
@@ -1923,10 +1999,19 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   changes nothing in the piles. What the piles lose is elsewhere: the ball
   the others spawn into is metres off through the start pile under every
   contact policy, while the last joiner is within 2-3 m, which points at the
-  prediction around a remote spawn; and the solo prop probe shows a free body
-  matching at the rewind tick and 6 cm off two ticks later, an impact that
-  lands in one world and not the other. Those two are the work left for a
-  client that could run on inputs alone.
+  prediction around a remote spawn; and the solo prop probe, traced tick by
+  tick ("What the trace shows" above), shows what a rewind through contacts
+  between movable bodies cannot put back: the collision state IVP builds
+  only by running the impacts itself - which ledge pairs hold contact
+  points, points made by the anchor tick's own impacts, per-pair easing and
+  anti-energy, the mindists' lengths before the next PSI. A recheck pass of
+  its own, pruning the live contacts, re-creating the recorded ones with or
+  without their fields: all measured, none better than the narrow default,
+  and pruning tears sleeping stacks apart. The piles share that floor. What
+  is left for a client that could run on inputs alone is the prediction
+  window around a remote spawn, and the question whether the pile's residual
+  (metres through the start pile, under 0.8 m once the field strings out)
+  is acceptable with the snapshot fallback in place - which it is today.
 
 ## Not covered
 

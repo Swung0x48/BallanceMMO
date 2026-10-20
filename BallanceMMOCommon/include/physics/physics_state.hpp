@@ -91,6 +91,26 @@ namespace bmmo::physics {
     // (partner, status, length).  What a beam cannot carry: a rewind to an
     // anchor whose contact has since ended re-creates the contact fresh.
     std::string describe_contacts(CKIpionManager* physics, const char* entity_name);
+    // Diagnostics: the collision state of one body that no record carries -
+    // its core's movement state, velocities and queued changes, its contacts
+    // (describe_contacts), the friction pairs it is in (easing countdown,
+    // integrated anti-energy, time since the pair's last impact) and its exact
+    // mindists with IVP's collision-distance bookkeeping (selector, decrease
+    // counter, extra radius, angular hull time) and the time until the
+    // mindist's scheduled event.  For diffing a rewound run against a control
+    // tick by tick.
+    std::string describe_body(CKIpionManager* physics, const char* entity_name);
+
+    // ---- bridge API v16: the collision recheck as a pass of its own ----
+
+    // Rebuild the body's collision pairs against the world as it stands now
+    // (IVP_Real_Object::recheck_collision_filter - the recheck a
+    // non-optimized beam runs right after its pose write).  A restore writes
+    // every pose without the recheck, then rechecks every moved body, so no
+    // body's pairs are built against a partner still standing at its live
+    // pose (measured: a restored prop ball with a contact at 0.0100 m to a
+    // plate the record had 0.0456 m away).
+    bool recheck_body(CKIpionManager* physics, const char* entity_name, std::string& error);
 
     // ---- bridge API v15: a body's friction contacts ----
 

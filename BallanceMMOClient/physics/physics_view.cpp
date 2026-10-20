@@ -507,6 +507,19 @@ namespace bmmo::physics {
         return made;
     }
 
+    bool physics_view::body_recheck(const char* entity, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->body_recheck) {
+            error = "the physics_RT bridge lacks body_recheck";
+            return false;
+        }
+        char text[256] = {};
+        const bool ok = api_->body_recheck(manager_, entity, text, sizeof(text)) > 0;
+        if (text[0]) error = text;
+        return ok;
+    }
+
     bool physics_view::set_event_log_muted(bool muted, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

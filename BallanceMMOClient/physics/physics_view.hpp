@@ -82,6 +82,8 @@ namespace bmmo::physics {
         // the bridge returns, -1 on an error.
         int contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string& error) const;
         int contacts_set(const char* entity, const bmmo_physics_contact* in, int count, uint32_t flags, std::string& error) const;
+        // v16: rebuild the body's collision pairs against the world as it stands now.
+        bool body_recheck(const char* entity, std::string& error) const;
 
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,

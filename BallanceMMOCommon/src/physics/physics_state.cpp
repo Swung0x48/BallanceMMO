@@ -77,6 +77,11 @@ namespace bmmo::physics::ivp_access {
     inline IVP_FLOAT* span(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_span()); }
     inline IVP_FLOAT& pressure(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_pressure()); }
     inline IVP_FLOAT& friction(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_friction()); }
+    // The time manager's event list: an event's scheduled time is its
+    // element's value, relative to the manager's base time.
+    struct ml_elems { using type = IVP_U_Min_List_Element* IVP_U_Min_List::*; friend type steal(ml_elems); };
+    template struct thief<ml_elems, &IVP_U_Min_List::elems>;
+    inline IVP_U_Min_List_Element* elements(IVP_U_Min_List& list) { return list.*steal(ml_elems()); }
 
     // IVP_Real_Object::get_all_near_mindists is protected: the recheck of the
     // object's overlap element in the IVP_MT_GET_MINDIST movement state, which
@@ -975,6 +980,77 @@ namespace bmmo::physics {
         return out;
     }
 
+    std::string describe_body(CKIpionManager* physics, const char* entity_name) {
+        CK3dEntity* entity = physics ? find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE)) : nullptr;
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+        IVP_Core* core = real ? real->get_core() : nullptr;
+        if (!core) return "no body";
+        IVP_Environment* env = real->get_environment();
+        const auto other_of = [real](IVP_Real_Object* a, IVP_Real_Object* b) -> IVP_Real_Object* { return a == real ? b : a; };
+        const auto name_of = [](IVP_Real_Object* o) -> const char* { return o && o->get_name() ? o->get_name() : "?"; };
+        char text[320];
+        std::snprintf(text, sizeof(text), "state=%d v=(%.6f,%.6f,%.6f) w=(%.6f,%.6f,%.6f) dv=(%.6f,%.6f,%.6f) dw=(%.6f,%.6f,%.6f)",
+                      static_cast<int>(core->movement_state),
+                      static_cast<double>(core->speed.k[0]), static_cast<double>(core->speed.k[1]), static_cast<double>(core->speed.k[2]),
+                      static_cast<double>(core->rot_speed.k[0]), static_cast<double>(core->rot_speed.k[1]), static_cast<double>(core->rot_speed.k[2]),
+                      static_cast<double>(core->speed_change.k[0]), static_cast<double>(core->speed_change.k[1]), static_cast<double>(core->speed_change.k[2]),
+                      static_cast<double>(core->rot_speed_change.k[0]), static_cast<double>(core->rot_speed_change.k[1]), static_cast<double>(core->rot_speed_change.k[2]));
+        std::string out = text;
+        out += " | " + describe_contacts(physics, entity_name);
+        // The friction pairs this core is in, with the pair state that lives
+        // on neither body: the easing countdown, the integrated anti-energy,
+        // the time since the pair's last impact.
+        out += " | pairs=";
+        IVP_Friction_Info_For_Core* info = core->physical_unmoveable ? nullptr : core->moveable_core_has_friction_info();
+        IVP_Friction_System* system = info ? info->l_friction_system : nullptr;
+        if (system) {
+            for (IVP_Synapse_Friction* syn = real->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+                IVP_Contact_Point* cp = syn->get_contact_point();
+                if (!cp) continue;
+                IVP_Real_Object* other = other_of(cp->get_synapse(0)->get_object(), cp->get_synapse(1)->get_object());
+                IVP_Core* other_core = other ? other->get_core() : nullptr;
+                IVP_Friction_Core_Pair* pair = other_core ? system->get_pair_info_for_objs(core, other_core) : nullptr;
+                if (!pair) {
+                    out += std::string("{") + name_of(other) + " none}";
+                    continue;
+                }
+                std::snprintf(text, sizeof(text), "{%s ease=%d anti=%.6f since_impact=%.5f}", name_of(other), pair->next_ease_nr_psi,
+                              static_cast<double>(pair->integrated_anti_energy),
+                              static_cast<double>(env->get_current_time() - pair->last_impact_time_pair));
+                out += text;
+            }
+        } else {
+            out += "(no friction system)";
+        }
+        // The exact mindists with the collision-distance bookkeeping and the
+        // time until each one's scheduled event.
+        IVP_Time_Manager* manager = env->get_time_manager();
+        IVP_U_Min_List_Element* events = manager && manager->min_hash ? ivp_access::elements(*manager->min_hash) : nullptr;
+        out += " | mind=";
+        for (IVP_Synapse_Real* syn = real->get_first_exact_synapse(); syn; syn = syn->get_next()) {
+            IVP_Mindist* md = syn->get_mindist();
+            if (!md) continue;
+            double event_in = 0.0;
+            bool scheduled = false;
+            if (events && md->index >= 0) {
+                IVP_Time at = manager->base_time;
+                at += static_cast<double>(events[md->index].value);
+                event_in = at - env->get_current_time();
+                scheduled = true;
+            }
+            std::snprintf(text, sizeof(text), "{%s st=%d rr=%d len=%.6f coll=%.4f sel=%u dec=%u extra=%.4f ahull=%.6f ev=%s%.5f}",
+                          name_of(other_of(md->get_synapse(0)->get_object(), md->get_synapse(1)->get_object())),
+                          static_cast<int>(md->mindist_status), static_cast<int>(md->recalc_result),
+                          static_cast<double>(md->get_length()), static_cast<double>(md->get_coll_dist()),
+                          static_cast<unsigned>(md->coll_dist_selector), static_cast<unsigned>(md->coll_dist_decrease_counter),
+                          static_cast<double>(md->sum_extra_radius), static_cast<double>(md->sum_angular_hull_time),
+                          scheduled ? "" : "none ", event_in);
+            out += text;
+        }
+        return out;
+    }
+
     namespace {
         IVP_Real_Object* real_object_of(CKIpionManager* physics, const char* entity_name, std::string& error) {
             const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
@@ -1027,6 +1103,28 @@ namespace bmmo::physics {
         if (!real) return -1;
         IVP_Core* core = real->get_core();
         if (!core || count <= 0 || !in) return 0;
+        // A beam keeps the body's contact points, so after a restore the body
+        // still rests on the partners it had at the LIVE tick, not the
+        // anchor's (measured: a prop ball restored twelve ticks back onto one
+        // plate kept its contact with the plate it was on NOW and had none
+        // with the one it was on THEN).  With PRUNE, every live contact whose
+        // partner the record does not name goes first, through IVP's own
+        // deletion (the pair, the friction infos, the system if it empties).
+        if (flags & BMMO_PHYSICS_CONTACT_PRUNE) {
+            std::vector<IVP_Real_Object*> stale;
+            for (IVP_Synapse_Friction* syn = real->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+                IVP_Contact_Point* cp = syn->get_contact_point();
+                if (!cp) continue;
+                IVP_Real_Object* a = cp->get_synapse(0)->get_object();
+                IVP_Real_Object* b = cp->get_synapse(1)->get_object();
+                IVP_Real_Object* other = a == real ? b : a;
+                const char* partner = other && other->get_name() ? other->get_name() : "";
+                bool recorded = false;
+                for (int i = 0; i < count && !recorded; ++i) recorded = std::strcmp(in[i].partner, partner) == 0;
+                if (!recorded && other && std::find(stale.begin(), stale.end(), other) == stale.end()) stale.push_back(other);
+            }
+            for (IVP_Real_Object* other: stale) real->unlink_contact_points_for_object(other);
+        }
         // Which recorded partners the body still touches: those contacts
         // survived the beam with their state and are left alone.
         std::vector<bool> present(static_cast<size_t>(count), false);
@@ -1130,6 +1228,14 @@ namespace bmmo::physics {
             ++made;
         }
         return made;
+    }
+
+    bool recheck_body(CKIpionManager* physics, const char* entity_name, std::string& error) {
+        error.clear();
+        IVP_Real_Object* real = real_object_of(physics, entity_name, error);
+        if (!real) return false;
+        real->recheck_collision_filter();
+        return true;
     }
 
     std::string describe_controllers(CKIpionManager* physics, const char* entity_name) {

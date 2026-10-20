@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 15u  /* v15: a body's friction contacts, for the rollback restore (v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 16u  /* v16: the collision recheck as a pass of its own (v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -169,6 +169,9 @@ typedef struct bmmo_physics_contact {
 #define BMMO_PHYSICS_CONTACT_STATIC_ONLY    512u   /* re-create only contacts with an unmovable partner (a floor) */
 #define BMMO_PHYSICS_CONTACT_REVIVE         1024u  /* a movable pair with one core asleep: wake it as an impact would,
                                                       instead of leaving the pair to IVP */
+#define BMMO_PHYSICS_CONTACT_PRUNE          2048u  /* first delete every live contact whose partner the record does not
+                                                      name: a beam keeps the body's contact points, so a restored body
+                                                      otherwise rests on the partners it had at the LIVE tick */
 /* The default the rollback uses - measured (docs/lockstep-without-snapshots.md,
  * "The one the ball still had"): a fresh point, only for a body with no
  * contact left, only against static geometry.  Copying the recorded fields
@@ -513,6 +516,16 @@ typedef struct bmmo_physics_api_v2 {
                             char* error, uint32_t error_size);
     int32_t (*contacts_set)(void* ipion_manager, const char* entity, const bmmo_physics_contact* in, int32_t count,
                             uint32_t flags, char* error, uint32_t error_size);
+
+    /* ---- v16: the collision recheck as a pass of its own ---- */
+
+    /* body_recheck rebuilds the body's collision pairs against the world as
+     * it stands now (IVP_Real_Object::recheck_collision_filter, what a
+     * non-optimized beam does right after its pose write).  A restore writes
+     * every pose without the recheck and then rechecks every moved body, so
+     * no body's pairs are built against a partner still at its live pose.
+     * Returns 1, or -1 with a message. */
+    int32_t (*body_recheck)(void* ipion_manager, const char* entity, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

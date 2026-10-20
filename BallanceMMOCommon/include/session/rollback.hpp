@@ -67,6 +67,14 @@ namespace bmmo::session {
         // rebuild its contact pairs (the plain beam keeps the old ones).
         std::function<bool(const std::string& entity, const bmmo_physics_body_state& state,
                            wake_mode mode, bool recheck)> set_body;
+        // The recheck as a pass of its own (bridge API v16).  Optional: with
+        // it, a restore writes every pose with recheck = false and then
+        // rechecks every body the old path would have rechecked, once all the
+        // poses are in - a body rechecked at its own write meets the partners
+        // written after it still at their live poses, and keeps the pairs it
+        // built against them (measured: a prop ball restored with a contact
+        // at 0.0100 m to a plate its record had 0.0456 m away).
+        std::function<bool(const std::string& entity)> recheck_body;
         // The core's queued impulses (bridge API v11).  Optional: a caller
         // that does not provide them gets exactly the old behaviour, which is
         // a restore that drops whatever IVP had queued for the next PSI.  With
@@ -495,6 +503,7 @@ namespace bmmo::session {
                 return it == at->extras.end() ? nullptr : &it->second;
             };
             std::map<std::string, restore> plan;
+            std::vector<std::string> rechecks;   // bodies rechecked after every pose is in (v16)
             for (const auto& entity: restore_candidates(anchor, rows)) {
                 const auto row = rows.find(entity);
                 const bmmo_physics_body_state* recorded = record_at(entity);
@@ -671,7 +680,9 @@ namespace bmmo::session {
                 // measured rather than argued about.
                 const bool recheck = recheck_on_restore_
                                    && (item.force_recheck || write_moves_body(live, item.state));
-                world.set_body(entity, item.state, item.mode, recheck);
+                const bool deferred = recheck && two_pass_recheck_ && world.recheck_body;
+                world.set_body(entity, item.state, item.mode, recheck && !deferred);
+                if (deferred) rechecks.push_back(entity);
                 // After the pose write, which zeroed the queue.  A body born in
                 // the window is parked here and gets its record's extra at the
                 // re-pose instead.
@@ -683,6 +694,8 @@ namespace bmmo::session {
                 auto existing = at->bodies.find(entity);
                 if (existing != at->bodies.end()) existing->second = item.state;
             }
+            // The rechecks, once every pose is in (see rollback_world::recheck_body).
+            for (const auto& entity: rechecks) world.recheck_body(entity);
             // The unit countdowns last: a unit is several cores, grouped by
             // IVP after the rechecks above, so the write lands on the units as
             // they are now (last writer wins within a unit).
@@ -868,6 +881,11 @@ namespace bmmo::session {
 
         // Diagnostic only (see the recheck comment in restore_and_replay).
         void set_recheck_on_restore(bool enable) { recheck_on_restore_ = enable; }
+        // On, every body is rechecked after all the poses are in; off (the
+        // default), each at its own write.  Measured no better on the prop
+        // probe - the contact set, not the recheck order, is what a restore
+        // gets wrong - so it stays an A/B switch.
+        void set_two_pass_recheck(bool enable) { two_pass_recheck_ = enable; }
         // Off reproduces the pre-v11 restore, for an A/B in one binary - which
         // is the only honest way to measure this, because two builds' plain
         // runs disagree by more than the effect does.
@@ -1099,6 +1117,7 @@ namespace bmmo::session {
         uint32_t resim_traces_ = 0;    // re-simulation trace lines logged (capped)
         bool verbose_ = false;
         bool recheck_on_restore_ = true;
+        bool two_pass_recheck_ = false;   // measured no better (docs: 'Movable partners'); opt-in A/B
         bool restore_impulses_ = true;
         bool restore_quaternions_ = true;
         bool restore_clock_ = true;

@@ -2850,6 +2850,14 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         out.assign(buffer, buffer + std::min(n, 16));
         return n;
     };
+    // Bridge API v16: the restore's collision recheck as a pass of its own,
+    // after every pose is written.
+    world.recheck_body = [this](const std::string& entity) {
+        std::string error;
+        if (physics_view_.body_recheck(entity.c_str(), error)) return true;
+        physics_session_.last_error = error;
+        return false;
+    };
     world.set_contacts = [this](const std::string& entity, const std::vector<bmmo_physics_contact>& in, uint32_t flags) {
         std::string error;
         const int made = physics_view_.contacts_set(entity.c_str(), in.data(), static_cast<int>(in.size()), flags, error);

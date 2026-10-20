@@ -538,6 +538,19 @@ namespace {
         return made;
     }
 
+    int32_t api_body_recheck(void* manager, const char* entity, char* error, uint32_t error_size) {
+        if (!manager || !entity) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::string text;
+        if (!bmmo::physics::recheck_body(static_cast<CKIpionManager*>(manager), entity, text)) {
+            set_error(error, error_size, text);
+            return -1;
+        }
+        return 1;
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -591,6 +604,7 @@ namespace {
         api_set_event_log_muted,
         api_contacts_get,
         api_contacts_set,
+        api_body_recheck,
     };
 }
 

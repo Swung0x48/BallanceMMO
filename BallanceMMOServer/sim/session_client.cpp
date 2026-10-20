@@ -135,6 +135,12 @@ namespace {
         // restore fails to put back, per body and per field, instead of
         // inferring it from a hash that diverged forty ticks later.
         bool trace_restore = false;
+        // --trace-body NAME --trace-ticks A B: log describe_body(NAME) after
+        // every live tick in [A, B], before every replayed tick in it and
+        // after a rewind that ends in it - a body's collision bookkeeping,
+        // for diffing a rewound run against a control.
+        std::string trace_body;
+        uint32_t trace_from = 0, trace_until = 0;
         // --no-restore-recheck: do not ask IVP to recheck contacts for a
         // body the restore moved.  Isolates the recheck's own cost to
         // replay fidelity from everything else.
@@ -171,6 +177,10 @@ namespace {
         // --no-restore-contacts: leave a body that lost a friction contact
         // inside the window resting on nothing after the restore (v15 A/B).
         bool restore_contacts = true;
+        // --two-pass-recheck: recheck every body after all the poses are in
+        // instead of each at its own write (bridge API v16).  Measured no
+        // better on the prop probe; the A/B stays.
+        bool two_pass_recheck = false;
         // --contact-flags N: BMMO_PHYSICS_CONTACT_* bits (1..16 = the recorded
         // fields to copy onto a re-created point, 256 = only for a body with no
         // contact left, 512 = only against static geometry, 1024 = wake a
@@ -271,6 +281,13 @@ namespace {
             else if (arg == "--keep-lane") { if (!(v = next())) return false; out.keep_lane = true; out.keep_lane_z = std::atof(v); }
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--trace-restore") out.trace_restore = true;
+            else if (arg == "--trace-body") { if (!(v = next())) return false; out.trace_body = v; }
+            else if (arg == "--trace-ticks") {
+                if (!(v = next())) return false;
+                out.trace_from = static_cast<uint32_t>(std::atoi(v));
+                if (!(v = next())) return false;
+                out.trace_until = static_cast<uint32_t>(std::atoi(v));
+            }
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
             else if (arg == "--no-restore-impulses") out.restore_impulses = false;
             else if (arg == "--no-restore-quats") out.restore_quaternions = false;
@@ -278,6 +295,7 @@ namespace {
             else if (arg == "--no-restore-calm") out.restore_calm = false;
             else if (arg == "--no-restore-unit") out.restore_unit = false;
             else if (arg == "--no-restore-contacts") out.restore_contacts = false;
+            else if (arg == "--two-pass-recheck") out.two_pass_recheck = true;
             else if (arg == "--contact-flags") { if (!(v = next())) return false; out.contact_flags = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--no-sleep-as-recorded") out.sleep_as_recorded = false;
             else if (arg == "--no-script-replay") out.script_replay = false;
@@ -799,6 +817,7 @@ namespace {
             close_journal("a new session started");
             rollback_.set_verbose(args_.trace);
             rollback_.set_recheck_on_restore(args_.restore_recheck);
+            rollback_.set_two_pass_recheck(args_.two_pass_recheck);
             rollback_.set_restore_impulses(args_.restore_impulses);
             rollback_.set_restore_quaternions(args_.restore_quaternions);
             rollback_.set_restore_clock(args_.restore_clock);
@@ -1674,6 +1693,9 @@ namespace {
                 if (amend_failures_++ == 0)
                     logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
             }
+            if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
+                logf("body %s after live tick %u: %s", args_.trace_body.c_str(), tick,
+                     bmmo::physics::describe_body(physics, args_.trace_body.c_str()).c_str());
             // --trace: what pushes the own ball - the navigation replica's
             // leaves, every controller on its core, the mechanism force blocks
             // whose target it is - logged whenever that changes.
@@ -2117,6 +2139,9 @@ namespace {
             else ++forced_rollbacks_missed_;
             if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
                 ++contact_traces_;
+                if (!args_.trace_body.empty() && now >= args_.trace_from && now <= args_.trace_until)
+                    logf("body %s after the rewind (replayed to %u): %s", args_.trace_body.c_str(), now,
+                         bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
                 logf("contacts of %s after the rewind (replayed to %u): %s", own_body_entity_.c_str(), now,
                      bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
             }
@@ -2544,6 +2569,12 @@ namespace {
                 return bmmo::physics::set_body_state(physics, entity.c_str(), state.position, state.rotation, state.linear,
                                                      state.angular, bridge_mode, recheck, error);
             };
+            // Bridge API v16: the restore's collision recheck as a pass of its
+            // own, after every pose is written.
+            world.recheck_body = [physics](const std::string& entity) {
+                std::string error;
+                return bmmo::physics::recheck_body(physics, entity.c_str(), error);
+            };
             // Not installed at all when neither half is wanted: a caller that
             // restores nothing should not pay to capture it either, and it
             // makes --no-restore-impulses --no-restore-quats a true pre-v11
@@ -2601,6 +2632,9 @@ namespace {
                 // it - a replayed Physics WakeUp is not a live event for the
                 // server.
                 world.pre_step = [this, context](uint32_t tick) {
+                    if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
+                        logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
+                             bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
                     if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
                         ++contact_traces_;
                         logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
