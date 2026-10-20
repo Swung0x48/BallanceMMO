@@ -25,6 +25,7 @@
 //
 // Exit code 0 when the own ball never needed a correction, 2 otherwise.
 
+#include "crash_report.hpp"
 #include "headless_engine.hpp"
 
 #include "CKAll.h"
@@ -2129,14 +2130,20 @@ namespace {
                 return bmmo::physics::set_body_state(physics, entity.c_str(), state.position, state.rotation, state.linear,
                                                      state.angular, bridge_mode, recheck, error);
             };
-            world.get_body_extra = [physics](const std::string& entity, bmmo_physics_core_extra& out) {
-                std::string error;
-                return bmmo::physics::get_core_extra(physics, entity.c_str(), out, error);
-            };
-            world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
-                std::string error;
-                return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
-            };
+            // Not installed at all when neither half is wanted: a caller that
+            // restores nothing should not pay to capture it either, and it
+            // makes --no-restore-impulses --no-restore-quats a true pre-v11
+            // control rather than one that still runs the new capture.
+            if (args_.restore_impulses || args_.restore_quaternions) {
+                world.get_body_extra = [physics](const std::string& entity, bmmo_physics_core_extra& out) {
+                    std::string error;
+                    return bmmo::physics::get_core_extra(physics, entity.c_str(), out, error);
+                };
+                world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
+                    std::string error;
+                    return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
+                };
+            }
             world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
                 std::string error;
                 return bmmo::physics::navigation_get_state(physics, entity.c_str(), out, error);
@@ -2485,7 +2492,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -2644,6 +2651,10 @@ namespace {
 }
 
 int main(int argc, char** argv) {
+    // The SimTool has had this since the reset heisenbug; the session client
+    // had not, which is why a crash here used to be a bare 0xC0000005 from the
+    // harness with no stack at all.
+    bmmo::sim::install_crash_reporter();
     arguments args;
     if (!parse(argc, argv, args)) { usage(); return 1; }
     role::init_socket();
