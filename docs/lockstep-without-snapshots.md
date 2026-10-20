@@ -1673,29 +1673,27 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
 
 ## Still open
 
-* **A rewind cannot cross a new sector's setup.** One forced rewind across the
-  sector-2 activation (solo, otherwise exact; activation at 855, bodies born
-  at 859-860) put the new sector's bodies 0.2-0.7 m off. `--trace-plan` shows
-  every one of them restored by the engine's birth branch, from a record made
-  at its birth: the headless client records every movable body, so they were
-  never untracked. Moving the anchor locates it:
+* **Closed by the script replay: a rewind across a new sector's setup.** One
+  forced rewind across the sector-2 activation (solo, otherwise exact;
+  activation at 855, bodies born at 859-860) used to put the new sector's
+  bodies 0.2-0.7 m off, and moving the anchor located it in the window right
+  after the activation, where the module scripts are still setting the sector
+  up (its hinges among it) and a physics-only replay cannot redo that. Measured
+  again on sector 4 (activation at 1814) with one forced rewind of depth 12,
+  against the same control:
 
-  | anchor (rewind at 880) | how the new bodies were restored | Paper ball | worst plate |
-  |---|---|---|---|
-  | 840, 858 | birth branch (parked, re-posed at 859/860) | 0.63 m | 0.26-0.62 m |
-  | 861 | our own records, no birth involved | 0.69 m | 0.40 m |
-  | 870 | our own records | **0.0000 m** | ~0.001 m |
+  | anchor | physics-only replay | with the scripts |
+  |---|---|---|
+  | 1800 (the window ends before the activation) | exact | exact |
+  | 1818 (4 ticks in) | **swing 3.90 m, sandbag 0.48 m, rope 0.21 m**, 3 corrections | **0.0019 m**, none |
+  | 1826 (12 ticks in) | exact | exact |
+  | 1836 (22 ticks in) | exact | exact |
 
-  A plain restore at 861 is as bad as the birth branch, and one at 870 is the
-  usual contact residual. So it is not the birth handling but the window after
-  the activation: for about fifteen ticks the manager's walk and the module
-  scripts are still setting the sector up (its hinges among it), and a
-  physics-only replay cannot redo that - the replay wall above, concentrated
-  in the frames after an activation. Freezing the parked newborns, or
-  writing back their birth tick's queued impulses at the re-pose, changed
-  nothing (measured, reverted). A rewind whose anchor falls in that window
-  is the next thing to solve, for example by keeping the setup's bodies on
-  their live trajectory through such a replay.
+  The window is the first ten ticks, and what a physics-only replay could not
+  redo there is the scripts' own work - the swing's and the sandbag's setup
+  chains toggling their forces - which the replay now runs. The freeze
+  bookkeeping (v13) had already taken the births' part of it from 0.6 to
+  0.02 m.
 * **Fixed in be9c559: the retail client recorded only what the registry had
   resolved.** The fix that made the headless client record its whole movable
   world (fd74a59) had never reached `physics_session_client.cpp`, so on the
@@ -1764,9 +1762,11 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   pre-change server logs "SessionStart could not be decoded: the server runs
   a different physics protocol" and leaves.
 
-* The prop ball `P_Ball_Paper_MF` disappears from one side's body set after
-  tick ~1 270 and stays missing for the rest of the session. A real
-  asymmetry, not yet explained.
+* The prop ball `P_Ball_Paper_MF` once disappeared from one side's body set
+  after tick ~1 270 and stayed missing. Not reproduced in the 2026-10-20 runs:
+  in the four-client swing-bay and lane runs it is present on the server and
+  on the client for exactly the same checkpoints (913 of 1728, 1213 of 1619),
+  and the body sets agree at the last tick (55 and 56 bodies).
 * `mechanisms: 14/13` in every run: one dictionary entry never resolves to a
   local body. Harmless here (it is another instance's) but unverified.
 * The name-to-index dictionary is delivered **only in full snapshots**
