@@ -15,6 +15,9 @@ namespace bmmo {
         uint64_t anchor_surfaces = 0;   // collision surface signature
         std::string physics_sha256;     // <= MAX_NAME
         std::string build_id;           // <= MAX_NAME
+        // session::PHYSICS_PROTOCOL_VERSION of the client.  Required: a build
+        // that does not send it does not parse here.
+        uint32_t protocol = session::PHYSICS_PROTOCOL_VERSION;
 
         session_ready_msg() : serializable_message(bmmo::SessionReady) {}
 
@@ -22,6 +25,7 @@ namespace bmmo {
             serializable_message::serialize();
             raw.write(reinterpret_cast<const char*>(&session), sizeof(session));
             raw.write(reinterpret_cast<const char*>(&first_tick), sizeof(first_tick));
+            raw.write(reinterpret_cast<const char*>(&protocol), sizeof(protocol));
             raw.write(reinterpret_cast<const char*>(&anchor_hash), sizeof(anchor_hash));
             raw.write(reinterpret_cast<const char*>(&anchor_surfaces), sizeof(anchor_surfaces));
             message_utils::write_string<uint16_t>(physics_sha256.substr(0, session::MAX_NAME), raw);
@@ -34,6 +38,7 @@ namespace bmmo {
                 return false;
             if (!message_utils::read_variable(raw, &session)) return false;
             if (!message_utils::read_variable(raw, &first_tick)) return false;
+            if (!message_utils::read_variable(raw, &protocol)) return false;
             if (!message_utils::read_variable(raw, &anchor_hash)) return false;
             if (!message_utils::read_variable(raw, &anchor_surfaces)) return false;
             if (!message_utils::read_string<uint16_t>(raw, physics_sha256)) return false;

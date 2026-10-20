@@ -2399,8 +2399,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionStart: {
         bmmo::session_start_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize())
+        if (msg.deserialize()) {
             handle_session_start(std::move(msg));
+        } else {
+            // A SessionStart this build cannot read comes from a server of
+            // another physics protocol (entity/session.hpp): say so instead of
+            // sitting in a room where nothing starts.
+            logger_->Error("Physics session: the server's SessionStart could not be decoded; it runs a different "
+                           "physics protocol than this mod (%u)", bmmo::session::PHYSICS_PROTOCOL_VERSION);
+            SendIngameMessage("Physics session refused: the server runs a different physics protocol than this mod. "
+                              "Update the mod or the server.", bmmo::ansi::BrightRed);
+        }
         break;
     }
     case bmmo::SessionAssign: {

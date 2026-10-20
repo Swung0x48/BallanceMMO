@@ -1096,6 +1096,15 @@ public:
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
+        // Same protocol, or the two builds do not compute and compare the same
+        // things (entity/session.hpp).  Before everything else, so a mixed
+        // pair is told exactly that instead of "world mismatch".
+        if (msg.protocol != bmmo::session::PHYSICS_PROTOCOL_VERSION) {
+            end_physics_session(msg.session, Sprintf("%s runs physics protocol %u, this server runs %u: "
+                    "the client's BallanceMMO build is from a different protocol",
+                    client_it->second.name, msg.protocol, bmmo::session::PHYSICS_PROTOCOL_VERSION));
+            return;
+        }
         // Same engine, or the two sides do not simulate alike: the session
         // would spend itself hard-correcting a client that never agrees.  Only
         // the engine half of the build id is compared - the repository half

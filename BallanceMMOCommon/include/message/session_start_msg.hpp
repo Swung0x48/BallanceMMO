@@ -24,6 +24,9 @@ namespace bmmo {
         // late joiners included.
         float spawn_impulse = 0.0f;
         std::vector<session::player_entry> players;   // <= MAX_PLAYERS_PER_SESSION; spawn_* = the retail resetpoint
+        // session::PHYSICS_PROTOCOL_VERSION of the server.  Required: a build
+        // that does not send it does not parse here, and the receiver says so.
+        uint32_t protocol = session::PHYSICS_PROTOCOL_VERSION;
 
         session_start_msg() : serializable_message(bmmo::SessionStart) {}
 
@@ -45,6 +48,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&first_tick), sizeof(first_tick));
             raw.write(reinterpret_cast<const char*>(&seed), sizeof(seed));
             raw.write(reinterpret_cast<const char*>(&spawn_impulse), sizeof(spawn_impulse));
+            raw.write(reinterpret_cast<const char*>(&protocol), sizeof(protocol));
 
             const uint8_t player_count = static_cast<uint8_t>(std::min<size_t>(players.size(), session::MAX_PLAYERS_PER_SESSION));
             raw.write(reinterpret_cast<const char*>(&player_count), sizeof(player_count));
@@ -81,6 +85,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &first_tick)) return false;
             if (!message_utils::read_variable(raw, &seed)) return false;
             if (!message_utils::read_variable(raw, &spawn_impulse)) return false;
+            if (!message_utils::read_variable(raw, &protocol)) return false;
 
             uint8_t player_count = 0;
             if (!message_utils::read_variable(raw, &player_count)) return false;

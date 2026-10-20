@@ -9,6 +9,9 @@
 //            v2 adds { surfaces u64, probe_position f64[3], probe_speed f32[3],
 //                      probe_rot_speed f32[3], pose u64, probe_name char[32] }
 //            (the probe core, see world_hash)
+//            v3: the same layout; hash and pose are the order-independent fold
+//            (world_hash.hpp).  Only v3 is read: an older record's hashes
+//            compare with nothing this build computes.
 //
 // Frame 0 is the first tick at which the retail Gameplay_Ingame script is
 // active (the level has started).  keys is the DirectInput keyboard state the
@@ -24,7 +27,7 @@
 namespace bmmo::physics {
     struct tick_record_header {
         char magic[4] = {'B', 'M', 'R', 'C'};
-        uint32_t version = 2;
+        uint32_t version = 3;
         double tick_rate = 66.0;
         int32_t level = 0;
         char physics_sha256[64] = {};
@@ -82,14 +85,13 @@ namespace bmmo::physics {
                 return false;
             }
             stream.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (!stream || std::memcmp(header.magic, "BMRC", 4) != 0
-                    || (header.version != 1 && header.version != 2)) {
-                error = "not a BMRC v1/v2 record: " + path;
+            if (!stream || std::memcmp(header.magic, "BMRC", 4) != 0 || header.version != 3) {
+                error = "not a BMRC v3 record (an older record's hashes are not comparable): " + path;
                 return false;
             }
             frames.clear();
             tick_record_frame frame;
-            const size_t frame_size = header.version == 1 ? kTickRecordFrameV1Size : sizeof(frame);
+            const size_t frame_size = sizeof(frame);
             while (stream.read(reinterpret_cast<char*>(&frame), static_cast<std::streamsize>(frame_size)))
                 frames.push_back(frame);
             return true;

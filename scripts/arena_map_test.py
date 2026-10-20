@@ -143,7 +143,7 @@ def write_drive_record(path, level, ticks, player, steer=False, stop_tick=0):
     the first sector, which is worse: then nothing reaches a mechanism.
     """
     with open(path, 'wb') as rec:
-        rec.write(struct.pack('<4sIdi64s32s4x', b'BMRC', 1, 66., level, b'', b''))
+        rec.write(struct.pack('<4sIdi64s32s4x', b'BMRC', 3, 66., level, b'', b''))
         start = 120 + 40 * player
         for tick in range(ticks):
             keys = bytearray(256)
@@ -162,7 +162,7 @@ def write_drive_record(path, level, ticks, player, steer=False, stop_tick=0):
                         keys[DIK_LEFT] = 1
                     elif 200 <= swing < 230:
                         keys[DIK_RIGHT] = 1
-            rec.write(keys + bytes(24))
+            rec.write(keys + bytes(120))
 
 
 def status_metrics(line):

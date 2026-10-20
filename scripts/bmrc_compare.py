@@ -12,15 +12,15 @@ import sys
 
 HEADER = struct.Struct("<4sIdi64s32s")   # 116 bytes, file has 120 with padding
 HEADER_SIZE = 120
-FRAME = struct.Struct("<256sQdiI")       # 280 bytes
+FRAME = struct.Struct("<256sQdiI96x")    # 376 bytes: the v3 frame, of which only the v1 fields are compared here
 
 
 def load(path):
     with open(path, "rb") as handle:
         data = handle.read()
     magic, version, tick_rate, level, sha, _ = HEADER.unpack_from(data, 0)
-    if magic != b"BMRC" or version != 1:
-        raise SystemExit("not a BMRC v1 file: " + path)
+    if magic != b"BMRC" or version != 3:
+        raise SystemExit("not a BMRC v3 file: " + path)
     frames = []
     offset = HEADER_SIZE
     while offset + FRAME.size <= len(data):

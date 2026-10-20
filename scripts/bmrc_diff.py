@@ -1,4 +1,4 @@
-"""Compare two BMRC v2 tick records frame by frame.
+"""Compare two BMRC v3 tick records frame by frame.
 
     bmrc_diff.py a.bmrc b.bmrc [--show N]
 
@@ -17,8 +17,8 @@ def load(path):
     with open(path, "rb") as f:
         data = f.read()
     magic, version, tick_rate, level, sha, _ = HEADER.unpack_from(data, 0)
-    if magic != b"BMRC" or version != 2:
-        raise SystemExit("{}: not a BMRC v2 record (version {})".format(path, version))
+    if magic != b"BMRC" or version != 3:
+        raise SystemExit("{}: not a BMRC v3 record (version {})".format(path, version))
     frames = []
     offset = HEADER.size
     while offset + FRAME.size <= len(data):

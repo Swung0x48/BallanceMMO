@@ -517,7 +517,13 @@ namespace {
             }
             case bmmo::SessionStart: {
                 bmmo::session_start_msg msg;
-                if (!fill(msg)) return;
+                if (!fill(msg)) {
+                    // A server of another physics protocol (entity/session.hpp).
+                    logf("SessionStart could not be decoded: the server runs a different physics protocol than this "
+                         "client (%u)", bmmo::session::PHYSICS_PROTOCOL_VERSION);
+                    ended_ = true;
+                    return;
+                }
                 begin_session(msg);
                 break;
             }
@@ -744,6 +750,15 @@ namespace {
 
         // ---------------------------------------------------------- session
         void begin_session(const bmmo::session_start_msg& msg) {
+            // A server of another protocol (entity/session.hpp) computes and
+            // compares other things: refuse, loudly, rather than play a session
+            // that cannot agree.
+            if (msg.protocol != bmmo::session::PHYSICS_PROTOCOL_VERSION) {
+                logf("session %u refused: the server runs physics protocol %u, this client runs %u", msg.session,
+                     msg.protocol, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+                ended_ = true;
+                return;
+            }
             // A box of the previous session is closed with its own numbering,
             // before begin_session resets the tick base under it.
             close_journal("a new session started");

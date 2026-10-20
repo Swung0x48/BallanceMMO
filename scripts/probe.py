@@ -120,13 +120,13 @@ def main():
                 if mode == 'edges':
                     record = case_dir/f'input{i}.bmrc'
                     with record.open('wb') as rec:
-                        rec.write(struct.pack('<4sIdi64s32s4x', b'BMRC', 1, 66., level, b'', b''))
+                        rec.write(struct.pack('<4sIdi64s32s4x', b'BMRC', 3, 66., level, b'', b''))
                         for tick in range(args.seconds * 66):
                             keys = bytearray(256)
                             # Brief alternating left/right key edges, preserving proximity to spawn.
                             if tick >= 120 and (tick + i * 5) % 132 < 8:
                                 keys[203 if (tick // 132) % 2 == 0 else 205] = 1
-                            rec.write(keys + bytes(24))
+                            rec.write(keys + bytes(120))
                     cmd += ['--record', str(record)]
                 p = subprocess.Popen(cmd, cwd=client_dir, stdin=subprocess.DEVNULL, stdout=cf,
                                      stderr=subprocess.STDOUT, creationflags=FLAGS)

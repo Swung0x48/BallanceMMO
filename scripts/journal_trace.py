@@ -48,7 +48,7 @@ import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 1
+VERSION = 2   # 2: order-independent world hash (world_hash.hpp)
 
 TAG_HEADER = 0
 TAG_PLAYER = 1

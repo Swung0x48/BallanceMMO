@@ -94,8 +94,7 @@ namespace bmmo::physics {
         env.ivp_seed = ivp_srand_read();
         env.delta_time_ms = physics->m_DeltaTime;
         env.physics_delta_time = physics->m_PhysicsDeltaTime;
-        fnv1a64 hasher, pose_hasher;
-        feed_environment(hasher, env);
+        uint64_t core_sum = 0, pose_sum = 0;
 
         std::vector<const IVP_Core*> seen;
         const IVP_Real_Object* probe = nullptr;
@@ -132,9 +131,17 @@ namespace bmmo::physics {
             c.movement_state = static_cast<uint8_t>(core->movement_state);
             c.i_delta_time = core->i_delta_time;
             c.time_of_last_psi = core->time_of_last_psi.get_seconds();
-            feed_core(hasher, c);
-            feed_core_pose(pose_hasher, c);
+            // Order-independent (world_hash.hpp): a term per core, summed.
+            fnv1a64 core_hasher, core_pose_hasher;
+            feed_core(core_hasher, c);
+            feed_core_pose(core_pose_hasher, c);
+            core_sum += fold_term(core_hasher.value);
+            pose_sum += fold_term(core_pose_hasher.value);
         }
+        fnv1a64 hasher, pose_hasher;
+        feed_environment(hasher, env);
+        hasher.feed(core_sum);
+        pose_hasher.feed(pose_sum);
         out.hash = hasher.value;
         out.pose = pose_hasher.value;
         out.surfaces = surface_signature(physics);

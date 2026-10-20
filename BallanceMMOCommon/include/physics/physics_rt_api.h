@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 11u  /* v11: the core's integrator state, for a rollback restore */
+#define BMMO_PHYSICS_API_VERSION 12u  /* v12: order-independent world hash (v11: the core's integrator state) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline

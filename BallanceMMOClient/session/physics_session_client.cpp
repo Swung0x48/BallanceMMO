@@ -280,6 +280,17 @@ void BallanceMMOClient::handle_session_end(const bmmo::session_end_msg& msg) {
 
 void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg) {
     auto& s = physics_session_;
+    // A server of another protocol (entity/session.hpp) computes and compares
+    // other things: refuse, and say so, rather than play a session that cannot
+    // agree.  The server ends the session when our SessionReady never comes.
+    if (msg.protocol != bmmo::session::PHYSICS_PROTOCOL_VERSION) {
+        logger_->Error("Physics session %u refused: the server runs physics protocol %u, this mod runs %u",
+                       msg.session, msg.protocol, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+        SendIngameMessage(std::format("Physics session refused: the server runs physics protocol {}, this mod "
+                                      "runs {}. Update the mod or the server.", msg.protocol,
+                                      bmmo::session::PHYSICS_PROTOCOL_VERSION), bmmo::ansi::BrightRed);
+        return;
+    }
     if (s.phase != phase_type::idle) physics_session_end_local("replaced by a new session");
     s.reset_runtime();
     // The black box is armed once per session, so switching it off in the BML

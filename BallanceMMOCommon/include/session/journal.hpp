@@ -9,9 +9,11 @@
 // readers parse it (the SimTool's --replay-session, scripts/journal_trace.py,
 // the round-trip unit tests).
 //
-// File format, version 1.  Everything little-endian and written field by
+// File format, version 2.  Everything little-endian and written field by
 // field, never a struct dump: the writer may be a Linux x64 server and the
-// reader a Windows x86 client.
+// reader a Windows x86 client.  Version 2 differs from 1 only in what a TICK
+// record's hashes mean (world_hash.hpp: the order-independent fold); a version
+// 1 file is refused rather than read with hashes nothing can compare.
 //
 //   file   = magic "BMMOJRNL" (8 bytes) , u32 version , record*
 //   record = u8 tag , u32 payload_size , payload[payload_size]
@@ -63,7 +65,7 @@ namespace bmmo::session {
     };
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
-    constexpr uint32_t kJournalVersion = 1;
+    constexpr uint32_t kJournalVersion = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
     constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::correction);
     // A str never exceeds this; a longer one makes the record invalid.

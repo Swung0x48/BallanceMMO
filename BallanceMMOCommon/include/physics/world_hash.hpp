@@ -2,7 +2,19 @@
 
 // Physics world hashing shared by the client (retail physics_RT.dll view) and
 // the headless server (Ballanced physics_RT).  Both sides feed exactly the
-// same fields in the same order, so equal hashes mean equal IVP state.
+// same fields, so equal hashes mean equal IVP state.
+//
+// The cores are folded ORDER-INDEPENDENTLY: one FNV hash per core, multiplied
+// by an odd constant and summed, the way surface_signature() always did it.
+// Folding them in m_MovableObjects order made the hash depend on where the
+// manager happened to list a body, and when several bodies are recreated in
+// one tick (four players beamed together) the live server and the replay of
+// its own journal listed them differently with identical state - every
+// checkpoint agreed to 1e-6 m and the replay check still failed from that tick
+// on (docs/lockstep-without-snapshots.md, "the 701 hash artefact").  Hash
+// values of this fold are not comparable with the earlier one: the journal
+// format, the tick-record format and the bridge API are all bumped with it,
+// and nothing reads the old ones.
 
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +52,10 @@ namespace bmmo::physics {
         float physics_delta_time = 0.0f;
         float time_factor = 0.0f;
     };
+
+    // One core's term of the fold, independent of its place in the list.
+    inline constexpr uint64_t kFoldMultiplier = 0x9E3779B97F4A7C15ULL;
+    inline uint64_t fold_term(uint64_t core_hash) { return core_hash * kFoldMultiplier; }
 
     // Per-core state in the canonical order (matches BallanceTAS's CoreState).
     struct core_state {
