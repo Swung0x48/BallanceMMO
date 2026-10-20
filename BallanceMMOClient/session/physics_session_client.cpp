@@ -16,6 +16,7 @@
 #include <sstream>
 #include <thread>
 
+#include <game/menu_driver.hpp>
 #include <session/spawn_impulse.hpp>
 
 #include "session_journal_client.hpp"
@@ -383,6 +384,7 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     pause_scripts_restore();
     death_reset_restore();
     sector_deactivate_restore();
+    sector_activate_restore();
     // The clock guard is scoped to the session and must not outlive it, so it
     // is dropped even when there is nothing left to tear down.
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
@@ -1108,6 +1110,123 @@ void BallanceMMOClient::sector_deactivate_restore() {
     sector_deactivate_failed_ = false;
 }
 
+// N3, the checkpoint's own activation.  Crossing a checkpoint runs
+// Gameplay_Events / activate Sektor, whose Execute Script runs
+// Gameplay_SectorManager in the same frame - the sector's mechanisms are
+// physicalized and start here the moment the ball crosses the line, while the
+// server's world starts them when the Sector event arrives, a one-way trip
+// later, and the two never agree again under lockstep (every plate of the
+// arena 0.07-0.26 m off by its first comparable tick; see the doc).  So the
+// activation becomes an input: this Execute Script is fed a session-owned
+// script parameter that holds no script (it activates its Out at once on a
+// null script, ExecuteScript.cpp:66-70, so the chain and the hooks behind it
+// keep their shape), the Sector event is stamped ahead, and the manager is run
+// by physics_session_frame at that tick - where the server runs its own.
+//
+// The source is swapped rather than emptied because, unlike the two call sites
+// death_reset_resolve empties, this one's parameter may be shared; the swap is
+// the technique sector_deactivate_resolve_one already uses, and the original
+// source goes back at session end.
+bool BallanceMMOClient::sector_activate_resolve() {
+    sector_activate_ = {};
+    sector_activate_failed_ = false;
+    const auto refuse = [&](const std::string& why) {
+        sector_activate_failed_ = true;
+        logger_->Error("Physics session: the checkpoint's sector activation was NOT taken over (%s): this client "
+                       "will activate a sector the moment its ball crosses the line, the server a trip later, and the "
+                       "sector's mechanisms run out of phase", why.c_str());
+        return false;
+    };
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* events = m_bml->GetScriptByName("Gameplay_Events");
+    if (!events) return refuse("Gameplay_Events is missing");
+    CKBehavior* chain = ScriptHelper::FindFirstBB(events, const_cast<CKSTRING>("activate Sektor"));
+    if (!chain) return refuse("the activate Sektor group is missing");
+    CKBehavior* block = nullptr;
+    const int subs = chain->GetSubBehaviorCount();
+    for (int i = 0; i < subs; ++i) {
+        CKBehavior* sub = chain->GetSubBehavior(i);
+        const char* prototype = sub && sub->IsUsingFunction() ? sub->GetPrototypeName() : nullptr;
+        if (!prototype || std::strcmp(prototype, "Execute Script") != 0) continue;
+        auto* target = CKBehavior::Cast(sub->GetInputParameterObject(1));   // "Script"
+        const char* name = target ? target->GetName() : nullptr;
+        if (!name || std::strcmp(name, "Gameplay_SectorManager") != 0) continue;
+        if (block) return refuse("more than one Execute Script in activate Sektor runs Gameplay_SectorManager");
+        block = sub;
+    }
+    if (!block) return refuse("no Execute Script in activate Sektor runs Gameplay_SectorManager");
+    CKParameterIn* input = block->GetInputParameter(1);
+    if (!input || input->GetGUID() != CKPGUID_SCRIPT) return refuse("its Script input is not a script parameter");
+    CKParameter* source = input->GetRealSource();
+    if (!source || source->GetDataSize() != static_cast<int>(sizeof(CK_ID)))
+        return refuse("its Script input has no usable source");
+    auto* none = context->CreateCKParameterLocal(const_cast<CKSTRING>("BMMO_SectorHold"), CKPGUID_SCRIPT, TRUE);
+    if (!none) return refuse("could not create the session's parameter");
+    const CK_ID no_script = 0;
+    none->SetValue(&no_script, sizeof(no_script));
+    CKParameterIn* shared = input->GetSharedSource();
+    CKParameter* direct = input->GetDirectSource();
+    if (input->SetDirectSource(none) != CK_OK) {
+        context->DestroyObject(none);
+        return refuse("the Script input refused the session's parameter");
+    }
+    sector_activate_.block = block->GetID();
+    sector_activate_.chain = "activate Sektor";
+    sector_activate_.input = 1;
+    sector_activate_.retail_source = direct ? direct->GetID() : 0;
+    sector_activate_.retail_shared = shared ? shared->GetID() : 0;
+    sector_activate_.retail_real = source->GetID();
+    sector_activate_.none = none->GetID();
+    sector_activate_.applied = true;
+    logger_->Info("Physics session: the checkpoint's sector activation (Gameplay_Events/activate Sektor -> Execute "
+                  "Script Gameplay_SectorManager) is held: a crossed checkpoint stamps its Sector event %u ticks "
+                  "ahead and the manager runs at that tick", physics_session_.sector_lead());
+    return true;
+}
+
+// Keeps the swap applied, like sector_deactivate_apply: a level reset that
+// handed the retail source back has to be caught before the next checkpoint.
+void BallanceMMOClient::sector_activate_apply() {
+    sector_activate_write& write = sector_activate_;
+    if (!write.block || !write.none) return;
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* block = session_block(context, write.block, "Execute Script");
+    CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
+    auto* none = CKParameter::Cast(context->GetObject(write.none));
+    if (!input || !none) return;
+    CKParameter* current = input->GetRealSource();
+    if (current == none) return;   // still ours
+    if (!current || current->GetID() != write.retail_real) return;
+    if (input->SetDirectSource(none) == CK_OK)
+        logger_->Info("Physics session: the checkpoint's sector activation in %s was held again",
+                      write.chain ? write.chain : "?");
+}
+
+void BallanceMMOClient::sector_activate_restore() {
+    sector_activate_write& write = sector_activate_;
+    CKContext* context = m_bml->GetCKContext();
+    CKBehavior* block = write.block ? session_block(context, write.block, "Execute Script") : nullptr;
+    CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
+    auto* none = write.none ? CKParameter::Cast(context->GetObject(write.none)) : nullptr;
+    bool referenced = false;
+    if (input && none && input->GetRealSource() == none) {
+        referenced = true;
+        if (write.retail_shared) {
+            auto* shared = CKParameterIn::Cast(context->GetObject(write.retail_shared));
+            if (shared && input->ShareSourceWith(shared) == CK_OK) referenced = false;
+        } else {
+            auto* source = CKParameter::Cast(context->GetObject(write.retail_source));
+            if (source && input->SetDirectSource(source) == CK_OK) referenced = false;
+        }
+        if (referenced)
+            logger_->Warn("Physics session: the Script input of %s could not be handed back to its retail source; "
+                          "the session's parameter is left in place", write.chain ? write.chain : "?");
+    }
+    if (none && !referenced) context->DestroyObject(none);
+    write = {};
+    sector_activate_failed_ = false;
+}
+
 // The automation's read ("pausechain"): one line that says whether the menu is
 // open, whether the world scripts are still active, and what each recorded
 // pause-chain block points at now (a target of 0 is a neutralized one, the
@@ -1217,6 +1336,7 @@ void BallanceMMOClient::physics_session_anchor() {
     // one that plays with a known difference.
     death_reset_restore();
     sector_deactivate_restore();
+    sector_activate_restore();
     const bool death_neutralized = death_reset_resolve();
     const bool sector_neutralized = sector_deactivate_resolve();
     if (death_neutralized && sector_neutralized)
@@ -1224,6 +1344,10 @@ void BallanceMMOClient::physics_session_anchor() {
                       "longer run Gameplay_SectorManager (a death and a level reset), and %d chain(s) activate a "
                       "sector without deactivating anything (a checkpoint and a level reset)",
                       death_reset_count_, sector_deactivate_count_);
+    // Sector activation as an input (N3): the checkpoint's run of the manager
+    // is held, so it can be stamped ahead and run at the stamped tick.
+    s.sector_holds.clear();
+    sector_activate_resolve();
     // Design 9.26: the mechanism Sequencers start from the level file's
     // counters, as they do on the server, instead of wherever the play before
     // the restart left them (Level 11's sandbags swing the other way otherwise).
@@ -1286,6 +1410,17 @@ void BallanceMMOClient::physics_session_anchor() {
     bmmo::session::client_journal::instance().note(0, "anchor hold: the world stands still until the tick base arrives");
     SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
     physics_session_hold_until_assigned();
+    // The mirrored sector pacer counts once per step, before it: the server
+    // counts its first at the anchor state, for the step numbered with the
+    // base, and so does this - every later count is physics_session_frame's.
+    s.sector_pacer = {};
+    physics_session_count_sector_pacer();
+    // Sector 1 is the level's own (Init Ingame activates it on every side,
+    // and the server's world starts with it); the cell starts where it is.
+    s.sectors_requested = {1};
+    s.sector_cell = 0;
+    if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter"))
+        parameters->GetElementValue(0, 1, &s.sector_cell);
 }
 
 // The anchor hold (design 9.26 phase alignment).  Waits inside the anchor
@@ -1452,6 +1587,37 @@ void BallanceMMOClient::physics_session_frame() {
     // both chains can fire at any tick.
     death_reset_apply();
     sector_deactivate_apply();
+    sector_activate_apply();
+    // Sector activation as an input: a held sector runs at the end of the frame
+    // before the step it is stamped for - or the first one after it the pacer
+    // allows, which is the one the server's pacer allows.  This function runs
+    // after this frame's step (`tick`); the next step is tick + 1, and the
+    // server counts its pacer and makes its pass after the events of a tick and
+    // before that tick's step.  One pass per step, like the server's.
+    // The cell poll: the checkpoint chain writes IngameParameter[0][1] before
+    // its (held) Execute Script, so a sector the hook did not report - a
+    // Gameplay_Events graph BMLPlus refused to patch, say - still becomes an
+    // input here instead of never starting at all.  The hook runs earlier in
+    // the same frame, so normally the sector is already requested by now.
+    if (sector_activate_.block && !sector_activate_failed_) {
+        if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) {
+            int cell = 0;
+            if (parameters->GetElementValue(0, 1, &cell) && cell != s.sector_cell) {
+                s.sector_cell = cell;
+                if (cell > 0 && !s.sectors_requested.count(cell))
+                    physics_session_hold_sector(cell, "sector cell");
+            }
+        }
+    }
+    if (physics_session_count_sector_pacer() && !s.sector_holds.empty() && tick + 1 >= s.sector_holds.front().second) {
+        const auto [sector, due] = s.sector_holds.front();
+        s.sector_holds.pop_front();
+        const bool held = tick + 1 > due;
+        if (held) ++s.sectors_late;
+        physics_session_run_sector(sector, tick + 1,
+                                   held ? "after its stamp: the pacer held it, as the server's does" : "as stamped");
+        s.sector_pacer.started();
+    }
 
     // The tick driver restarted its schedule (pause, long stall): our tick
     // numbers no longer line up with the server's.
@@ -2406,14 +2572,76 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
     logger_->Info("Physics session: own ball unphysicalized at tick %u", event.tick);
 }
 
-void BallanceMMOClient::physics_session_on_sector(int sector) {
+void BallanceMMOClient::physics_session_on_sector(int sector, bool checkpoint) {
     auto& s = physics_session_;
     if (s.phase != phase_type::running) return;
+    // A crossed checkpoint with the chain's manager run held (N3): the
+    // activation is an input, stamped ahead and run at its tick on both sides.
+    if (checkpoint && physics_session_hold_sector(sector, "checkpoint")) return;
+    // Otherwise what it always was: a report of where this ball is, applied
+    // by the server when it arrives.
     bmmo::session_event_msg event;
     event.tick = s.current_tick();
     event.type = bmmo::session::event_type::Sector;
     event.sector = sector;
     physics_session_send_event(event);
+}
+
+bool BallanceMMOClient::physics_session_hold_sector(int sector, const char* why) {
+    auto& s = physics_session_;
+    if (s.phase != phase_type::running || !s.assigned) return false;
+    if (sector_activate_failed_ || !sector_activate_.block) return false;   // the chain still runs the manager itself
+    // Already an input of this session (held, or run): the hook and the cell
+    // poll can both report one crossing, and a sector that is up must not be
+    // activated again.
+    if (s.sectors_requested.count(sector)) return true;
+    // From inside a frame, current_tick() + 1 is this frame's step (the
+    // convention of OnPhysicalize and the beam); from OnProcess before
+    // physics_session_frame has counted the frame, it is the step that just
+    // ran.  Either way the manager can run before the step after it at the
+    // earliest, which a lead of 1 names.
+    const uint32_t due = s.current_tick() + 1 + s.sector_lead();
+    bmmo::session_event_msg event;
+    event.tick = due;
+    event.type = bmmo::session::event_type::Sector;
+    event.sector = sector;
+    physics_session_send_event(event);
+    s.sector_holds.emplace_back(sector, due);
+    s.sectors_requested.insert(sector);
+    ++s.sectors_deferred;
+    bmmo::session::client_journal::instance().note(
+            s.current_tick(), std::format("sector {} held for tick {} ({}, lead {})", sector, due, why, s.sector_lead()));
+    logger_->Info("Physics session: sector %d (%s) held for tick %u (lead %u ticks from tick %u); Sector event sent ahead",
+                  sector, why, due, s.sector_lead(), s.current_tick() + 1);
+    return true;
+}
+
+bool BallanceMMOClient::physics_session_count_sector_pacer() {
+    auto& s = physics_session_;
+    CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
+    return s.sector_pacer.tick(manager && manager->IsActive());
+}
+
+void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, const char* how) {
+    auto& s = physics_session_;
+    CKContext* context = m_bml->GetCKContext();
+    CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
+    CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
+    if (!parameters || !manager) {
+        logger_->Error("Physics session: sector %d could not be activated for tick %u: IngameParameter or "
+                       "Gameplay_SectorManager is missing", sector, tick);
+        return;
+    }
+    // Deactivate nothing (the server's world activates the union of its
+    // players' sectors, and the SectorManager's own Test skips the
+    // deactivation on 0), activate `sector`, run the manager from its start.
+    int none = 0;
+    parameters->SetElementValue(0, 2, &none, sizeof(none));
+    parameters->SetElementValue(0, 1, &sector, sizeof(sector));
+    s.sector_cell = sector;
+    if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+    bmmo::session::client_journal::instance().note(s.current_tick(), std::format("sector {} activated for tick {} ({})", sector, tick, how));
+    logger_->Info("Physics session: sector %d activated for tick %u (%s)", sector, tick, how);
 }
 
 void BallanceMMOClient::physics_session_on_finish() {
@@ -2923,7 +3151,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
     return std::format(
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
-        "events={}/{} phys_resends={} "
+        "events={}/{} phys_resends={} sectors_held={}/{} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         // held=<holding now>/<1 ms polls the hold took>[+timeout]: the anchor
@@ -2941,7 +3169,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.mechanism_tracking.known(), s.mechanism_tracking.resolved(), s.body_writes, s.body_write_errors,
         s.generations.size(),
         s.amend_failures,
-        s.events_sent, s.events_received, s.physicalize_resends,
+        s.events_sent, s.events_received, s.physicalize_resends, s.sectors_deferred, s.sectors_late,
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,
         rs.too_far, rs.frozen, rs.max_error, rs.last_mismatch,

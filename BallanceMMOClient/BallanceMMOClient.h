@@ -237,7 +237,7 @@ private:
 
 	void on_fatal_error(char* extra_text);
 
-	inline void on_sector_changed();
+	inline void on_sector_changed(bool checkpoint = false);
 
 	std::unique_ptr<text_sprite> player_list_display_;
 	struct player_status_list_entry { std::string map_name, name; int sector; int64_t time_diff; bool cheated; };
@@ -629,6 +629,43 @@ private:
 	bool sector_deactivate_resolve_one(CKBehavior* script, const char* script_name, const char* group_name);
 	void sector_deactivate_apply();
 	void sector_deactivate_restore();
+	// Sector activation as an input, neutralization N3: the checkpoint chain's
+	// own run of Gameplay_SectorManager (Gameplay_Events / activate Sektor ->
+	// Execute Script) is fed a session-owned script parameter holding no script,
+	// so the chain keeps its shape (Execute Script activates its Out at once on a
+	// null script) but activates nothing; physics_session_on_sector then stamps
+	// the Sector event ahead and physics_session_frame runs the manager at that
+	// tick.  Today's path - activate the moment the ball crosses the line and
+	// report it, the server activating a one-way trip later - put every
+	// mechanism of the sector out of phase for the rest of the session
+	// (docs/lockstep-without-snapshots.md).  The original source goes back at
+	// session end, like the deactivate write's.
+	struct sector_activate_write {
+		CK_ID block = 0;           // the Execute Script block running Gameplay_SectorManager
+		const char* chain = nullptr;   // the group it sits in, for the log
+		int input = 0;             // its "Script" input
+		CK_ID retail_source = 0;   // the parameter it read (direct source)
+		CK_ID retail_shared = 0;   // or the input it shared its source with
+		CK_ID retail_real = 0;     // what GetRealSource() answered before we moved it
+		CK_ID none = 0;            // our script parameter holding no script, destroyed on restore
+		bool applied = false;
+	};
+	sector_activate_write sector_activate_;
+	bool sector_activate_failed_ = false;
+	bool sector_activate_resolve();
+	void sector_activate_apply();
+	void sector_activate_restore();
+	// Stamp `sector`'s activation sector_lead() ticks ahead of this frame's step,
+	// send the event, and remember to run the manager at that tick.  False when
+	// the hold is not in place (no running assigned session, or N3 failed): the
+	// caller then does what it did before.
+	bool physics_session_hold_sector(int sector, const char* why);
+	// Run Gameplay_SectorManager for `sector`, deactivating nothing - what the
+	// server's update_sectors() and the automation's `sector` verb write.
+	void physics_session_run_sector(int sector, uint32_t tick, const char* how);
+	// One count of the mirrored sector pacer, for the step after this point;
+	// true if a held sector may start before that step.
+	bool physics_session_count_sector_pacer();
 	void handle_session_start(bmmo::session_start_msg msg);
 	void handle_session_assign(const bmmo::session_assign_msg& msg);
 	void handle_session_snapshot(bmmo::session_snapshot_msg msg);
@@ -690,7 +727,7 @@ private:
 	void physics_session_apply_resync(const bmmo::session_snapshot_msg& snapshot);
 	float physics_session_ball_force(uint8_t ball_type) const;
 	void physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action);
-	void physics_session_on_sector(int sector);
+	void physics_session_on_sector(int sector, bool checkpoint);
 	void physics_session_on_finish();
 	std::string physics_session_status_text();
 	std::string physics_session_overlay_text();

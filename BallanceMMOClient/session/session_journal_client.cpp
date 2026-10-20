@@ -4,6 +4,7 @@
 #include "session_journal_client.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <format>
@@ -73,9 +74,14 @@ namespace bmmo::session {
         }
         // Room for the one about to be opened.
         prune(directory, kKeepFiles > 0 ? kKeepFiles - 1 : 0);
+        checkpoint_ticks_ = kCheckpointTicks;
+        if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
+            const long value = std::strtol(env, nullptr, 10);
+            if (value >= 1 && value <= static_cast<long>(kCheckpointTicks)) checkpoint_ticks_ = static_cast<uint32_t>(value);
+        }
         journal_header full = header;
         full.kind = journal_kind::client;
-        full.checkpoint_ticks = kCheckpointTicks;
+        full.checkpoint_ticks = checkpoint_ticks_;
         full.utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
         if (!writer_.open(directory / file_name(full.session, full.level, full.own_player), full, max_bytes, error))
@@ -220,7 +226,7 @@ namespace bmmo::session {
     bool client_journal::checkpoint_due(uint32_t tick) const {
         if (!recording()) return false;
         if (have_checkpoint_ && last_checkpoint_tick_ == tick) return false;
-        if (tick % kCheckpointTicks == 0) return true;
+        if (tick % checkpoint_ticks_ == 0) return true;
         if (!checkpoint_pending_) return false;
         // A tick before the last one means the numbering restarted (a resync):
         // that world is new, so it gets its checkpoint.

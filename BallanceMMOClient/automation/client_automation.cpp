@@ -475,6 +475,12 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // frame, which is how the mechanisms are checked for bit-exactness.
         int sector = std::atoi(rest.c_str());
         if (sector < 1) return "error usage: sector <n>";
+        // In a running session the activation is an input (neutralization N3):
+        // stamped ahead, sent, and run here at that tick, like a crossed
+        // checkpoint - the server activates at the same tick.
+        if (physics_session_hold_sector(sector, "automation"))
+            return std::format("ok sector {} held for tick {} (Sector event sent ahead)", sector,
+                               physics_session_.sector_holds.back().second);
         auto* context = m_bml->GetCKContext();
         CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
         CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");

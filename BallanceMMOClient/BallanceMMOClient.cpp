@@ -325,16 +325,19 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
     }
 }
 
-void BallanceMMOClient::on_sector_changed() {
+// `checkpoint`: the change is a crossed checkpoint (OnPostCheckpointReached),
+// the one sector change a physics session treats as an input; the others (a
+// level start, the counter, a map entry) only report.
+void BallanceMMOClient::on_sector_changed(bool checkpoint) {
     if (!update_current_sector()) return;
     max_sector_ = std::max(current_sector_.load(), max_sector_.load());
     if (connected()) send_current_sector();
-    physics_session_on_sector(current_sector_);
+    physics_session_on_sector(current_sector_, checkpoint);
     if (current_level_mode_ != bmmo::level_mode::Highscore) return;
     extra_life_received_ = false;
 }
 
-void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(); }
+void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(true); }
 
 // Design 9.26: the frames right after a map load, until the level's mechanism
 // Sequencers have been seen once (their counters are the file's until the

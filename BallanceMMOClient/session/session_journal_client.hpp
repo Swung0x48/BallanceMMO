@@ -32,6 +32,10 @@ namespace bmmo::session {
         // correction - but not more often than every half second, or a burst of
         // corrections would fill the file with bodies instead of inputs.
         static constexpr uint32_t kCheckpointTicks = 660;
+        // BMMO_JOURNAL_CHECKPOINT_TICKS=<n> overrides the cadence for the next
+        // session, for a test run that compares bodies tick by tick with the
+        // server's journal (the headless client's --checkpoint-ticks).
+        uint32_t checkpoint_ticks() const { return checkpoint_ticks_; }
         static constexpr uint32_t kCheckpointMinGap = 33;
         static constexpr uint64_t kMaxBytes = 256ull << 20;
         static constexpr size_t kKeepFiles = 10;
@@ -117,6 +121,7 @@ namespace bmmo::session {
         uint64_t records_ = 0;
         std::chrono::steady_clock::time_point started_{};
         uint32_t last_checkpoint_tick_ = 0;
+        uint32_t checkpoint_ticks_ = kCheckpointTicks;
         bool have_checkpoint_ = false;
         bool checkpoint_pending_ = false;
     };
