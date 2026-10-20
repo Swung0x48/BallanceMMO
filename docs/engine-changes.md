@@ -540,6 +540,44 @@ which led to the script-side cause (a Sequencer counter that survives the level
 restart). The hooks stay because that class of question ("what did the scripts
 build, and when") comes back with every mechanism.
 
+## 16. One rounding when an object is filed in the overlap grid (physics_RT / IVP)
+
+File: `Source/BuildingBlocks/physics_RT/ivp/ivp_collision/ivp_clustering_longrange.cxx`
+(`ivp_int_floor`, `ivp_int_ceil`).
+
+`IVP_OV_Tree_Manager::calc_optimal_box` files every collision-enabled object
+in a grid of power-of-two boxes, and it computed the box's integer edges with
+`floorf`/`ceilf` on Windows and `floor`/`ceil` under `LINUX` (and on the
+PowerPC and GEKKO ports). The argument is a double; the float variant rounds
+it to float first, so the two disagree whenever that double lies within half a
+float ulp of an integer - a box edge landing on a grid line. The box an object
+is filed under decides which node the overlap tree walks first when the
+object's collision partners are gathered (`collect_collision_partners` walks a
+node's elements, then its children), so two partners at the same distance come
+out in one order on Linux and the other on Windows, and with them the order
+their contacts are created and solved in.
+
+Found by the server journal's replay check. Four players beamed onto the
+mechanism row in one tick (balls recreated at x = 342, 345, 348 and 351, the
+one at 345 touching two neighbours at the same distance) replayed bit for bit
+on Linux and diverged on Windows from the first tick the balls made contact,
+`matched=704 first_divergence=716`, every checkpoint agreeing to 1e-6 m, the
+balls' quaternions apart by 1e-9. Instrumented on both sides down to the
+cause: identical state and identical events up to the revive of the fourth
+ball, then `grow_friction_system` creating its two contacts in opposite
+orders, because the ball's collision partners had been gathered in opposite
+orders. Compiling the Linux replay tool with the Windows variant reproduced
+the Windows result on Linux exactly - the same hash `d6249958608cb54e` at tick
+716, the same partner order - which is the proof this change rests on. It only
+shows when two or more bodies are created in one tick at symmetric spacing
+(join order 0132 in the harness put the fourth ball between two others; 0123
+chained them and never failed), so a session of players respawning together
+at one checkpoint is the case that matters in play.
+
+The Windows retail game is the reference, so the float variant is the one
+every platform keeps. Inert for the simulation on Windows (its own build was
+already this); on Linux it changes only ties of this kind.
+
 ## Bridge notes: restoring a body's leapfrog state (no engine change)
 
 Not a numbered engine change: nothing under `submodule/Ballanced` changed for

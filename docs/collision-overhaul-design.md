@@ -116,7 +116,7 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 范围说明：M2 只把球状态按房间隔离；聊天保持全局（符合协议 1.2）。倒计时/分节等旧广播仍全局，留待后续。物理会话（`mode=Physics`）此阶段返回 `PhysicsUnavailable`，由 M3 实现。
 ## 6. 确定性结论与要求（M1）
 
-同一份客户端录制（`BallanceMMOClient` 命令通道 `record start`，BMRC v2）在下列引擎上回放，2345 帧的物理哈希、刚体姿态、探针位置/速度全部一致，输出录制文件逐字节相同：
+同一份客户端录制（`BallanceMMOClient` 命令通道 `record start`，当时为 BMRC v2；现为 v3，布局相同、哈希为无序折叠，只读 v3）在下列引擎上回放，2345 帧的物理哈希、刚体姿态、探针位置/速度全部一致，输出录制文件逐字节相同：
 
 | 引擎 | 编译器 | 结果 |
 | --- | --- | --- |
@@ -634,7 +634,7 @@ x≈85–115、z≈-122…-148，跟着球走，不再留在第一次的落点�
 `scripts/journal_trace.py`、单元测试 `BallanceMMOServer/tests/session_journal_test.cpp`（14 个用例，
 含 event_tick 的往返与旧格式兼容）。
 
-**格式（version 1，扩展名 `.bmjr`）.** 一律小端、逐字段写，绝不 dump 结构体：写的可能是 Linux x64
+**格式（version 2，扩展名 `.bmjr`；version 1 与 2 的差别只在 TICK 记录的哈希含义——2 是与刚体列表顺序无关的折叠，见 `world_hash.hpp`，旧文件直接拒读）.** 一律小端、逐字段写，绝不 dump 结构体：写的可能是 Linux x64
 服务端，读的是 Windows x64/x86。
 
 ```

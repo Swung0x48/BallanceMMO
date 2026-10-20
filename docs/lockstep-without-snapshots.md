@@ -1230,15 +1230,46 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   in journals and at the anchor exchange, so it is a decision, not a fix in
   passing.
 
-  Confirmed with a temporary probe (not committed) on a fresh run that joined
-  0132: the live server and the replay logged the `m_MovableObjects` order and
-  an order-independent pose hash (a sum of per-core hashes) at ticks 699-702.
-  Through 700 both agree on both. At 701 and 702 the order-independent hash
-  is identical on the two sides (`744eee1924070b01`, `e3fadb147b556967`)
-  while the order is not: the live list holds the four balls as A, C, D, B and
-  the replay as A, D, B, C. Identical state, different list order. What
-  orders the list after the recreations was not chased; the checkpoints say
-  it does not reach the simulation.
+  A temporary probe on a fresh 0132 run showed the live server and the replay
+  with identical state and an identical order-independent hash through tick
+  702 while the `m_MovableObjects` list order already differed at 701 - which
+  looked like a pure hash artefact. It was not.
+
+  **With the fold order-independent, the failure moved to tick 716 and
+  stayed.** Not the hash: the balls' tilt quaternions really differ from 716
+  on, by about 1e-9, with positions bit-identical and every checkpoint inside
+  its tolerance. Probing both sides inside tick 701 (the bridge's event log
+  plus temporary dumps of each ball's hull list and overlap-tree partners):
+  identical creation events, identical insertion-time state, and then the
+  fourth ball's two contacts - with the balls at 348 and 342, both 3 units
+  away - created in opposite orders on the two sides, because its overlap
+  partners had been gathered in opposite orders. And the decisive test: the
+  Linux replay tool replays the Linux journal exactly, and the same tool built
+  with one line of the Windows variant reproduces the Windows divergence on
+  Linux to the hash. The line is `ivp_int_floor`/`ivp_int_ceil` in
+  `ivp_clustering_longrange.cxx`: `floorf` of the box edge on Windows,
+  `floor` of the same double under `LINUX`, which file an object under a
+  different grid box when an edge lands on a grid line. Engine change #16
+  (docs/engine-changes.md) makes every platform use the float variant the
+  retail game uses; the order-independent fold stays, because a hash of a
+  list in list order was never a hash of the world.
+
+  **Fixed: the fold is order-independent now** (`world_hash.hpp`: one FNV hash
+  per core, multiplied by an odd constant and summed, the way the surface
+  signature always was). Every hash value changed with it, and nothing reads
+  the old ones: the journal format is version 2, the tick-record format
+  version 3, the bridge API version 12, and a physics session carries a
+  protocol version (`session::PHYSICS_PROTOCOL_VERSION`, 2) in `SessionStart`
+  and `SessionReady` that both sides require to match. The server's minimum
+  client version moved with it, so a client from before this cannot log in at
+  all. Deliberately no compatibility path: an old and a new build must never
+  share a session or compare journals.
+
+  Verified on the real path: old journals are refused by the replay tool and
+  the Python reader; a pre-change client gets "Outdated client (client:
+  4.0.0-alpha1; minimum: 4.0.0-alpha2)" at login; a new client on a
+  pre-change server logs "SessionStart could not be decoded: the server runs
+  a different physics protocol" and leaves.
 
 * The prop ball `P_Ball_Paper_MF` disappears from one side's body set after
   tick ~1 270 and stays missing for the rest of the session. A real
