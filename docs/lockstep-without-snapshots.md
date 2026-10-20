@@ -1072,8 +1072,9 @@ traps).
 * **The sector union across players.** A client still runs only the sectors
   *it* enters. The server runs every player's, so a trailing player's world
   lacks the leader's sector until it crosses too (see "Not covered").
-* **Rollbacks while a new sector's bodies are untracked.** See "Still open":
-  measured at 0.2-0.6 m, and the next thing to fix.
+* **A rollback across a sector's setup.** See "Still open": measured at
+  0.2-0.7 m when the anchor falls in the fifteen ticks after an activation,
+  and the next thing to fix.
 
 ## Checked on the real networked path, and two things found there
 
@@ -1179,18 +1180,35 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
 
 ## Still open
 
-* **A new sector's bodies are untracked until the server's dictionary
-  arrives**, and a rollback in that window leaves them live and steps them
-  again. The client records a mechanism only once `mechanism_registry` has
-  resolved it, and the registry learns names only from full snapshots, which
-  reach the client an input delay plus a trip after the birth. Until then a
-  restore has no record of the bodies ("no opinion"), so the replay steps them
-  another `depth` times. One forced rewind across the sector-2 activation
-  (`--force-rollback 880:40`, solo, otherwise exact) put every sector-2 body
-  0.2-0.6 m off on the next tick, caught only by the next full snapshot. The
-  item below about the dictionary is the cause; a client that runs a sector
-  activation itself knows those bodies before the server can name them, so it
-  can record them from their birth.
+* **A rewind cannot cross a new sector's setup.** One forced rewind across the
+  sector-2 activation (solo, otherwise exact; activation at 855, bodies born
+  at 859-860) put the new sector's bodies 0.2-0.7 m off. `--trace-plan` shows
+  every one of them restored by the engine's birth branch, from a record made
+  at its birth: the headless client records every movable body, so they were
+  never untracked. Moving the anchor locates it:
+
+  | anchor (rewind at 880) | how the new bodies were restored | Paper ball | worst plate |
+  |---|---|---|---|
+  | 840, 858 | birth branch (parked, re-posed at 859/860) | 0.63 m | 0.26-0.62 m |
+  | 861 | our own records, no birth involved | 0.69 m | 0.40 m |
+  | 870 | our own records | **0.0000 m** | ~0.001 m |
+
+  A plain restore at 861 is as bad as the birth branch, and one at 870 is the
+  usual contact residual. So it is not the birth handling but the window after
+  the activation: for about fifteen ticks the manager's walk and the module
+  scripts are still setting the sector up (its hinges among it), and a
+  physics-only replay cannot redo that - the replay wall above, concentrated
+  in the frames after an activation. Freezing the parked newborns, or
+  writing back their birth tick's queued impulses at the re-pose, changed
+  nothing (measured, reverted). A rewind whose anchor falls in that window
+  is the next thing to solve, for example by keeping the setup's bodies on
+  their live trajectory through such a replay.
+* **The retail client still records only what the registry has resolved.**
+  The fix that made the headless client record its whole movable world
+  (fd74a59) never reached `physics_session_client.cpp`, which still builds
+  the tracked set from `mechanism_tracking.tracked_entities()`. On the retail
+  client a body the server has not named yet - a new sector's, until the next
+  full snapshot - is stepped by every replay and restored by none.
 * After the same forced rewinds, `P_Modul_26_Sack` and `P_Modul_08_Schaukel`
   diverged by 0.95 m and 1.78 m on rewinds that crossed no activation. Those
   are the script-driven mechanisms the replay does not run (see "So the

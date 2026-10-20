@@ -478,6 +478,12 @@ namespace bmmo::session {
                     // kept there through T+1..birth-1 (below) and released into
                     // the replay at its birth tick.
                     item.state = birth->bodies.find(entity)->second;
+                    // Measured (docs/lockstep-without-snapshots.md, "a rewind
+                    // cannot cross a new sector's setup"): parking it frozen
+                    // instead of awake, or writing its birth tick's queued
+                    // impulses back with the re-pose, changes nothing - what
+                    // a replay across a birth gets wrong is the setup the
+                    // scripts do in the frames after it.
                     item.mode = wake_mode::wake;
                     item.repose_tick = birth->tick;
                     item.force_recheck = true;
@@ -508,6 +514,25 @@ namespace bmmo::session {
                     continue;   // no row, no record: no opinion
                 }
                 plan[entity] = item;
+            }
+            if (trace_plan_ && world.log && plan_traces_ < 16) {
+                ++plan_traces_;
+                int rows_used = 0, records = 0, births = 0;
+                std::string born;
+                for (const auto& [entity, item]: plan) {
+                    if (item.repose_tick) {
+                        ++births;
+                        if (births <= 12) born += " " + entity + "@" + std::to_string(item.repose_tick);
+                    } else if (item.from_row) {
+                        ++rows_used;
+                    } else {
+                        ++records;
+                    }
+                }
+                world.log("restore plan at tick " + std::to_string(anchor) + " (now " + std::to_string(current_tick)
+                          + ", " + reason + "): " + std::to_string(records) + " from our records, "
+                          + std::to_string(rows_used) + " from rows, " + std::to_string(births)
+                          + " born in the window" + (born.empty() ? "" : ":" + born));
             }
             // The clock first: the beam below stamps every restored core with
             // the environment's time_of_last_psi, so the environment has to be
@@ -709,6 +734,8 @@ namespace bmmo::session {
         void set_restore_impulses(bool enable) { restore_impulses_ = enable; }
         void set_restore_quaternions(bool enable) { restore_quaternions_ = enable; }
         void set_restore_clock(bool enable) { restore_clock_ = enable; }
+        // Log which branch every body of a restore took (capped at 16).
+        void set_trace_plan(bool enable) { trace_plan_ = enable; }
 
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
@@ -906,5 +933,7 @@ namespace bmmo::session {
         bool restore_impulses_ = true;
         bool restore_quaternions_ = true;
         bool restore_clock_ = true;
+        bool trace_plan_ = false;
+        uint32_t plan_traces_ = 0;
     };
 }

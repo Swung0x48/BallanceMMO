@@ -156,6 +156,8 @@ namespace {
         // appeared in four clock-on networked runs against none in eight
         // without.  Not proven to be the cause, not worth the risk for no gain.
         bool restore_clock = false;
+        // --trace-plan: log which branch every body of a restore took.
+        bool trace_plan = false;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -243,6 +245,7 @@ namespace {
             else if (arg == "--no-restore-impulses") out.restore_impulses = false;
             else if (arg == "--no-restore-quats") out.restore_quaternions = false;
             else if (arg == "--restore-clock") out.restore_clock = true;
+            else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -749,6 +752,7 @@ namespace {
             rollback_.set_restore_impulses(args_.restore_impulses);
             rollback_.set_restore_quaternions(args_.restore_quaternions);
             rollback_.set_restore_clock(args_.restore_clock);
+            rollback_.set_trace_plan(args_.trace_plan);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
