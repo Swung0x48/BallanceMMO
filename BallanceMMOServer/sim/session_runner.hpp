@@ -67,6 +67,9 @@ namespace bmmo::sim {
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
         float spawn_position[3] = {};
         float spawn_rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        // Every resetpoint of the level (physics_world::resetpoints): a
+        // respawn after a checkpoint is at one of the later ones.
+        std::vector<VxVector> resetpoints;
         // The level's Physicalize_GameBall rows: the reference the event
         // validation compares a reported ball recipe with (design 9.4).
         std::vector<physics_world::ball_row> ball_rows;

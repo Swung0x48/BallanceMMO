@@ -945,6 +945,7 @@ namespace {
                 if (!trouble.empty())
                     logf("the retail sector resets were NOT neutralized (%s): a death will reset this client's sector", trouble.c_str());
             }
+            resetpoint_seen_ = level_resetpoint();
             {
                 std::string hold_error;
                 checkpoint_held_ = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
@@ -1127,6 +1128,18 @@ namespace {
             CKDataArray* level = engine_->data_array("CurrentLevel");
             if (!level) return nullptr;
             return CK3dEntity::Cast(level->GetElementObject(0, 1));
+        }
+
+        // The level's current resetpoint, CurrentLevel[0,3] - where the retail
+        // death respawns the ball.  Only Gameplay_Events moves it: on a
+        // "Checkpoint reached" from the armed PC_TwoFlames flame, which fires
+        // when THIS world's Ball_Pos_Frame (the own ball) comes within 6.5 of
+        // the flame.  A sector union pass never touches it.
+        VxVector level_resetpoint() const {
+            VxMatrix reset;
+            CKDataArray* level = engine_->data_array("CurrentLevel");
+            if (!level || !level->GetElementValue(0, 3, &reset)) return VxVector(0.0f, 0.0f, 0.0f);
+            return VxVector(reset[3][0], reset[3][1], reset[3][2]);
         }
 
         // Arms own_physicalize_callback for the live tick `serial`, which
@@ -1535,9 +1548,25 @@ namespace {
             // `tick`, so the earliest the manager can run is before tick + 1.
             // Without the hold (a graph the hold did not understand) the chain
             // already activated it: report it after the fact, out of lockstep.
+            //
+            // A moved resetpoint is a crossing too, the own ball's alone (only
+            // the checkpoint chain moves it, in the frame it writes the cell).
+            // It is what catches a trailing ball: a peer's crossing has the
+            // union pass write the same sector into the cell first, so the
+            // chain's own write changes nothing there - the retail client
+            // reports that crossing from OnPostCheckpointReached.
+            const VxVector reset = level_resetpoint();
+            const bool resetpoint_moved = reset != resetpoint_seen_;
+            if (resetpoint_moved) {
+                resetpoint_seen_ = reset;
+                VxVector at(0.0f, 0.0f, 0.0f);
+                if (CK3dEntity* ball = current_ball()) ball->GetPosition(&at);
+                logf("resetpoint now (%.2f,%.2f,%.2f) at tick %u, own ball at (%.2f,%.2f,%.2f)",
+                     reset.x, reset.y, reset.z, tick, at.x, at.y, at.z);
+            }
             if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
                 int sector = 0;
-                if (parameters->GetElementValue(0, 1, &sector) && sector != sector_cell_) {
+                if (parameters->GetElementValue(0, 1, &sector) && (sector != sector_cell_ || resetpoint_moved)) {
                     sector_cell_ = sector;
                     if (sector > 0 && !sectors_requested_.count(sector)) {
                         if (checkpoint_held_) {
@@ -2955,6 +2984,7 @@ namespace {
         uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
         std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
+        VxVector resetpoint_seen_;           // CurrentLevel[0,3]'s position as last seen: a move is an own crossing
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
         CK_ID sector_manager_id_ = 0;
         bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)

@@ -183,6 +183,14 @@ namespace bmmo::sim {
             if (CKObject* ball = current_level->GetElementObject(0, 1)) retail_ball_ = ball->GetID();
             current_level->GetElementValue(0, 3, &spawn_matrix_);
         }
+        resetpoints_.clear();
+        if (CKDataArray* table = engine_->data_array("ResetPoints")) {
+            VxMatrix row_matrix;
+            for (int row = 0; row < table->GetRowCount(); ++row)
+                if (table->GetElementValue(row, 0, &row_matrix))
+                    resetpoints_.emplace_back(row_matrix[3][0], row_matrix[3][1], row_matrix[3][2]);
+        }
+        if (resetpoints_.empty()) resetpoints_.emplace_back(spawn_matrix_[3][0], spawn_matrix_[3][1], spawn_matrix_[3][2]);
         if (!retail_ball_) {
             error = "CurrentLevel[0,1] has no active ball";
             return false;

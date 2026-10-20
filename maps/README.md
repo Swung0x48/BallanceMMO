@@ -209,6 +209,43 @@ respawn on the server, on the ball's own client and on its peers, at x = -20,
 each reported at the resetpoint to the bit. The SimTool roll-outs above remain
 the controlled measurement of the plate.
 
+### Checkpoints are taken on the lane centre
+
+A ball that drives the whole arena and falls off the far end does not
+necessarily respawn at x = 700: in the 4-player drive run two of the four
+respawn at the level's first resetpoint (x = -20). That is the retail rule,
+not a session fault. A checkpoint is taken when the armed `PC_TwoFlames` flame
+fires - a `TT Scaleable Proximity` of 6.5 (X, Y and Z) between
+`Ball_Pos_Frame`, i.e. the world's own ball, and the flame, which stands on
+the lane centre (y = 15). Only then does `Gameplay_Events` copy row k of the
+`ResetPoints` array into `CurrentLevel[0,3]` (the respawn point), write the
+sector cell and arm the next flame from the `Checkpoints` array (the two flame
+objects alternate, `PC_TwoFlames_MF` / `_MF001` / `_MF`). The drive does not
+steer, and the tick-212 kicks plus the collisions at the start fan the balls
+out across the floor, where each holds its line for the whole arena - the
+offset from the lane centre at x = 220, 460 and 700, by join order:
+
+| run | client0 | client1 | client2 | client3 |
+| --- | --- | --- | --- | --- |
+| harness spawns kicked (93a6938 and later) | +3.0, taken | -4.8, taken | +8.6, missed | -12.5, missed |
+| the death-zone run of the table below | +2.6, taken | +1.2, taken | +6.31 taken, then +6.41 missed twice | -10.3, missed |
+
+So the earlier run's "700, 700, 220, -20" was the last checkpoint each ball
+had *taken*, with the 220 ball right on the edge of the radius. The sector
+union plays no part in it: `Gameplay_SectorManager`, which the union runs,
+never moves a flame or the resetpoint, and client0 took every checkpoint
+60-160 ticks after a peer's Sector event had already started the next sector
+in its world, and still respawned at 700. A retail client is the same: its own
+ball arms its own chain. The headless client logs every move of the
+resetpoint (`resetpoint now (x,y,z) at tick T, own ball at ...`) and stamps
+that crossing's sector like a real client's `OnPostCheckpointReached` does,
+also when a peer's pass already wrote that sector into the cell (it used to
+miss those, so only the leading ball ever reported a sector). The server
+accepted every one of these respawns before as well, but flagged each one
+after a checkpoint as a "suspicious event", because it checked a respawn
+against the level's first resetpoint only; it now checks every row of
+`ResetPoints`.
+
 ## Rebuilding the map
 
 With Blender running and `bbp_ng` enabled (its **Ballance texture folder**
@@ -480,7 +517,7 @@ server's journal replayed bit-exact with `hard=0`, `resyncs=0`, `starved=0`.
 | map | at the start | further on | replay | mechanism bodies touched |
 | --- | --- | --- | --- | --- |
 | death zone only, old start | 2 balls went over the back edge, died 107-108 ticks later and respawned; one went over again, died at tick 710 and respawned again | the others drove off the far end, died and respawned | 2799/2799 | 12 |
-| as committed (twice: a copy of the game directory, then the installed one) | no ball left the plate | all 4 drove off the far end (x ~ 970) 33-36 s in, died 104-106 ticks after leaving the floor and respawned 204 ticks later at the resetpoint each had last crossed (x = 700, 700, 220, -20) | 3033/3033, 2847/2847 | 25, 26 |
+| as committed (twice: a copy of the game directory, then the installed one) | no ball left the plate | all 4 drove off the far end (x ~ 970) 33-36 s in, died 104-106 ticks after leaving the floor and respawned 204 ticks later at the resetpoint of the last checkpoint each had taken (x = 700, 700, 220, -20: the last two drove past flames outside their 6.5 radius, see "Checkpoints are taken on the lane centre") | 3033/3033, 2847/2847 | 25, 26 |
 | as committed, `--checkpoint-ticks 2` | the same | the same, checked every 2 ticks: all 8 lives, no ball under the floor without a death | 2832/2832, 1416 checkpoints | 25 |
 
 On the map before either fix, a 4-player drive run that went on for 84 s had

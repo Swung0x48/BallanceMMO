@@ -152,4 +152,4 @@ physics:
 - 服务端需要一份完整的游戏数据目录（`physics.game_root`，含 `base.cmo`、`3D Entities`、`Textures`、`Sounds` 等），Windows 与 Linux 都可以；一个物理房间的世界大约占一个核心，`maximum_physics_rooms` 默认 1。
 - 客户端需要与服务端同一引擎提交构建的 physics_RT.dll 与 Mod。`SessionReady` 上报 DLL 的 sha256 与构建 id（`ballanced-<引擎提交>+bmmo-<仓库提交>`，每次构建前重新生成）；服务端只比引擎那一半，不同则结束会话并写明两边版本。无 git 可读的构建报 `unknown`，不参与比较（可用 `-DBMMO_BUILD_ID=` 指定）。
 - 安装目标：`BallanceMMOServer`、`BallanceMMOSimTool`（离线回放/诊断）、`BallanceMMOSessionClient`（无头会话客户端，用于联调与压测）。
-- 服务端校验客户端事件（设计 9.4）：每玩家每秒超过 20 条事件的部分直接丢弃；球型超范围或配方数值不合理的 Physicalize 直接拒绝；位姿远离复活点 2.5 m 且远离上次位置 5 m 的 Physicalize、非单调的 Sector 只记日志并计数（控制台 `sessions` 显示 flagged/rejected）。
+- 服务端校验客户端事件（设计 9.4）：每玩家每秒超过 20 条事件的部分直接丢弃；球型超范围或配方数值不合理的 Physicalize 直接拒绝；位姿远离关卡每个复活点（`ResetPoints` 的每一行）2.5 m 且远离上次位置 5 m 的 Physicalize、非单调的 Sector 只记日志并计数（控制台 `sessions` 显示 flagged/rejected）。
