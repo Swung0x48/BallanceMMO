@@ -67,6 +67,17 @@ namespace bmmo::session {
         // rebuild its contact pairs (the plain beam keeps the old ones).
         std::function<bool(const std::string& entity, const bmmo_physics_body_state& state,
                            wake_mode mode, bool recheck)> set_body;
+        // The core's queued impulses (bridge API v11).  Optional: a caller
+        // that does not provide them gets exactly the old behaviour, which is
+        // a restore that drops whatever IVP had queued for the next PSI.  With
+        // them, a replay restore puts the queue back - worth 1.6-3.6 cm per
+        // rewind on a body in contact, see bmmo_physics_core_extra.
+        //
+        // set_body_extra runs AFTER set_body for the same entity, because
+        // set_body zeroes the queue by design 8.4 and nothing in it touches the
+        // queue after that point.
+        std::function<bool(const std::string& entity, bmmo_physics_core_extra& out)> get_body_extra;
+        std::function<bool(const std::string& entity, const bmmo_physics_core_extra& state)> set_body_extra;
         std::function<bool(const std::string& entity, bmmo_physics_nav_state& out)> get_nav;
         std::function<bool(const std::string& entity, const bmmo_physics_nav_state& state)> set_nav;
         // explicit input for the next physics step of a navigated ball
@@ -171,6 +182,7 @@ namespace bmmo::session {
     struct rollback_stats {
         uint64_t snapshots = 0, matched = 0, mismatched = 0, rollbacks = 0, resim_ticks = 0;
         uint64_t rewinds = 0;          // re-anchors the caller asked for (rewind_to), not snapshot disagreements
+        uint64_t impulses_restored = 0;  // body writes that put a recorded queued impulse back (v11)
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
@@ -438,6 +450,10 @@ namespace bmmo::session {
             //    otherwise from its own record - and a body we have no opinion
             //    about is left alone rather than guessed at.
             const rollback_tracked tracked = at->tracked;
+            const auto extra_at = [&](const std::string& entity) -> const bmmo_physics_core_extra* {
+                const auto it = at->extras.find(entity);
+                return it == at->extras.end() ? nullptr : &it->second;
+            };
             std::map<std::string, restore> plan;
             for (const auto& entity: restore_candidates(anchor, rows)) {
                 const auto row = rows.find(entity);
@@ -468,6 +484,18 @@ namespace bmmo::session {
                     // whether it sleeps.
                     item.state = *recorded;
                     item.mode = wake_mode::keep;
+                    // ...and with the impulses IVP had queued at T.  Only on
+                    // this branch: a row is an authoritative pose from the
+                    // server, which carries no queue, and the queue we happen
+                    // to hold locally does not belong to the state being
+                    // written (the zeroing is right for that case - it IS the
+                    // hard set design 8.4 is about).  A body born inside the
+                    // window is parked rather than restored, so its queue is
+                    // not meaningful either.
+                    if (const bmmo_physics_core_extra* extra = extra_at(entity)) {
+                        item.extra = *extra;
+                        item.have_extra = true;
+                    }
                 } else {
                     continue;   // no row, no record: no opinion
                 }
@@ -490,6 +518,11 @@ namespace bmmo::session {
                 const bool recheck = recheck_on_restore_
                                    && (item.force_recheck || write_moves_body(live, item.state));
                 world.set_body(entity, item.state, item.mode, recheck);
+                // After the pose write, which zeroed the queue.
+                if (item.have_extra && world.set_body_extra && restore_impulses_) {
+                    world.set_body_extra(entity, item.extra);
+                    ++stats_.impulses_restored;
+                }
                 // What we wrote from a row is the authoritative state of T now:
                 // without this the next snapshot of T compares against the
                 // prediction we just discarded and rolls back again.
@@ -642,6 +675,10 @@ namespace bmmo::session {
 
         // Diagnostic only (see the recheck comment in restore_and_replay).
         void set_recheck_on_restore(bool enable) { recheck_on_restore_ = enable; }
+        // Off reproduces the pre-v11 restore, for an A/B in one binary - which
+        // is the only honest way to measure this, because two builds' plain
+        // runs disagree by more than the effect does.
+        void set_restore_impulses(bool enable) { restore_impulses_ = enable; }
 
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
@@ -686,6 +723,11 @@ namespace bmmo::session {
             uint32_t tick = 0;
             rollback_tracked tracked;
             std::map<std::string, bmmo_physics_body_state> bodies;
+            // Parallel to `bodies`, and deliberately a separate map: a body we
+            // recorded OURSELVES has a queued-impulse state, a body an
+            // authoritative snapshot row describes does not, and the absence
+            // is the information that tells the restore which it is holding.
+            std::map<std::string, bmmo_physics_core_extra> extras;
             std::map<std::string, bmmo_physics_nav_state> navs;
             std::map<std::string, input_frame> inputs;   // applied at this tick, per navigated ball
         };
@@ -698,6 +740,10 @@ namespace bmmo::session {
             bool from_row = false;
             bool force_recheck = false;
             uint32_t repose_tick = 0;    // 0: none - re-pose at this replayed tick
+            // Only set when the state came from our OWN record; see the
+            // recorded branch of the planning loop.
+            bmmo_physics_core_extra extra{};
+            bool have_extra = false;
         };
 
         static uint32_t generation_in(const tick_state& state, const std::string& entity) {
@@ -768,7 +814,10 @@ namespace bmmo::session {
                 if (world.get_body(entity, body)) state.bodies[entity] = body;
                 // A tracked name the world no longer knows must not survive an
                 // amendment: a later rollback would write the body back.
-                else state.bodies.erase(entity);
+                else { state.bodies.erase(entity); state.extras.erase(entity); return; }
+                bmmo_physics_core_extra extra{};
+                if (world.get_body_extra && world.get_body_extra(entity, extra)) state.extras[entity] = extra;
+                else state.extras.erase(entity);
             };
             grab(state.tracked.own_entity);
             for (const auto& remote: state.tracked.remote_entities) grab(remote);
@@ -817,5 +866,6 @@ namespace bmmo::session {
         uint32_t resim_traces_ = 0;    // re-simulation trace lines logged (capped)
         bool verbose_ = false;
         bool recheck_on_restore_ = true;
+        bool restore_impulses_ = true;
     };
 }

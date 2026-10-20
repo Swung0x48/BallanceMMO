@@ -282,6 +282,45 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::get_core_extra(const char* entity_name, bmmo_physics_core_extra& out,
+                                      std::string& error) const {
+        error.clear();
+        out = bmmo_physics_core_extra{};
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->get_core_extra) {
+            error = "the physics_RT bridge lacks get_core_extra";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->get_core_extra(manager_, entity_name, &out, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::set_core_extra(const char* entity_name, const bmmo_physics_core_extra& in,
+                                      std::string& error) const {
+        error.clear();
+        if (!available()) {
+            error = "physics bridge is not initialized";
+            return false;
+        }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_core_extra) {
+            error = "the physics_RT bridge lacks set_core_extra";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_core_extra(manager_, entity_name, &in, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
     bool physics_view::physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
                                    const char* collision_group, std::string& error) const {
         error.clear();

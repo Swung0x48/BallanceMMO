@@ -61,6 +61,14 @@ namespace bmmo::physics {
         bool set_body_state(const char* entity_name, const double position[3],
                             const double rotation[4], const float linear[3], const float angular[3],
                             bmmo::physics::wake_mode mode, bool recheck, std::string& error) const;
+        // ---- bridge API v11 ----
+        // The core's queued impulses, which a body state does not carry and a
+        // rollback restore needs: set_body_state zeroes them (design 8.4, right
+        // for a hard set), so a replay restore calls set_core_extra straight
+        // after the pose write to put the recorded queue back.
+        bool get_core_extra(const char* entity_name, bmmo_physics_core_extra& out, std::string& error) const;
+        bool set_core_extra(const char* entity_name, const bmmo_physics_core_extra& in, std::string& error) const;
+
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
                          const char* collision_group, std::string& error) const;

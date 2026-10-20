@@ -32,6 +32,8 @@ namespace {
         double position[3] = {};
         float linear[3] = {};
         bool simulated = true;
+        // The queue IVP would carry into the next PSI (bridge API v11).
+        float speed_change[3] = {};
     };
 
     const char* mode_name(wake_mode mode) {
@@ -72,6 +74,22 @@ namespace {
                 }
                 if (mode == wake_mode::wake) body.simulated = true;
                 else if (mode == wake_mode::freeze) body.simulated = false;
+                // Design 8.4, which is the behaviour the v11 restore works
+                // around: a pose write drops whatever was queued.
+                for (int k = 0; k < 3; ++k) body.speed_change[k] = 0.0f;
+                return true;
+            };
+            w.get_body_extra = [this](const std::string& entity, bmmo_physics_core_extra& out) {
+                auto it = bodies.find(entity);
+                if (it == bodies.end()) return false;
+                out = {};
+                for (int k = 0; k < 3; ++k) out.speed_change[k] = it->second.speed_change[k];
+                return true;
+            };
+            w.set_body_extra = [this](const std::string& entity, const bmmo_physics_core_extra& state) {
+                calls.push_back("set_body_extra " + entity + " dv=" + std::to_string(state.speed_change[0]));
+                auto& body = bodies[entity];
+                for (int k = 0; k < 3; ++k) body.speed_change[k] = state.speed_change[k];
                 return true;
             };
             w.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
@@ -1102,6 +1120,105 @@ TEST(RollbackEngine, OnlyAWriteThatMovesTheBodyAsksForAContactRecheck) {
 // 5 mm of pose error is prediction noise for either - the ball pair used to be
 // 50x tighter, which rolled the session back on that noise - and both trip
 // once the error passes the tolerance.
+// A replay restore puts back the impulses IVP had queued for the next PSI
+// (bridge API v11).  The pose write zeroes them by design 8.4 - right for a
+// hard set, and the whole reason a rollback used to lose the world: the impact
+// solver parks a delayed push on the heavier core, so a plate struck by a ball
+// carries one, and dropping it costs centimetres per rewind.
+TEST(RollbackEngine, ARewindRestoresTheQueuedImpulseOfABodyItRecordedItself) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Plate"].position[0] = 40.0;
+    world.bodies["Plate"].speed_change[0] = 1.212f;   // a push IVP is holding
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Plate"};
+    record_ticks(world, engine, tracked, 1, 4);
+    world.calls.clear();
+
+    // A rewind with no snapshot behind it: every body is restored from our own
+    // record, so every body's queue is ours to put back.
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_body_extra Plate"), 1);
+    EXPECT_FLOAT_EQ(world.bodies["Plate"].speed_change[0], 1.212f);
+    EXPECT_EQ(engine.stats().impulses_restored, 2u);   // Own and Plate
+}
+
+// ...and does NOT put one back on a body an authoritative row describes.  A row
+// is a pose the server reported; it carries no queue, and the queue we happen
+// to hold locally belongs to the state being replaced, not to the one being
+// written.  That write IS the hard set design 8.4 is about.
+TEST(RollbackEngine, ARowRestoreLeavesTheQueueZeroedBecauseItIsAHardSet) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Plate"].position[0] = 40.0;
+    world.bodies["Plate"].speed_change[0] = 1.212f;
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Plate"};
+    record_ticks(world, engine, tracked, 1, 4);
+    world.calls.clear();
+
+    fake_body server_own;
+    server_own.position[0] = 0.5;                      // the ball breaches
+    const auto snapshot = snapshot_of(2, {ball_body(1, server_own),
+                                          mechanism_row("Plate", 41.0, 0.0f, true)});
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 4, entity_of_named, no_input));
+    // The plate came from a row, so no queue is written for it and the pose
+    // write's zeroing stands.
+    EXPECT_EQ(world.count("set_body_extra Plate"), 0);
+    EXPECT_FLOAT_EQ(world.bodies["Plate"].speed_change[0], 0.0f);
+}
+
+// The switch that makes the measurement honest: one binary, both behaviours, so
+// an A/B never compares two builds (whose plain runs disagree by more than this
+// effect is worth).
+TEST(RollbackEngine, TheImpulseRestoreCanBeTurnedOffToReproduceTheOldBehaviour) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Plate"].position[0] = 40.0;
+    world.bodies["Plate"].speed_change[0] = 1.212f;
+    rollback_engine engine;
+    engine.set_restore_impulses(false);
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Plate"};
+    record_ticks(world, engine, tracked, 1, 4);
+    world.calls.clear();
+
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_body_extra"), 0);
+    EXPECT_FLOAT_EQ(world.bodies["Plate"].speed_change[0], 0.0f);
+    EXPECT_EQ(engine.stats().impulses_restored, 0u);
+}
+
+// A caller whose world predates v11 provides neither callback, and must get
+// exactly the old behaviour rather than a crash.
+TEST(RollbackEngine, AWorldWithoutTheV11CallbacksStillRewinds) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Plate"].position[0] = 40.0;
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.mechanisms = {"Plate"};
+    auto adapter = world.adapter();
+    adapter.get_body_extra = nullptr;
+    adapter.set_body_extra = nullptr;
+    for (uint32_t tick = 1; tick <= 4; ++tick) {
+        engine.record(adapter, tick, tracked, {});
+        adapter.step();
+    }
+    world.calls.clear();
+
+    EXPECT_TRUE(engine.rewind_to(adapter, 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_body_extra"), 0);
+    EXPECT_EQ(engine.stats().impulses_restored, 0u);
+    EXPECT_GT(world.count("set_body Plate"), 0);
+}
+
 TEST(RollbackEngine, MechanismAndBallRowsShareTheSameTolerance) {
     fake_world world;
     world.bodies["Wippe"];

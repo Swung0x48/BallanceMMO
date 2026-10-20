@@ -2470,6 +2470,18 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         physics_session_.last_error = error;
         return false;
     };
+    // Design 9.29 / bridge API v11: the queued impulses a restore used to drop.
+    // physics_view requires api_version == BMMO_PHYSICS_API_VERSION exactly, so
+    // the mod and the physics_RT bridge always ship together; there is no
+    // version in which these are absent at run time.
+    world.get_body_extra = [this](const std::string& entity, bmmo_physics_core_extra& out) {
+        std::string error;
+        return physics_view_.get_core_extra(entity.c_str(), out, error);
+    };
+    world.set_body_extra = [this](const std::string& entity, const bmmo_physics_core_extra& state) {
+        std::string error;
+        return physics_view_.set_core_extra(entity.c_str(), state, error);
+    };
     world.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
         std::string error;
         return physics_view_.navigation_get_state(entity.c_str(), out, error);

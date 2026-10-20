@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 10u  /* v10: sleep-preserving, contact-rechecking body writes */
+#define BMMO_PHYSICS_API_VERSION 11u  /* v11: the core's queued impulses, for a rollback restore */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -65,6 +65,27 @@ typedef struct bmmo_physics_body_state {
     float linear[3];                   /* core->speed, world space [m/s] */
     float angular[3];                  /* core->rot_speed, core space [rad/s] */
 } bmmo_physics_body_state;
+
+/* The part of IVP's integrator state that bmmo_physics_body_state does not
+ * carry, because the wire and the renderer do not need it: the impulses IVP has
+ * queued for the next PSI.
+ *
+ * A body state is a DESCRIPTION of a body - an interpolated pose and a
+ * velocity.  This is the integrator's own working state, and a rollback restore
+ * needs it: the impact solver runs in mindist events BETWEEN PSIs and
+ * delay_decision parks the push on the core with the larger virt_mass, so when
+ * a ball hits a plate it is the PLATE that carries a queued impulse into the
+ * next PSI.  set_body_state zeroes that queue by design 8.4, which is right for
+ * a hard set and wrong for a replay restore - a measured 1.6-3.6 cm per rewind
+ * on a hinged plate, against a floor of zero (docs/lockstep-without-snapshots.md).
+ *
+ * This never goes on the wire.  It is a LOCAL savestate, which is what GGPO's
+ * save_game_state always was, and it is deliberately a separate struct so that
+ * the shared bmmo_physics_body_state ABI does not grow. */
+typedef struct bmmo_physics_core_extra {
+    float speed_change[3];     /* core->speed_change, world space [m/s] */
+    float rot_speed_change[3]; /* core->rot_speed_change, core space [rad/s] */
+} bmmo_physics_core_extra;
 
 /* The full parameter set of the retail Physicalize block, which is also what
  * BMLPlus reports through IMod::OnPhysicalize.  Meshes and the collision
@@ -318,6 +339,24 @@ typedef struct bmmo_physics_api_v2 {
                                  const double position[3], const double rotation[4],
                                  const float linear[3], const float angular[3],
                                  int32_t wake_mode, int32_t recheck, char* error, uint32_t error_size);
+
+    /* ---- v11: the core's queued impulses, for a rollback restore ---- */
+
+    /* Read / write core->speed_change and rot_speed_change.  See
+     * bmmo_physics_core_extra for why a rollback needs them.
+     *
+     * set_core_extra is meant to run AFTER a set_body_state_ex that restored
+     * the pose: that call zeroes the queue (design 8.4) and neither
+     * ensure_in_simulation nor disable_simulation touches it afterwards, so
+     * writing the recorded queue last puts the body back exactly as it was.
+     * Writing a queue onto a body that is being FROZEN is incoherent and no
+     * caller should do it - a frozen body's queue is never restored, because a
+     * restore that freezes is a hard set from an authoritative row, which has
+     * no queue to restore in the first place. */
+    int32_t (*get_core_extra)(void* ipion_manager, const char* entity_name,
+                              bmmo_physics_core_extra* out, char* error, uint32_t error_size);
+    int32_t (*set_core_extra)(void* ipion_manager, const char* entity_name,
+                              const bmmo_physics_core_extra* in, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

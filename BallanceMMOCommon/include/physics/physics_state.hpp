@@ -31,10 +31,17 @@ namespace bmmo::physics {
     bool reset_session_clock(CKIpionManager* physics, int seed, std::string& error);
     // One physics step outside the frame loop (design 9.6 rollback): the
     // manager's Simulate() with the given behaviour delta in milliseconds.
-    // Diagnostic: stop write_body_state zeroing core->speed_change /
-    // rot_speed_change.  At a depth-0 rewind this is exactly equivalent to
-    // restoring them, so it measures what the zeroing costs a rollback.
-    void set_keep_queued_impulses(bool enable);
+    // ---- bridge API v11: the core's queued impulses ----
+    //
+    // What set_body_state throws away and a rollback restore needs back.  See
+    // bmmo_physics_core_extra in physics_rt_api.h for the mechanism and the
+    // measurement; set_core_extra is meant to run immediately after the pose
+    // write, which is where the zeroing has already happened and nothing later
+    // in that call touches the queue again.
+    bool get_core_extra(CKIpionManager* physics, const char* entity_name,
+                        bmmo_physics_core_extra& out, std::string& error);
+    bool set_core_extra(CKIpionManager* physics, const char* entity_name,
+                        const bmmo_physics_core_extra& in, std::string& error);
 
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
     // Engine change #6: while enabled, the retail Unphysicalize block keeps

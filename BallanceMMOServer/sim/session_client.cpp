@@ -134,8 +134,11 @@ namespace {
         // body the restore moved.  Isolates the recheck's own cost to
         // replay fidelity from everything else.
         bool restore_recheck = true;
-        // --keep-queued-impulses: see physics_state::set_keep_queued_impulses.
-        bool keep_queued_impulses = false;
+        // --no-restore-impulses: reproduce the pre-v11 restore, which dropped
+        // whatever IVP had queued for the next PSI.  Here so the fix can be
+        // measured against itself in ONE binary - two builds' plain runs
+        // disagree by more than this effect is worth.
+        bool restore_impulses = true;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -198,7 +201,7 @@ namespace {
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--trace-restore") out.trace_restore = true;
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
-            else if (arg == "--keep-queued-impulses") out.keep_queued_impulses = true;
+            else if (arg == "--no-restore-impulses") out.restore_impulses = false;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -699,7 +702,7 @@ namespace {
             close_journal("a new session started");
             rollback_.set_verbose(args_.trace);
             rollback_.set_recheck_on_restore(args_.restore_recheck);
-            bmmo::physics::set_keep_queued_impulses(args_.keep_queued_impulses);
+            rollback_.set_restore_impulses(args_.restore_impulses);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
@@ -2120,6 +2123,14 @@ namespace {
                 return bmmo::physics::set_body_state(physics, entity.c_str(), state.position, state.rotation, state.linear,
                                                      state.angular, bridge_mode, recheck, error);
             };
+            world.get_body_extra = [physics](const std::string& entity, bmmo_physics_core_extra& out) {
+                std::string error;
+                return bmmo::physics::get_core_extra(physics, entity.c_str(), out, error);
+            };
+            world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
+                std::string error;
+                return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
+            };
             world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
                 std::string error;
                 return bmmo::physics::navigation_get_state(physics, entity.c_str(), out, error);
@@ -2489,7 +2500,8 @@ namespace {
                  static_cast<unsigned long long>(rs.snapshots), static_cast<unsigned long long>(rs.matched),
                  static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
                  static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
-                 static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen), rs.max_error,
+                 static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen),
+                 static_cast<unsigned long long>(rs.impulses_restored), rs.max_error,
                  rs.last_mismatch.c_str(),
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),

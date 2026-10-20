@@ -601,14 +601,6 @@ namespace bmmo::physics {
         return true;
     }
 
-    namespace {
-        // See the DIAGNOSTIC note in write_body_state.  Off by design 8.4;
-        // the session client turns it on for --keep-queued-impulses only.
-        bool g_keep_queued_impulses = false;
-    }
-
-    void set_keep_queued_impulses(bool enable) { g_keep_queued_impulses = enable; }
-
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error) {
         error.clear();
         if (!physics || !physics->GetEnvironment()) {
@@ -905,15 +897,15 @@ namespace bmmo::physics {
             // A hard set replaces the motion, so pushes queued for the next PSI
             // must not survive it (design 8.4).
             //
-            // DIAGNOSTIC: a replay restore is not a hard set.  At a rewind of
-            // depth 0 the live core IS the anchor core, so leaving the queue
-            // alone is exactly equivalent to restoring it - which makes this
-            // toggle an exact test of whether the zeroing is what a rollback
-            // loses, with nothing added to any record and no ABI touched.
-            if (!g_keep_queued_impulses) {
-                core->speed_change.set_to_zero();
-                core->rot_speed_change.set_to_zero();
-            }
+            // A REPLAY RESTORE IS NOT A HARD SET, and this is where a rollback
+            // used to lose the world: the impact solver parks a delayed push on
+            // the core with the larger virt_mass - the plate, not the ball - and
+            // zeroing it costs a hinged plate 1.6-3.6 cm per rewind against a
+            // floor of zero.  Such a caller restores the queue afterwards with
+            // set_core_extra, which is sound precisely because nothing below
+            // this line touches it again.
+            core->speed_change.set_to_zero();
+            core->rot_speed_change.set_to_zero();
             switch (action) {
                 case sleep_action::legacy_wake: real->ensure_in_simulation(); break;
                 case sleep_action::wake_if_frozen:
@@ -1070,6 +1062,42 @@ namespace bmmo::physics {
         // the guard goes on again; ids of a level that is being left behind
         // do not outlive the guard they belonged to.
         if (!enable) physics->m_KeepLevelBodiesFree.Clear();
+        return true;
+    }
+
+    namespace {
+        // The core behind a name, or nullptr with `error` set.  Shared by the
+        // two core_extra entries, whose only job is to move six floats.
+        IVP_Core* core_for(CKIpionManager* physics, const char* entity_name, std::string& error) {
+            CK3dEntity* entity = find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE));
+            PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+            IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+            IVP_Core* core = real ? real->get_core() : nullptr;
+            if (!core) error = "no physics body named " + std::string(entity_name ? entity_name : "");
+            return core;
+        }
+    }
+
+    bool get_core_extra(CKIpionManager* physics, const char* entity_name,
+                        bmmo_physics_core_extra& out, std::string& error) {
+        error.clear();
+        out = bmmo_physics_core_extra{};
+        IVP_Core* core = core_for(physics, entity_name, error);
+        if (!core) return false;
+        for (int k = 0; k < 3; ++k) {
+            out.speed_change[k] = static_cast<float>(core->speed_change.k[k]);
+            out.rot_speed_change[k] = static_cast<float>(core->rot_speed_change.k[k]);
+        }
+        return true;
+    }
+
+    bool set_core_extra(CKIpionManager* physics, const char* entity_name,
+                        const bmmo_physics_core_extra& in, std::string& error) {
+        error.clear();
+        IVP_Core* core = core_for(physics, entity_name, error);
+        if (!core) return false;
+        core->speed_change.set(in.speed_change[0], in.speed_change[1], in.speed_change[2]);
+        core->rot_speed_change.set(in.rot_speed_change[0], in.rot_speed_change[1], in.rot_speed_change[2]);
         return true;
     }
 

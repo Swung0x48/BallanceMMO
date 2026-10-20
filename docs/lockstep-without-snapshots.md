@@ -675,16 +675,84 @@ rewind at depth 1:
 | `P_Modul_29_Platte09` | 3.47e-02 m | 9.41e-04 m |
 | `P_Modul_29_Platte03` | 1.97e-02 m | 3.82e-03 m |
 
-30x rather than 10^6: one tick of staleness costs five orders. So the fix is not
-"stop zeroing" - it is **record `speed_change` / `rot_speed_change` at the
-anchor and restore them**, with the zeroing kept for a genuine hard set, which
-is what design 8.4 was actually about. The two operations are wearing one
-function.
+30x rather than 10^6. The obvious reading - one tick of staleness costs five
+orders - turned out to be **wrong**, and the fix below says so: restoring the
+*anchor's* queue gives bit-identical numbers to keeping the live one, because
+the queue is near-constant from tick to tick. What is left at depth 1 is a
+different, depth-scaling term. See "What is left" below.
+
+The fix is still to **record `speed_change`/`rot_speed_change` at the anchor and
+restore them**, with the zeroing kept for a genuine hard set, which is what
+design 8.4 was actually about - the two operations are wearing one function.
 
 That record is a **local savestate**, which is what GGPO's
 `save_game_state`/`load_game_state` always were. It never goes on the wire, so
 it is not a snapshot; and it need not go in `bmmo_physics_body_state`, the
 struct the retail mod shares - a second, local struct keeps that ABI untouched.
+
+## The fix, as built (bridge API v11)
+
+`bmmo_physics_core_extra` is a **new** struct carrying `speed_change` and
+`rot_speed_change`; `bmmo_physics_body_state` is byte-identical to before,
+because it is what the wire and the renderer need and the retail mod shares it.
+Two v11 entries, appended to the v-table, read and write the queue
+(`get_core_extra` / `set_core_extra`), and `rollback.hpp` carries the values in
+a map parallel to `tick_state::bodies`.
+
+Three things make it correct rather than just effective:
+
+* **`set_body_state` still zeroes the queue.** A replay restore writes the
+  recorded queue back immediately *after* the pose write. That is sound because
+  nothing in `write_body_state` after the zeroing touches the queue again, and
+  neither `ensure_in_simulation` nor `disable_simulation` does either - checked
+  against IVP, whose only clearers are `set_pinned`,
+  `abort_all_async_pushes`, `commit_all_async_pushes` (the PSI, which is what we
+  want to happen next) and `stop_movement_without_collision_recheck`. The
+  composition measures bit-identically to never zeroing at all.
+* **Only a body restored from our own record gets its queue back.** A body
+  restored from an authoritative snapshot row does not: a row is a pose the
+  server reported, it carries no queue, and the queue we happen to hold locally
+  belongs to the state being replaced. *That* write is the hard set design 8.4
+  is about. The `from_row` flag already encoded the distinction. A body born
+  inside the replayed window is parked rather than restored, so it gets none
+  either.
+* **The A/B lives in one binary.** `--no-restore-impulses` reproduces the
+  pre-v11 restore, because two builds' plain runs disagree by more than this
+  effect is worth (see the methodology section).
+
+### Measured
+
+Solo, one forced rewind every 40 ticks, worst error per body over the window,
+control run twice in the same batch for the floor:
+
+| depth | window | floor | `--no-restore-impulses` | restored | |
+|---|---|---|---|---|---|
+| 0 | <= 48 | 0 | 3.62e-02 m | **1.81e-08 m** | 10^6 |
+| 1 | <= 48 | 0 | 3.81e-02 m | 1.05e-03 m | 36x |
+| 12 | <= 60 | 0 | 1.37e-01 m | 7.39e-02 m | ~2x |
+
+(worst plate in each arm; the ball is 0.0000 m throughout, and
+`P_Modul_30_Wippe`, `P_Modul_25_Bridge` are exactly 0 in every arm)
+
+At depth 0 the restore is now essentially exact - 1.8e-08 m is the quaternion
+floor below, not the queue. The win shrinks with depth because a second term
+takes over.
+
+### What is left, and it is not staleness
+
+Restoring the anchor's queue at depth 1 gives **1.046e-03 m**, which is
+bit-identical to what keeping the *live* queue gave. So one tick of staleness
+costs nothing - the queue is near-constant between ticks - and the residual is
+the other loss the field trace found: `write_body_state` reconstructs the
+missing quaternion from the **live** PSI rotation step, not the anchor's, so the
+restored rotational phase is wrong by however much the body's angular velocity
+changed over the rewind. That is depth-scaling, which is exactly the shape of
+the table above, and it is the next thing to fix: the same local savestate
+should carry **both** quaternions instead of re-deriving one.
+
+Two other bodies say the same thing. `P_Box_MF` (2.978e-04 m) and
+`P_Ball_Stone_MF` (7.498e-05 m) are unchanged by the queue fix at depth 1 and
+exactly 0 at depth 0, so their error is the replay's, not the queue's.
 
 ### The floor underneath: the quaternion round trip
 
