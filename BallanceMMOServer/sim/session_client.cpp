@@ -2402,6 +2402,93 @@ namespace {
             std::string error;
             switch (event.type) {
             case bmmo::session::event_type::Physicalize: {
+                // A birth stamped in the past, with its tick still in the
+                // rollback history, is not made here: the world is rewound to
+                // the tick before it and the body is made inside the replay,
+                // at its tick, in the world as it stood then (pre_step below).
+                // Made here, at the live tick, its collision bookkeeping is
+                // built against the live world - a ball 1.9 m from the spawn
+                // it is then put back onto - where the server built it
+                // coincident with the balls born the same tick (a zero
+                // contact normal, no event; measured: the host's own ball
+                // knocked 0.8 m back at the first replay and 11-17 m from the
+                // server's through the start pile).
+                const uint32_t now = current_tick();
+                if (args_.rollback && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
+                        && rollback_.knows_tick(event.tick - 1)) {
+                    pending_births_.push_back(pending_birth::of(event));
+                    rewind_for_lifecycle(event);
+                    // The replay made it at its tick; if it did not get that
+                    // far, make it now.
+                    for (auto it = pending_births_.begin(); it != pending_births_.end();)
+                        if (it->player == event.player) {
+                            logf("remote physicalize of %u: the replay did not reach tick %u, made live", event.player, event.tick);
+                            physicalize_remote(*it);
+                            it = pending_births_.erase(it);
+                        } else ++it;
+                    break;
+                }
+                physicalize_remote(pending_birth::of(event));
+                rewind_for_lifecycle(event);
+                break;
+            }
+            case bmmo::session::event_type::Sector:
+                // Another member entered a sector: an input to our world too.
+                // Stamped into the union, which starts the sector before the
+                // step of the stamped tick - this very frame when the relay was
+                // on time (drain_due_events runs before the union's tick), the
+                // next one when it was late, which the union counts.
+                sectors_.stamp(event.player, event.sector, event.tick);
+                logf("remote player %u entered sector %d, stamped for tick %u%s", event.player, event.sector, event.tick,
+                     static_cast<int32_t>(event.tick - current_tick()) <= 0 ? " (LATE: the server started it already)" : "");
+                break;
+            case bmmo::session::event_type::Unphysicalize: {
+                auto it = remotes_.find(event.player);
+                if (it == remotes_.end()) return;
+                if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
+                it->second.navigation = false;
+                if (it->second.physicalized) {
+                    ++generations_[it->second.entity];   // the body goes: a new lifetime
+                    bmmo::physics::unphysicalize(engine_->physics(), it->second.entity.c_str(), error);
+                }
+                it->second.physicalized = false;
+                logf("remote player %u unphysicalized at tick %u", event.player, event.tick);
+                rewind_for_lifecycle(event);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+
+        struct pending_birth {
+            uint32_t player = 0, tick = 0;
+            uint8_t ball_type = 0, flags = 0;
+            float position[3] = {};
+            float rotation[9] = {};
+            bmmo::session::ball_recipe recipe;
+            static pending_birth of(const bmmo::session_event_msg& event) {
+                pending_birth b;
+                b.player = event.player; b.tick = event.tick; b.ball_type = event.ball_type; b.flags = event.flags;
+                std::copy(std::begin(event.position), std::end(event.position), b.position);
+                std::copy(std::begin(event.rotation), std::end(event.rotation), b.rotation);
+                b.recipe = event.recipe;
+                return b;
+            }
+        };
+        // Births deferred into a replay (apply_event): made at their tick,
+        // before its step.
+        void drain_pending_births(uint32_t tick) {
+            for (auto it = pending_births_.begin(); it != pending_births_.end();)
+                if (it->tick == tick) {
+                    physicalize_remote(*it);
+                    it = pending_births_.erase(it);
+                } else ++it;
+        }
+
+        void physicalize_remote(const pending_birth& event) {
+            std::string error;
+            {
                 CK3dEntity* entity = remote_entity(event.player, event.ball_type, error);
                 if (!entity) { logf("remote physicalize: %s", error.c_str()); return; }
                 auto& remote = remotes_[event.player];
@@ -2439,42 +2526,13 @@ namespace {
                 attach_remote_navigation(event.player, remote);
                 logf("remote player %u physicalized (%s) at tick %u%s", event.player, remote.entity.c_str(), event.tick,
                      remote.navigation ? ", predicted" : ", mirrored");
-                // LAST, once the body is fully set up.  The replay only drives
-                // and records a remote that is physicalized AND navigated (see
-                // the tracked set in frame()), and the spawn impulse above is
-                // part of the state the owner had at the stamp tick - rewinding
-                // before either left the mirror outside the rollback entirely,
-                // undriven and unkicked, and the balls ran away instead of
-                // converging (2.2 m at birth to 11 m twenty ticks later).
-                rewind_for_lifecycle(event);
-                break;
-            }
-            case bmmo::session::event_type::Sector:
-                // Another member entered a sector: an input to our world too.
-                // Stamped into the union, which starts the sector before the
-                // step of the stamped tick - this very frame when the relay was
-                // on time (drain_due_events runs before the union's tick), the
-                // next one when it was late, which the union counts.
-                sectors_.stamp(event.player, event.sector, event.tick);
-                logf("remote player %u entered sector %d, stamped for tick %u%s", event.player, event.sector, event.tick,
-                     static_cast<int32_t>(event.tick - current_tick()) <= 0 ? " (LATE: the server started it already)" : "");
-                break;
-            case bmmo::session::event_type::Unphysicalize: {
-                auto it = remotes_.find(event.player);
-                if (it == remotes_.end()) return;
-                if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
-                it->second.navigation = false;
-                if (it->second.physicalized) {
-                    ++generations_[it->second.entity];   // the body goes: a new lifetime
-                    bmmo::physics::unphysicalize(engine_->physics(), it->second.entity.c_str(), error);
-                }
-                it->second.physicalized = false;
-                logf("remote player %u unphysicalized at tick %u", event.player, event.tick);
-                rewind_for_lifecycle(event);
-                break;
-            }
-            default:
-                break;
+                // (The rewind for a late birth happens in apply_event, once the
+                // body is fully set up: the replay only drives and records a
+                // remote that is physicalized AND navigated, and the spawn
+                // impulse is part of the state the owner had at the stamp tick
+                // - rewinding before either left the mirror outside the
+                // rollback entirely, undriven and unkicked, and the balls ran
+                // away instead of converging.)
             }
         }
 
@@ -2627,24 +2685,28 @@ namespace {
                     return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
                          + (d.logical && args_.trace ? " :: " + d.detail : std::string());
                 };
-                // The mechanism scripts' frame, where the live frame runs it:
-                // before the physics step.  The bridge event log is muted for
-                // it - a replayed Physics WakeUp is not a live event for the
-                // server.
-                world.pre_step = [this, context](uint32_t tick) {
-                    if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
-                        logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
-                             bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
-                    if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
-                        ++contact_traces_;
-                        logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
-                             bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
-                    }
-                    bmmo::physics::set_event_log_muted(true);
-                    bmmo::game::script_replay::execute_frame(context, scripts_, 1000.0f / 66.0f, &scripts_replayed_);
-                    bmmo::physics::set_event_log_muted(false);
-                };
             }
+            // Before each replayed tick's step: the births deferred into this
+            // replay (apply_event), made at their tick in the world as it
+            // stands then; then the mechanism scripts' frame, where the live
+            // frame runs it (the bridge event log is muted for it - a
+            // replayed Physics WakeUp is not a live event for the server).
+            world.pre_step = [this](uint32_t tick) {
+                drain_pending_births(tick);
+                if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
+                    logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
+                         bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
+                if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+                    ++contact_traces_;
+                    logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
+                         bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+                }
+                if (!scripts_.empty()) {
+                    bmmo::physics::set_event_log_muted(true);
+                    bmmo::game::script_replay::execute_frame(engine_->context(), scripts_, 1000.0f / 66.0f, &scripts_replayed_);
+                    bmmo::physics::set_event_log_muted(false);
+                }
+            };
             world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
                 std::string error;
                 return bmmo::physics::navigation_get_state(physics, entity.c_str(), out, error);
@@ -3067,6 +3129,9 @@ namespace {
         uint32_t session_ = 0;
         uint8_t snapshot_interval_ = 2, input_delay_ = 6;
         uint64_t life_rewinds_ = 0, life_rewinds_missed_ = 0;
+        // Births stamped in the past, waiting to be made inside a replay at
+        // their tick (apply_event / drain_pending_births).
+        std::vector<pending_birth> pending_births_;
         uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
         uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
         int restore_traces_ = 0;

@@ -1642,6 +1642,72 @@ through the whole control came apart at the first rewind that reached it.
 A contact set cannot be pruned per body: the record names the partners a
 body touched, not the partners every other body may keep.
 
+### The start pile: a coincident spawn that no rewind can reproduce
+
+The ball the others spawn into was 11-17 m from the server's through the
+start pile under every contact policy. Taken apart with the same four-client
+lane drive, snapshots off:
+
+* **At zero latency it is still there.** Three runs: the host's own ball
+  2.5-3.3 m from the server's over ticks 0-1199 (2.5522 m twice - it is
+  deterministic), client1's own ball **0.001 m for 800 ticks** (it touched
+  nobody), the other two 2-3 m; 1100-2100 ticks re-simulated in the whole
+  minute against 20000 at 150 ms. So it is not the prediction window, and the
+  two restore changes it suggested (below) could not have been the fix.
+* **Two players at zero latency:** the host's own ball 0.38 / 0.16 m, the
+  other client's own ball 0.0000 m - and that client sees the host's ball
+  exactly as the server does (0.0000 m). The divergence is in the host's
+  own world only.
+* **Tick by tick** (`ct768_l0_*`): the four balls are born at one tick, at
+  one point, the reset point, and kicked apart by the deterministic spawn
+  impulse. From its first step the server's host ball drifts -z 0.004 m a
+  tick, the host's own copy +0.002: a 0.4 m/s difference out of the
+  pile's resolution in the birth tick itself. At tick 229 the server's ball,
+  on its way -z, touches ball 1467 (1.14 m apart: one diameter) and takes a
+  0.4 m sideways push; the host's, on its way +z, never does. The 3.5 m
+  lateral offset that leaves persists until the lane steer and the
+  checkpoint's lifecycle snapshot (tick ~1300) bring it back. At 150 ms the
+  same, plus the births arriving 20 ticks late: the first birth replay knocks
+  the host's ball 0.8 m back at tick 252 and it runs 11-17 m behind until
+  the checkpoint snapshot at tick ~900.
+
+Two things the replay does differently from the server at that tick were
+fixed and measured:
+
+| change | 150 ms, host's own ball 0-599 / 600-1199 | 0 ms |
+|---|---|---|
+| none | 11.0 / 6.7 m, 11.0 / 8.8 m | 3.25 / 2.02 m |
+| a body born in the window re-posed to its end-of-tick record *after* its birth tick's step (the old rule) → to its pre-step birth state, kick queued, *before* the step, so the birth tick is re-simulated with every body born into it | 13.5 / 10.9 m | 2.55 / 2.81 m |
+| a late remote birth created live and beamed back → created inside the replay at its stamped tick, in the world as it stood then (`pending_births_`, `drain_pending_births` in `pre_step`) | 11.6 / 10.2 m | 2.55 / 3.37 m |
+| both, with every birth note in use (a diagnostic line per birth confirmed it) | - | **a ball 109-414 m out, client1's own ball 186 m off** |
+
+The last row is the answer. IVP leaves a pair created coincident alone (a
+zero contact normal, no event: `player_collision_filter`'s comment, design
+9.10) and the kicks take the balls apart; a pair *beamed* back on top of
+each other and stepped is separated by the impact solver's rescue push,
+with whatever normal the pair's bookkeeping had. Beaming four balls into
+coincidence is not creating four balls coincident, so a rewind across the
+spawn tick cannot re-simulate it, and the own ball of the client whose
+world the server differs from is the one that pays, because its own ball is
+the one body the level script created (the clones are made by events, live
+or in a replay) and the four worlds - the server's and the three clients' -
+resolve the same coincident pile in the order each one's object set and
+creation history gives IVP. The birth re-pose was removed again; the
+in-replay creation of a late birth stays (neutral, and the right place: a
+body created live and beamed back carries collision bookkeeping built
+against the live world).
+
+What bounds it: with the server's snapshots on, as deployed, the
+corrections hold every own ball within 0.01-0.05 m of the server's through
+the pile (the interval sweep above); snapshot-free, the host is metres off
+until the first lifecycle snapshot, the checkpoint. What would remove it
+is a spawn where no two balls are born inside each other - a deterministic
+lateral offset by join order of at least one diameter (1.2 units), applied
+by the owner before its spawn kick and carried in its Physicalize pose, or
+a kick strong enough to clear a diameter in the first tick. The spawn ring
+was replaced by the coincident spawn plus impulse on purpose (design 9.10),
+so that is a design call, not made here.
+
 ## Without snapshots: what the input stream alone sustains
 
 The design never let the server depend on a snapshot - its world is the
@@ -2007,11 +2073,15 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   anti-energy, the mindists' lengths before the next PSI. A recheck pass of
   its own, pruning the live contacts, re-creating the recorded ones with or
   without their fields: all measured, none better than the narrow default,
-  and pruning tears sleeping stacks apart. The piles share that floor. What
-  is left for a client that could run on inputs alone is the prediction
-  window around a remote spawn, and the question whether the pile's residual
-  (metres through the start pile, under 0.8 m once the field strings out)
-  is acceptable with the snapshot fallback in place - which it is today.
+  and pruning tears sleeping stacks apart. The start pile itself is a
+  coincident spawn ("The start pile" above): four balls born at one point
+  resolve by IVP's rescue pushes in the order each world's creation history
+  gives it, the server's and each client's differently, and a rewind cannot
+  re-create "created coincident" (beaming the balls back on top of each
+  other explodes them). A ball nobody touches is exact; a touched one is
+  metres off until the next lifecycle snapshot, and within 0.05 m with the
+  snapshots on as deployed. Removing it is a spawn-layout decision (balls
+  born a diameter apart), not a restore fix.
 
 ## Not covered
 
