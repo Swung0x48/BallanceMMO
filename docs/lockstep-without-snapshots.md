@@ -1706,7 +1706,60 @@ lateral offset by join order of at least one diameter (1.2 units), applied
 by the owner before its spawn kick and carried in its Physicalize pose, or
 a kick strong enough to clear a diameter in the first tick. The spawn ring
 was replaced by the coincident spawn plus impulse on purpose (design 9.10),
-so that is a design call, not made here.
+so that is a design call - made next, and measured.
+
+### Spawn spacing: balls born a diameter apart (protocol 4)
+
+`spawn_spacing` (server config, map units, default 0 = the design 9.10
+layout) travels in SessionStart next to the impulse; with it, every member's
+ball is born in a cell of its own around the resetpoint - join order 0 at
+the resetpoint itself, the rest spiralling out on the resetpoint's lateral
+and forward axes in whole multiples of the spacing
+(`session/spawn_impulse.hpp`, `kSpawnOffsetTable`, 16 cells). The owner
+moves its own ball before anything else sees it - the headless client beams
+the body it finds at the resetpoint, the retail client moves the entity in
+OnPhysicalize before the block creates the body - and reports the offset
+pose in its Physicalize event, so the server and every mirror create the
+clone where the ball is; nothing else needs the spacing, and the kick is
+unchanged. A ball is 4 units across, so 4.2 keeps same-tick spawns, and
+respawns at a shared checkpoint, from being born inside each other.
+
+Measured on the four-client lane drive, snapshots off, spacing 4.2 against
+0 (the runs above):
+
+| latency | spacing | host's own ball 0-599 / 600-1199 | the other three, 0-599 | server replay |
+|---|---|---|---|---|
+| 0 ms | 0 | 2.5-3.3 m / 2.0-3.9 m (three runs) | 0.00-3.0 m | bit-exact |
+| 0 ms | 4.2 | **0.64 / 1.03 m** | 0.002-0.68 m | bit-exact |
+| 150 ms | 0 | 10.6-13.5 m / 8.9-10.9 m (four runs) | 1.9-7.3 m | bit-exact |
+| 150 ms | 4.2 | **0.95 / 0.58 m** | 2.0-4.3 m | bit-exact |
+
+Two more pairs (`ct768_l0_s42_*`, `ct768_l150_s42_*`) hold it: at 0 ms the
+host's ball 0.33 / 1.39 m and 0.40 / 2.77 m, at 150 ms 1.69 / 1.22 m and
+1.52 / 1.24 m - against 10.6-13.5 m in every run without the spacing - and
+the balls nobody touches stay at 0.000-0.002 m. The other three balls
+improve less (2-5 m through the start pile at 150 ms, 0.5-2 m at 0 ms,
+against 2-7 m and 0.5-3 m): what remains of the pile is ordinary ball-ball
+contact under a 20-tick input prediction, the floor the prop probe
+measured, and no longer the birth. The server's journal replayed bit-exact
+in all six runs; no crash. One of the six (the first at 150 ms) had a
+different incident on one client: the hinged plate row of `P_Modul_29`,
+far behind the balls, came apart after the sector-3 checkpoint's lifecycle
+rewind at tick 1271 (plates 0.7 m off in the replayed window, 50-130 m
+within 100 ticks, 10 km by the end) right after that rewind re-created two
+floor contacts for `Platte09`; it did not recur in five runs with the same
+settings and never appeared in the fifteen earlier lane runs, so it is
+noted as an open item (a sleeping hinge chain restored with a re-created
+contact), not attributed to the spacing.
+
+So `spawn_spacing` defaults to 4.2 on the server (`config_manager.hpp`;
+0 restores the design 9.10 layout exactly, and a solo session always gets
+0). The server's own check that a spawn Physicalize lands near a resetpoint
+(2.5 units) flagged every offset spawn as suspicious in those six runs -
+informational, nothing rejected - and now reaches 2.3 spacings further when
+a spacing is set, the farthest of the 16 cells being sqrt(5) spacings out.
+The retail client applies the same offset in its OnPhysicalize and
+compiles, but has not been run on the arena with it.
 
 ## Without snapshots: what the input stream alone sustains
 

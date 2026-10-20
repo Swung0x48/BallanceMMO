@@ -34,6 +34,28 @@ TEST(SpawnImpulse, DirectionsArePairwiseDistinct) {
         }
 }
 
+TEST(SpawnImpulse, OffsetCellsAreDistinctAndAtLeastASpacingApart) {
+    using namespace bmmo::session;
+    const float right[3] = {0.0f, 0.0f, 1.0f};
+    const float dir[3] = {1.0f, 0.0f, 0.0f};
+    float cells[kSpawnOffsets][3];
+    for (uint32_t j = 0; j < kSpawnOffsets; ++j) spawn_offset(static_cast<uint8_t>(j), 4.2f, right, dir, cells[j]);
+    EXPECT_FLOAT_EQ(0.0f, cells[0][0]);   // join order 0 is the resetpoint itself
+    EXPECT_FLOAT_EQ(0.0f, cells[0][2]);
+    for (uint32_t i = 0; i < kSpawnOffsets; ++i) {
+        EXPECT_FLOAT_EQ(0.0f, cells[i][1]);   // in the resetpoint's plane
+        for (uint32_t j = i + 1; j < kSpawnOffsets; ++j) {
+            const float dx = cells[i][0] - cells[j][0], dz = cells[i][2] - cells[j][2];
+            EXPECT_GE(std::sqrt(dx * dx + dz * dz), 4.2f - 1e-5f) << i << " vs " << j;
+        }
+    }
+    // Spacing 0 is the design 9.10 layout: every cell at the resetpoint.
+    float none[3];
+    spawn_offset(5, 0.0f, right, dir, none);
+    EXPECT_FLOAT_EQ(0.0f, none[0]);
+    EXPECT_FLOAT_EQ(0.0f, none[2]);
+}
+
 TEST(SpawnImpulse, IndexIsDistinctPerJoinOrderAndDeterministic) {
     using namespace bmmo::session;
     for (uint32_t tick: {0u, 1u, 66u, 12345u}) {

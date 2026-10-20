@@ -834,6 +834,7 @@ namespace {
             sector_lead_ = msg.sector_lead;
             seed_ = msg.seed;
             spawn_impulse_ = msg.spawn_impulse;
+            spawn_spacing_ = msg.spawn_spacing;
             level_ = msg.map.level > 0 ? msg.map.level : args_.level;
             players_ = msg.players;
             own_join_order_ = -1;
@@ -1220,17 +1221,41 @@ namespace {
             own_capture_.entity = name;
             own_capture_.pose = ball->GetWorldMatrix();
             own_capture_.spawn = false;
+            VxMatrix reset;
+            bool have_reset = false;
             if (CKDataArray* level = engine_->data_array("CurrentLevel")) {
-                VxMatrix reset;
                 if (level->GetElementValue(0, 3, &reset)) {
+                    have_reset = true;
                     const float dx = own_capture_.pose[3][0] - reset[3][0];
                     const float dy = own_capture_.pose[3][1] - reset[3][1];
                     const float dz = own_capture_.pose[3][2] - reset[3][2];
                     own_capture_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
                 }
             }
-            if (!own_capture_.spawn || spawn_impulse_ <= 0.0f) return;
+            if (!own_capture_.spawn) return;
             const uint8_t join_order = static_cast<uint8_t>(own_join_order_ < 0 ? 63 : own_join_order_);
+            // The birth cell (session/spawn_impulse.hpp): the ball is moved
+            // off the resetpoint before anything else sees it - the kick
+            // below, the pose the Physicalize event carries, this tick's step
+            // - so every side creates the clone where this ball is.
+            if (spawn_spacing_ > 0.0f && have_reset && join_order % bmmo::session::kSpawnOffsets != 0) {
+                const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
+                const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
+                float offset[3];
+                bmmo::session::spawn_offset(join_order, spawn_spacing_, right, dir, offset);
+                double target[3];
+                for (int k = 0; k < 3; ++k) target[k] = state.position[k] + static_cast<double>(offset[k]);
+                const float still[3] = {0.0f, 0.0f, 0.0f};
+                if (!bmmo::physics::set_body_state(engine_->physics(), name.c_str(), target, state.rotation, still, still,
+                                                   bmmo::physics::wake_mode::keep, true, error)) {
+                    logf("spawn offset: %s", error.c_str());
+                } else {
+                    for (int k = 0; k < 3; ++k) own_capture_.pose[3][k] = static_cast<float>(target[k]);
+                    logf("spawn offset (%.3f,%.3f,%.3f) for join order %u at tick %u", static_cast<double>(offset[0]),
+                         static_cast<double>(offset[1]), static_cast<double>(offset[2]), join_order, tick);
+                }
+            }
+            if (spawn_impulse_ <= 0.0f) return;
             const uint32_t idx = bmmo::session::spawn_direction_index(seed_, join_order, tick);
             if (!bmmo::physics::push_impulse(engine_->physics(), name.c_str(), bmmo::session::kSpawnDirectionTable[idx],
                         spawn_impulse_, 0, error))
@@ -3168,6 +3193,7 @@ namespace {
         float spawn_position_[3] = {};
         bool spawn_known_ = false;
         float spawn_impulse_ = 0.0f;             // SessionStart::spawn_impulse (design 9.10)
+        float spawn_spacing_ = 0.0f;             // SessionStart::spawn_spacing (session/spawn_impulse.hpp)
         // The own ball's last Physicalize as capture_own_physicalize() saw it
         // before the step: what report_physicalize sends (design 9.10).
         struct {

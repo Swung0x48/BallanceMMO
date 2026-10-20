@@ -303,6 +303,7 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
     s.sector_lead_ticks = msg.sector_lead;
     s.seed = msg.seed;
     s.spawn_impulse = msg.spawn_impulse;
+    s.spawn_spacing = msg.spawn_spacing;
     s.map = msg.map;
     s.players = msg.players;
     s.own_join_order = -1;
@@ -2553,9 +2554,11 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
     // or a respawn (a trafo never happens there), flagged so every side
     // - including this one's own kick below - applies the same impulse.
     bool spawn = false;
+    VxMatrix reset;
+    bool have_reset = false;
     if (CKDataArray* level = current_level_array()) {
-        VxMatrix reset;
         if (level->GetElementValue(0, 3, &reset)) {
+            have_reset = true;
             const float dx = event.position[0] - reset[3][0];
             const float dy = event.position[1] - reset[3][1];
             const float dz = event.position[2] - reset[3][2];
@@ -2563,6 +2566,26 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
         }
     }
     if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+    // The birth cell (session/spawn_impulse.hpp): the entity is moved off the
+    // resetpoint now, before the Physicalize block creates the body from its
+    // matrix and before the pose goes into the event, so every side creates
+    // the clone where this ball is born.
+    if (spawn && s.spawn_spacing > 0.0f && have_reset) {
+        const uint8_t cell_order = static_cast<uint8_t>(s.own_join_order < 0 ? 63 : s.own_join_order);
+        if (cell_order % bmmo::session::kSpawnOffsets != 0) {
+            const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
+            const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
+            float offset[3];
+            bmmo::session::spawn_offset(cell_order, s.spawn_spacing, right, dir, offset);
+            VxMatrix moved = world;
+            for (int k = 0; k < 3; ++k) moved[3][k] += offset[k];
+            target->SetWorldMatrix(moved);
+            for (int k = 0; k < 3; ++k) event.position[k] = moved[3][k];
+            logger_->Info("Physics session: spawn offset (%.3f,%.3f,%.3f) for join order %u at tick %u",
+                          static_cast<double>(offset[0]), static_cast<double>(offset[1]), static_cast<double>(offset[2]),
+                          cell_order, event.tick);
+        }
+    }
     auto& r = event.recipe;
     r.fixed = fixed != 0;
     r.friction = friction;

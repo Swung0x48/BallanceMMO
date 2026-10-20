@@ -567,6 +567,7 @@ public:
         // Spawn kick speed sent in this session's SessionStart (design 9.10):
         // fixed at on_world_ready so a late joiner gets the same value.
         float spawn_impulse = 0;
+        float spawn_spacing = 0;   // birth cell spacing (SessionStart), fixed with the impulse
         // Ticks the server waits for this session's inputs, sized at the start
         // from the worst round trip among the members (session_input_delay).
         // Fixed for the session's life: the scheduler's deadlines are measured
@@ -763,6 +764,7 @@ public:
         // member joining or leaving during the world's boot must not be able
         // to move it out from under the clients that were already told.
         s.spawn_impulse = s.members.size() > 1 ? config_.physics_spawn_impulse : 0.0f;
+        s.spawn_spacing = s.members.size() > 1 ? config_.physics_spawn_spacing : 0.0f;
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
@@ -831,6 +833,7 @@ public:
         msg.first_tick = first_tick;
         msg.seed = 1;
         msg.spawn_impulse = s.spawn_impulse;
+        msg.spawn_spacing = s.spawn_spacing;
         // Every member spawns at the retail resetpoint (design 9.10): the
         // kick set below moves same-tick spawns apart instead of a ring.
         for (size_t i = 0; i < s.members.size() && i < bmmo::session::MAX_PLAYERS_PER_SESSION; ++i) {
@@ -1289,11 +1292,15 @@ public:
                 };
                 const double pos[3] = {msg.position[0], msg.position[1], msg.position[2]};
                 // A respawn is at the resetpoint of the last checkpoint the
-                // player's own ball took, which can be any of the level's.
-                bool near_spawn = distance(pos, s.spawn_position) <= 2.5;
+                // player's own ball took, which can be any of the level's -
+                // or, with a spawn spacing, in the player's birth cell around
+                // it (session/spawn_impulse.hpp: the farthest of the 16 cells
+                // is sqrt(5) spacings out).
+                const double reach = 2.5 + (s.spawn_spacing > 0.0f ? 2.3 * static_cast<double>(s.spawn_spacing) : 0.0);
+                bool near_spawn = distance(pos, s.spawn_position) <= reach;
                 for (const VxVector& reset: s.resetpoints) {
                     const float at[3] = {reset.x, reset.y, reset.z};
-                    near_spawn = near_spawn || distance(pos, at) <= 2.5;
+                    near_spawn = near_spawn || distance(pos, at) <= reach;
                 }
                 bool near_last = false;
                 if (guard.have_position) {

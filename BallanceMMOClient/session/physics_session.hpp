@@ -49,6 +49,7 @@ namespace bmmo::session {
         float spawn_rotation[4] = {};
         bool spawn_known = false;
         float spawn_impulse = 0.0f;          // design 9.10: kick speed at the resetpoint, 0 = none
+        float spawn_spacing = 0.0f;          // birth cell spacing around the resetpoint (session/spawn_impulse.hpp), 0 = none
 
         // Restart / anchor detection.
         bool saw_ingame_inactive = false;

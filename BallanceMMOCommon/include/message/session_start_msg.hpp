@@ -29,6 +29,11 @@ namespace bmmo {
         // 0 = none (design 9.10).  The same value goes to every member,
         // late joiners included.
         float spawn_impulse = 0.0f;
+        // Spawn spacing (map units) between the members' birth cells around
+        // the resetpoint; 0 = all at the resetpoint (session/spawn_impulse.hpp,
+        // spawn_offset).  Applied by each owner to its own ball before the
+        // kick and carried in its Physicalize pose.
+        float spawn_spacing = 0.0f;
         std::vector<session::player_entry> players;   // <= MAX_PLAYERS_PER_SESSION; spawn_* = the retail resetpoint
         // session::PHYSICS_PROTOCOL_VERSION of the server.  Required: a build
         // that does not send it does not parse here, and the receiver says so.
@@ -55,6 +60,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&first_tick), sizeof(first_tick));
             raw.write(reinterpret_cast<const char*>(&seed), sizeof(seed));
             raw.write(reinterpret_cast<const char*>(&spawn_impulse), sizeof(spawn_impulse));
+            raw.write(reinterpret_cast<const char*>(&spawn_spacing), sizeof(spawn_spacing));
             raw.write(reinterpret_cast<const char*>(&protocol), sizeof(protocol));
 
             const uint8_t player_count = static_cast<uint8_t>(std::min<size_t>(players.size(), session::MAX_PLAYERS_PER_SESSION));
@@ -93,6 +99,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &first_tick)) return false;
             if (!message_utils::read_variable(raw, &seed)) return false;
             if (!message_utils::read_variable(raw, &spawn_impulse)) return false;
+            if (!message_utils::read_variable(raw, &spawn_spacing)) return false;
             if (!message_utils::read_variable(raw, &protocol)) return false;
 
             uint8_t player_count = 0;

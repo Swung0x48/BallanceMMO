@@ -62,6 +62,7 @@ public:
     bool physics_debug_trace = false;              // per-tick diagnostics in the log (see world_options::trace)
     uint32_t physics_event_rate_limit = 20;        // client lifecycle events per second per player; 0 = no limit
     float physics_spawn_impulse = 3.0f;            // spawn kick speed, m/s (design 9.10); 0 disables
+    float physics_spawn_spacing = 4.2f;            // spawn cell spacing, map units (a ball is 4 across); 0 = every ball at the resetpoint
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

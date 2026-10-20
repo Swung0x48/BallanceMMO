@@ -72,6 +72,7 @@ bool config_manager::load() {
         physics_debug_trace = yaml_load_value(physics, "debug_trace", physics_debug_trace);
         physics_event_rate_limit = yaml_load_value(physics, "event_rate_limit", physics_event_rate_limit);
         physics_spawn_impulse = yaml_load_value(physics, "spawn_impulse", physics_spawn_impulse);
+        physics_spawn_spacing = yaml_load_value(physics, "spawn_spacing", physics_spawn_spacing);
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
         physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
         physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",
@@ -216,6 +217,9 @@ void config_manager::save(bool reload_values) {
                    "#   debug_trace (per-tick diagnostics in the log; pair with the client's \"session trace on\"),\n"
                    "#   event_rate_limit (client lifecycle events per second per player; 0 = no limit),\n"
                    "#   spawn_impulse (spawn kick speed in m/s, design 9.10; 0 disables; a solo session stays at 0),\n"
+                   "#   spawn_spacing (map units between the members' birth cells around the resetpoint, by join\n"
+                   "#     order, default 4.2: a ball is 4 units across, so same-tick spawns are not born inside\n"
+                   "#     each other; 0 = every ball at the resetpoint, the design 9.10 layout),\n"
                    "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
                    "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
                    "#     relative to the server's own directory, empty = record nothing),\n"

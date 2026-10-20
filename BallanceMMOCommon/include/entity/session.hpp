@@ -25,7 +25,7 @@ namespace bmmo::session {
     //      lifecycle events sent without Nagle.
     //   1  everything before 2026-10-20 (never sent; a message without the
     //      field reads as 0).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 3;
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 4;   // 4: SessionStart carries spawn_spacing
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.

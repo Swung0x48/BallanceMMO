@@ -16,6 +16,36 @@
 namespace bmmo::session {
     constexpr uint32_t kSpawnDirections = 64;
 
+    // Spawn spacing: where a member's ball is born relative to the resetpoint
+    // when SessionStart carries a spacing (spawn_spacing, map units; 0 = every
+    // ball at the resetpoint, the design 9.10 layout).  Balls born at one
+    // point at one tick resolve their overlap by IVP's rescue pushes in an
+    // order each world's object set gives the engine, and a rewind cannot
+    // re-create "created coincident" (docs/lockstep-without-snapshots.md,
+    // "The start pile"); born a diameter apart they never overlap.  The owner
+    // applies the offset to its own ball before the kick and reports the
+    // offset pose in its Physicalize event, so the server and every mirror
+    // create the clone where the owner is - nothing else needs the spacing.
+    // Join order 0 is at the resetpoint itself (a solo session is unchanged);
+    // the rest spiral out on the resetpoint's lateral (right) and forward
+    // (dir) axes in whole multiples of the spacing, 16 distinct cells.
+    constexpr uint32_t kSpawnOffsets = 16;
+    inline constexpr int kSpawnOffsetTable[kSpawnOffsets][2] = {   // {lateral, forward} in spacings
+        {0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, 1}, {1, -1},
+        {-1, -1}, {2, 0}, {-2, 0}, {0, 2}, {0, -2}, {2, 1}, {-2, 1}, {2, -1},
+    };
+
+    // The world-space offset of `join_order`'s spawn cell: `right` and `dir`
+    // are the resetpoint's lateral and forward unit axes (the retail
+    // resetpoint matrix's first and third rows).  Exact for whole multiples:
+    // the same bits on every side.
+    inline void spawn_offset(uint8_t join_order, float spacing, const float right[3], const float dir[3], float out[3]) {
+        const int* cell = kSpawnOffsetTable[join_order % kSpawnOffsets];
+        const float lateral = spacing * static_cast<float>(cell[0]);
+        const float forward = spacing * static_cast<float>(cell[1]);
+        for (int k = 0; k < 3; ++k) out[k] = lateral * right[k] + forward * dir[k];
+    }
+
     // Unit vectors in the world XZ plane (Y up) along the golden-angle
     // sequence: any two entries are at least 2.9 degrees apart, so players
     // with different join orders never share a direction.  Float literals,
