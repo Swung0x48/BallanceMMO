@@ -858,6 +858,61 @@ one.
   feeds neither the environment nor `time_of_last_psi`, diverges at exactly the
   same tick, so the measurements stand as made.
 
+## Checked on the real networked path, and two things found there
+
+The solo probe is where the fix was measured, so the 4-player 300 ms run was the
+check that it had not broken anything. It found two faults, neither of them the
+fix - and the way the first one hid is worth recording.
+
+### A printf, and three runs spent blaming the wrong thing
+
+The commit that added the impulse restore also added an `imp=` argument to the
+status line's `printf` **without its format specifier**, so every argument after
+it shifted: `max_err=%.4f` consumed the integer and `last=%s` consumed a double
+as a `char*`. Four clients, every networked run, dead at around tick 400 with
+`0xC0000005`.
+
+The solo runs could not have caught it. There `rs.max_error` is `0.0`, which
+`%s` reads as a null pointer and MSVC prints as `(null)`; only a run with a real
+error value turns it into a wild pointer. So a change measured entirely on the
+solo probe shipped a crash that the solo probe was structurally incapable of
+seeing.
+
+And the harness could not say where it was, because `BallanceMMOSessionClient`
+never installed the crash reporter the SimTool has had since the reset
+heisenbug - all it could report was a bare exit code. It is installed now, and
+the first trace named `logf` -> `session_client::report` immediately.
+
+One further trap on the way: the first two "pre-v11 controls" crashed
+identically, which looked like proof the crash was not the fix's. It was not
+proof of anything - the switches gated the *write*, so the new capture still ran
+on every body every tick. The callbacks are now not installed at all when
+neither half is wanted, which makes `--no-restore-impulses --no-restore-quats` a
+true control.
+
+### An intermittent journal-replay divergence at tick 701, which is NOT the fix
+
+With the crash gone, the 4-player run sometimes fails its journal replay:
+`matched=689 first_divergence=701`, with `checkpoint_mismatches=0`. The tick is
+the same every time it happens, so it is one specific event rather than noise.
+
+It is not the fix, and that took the right control to establish:
+
+| arm | runs | result |
+|---|---|---|
+| both halves on | 3 | FAIL, PASS, FAIL |
+| impulses only | 1 | PASS |
+| quaternions only | 1 | PASS |
+| **both halves off (pre-v11)** | 2+ | PASS, **FAIL with the identical 689/701** |
+
+A true pre-v11 control reproduces it, at the same tick, with the same counts. So
+it is a pre-existing intermittent nondeterminism in the server's own session,
+exposed by this configuration and not by the fix. Worth noting that a single
+passing control run was nearly enough to pin it on the fix - an intermittent
+failure needs a base rate, not one comparison.
+
+Still open, and recorded here rather than guessed at.
+
 ## How to measure this without fooling yourself
 
 Two methodological traps cost real time here, and both are cheap to avoid.
