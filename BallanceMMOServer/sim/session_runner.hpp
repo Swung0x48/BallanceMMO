@@ -180,6 +180,7 @@ namespace bmmo::sim {
             std::map<uint32_t, uint32_t> acked;
             std::vector<pending_event> events;   // sorted by tick on insertion
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs
+            uint32_t late_events = 0;   // applied after the tick they were stamped for (logged, capped)
             // Design 9.26: the start base B the members are numbered from.  The
             // world's first step is numbered B, and it is DUE B tick periods
             // after the assignment goes out - where a world counting from 0

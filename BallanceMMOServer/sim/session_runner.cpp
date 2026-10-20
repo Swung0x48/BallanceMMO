@@ -512,6 +512,16 @@ namespace bmmo::sim {
             return join_rank(a.player) < join_rank(b.player);
         });
         for (pending_event& e: due) {
+            // An event that arrives after its tick was simulated is applied
+            // now, which the client that stamped it did not do: the two sides
+            // apply it at different ticks from here on (a Sector event moves
+            // every mechanism of the sector by that much).  Said once per
+            // event, capped, so a journal reader can tell a late event from a
+            // fault in the simulation.
+            if (e.tick < tick && ++s.late_events <= 50)
+                log("[session " + std::to_string(s.id) + "] event type " + std::to_string(static_cast<int>(e.event.type))
+                    + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.tick) + " applied at tick "
+                    + std::to_string(tick) + " (late by " + std::to_string(tick - e.tick) + ")");
             e.event.tick = e.tick;
             // After the tick is stamped: the spawn impulse direction is derived
             // from that field, so the record has to carry it - but the world

@@ -32,6 +32,8 @@
 #include <entity/session.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
+#include <game/sector_activation.hpp>
+#include <session/sector_pacer.hpp>
 #include <physics/physics_rt_api.h>
 
 #include "headless_engine.hpp"
@@ -266,7 +268,7 @@ namespace bmmo::sim {
         CK_ID sector_manager_ = 0;
         CK_ID ingame_parameter_ = 0;
         std::set<int> active_sectors_;
-        int sector_idle_ticks_ = 0;     // ticks the sector manager has been idle
+        bmmo::session::sector_pacer sector_pacer_;   // one pass per idle manager, counted every tick
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
         struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };

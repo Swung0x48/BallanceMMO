@@ -230,6 +230,22 @@ namespace bmmo::sim {
         if (!ensure_collision_filter(error)) return false;
         rewire_proximity_probes();
         rewire_ball_identity_reads();
+        // The level's own checkpoint activation, held (game/sector_activation.hpp):
+        // update_sectors() is the only path that runs Gameplay_SectorManager in
+        // this world.  The rewired proximity probes let any player's clone fire
+        // a checkpoint, and the chain then ran the manager at the tick the
+        // server's clone got there - no client activates at that tick - and
+        // deactivated the sector it left, whoever was still in it.  Measured: a
+        // retail crossing put the server's sector-2 bodies 14 ticks ahead of
+        // the client's and took sector 1's away at the crossing.
+        {
+            std::string hold_error;
+            if (bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error))
+                log("world: the level's checkpoint sector activation is held; update_sectors() alone runs the sector manager");
+            else
+                log("world: the level's checkpoint sector activation was NOT held (" + hold_error
+                    + "): a checkpoint a clone crosses activates a sector behind update_sectors()");
+        }
         {
             // Hex, like every other place these two are printed (the client's
             // anchor line, SessionEnd's mismatch reason, the sim tool): the
@@ -750,19 +766,23 @@ namespace bmmo::sim {
     // in their first frame and stay dead if it is false.  So one pass per idle
     // manager, deactivate and activate paired in it exactly like a retail
     // checkpoint does, and the rest of the changes follow in the next frames.
+    //
+    // The idle count runs EVERY tick (session/sector_pacer.hpp).  It used to
+    // run only once the sets differed, which put every activation exactly two
+    // ticks after the tick its Sector event was stamped for - and a client
+    // that activates at the stamp was two ticks ahead on every mechanism of
+    // the sector for the rest of the session.
     void physics_world::update_sectors() {
-        std::set<int> desired;
-        for (const auto& [id, p]: players_)
-            if (p.sector > 0) desired.insert(p.sector);
-        if (desired.empty() || desired == active_sectors_) return;
         CKContext* context = engine_->context();
         auto* parameters = CKDataArray::Cast(context->GetObject(ingame_parameter_));
         auto* manager_script = CKBehavior::Cast(context->GetObject(sector_manager_));
         if (!parameters || !manager_script) return;
-        // Idle means the walk is over; the two extra ticks give the mechanism
-        // scripts it started their own first frame before the flag moves again.
-        sector_idle_ticks_ = manager_script->IsActive() ? 0 : sector_idle_ticks_ + 1;
-        if (sector_idle_ticks_ < 3) return;
+        const bool may_start = sector_pacer_.tick(manager_script->IsActive() != FALSE);
+        std::set<int> desired;
+        for (const auto& [id, p]: players_)
+            if (p.sector > 0) desired.insert(p.sector);
+        if (desired.empty() || desired == active_sectors_) return;
+        if (!may_start) return;
         int activate = 0, deactivate = 0;
         for (int sector: desired)
             if (!active_sectors_.count(sector)) { activate = sector; break; }
@@ -771,7 +791,7 @@ namespace bmmo::sim {
         parameters->SetElementValue(0, 2, &deactivate, sizeof(deactivate));
         parameters->SetElementValue(0, 1, &activate, sizeof(activate));
         if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager_script, TRUE);
-        sector_idle_ticks_ = 0;
+        sector_pacer_.started();
         if (activate) active_sectors_.insert(activate);
         if (deactivate) active_sectors_.erase(deactivate);
         body_set_changed_ = true;
