@@ -481,6 +481,32 @@ namespace bmmo::physics {
         return true;
     }
 
+    int physics_view::contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->contacts_get) {
+            error = "the physics_RT bridge lacks contacts_get";
+            return -1;
+        }
+        char text[256] = {};
+        const int n = api_->contacts_get(manager_, entity, out, max, text, sizeof(text));
+        if (n < 0) error = text;
+        return n;
+    }
+
+    int physics_view::contacts_set(const char* entity, const bmmo_physics_contact* in, int count, uint32_t flags, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->contacts_set) {
+            error = "the physics_RT bridge lacks contacts_set";
+            return -1;
+        }
+        char text[256] = {};
+        const int made = api_->contacts_set(manager_, entity, in, count, flags, text, sizeof(text));
+        if (text[0]) error = text;
+        return made;
+    }
+
     bool physics_view::set_event_log_muted(bool muted, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

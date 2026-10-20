@@ -87,6 +87,12 @@ namespace bmmo::session {
         std::function<bool(const bmmo_physics_clock_state& state)> set_clock;
         std::function<bool(const std::string& entity, bmmo_physics_nav_state& out)> get_nav;
         std::function<bool(const std::string& entity, const bmmo_physics_nav_state& state)> set_nav;
+        // A body's friction contacts (bmmo_physics_contact, bridge v15).
+        // Optional.  get fills the vector and returns the count (-1: unknown
+        // body); set re-creates the recorded contacts the body lacks and
+        // returns how many it made (-1: unknown body).
+        std::function<int(const std::string& entity, std::vector<bmmo_physics_contact>& out)> get_contacts;
+        std::function<int(const std::string& entity, const std::vector<bmmo_physics_contact>& in, uint32_t flags)> set_contacts;
         // explicit input for the next physics step of a navigated ball
         std::function<bool(const std::string& entity, const input_frame& frame)> nav_input;
         // polling mode on/off (the own ball reads the keyboard itself in live frames)
@@ -206,6 +212,8 @@ namespace bmmo::session {
         uint64_t impulses_restored = 0;  // body writes that put a recorded queued impulse back (v11)
         uint64_t calm_restored = 0;      // body writes that put the recorded calm references back (v13)
         uint64_t units_restored = 0;     // body writes that put the recorded unit countdown back (v13)
+        uint64_t contacts_restored = 0;         // friction contacts re-created at an anchor (v15)
+        uint64_t contact_restore_failures = 0;  // set_contacts calls that failed outright
         // The script replay (game/script_replay.hpp): restores of the scripts'
         // state at an anchor, and replays after which the re-executed scripts'
         // state differed from the live record of the same tick - zero on a
@@ -680,6 +688,23 @@ namespace bmmo::session {
             // they are now (last writer wins within a unit).
             for (auto& [entity, item]: plan)
                 if (!item.repose_tick) write_extra(entity, item, true);
+            // The friction contacts the anchor's record had and the live world
+            // lacks - a contact that ended inside the window.  IVP creates a
+            // contact only on an impact, and a body put back on the floor it
+            // has since rolled off has none coming: it rests on nothing until
+            // it leaves (measured: the own ball 0.76 m low after a rewind
+            // whose anchor still had the floor, exact when the contact lived
+            // on).  After every body is back, so the partners stand where they
+            // did; a body born in the window has no record of its own here.
+            if (restore_contacts_ && world.set_contacts)
+                for (auto& [entity, item]: plan) {
+                    if (item.repose_tick) continue;
+                    const auto it = at->contacts.find(entity);
+                    if (it == at->contacts.end()) continue;
+                    const int made = world.set_contacts(entity, it->second, contact_flags_);
+                    if (made < 0) ++stats_.contact_restore_failures;
+                    else stats_.contacts_restored += static_cast<uint64_t>(made);
+                }
             for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
 
             // 3. re-simulate T+1 .. current with the recorded inputs
@@ -855,6 +880,13 @@ namespace bmmo::session {
         void set_restore_calm(bool enable) { restore_calm_ = enable; }
         void set_restore_unit(bool enable) { restore_unit_ = enable; }
         void set_sleep_as_recorded(bool enable) { sleep_as_recorded_ = enable; }
+        // v15: the friction contacts a record had and the world lacks are
+        // re-created at the anchor.  Off reproduces the restore that left a
+        // restored body resting on nothing.
+        void set_restore_contacts(bool enable) { restore_contacts_ = enable; }
+        // Which recorded fields a re-created contact gets, and whether a body
+        // with some contact left is left alone (BMMO_PHYSICS_CONTACT_*).
+        void set_contact_flags(uint32_t flags) { contact_flags_ = flags; }
         // The script replay (game/script_replay.hpp).  Off: the records carry
         // no script state and a replay is physics only, as before.
         void set_replay_scripts(bool enable) { replay_scripts_ = enable; }
@@ -918,6 +950,9 @@ namespace bmmo::session {
             bool have_scripts = false;
             std::map<std::string, bmmo_physics_nav_state> navs;
             std::map<std::string, input_frame> inputs;   // applied at this tick, per navigated ball
+            // The friction contacts each recorded body had at the end of this
+            // tick (bodies with none are absent).
+            std::map<std::string, std::vector<bmmo_physics_contact>> contacts;
         };
 
 
@@ -1004,10 +1039,13 @@ namespace bmmo::session {
                 if (world.get_body(entity, body)) state.bodies[entity] = body;
                 // A tracked name the world no longer knows must not survive an
                 // amendment: a later rollback would write the body back.
-                else { state.bodies.erase(entity); state.extras.erase(entity); return; }
+                else { state.bodies.erase(entity); state.extras.erase(entity); state.contacts.erase(entity); return; }
                 bmmo_physics_core_extra extra{};
                 if (world.get_body_extra && world.get_body_extra(entity, extra)) state.extras[entity] = extra;
                 else state.extras.erase(entity);
+                std::vector<bmmo_physics_contact> contacts;
+                if (world.get_contacts && world.get_contacts(entity, contacts) > 0 && !contacts.empty()) state.contacts[entity] = std::move(contacts);
+                else state.contacts.erase(entity);
             };
             grab(state.tracked.own_entity);
             for (const auto& remote: state.tracked.remote_entities) grab(remote);
@@ -1065,6 +1103,8 @@ namespace bmmo::session {
         bool restore_quaternions_ = true;
         bool restore_clock_ = true;
         bool restore_calm_ = true;
+        bool restore_contacts_ = true;
+        uint32_t contact_flags_ = BMMO_PHYSICS_CONTACT_DEFAULT;
         bool restore_unit_ = true;
         bool sleep_as_recorded_ = true;
         bool replay_scripts_ = true;

@@ -168,6 +168,14 @@ namespace {
         bool restore_calm = true;
         bool restore_unit = true;
         bool sleep_as_recorded = true;
+        // --no-restore-contacts: leave a body that lost a friction contact
+        // inside the window resting on nothing after the restore (v15 A/B).
+        bool restore_contacts = true;
+        // --contact-flags N: BMMO_PHYSICS_CONTACT_* bits (1..16 = the recorded
+        // fields to copy onto a re-created point, 256 = only for a body with no
+        // contact left, 512 = only against static geometry; the default is
+        // 768, the measured one).
+        uint32_t contact_flags = BMMO_PHYSICS_CONTACT_DEFAULT;
         // The script replay (game/script_replay.hpp): the mechanism scripts'
         // state travels with the records and every replayed tick runs their
         // frame before its physics step.  --no-script-replay is the physics-only
@@ -248,6 +256,8 @@ namespace {
             else if (arg == "--restore-clock") out.restore_clock = true;
             else if (arg == "--no-restore-calm") out.restore_calm = false;
             else if (arg == "--no-restore-unit") out.restore_unit = false;
+            else if (arg == "--no-restore-contacts") out.restore_contacts = false;
+            else if (arg == "--contact-flags") { if (!(v = next())) return false; out.contact_flags = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--no-sleep-as-recorded") out.sleep_as_recorded = false;
             else if (arg == "--no-script-replay") out.script_replay = false;
             else if (arg == "--trace-plan") out.trace_plan = true;
@@ -773,6 +783,8 @@ namespace {
             rollback_.set_restore_clock(args_.restore_clock);
             rollback_.set_restore_calm(args_.restore_calm);
             rollback_.set_restore_unit(args_.restore_unit);
+            rollback_.set_restore_contacts(args_.restore_contacts);
+            rollback_.set_contact_flags(args_.contact_flags);
             rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
             rollback_.set_replay_scripts(args_.script_replay);
             rollback_.set_trace_plan(args_.trace_plan);
@@ -1605,6 +1617,24 @@ namespace {
                     logf("ball forces at tick %u: %s", tick, text.c_str());
                     last_ball_forces_ = text;
                 }
+                // The contacts, whenever a partner, the keeper counter or the
+                // pull counter changes (the floats change every tick).
+                const std::string contacts = bmmo::physics::describe_contacts(physics, own_nav_entity_.c_str());
+                std::string shape;
+                for (size_t i = 0; i < contacts.size(); ++i) {
+                    if (contacts.compare(i, 5, " gap=") == 0 || contacts.compare(i, 3, " s=") == 0
+                            || contacts.compare(i, 7, " press=") == 0 || contacts.compare(i, 4, " mu=") == 0
+                            || contacts.compare(i, 5, " len=") == 0) {
+                        const size_t end = contacts.find_first_of(" }", i + 1);
+                        i = (end == std::string::npos ? contacts.size() : end) - 1;
+                        continue;
+                    }
+                    shape += contacts[i];
+                }
+                if (shape != last_ball_contacts_) {
+                    logf("ball contacts at tick %u: %s", tick, contacts.c_str());
+                    last_ball_contacts_ = shape;
+                }
             }
             if (args_.trace && trace_frames_ > 0) {
                 --trace_frames_;
@@ -1992,8 +2022,18 @@ namespace {
                 bmmo::physics::get_clock(engine_->physics(), factor_before, delta_before, clock_error);
                 bmmo::physics::get_clock_state(engine_->physics(), clock_before, clock_error);
             }
+            if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+                ++contact_traces_;
+                logf("contacts of %s before the rewind at %u: %s", own_body_entity_.c_str(), now,
+                     bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+            }
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) ++forced_rollbacks_;
             else ++forced_rollbacks_missed_;
+            if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+                ++contact_traces_;
+                logf("contacts of %s after the rewind (replayed to %u): %s", own_body_entity_.c_str(), now,
+                     bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+            }
             if (args_.trace_restore && restore_traces_ < 8) {
                 ++restore_traces_;
                 const std::string after = bmmo::physics::describe_cores_exact(engine_->physics());
@@ -2474,7 +2514,12 @@ namespace {
                 // before the physics step.  The bridge event log is muted for
                 // it - a replayed Physics WakeUp is not a live event for the
                 // server.
-                world.pre_step = [this, context](uint32_t) {
+                world.pre_step = [this, context](uint32_t tick) {
+                    if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+                        ++contact_traces_;
+                        logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
+                             bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+                    }
                     bmmo::physics::set_event_log_muted(true);
                     bmmo::game::script_replay::execute_frame(context, scripts_, 1000.0f / 66.0f, &scripts_replayed_);
                     bmmo::physics::set_event_log_muted(false);
@@ -2487,6 +2532,26 @@ namespace {
             world.set_nav = [physics](const std::string& entity, const bmmo_physics_nav_state& state) {
                 std::string error;
                 return bmmo::physics::navigation_set_state(physics, entity.c_str(), state, error);
+            };
+            world.get_contacts = [physics](const std::string& entity, std::vector<bmmo_physics_contact>& out) {
+                std::string error;
+                bmmo_physics_contact buffer[16];
+                const int n = bmmo::physics::get_contacts(physics, entity.c_str(), buffer, 16, error);
+                if (n < 0) return -1;
+                out.assign(buffer, buffer + std::min(n, 16));
+                return n;
+            };
+            world.set_contacts = [this, physics](const std::string& entity, const std::vector<bmmo_physics_contact>& in, uint32_t flags) {
+                std::string error;
+                const int made = bmmo::physics::set_contacts(physics, entity.c_str(), in.data(), static_cast<int>(in.size()), flags, error);
+                if (!error.empty() && contact_restore_logs_++ < 8) logf("contact restore of %s: %s", entity.c_str(), error.c_str());
+                if (made > 0 && args_.trace && contact_made_logs_++ < 40) {
+                    std::string partners;
+                    for (const auto& c: in) partners += std::string(partners.empty() ? "" : ",") + c.partner;
+                    logf("contact restore of %s at tick %u: %d re-created of %zu recorded (%s)", entity.c_str(), current_tick(), made,
+                         in.size(), partners.c_str());
+                }
+                return made;
             };
             world.nav_input = [physics](const std::string& entity, const bmmo::session::input_frame& frame) {
                 std::string error;
@@ -2828,7 +2893,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -2851,6 +2916,7 @@ namespace {
                  static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
                  static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen),
                  static_cast<unsigned long long>(rs.impulses_restored),
+                 static_cast<unsigned long long>(rs.contacts_restored), static_cast<unsigned long long>(rs.contact_restore_failures),
                  static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
                  static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
                  static_cast<unsigned long long>(script_reset_skips_), rs.max_error,
@@ -2900,6 +2966,10 @@ namespace {
         std::map<CK_ID, uint32_t> script_reset_ticks_;        // the tick each script was last told to reset
         uint64_t script_reset_skips_ = 0;                    // scripts a restore kept live for having been reset after its anchor
         std::string last_ball_forces_;                       // --trace: the last "ball forces" line
+        std::string last_ball_contacts_;                     // --trace: the shape of the last "ball contacts" line
+        uint32_t contact_restore_logs_ = 0;
+        uint32_t contact_made_logs_ = 0;
+        int contact_traces_ = 0;                             // --trace-restore: contact lines logged around rewinds
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;

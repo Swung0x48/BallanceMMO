@@ -85,6 +85,27 @@ namespace bmmo::physics {
     // SetPhysicsForce controller is counted here and read through the block
     // that owns it (game/script_replay.hpp, describe_force_blocks).
     std::string describe_controllers(CKIpionManager* physics, const char* entity_name);
+    // Diagnostics: one body's IVP contact state - its friction contact points
+    // (partner, the distance keeper's turn-on counter, the gap, the pull
+    // counter, the friction spans, the pressure) and its exact mindists
+    // (partner, status, length).  What a beam cannot carry: a rewind to an
+    // anchor whose contact has since ended re-creates the contact fresh.
+    std::string describe_contacts(CKIpionManager* physics, const char* entity_name);
+
+    // ---- bridge API v15: a body's friction contacts ----
+
+    // The body's contact points, at most `max` of them into `out` (may be
+    // null); returns the count, or -1 with `error`.
+    int get_contacts(CKIpionManager* physics, const char* entity_name, bmmo_physics_contact* out, int max,
+                     std::string& error);
+    // Re-creates every recorded contact the body lacks now, through IVP's own
+    // creation path (the exact mindist to the partner, then
+    // IVP_Mindist::try_to_generate_managed_friction, then the recorded
+    // per-contact state written onto the new point).  Returns how many it
+    // made, -1 when the body is unknown; a partner without a mindist in range
+    // is named in `error` and skipped.
+    int set_contacts(CKIpionManager* physics, const char* entity_name, const bmmo_physics_contact* in, int count,
+                     uint32_t flags, std::string& error);
     // Diagnostics: the per-body terms of the world hash's surface signature
     // (name, surface type, compact-surface size and hash), one line per body,
     // sorted by name so two worlds can be diffed textually.

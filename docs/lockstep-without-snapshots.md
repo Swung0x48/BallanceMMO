@@ -1348,8 +1348,7 @@ none): **16 with physics only** - the swing eight times at 0.39-0.93 m,
 and **6 with the scripts**: the box once, the prop ball four times, the own ball
 once. The own ball's is the same 0.76 m in both arms and in every forced arm
 before: a rewind that crosses the ball's departure from the road edge puts it
-0.76 m lower, a contact-leaving infidelity of the physics restore, not the
-scripts'. The re-executed scripts arrive where the live frames left them on
+0.76 m lower, a contact the beam could not bring back - the next section. The re-executed scripts arrive where the live frames left them on
 every rewind but three (of 83): the ventilator's `TurnON_Permission` after the
 first two rewinds of the run (1 live vs 0 replayed - a one-shot the record has
 no bearing on) and the balloon's `UFO` referential (an object id vs 0) on the
@@ -1392,6 +1391,85 @@ moves nothing either way: two pairs there gave 8/9/4/4 vs 3/3/2/11 and then
 mechanism column is a bistable prop ball. The server journals of all six runs
 replay bit for bit.
 
+
+## The one the ball still had: a contact that ended inside the window (bridge API v15)
+
+Every forced-rewind arm above, scripts or not, took the same single correction
+on the own ball: at tick 2400 the server had it 0.76 m higher, and the control
+run took none. The rewind that does it is the one at 2360, anchored at 2348:
+
+| rewind at 2360, anchor | the ball at the anchor | against the control |
+|---|---|---|
+| 2348 (depth 12) | rolling on the road, its floor contact alive | **0.76 m** |
+| 2348, `--no-restore-recheck` | same | 0.76 m |
+| 2348, `--no-restore-impulses` | same | 0.76 m |
+| 2352 (depth 8) | just off the edge | exact |
+| 2356 (depth 4) | falling | exact |
+| rewind at 2340, anchor 2328 | on the road, the contact still alive at 2340 | exact |
+
+So the restore is exact whenever the anchor's floor contact still exists at the
+rewind tick, and loses 0.76 m exactly when the contact ended inside the window.
+The per-tick data says the same: the first checkpoint after the rewind is
+already 0.24 m lower and 0.54 m/s faster downward than the control, and the
+rest is free fall. The contact diagnostic (`describe_contacts`, the friction
+contact points and exact mindists of one body) shows why. Live, the ball rolled
+on `A_Floor_035` with one friction contact until tick 2347 and lost it at the
+edge; beamed back to 2348 it has no contact and no mindist at all; the mindists
+are back one step later (0.019 m, exact); a friction contact never comes. IVP
+creates a contact point only on an impact (`IVP_Mindist::do_impact`), and a
+ball put back at rest on the floor has none coming - it rolls its last ticks on
+the road resting on nothing, and leaves the lip early.
+
+A beam cannot carry contacts, so the records do (`bmmo_physics_contact`, bridge
+API v15): per tracked body, the partner of each friction contact and the state
+IVP keeps on the point (the gap, the friction spans, the pressure, the pull and
+keeper counters). A restore, after every body is back, re-creates a recorded
+contact the body lacks through IVP's own path: the pair's collision checkers
+driven to exact mindists now (the beam's recheck had made them hulls - a beamed
+body has `current_speed` 0, so the hull check length is just the collision
+distance, and the PSI would only turn them exact a step later; for a mesh the
+checker is an `IVP_OO_Watcher` whose children must be driven one by one), the
+shortest exact mindist to the recorded partner, `try_to_generate_managed_friction`
+on it, which files the point into a friction system and fires the game's
+friction listeners as an impact would. `docs/engine-changes.md` has the bridge
+note; `--no-restore-contacts` turns it off and `--contact-flags` picks the
+variant.
+
+**Which variant, measured** (the forced physics-only run against the same
+control, so the contacts are the only thing that changed; the baseline took 16
+corrections, one of them the edge):
+
+| re-created | fields copied onto the point | corrections | on the own ball | the edge |
+|---|---|---|---|---|
+| for any body with a recorded contact missing | all | 25 | 9 | fixed |
+| any body | none (IVP's fresh point) | 17 | 1 | fixed |
+| only a body with no contact left | none | 15 | 0 | fixed |
+| only a body with no contact left | all | 21 | 6 | fixed |
+| no contact left, static partner only | none | **16** | **0** | **fixed** |
+| no contact left, static partner only | all | 21 | 6 | fixed |
+
+Copying the recorded fields onto the new point costs 5-11 cm on a ball crossing
+from one floor block to the next inside a window (a case the plain restore
+got exact: the point IVP makes at the next impact is consistent with the
+`tmp_contact_info` the solver rebuilds, and one carrying another moment's gap
+and spans is not), and re-creating a point between two movable bodies - two
+player balls, a ball on a plate - crashed the next impact solve
+(`IVP_Impact_System::test_loop_all_pairs`, a null friction structure) on one of
+four networked clients. So the default is the last row but one: a fresh point,
+only for a body that has no contact left, only against static geometry - the
+measured case and nothing more; the recorded fields stay in the record for the
+diagnostic.
+
+**With the default in place:** the single rewind across the edge is exact
+(one contact re-created, no correction); the scripts arm over the whole forced
+run takes **5** server corrections (6 without the restore, 16 physics-only),
+none of them on the own ball, and the swing and `P_Modul_03` stay off the
+worst-body list; the four-client swing-bay run at 150 ms neither crashes nor
+moves - mechanism rollbacks 2 / 5 / 4 / 4 against 1 / 3 / 4 / 6 without it, the
+ball column 7 / 5 / 5 / 6 against 7 / 7 / 8 / 8, the server journal bit-exact.
+The 12 contact-restore failures each client logs there are the remote balls'
+records restored while their body is unphysicalized, which is nothing to
+restore. The 189 unit tests pass.
 
 ## Checked on the real networked path, and two things found there
 

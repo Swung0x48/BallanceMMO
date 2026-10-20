@@ -253,6 +253,7 @@ namespace bmmo::session {
         std::vector<CK_ID> scripts_replayed;     // the scripts the last restore wrote: active at its anchor
         bmmo::game::script_replay_hooks script_hooks;
         uint32_t script_restore_logs = 0;
+        uint32_t contact_restore_logs = 0;
         std::map<CK_ID, uint32_t> script_reset_ticks;   // the tick each script was last told to reset
         uint64_t script_reset_skips = 0;                 // scripts a restore kept live for having been reset after its anchor
         // Every sector this session has held or run, sector 1 (the level's own)

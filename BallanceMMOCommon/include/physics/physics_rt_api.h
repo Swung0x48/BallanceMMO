@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 14u  /* v14: the force block's controller and the event-log mute, for the script replay (v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 15u  /* v15: a body's friction contacts, for the rollback restore (v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -139,6 +139,40 @@ typedef struct bmmo_physics_force_block {
     double position[3];   /* PhysicsControllerForce::m_Position (object space) */
     double force[3];      /* PhysicsControllerForce::m_Force */
 } bmmo_physics_force_block;
+
+/* One friction contact point of a body (v15): the other object, and the
+ * per-contact state IVP keeps on the point (ivp_friction.hxx,
+ * IVP_Contact_Point_Fast).  What a beam cannot carry: IVP creates a contact
+ * point only on an impact, so a body restored to the resting pose it had at
+ * an anchor whose contact has since ended rests on nothing until it leaves
+ * (measured: a ball rolling off the road end inside a rewind's window,
+ * 0.76 m low afterwards, exact when the contact still existed). */
+typedef struct bmmo_physics_contact {
+    char partner[BMMO_PHYSICS_NAME_SIZE];   /* the other object's name */
+    float gap;          /* last_gap_len */
+    float span[2];      /* span_friction_s */
+    float pressure;     /* now_friction_pressure */
+    int32_t pull;       /* has_negative_pull_since */
+    int32_t keeper;     /* slowly_turn_on_keeper */
+} bmmo_physics_contact;
+
+/* contacts_set flags: which recorded fields are written onto a re-created
+ * point (the rest keep what IVP_Contact_Point's constructor set), and whether
+ * a body that still has some contact is left alone. */
+#define BMMO_PHYSICS_CONTACT_GAP       1u
+#define BMMO_PHYSICS_CONTACT_SPAN      2u
+#define BMMO_PHYSICS_CONTACT_PRESSURE  4u
+#define BMMO_PHYSICS_CONTACT_PULL      8u
+#define BMMO_PHYSICS_CONTACT_KEEPER    16u
+#define BMMO_PHYSICS_CONTACT_ALL_FIELDS 31u
+#define BMMO_PHYSICS_CONTACT_ONLY_WHEN_NONE 256u   /* re-create only for a body with no contact left */
+#define BMMO_PHYSICS_CONTACT_STATIC_ONLY    512u   /* re-create only contacts with an unmovable partner (a floor) */
+/* The default the rollback uses - measured (docs/lockstep-without-snapshots.md,
+ * "The one the ball still had"): a fresh point, only for a body with no
+ * contact left, only against static geometry.  Copying the recorded fields
+ * onto the point cost 5-11 cm on a ball crossing floor blocks, and a point
+ * made between two movable bodies crashed the next impact solve. */
+#define BMMO_PHYSICS_CONTACT_DEFAULT (BMMO_PHYSICS_CONTACT_ONLY_WHEN_NONE | BMMO_PHYSICS_CONTACT_STATIC_ONLY)
 
 /* The environment's clock, which a rollback restore has to put back too.
  *
@@ -464,6 +498,19 @@ typedef struct bmmo_physics_api_v2 {
      * Physics WakeUp would otherwise show up as a `revived` the frame's drain
      * turns into a BodyRevived event for the server. */
     int32_t (*set_event_log_muted)(void* ipion_manager, int32_t muted, char* error, uint32_t error_size);
+
+    /* ---- v15: a body's friction contacts (bmmo_physics_contact) ---- */
+
+    /* contacts_get fills at most `max` entries and returns the body's contact
+     * count (like snprintf; `out` may be null), or -1 with a message.
+     * contacts_set re-creates, through IVP's own creation path, every recorded
+     * contact the body lacks now, with the recorded per-contact state, and
+     * returns how many it made (-1 with a message when the body is unknown;
+     * a partner with no mindist in range is reported in `error` and skipped). */
+    int32_t (*contacts_get)(void* ipion_manager, const char* entity, bmmo_physics_contact* out, int32_t max,
+                            char* error, uint32_t error_size);
+    int32_t (*contacts_set)(void* ipion_manager, const char* entity, const bmmo_physics_contact* in, int32_t count,
+                            uint32_t flags, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

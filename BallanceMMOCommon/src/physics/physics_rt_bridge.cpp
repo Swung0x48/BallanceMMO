@@ -514,6 +514,30 @@ namespace {
         return 1;
     }
 
+    int32_t api_contacts_get(void* manager, const char* entity, bmmo_physics_contact* out, int32_t max, char* error,
+                             uint32_t error_size) {
+        if (!manager || !entity) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::string text;
+        const int n = bmmo::physics::get_contacts(static_cast<CKIpionManager*>(manager), entity, out, out ? max : 0, text);
+        if (n < 0) set_error(error, error_size, text);
+        return n;
+    }
+
+    int32_t api_contacts_set(void* manager, const char* entity, const bmmo_physics_contact* in, int32_t count, uint32_t flags,
+                             char* error, uint32_t error_size) {
+        if (!manager || !entity) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::string text;
+        const int made = bmmo::physics::set_contacts(static_cast<CKIpionManager*>(manager), entity, in, count, flags, text);
+        if (!text.empty()) set_error(error, error_size, text);
+        return made;
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -565,6 +589,8 @@ namespace {
         api_force_block_get,
         api_force_block_set,
         api_set_event_log_muted,
+        api_contacts_get,
+        api_contacts_set,
     };
 }
 

@@ -2840,6 +2840,21 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         std::string error;
         return physics_view_.navigation_set_state(entity.c_str(), state, error);
     };
+    world.get_contacts = [this](const std::string& entity, std::vector<bmmo_physics_contact>& out) {
+        std::string error;
+        bmmo_physics_contact buffer[16];
+        const int n = physics_view_.contacts_get(entity.c_str(), buffer, 16, error);
+        if (n < 0) return -1;
+        out.assign(buffer, buffer + std::min(n, 16));
+        return n;
+    };
+    world.set_contacts = [this](const std::string& entity, const std::vector<bmmo_physics_contact>& in, uint32_t flags) {
+        std::string error;
+        const int made = physics_view_.contacts_set(entity.c_str(), in.data(), static_cast<int>(in.size()), flags, error);
+        if (!error.empty() && physics_session_.contact_restore_logs++ < 8)
+            logger_->Warn("Physics session: contact restore of %s: %s", entity.c_str(), error.c_str());
+        return made;
+    };
     world.nav_input = [this](const std::string& entity, const bmmo::session::input_frame& frame) {
         std::string error;
         const bool active = (frame.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
@@ -3274,7 +3289,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
         "events={}/{} phys_resends={} sectors={} held={} late={} lead={} "
-        "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} scr={}/{}/{}/{}/{} max_err={:.4f} last={} "
+        "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} ct={}/{} scr={}/{}/{}/{}/{} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         // held=<holding now>/<1 ms polls the hold took>[+timeout]: the anchor
         // hold of design 9.26 - the wait between the anchor and the tick base,
@@ -3295,7 +3310,8 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.sector_union.late(), s.sector_lead(),
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,
-        rs.too_far, rs.frozen, rs.script_restores, rs.script_restore_failures, rs.script_mismatches, rs.script_float_mismatches, s.script_reset_skips,
+        rs.too_far, rs.frozen, rs.contacts_restored, rs.contact_restore_failures,
+        rs.script_restores, rs.script_restore_failures, rs.script_mismatches, rs.script_float_mismatches, s.script_reset_skips,
         rs.max_error, rs.last_mismatch,
         st.compared, st.ignored, st.blended, st.hard, st.unmatched, st.last_error, st.max_error, s.last_error);
 }

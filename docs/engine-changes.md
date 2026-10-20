@@ -676,6 +676,52 @@ event log while replayed script frames run - a replayed `Physics WakeUp` must
 not be reported to the server as a live `BodyRevived`. The retail block's own
 code is untouched.
 
+## Bridge notes: a body's friction contacts (bridge API v15, no engine change)
+
+Nothing under `submodule/Ballanced` changed for this one either. A rollback
+restore beams every body back to its anchor pose, and a beam cannot carry a
+body's **friction contact points**: IVP creates a contact point only when an
+impact happens (`IVP_Mindist::do_impact` ->
+`IVP_Mindist::try_to_generate_managed_friction`), and a body put back onto the
+floor it has since rolled off has no impact coming - it rests on nothing until
+it leaves. Measured on the mechanism arena with one forced rewind of depth 12:
+anchored while the ball still rolled on `A_Floor_035`, with the contact already
+gone at the rewind tick, the ball came out 0.76 m low and 0.5 m/s faster
+downward; anchored two ticks later, or with the contact still alive at the
+rewind tick, exactly reproduced. The contact diagnostic
+(`bmmo::physics::describe_contacts`) showed the restored ball with no friction
+contact and no mindist at all, the mindists back one step later, and no contact
+ever re-created.
+
+So every rollback record carries, per tracked body, its contacts (the partner
+and the per-contact state IVP keeps on the point: `last_gap_len`,
+`span_friction_s`, `now_friction_pressure`, `has_negative_pull_since`,
+`slowly_turn_on_keeper`), and a restore re-creates a recorded contact the body
+lacks through IVP's own creation path: the pair's collision checkers in the
+body's overlap element driven to exact mindists now - the beam's recheck leaves
+them as hulls, since a beamed body has `current_speed` 0 and the hull check
+length is then just the collision distance, and the PSI would only turn them
+exact a step later; a mesh pair's checker is an `IVP_OO_Watcher`, whose children
+are driven one by one with the body's real speed on the core and the
+`IVP_MT_GET_MINDIST` movement state, so a mindist made now stays exact - then the
+shortest exact mindist to the recorded partner, and
+`IVP_Mindist::try_to_generate_managed_friction` on it, which files the point into
+a friction system and fires the friction-created listeners the game registers,
+exactly as an impact would. Protected members are reached the way
+`ivp_private_access.hpp` reaches the environment's clock.
+
+Measured against the variants (`docs/lockstep-without-snapshots.md`, "The one
+the ball still had"), the default (`BMMO_PHYSICS_CONTACT_DEFAULT`) is the
+narrow one: a fresh point - IVP's constructor values, none of the recorded
+fields copied - only for a body that has no contact left at all, and only
+against an unmovable partner. Copying the recorded fields onto the new point
+cost 5-11 cm on a ball crossing floor blocks inside a window, which the plain
+restore got exact, and a point made between two movable bodies crashed the next
+impact solve (`IVP_Impact_System::test_loop_all_pairs`). A contact the body
+still has is left alone with its own state; one the record lacks is left to
+IVP, which drops a contact whose distance has grown. `--no-restore-contacts`
+and `--contact-flags` on the headless client are the A/B switches.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

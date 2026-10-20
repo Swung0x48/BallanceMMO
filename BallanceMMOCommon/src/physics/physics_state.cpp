@@ -8,6 +8,9 @@
 #include "ivp_core.hxx"
 #include "ivp_controller.hxx"
 #include "ivp_real_object.hxx"
+#include "ivp_mindist.hxx"
+#include "ivp_friction.hxx"
+#include "ivp_clustering_longrange.hxx"
 #include <physics/ball_navigation.hpp>
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
@@ -50,6 +53,109 @@ static void bmmo_fp_env_text(char* out, size_t size) {
 #else
     snprintf(out, size, "cw=-|mxcsr=-");
 #endif
+}
+
+// The contact point's per-contact state is protected (ivp_friction.hxx,
+// IVP_Contact_Point_Fast); read the same way ivp_private_access.hpp reads the
+// environment's clock, without touching the pinned headers.
+namespace bmmo::physics::ivp_access {
+    struct cp_keeper { using type = short IVP_Contact_Point_Fast::*; friend type steal(cp_keeper); };
+    struct cp_gap { using type = IVP_FLOAT IVP_Contact_Point_Fast::*; friend type steal(cp_gap); };
+    struct cp_pull { using type = int IVP_Contact_Point_Fast::*; friend type steal(cp_pull); };
+    struct cp_span { using type = IVP_FLOAT (IVP_Contact_Point_Fast::*)[2]; friend type steal(cp_span); };
+    struct cp_pressure { using type = IVP_FLOAT IVP_Contact_Point_Fast::*; friend type steal(cp_pressure); };
+    struct cp_friction { using type = IVP_FLOAT IVP_Contact_Point_Fast::*; friend type steal(cp_friction); };
+    template struct thief<cp_keeper, &IVP_Contact_Point_Fast::slowly_turn_on_keeper>;
+    template struct thief<cp_gap, &IVP_Contact_Point_Fast::last_gap_len>;
+    template struct thief<cp_pull, &IVP_Contact_Point_Fast::has_negative_pull_since>;
+    template struct thief<cp_span, &IVP_Contact_Point_Fast::span_friction_s>;
+    template struct thief<cp_pressure, &IVP_Contact_Point_Fast::now_friction_pressure>;
+    template struct thief<cp_friction, &IVP_Contact_Point_Fast::real_friction_factor>;
+    inline short& keeper(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_keeper()); }
+    inline IVP_FLOAT& gap(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_gap()); }
+    inline int& pull(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_pull()); }
+    inline IVP_FLOAT* span(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_span()); }
+    inline IVP_FLOAT& pressure(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_pressure()); }
+    inline IVP_FLOAT& friction(IVP_Contact_Point_Fast& cp) { return cp.*steal(cp_friction()); }
+
+    // IVP_Real_Object::get_all_near_mindists is protected: the recheck of the
+    // object's overlap element in the IVP_MT_GET_MINDIST movement state, which
+    // creates the mindists to everything in range as EXACT ones at once (the
+    // ordinary recheck leaves them as hulls that turn exact a PSI later).
+    struct ro_near_mindists { using type = void (IVP_Real_Object::*)(); friend type steal(ro_near_mindists); };
+    template struct thief<ro_near_mindists, &IVP_Real_Object::get_all_near_mindists>;
+    inline void scan_near_mindists(IVP_Real_Object& object) { (object.*steal(ro_near_mindists()))(); }
+
+    // IVP_Mindist::mindist_hull_limit_exceeded_event is protected: what the
+    // PSI does to a hull mindist whose hull was exceeded - recalculate it and,
+    // within range, make it exact (for a mesh pair, spawn the exact mindists
+    // to the ledges in range).
+    struct md_hull_event { using type = void (IVP_Mindist::*)(IVP_HTIME); friend type steal(md_hull_event); };
+    template struct thief<md_hull_event, &IVP_Mindist::mindist_hull_limit_exceeded_event>;
+    // A pair with a mesh on either side is checked by an IVP_OO_Watcher, whose
+    // hull event (re)creates the exact mindists to the ledges in range.
+    struct oo_hull_event { using type = void (IVP_OO_Watcher::*)(); friend type steal(oo_hull_event); };
+    template struct thief<oo_hull_event, &IVP_OO_Watcher::hull_limit_exceeded_event>;
+    struct oo_children { using type = IVP_U_FVector<IVP_Collision> IVP_OO_Watcher::*; friend type steal(oo_children); };
+    template struct thief<oo_children, &IVP_OO_Watcher::mindists>;
+
+    // One collision checker and everything under it, driven to exact
+    // mindists: a watcher (re)creates its children, a recursive mindist its
+    // own, and every hull child gets the event the PSI would give it when its
+    // hull is exceeded, which turns it exact (ivp_mindist.cxx,
+    // mindist_hull_limit_exceeded_event).
+    inline void drive_exact(IVP_Collision* coll, int depth = 0) {
+        if (!coll || depth > 4) return;
+        if (auto* watcher = dynamic_cast<IVP_OO_Watcher*>(coll)) {
+            (watcher->*steal(oo_hull_event()))();
+            IVP_U_FVector<IVP_Collision>& children = watcher->*steal(oo_children());
+            for (int i = children.len() - 1; i >= 0; --i) drive_exact(children.element_at(i), depth + 1);
+            return;
+        }
+        auto* md = dynamic_cast<IVP_Mindist*>(coll);
+        if (!md) return;
+        if (md->mindist_status == IVP_MD_HULL_RECURSIVE) {
+            auto* recursive = static_cast<IVP_Mindist_Recursive*>(md);
+            recursive->rec_hull_limit_exceeded_event();
+            for (int i = recursive->mindists.len() - 1; i >= 0; --i) drive_exact(recursive->mindists.element_at(i), depth + 1);
+        } else if (md->mindist_status == IVP_MD_HULL) {
+            (md->*steal(md_hull_event()))(0.0f);
+        }
+    }
+
+    // The collision checkers between `object` and the object named `partner`,
+    // as the beam's recheck left them - hulls that would turn exact a PSI
+    // later - driven to their exact mindists now.  Returns false when the
+    // overlap list has no checker for the pair at all.
+    inline bool force_exact_mindists(IVP_Real_Object& object, const char* partner) {
+        IVP_OV_Element* elem = object.get_ov_element();
+        IVP_Core* core = object.get_core();
+        if (!elem || !core) return false;
+        // In the IVP_MT_GET_MINDIST movement state a mindist created now stays
+        // exact (IVP_Mindist_Manager::insert_and_recalc_exact_mindist does not
+        // convert it to a hull), which is how get_all_near_mindists works.
+        const auto saved_state = core->movement_state;
+        const IVP_FLOAT saved_speed = core->current_speed;
+        core->movement_state = IVP_MT_GET_MINDIST;
+        // The beam left current_speed at 0, and a hull mindist's event keeps
+        // it a hull while its estimated distance exceeds the look-ahead
+        // (speed * PSI * 6): give the look-ahead the speed the body has.
+        core->current_speed = static_cast<IVP_FLOAT>(core->speed.real_length()) + 1.0f;
+        bool found = false;
+        for (int i = elem->collision_fvector.len() - 1; i >= 0; --i) {
+            IVP_Collision* coll = elem->collision_fvector.element_at(i);
+            if (!coll) continue;
+            IVP_Real_Object* objects[2] = {nullptr, nullptr};
+            coll->get_objects(objects);
+            IVP_Real_Object* other = objects[0] == &object ? objects[1] : objects[0];
+            if (!other || !other->get_name() || std::strcmp(other->get_name(), partner) != 0) continue;
+            found = true;
+            drive_exact(coll);
+        }
+        core->current_speed = saved_speed;
+        core->movement_state = saved_state;
+        return found;
+    }
 }
 
 namespace bmmo::physics {
@@ -826,6 +932,185 @@ namespace bmmo::physics {
         }
         fill_body_state(object->m_RealObject, out);
         return true;
+    }
+
+    std::string describe_contacts(CKIpionManager* physics, const char* entity_name) {
+        CK3dEntity* entity = physics ? find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE)) : nullptr;
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+        if (!real) return "no body";
+        const auto other_name = [real](IVP_Real_Object* a, IVP_Real_Object* b) -> const char* {
+            IVP_Real_Object* other = a == real ? b : a;
+            return other && other->get_name() ? other->get_name() : "?";
+        };
+        char text[240];
+        std::string out = "fr=";
+        int n = 0;
+        std::string list;
+        for (IVP_Synapse_Friction* syn = real->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+            IVP_Contact_Point* cp = syn->get_contact_point();
+            if (!cp) continue;
+            ++n;
+            IVP_Contact_Point_Fast& f = *cp;
+            std::snprintf(text, sizeof(text), "{%s keeper=%d gap=%.5f pull=%d s=(%.4f,%.4f) press=%.4f mu=%.3f}",
+                          other_name(cp->get_synapse(0)->get_object(), cp->get_synapse(1)->get_object()),
+                          static_cast<int>(ivp_access::keeper(f)), static_cast<double>(ivp_access::gap(f)), ivp_access::pull(f),
+                          static_cast<double>(ivp_access::span(f)[0]), static_cast<double>(ivp_access::span(f)[1]),
+                          static_cast<double>(ivp_access::pressure(f)), static_cast<double>(ivp_access::friction(f)));
+            list += text;
+        }
+        out += std::to_string(n) + list + " mind=";
+        n = 0;
+        list.clear();
+        for (IVP_Synapse_Real* syn = real->get_first_exact_synapse(); syn; syn = syn->get_next()) {
+            IVP_Mindist* md = syn->get_mindist();
+            if (!md) continue;
+            ++n;
+            std::snprintf(text, sizeof(text), "{%s st=%d len=%.5f}",
+                          other_name(md->get_synapse(0)->get_object(), md->get_synapse(1)->get_object()),
+                          static_cast<int>(md->mindist_status), static_cast<double>(md->get_length()));
+            list += text;
+        }
+        out += std::to_string(n) + list;
+        return out;
+    }
+
+    namespace {
+        IVP_Real_Object* real_object_of(CKIpionManager* physics, const char* entity_name, std::string& error) {
+            const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+            CK3dEntity* entity = physics ? find_entity(physics, name) : nullptr;
+            PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+            if (!object || !object->m_RealObject) {
+                error = "'" + name + "' is not physicalized";
+                return nullptr;
+            }
+            return object->m_RealObject;
+        }
+
+        const char* contact_partner(IVP_Real_Object* self, IVP_Real_Object* a, IVP_Real_Object* b) {
+            IVP_Real_Object* other = a == self ? b : a;
+            return other && other->get_name() ? other->get_name() : "";
+        }
+    }
+
+    int get_contacts(CKIpionManager* physics, const char* entity_name, bmmo_physics_contact* out, int max,
+                     std::string& error) {
+        error.clear();
+        IVP_Real_Object* real = real_object_of(physics, entity_name, error);
+        if (!real) return -1;
+        int n = 0;
+        for (IVP_Synapse_Friction* syn = real->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+            IVP_Contact_Point* cp = syn->get_contact_point();
+            if (!cp) continue;
+            if (out && n < max) {
+                bmmo_physics_contact& c = out[n];
+                c = bmmo_physics_contact{};
+                std::snprintf(c.partner, sizeof(c.partner), "%s",
+                              contact_partner(real, cp->get_synapse(0)->get_object(), cp->get_synapse(1)->get_object()));
+                IVP_Contact_Point_Fast& f = *cp;
+                c.gap = ivp_access::gap(f);
+                c.span[0] = ivp_access::span(f)[0];
+                c.span[1] = ivp_access::span(f)[1];
+                c.pressure = ivp_access::pressure(f);
+                c.pull = ivp_access::pull(f);
+                c.keeper = ivp_access::keeper(f);
+            }
+            ++n;
+        }
+        return n;
+    }
+
+    int set_contacts(CKIpionManager* physics, const char* entity_name, const bmmo_physics_contact* in, int count,
+                     uint32_t flags, std::string& error) {
+        error.clear();
+        IVP_Real_Object* real = real_object_of(physics, entity_name, error);
+        if (!real) return -1;
+        IVP_Core* core = real->get_core();
+        if (!core || count <= 0 || !in) return 0;
+        // Which recorded partners the body still touches: those contacts
+        // survived the beam with their state and are left alone.
+        std::vector<bool> present(static_cast<size_t>(count), false);
+        int live = 0;
+        for (IVP_Synapse_Friction* syn = real->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+            IVP_Contact_Point* cp = syn->get_contact_point();
+            if (!cp) continue;
+            ++live;
+            const char* partner = contact_partner(real, cp->get_synapse(0)->get_object(), cp->get_synapse(1)->get_object());
+            for (int i = 0; i < count; ++i)
+                if (!present[i] && std::strcmp(in[i].partner, partner) == 0) { present[i] = true; break; }
+        }
+        int missing = 0;
+        for (int i = 0; i < count; ++i) if (!present[i]) ++missing;
+        if (!missing) return 0;
+        if ((flags & BMMO_PHYSICS_CONTACT_ONLY_WHEN_NONE) && live > 0) return 0;
+        int made = 0;
+        for (int i = 0; i < count; ++i) {
+            if (present[i]) continue;
+            // The pair's collision checker, as the beam's recheck left it: a
+            // hull (recursive, for a mesh) that turns exact a PSI later.  Its
+            // hull event now does what that PSI would: the exact mindists to
+            // the ledges in range exist at once.  A partner the overlap list
+            // does not know yet is looked for first.
+            if (!ivp_access::force_exact_mindists(*real, in[i].partner)) {
+                ivp_access::scan_near_mindists(*real);
+                ivp_access::force_exact_mindists(*real, in[i].partner);
+            }
+            IVP_Mindist* best = nullptr;
+            for (IVP_Synapse_Real* syn = real->get_first_exact_synapse(); syn; syn = syn->get_next()) {
+                IVP_Mindist* md = syn->get_mindist();
+                if (!md || md->mindist_status != IVP_MD_EXACT) continue;
+                const char* partner = contact_partner(real, md->get_synapse(0)->get_object(), md->get_synapse(1)->get_object());
+                if (std::strcmp(partner, in[i].partner) != 0) continue;
+                if (!best || md->get_length() < best->get_length()) best = md;
+            }
+            if (best && (flags & BMMO_PHYSICS_CONTACT_STATIC_ONLY)) {
+                IVP_Real_Object* a = best->get_synapse(0)->get_object();
+                IVP_Real_Object* b = best->get_synapse(1)->get_object();
+                IVP_Real_Object* other = a == real ? b : a;
+                IVP_Core* other_core = other ? other->get_core() : nullptr;
+                if (!other_core || !other_core->physical_unmoveable) continue;   // a movable partner: left to IVP
+            }
+            if (!best) {
+                int exact = 0;
+                std::string seen;
+                for (IVP_Synapse_Real* syn = real->get_first_exact_synapse(); syn; syn = syn->get_next()) {
+                    ++exact;
+                    if (IVP_Mindist* md = syn->get_mindist())
+                        seen += std::string(" ") + contact_partner(real, md->get_synapse(0)->get_object(), md->get_synapse(1)->get_object())
+                              + "/st" + std::to_string(static_cast<int>(md->mindist_status));
+                }
+                std::string checkers;
+                if (IVP_OV_Element* elem = real->get_ov_element())
+                    for (int c = 0; c < elem->collision_fvector.len(); ++c) {
+                        IVP_Collision* coll = elem->collision_fvector.element_at(c);
+                        IVP_Real_Object* objects[2] = {nullptr, nullptr};
+                        if (coll) coll->get_objects(objects);
+                        const char* kind = dynamic_cast<IVP_OO_Watcher*>(coll) ? "watcher" : dynamic_cast<IVP_Mindist*>(coll) ? "mindist" : "other";
+                        checkers += std::string(" ") + contact_partner(real, objects[0], objects[1]) + "(" + kind + ")";
+                    }
+                error += (error.empty() ? "" : "; ") + std::string("no exact mindist to ") + in[i].partner + " (exact:" + seen
+                       + "; checkers:" + checkers + ")";
+                continue;
+            }
+            IVP_Friction_System* system = nullptr;
+            IVP_BOOL fresh = IVP_FALSE;
+            IVP_Contact_Point* cp = best->try_to_generate_managed_friction(&system, &fresh, core->sim_unit_of_core, IVP_TRUE);
+            if (!cp) {
+                error += (error.empty() ? "" : "; ") + std::string("no contact point for ") + in[i].partner;
+                continue;
+            }
+            IVP_Contact_Point_Fast& f = *cp;
+            if (flags & BMMO_PHYSICS_CONTACT_KEEPER) ivp_access::keeper(f) = static_cast<short>(in[i].keeper);
+            if (flags & BMMO_PHYSICS_CONTACT_GAP) ivp_access::gap(f) = in[i].gap;
+            if (flags & BMMO_PHYSICS_CONTACT_PULL) ivp_access::pull(f) = in[i].pull;
+            if (flags & BMMO_PHYSICS_CONTACT_SPAN) {
+                ivp_access::span(f)[0] = in[i].span[0];
+                ivp_access::span(f)[1] = in[i].span[1];
+            }
+            if (flags & BMMO_PHYSICS_CONTACT_PRESSURE) ivp_access::pressure(f) = in[i].pressure;
+            ++made;
+        }
+        return made;
     }
 
     std::string describe_controllers(CKIpionManager* physics, const char* entity_name) {
