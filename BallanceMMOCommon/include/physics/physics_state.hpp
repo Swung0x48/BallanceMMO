@@ -31,6 +31,11 @@ namespace bmmo::physics {
     bool reset_session_clock(CKIpionManager* physics, int seed, std::string& error);
     // One physics step outside the frame loop (design 9.6 rollback): the
     // manager's Simulate() with the given behaviour delta in milliseconds.
+    // Diagnostic: stop write_body_state zeroing core->speed_change /
+    // rot_speed_change.  At a depth-0 rewind this is exactly equivalent to
+    // restoring them, so it measures what the zeroing costs a rollback.
+    void set_keep_queued_impulses(bool enable);
+
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
     // Engine change #6: while enabled, the retail Unphysicalize block keeps
     // every body except `except_entity` (the player's ball; null or empty =

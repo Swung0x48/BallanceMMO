@@ -601,6 +601,14 @@ namespace bmmo::physics {
         return true;
     }
 
+    namespace {
+        // See the DIAGNOSTIC note in write_body_state.  Off by design 8.4;
+        // the session client turns it on for --keep-queued-impulses only.
+        bool g_keep_queued_impulses = false;
+    }
+
+    void set_keep_queued_impulses(bool enable) { g_keep_queued_impulses = enable; }
+
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error) {
         error.clear();
         if (!physics || !physics->GetEnvironment()) {
@@ -896,8 +904,16 @@ namespace bmmo::physics {
             }
             // A hard set replaces the motion, so pushes queued for the next PSI
             // must not survive it (design 8.4).
-            core->speed_change.set_to_zero();
-            core->rot_speed_change.set_to_zero();
+            //
+            // DIAGNOSTIC: a replay restore is not a hard set.  At a rewind of
+            // depth 0 the live core IS the anchor core, so leaving the queue
+            // alone is exactly equivalent to restoring it - which makes this
+            // toggle an exact test of whether the zeroing is what a rollback
+            // loses, with nothing added to any record and no ABI touched.
+            if (!g_keep_queued_impulses) {
+                core->speed_change.set_to_zero();
+                core->rot_speed_change.set_to_zero();
+            }
             switch (action) {
                 case sleep_action::legacy_wake: real->ensure_in_simulation(); break;
                 case sleep_action::wake_if_frozen:

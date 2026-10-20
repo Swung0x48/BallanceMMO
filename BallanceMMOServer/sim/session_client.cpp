@@ -134,6 +134,8 @@ namespace {
         // body the restore moved.  Isolates the recheck's own cost to
         // replay fidelity from everything else.
         bool restore_recheck = true;
+        // --keep-queued-impulses: see physics_state::set_keep_queued_impulses.
+        bool keep_queued_impulses = false;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -196,6 +198,7 @@ namespace {
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--trace-restore") out.trace_restore = true;
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
+            else if (arg == "--keep-queued-impulses") out.keep_queued_impulses = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -696,6 +699,7 @@ namespace {
             close_journal("a new session started");
             rollback_.set_verbose(args_.trace);
             rollback_.set_recheck_on_restore(args_.restore_recheck);
+            bmmo::physics::set_keep_queued_impulses(args_.keep_queued_impulses);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
