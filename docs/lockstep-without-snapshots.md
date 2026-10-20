@@ -1213,12 +1213,23 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   diverged by 0.95 m and 1.78 m on rewinds that crossed no activation. Those
   are the script-driven mechanisms the replay does not run (see "So the
   remaining work is exactly: run the scripts during the replay").
-* The server's journal replay failed at `matched=689 first_divergence=701` in
-  6 of this round's 11 4-player runs, at the same tick every time: 5 of the 9
-  led runs and neither of the 2 lead-0 controls. A pre-v11 control failed the
-  same way in the earlier round, so it predates this work, but two controls
-  are not a base rate. The solo crossing runs all replayed exactly. It is the
-  other thing to fix next.
+* **The journal-replay failure at tick 701 is a hash artefact, and it follows
+  the join order.** Over 17 four-player runs it failed in all 8 whose players
+  joined out of client order (join order 0132 or 0321) and in none of the 9
+  that joined 0123, controls and led runs alike. Tick 701 is where all four
+  players' beams land: an Unphysicalize and a Physicalize each, every ball's
+  body recreated in one tick. The pose hash differs from 701 on, while all 1283
+  checkpoints of the failing session agree with the replay to 1e-6 m and
+  1e-4 m/s, through 1400 ticks of four balls on hinged plates, where any real
+  divergence would have grown far past that. So the physics is identical and
+  only the hash is not: `capture_world_hash` folds the cores into one FNV
+  stream in `m_MovableObjects` order, which the recreations evidently leave
+  different between the live world and the replay. The surface signature next
+  to it is already order-independent, a sum of per-body hashes. Doing the same
+  for the cores would fix the replay check, but it changes every hash value,
+  in journals and at the anchor exchange, so it is a decision, not a fix in
+  passing. Not chased further: the order itself is not known to matter to the
+  simulation.
 
 * The prop ball `P_Ball_Paper_MF` disappears from one side's body set after
   tick ~1 270 and stays missing for the rest of the session. A real

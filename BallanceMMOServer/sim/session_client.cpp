@@ -1555,7 +1555,13 @@ namespace {
         void send_event(bmmo::session_event_msg& event) {
             event.session = session_;
             event.serialize();
-            send_bytes(event.raw.str(), k_nSteamNetworkingSend_Reliable);
+            // ReliableNoNagle, not Reliable: a reliable message waits up to the
+            // Nagle delay to be batched, and this frame's input goes out
+            // unreliable with no delay a moment later - so an event stamped
+            // for this tick could arrive after the input that lets the server
+            // step it, and be applied a tick late (the server logs it: "late
+            // by 1", seen on BodyRevived and Physicalize).
+            send_bytes(event.raw.str(), k_nSteamNetworkingSend_ReliableNoNagle);
             ++events_sent_;
             // Own events go on the wire with player 0; the box names the
             // player the server will fill in.

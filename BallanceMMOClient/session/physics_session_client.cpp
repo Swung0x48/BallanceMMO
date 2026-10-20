@@ -2007,7 +2007,12 @@ void BallanceMMOClient::physics_session_send_event(bmmo::session_event_msg& even
     auto& s = physics_session_;
     event.session = s.session;
     event.serialize();
-    send(event.raw.str().data(), event.size(), k_nSteamNetworkingSend_Reliable);
+    // ReliableNoNagle, not Reliable: a reliable message waits up to the Nagle
+    // delay to be batched, and this frame's input goes out unreliable with no
+    // delay a moment later - so an event stamped for this tick could arrive
+    // after the input that lets the server step it, and be applied a tick late
+    // (the server logs it: "late by 1", seen on BodyRevived and Physicalize).
+    send(event.raw.str().data(), event.size(), k_nSteamNetworkingSend_ReliableNoNagle);
     ++s.events_sent;
     // The black box: our own events carry player 0 on the wire; in the file
     // they are ours by id, like the relayed ones are their sender's.
