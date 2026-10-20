@@ -1069,11 +1069,13 @@ TEST(RollbackEngine, SleepingRowInsideToleranceLeavesTheLocalSleepStateAlone) {
             EXPECT_FALSE(world.bodies["Wippe"].simulated);
             EXPECT_DOUBLE_EQ(world.bodies["Wippe"].position[0], 30.4);
         } else {
-            // restored from its own record, which is where it already is: no
-            // sleep-state change and no contact recheck
-            EXPECT_EQ(world.count("set_body Wippe keep"), 1);
-            EXPECT_EQ(world.count("set_body Wippe keep recheck"), 0);
-            EXPECT_EQ(world.count("set_body Wippe wake"), 0);
+            // restored from its own record, which is where it already is and
+            // which has it awake (v13: the record's sleep state, not the live
+            // one): no contact recheck, and the row's "sleeping" is not
+            // applied because the row is inside tolerance
+            EXPECT_EQ(world.count("set_body Wippe wake"), 1);
+            EXPECT_EQ(world.count("set_body Wippe wake recheck"), 0);
+            EXPECT_EQ(world.count("set_body Wippe keep"), 0);
             EXPECT_EQ(world.count("set_body Wippe freeze"), 0);
             EXPECT_TRUE(world.bodies["Wippe"].simulated);
             EXPECT_DOUBLE_EQ(world.bodies["Wippe"].position[0], 30.0);
@@ -1081,15 +1083,19 @@ TEST(RollbackEngine, SleepingRowInsideToleranceLeavesTheLocalSleepStateAlone) {
     }
 }
 
-// 9.25 rule 3: a tracked body the snapshot says nothing about gets no opinion.
-// It rewinds with the group from its own record - the world has to be one
-// consistent state at T - but with mode keep, so a body the client froze stays
-// frozen and an awake one keeps its freeze timers.
-TEST(RollbackEngine, TrackedBodyWithNoRowIsRestoredFromItsRecordWithModeKeep) {
+// 9.25 rule 3: a tracked body the snapshot says nothing about gets no opinion
+// from the server.  It rewinds with the group from its own record - the world
+// has to be one consistent state at T - in the sleep state the RECORD has
+// (v13).  It used to be restored with mode keep, which left the live sleep
+// state in place: a body that fell asleep after T then replayed T+1.. asleep
+// while the live frames had run it awake, and the replay diverged on exactly
+// the bodies whose sleep decision fell inside the window
+// (scripts/sleep_divergence.py).
+TEST(RollbackEngine, TrackedBodyWithNoRowIsRestoredFromItsRecordInItsRecordedSleepState) {
     fake_world world;
     world.bodies["Own"];
     world.bodies["Wippe"].position[0] = 30.0;
-    world.bodies["Wippe"].simulated = false;   // the client has it asleep
+    world.bodies["Wippe"].simulated = false;   // asleep at T and now
     rollback_engine engine;
     rollback_tracked tracked;
     tracked.own_entity = "Own";
@@ -1103,10 +1109,52 @@ TEST(RollbackEngine, TrackedBodyWithNoRowIsRestoredFromItsRecordWithModeKeep) {
     // a delta snapshot that carries the ball alone
     EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 4,
                                    entity_of_named, no_input));
-    EXPECT_EQ(world.count("set_body Wippe keep"), 1);
-    EXPECT_EQ(world.count("set_body Wippe keep recheck"), 0);   // it never moved
+    EXPECT_EQ(world.count("set_body Wippe freeze"), 1);
+    EXPECT_EQ(world.count("set_body Wippe freeze recheck"), 0);   // it never moved
+    EXPECT_EQ(world.count("set_body Wippe keep"), 0);
     EXPECT_FALSE(world.bodies["Wippe"].simulated);
     EXPECT_DOUBLE_EQ(world.bodies["Wippe"].position[0], 30.0);
+}
+
+// The rule itself, both ways: awake at T but asleep now is woken, asleep at T
+// but awake now is frozen; and set_sleep_as_recorded(false) is the pre-v13
+// restore, for the A/B.
+TEST(RollbackEngine, RecordedSleepStateWinsOverTheLiveOneUnlessSwitchedOff) {
+    for (const bool as_recorded: {true, false}) {
+        SCOPED_TRACE(as_recorded ? "as recorded" : "keep (pre-v13)");
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Wippe"].position[0] = 30.0;   // awake at T
+        world.bodies["Post"].position[0] = 40.0;
+        world.bodies["Post"].simulated = false;     // asleep at T
+        rollback_engine engine;
+        engine.set_sleep_as_recorded(as_recorded);
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Wippe", "Post"};
+        record_ticks(world, engine, tracked, 1, 4);
+        // after T the live frames changed both sleep states
+        world.bodies["Wippe"].simulated = false;
+        world.bodies["Post"].simulated = true;
+        world.calls.clear();
+        world.steps = 0;
+
+        fake_body server_own;
+        server_own.position[0] = 0.5;
+        EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 4,
+                                       entity_of_named, no_input));
+        if (as_recorded) {
+            EXPECT_EQ(world.count("set_body Wippe wake"), 1);
+            EXPECT_EQ(world.count("set_body Post freeze"), 1);
+            EXPECT_TRUE(world.bodies["Wippe"].simulated);
+            EXPECT_FALSE(world.bodies["Post"].simulated);
+        } else {
+            EXPECT_EQ(world.count("set_body Wippe keep"), 1);
+            EXPECT_EQ(world.count("set_body Post keep"), 1);
+            EXPECT_FALSE(world.bodies["Wippe"].simulated);
+            EXPECT_TRUE(world.bodies["Post"].simulated);
+        }
+    }
 }
 
 // The contact recheck is asked for only when the write actually moves the body:

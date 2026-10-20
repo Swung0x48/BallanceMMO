@@ -120,6 +120,14 @@ if (BMMO_BUILD_SIM)
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config"
             "${BMMO_PLAYER_SRC_DIR}" "${BMMO_PLAYER_GENERATED_DIR}")
     target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET})
+    # The bridge (physics_state.cpp) reads IVP classes whose layout the macro
+    # changes - engine change #5 adds the per-unit movement-check countdown to
+    # IVP_Simulation_Unit - so it is compiled under the same macro as the IVP
+    # libraries it links (cmake/PortableMath.cmake); the client plugin's copy
+    # is, by being part of the physics_RT target.
+    if (BMMO_PHYSICS_PORTABLE_MATH)
+        target_compile_definitions(BallanceMMOSim PRIVATE IVP_PORTABLE_BMMO)
+    endif ()
     target_compile_features(BallanceMMOSim PUBLIC cxx_std_20)
     # The same build id the client's physics_RT plugin reports, so the server
     # can tell a client running another engine revision from its own.

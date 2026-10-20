@@ -1159,8 +1159,114 @@ had no mismatch for 1600 ticks, until the balls reached the balloon platform
 at 1982; the phase offset of docs/mechanism-phase-at-sector-activation.md is
 gone. The rollback mismatches that remain (26 on the real client, at the same
 ticks and on the same bodies as on the bots: the pusher at 600, the see-saw at
-1092, the sliding stone at 1388, the balloon platform at 1982) are each where
-a predicted remote ball arrives at a mechanism - the ball story again.
+1092, the sliding stone at 1388, the balloon platform at 1982) were first read
+as the ball story - predicted remote balls arriving at mechanisms. **They are
+not.** Every one of those lines carries the `z` suffix on the local pose, the
+trace's mark for a body that is not simulated, against a server row that is
+moving (the pusher: `local=(162.508,-1.485,43.650)z`, `dv=0.067` on the
+server), and the real client and a bot log the pusher's mismatch with the same
+`dp=0.0898 dv=0.067` to four decimals, which two different ball predictions
+could not produce. The clients had put bodies to sleep that the server kept
+awake, deterministically, after the same early rollbacks - the next section.
+
+## The replay's sleep decisions, restored (bridge API v13)
+
+The restore was bit-exact for pose, velocity, queue and quaternions, and still
+every rewind changed the world. What it left at its live values was IVP's
+freeze bookkeeping: each core's two calm references (`time_of_calm_reference`,
+the calm pose and quaternion `calc_movement_state` compares the body against to
+decide whether it may sleep), each simulation unit's movement-check countdown
+(engine change #5), and the sleep state itself, which the `keep` mode of a
+restore from our own record deliberately left as it was NOW rather than as it
+was at T - and a body born in the replayed window was parked and re-posed awake
+whatever its birth record said.
+
+Measured before touching anything (the queued-impulse lesson): the journals
+carry `BODY_FLAG_SIMULATED` every two ticks, and `scripts/sleep_divergence.py`
+compares two client journals' local checkpoints body by body for the first tick
+their sleep flags differ. Solo, one forced depth-12 rewind every 40 ticks (85
+rewinds), against a control from the same batch (two controls agree on every
+body to 0.0000 m and on every sleep flag):
+
+| | bodies whose sleep flag ever differs | the plates born in the window (`P_Modul_29_Platte*`) | `P_Ball_Paper_MF` | `P_Modul_30_Wippe` |
+|---|---|---|---|---|
+| before (the v11 restore) | **44** | **0.48-0.62 m** from the first checkpoint after the rewind across their births | 0.63 m | 0.35 m |
+
+The see-saw and the bridge were asleep in the control from their birth
+(physicalized frozen) and awake in the arm: parked awake by the birth branch,
+they tilted under gravity for the replayed window and were released awake. The
+plates' 0.6 m is the same thing on a hinged chain. That is the "rewind cannot
+cross a sector's setup" item of the open list, and it is not the scripts: the
+block trace of the frames after an activation (`--debug-frames` on the SimTool)
+shows the manager walking for three frames, every module script physicalizing
+and hinging its bodies in its first frame, and nothing but proximity sensing
+from then on.
+
+**The fix** (`bmmo_physics_core_extra` v13, `rollback.hpp`): the calm references
+travel with every record and are written back after the pose - shifted by the
+live clock's offset from the anchor's when the clock is not rewound, so they are
+as old relative to every replayed step as they were live; the unit countdown is
+written in a pass of its own after every body is back; a body restored from our
+own record is woken or frozen as the RECORD has it; a birth is parked and
+re-posed in its birth record's sleep state with its birth record's bookkeeping.
+Each half is a switch in one binary (`--no-restore-calm`, `--no-restore-unit`,
+`--no-sleep-as-recorded`), same batch, same control:
+
+| arm | sleep flags differ | plates | Paper ball | see-saw | `P_Modul_03_*` | `P_Modul_08_Schaukel` |
+|---|---|---|---|---|---|---|
+| all three off (the old restore, rebuilt) | 44 | 0.48-0.62 m | 0.63 m | 0.35 m | 0.54 m | 0.93 m |
+| calm + unit, live sleep state | 44 | 0.48-0.62 m | 0.63 m | 0.35 m | - | 0.93 m |
+| sleep as recorded + unit, **no calm** | - | 0.17 m | 0.26 m | 0.09 m | - | sack **8.6 m**, rope 3.7 m, the ball 139 m |
+| sleep as recorded + calm, no unit | 42 | 0.013-0.02 m | 0.19 m | - | 0.32 m | 0.93 m |
+| **all three on** | 42 | **0.02-0.03 m** | 0.19 m | - | 0.32 m | 0.93 m |
+| all three on + `--restore-clock` | 42 | 0.02-0.06 m | **1.02 m** | - | 0.32 m | 0.93 m |
+
+Three things the matrix says:
+
+* **The sleep state as recorded is the half that matters, and it needs the
+  calm references.** Alone it is a disaster: a body woken from the record with
+  its live references in place reads as "moved since the reference" for ever
+  and never sleeps again, and the chain it is part of comes apart (the sack
+  and rope at 8.6 and 3.7 m, the ball at 139 m). With the references it is a
+  twenty-fold improvement on every body born in the window.
+* **The unit countdown is within noise** here (the no-unit arm is, if anything,
+  a little better on the plates). Kept, because it is the state engine change
+  #5 added and nothing else puts it back, but it bought nothing measurable.
+* **The clock rewind hurts** (the Paper ball 0.19 -> 1.02 m) and stays opt-in,
+  as the earlier null measurement and the hull manager's time-anchored state
+  already suggested; the shifted references make it unnecessary.
+
+**What is left, and it is a different kind of thing.** The remaining large
+errors are `P_Modul_08_Schaukel` (0.93 m, from a rewind at 1920) and the
+`P_Modul_03` group (0.32 m, in the frames after their births at ~2000), and
+the sector-4 block trace names the cause: `P_Modul_08_MF Script` is
+`Physicalize` + `Set Physics Hinge` and then **`SetPhysicsForce` + `Physics
+WakeUp` + `Delayer`, with the force toggled by the Delayer every ~32 frames**
+- a script that drives its mechanism on a timer, which a physics-only replay
+keeps at whatever phase the toggle had when the rewind started. That is the
+class the script replay was always for, and it is the next item. The ~40
+bodies whose sleep flags still differ somewhere are the small residual (the
+pusher 0.0004 m, the bridge 0.002 m): a body woken by a restore lands in a
+fresh simulation unit whose merges with its neighbours IVP decides anew, so
+its check phase cannot be put back exactly through the body API.
+
+**On the networked path** (four headless clients driving, 150 ms each way,
+90 s, the same run as the union's measurement, before and after), every
+rollback classified by the body that breached:
+
+| | rollbacks on a ball (prediction at a 300 ms round trip) | rollbacks on a mechanism |
+|---|---|---|
+| before, clients 0-3 | 46 / 433 / 433 / 408 | 62 / 65 / 66 / 60 |
+| after | 37 / 425 / 427 / 406 | 61 / 66 / **46** / **32** |
+
+The ball column is the ball story and does not move. The mechanism column
+moves where sleep was the cause, and what is left of it is named: the
+balloon chain (`PE_Balloon_Ballon0x`, 40-52 of each client's mechanism
+rollbacks before, up to 40 after) and the swing (`P_Modul_08_Schaukel`, 14-24
+after) - the two mechanisms whose scripts drive them on a timer (the balloon
+script's Sequencer, the swing's Delayer-toggled force), with the sandbag a
+distant third. Those are the script replay's, next. The server journals of
+both runs replay bit for bit.
 
 ## Checked on the real networked path, and two things found there
 

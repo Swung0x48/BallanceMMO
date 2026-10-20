@@ -2761,6 +2761,13 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         std::string error;
         return physics_view_.set_core_extra(entity.c_str(), state, error);
     };
+    // Bridge API v13: the clock is read so a restore can shift the calm
+    // references it puts back by the live clock's offset.  Not rewound: the
+    // clock rewind stays opt-in on the headless client, where it is measured.
+    world.get_clock = [this](bmmo_physics_clock_state& out) {
+        std::string error;
+        return physics_view_.get_clock_state(out, error);
+    };
     world.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
         std::string error;
         return physics_view_.navigation_get_state(entity.c_str(), out, error);

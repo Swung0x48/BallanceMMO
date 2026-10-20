@@ -68,6 +68,12 @@ namespace bmmo::physics {
         // after the pose write to put the recorded queue back.
         bool get_core_extra(const char* entity_name, bmmo_physics_core_extra& out, std::string& error) const;
         bool set_core_extra(const char* entity_name, const bmmo_physics_core_extra& in, std::string& error) const;
+        // ---- bridge API v13 ----
+        // The environment's clock: read so a restore can shift the calm
+        // references it puts back by the clock offset; written only by the
+        // opt-in clock rewind.
+        bool get_clock_state(bmmo_physics_clock_state& out, std::string& error) const;
+        bool set_clock_state(const bmmo_physics_clock_state& in, std::string& error) const;
 
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,

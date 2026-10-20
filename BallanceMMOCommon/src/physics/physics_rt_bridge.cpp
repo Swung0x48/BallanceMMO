@@ -460,6 +460,32 @@ namespace {
         return 1;
     }
 
+    int32_t api_get_clock_state(void* manager, bmmo_physics_clock_state* out, char* error, uint32_t error_size) {
+        if (!manager || !out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::get_clock_state(static_cast<CKIpionManager*>(manager), *out, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_set_clock_state(void* manager, const bmmo_physics_clock_state* in, char* error, uint32_t error_size) {
+        if (!manager || !in) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_clock_state(static_cast<CKIpionManager*>(manager), *in, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     const bmmo_physics_api_v2 kApi = {
         sizeof(bmmo_physics_api_v2),
         BMMO_PHYSICS_API_VERSION,
@@ -500,6 +526,8 @@ namespace {
         api_set_body_state_ex,
         api_get_core_extra,
         api_set_core_extra,
+        api_get_clock_state,
+        api_set_clock_state,
     };
 }
 

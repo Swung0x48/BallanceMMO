@@ -156,6 +156,16 @@ namespace {
         // appeared in four clock-on networked runs against none in eight
         // without.  Not proven to be the cause, not worth the risk for no gain.
         bool restore_clock = false;
+        // v13, IVP's freeze bookkeeping (scripts/sleep_divergence.py measured
+        // the premise: 44 bodies asleep or awake where the plain run was not,
+        // after forced rewinds).  Each half is an A/B in one binary:
+        // --no-restore-calm leaves the calm references at their live values,
+        // --no-restore-unit the simulation units' check countdown,
+        // --no-sleep-as-recorded restores a body in its LIVE sleep state (the
+        // pre-v13 "keep", and births parked awake) instead of the record's.
+        bool restore_calm = true;
+        bool restore_unit = true;
+        bool sleep_as_recorded = true;
         // --trace-plan: log which branch every body of a restore took.
         bool trace_plan = false;
         bool correct = true;
@@ -229,6 +239,9 @@ namespace {
             else if (arg == "--no-restore-impulses") out.restore_impulses = false;
             else if (arg == "--no-restore-quats") out.restore_quaternions = false;
             else if (arg == "--restore-clock") out.restore_clock = true;
+            else if (arg == "--no-restore-calm") out.restore_calm = false;
+            else if (arg == "--no-restore-unit") out.restore_unit = false;
+            else if (arg == "--no-sleep-as-recorded") out.sleep_as_recorded = false;
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
@@ -748,6 +761,9 @@ namespace {
             rollback_.set_restore_impulses(args_.restore_impulses);
             rollback_.set_restore_quaternions(args_.restore_quaternions);
             rollback_.set_restore_clock(args_.restore_clock);
+            rollback_.set_restore_calm(args_.restore_calm);
+            rollback_.set_restore_unit(args_.restore_unit);
+            rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
             rollback_.set_trace_plan(args_.trace_plan);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
@@ -2293,21 +2309,25 @@ namespace {
             // restores nothing should not pay to capture it either, and it
             // makes --no-restore-impulses --no-restore-quats a true pre-v11
             // control rather than one that still runs the new capture.
-            if (args_.restore_impulses || args_.restore_quaternions) {
-                world.get_body_extra = [physics](const std::string& entity, bmmo_physics_core_extra& out) {
-                    std::string error;
-                    return bmmo::physics::get_core_extra(physics, entity.c_str(), out, error);
-                };
-                world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
-                    std::string error;
-                    return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
-                };
-            }
+            // The extra state is always captured; the engine's switches
+            // decide what of it a restore writes back (so every half is an
+            // A/B in one binary).
+            world.get_body_extra = [physics](const std::string& entity, bmmo_physics_core_extra& out) {
+                std::string error;
+                return bmmo::physics::get_core_extra(physics, entity.c_str(), out, error);
+            };
+            world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
+                std::string error;
+                return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
+            };
+            // The clock is always READ (a restore shifts the calm references
+            // it puts back by the live clock's offset); it is rewound only on
+            // --restore-clock.
+            world.get_clock = [physics](bmmo_physics_clock_state& out) {
+                std::string error;
+                return bmmo::physics::get_clock_state(physics, out, error);
+            };
             if (args_.restore_clock) {
-                world.get_clock = [physics](bmmo_physics_clock_state& out) {
-                    std::string error;
-                    return bmmo::physics::get_clock_state(physics, out, error);
-                };
                 world.set_clock = [physics](const bmmo_physics_clock_state& state) {
                     std::string error;
                     return bmmo::physics::set_clock_state(physics, state, error);

@@ -190,6 +190,8 @@ namespace bmmo::session {
         uint64_t snapshots = 0, matched = 0, mismatched = 0, rollbacks = 0, resim_ticks = 0;
         uint64_t rewinds = 0;          // re-anchors the caller asked for (rewind_to), not snapshot disagreements
         uint64_t impulses_restored = 0;  // body writes that put a recorded queued impulse back (v11)
+        uint64_t calm_restored = 0;      // body writes that put the recorded calm references back (v13)
+        uint64_t units_restored = 0;     // body writes that put the recorded unit countdown back (v13)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
@@ -478,26 +480,43 @@ namespace bmmo::session {
                     // kept there through T+1..birth-1 (below) and released into
                     // the replay at its birth tick.
                     item.state = birth->bodies.find(entity)->second;
-                    // Measured (docs/lockstep-without-snapshots.md, "a rewind
-                    // cannot cross a new sector's setup"): parking it frozen
-                    // instead of awake, or writing its birth tick's queued
-                    // impulses back with the re-pose, changes nothing - what
-                    // a replay across a birth gets wrong is the setup the
-                    // scripts do in the frames after it.
-                    item.mode = wake_mode::wake;
+                    // Parked, and re-posed at its birth tick, in the sleep
+                    // state its birth record has.  It used to be parked and
+                    // re-posed AWAKE whatever the record said, and most sector
+                    // bodies are born frozen (start_frozen, or calm from their
+                    // first check): a see-saw or a bridge parked awake tilts
+                    // under gravity during the replayed window and is then
+                    // released awake - measured as the 0.3-0.6 m a rewind
+                    // across a sector's births cost (scripts/sleep_divergence.py:
+                    // the control had them asleep, the arm awake, from the
+                    // first checkpoint after the rewind).  The birth record's
+                    // freeze bookkeeping goes with the re-pose, so the first
+                    // movement check after it sees the history the live run
+                    // had.
+                    item.mode = sleep_as_recorded_
+                        ? (item.state.simulated ? wake_mode::wake : wake_mode::freeze) : wake_mode::wake;
                     item.repose_tick = birth->tick;
                     item.force_recheck = true;
+                    if (const auto ex = birth->extras.find(entity); ex != birth->extras.end()) {
+                        item.extra = ex->second;
+                        item.have_extra = true;
+                    }
                 } else if (row != rows.end() && row->second.authoritative) {
                     item.state = state_of(*row->second.row);
                     item.mode = row->second.simulated ? wake_mode::wake : wake_mode::freeze;
                     item.from_row = true;
                 } else if (recorded) {
-                    // Our own record of T, with the sleep state we had then:
-                    // the snapshot said nothing about this body (or only that
-                    // it sleeps where we have it), so nothing may change about
-                    // whether it sleeps.
+                    // Our own record of T, with the sleep state we had THEN -
+                    // the record's, not the live one.  The sleep state used to
+                    // be kept as it is now, on the reasoning that the snapshot
+                    // said nothing about it; but a body that fell asleep after
+                    // T then replayed T+1.. asleep while the live frames ran it
+                    // awake (and the other way round), and the replay diverged
+                    // from the live run on exactly the bodies whose sleep
+                    // decision fell inside the window.
                     item.state = *recorded;
-                    item.mode = wake_mode::keep;
+                    item.mode = sleep_as_recorded_
+                        ? (recorded->simulated ? wake_mode::wake : wake_mode::freeze) : wake_mode::keep;
                     // ...and with the impulses IVP had queued at T.  Only on
                     // this branch: a row is an authoritative pose from the
                     // server, which carries no queue, and the queue we happen
@@ -541,11 +560,52 @@ namespace bmmo::session {
             // history, and a clock left behind with nothing to advance it
             // would stay behind.
             const uint32_t window = current_tick > anchor ? current_tick - anchor : 0;
+            // The clock offset the restored calm references have to carry
+            // when the clock itself stays live (the rewind is opt-in: IVP
+            // keeps other time-anchored state a rewound clock turns into
+            // negative deltas).  The references are absolute IVP times; with
+            // the live clock `offset` seconds ahead of the anchor's, a
+            // reference shifted by the same amount is as old relative to
+            // every replayed step as it was in the live run.
+            double calm_shift = 0.0;
+            {
+                bmmo_physics_clock_state now_clock{};
+                if (at->have_clock && world.get_clock && world.get_clock(now_clock))
+                    calm_shift = now_clock.current_time - at->clock.current_time;
+            }
             if (restore_clock_ && at->have_clock && world.set_clock && !frozen
                     && window <= thresholds_.max_resim_ticks) {
                 world.set_clock(at->clock);
                 ++stats_.clock_rewinds;
+                calm_shift = 0.0;
             }
+            // What a record's extra may write back, by switch and by sleep
+            // state: a body being frozen gets no queue (a frozen body's queue
+            // is meaningless), the unit countdown is written in a pass of its
+            // own below, after every body is back and IVP has regrouped them.
+            const auto extra_mask = [&](const restore& item, bool unit_pass) -> uint32_t {
+                uint32_t fields = item.extra.fields;
+                if (!restore_impulses_ || item.mode == wake_mode::freeze) fields &= ~BMMO_PHYSICS_EXTRA_IMPULSES;
+                if (!restore_quaternions_) fields &= ~BMMO_PHYSICS_EXTRA_QUATS;
+                if (!restore_calm_) fields &= ~BMMO_PHYSICS_EXTRA_CALM;
+                if (!restore_unit_) fields &= ~BMMO_PHYSICS_EXTRA_UNIT;
+                if (unit_pass) fields &= BMMO_PHYSICS_EXTRA_UNIT;
+                else fields &= ~BMMO_PHYSICS_EXTRA_UNIT;
+                return fields;
+            };
+            const auto write_extra = [&](const std::string& entity, const restore& item, bool unit_pass) {
+                if (!item.have_extra || !world.set_body_extra) return;
+                bmmo_physics_core_extra extra = item.extra;
+                extra.fields = extra_mask(item, unit_pass);
+                if (extra.fields == 0) return;
+                if (extra.fields & BMMO_PHYSICS_EXTRA_CALM)
+                    for (int k = 0; k < 2; ++k) extra.calm_time[k] += calm_shift;
+                if (world.set_body_extra(entity, extra)) {
+                    if (extra.fields & BMMO_PHYSICS_EXTRA_IMPULSES) ++stats_.impulses_restored;
+                    if (extra.fields & BMMO_PHYSICS_EXTRA_CALM) ++stats_.calm_restored;
+                    if (extra.fields & BMMO_PHYSICS_EXTRA_UNIT) ++stats_.units_restored;
+                }
+            };
             for (auto& [entity, item]: plan) {
                 bmmo_physics_body_state live{};
                 // A body destroyed after its last record simply has nothing to
@@ -563,19 +623,10 @@ namespace bmmo::session {
                 const bool recheck = recheck_on_restore_
                                    && (item.force_recheck || write_moves_body(live, item.state));
                 world.set_body(entity, item.state, item.mode, recheck);
-                // After the pose write, which zeroed the queue.
-                if (item.have_extra && world.set_body_extra) {
-                    // The caller's two switches, applied to the mask rather
-                    // than to the call, so each half can be measured on its own
-                    // in one binary.
-                    bmmo_physics_core_extra extra = item.extra;
-                    if (!restore_impulses_) extra.fields &= ~BMMO_PHYSICS_EXTRA_IMPULSES;
-                    if (!restore_quaternions_) extra.fields &= ~BMMO_PHYSICS_EXTRA_QUATS;
-                    if (extra.fields != 0) {
-                        world.set_body_extra(entity, extra);
-                        ++stats_.impulses_restored;
-                    }
-                }
+                // After the pose write, which zeroed the queue.  A body born in
+                // the window is parked here and gets its record's extra at the
+                // re-pose instead.
+                if (!item.repose_tick) write_extra(entity, item, false);
                 // What we wrote from a row is the authoritative state of T now:
                 // without this the next snapshot of T compares against the
                 // prediction we just discarded and rolls back again.
@@ -583,6 +634,11 @@ namespace bmmo::session {
                 auto existing = at->bodies.find(entity);
                 if (existing != at->bodies.end()) existing->second = item.state;
             }
+            // The unit countdowns last: a unit is several cores, grouped by
+            // IVP after the rechecks above, so the write lands on the units as
+            // they are now (last writer wins within a unit).
+            for (auto& [entity, item]: plan)
+                if (!item.repose_tick) write_extra(entity, item, true);
             for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
 
             // 3. re-simulate T+1 .. current with the recorded inputs
@@ -676,7 +732,9 @@ namespace bmmo::session {
                     if (item.repose_tick != t) continue;
                     bmmo_physics_body_state live{};
                     if (!world.get_body(entity, live)) continue;
-                    world.set_body(entity, item.state, wake_mode::wake, true);
+                    world.set_body(entity, item.state, item.mode, true);
+                    write_extra(entity, item, false);
+                    write_extra(entity, item, true);
                 }
                 if (!trace.empty()) {
                     for (const auto& remote: step_tracked.remote_entities) {
@@ -734,6 +792,12 @@ namespace bmmo::session {
         void set_restore_impulses(bool enable) { restore_impulses_ = enable; }
         void set_restore_quaternions(bool enable) { restore_quaternions_ = enable; }
         void set_restore_clock(bool enable) { restore_clock_ = enable; }
+        // v13: IVP's freeze bookkeeping.  Off reproduces the restore that
+        // left the calm references, the unit countdown and the live sleep
+        // state in place - each half an A/B in one binary.
+        void set_restore_calm(bool enable) { restore_calm_ = enable; }
+        void set_restore_unit(bool enable) { restore_unit_ = enable; }
+        void set_sleep_as_recorded(bool enable) { sleep_as_recorded_ = enable; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
 
@@ -801,8 +865,10 @@ namespace bmmo::session {
             bool from_row = false;
             bool force_recheck = false;
             uint32_t repose_tick = 0;    // 0: none - re-pose at this replayed tick
-            // Only set when the state came from our OWN record; see the
-            // recorded branch of the planning loop.
+            // Only set when the state came from our OWN record (the recorded
+            // branch of the planning loop) or from the birth record of a body
+            // born inside the window (written at its re-pose, not at the
+            // parking write).
             bmmo_physics_core_extra extra{};
             bool have_extra = false;
         };
@@ -933,6 +999,9 @@ namespace bmmo::session {
         bool restore_impulses_ = true;
         bool restore_quaternions_ = true;
         bool restore_clock_ = true;
+        bool restore_calm_ = true;
+        bool restore_unit_ = true;
+        bool sleep_as_recorded_ = true;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;
     };

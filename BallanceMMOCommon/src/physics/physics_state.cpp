@@ -483,7 +483,7 @@ namespace bmmo::physics {
             const auto& qn = core->q_world_f_core_next_psi;
             std::snprintf(text, sizeof(text),
                 "%s st=%d pos=%a,%a,%a ql=%a,%a,%a,%a qn=%a,%a,%a,%a v=%a,%a,%a w=%a,%a,%a dv=%a,%a,%a dw=%a,%a,%a"
-                " dpsi=%a,%a,%a idt=%a tlast=%a",
+                " dpsi=%a,%a,%a idt=%a tlast=%a nmc=%d calm=%a,%a",
                 object->get_name() ? object->get_name() : "?", static_cast<int>(core->movement_state),
                 p.k[0], p.k[1], p.k[2], ql.x, ql.y, ql.z, ql.w, qn.x, qn.y, qn.z, qn.w,
                 core->speed.k[0], core->speed.k[1], core->speed.k[2],
@@ -492,7 +492,13 @@ namespace bmmo::physics {
                 core->rot_speed_change.k[0], core->rot_speed_change.k[1], core->rot_speed_change.k[2],
                 core->delta_world_f_core_psis.k[0], core->delta_world_f_core_psis.k[1],
                 core->delta_world_f_core_psis.k[2], static_cast<double>(core->i_delta_time),
-                core->time_of_last_psi.get_seconds());
+                core->time_of_last_psi.get_seconds(),
+#ifdef IVP_PORTABLE_BMMO
+                core->sim_unit_of_core ? static_cast<int>(core->sim_unit_of_core->next_movement_check) : -1,
+#else
+                -1,
+#endif
+                core->time_of_calm_reference[0].get_seconds(), core->time_of_calm_reference[1].get_seconds());
             lines.emplace_back(text);
         }
         std::sort(lines.begin(), lines.end());
@@ -1093,11 +1099,27 @@ namespace bmmo::physics {
         out = bmmo_physics_core_extra{};
         IVP_Core* core = core_for(physics, entity_name, error);
         if (!core) return false;
-        out.fields = BMMO_PHYSICS_EXTRA_IMPULSES | BMMO_PHYSICS_EXTRA_QUATS;
+        out.fields = BMMO_PHYSICS_EXTRA_IMPULSES | BMMO_PHYSICS_EXTRA_QUATS | BMMO_PHYSICS_EXTRA_CALM;
         for (int k = 0; k < 3; ++k) {
             out.speed_change[k] = static_cast<float>(core->speed_change.k[k]);
             out.rot_speed_change[k] = static_cast<float>(core->rot_speed_change.k[k]);
         }
+        // v13: the freeze bookkeeping calc_movement_state reads (see the
+        // struct's comment).
+        out.movement_state = static_cast<int32_t>(core->movement_state);
+        for (int k = 0; k < 2; ++k) {
+            out.calm_time[k] = core->time_of_calm_reference[k].get_seconds();
+            const auto& q = core->q_world_f_core_calm_reference[k];
+            out.calm_quat[k][0] = q.x; out.calm_quat[k][1] = q.y; out.calm_quat[k][2] = q.z; out.calm_quat[k][3] = q.w;
+            const auto& p = core->position_world_f_core_calm_reference[k];
+            for (int j = 0; j < 3; ++j) out.calm_position[k][j] = p.k[j];
+        }
+#ifdef IVP_PORTABLE_BMMO
+        if (core->sim_unit_of_core) {
+            out.fields |= BMMO_PHYSICS_EXTRA_UNIT;
+            out.unit_next_movement_check = core->sim_unit_of_core->next_movement_check;
+        }
+#endif
         const auto& ql = core->q_world_f_core_last_psi;
         const auto& qn = core->q_world_f_core_next_psi;
         out.q_last_psi[0] = ql.x; out.q_last_psi[1] = ql.y;
@@ -1132,6 +1154,24 @@ namespace bmmo::physics {
             qn.z = in.q_next_psi[2]; qn.w = in.q_next_psi[3];
             core->q_world_f_core_last_psi.set_matrix(&core->m_world_f_core_last_psi);
         }
+        if (in.fields & BMMO_PHYSICS_EXTRA_CALM) {
+            // The references the next movement check compares against, as the
+            // record has them.  Not movement_state: the sleep state goes
+            // through the wake modes of write_body_state, which keep the
+            // unit manager's lists consistent.
+            for (int k = 0; k < 2; ++k) {
+                core->time_of_calm_reference[k] = IVP_Time(in.calm_time[k]);
+                auto& q = core->q_world_f_core_calm_reference[k];
+                q.x = static_cast<float>(in.calm_quat[k][0]); q.y = static_cast<float>(in.calm_quat[k][1]);
+                q.z = static_cast<float>(in.calm_quat[k][2]); q.w = static_cast<float>(in.calm_quat[k][3]);
+                auto& p = core->position_world_f_core_calm_reference[k];
+                for (int j = 0; j < 3; ++j) p.k[j] = static_cast<float>(in.calm_position[k][j]);
+            }
+        }
+#ifdef IVP_PORTABLE_BMMO
+        if ((in.fields & BMMO_PHYSICS_EXTRA_UNIT) && core->sim_unit_of_core)
+            core->sim_unit_of_core->next_movement_check = static_cast<short>(in.unit_next_movement_check);
+#endif
         return true;
     }
 

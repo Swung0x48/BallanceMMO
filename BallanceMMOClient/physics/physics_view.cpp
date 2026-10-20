@@ -431,6 +431,31 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::get_clock_state(bmmo_physics_clock_state& out, std::string& error) const {
+        error.clear();
+        out = bmmo_physics_clock_state{};
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->get_clock_state) {
+            error = "the physics_RT bridge lacks get_clock_state";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->get_clock_state(manager_, &out, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::set_clock_state(const bmmo_physics_clock_state& in, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_clock_state) {
+            error = "the physics_RT bridge lacks set_clock_state";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_clock_state(manager_, &in, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
     bool physics_view::get_clock(float& time_factor, float& physics_delta, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

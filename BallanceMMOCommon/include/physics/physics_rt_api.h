@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 12u  /* v12: order-independent world hash (v11: the core's integrator state) */
+#define BMMO_PHYSICS_API_VERSION 13u  /* v13: IVP's freeze bookkeeping in the core extra, the clock state in the table (v12: order-independent world hash) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -88,6 +88,8 @@ typedef struct bmmo_physics_body_state {
  * two builds' runs differ by more than either half is worth. */
 #define BMMO_PHYSICS_EXTRA_IMPULSES 1u /* speed_change, rot_speed_change */
 #define BMMO_PHYSICS_EXTRA_QUATS    2u /* q_last_psi, q_next_psi */
+#define BMMO_PHYSICS_EXTRA_CALM     4u /* the calm references (movement_state is read only) */
+#define BMMO_PHYSICS_EXTRA_UNIT     8u /* the simulation unit's movement-check countdown */
 
 typedef struct bmmo_physics_core_extra {
     uint32_t fields;           /* BMMO_PHYSICS_EXTRA_* */
@@ -104,6 +106,31 @@ typedef struct bmmo_physics_core_extra {
      * removes the derivation, and with it the depth-scaling error. */
     double q_last_psi[4];      /* core->q_world_f_core_last_psi, x y z w */
     double q_next_psi[4];      /* core->q_world_f_core_next_psi, x y z w */
+    /* v13: IVP's freeze bookkeeping (BMMO_PHYSICS_EXTRA_CALM).  Every
+     * movement check (IVP_Core::calc_movement_state) compares the core's pose
+     * against two calm references - a short-term and a long-term one - and
+     * the time each was taken, to decide whether the body may be frozen.  A
+     * restore that puts pose and velocity back but leaves these at their
+     * live values makes the replay's sleep decisions from the wrong history:
+     * measured on the solo probe (scripts/sleep_divergence.py), 44 bodies
+     * fell asleep or stayed awake where the plain run did not, and a hinged
+     * chain born in the replayed window settled 0.3-0.6 m away.  The times
+     * are absolute IVP seconds; a caller that does not rewind the clock
+     * shifts them by the clock offset before writing them back.
+     * movement_state is reported for diagnostics and never written: the
+     * sleep state is changed through the wake modes, which keep the
+     * simulation-unit manager's lists consistent. */
+    int32_t movement_state;    /* IVP_Core::movement_state (read only) */
+    double calm_time[2];       /* core->time_of_calm_reference[k] [s] */
+    double calm_quat[2][4];    /* core->q_world_f_core_calm_reference[k], x y z w */
+    double calm_position[2][3];/* core->position_world_f_core_calm_reference[k] */
+    /* v13 (BMMO_PHYSICS_EXTRA_UNIT): the movement-check countdown of the
+     * simulation unit the core is in (engine change #5 put it per unit).  A
+     * unit is several cores, so a caller writing it per body gets
+     * last-writer-wins within a unit; the value is in PSIs, clock-free.  Read
+     * as 0 and written as a no-op by a bridge built without the engine
+     * change. */
+    int32_t unit_next_movement_check;
 } bmmo_physics_core_extra;
 
 /* The environment's clock, which a rollback restore has to put back too.
@@ -405,6 +432,15 @@ typedef struct bmmo_physics_api_v2 {
                               bmmo_physics_core_extra* out, char* error, uint32_t error_size);
     int32_t (*set_core_extra)(void* ipion_manager, const char* entity_name,
                               const bmmo_physics_core_extra* in, char* error, uint32_t error_size);
+
+    /* ---- v13: the environment's clock, for a rollback restore ---- */
+
+    /* Read / write bmmo_physics_clock_state.  A restore that keeps the calm
+     * references coherent needs at least to READ it (to shift the reference
+     * times by the clock offset); writing it back is the opt-in rewind the
+     * struct's comment describes. */
+    int32_t (*get_clock_state)(void* ipion_manager, bmmo_physics_clock_state* out, char* error, uint32_t error_size);
+    int32_t (*set_clock_state)(void* ipion_manager, const bmmo_physics_clock_state* in, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested
