@@ -1471,6 +1471,104 @@ The 12 contact-restore failures each client logs there are the remote balls'
 records restored while their body is unphysicalized, which is nothing to
 restore. The 189 unit tests pass.
 
+## Without snapshots: what the input stream alone sustains
+
+The design never let the server depend on a snapshot - its world is the
+inputs, simulated from the anchor - but the clients did: every other tick the
+server sends the authoritative poses, and a client that disagrees past the
+tolerance rolls back to it. That is the fallback the "lockstep + prediction +
+rollback" story wanted to make unnecessary, and three things decide whether it
+is:
+
+* **The inputs reach the server.** A client sends its frame unreliably with no
+  delay, carrying the last `MAX_INPUT_FRAMES` (8) frames of its history, so a
+  lost packet is covered by the next one. A frame that still has not arrived
+  when its tick is simulated is not waited for: the server applies the last
+  frame it had (`timeline.hpp`, `input_buffer::take`), journals what it
+  applied, and the late frame is counted stale and never applied. So a loss
+  burst longer than eight frames costs the player's intent for those ticks,
+  never the consistency of the world: what the server applied is what the
+  session is.
+* **The applied inputs reach every other client, losslessly.** The server
+  relays, once per tick, every other member's applied frame in one message,
+  **reliable** (`server.cpp`, `on_session_inputs`): a redundancy window would
+  have multiplied an O(N²) stream, and reliable delivery costs nothing in the
+  steady state and only latency under loss - which the prediction and the
+  rollback window absorb. Being in the same ordered stream as the lifecycle
+  events, a client never sees an event before the inputs of the ticks that
+  preceded it. A frame that differs from the one the client predicted with
+  triggers the rewind ("input corrected at tick T") that re-simulates from
+  there with the truth.
+* **The replay is faithful**, which the preceding sections measured piece by
+  piece: the restore bit-exact for a quiet window (v11-v13), the scripts
+  re-executed (v14), a contact a beam cannot carry re-created (v15), the
+  activation tick of every sector an input (the sector union).
+
+**Measured** (four headless clients at 150 ms each way, 60 s, the server's
+snapshot interval 2 / 66 as deployed against 100000 / 100000 - none in the run
+but the ~25 full snapshots that lifecycle events force; `--loss-pct 10` on the
+third run):
+
+| run, 4 clients, 60 s | snapshots received | rollbacks per client | own ball vs server, last 900 ticks (mean) | mechanisms, last 900 ticks (mean) |
+|---|---|---|---|---|
+| swing bay, snapshots on | 1767 | 353 / 144 / 365 / 370 | 0.010 / 0.007 m | 0.23 / 0.17 m |
+| swing bay, snapshots off | 25-26 (forced by lifecycle events) | 12 / 14 / 12 / 15 | 0.03 / 0.14 m, 0.70 m in the window after | 0.16 / 0.15 m |
+| lane-kept drive, on | ~1700 | 326 / 449 / 477 / 232 | 0.03 / 0.01 m | 0.07 / 0.16 m |
+| lane-kept drive, off | 17 | 11 / 10 / 7 / 8 | 0.03 / **2.66 m** | **1.42 / 0.006 m** |
+| swing bay, off, 10 % loss | 18 | 5 / 4 / 8 / 10, `far` 5 / 9 | **120-150 m** | 0.2-0.6 m |
+
+(`rollbacks` here are snapshot corrections; the input-corrected rewinds that
+do the work without snapshots are `rb` on the status line: 708 / 939 in the
+swing bay, 501 / 639 in the lane run, every one of them replayed - `far=0`,
+`unmatched=0` - with 3000-3500 relayed input frames received per client.)
+
+So the two things that had to be true are true - no input frame is ever lost
+to the session, and every relayed frame arrives and is replayed - and the
+third is not yet: **the replay does not converge on its own under multi-ball
+play.** With no snapshot to pull it back, seven to nine hundred input-corrected
+rewinds a minute, each re-simulating a pile of four balls, leave the own ball
+0.03-0.14 m off in the swing bay and up to 2.7 m off in the lane run, and the
+level-end balloon chain 1.4 m off there - exactly the two residuals this
+document has not closed: contacts between movable bodies are not restored (the
+narrow v15 default), and the sector's setup window is not replayable. Under
+10 % loss the reliable relay arrives late enough that corrections fall past the
+rollback window (`far` 5-9): a correction that cannot be replayed is applied
+as a pose write without re-simulation, and the world comes apart by hundreds of
+metres. A snapshot is the only repair for that, so the fallback stays. What
+snapshots cost is also visible: with the deployed interval 2 the swing-bay
+clients take 350 corrections a minute and re-simulate 20-25 thousand ticks in
+60 s - most of them on the balloon chain (`PE_Balloon_Ballon02` 106-212 per
+client), which a row restores without its queue and extras and so disagrees
+again two ticks later.
+
+Where the own ball loses the server without snapshots is instructive. In the
+lane run, client2's own ball sits **within a millimetre** of the server's from
+tick 1500 to 2400 - nine hundred ticks of driving with three other balls on the
+lane and no authoritative pose in sight - and is metres off in two places: the
+start (ticks 300-900, 3.4-5.4 m), where the four kicked spawns pile up, and
+after tick 2400, where all four die at the far end within 200 ticks and respawn
+at x = 700 almost together, kicked into each other again. The replay sustains a
+field of balls strung out along a lane; it does not sustain a pile - the
+contacts between movable bodies that the v15 restore deliberately leaves to
+IVP, and the spawn kicks that start every pile.
+
+**Solo, the clean statement** (one client, 150 ms, the lane-kept drive, 60 s;
+with no other ball there is no prediction, so the client's world and the
+server's are the same input stream on the same ticks and every difference is
+the replay's own):
+
+| solo, 60 s at 150 ms | snapshots received | corrections | rewinds | own ball vs server | mechanisms vs server |
+|---|---|---|---|---|---|
+| snapshots on (2 / 66) | 1558 | 0 | 0 | **0.0000 m at all 1531 checkpoints** | 0.0000 m |
+| snapshots off | 11 (forced by the spawn, the death, the respawn) | 0 | 0 | **0.0000 m at all 1560 checkpoints** | 0.0000 m |
+
+Bit for bit, through the whole drive, the far-end death and the respawn at
+x = 700, with nothing arriving from the server but the relayed clock. That is
+the deterministic-lockstep core working as designed: one input stream, two
+machines, one world. Everything the four-client table loses is lost in the
+prediction of the other players and in what the replay cannot yet put back
+when their balls pile into ours.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the
@@ -1674,9 +1772,16 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
 * The name-to-index dictionary is delivered **only in full snapshots**
   (`mechanism_registry::note_name`, "a delta row carries no name"). If
   snapshots are to be demoted, that dictionary has to arrive some other way -
-  once at session start, or derived from the map on both sides.
-* `mism` has a floor of 6-8 per client even at zero latency with snapshots
-  off, which nothing above explains.
+  once at session start, or derived from the map on both sides. (With the
+  server's snapshot interval set past the run, the 11-26 full snapshots the
+  lifecycle events force still carry it, which is why the snapshot-free runs
+  above resolved every mechanism.)
+* Without snapshots the replay does not converge under multi-ball play: the
+  own ball ends 0.03-2.7 m off the server after the balls pile up, and under
+  10 % packet loss corrections fall past the rollback window and the world
+  comes apart ("Without snapshots" above). The two pieces named there - the
+  contacts between movable bodies, the sector setup window - are the work
+  left for a client that could run on inputs alone.
 
 ## Not covered
 
