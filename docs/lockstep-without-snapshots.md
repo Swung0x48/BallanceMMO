@@ -1236,19 +1236,27 @@ Three things the matrix says:
   as the earlier null measurement and the hull manager's time-anchored state
   already suggested; the shifted references make it unnecessary.
 
-**What is left, and it is a different kind of thing.** The remaining large
-errors are `P_Modul_08_Schaukel` (0.93 m, from a rewind at 1920) and the
-`P_Modul_03` group (0.32 m, in the frames after their births at ~2000), and
-the sector-4 block trace names the cause: `P_Modul_08_MF Script` is
-`Physicalize` + `Set Physics Hinge` and then **`SetPhysicsForce` + `Physics
-WakeUp` + `Delayer`, with the force toggled by the Delayer every ~32 frames**
-- a script that drives its mechanism on a timer, which a physics-only replay
-keeps at whatever phase the toggle had when the rewind started. That is the
-class the script replay was always for, and it is the next item. The ~40
-bodies whose sleep flags still differ somewhere are the small residual (the
-pusher 0.0004 m, the bridge 0.002 m): a body woken by a restore lands in a
-fresh simulation unit whose merges with its neighbours IVP decides anew, so
-its check phase cannot be put back exactly through the body API.
+**What is left is two different kinds of thing.** `P_Modul_08_Schaukel`
+(0.93 m, from a rewind at 1920): the sector-4 block trace names the cause.
+`P_Modul_08_MF Script` is `Physicalize` + `Set Physics Hinge` and then
+**`SetPhysicsForce` + `Physics WakeUp` + `Delayer`, with the force toggled by
+the Delayer every ~32 frames** - a script that drives its mechanism on a
+timer, which a physics-only replay keeps at whatever phase the toggle had
+when the rewind started. The sandbag has the same shape (`P_Modul_26_MF
+Script`, group `Swing`: Delayer -> Sequencer -> SetPhysicsForce) and the
+balloon script drives its sliders and springs from a Sequencer; those three
+are the mechanisms left in the networked mechanism-rollback column below.
+That is the class the script replay was always for, and it is the next
+item. The `P_Modul_03` group (0.32 m in the frames after their births at
+~2000) is something else: it has **no script at all** (`--list-scripts
+P_Modul_03` finds none; the manager's own Type 2/3 rows physicalize its
+parts), so its bodies are born awake and settle against each other - which
+points at the contact and friction-system state the earlier candidate list
+already named, not at scripts. The ~40 bodies whose sleep flags still differ
+somewhere are the small residual (the pusher 0.0004 m, the bridge 0.002 m):
+a body woken by a restore lands in a fresh simulation unit whose merges with
+its neighbours IVP decides anew, so its check phase cannot be put back
+exactly through the body API.
 
 **On the networked path** (four headless clients driving, 150 ms each way,
 90 s, the same run as the union's measurement, before and after), every
