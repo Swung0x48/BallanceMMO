@@ -49,6 +49,8 @@
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
 #include <session/sector_union.hpp>
+#include <game/script_replay.hpp>
+#include <game/sector_reset_guard.hpp>
 #include <session/spawn_impulse.hpp>
 
 #include <algorithm>
@@ -166,6 +168,11 @@ namespace {
         bool restore_calm = true;
         bool restore_unit = true;
         bool sleep_as_recorded = true;
+        // The script replay (game/script_replay.hpp): the mechanism scripts'
+        // state travels with the records and every replayed tick runs their
+        // frame before its physics step.  --no-script-replay is the physics-only
+        // replay, for the A/B.
+        bool script_replay = true;
         // --trace-plan: log which branch every body of a restore took.
         bool trace_plan = false;
         bool correct = true;
@@ -242,6 +249,7 @@ namespace {
             else if (arg == "--no-restore-calm") out.restore_calm = false;
             else if (arg == "--no-restore-unit") out.restore_unit = false;
             else if (arg == "--no-sleep-as-recorded") out.sleep_as_recorded = false;
+            else if (arg == "--no-script-replay") out.script_replay = false;
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
@@ -766,6 +774,7 @@ namespace {
             rollback_.set_restore_calm(args_.restore_calm);
             rollback_.set_restore_unit(args_.restore_unit);
             rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
+            rollback_.set_replay_scripts(args_.script_replay);
             rollback_.set_trace_plan(args_.trace_plan);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
@@ -811,6 +820,9 @@ namespace {
             sectors_.reset();
             sectors_requested_.clear();
             sector_cell_ = 0;
+            scripts_.clear();
+            script_reset_ticks_.clear();
+            reset_guard_.restore(engine_->context());
             checkpoint_held_ = false;
             sector_manager_id_ = 0;
             std::string error;
@@ -883,6 +895,44 @@ namespace {
             sectors_requested_ = {1};
             if (CKDataArray* parameters = engine_->data_array("IngameParameter"))
                 parameters->GetElementValue(0, 1, &sector_cell_);
+            // The script replay (game/script_replay.hpp): the mechanism scripts
+            // whose state travels with the rollback records, and the hooks
+            // that carry the force blocks' controllers through the bridge.
+            scripts_ = args_.script_replay ? bmmo::game::script_replay::select(engine_->context()) : bmmo::game::script_replay::selection{};
+            {
+                CKIpionManager* physics = engine_->physics();
+                script_hooks_.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
+                    bmmo_physics_force_block state{};
+                    std::string error;
+                    if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, error)) return false;
+                    out.exists = state.exists != 0;
+                    for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+                    return true;
+                };
+                script_hooks_.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
+                    bmmo_physics_force_block state{};
+                    state.exists = in.exists ? 1 : 0;
+                    for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+                    std::string error;
+                    return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
+                };
+            }
+            if (!scripts_.empty()) {
+                const auto st = bmmo::game::script_replay::describe(engine_->context(), scripts_);
+                logf("script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, %d force blocks, %d opaque: %s",
+                     st.scripts, st.active, st.satellites, st.blocks, st.parameters, st.force_blocks, st.opaque,
+                     bmmo::game::script_replay::names(engine_->context(), scripts_).c_str());
+            } else if (args_.script_replay) {
+                logf("script replay: no mechanism script in this level");
+            }
+            // The retail sector resets (a death's, a level reset's) neutralized
+            // for the session, as the retail mod does (game/sector_reset_guard.hpp):
+            // the server's world never resets, so neither may this client.
+            {
+                const std::string trouble = reset_guard_.resolve(engine_->context());
+                if (!trouble.empty())
+                    logf("the retail sector resets were NOT neutralized (%s): a death will reset this client's sector", trouble.c_str());
+            }
             {
                 std::string hold_error;
                 checkpoint_held_ = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
@@ -1214,6 +1264,10 @@ namespace {
             // among them - then the union's pass, then the step: the order the
             // server's session_runner::step keeps.
             drain_due_events(frame_tick);
+            // The sector resets stay neutralized (the level-reset one once the
+            // sector is up: this client has resolved a mechanism of its own).
+            for (const auto& chain: reset_guard_.apply(engine_->context(), mechanism_tracking_.resolved() > 0))
+                logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
             // The sector union (session/sector_union.hpp), the rule the server's
             // update_sectors() runs: one count of the pacer per step, before
             // it, from the manager's state after the previous step, and one
@@ -1439,6 +1493,14 @@ namespace {
                 // about is restored from our own record, which is right.
                 for (const auto& name: movable_body_names()) tracked.mechanisms.push_back(name);
                 tracked.generations = generations_;
+                for (CK_ID id: bmmo::game::script_replay::resets_pending(engine_->context(), scripts_)) {
+                    script_reset_ticks_[id] = tick;
+                    if (script_reset_logs_++ < 12) {
+                        auto* beh = CKBehavior::Cast(engine_->context()->GetObject(id));
+                        logf("script replay: %s is told to reset at tick %u; a rewind anchored earlier keeps it live",
+                             beh && beh->GetName() ? beh->GetName() : "?", tick);
+                    }
+                }
                 rollback_.record(rollback_world(), tick, tracked, applied);
             }
             if (assigned_) {
@@ -1513,6 +1575,36 @@ namespace {
             if (args_.rollback && !rollback_.amend_record(rollback_world(), tick)) {
                 if (amend_failures_++ == 0)
                     logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
+            }
+            // --trace: what pushes the own ball - the navigation replica's
+            // leaves, every controller on its core, the mechanism force blocks
+            // whose target it is - logged whenever that changes.
+            if (args_.trace && own_physicalized_ && own_navigation_) {
+                std::string text;
+                bmmo_physics_nav_state nav{};
+                std::string nav_error;
+                if (bmmo::physics::navigation_get_state(physics, own_nav_entity_.c_str(), nav, nav_error)) {
+                    char buf[200];
+                    std::snprintf(buf, sizeof(buf), "nav active=%d keys=%02x ctl=%02x pending=%02x", nav.active, nav.key_mask,
+                                  nav.controller_mask, nav.create_pending_mask);
+                    text += buf;
+                    for (int i = 0; i < 8; ++i)
+                        if (nav.controller_mask & (1u << i)) {
+                            std::snprintf(buf, sizeof(buf), " f%d=(%.3f,%.3f,%.3f)", i, nav.force[i][0], nav.force[i][1], nav.force[i][2]);
+                            text += buf;
+                        }
+                }
+                text += " | core: " + bmmo::physics::describe_controllers(physics, own_nav_entity_.c_str());
+                if (!scripts_.empty()) {
+                    CK3dEntity* ball = current_ball();
+                    const std::string blocks = bmmo::game::script_replay::describe_force_blocks(engine_->context(), scripts_, script_hooks_,
+                                                                                               ball ? ball->GetID() : 0);
+                    if (!blocks.empty()) text += " | blocks on the ball: " + blocks;
+                }
+                if (text != last_ball_forces_) {
+                    logf("ball forces at tick %u: %s", tick, text.c_str());
+                    last_ball_forces_ = text;
+                }
             }
             if (args_.trace && trace_frames_ > 0) {
                 --trace_frames_;
@@ -2354,6 +2446,40 @@ namespace {
                     return bmmo::physics::set_clock_state(physics, state, error);
                 };
             }
+            if (args_.script_replay && !scripts_.empty()) {
+                CKContext* context = engine_->context();
+                world.capture_scripts = [this, context](std::vector<uint8_t>& out) {
+                    return bmmo::game::script_replay::capture(context, scripts_, script_hooks_, out);
+                };
+                world.restore_scripts = [this, context](const std::vector<uint8_t>& bytes, uint32_t anchor) {
+                    // A script the game reset after the anchor keeps its live
+                    // state: the anchor's record is what the reset tore down.
+                    std::vector<CK_ID> kept_live;
+                    for (const auto& [id, reset_tick]: script_reset_ticks_)
+                        if (reset_tick > anchor) kept_live.push_back(id);
+                    script_reset_skips_ += kept_live.size();
+                    std::string error;
+                    const bool ok = bmmo::game::script_replay::restore(context, scripts_, script_hooks_, bytes, &error,
+                                                                       &scripts_replayed_, &kept_live);
+                    if (!ok && script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
+                    return ok;
+                };
+                world.diff_scripts = [this, context](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical) {
+                    const auto d = bmmo::game::script_replay::diff(context, scripts_, a, b);
+                    logical = d.logical;
+                    return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
+                         + (d.logical && args_.trace ? " :: " + d.detail : std::string());
+                };
+                // The mechanism scripts' frame, where the live frame runs it:
+                // before the physics step.  The bridge event log is muted for
+                // it - a replayed Physics WakeUp is not a live event for the
+                // server.
+                world.pre_step = [this, context](uint32_t) {
+                    bmmo::physics::set_event_log_muted(true);
+                    bmmo::game::script_replay::execute_frame(context, scripts_, 1000.0f / 66.0f, &scripts_replayed_);
+                    bmmo::physics::set_event_log_muted(false);
+                };
+            }
             world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
                 std::string error;
                 return bmmo::physics::navigation_get_state(physics, entity.c_str(), out, error);
@@ -2702,7 +2828,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -2724,7 +2850,10 @@ namespace {
                  static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
                  static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
                  static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen),
-                 static_cast<unsigned long long>(rs.impulses_restored), rs.max_error,
+                 static_cast<unsigned long long>(rs.impulses_restored),
+                 static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
+                 static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
+                 static_cast<unsigned long long>(script_reset_skips_), rs.max_error,
                  rs.last_mismatch.c_str(),
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
@@ -2762,6 +2891,15 @@ namespace {
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
         CK_ID sector_manager_id_ = 0;
+        bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)
+        std::vector<CK_ID> scripts_replayed_;                // the scripts the last restore wrote: active at its anchor
+        bmmo::game::script_replay_hooks script_hooks_;
+        bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
+        uint32_t script_restore_logs_ = 0;
+        uint32_t script_reset_logs_ = 0;
+        std::map<CK_ID, uint32_t> script_reset_ticks_;        // the tick each script was last told to reset
+        uint64_t script_reset_skips_ = 0;                    // scripts a restore kept live for having been reset after its anchor
+        std::string last_ball_forces_;                       // --trace: the last "ball forces" line
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;

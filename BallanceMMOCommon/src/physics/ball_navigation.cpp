@@ -522,6 +522,16 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool navigation_controller_info(const ::IVP_Controller* controller, double pos[3], double force[3]) {
+        const auto* ours = dynamic_cast<const force_controller*>(controller);
+        if (!ours) return false;
+        for (int k = 0; k < 3; ++k) {
+            if (pos) pos[k] = ours->position_.k[k];
+            if (force) force[k] = ours->force_.k[k];
+        }
+        return true;
+    }
+
     bool navigation_set_state(CKIpionManager* physics, const char* ball_entity, const bmmo_physics_nav_state& state,
                               std::string& error) {
         error.clear();

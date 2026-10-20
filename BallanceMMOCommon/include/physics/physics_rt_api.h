@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 13u  /* v13: IVP's freeze bookkeeping in the core extra, the clock state in the table (v12: order-independent world hash) */
+#define BMMO_PHYSICS_API_VERSION 14u  /* v14: the force block's controller and the event-log mute, for the script replay (v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -132,6 +132,13 @@ typedef struct bmmo_physics_core_extra {
      * change. */
     int32_t unit_next_movement_check;
 } bmmo_physics_core_extra;
+
+/* A SetPhysicsForce block's controller (v14, game/script_replay.hpp). */
+typedef struct bmmo_physics_force_block {
+    int32_t exists;       /* the block holds a controller */
+    double position[3];   /* PhysicsControllerForce::m_Position (object space) */
+    double force[3];      /* PhysicsControllerForce::m_Force */
+} bmmo_physics_force_block;
 
 /* The environment's clock, which a rollback restore has to put back too.
  *
@@ -441,6 +448,22 @@ typedef struct bmmo_physics_api_v2 {
      * struct's comment describes. */
     int32_t (*get_clock_state)(void* ipion_manager, bmmo_physics_clock_state* out, char* error, uint32_t error_size);
     int32_t (*set_clock_state)(void* ipion_manager, const bmmo_physics_clock_state* in, char* error, uint32_t error_size);
+
+    /* ---- v14: the script replay (game/script_replay.hpp) ---- */
+
+    /* The IVP controller a SetPhysicsForce block (behavior_id) holds: whether
+     * it has one, and the point and force it was built with, in the body's
+     * object space.  The restore deletes or re-creates the controller so the
+     * block's state matches `in` (and writes the block's pointer parameter),
+     * which is how a replayed script starts from the anchor's forces. */
+    int32_t (*force_block_get)(void* ipion_manager, uint32_t behavior_id, bmmo_physics_force_block* out,
+                               char* error, uint32_t error_size);
+    int32_t (*force_block_set)(void* ipion_manager, uint32_t behavior_id, const bmmo_physics_force_block* in,
+                               char* error, uint32_t error_size);
+    /* While muted, the bridge event log records nothing: a replayed script's
+     * Physics WakeUp would otherwise show up as a `revived` the frame's drain
+     * turns into a BodyRevived event for the server. */
+    int32_t (*set_event_log_muted)(void* ipion_manager, int32_t muted, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* Signature of the exported entry point: returns the table for the requested

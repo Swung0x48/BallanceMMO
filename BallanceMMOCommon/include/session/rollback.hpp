@@ -97,11 +97,25 @@ namespace bmmo::session {
         // re-simulated.  Optional; missing means "simulating".
         std::function<bool()> simulating;
         // Called before each re-simulated tick, with the tick about to be
-        // stepped.  Nothing in 9.25 needs it - the mechanisms are tracked
-        // bodies again and rewind with everything else - but it stays for a
-        // caller that has to re-pose something the engine does not know about.
-        // Null on the server/tests.
+        // stepped: the script replay runs the mechanism scripts' frame here
+        // (game/script_replay.hpp), where the live frame runs them - before
+        // the physics step.  Null on the server/tests.
         std::function<void(uint32_t tick)> pre_step;
+        // The mechanism scripts' runtime state as bytes (game/script_replay.hpp):
+        // captured with every record, put back at the anchor so the replayed
+        // frames start the scripts where the live frames had them.  Optional;
+        // without them the replay is physics only, as it was.
+        std::function<bool(std::vector<uint8_t>& out)> capture_scripts;
+        // `anchor` is the tick the bytes were captured at: the adapter keeps
+        // live every script the game reset after it (script_replay::restore).
+        std::function<bool(const std::vector<uint8_t>& bytes, uint32_t anchor)> restore_scripts;
+        // Optional: names how two script snapshots differ (the adapter has
+        // the graph).  Returns "" when they are equal in every logical field
+        // - a float parameter that follows the physics by an ulp is reported
+        // in the text but is not a logical difference.  The engine counts a
+        // mismatch only when this says the difference is logical (or when it
+        // is absent and the bytes differ).
+        std::function<std::string(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical)> diff_scripts;
         std::function<void(const std::string&)> log;
         // Optional: every decision the engine takes about a snapshot, so the
         // session journal can record it without parsing the log lines.
@@ -192,6 +206,14 @@ namespace bmmo::session {
         uint64_t impulses_restored = 0;  // body writes that put a recorded queued impulse back (v11)
         uint64_t calm_restored = 0;      // body writes that put the recorded calm references back (v13)
         uint64_t units_restored = 0;     // body writes that put the recorded unit countdown back (v13)
+        // The script replay (game/script_replay.hpp): restores of the scripts'
+        // state at an anchor, and replays after which the re-executed scripts'
+        // state differed from the live record of the same tick - zero on a
+        // solo probe means the snapshot carries everything the scripts keep.
+        uint64_t script_restores = 0;
+        uint64_t script_restore_failures = 0;
+        uint64_t script_mismatches = 0;        // logical: flags, IOs, controllers, counters
+        uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
@@ -579,6 +601,25 @@ namespace bmmo::session {
                 ++stats_.clock_rewinds;
                 calm_shift = 0.0;
             }
+            // The mechanism scripts' state at T, before the bodies: a force
+            // block restored here re-creates or deletes its IVP controller,
+            // and the replayed frames then toggle it from the right phase.
+            // Only when a replay will follow - a frozen clock or a too-far
+            // window sets the bodies and drops the history.
+            const bool scripts_replayed = replay_scripts_ && at->have_scripts && world.restore_scripts && !frozen
+                                        && window <= thresholds_.max_resim_ticks;
+            // The live record of `current_tick`, kept aside before the replay
+            // overwrites it: what the re-executed scripts must arrive at.
+            std::vector<uint8_t> live_scripts;
+            bool have_live_scripts = false;
+            if (scripts_replayed) {
+                if (const tick_state* live = find(current_tick); live && live->have_scripts) {
+                    live_scripts = live->scripts;
+                    have_live_scripts = true;
+                }
+                if (world.restore_scripts(at->scripts, anchor)) ++stats_.script_restores;
+                else ++stats_.script_restore_failures;
+            }
             // What a record's extra may write back, by switch and by sleep
             // state: a body being frozen gets no queue (a frozen body's queue
             // is meaningless), the unit countdown is written in a pass of its
@@ -754,6 +795,22 @@ namespace bmmo::session {
                 state.tracked = recorded ? recorded->tracked : tracked;
                 state.inputs = std::move(inputs);
                 capture(world, state);
+                // The last replayed tick: do the re-executed scripts stand where
+                // the live frames left them?  A difference is state the
+                // snapshot does not carry (solo), or a sensor that decided
+                // differently on the corrected world (networked, by design).
+                if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts
+                        && state.scripts != live_scripts) {
+                    bool logical = true;
+                    std::string where;
+                    if (world.diff_scripts) where = world.diff_scripts(live_scripts, state.scripts, logical);
+                    if (logical) ++stats_.script_mismatches; else ++stats_.script_float_mismatches;
+                    if (world.log && (logical ? script_mismatch_logs_ : script_float_logs_)++ < 8)
+                        world.log(std::string("script replay: the scripts re-executed to tick ") + std::to_string(t)
+                                  + (logical ? " differ from the live record: " : " differ in float parameters only: ")
+                                  + (where.empty() ? std::to_string(state.scripts.size()) + " vs "
+                                                       + std::to_string(live_scripts.size()) + " bytes" : where));
+                }
                 if (recorded) *recorded = std::move(state);
                 else history_.push_back(std::move(state));
             }
@@ -798,6 +855,9 @@ namespace bmmo::session {
         void set_restore_calm(bool enable) { restore_calm_ = enable; }
         void set_restore_unit(bool enable) { restore_unit_ = enable; }
         void set_sleep_as_recorded(bool enable) { sleep_as_recorded_ = enable; }
+        // The script replay (game/script_replay.hpp).  Off: the records carry
+        // no script state and a replay is physics only, as before.
+        void set_replay_scripts(bool enable) { replay_scripts_ = enable; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
 
@@ -853,6 +913,9 @@ namespace bmmo::session {
             // provides it.
             bmmo_physics_clock_state clock{};
             bool have_clock = false;
+            // The mechanism scripts' state at the end of this tick (game/script_replay.hpp).
+            std::vector<uint8_t> scripts;
+            bool have_scripts = false;
             std::map<std::string, bmmo_physics_nav_state> navs;
             std::map<std::string, input_frame> inputs;   // applied at this tick, per navigated ball
         };
@@ -960,6 +1023,8 @@ namespace bmmo::session {
             bmmo_physics_clock_state clock{};
             state.have_clock = world.get_clock && world.get_clock(clock);
             if (state.have_clock) state.clock = clock;
+            state.have_scripts = replay_scripts_ && world.capture_scripts && world.capture_scripts(state.scripts);
+            if (!state.have_scripts) state.scripts.clear();
         }
 
         tick_state* find(uint32_t tick) {
@@ -1002,6 +1067,9 @@ namespace bmmo::session {
         bool restore_calm_ = true;
         bool restore_unit_ = true;
         bool sleep_as_recorded_ = true;
+        bool replay_scripts_ = true;
+        uint32_t script_mismatch_logs_ = 0;
+        uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;
     };

@@ -29,6 +29,7 @@
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
 #include <session/sector_union.hpp>
+#include <game/script_replay.hpp>
 
 namespace bmmo::session {
     struct physics_session_state {
@@ -244,6 +245,16 @@ namespace bmmo::session {
         bmmo::session::sector_union sector_union;
         uint64_t sectors_deferred = 0;
         uint32_t last_sector_due = 0;        // the stamp of the last own hold, for the automation's reply
+        // The script replay (game/script_replay.hpp): the mechanism scripts
+        // whose state travels with the rollback records, selected at the
+        // anchor, and the hooks that carry the force blocks' controllers
+        // through the bridge.
+        bmmo::game::script_replay::selection script_ids;
+        std::vector<CK_ID> scripts_replayed;     // the scripts the last restore wrote: active at its anchor
+        bmmo::game::script_replay_hooks script_hooks;
+        uint32_t script_restore_logs = 0;
+        std::map<CK_ID, uint32_t> script_reset_ticks;   // the tick each script was last told to reset
+        uint64_t script_reset_skips = 0;                 // scripts a restore kept live for having been reset after its anchor
         // Every sector this session has held or run, sector 1 (the level's own)
         // from the anchor: a sector is an input once, whichever path reports it
         // - the checkpoint hook, the cell poll, the automation - so a second

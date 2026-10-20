@@ -1430,6 +1430,29 @@ void BallanceMMOClient::physics_session_anchor() {
     // on every side, and the server's world starts with it).
     s.sector_union.reset();
     s.sector_union.tick(s.tick_base, physics_session_sector_manager_active());
+    // The script replay (game/script_replay.hpp).
+    s.script_ids = bmmo::game::script_replay::select(m_bml->GetCKContext());
+    s.script_hooks.capture_force = [this](CKBehavior* block, bmmo::game::force_block_state& out) {
+        bmmo_physics_force_block state{};
+        std::string error;
+        if (!physics_view_.force_block_get(static_cast<uint32_t>(block->GetID()), state, error)) return false;
+        out.exists = state.exists != 0;
+        for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+        return true;
+    };
+    s.script_hooks.restore_force = [this](CKBehavior* block, const bmmo::game::force_block_state& in) {
+        bmmo_physics_force_block state{};
+        state.exists = in.exists ? 1 : 0;
+        for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+        std::string error;
+        return physics_view_.force_block_set(static_cast<uint32_t>(block->GetID()), state, error);
+    };
+    {
+        const auto st = bmmo::game::script_replay::describe(m_bml->GetCKContext(), s.script_ids);
+        logger_->Info("Physics session: script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, "
+                      "%d force blocks, %d opaque: %s", st.scripts, st.active, st.satellites, st.blocks, st.parameters,
+                      st.force_blocks, st.opaque, bmmo::game::script_replay::names(m_bml->GetCKContext(), s.script_ids).c_str());
+    }
     // The cell starts where it is.
     s.sectors_requested = {1};
     s.sector_cell = 0;
@@ -1884,6 +1907,8 @@ void BallanceMMOClient::physics_session_frame() {
         // The lifetime of every tracked name, so a record of an earlier body
         // under the same name is never used to restore the current one.
         tracked.generations = s.generations;
+        for (CK_ID id: bmmo::game::script_replay::resets_pending(m_bml->GetCKContext(), s.script_ids))
+            s.script_reset_ticks[id] = tick;
         s.rollback.record(physics_session_rollback_world(), tick, tracked, applied);
     }
     if (s.assigned) {
@@ -2768,6 +2793,45 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         std::string error;
         return physics_view_.get_clock_state(out, error);
     };
+    // The script replay (game/script_replay.hpp): the mechanism scripts' state
+    // with every record, back at the anchor, and their frame before every
+    // replayed step - with the bridge event log muted, so a replayed Physics
+    // WakeUp is not reported to the server as a live BodyRevived.
+    if (!physics_session_.script_ids.empty()) {
+        world.capture_scripts = [this](std::vector<uint8_t>& out) {
+            auto& s = physics_session_;
+            return bmmo::game::script_replay::capture(m_bml->GetCKContext(), s.script_ids, s.script_hooks, out);
+        };
+        world.restore_scripts = [this](const std::vector<uint8_t>& bytes, uint32_t anchor) {
+            auto& s = physics_session_;
+            // A script the game reset after the anchor keeps its live state:
+            // the anchor's record is what the reset tore down.
+            std::vector<CK_ID> kept_live;
+            for (const auto& [id, reset_tick]: s.script_reset_ticks)
+                if (reset_tick > anchor) kept_live.push_back(id);
+            s.script_reset_skips += kept_live.size();
+            std::string error;
+            const bool ok = bmmo::game::script_replay::restore(m_bml->GetCKContext(), s.script_ids, s.script_hooks, bytes, &error,
+                                                               &s.scripts_replayed, &kept_live);
+            if (!ok && s.script_restore_logs++ < 8)
+                logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
+            return ok;
+        };
+        world.diff_scripts = [this](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical) {
+            auto& s = physics_session_;
+            const auto d = bmmo::game::script_replay::diff(m_bml->GetCKContext(), s.script_ids, a, b);
+            logical = d.logical;
+            return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
+                 + (d.logical && s.trace ? " :: " + d.detail : std::string());
+        };
+        world.pre_step = [this](uint32_t) {
+            auto& s = physics_session_;
+            std::string error;
+            physics_view_.set_event_log_muted(true, error);
+            bmmo::game::script_replay::execute_frame(m_bml->GetCKContext(), s.script_ids, 1000.0f / 66.0f, &s.scripts_replayed);
+            physics_view_.set_event_log_muted(false, error);
+        };
+    }
     world.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
         std::string error;
         return physics_view_.navigation_get_state(entity.c_str(), out, error);
@@ -3210,7 +3274,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
         "events={}/{} phys_resends={} sectors={} held={} late={} lead={} "
-        "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
+        "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} scr={}/{}/{}/{}/{} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         // held=<holding now>/<1 ms polls the hold took>[+timeout]: the anchor
         // hold of design 9.26 - the wait between the anchor and the tick base,
@@ -3231,6 +3295,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.sector_union.late(), s.sector_lead(),
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,
-        rs.too_far, rs.frozen, rs.max_error, rs.last_mismatch,
+        rs.too_far, rs.frozen, rs.script_restores, rs.script_restore_failures, rs.script_mismatches, rs.script_float_mismatches, s.script_reset_skips,
+        rs.max_error, rs.last_mismatch,
         st.compared, st.ignored, st.blended, st.hard, st.unmatched, st.last_error, st.max_error, s.last_error);
 }

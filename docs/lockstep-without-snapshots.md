@@ -1276,6 +1276,123 @@ script's Sequencer, the swing's Delayer-toggled force), with the sandbag a
 distant third. Those are the script replay's, next. The server journals of
 both runs replay bit for bit.
 
+## The script replay, as built (bridge API v14)
+
+The mechanisms a physics-only replay could not follow were the ones a script
+drives on a timer: the swing's Delayer toggling its force every ~32 frames, the
+sandbag's Delayer -> Sequencer -> force, the level-end balloon's Sequencer behind
+its sliders and springs. A rewind kept their forces at whatever phase the toggle
+had when the rewind started, and the swing alone cost 0.93 m per depth-12
+rewind on the solo probe. So the scripts travel with the rollback records now
+(`game/script_replay.hpp`):
+
+* **What is state.** Every tick the client captures, for every mechanism script
+  (a root script whose owner is `P_*`/`PE_*` and not `P_Extra*` - 15 on the
+  arena, 292 blocks, 1575 parameters), what the engine itself changes between
+  frames: the runtime activation flags of every block (`ACTIVE`,
+  `ACTIVATENEXTFRAME`, `DEACTIVATENEXTFRAME`, `RESETNEXTFRAME`, `LAUNCHEDONCE`),
+  which inputs and outputs are active, and the bytes of every local and output
+  parameter (a Delayer keeps its elapsed time in output 0, a Sequencer its
+  position). The graph - blocks, links, input parameters - is not state.
+  Pointer-typed parameters are left alone, bar one: `SetPhysicsForce` keeps a
+  raw `PhysicsControllerForce*` in local parameter 0, and that controller is
+  the one piece of script state CK cannot carry, so the bridge captures whether
+  the block has one and the point and force it pushes with
+  (`BmmoPhysicsForceBlockState`) and a restore deletes or re-creates it
+  (`BmmoPhysicsForceBlockRestore`), so the replayed Shutdown / Create edges meet
+  the object they expect. 23.6 KB per tick on the arena.
+* **What a replay does.** A restore writes the anchor's script state back
+  before the bodies (a force block's controller first, then the bodies' poses
+  over it), and every replayed tick runs one behaviour frame of those scripts
+  - the next-frame activation flags, then `CKBehavior::Execute` of each active
+  script, the order the behaviour manager has - before its physics step. The
+  bridge's object event log is muted while the scripts run, so a replayed
+  `Physics WakeUp` is not reported to the server as a live `BodyRevived`.
+* **What is not replayed, and why.** The sensors' reference frame
+  (`Ball_Pos_Frame`, which every `TT Scaleable Proximity` of the mechanisms
+  measures) is a child of the ball entity, so it follows the restored and
+  replayed ball without any script; running the `TT Set Dynamic Position`
+  blocks that touch it as "satellites" was tried and tore the level-end bridge
+  apart (7.9 m), because the one in `Gameplay_Ingame` moves something else.
+  Nothing outside the mechanism scripts is executed.
+* **Two gates, both measured in.** A script that was not active at the anchor
+  keeps its live state and is not executed: the anchor's state would put a
+  script the sector manager activated inside the window back to sleep, and
+  nobody in the replay would wake it (a module activated at 2480 never started
+  after a rewind across it). And a script the game told to reset after the
+  anchor - the adapter watches `RESETNEXTFRAME` every tick and remembers the
+  tick per script - keeps its live state too: a sector activation resets the
+  new sector's scripts, a death resets every module of the sector, and the
+  anchor's mid-flight state coming back over a teardown in progress put the
+  balloons' lift back on bodies the reset was rebuilding (the bridge flew
+  1800 m). A global barrier (every script physics-only across any reset) was
+  the first form and was replaced: it also silenced the other sectors' scripts
+  across every sector activation.
+
+**Measured, solo probe** (one headless client, the WSL server, a forced depth-12
+rewind every 40 ticks, the same binaries and the same map for control and arms,
+compared over the ticks before the bot drives off the road end at 2473 - the
+death that follows is the next section's subject):
+
+| worst body against the control | physics-only replay | with the scripts |
+|---|---|---|
+| `P_Modul_08_Schaukel` (the swing) | **0.93 m** | not in the top eight |
+| `P_Modul_03_*` (gate, floor, walls) | 0.32 m | not in the top eight |
+| `P_Ball_Paper_MF` (the prop ball on the plates) | 0.37 m | 0.19 m |
+| `P_Box_MF` | 0.09 m | 0.09 m |
+| `P_Modul_29_Platte*` | - | 0.03 m |
+
+Server mismatches over the run (the guard below in place, so a death costs
+none): **16 with physics only** - the swing eight times at 0.39-0.93 m,
+`P_Modul_03` twice, the prop ball four times, the box once, the own ball once -
+and **6 with the scripts**: the box once, the prop ball four times, the own ball
+once. The own ball's is the same 0.76 m in both arms and in every forced arm
+before: a rewind that crosses the ball's departure from the road edge puts it
+0.76 m lower, a contact-leaving infidelity of the physics restore, not the
+scripts'. The re-executed scripts arrive where the live frames left them on
+every rewind but three (of 83): the ventilator's `TurnON_Permission` after the
+first two rewinds of the run (1 live vs 0 replayed - a one-shot the record has
+no bearing on) and the balloon's `UFO` referential (an object id vs 0) on the
+first rewind after sector 4's activation; 23 rewinds differ in float parameters
+only (sensor distances, timers following the physics by an ulp), and three
+rewinds kept a script live for having been reset after their anchor. The
+sleep-flag disagreements against the control do not move (41 vs 40 bodies).
+
+**The death found a second thing.** The arena has a death zone since 2859d88,
+and the bot's drive leaves the road end at 2473: with no rewind at all the
+headless client then disagreed with the server by 12-20 m on the level-end
+balloon chain for the rest of the session, 11 corrections in the control run
+itself. Retail Ballance's `Deactivate Ball` resets the whole sector on a death
+(`Execute Script` on `Gameplay_SectorManager` with Reset); the retail mod
+neutralizes that call site and the level reset's for the session (design 9.25
+N1, 9.28) because the server's world never resets, and the headless client
+never had that edit. It has it now (`game/sector_reset_guard.hpp`, the same
+walk of `Gameplay_Ingame` for the two `Execute Script` blocks, the death one
+emptied at session start and the level-reset one once the sector is up).
+With the guard, the control run's 11 server mismatches become **0**: a death costs
+nothing, on the headless client as on the retail one.
+
+**Measured, networked** (four headless clients, 150 ms each way, 40 s, all
+four beamed to the swing's bay in sector 4 - where the script-driven mechanisms
+are - with every rollback classified by the body that breached, the same binary
+with the scripts on and `--no-script-replay`):
+
+| | rollbacks on a ball (prediction at a 300 ms round trip) | rollbacks on a mechanism | of them, the swing | server mismatches |
+|---|---|---|---|---|
+| physics-only replay, clients 0-3 | 6 / 7 / 6 / 6 | 17 / 21 / 23 / 24 | **16 / 19 / 21 / 22** | 23 / 28 / 29 / 30 |
+| with the scripts | 7 / 7 / 8 / 8 | **1 / 3 / 4 / 6** | **0 / 0 / 0 / 0** | 8 / 10 / 12 / 14 |
+
+The ball column is the ball story and does not move. The mechanism column
+loses the swing entirely - 78 rollbacks on `P_Modul_08_Schaukel` across the
+four clients became none - and what is left of it is the prop ball and the box
+the players knock about and the see-saw, which are contact, not script. The
+same pair on the plate row of sector 2 (bay 9, no scripted mechanism in reach)
+moves nothing either way: two pairs there gave 8/9/4/4 vs 3/3/2/11 and then
+5/5/4/4 vs 7/1/0/4 mechanism rollbacks, which is the floor of a bay whose
+mechanism column is a bistable prop ball. The server journals of all six runs
+replay bit for bit.
+
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the
@@ -1411,8 +1528,8 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   It now records every movable body but the balls, like the headless client.
 * After the same forced rewinds, `P_Modul_26_Sack` and `P_Modul_08_Schaukel`
   diverged by 0.95 m and 1.78 m on rewinds that crossed no activation. Those
-  are the script-driven mechanisms the replay does not run (see "So the
-  remaining work is exactly: run the scripts during the replay").
+  were the script-driven mechanisms the replay did not run; it runs them now
+  (see "The script replay, as built"), and the swing left the worst-body list.
 * **The journal-replay failure at tick 701 is a hash artefact, and it follows
   the join order.** Over 17 four-player runs it failed in all 8 whose players
   joined out of client order (join order 0132 or 0321) and in none of the 9

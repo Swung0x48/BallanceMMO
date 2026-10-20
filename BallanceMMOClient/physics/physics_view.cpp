@@ -456,6 +456,43 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::force_block_get(uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error) const {
+        error.clear();
+        out = bmmo_physics_force_block{};
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->force_block_get) {
+            error = "the physics_RT bridge lacks force_block_get";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->force_block_get(manager_, behavior_id, &out, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->force_block_set) {
+            error = "the physics_RT bridge lacks force_block_set";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->force_block_set(manager_, behavior_id, &in, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::set_event_log_muted(bool muted, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_event_log_muted) {
+            error = "the physics_RT bridge lacks set_event_log_muted";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_event_log_muted(manager_, muted ? 1 : 0, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
     bool physics_view::get_clock(float& time_factor, float& physics_delta, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

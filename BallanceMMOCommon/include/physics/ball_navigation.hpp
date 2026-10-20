@@ -38,6 +38,7 @@
 class CKIpionManager;
 class CK3dEntity;
 class CKContext;
+class IVP_Controller;
 
 namespace bmmo::physics {
     class force_controller;
@@ -132,6 +133,9 @@ namespace bmmo::physics {
                               std::string& error);
     bool navigation_set_state(CKIpionManager* physics, const char* ball_entity, const bmmo_physics_nav_state& state,
                               std::string& error);
+    // Diagnostics: is `controller` one of the replica's force controllers, and
+    // with what force (world space, as created) at what point.
+    bool navigation_controller_info(const ::IVP_Controller* controller, double pos[3], double force[3]);
     // Applies every pending input of the manager now (what the queued
     // PreSimulate callback does); exposed for hosts with their own callback.
     void navigation_apply_pending(CKIpionManager* physics);

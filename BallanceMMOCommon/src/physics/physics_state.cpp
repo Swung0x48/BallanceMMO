@@ -6,7 +6,9 @@
 #include "PhysicsCallback.h"
 #include "ivp_physics.hxx"
 #include "ivp_core.hxx"
+#include "ivp_controller.hxx"
 #include "ivp_real_object.hxx"
+#include <physics/ball_navigation.hpp>
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
 #include <ivp_time.hxx>
@@ -285,8 +287,12 @@ namespace bmmo::physics {
             std::string text;
             IVP_Environment* environment = nullptr;
 
+            // A replay re-executes mechanism scripts whose Physics WakeUp
+            // and births would otherwise be logged as live events
+            // (game/script_replay.hpp); the clients mute the log around it.
+            bool muted = false;
             void record(const char* kind, IVP_Event_Object* event) {
-                if (!event || text.size() > 256 * 1024) return;
+                if (muted || !event || text.size() > 256 * 1024) return;
                 char stamp[64];
                 std::snprintf(stamp, sizeof(stamp), "t=%.6f ", event->environment
                     ? event->environment->get_current_time().get_seconds() : -1.0);
@@ -299,6 +305,7 @@ namespace bmmo::physics {
             // Design 9.26 diagnostics: the state a body is born with, before
             // its first PSI - "t=<s> birth <name>|pos=..|q=..|v=..|w=..|m=..|I=..|damp=..|tlast=..|surface=..".
             void record_birth(IVP_Event_Object* event) {
+                if (muted) return;
                 IVP_Real_Object* object = event ? event->real_object : nullptr;
                 const IVP_Core* core = object ? object->get_core() : nullptr;
                 if (!core || text.size() > 256 * 1024) return;
@@ -375,6 +382,7 @@ namespace bmmo::physics {
         public:
             IVP_Environment* environment = nullptr;
             void event_PSI(IVP_Event_PSI* event) override {
+                if (g_event_log.muted) return;
                 auto& v = psi_watches();
                 if (v.empty() || g_event_log.text.size() > 256 * 1024) return;
                 char stamp[64];
@@ -399,6 +407,7 @@ namespace bmmo::physics {
         // environment check already happened in CKIpionManager. It shares the
         // listener's log so the entries keep one format and one drain point.
         void record_script_wakeup(IVP_Real_Object* object) {
+            if (g_event_log.muted) return;
             if (!object || g_event_log.text.size() > 256 * 1024) return;
             IVP_Environment* environment = object->get_environment();
             char stamp[64];
@@ -414,6 +423,7 @@ namespace bmmo::physics {
         // A SetPhysicsForce block built its controller (design 9.26
         // diagnostics): "t=<s> force <name>|f=..|p=..|<immediate|deferred>".
         void record_force(IVP_Real_Object* object, const IVP_U_Point* force, const IVP_U_Point* pos, int deferred) {
+            if (g_event_log.muted) return;
             if (!object || !force || !pos || g_event_log.text.size() > 256 * 1024) return;
             IVP_Environment* environment = object->get_environment();
             char line[400];
@@ -427,6 +437,7 @@ namespace bmmo::physics {
         // A Set Physics Ball Joint built its constraint (design 9.26
         // diagnostics): "t=<s> constraint <reference>|<attached>|<immediate|deferred>".
         void record_constraint(IVP_Real_Object* reference, IVP_Real_Object* attached, int deferred) {
+            if (g_event_log.muted) return;
             if (!reference || g_event_log.text.size() > 256 * 1024) return;
             IVP_Environment* environment = reference->get_environment();
             char stamp[64];
@@ -444,6 +455,8 @@ namespace bmmo::physics {
             g_event_log.text += ';';
         }
     }
+
+    void set_event_log_muted(bool muted) { g_event_log.muted = muted; }
 
     std::string drain_event_log(CKIpionManager* physics) {
         IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
@@ -815,6 +828,28 @@ namespace bmmo::physics {
         return true;
     }
 
+    std::string describe_controllers(CKIpionManager* physics, const char* entity_name) {
+        CK3dEntity* entity = physics ? find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE)) : nullptr;
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        IVP_Core* core = object && object->m_RealObject ? object->m_RealObject->get_core() : nullptr;
+        if (!core) return "no body";
+        std::string out = "n=" + std::to_string(core->controllers_of_core.len());
+        char text[160];
+        for (int i = 0; i < core->controllers_of_core.len(); ++i) {
+            IVP_Controller* controller = core->controllers_of_core.element_at(i);
+            if (!controller) continue;
+            double pos[3] = {}, force[3] = {};
+            if (navigation_controller_info(controller, pos, force))
+                std::snprintf(text, sizeof(text), " %s/%d f=(%.3f,%.3f,%.3f)", controller->get_controller_name(),
+                              static_cast<int>(controller->get_controller_priority()), force[0], force[1], force[2]);
+            else
+                std::snprintf(text, sizeof(text), " %s/%d", controller->get_controller_name(),
+                              static_cast<int>(controller->get_controller_priority()));
+            out += text;
+        }
+        return out;
+    }
+
     namespace {
         // What a body write does to the sleep state.  `legacy_wake` is the
         // unconditional ensure_in_simulation() of the pre-v10 entries: on an
@@ -1172,6 +1207,45 @@ namespace bmmo::physics {
         if ((in.fields & BMMO_PHYSICS_EXTRA_UNIT) && core->sim_unit_of_core)
             core->sim_unit_of_core->next_movement_check = static_cast<short>(in.unit_next_movement_check);
 #endif
+        return true;
+    }
+
+    // The two helpers live next to the controller class, in
+    // physics_RT/Behaviors/PhysicsForce.cpp (the same library this bridge is
+    // built into, as a plugin and as the headless static library).
+    extern "C" int BmmoPhysicsForceBlockState(CKBehavior* beh, int* exists, double pos[3], double force[3]);
+    extern "C" int BmmoPhysicsForceBlockRestore(CKBehavior* beh, int exists, const double pos[3], const double force[3]);
+
+    bool force_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error) {
+        error.clear();
+        out = bmmo_physics_force_block{};
+        CKContext* context = physics ? physics->m_Context : nullptr;
+        auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(behavior_id))) : nullptr;
+        if (!beh) {
+            error = "no behavior " + std::to_string(behavior_id);
+            return false;
+        }
+        int exists = 0;
+        if (!BmmoPhysicsForceBlockState(beh, &exists, out.position, out.force)) {
+            error = "not a force block state";
+            return false;
+        }
+        out.exists = exists;
+        return true;
+    }
+
+    bool force_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) {
+        error.clear();
+        CKContext* context = physics ? physics->m_Context : nullptr;
+        auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(behavior_id))) : nullptr;
+        if (!beh) {
+            error = "no behavior " + std::to_string(behavior_id);
+            return false;
+        }
+        if (!BmmoPhysicsForceBlockRestore(beh, in.exists, in.position, in.force)) {
+            error = "the force block's body is not physicalized";
+            return false;
+        }
         return true;
     }
 

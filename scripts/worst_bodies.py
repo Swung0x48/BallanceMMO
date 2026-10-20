@@ -4,8 +4,13 @@ The per-body companion to client_divergence.py, which reports only the worst
 body per tick: this names them all, so a treatment that helps one kind of
 body and hurts another cannot hide behind a single number.
 
-usage: python scripts/worst_bodies.py <control.bmjr> <arm.bmjr>
+usage: python scripts/worst_bodies.py <control.bmjr> <arm.bmjr> [--from TICK] [--until TICK]
+
+--from / --until restrict the comparison to a tick window, for a session whose
+runs stop being comparable at some point (a death whose sector reset the two
+runs take at different ticks, a ball that leaves the map in one of them).
 """
+import argparse
 import pathlib
 import sys
 
@@ -13,12 +18,21 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import journal_trace as jt
 import first_divergence as fd
 
-control = fd.worlds(jt.read_journal(sys.argv[1]), want_local=True)
-arm = fd.worlds(jt.read_journal(sys.argv[2]), want_local=True)
+ap = argparse.ArgumentParser()
+ap.add_argument('control')
+ap.add_argument('arm')
+ap.add_argument('--from', dest='tick_from', type=int, default=0)
+ap.add_argument('--until', dest='tick_until', type=int, default=1 << 31)
+args = ap.parse_args()
+
+control = fd.worlds(jt.read_journal(args.control), want_local=True)
+arm = fd.worlds(jt.read_journal(args.arm), want_local=True)
 
 worst = {}
 first = {}
 for tick in sorted(set(control) & set(arm)):
+    if tick < args.tick_from or tick > args.tick_until:
+        continue
     for key, pos in control[tick].items():
         if key not in arm[tick]:
             continue

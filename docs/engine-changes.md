@@ -655,6 +655,27 @@ and "Waking an already simulated body restarts its freeze check"
 (`time_of_calm_reference` moves on `ensure_in_simulation()` of an awake body).
 All seven tests pass.
 
+## Bridge notes: the force block's controller (bridge API v14, no engine change)
+
+Not an engine change either: the only file under `submodule/Ballanced` that
+moved is `physics_RT/Behaviors/PhysicsForce.cpp`, and only by two exported
+helpers next to the controller class. The client's script replay
+(`docs/lockstep-without-snapshots.md`, "The script replay, as built") captures
+and restores the mechanism scripts' state through the public CK API, and the
+one piece of that state CK cannot carry is the IVP controller a
+`SetPhysicsForce` block owns: a raw `PhysicsControllerForce*` in local
+parameter 0, created by a deferred `PhysicsForceCallback` and deleted by the
+block's Shutdown. `BmmoPhysicsForceBlockState` reads whether the block has one
+and the point and force it was built with (object space, as
+`PhysicsForceCallback::Execute` computes them); `BmmoPhysicsForceBlockRestore`
+deletes a controller the anchor did not have and re-creates one it had, on the
+block's current target, so the replayed Shutdown / Create edges meet the object
+they expect. The bridge exposes them as `force_block_get` / `force_block_set`
+(API v14), and adds `set_event_log_muted`, which silences the bridge's object
+event log while replayed script frames run - a replayed `Physics WakeUp` must
+not be reported to the server as a live `BodyRevived`. The retail block's own
+code is untouched.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

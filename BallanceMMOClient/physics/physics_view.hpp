@@ -74,6 +74,10 @@ namespace bmmo::physics {
         // opt-in clock rewind.
         bool get_clock_state(bmmo_physics_clock_state& out, std::string& error) const;
         bool set_clock_state(const bmmo_physics_clock_state& in, std::string& error) const;
+        // ---- bridge API v14: the script replay ----
+        bool force_block_get(uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error) const;
+        bool force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const;
+        bool set_event_log_muted(bool muted, std::string& error) const;
 
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,

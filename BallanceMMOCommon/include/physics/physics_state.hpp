@@ -47,6 +47,11 @@ namespace bmmo::physics {
     // the environment's time_of_last_psi).  See bmmo_physics_clock_state.
     bool get_clock_state(CKIpionManager* physics, bmmo_physics_clock_state& out, std::string& error);
     bool set_clock_state(CKIpionManager* physics, const bmmo_physics_clock_state& in, std::string& error);
+    // v14, the script replay (game/script_replay.hpp): a SetPhysicsForce
+    // block's controller, and the event log's mute.
+    bool force_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error);
+    bool force_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error);
+    void set_event_log_muted(bool muted);
 
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
     // Engine change #6: while enabled, the retail Unphysicalize block keeps
@@ -74,6 +79,12 @@ namespace bmmo::physics {
     // Diagnostics: every simulated core with its exact state (hex floats), one
     // line per core, sorted by name so two worlds can be diffed textually.
     std::string describe_cores_exact(CKIpionManager* physics);
+    // Diagnostics: the IVP controllers attached to one body's core - what
+    // pushes it besides contacts: "n=K name/priority[ f=(..)] ...".  The force
+    // of the bridge's own navigation controllers is named; a retail
+    // SetPhysicsForce controller is counted here and read through the block
+    // that owns it (game/script_replay.hpp, describe_force_blocks).
+    std::string describe_controllers(CKIpionManager* physics, const char* entity_name);
     // Diagnostics: the per-body terms of the world hash's surface signature
     // (name, surface type, compact-surface size and hash), one line per body,
     // sorted by name so two worlds can be diffed textually.
