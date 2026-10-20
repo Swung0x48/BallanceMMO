@@ -1203,12 +1203,12 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
   nothing (measured, reverted). A rewind whose anchor falls in that window
   is the next thing to solve, for example by keeping the setup's bodies on
   their live trajectory through such a replay.
-* **The retail client still records only what the registry has resolved.**
-  The fix that made the headless client record its whole movable world
-  (fd74a59) never reached `physics_session_client.cpp`, which still builds
-  the tracked set from `mechanism_tracking.tracked_entities()`. On the retail
-  client a body the server has not named yet - a new sector's, until the next
-  full snapshot - is stepped by every replay and restored by none.
+* **Fixed in be9c559: the retail client recorded only what the registry had
+  resolved.** The fix that made the headless client record its whole movable
+  world (fd74a59) had never reached `physics_session_client.cpp`, so on the
+  retail client a body the server had not named yet - a new sector's, until
+  the next full snapshot - was stepped by every replay and restored by none.
+  It now records every movable body but the balls, like the headless client.
 * After the same forced rewinds, `P_Modul_26_Sack` and `P_Modul_08_Schaukel`
   diverged by 0.95 m and 1.78 m on rewinds that crossed no activation. Those
   are the script-driven mechanisms the replay does not run (see "So the
