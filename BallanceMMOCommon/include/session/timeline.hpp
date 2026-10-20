@@ -56,6 +56,30 @@ namespace bmmo::session {
         return delay;
     }
 
+    // How far ahead a member stamps the Sector event of a sector it enters
+    // (session/sector_union.hpp), in ticks, for a session whose input delay is
+    // `input_delay` and whose worst member round trip is `worst_rtt_ms`.
+    //
+    // An input only has to reach the server, which simulates a tick
+    // input_delay tick lengths after its nominal time; a Sector event has to
+    // reach every OTHER member before they simulate the stamped tick, and they
+    // run their own clocks from the same anchor.  The hop that binds is client
+    // -> server -> client: the input delay covers the first leg (it is the
+    // one-way budget for the worst member, jitter margin included), a second
+    // one-way budget sized from the same round trip covers the relay leg, and
+    // one tick on top because a client can only run the manager before its
+    // NEXT step.  A lead that is too short puts that sector's mechanisms out
+    // of phase on the members the relay reached late, for the rest of the
+    // session, which a rollback cannot repair (it cannot replay a sector's
+    // setup); a lead that is too long only starts the sector's mechanisms a
+    // little later after the crossing.  So, unlike the late-join lead
+    // (sim/late_tick.hpp), the round-trip term is not capped short: both
+    // terms carry input_delay_for_ping's own cap, which keeps the sum in a
+    // byte.
+    inline uint32_t sector_lead_for_ping(uint32_t input_delay, int worst_rtt_ms) {
+        return input_delay + 1 + input_delay_for_ping(worst_rtt_ms, 0);
+    }
+
     class input_buffer {
     public:
         // Inputs a client may send ahead of the server (ticks further in the

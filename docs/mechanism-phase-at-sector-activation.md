@@ -1,5 +1,15 @@
 # A mechanism starts out of phase for the player who enters a sector second
 
+> **Status (2026-10-20): fixed.** Every side now runs the same union of
+> sectors from the relayed, tick-stamped Sector events, with a lead sized for
+> the relay (`session/sector_union.hpp`, physics protocol 3), and nothing is
+> deactivated anywhere. Four driving clients at 150 ms each way: every sector
+> starts on the same tick on the server and all four clients, and the trailing
+> clients' mechanism error is 0.00000 m where it was 0.6-2.7 m here. See
+> docs/lockstep-without-snapshots.md, "The sector union, as built". The rest
+> of this file is the finding as it was made.
+
+
 Found 2026-10-19 on `maps/BMMO_Mechanism_Arena.nmo` (see
 [maps/README.md](../maps/README.md)), reproducible on demand with
 `scripts/arena_map_test.py`. It is a client-side artefact, not a server

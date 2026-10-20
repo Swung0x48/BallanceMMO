@@ -48,7 +48,7 @@
 #include <session/journal.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
-#include <session/sector_pacer.hpp>
+#include <session/sector_union.hpp>
 #include <session/spawn_impulse.hpp>
 
 #include <algorithm>
@@ -170,29 +170,13 @@ namespace {
         // anchor (the automation's `sector` verb), --beam drops the own ball at
         // a pose at a given session tick (the `beam` verb) - together they put
         // a ball on a mechanism in a few seconds instead of a minute of driving.
+        // A sector is an input to the whole session (session/sector_union.hpp):
+        // --start-sector is stamped the server's sector lead ahead on the
+        // first assigned frame, sent, and started here, on the server and on
+        // every other member at that tick - like a crossed checkpoint, whose
+        // own manager run the level's chain no longer makes
+        // (game/sector_activation.hpp).
         int start_sector = 0;
-        // --sector-lead N: a sector activation is an INPUT, as on the retail
-        // client (docs/lockstep-without-snapshots.md, "sector activation as an
-        // input").  The checkpoint chain's own manager run is held
-        // (game/sector_activation.hpp), and every sector this client enters -
-        // a crossed checkpoint, or --start-sector on the first assigned frame -
-        // is stamped `lead` ticks ahead, sent at once, and run here at that
-        // tick, or at the first one after it the mirrored pacer allows, which
-        // is the tick the server's update_sectors() picks.  -1 (default) uses
-        // input_delay + 1, the lead inputs get and the retail client uses;
-        // N > 0 is a fixed lead.  0 is the old behaviour, kept as the control:
-        // --start-sector activates at the anchor, a crossing activates through
-        // the level's own chain, and both are reported after the fact (the
-        // server applies them on arrival, a one-way trip late).
-        int sector_lead = -1;
-        // --no-sector-pacer: fire a held sector at its stamped tick even when
-        // the server's pacer would hold it (the manager walked within the last
-        // three ticks).  An A/B switch for the measurement only.
-        bool sector_pacer = true;
-        // --sector-skew N: activate locally N ticks AFTER the tick a held
-        // sector is due.  Measurement only (it showed what the old two-tick
-        // server guard cost before the guard was fixed).
-        int sector_skew = 0;
         bool beam = false;
         double beam_position[3] = {};
         uint32_t beam_tick = 0;
@@ -252,9 +236,6 @@ namespace {
             else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
             else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
-            else if (arg == "--sector-lead") { if (!(v = next())) return false; out.sector_lead = std::atoi(v); }
-            else if (arg == "--no-sector-pacer") out.sector_pacer = false;
-            else if (arg == "--sector-skew") { if (!(v = next())) return false; out.sector_skew = std::atoi(v); }
             else if (arg == "--beam") {
                 for (int k = 0; k < 3; ++k) {
                     if (!(v = next())) return false;
@@ -771,6 +752,7 @@ namespace {
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
             input_delay_ = msg.input_delay;
+            sector_lead_ = msg.sector_lead;
             seed_ = msg.seed;
             spawn_impulse_ = msg.spawn_impulse;
             level_ = msg.map.level > 0 ? msg.map.level : args_.level;
@@ -784,8 +766,9 @@ namespace {
                 spawn_known_ = true;
             }
             own_group_ = "P#" + std::to_string(own_join_order_ < 0 ? 63 : own_join_order_);
-            logf("session %u starting: level %d, %zu players, join order %d, seed %d", session_, level_, players_.size(),
-                 own_join_order_, seed_);
+            logf("session %u starting: level %d, %zu players, join order %d, seed %d, input delay %u, sector lead %u",
+                 session_, level_, players_.size(), own_join_order_, seed_, static_cast<unsigned>(input_delay_),
+                 static_cast<unsigned>(sector_lead_));
             // Fresh runtime state.
             assigned_ = false;
             held_ = false;
@@ -806,11 +789,10 @@ namespace {
             own_physicalized_ = false;
             own_spawn_callback_pending_ = false;
             start_sector_pending_ = false;
-            sector_holds_.clear();
+            sectors_.reset();
             sectors_requested_.clear();
             sector_cell_ = 0;
             checkpoint_held_ = false;
-            sector_pacer_ = {};
             sector_manager_id_ = 0;
             std::string error;
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
@@ -872,45 +854,33 @@ namespace {
             if (CKDataArray* level = engine_->data_array("CurrentLevel"))
                 level->GetElementValue(0, 3, &spawn_matrix_);
             anchor_hash_ = hash.pose;
-            // --start-sector (design 9.25 harness): the same three writes the
-            // retail client's `sector` automation verb makes - deactivate
-            // nothing, activate sector N, run Gameplay_SectorManager - so the
-            // level's later mechanisms exist and the resetpoint is that
-            // sector's.  AFTER the world hash: the server's own world has not
-            // activated anything yet and SessionReady's hash has to match it
-            // (server.cpp ends the session on a world mismatch).  The Sector
-            // event this client reports on its first frame makes the server
-            // activate the same sector, a relay behind us.
-            // Sector activation as an input: the level's own checkpoint chain
-            // no longer runs the manager here (the server's world holds its
-            // copy too); the detect block below holds whatever sector the
-            // chain writes.  Sector 1 is the level's own on every side.
+            // Sectors are inputs to the whole session (session/sector_union.hpp):
+            // the level's own checkpoint chain no longer runs the manager here
+            // (the server's world holds its copy too); the detect block in the
+            // frame loop stamps whatever sector the chain writes, --start-sector
+            // (design 9.25 harness) is stamped on the first assigned frame, and
+            // the union runs the passes - ours and the other members' - before
+            // the step of the tick each is due at.  Sector 1 is the level's own
+            // on every side, and the anchor hash is unaffected: nothing is
+            // activated before the server's world has.
             sectors_requested_ = {1};
             if (CKDataArray* parameters = engine_->data_array("IngameParameter"))
                 parameters->GetElementValue(0, 1, &sector_cell_);
-            if (args_.sector_lead != 0) {
+            {
                 std::string hold_error;
                 checkpoint_held_ = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
                 if (checkpoint_held_)
-                    logf("the level's checkpoint sector activation is held: a crossing is stamped %s ticks ahead",
-                         args_.sector_lead > 0 ? std::to_string(args_.sector_lead).c_str() : "input_delay+1");
+                    logf("the level's checkpoint sector activation is held: a crossing is stamped %u ticks ahead",
+                         static_cast<unsigned>(sector_lead_));
                 else
-                    logf("the level's checkpoint sector activation was NOT held (%s): crossings activate at once "
-                         "and are reported after the fact", hold_error.c_str());
+                    logf("the level's checkpoint sector activation was NOT held (%s): crossings activate here at "
+                         "once and are reported after the fact - this client is out of lockstep on every sector it enters",
+                         hold_error.c_str());
             }
             if (args_.start_sector > 0) {
-                if (args_.sector_lead != 0) {
-                    // Deferred: scheduled on the first running frame, once the
-                    // session tick and input_delay are known (see the frame
-                    // loop).  The anchor hash is unaffected either way.
-                    start_sector_pending_ = true;
-                    logf("--start-sector %d held for a lead of %s ticks", args_.start_sector,
-                         args_.sector_lead > 0 ? std::to_string(args_.sector_lead).c_str() : "input_delay+1");
-                } else {
-                    start_sector(args_.start_sector);
-                    logf("--start-sector %d activated at the anchor (the server follows on our first Sector event)",
-                         args_.start_sector);
-                }
+                start_sector_pending_ = true;
+                logf("--start-sector %d will be stamped %u ticks ahead of the first assigned frame", args_.start_sector,
+                     static_cast<unsigned>(sector_lead_));
             }
             frames_since_anchor_ = 0;
             phase_ = phase::running;
@@ -943,14 +913,14 @@ namespace {
             open_journal(hash);
         }
 
-        // The automation `sector` verb, headless (client_automation.cpp:461-476).
-        uint32_t sector_lead_ticks() const {
-            return args_.sector_lead > 0 ? static_cast<uint32_t>(args_.sector_lead) : static_cast<uint32_t>(input_delay_) + 1;
-        }
+        // The lead the server sized for this session (SessionStart).
+        uint32_t sector_lead_ticks() const { return sector_lead_; }
 
         // A sector this client enters, as an input: stamped for `due`, sent at
-        // once, and run by the frame loop at that tick (or the first one after
-        // it the mirrored pacer allows).  Once per sector per session.
+        // once, and handed to the union, which starts it before the step of
+        // that tick (or the first one after it the pacer allows) - as the
+        // server does with the event, and every other member with its relay.
+        // Once per sector per session.
         void hold_sector(int sector, uint32_t due, const char* why) {
             if (sectors_requested_.count(sector)) return;
             sectors_requested_.insert(sector);
@@ -959,11 +929,14 @@ namespace {
             event.type = bmmo::session::event_type::Sector;
             event.sector = sector;
             send_event(event);
-            sector_holds_.emplace_back(sector, due);
-            logf("sector %d scheduled for tick %u (%s, lead %u, input_delay %u), event sent ahead", sector, due, why,
+            sectors_.stamp(own_id_, sector, due);
+            logf("sector %d stamped for tick %u (%s, lead %u, input_delay %u), event sent ahead", sector, due, why,
                  sector_lead_ticks(), static_cast<unsigned>(input_delay_));
         }
 
+        // One pass of the sector union: deactivate nothing, activate `sector`,
+        // run Gameplay_SectorManager from its start - the writes the server's
+        // update_sectors() makes.
         void start_sector(int sector) {
             CKDataArray* parameters = engine_->data_array("IngameParameter");
             CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager");
@@ -1203,47 +1176,37 @@ namespace {
             // is not advanced to this frame yet, so name the tick the engine is
             // about to simulate - the same one the spawn callback above uses.
             const uint32_t frame_tick = tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
-            // The server's sector pacing, mirrored (session/sector_pacer.hpp):
-            // one count per step, before it, from the manager's state after the
-            // previous step - where physics_world::update_sectors() counts its
-            // own.  The two worlds run the same scripts from the same anchor, so
-            // the count, and with it the tick a held activation may start at,
-            // is the same on both sides.  Counted every frame, held sector or
-            // not, exactly like the server.
-            bool sector_may_start = false;
+            // A held --start-sector: on the first frame the session is assigned
+            // (tick base and lead known), stamp it `lead` ticks ahead like any
+            // other sector this client enters.
+            if (start_sector_pending_ && assigned_) {
+                start_sector_pending_ = false;
+                hold_sector(args_.start_sector, frame_tick + sector_lead_ticks(), "--start-sector");
+            }
+            // This tick's events first - a relayed Sector event stamped for it
+            // among them - then the union's pass, then the step: the order the
+            // server's session_runner::step keeps.
+            drain_due_events(frame_tick);
+            // The sector union (session/sector_union.hpp), the rule the server's
+            // update_sectors() runs: one count of the pacer per step, before
+            // it, from the manager's state after the previous step, and one
+            // pass per idle manager for the lowest sector owed.  The two worlds
+            // run the same scripts from the same anchor on the same stamps, so
+            // the tick a pass starts at is the same on every side.
             {
                 if (!sector_manager_id_)
                     if (CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager"))
                         sector_manager_id_ = manager->GetID();
                 auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
-                sector_may_start = sector_pacer_.tick(manager && manager->IsActive());
-            }
-            // A held --start-sector: on the first frame the session is assigned
-            // (tick base and input_delay known), stamp it `lead` ticks ahead
-            // like any other sector this client enters.
-            if (start_sector_pending_ && assigned_) {
-                start_sector_pending_ = false;
-                hold_sector(args_.start_sector, frame_tick + sector_lead_ticks(), "--start-sector");
-            }
-            // A held sector runs before the engine tick it is due at - where the
-            // server's update_sectors() runs relative to its own step - or at
-            // the first tick after it the pacer allows, which is the tick the
-            // server's pacer picks.  One per tick, like the server's passes.
-            if (!sector_holds_.empty()) {
-                const auto [sector, due] = sector_holds_.front();
-                const uint32_t fire_tick = due + static_cast<uint32_t>(std::max(args_.sector_skew, 0));
-                // --no-sector-pacer: the pre-mirror behaviour, the stamped tick
-                // whatever the manager is doing (the A/B for the doc).
-                if (frame_tick >= fire_tick && (sector_may_start || !args_.sector_pacer)) {
-                    sector_holds_.pop_front();
-                    sector_cell_ = sector;   // the detect block below must not take our own write for a crossing
-                    start_sector(sector);
-                    sector_pacer_.started();
-                    logf("sector %d activated at tick %u (stamped %u, skew %d%s)", sector, frame_tick, due,
-                         args_.sector_skew, frame_tick > fire_tick ? ", held by the pacer" : "");
+                const auto pass = sectors_.tick(frame_tick, manager && manager->IsActive());
+                if (pass) {
+                    sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
+                    start_sector(pass.sector);
+                    logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s", pass.sector, frame_tick,
+                         pass.player, pass.stamped_tick, frame_tick > pass.stamped_tick ? ", held by the pacer" : "",
+                         [this] { std::string s; for (int x: sectors_.active()) s += std::to_string(x) + " "; return s; }().c_str());
                 }
             }
-            drain_due_events(frame_tick);
             // After the events, so a birth and an input correction in the same
             // frame leave the world replayed from the earlier of the two.
             replay_corrected_inputs();
@@ -1460,8 +1423,8 @@ namespace {
             // not happen: it becomes an input, stamped ahead like the retail
             // client's cell poll (physics_session_frame).  This frame's step was
             // `tick`, so the earliest the manager can run is before tick + 1.
-            // Without the hold (--sector-lead 0, or a graph the hold did not
-            // understand) the chain already activated it: report it, as before.
+            // Without the hold (a graph the hold did not understand) the chain
+            // already activated it: report it after the fact, out of lockstep.
             if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
                 int sector = 0;
                 if (parameters->GetElementValue(0, 1, &sector) && sector != sector_cell_) {
@@ -2206,6 +2169,16 @@ namespace {
                 rewind_for_lifecycle(event);
                 break;
             }
+            case bmmo::session::event_type::Sector:
+                // Another member entered a sector: an input to our world too.
+                // Stamped into the union, which starts the sector before the
+                // step of the stamped tick - this very frame when the relay was
+                // on time (drain_due_events runs before the union's tick), the
+                // next one when it was late, which the union counts.
+                sectors_.stamp(event.player, event.sector, event.tick);
+                logf("remote player %u entered sector %d, stamped for tick %u%s", event.player, event.sector, event.tick,
+                     static_cast<int32_t>(event.tick - current_tick()) <= 0 ? " (LATE: the server started it already)" : "");
+                break;
             case bmmo::session::event_type::Unphysicalize: {
                 auto it = remotes_.find(event.player);
                 if (it == remotes_.end()) return;
@@ -2742,11 +2715,11 @@ namespace {
         uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
         int restore_traces_ = 0;
         bool start_sector_pending_ = false;  // a --start-sector waiting for the first assigned frame
-        std::deque<std::pair<int, uint32_t>> sector_holds_;   // (sector, the tick it is stamped for)
-        std::set<int> sectors_requested_;    // every sector held or run this session (1 from the anchor)
+        bmmo::session::sector_union sectors_;   // the sectors this session runs, the rule every side runs
+        uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
+        std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
-        bmmo::session::sector_pacer sector_pacer_;   // the server's update_sectors() pacing, mirrored
         CK_ID sector_manager_id_ = 0;
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;

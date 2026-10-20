@@ -17,6 +17,12 @@ namespace bmmo {
         uint8_t tick_rate = 66;
         uint8_t snapshot_interval = 0;
         uint8_t input_delay = 0;
+        // Ticks ahead of its current step a member stamps the Sector event of
+        // a sector it enters, so the relay reaches every other member before
+        // they simulate that tick (session::sector_lead_for_ping,
+        // session/sector_union.hpp).  One value for the session, late joiners
+        // included.
+        uint8_t sector_lead = 0;
         uint32_t first_tick = 0;           // recipient's anchor tick number
         int32_t seed = 0;
         // Kick speed (m/s) applied to every spawn Physicalize of the session;
@@ -45,6 +51,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&tick_rate), sizeof(tick_rate));
             raw.write(reinterpret_cast<const char*>(&snapshot_interval), sizeof(snapshot_interval));
             raw.write(reinterpret_cast<const char*>(&input_delay), sizeof(input_delay));
+            raw.write(reinterpret_cast<const char*>(&sector_lead), sizeof(sector_lead));
             raw.write(reinterpret_cast<const char*>(&first_tick), sizeof(first_tick));
             raw.write(reinterpret_cast<const char*>(&seed), sizeof(seed));
             raw.write(reinterpret_cast<const char*>(&spawn_impulse), sizeof(spawn_impulse));
@@ -82,6 +89,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &tick_rate)) return false;
             if (!message_utils::read_variable(raw, &snapshot_interval)) return false;
             if (!message_utils::read_variable(raw, &input_delay)) return false;
+            if (!message_utils::read_variable(raw, &sector_lead)) return false;
             if (!message_utils::read_variable(raw, &first_tick)) return false;
             if (!message_utils::read_variable(raw, &seed)) return false;
             if (!message_utils::read_variable(raw, &spawn_impulse)) return false;

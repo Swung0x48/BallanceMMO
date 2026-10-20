@@ -226,7 +226,7 @@ namespace bmmo::sim {
                 row, b.name.c_str(), b.friction, b.elasticity, b.mass, b.linear_damp, b.rot_damp, b.force);
             log(text);
         }
-        active_sectors_.insert(1);
+        sectors_.reset();
         if (!ensure_collision_filter(error)) return false;
         rewire_proximity_probes();
         rewire_ball_identity_reads();
@@ -752,55 +752,30 @@ namespace bmmo::sim {
         return it != players_.end() ? it->second.sector : 0;
     }
 
-    // Sector union (design 8.3, revised).  The retail Gameplay_SectorManager
-    // knows one ball: it activates the sector that ball entered and resets the
-    // one it left.  The server has many balls, so the sectors that run are the
-    // sectors its players are in -- every one of them, and only those: a
-    // mechanism nobody is at stops, one that any player reaches starts.
-    //
-    // Every change is taken the tick it appears, but they are handed to the
-    // manager one at a time: its PH-table walk spans about seven frames (it
-    // waits for each Activate Script), and starting a new run in the middle of
-    // one both resets that walk and flips CurrentLevel[Activation Phase?]
-    // under the mechanism scripts it has just started -- they read that cell
-    // in their first frame and stay dead if it is false.  So one pass per idle
-    // manager, deactivate and activate paired in it exactly like a retail
-    // checkpoint does, and the rest of the changes follow in the next frames.
-    //
-    // The idle count runs EVERY tick (session/sector_pacer.hpp).  It used to
-    // run only once the sets differed, which put every activation exactly two
-    // ticks after the tick its Sector event was stamped for - and a client
-    // that activates at the stamp was two ticks ahead on every mechanism of
-    // the sector for the rest of the session.
+    // The sector union (session/sector_union.hpp, which has the rule and its
+    // reasons).  Every sector any member has entered runs here, each started
+    // by one pass of Gameplay_SectorManager - deactivate nothing, activate the
+    // sector, run the manager from its start - at the tick the shared rule
+    // picks: after the tick's events, before its step, one pass per idle
+    // manager, the idle count running every tick.  The clients run the same
+    // rule on the same Sector events, so a sector's mechanisms are born on
+    // the same tick on every side.  Nothing is deactivated.
     void physics_world::update_sectors() {
         CKContext* context = engine_->context();
         auto* parameters = CKDataArray::Cast(context->GetObject(ingame_parameter_));
         auto* manager_script = CKBehavior::Cast(context->GetObject(sector_manager_));
         if (!parameters || !manager_script) return;
-        const bool may_start = sector_pacer_.tick(manager_script->IsActive() != FALSE);
-        std::set<int> desired;
-        for (const auto& [id, p]: players_)
-            if (p.sector > 0) desired.insert(p.sector);
-        if (desired.empty() || desired == active_sectors_) return;
-        if (!may_start) return;
-        int activate = 0, deactivate = 0;
-        for (int sector: desired)
-            if (!active_sectors_.count(sector)) { activate = sector; break; }
-        for (int sector: active_sectors_)
-            if (!desired.count(sector)) { deactivate = sector; break; }
-        parameters->SetElementValue(0, 2, &deactivate, sizeof(deactivate));
+        const auto pass = sectors_.tick(tick_, manager_script->IsActive() != FALSE);
+        if (!pass) return;
+        int none = 0, activate = pass.sector;
+        parameters->SetElementValue(0, 2, &none, sizeof(none));
         parameters->SetElementValue(0, 1, &activate, sizeof(activate));
         if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager_script, TRUE);
-        sector_pacer_.started();
-        if (activate) active_sectors_.insert(activate);
-        if (deactivate) active_sectors_.erase(deactivate);
         body_set_changed_ = true;
-        std::string text = "world: sector";
-        if (activate) text += " +" + std::to_string(activate);
-        if (deactivate) text += " -" + std::to_string(deactivate);
-        text += " at tick " + std::to_string(tick_) + ", running:";
-        for (int sector: active_sectors_) text += " " + std::to_string(sector);
-        if (desired != active_sectors_) text += " (more to come)";
+        std::string text = "world: sector +" + std::to_string(pass.sector) + " at tick " + std::to_string(tick_)
+            + " (player " + std::to_string(pass.player) + ", stamped " + std::to_string(pass.stamped_tick) + "), running:";
+        for (int sector: sectors_.active()) text += " " + std::to_string(sector);
+        if (sectors_.pass_pending()) text += " (more to come)";
         log(text);
     }
 
@@ -869,7 +844,11 @@ namespace bmmo::sim {
             return true;
         }
         case event_type::Sector:
-            // The sector union follows the players (update_sectors).
+            // A sector this member entered: the union grows by it, and the
+            // pass that starts it runs in update_sectors() under the shared
+            // rule (session/sector_union.hpp).  Handed over at the tick the
+            // runner dequeued the event at - the stamp, or later for an event
+            // that arrived late - which is the tick the journal files it under.
             //
             // Deliberately the one event that does NOT mark body_set_changed_.
             // Asking for a full snapshot here is tempting - a player entering a
@@ -882,6 +861,7 @@ namespace bmmo::sim {
             // mechanisms awake and their rows are in every delta snapshot
             // anyway.  See docs/mechanism-phase-at-sector-activation.md before
             // adding it back.
+            sectors_.request(id, event.sector, event.tick);
             p.sector = event.sector;
             return true;
         case event_type::Finish:
@@ -1131,7 +1111,7 @@ namespace bmmo::sim {
     std::string physics_world::describe() const {
         std::string text = "tick=" + std::to_string(tick_) + " players=" + std::to_string(players_.size())
             + " parked=" + (retail_parked_ ? "1" : "0") + " sectors=";
-        for (int s: active_sectors_) text += std::to_string(s) + ",";
+        for (int s: sectors_.active()) text += std::to_string(s) + ",";
         for (const auto& [id, p]: players_) {
             text += " [" + std::to_string(id) + ": type=" + std::to_string(p.ball_type)
                 + " phys=" + (p.physicalized ? "1" : "0") + " sector=" + std::to_string(p.sector)

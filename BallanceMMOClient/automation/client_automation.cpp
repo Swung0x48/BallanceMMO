@@ -480,7 +480,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // checkpoint - the server activates at the same tick.
         if (physics_session_hold_sector(sector, "automation"))
             return std::format("ok sector {} held for tick {} (Sector event sent ahead)", sector,
-                               physics_session_.sector_holds.back().second);
+                               physics_session_.last_sector_due);
         auto* context = m_bml->GetCKContext();
         CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
         CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");

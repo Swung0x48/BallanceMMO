@@ -300,6 +300,7 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
     s.room = msg.room;
     s.snapshot_interval = msg.snapshot_interval;
     s.input_delay = msg.input_delay;
+    s.sector_lead_ticks = msg.sector_lead;
     s.seed = msg.seed;
     s.spawn_impulse = msg.spawn_impulse;
     s.map = msg.map;
@@ -1357,7 +1358,8 @@ void BallanceMMOClient::physics_session_anchor() {
                       death_reset_count_, sector_deactivate_count_);
     // Sector activation as an input (N3): the checkpoint's run of the manager
     // is held, so it can be stamped ahead and run at the stamped tick.
-    s.sector_holds.clear();
+    s.sector_union.reset();
+    s.last_sector_due = 0;
     sector_activate_resolve();
     // Design 9.26: the mechanism Sequencers start from the level file's
     // counters, as they do on the server, instead of wherever the play before
@@ -1421,13 +1423,14 @@ void BallanceMMOClient::physics_session_anchor() {
     bmmo::session::client_journal::instance().note(0, "anchor hold: the world stands still until the tick base arrives");
     SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
     physics_session_hold_until_assigned();
-    // The mirrored sector pacer counts once per step, before it: the server
-    // counts its first at the anchor state, for the step numbered with the
-    // base, and so does this - every later count is physics_session_frame's.
-    s.sector_pacer = {};
-    physics_session_count_sector_pacer();
-    // Sector 1 is the level's own (Init Ingame activates it on every side,
-    // and the server's world starts with it); the cell starts where it is.
+    // The union's pacer counts once per step, before it: the server counts
+    // its first at the anchor state, for the step numbered with the base, and
+    // so does this - every later count is physics_session_frame's.  The union
+    // itself starts fresh: sector 1, the level's own (Init Ingame activates it
+    // on every side, and the server's world starts with it).
+    s.sector_union.reset();
+    s.sector_union.tick(s.tick_base, physics_session_sector_manager_active());
+    // The cell starts where it is.
     s.sectors_requested = {1};
     s.sector_cell = 0;
     if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter"))
@@ -1620,15 +1623,9 @@ void BallanceMMOClient::physics_session_frame() {
             }
         }
     }
-    if (physics_session_count_sector_pacer() && !s.sector_holds.empty() && tick + 1 >= s.sector_holds.front().second) {
-        const auto [sector, due] = s.sector_holds.front();
-        s.sector_holds.pop_front();
-        const bool held = tick + 1 > due;
-        if (held) ++s.sectors_late;
-        physics_session_run_sector(sector, tick + 1,
-                                   held ? "after its stamp: the pacer held it, as the server's does" : "as stamped");
-        s.sector_pacer.started();
-    }
+    // The union's pass for the next step runs below, after this frame's
+    // relayed events (physics_session_apply_queues), where a Sector event
+    // stamped for tick + 1 may be among them.
 
     // The tick driver restarted its schedule (pause, long stall): our tick
     // numbers no longer line up with the server's.
@@ -1946,6 +1943,21 @@ void BallanceMMOClient::physics_session_frame() {
     const uint64_t frozen_before = s.rollback.stats().frozen;
     const uint64_t unmatched_before = s.rollback.stats().unmatched;
     physics_session_apply_queues();
+    // The sector union (session/sector_union.hpp): this frame's step was
+    // `tick`, the next is tick + 1, and the server counts its pacer and makes
+    // its pass after the events of a tick and before that tick's step.  One
+    // count and at most one pass per step, like the server's - the stamps due
+    // (ours from physics_session_hold_sector, the other members' from the
+    // relay) are applied by the union itself.
+    if (s.phase == phase_type::running && s.assigned) {
+        const auto pass = s.sector_union.tick(tick + 1, physics_session_sector_manager_active());
+        if (pass) {
+            char how[160];
+            std::snprintf(how, sizeof(how), "player %u, stamped %u%s", pass.player, pass.stamped_tick,
+                          tick + 1 > pass.stamped_tick ? ", held by the pacer as the server's does" : ", as stamped");
+            physics_session_run_sector(pass.sector, tick + 1, how);
+        }
+    }
     if (s.rollback_enabled && !s.resync_pending) {
         const auto& rollback = s.rollback.stats();
         // The rollback path returns before the correction ladder of the
@@ -2192,6 +2204,19 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
         physics_session_attach_remote_navigation(event.player);
         break;
     }
+    case bmmo::session::event_type::Sector:
+        // Another member entered a sector: an input to our world too, held by
+        // the union until its stamp and started before the step of that tick
+        // (physics_session_frame), as the server's world does with the event.
+        // Late (the stamp already simulated): started at the next step, which
+        // the union counts; the server started it at the stamp.
+        s.sector_union.stamp(event.player, event.sector, event.tick);
+        if (static_cast<int32_t>(event.tick - s.current_tick()) <= 0)
+            logger_->Warn("Physics session: sector %d of player %u was stamped for tick %u and arrived at tick %u: "
+                          "its mechanisms start late here", event.sector, event.player, event.tick, s.current_tick());
+        else
+            logger_->Info("Physics session: player %u enters sector %d at tick %u (relayed)", event.player, event.sector, event.tick);
+        break;
     case bmmo::session::event_type::Unphysicalize: {
         auto it = s.remotes.find(event.player);
         if (it == s.remotes.end()) return;
@@ -2631,7 +2656,8 @@ bool BallanceMMOClient::physics_session_hold_sector(int sector, const char* why)
     event.type = bmmo::session::event_type::Sector;
     event.sector = sector;
     physics_session_send_event(event);
-    s.sector_holds.emplace_back(sector, due);
+    s.sector_union.stamp(db_.get_client_id(), sector, due);
+    s.last_sector_due = due;
     s.sectors_requested.insert(sector);
     ++s.sectors_deferred;
     bmmo::session::client_journal::instance().note(
@@ -2641,10 +2667,9 @@ bool BallanceMMOClient::physics_session_hold_sector(int sector, const char* why)
     return true;
 }
 
-bool BallanceMMOClient::physics_session_count_sector_pacer() {
-    auto& s = physics_session_;
+bool BallanceMMOClient::physics_session_sector_manager_active() {
     CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
-    return s.sector_pacer.tick(manager && manager->IsActive());
+    return manager && manager->IsActive();
 }
 
 void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, const char* how) {
@@ -2657,9 +2682,10 @@ void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, co
                        "Gameplay_SectorManager is missing", sector, tick);
         return;
     }
-    // Deactivate nothing (the server's world activates the union of its
-    // players' sectors, and the SectorManager's own Test skips the
-    // deactivation on 0), activate `sector`, run the manager from its start.
+    // Deactivate nothing (nothing is ever deactivated in a session, the
+    // server's world included - session/sector_union.hpp - and the
+    // SectorManager's own Test skips the deactivation on 0), activate
+    // `sector`, run the manager from its start: the server's writes.
     int none = 0;
     parameters->SetElementValue(0, 2, &none, sizeof(none));
     parameters->SetElementValue(0, 1, &sector, sizeof(sector));
@@ -3176,7 +3202,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
     return std::format(
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
-        "events={}/{} phys_resends={} sectors_held={}/{} "
+        "events={}/{} phys_resends={} sectors={} held={} late={} lead={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         // held=<holding now>/<1 ms polls the hold took>[+timeout]: the anchor
@@ -3194,7 +3220,8 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.mechanism_tracking.known(), s.mechanism_tracking.resolved(), s.body_writes, s.body_write_errors,
         s.generations.size(),
         s.amend_failures,
-        s.events_sent, s.events_received, s.physicalize_resends, s.sectors_deferred, s.sectors_late,
+        s.events_sent, s.events_received, s.physicalize_resends, s.sector_union.active().size(), s.sectors_deferred,
+        s.sector_union.late(), s.sector_lead(),
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,
         rs.too_far, rs.frozen, rs.max_error, rs.last_mismatch,

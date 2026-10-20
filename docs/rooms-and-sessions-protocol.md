@@ -80,6 +80,8 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 - `input_delay` 是**每个会话**自己的，在会话开始时定下并写进该会话的 `SessionStart`：取成员里最差的一条链路（GNS 的 `m_nPing`，且用该连接上见过的峰值而不是当下值），按 `单程 × 1.5 + 16 ms` 折成 tick，再夹在 `physics.input_delay`（下限）与 40 tick（上限）之间。窗口装的是**单程**——客户端按自己的时钟跑在服务端调度之前，输入只需单向抵达；乘 1.5 是因为决定输入迟不迟到的是抖动而不是均值，而 RTT 本身已经是平滑过的数。定下之后整场不变：调度的截止时刻是从会话开始时刻带着这个值算出来的，迟到加入者不能把已经在跑的成员的时间线挪走。
 - 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`（不可靠）；每 66 tick 或刚体集合变化时广播 full 快照（可靠，携带机关名字典）。
 - 生命周期事件（`SessionEvent`）可靠传输，带发生的客户端 tick；服务端在不早于该 tick 的模拟步中应用，并转发给房间其他成员（`player` 字段为来源）。
+- **分节是整场会话的输入**（协议 3，`session/sector_union.hpp`）：每一端——服务端世界、每个客户端——都运行**所有成员到过的分节的并集**，且每个分节在每一端都于同一 tick 启动。成员跨过检查点时把 `Sector` 事件盖上 `当前步 + 1 + sector_lead` 的 tick 立即发出（原版链里跑 `Gameplay_SectorManager` 的那一步被扣住，见中和 N3），服务端在该 tick 应用并**不经 Nagle** 转发，其他成员收到后同样在该 tick 应用；随后启动该分节的那一遍管理器运行（`IngameParameter[0,2]=0`、`[0,1]=分节`、`scene->Activate`）在各端按同一节拍规则跑（`session/sector_pacer.hpp`：管理器空闲 3 tick 后一遍，最小的待启动分节先）。**任何一端都不再反激活任何分节**，服务端也不：并集只增不减。迟到加入者与重同步者在各成员最近的 Physicalize 之后补收本场会话的全部 `Sector` 事件。
+- `sector_lead` 同样是每个会话自己的，与 `input_delay` 出自同一次 RTT 测量并写进 `SessionStart`（`session::sector_lead_for_ping`）：`input_delay`（到服务端那一程的单程预算）+ 1 tick（客户端只能在它的**下一步**之前跑管理器）+ 再一份按同一 RTT 折算的单程预算（服务端转发到其他成员那一程）。局域网 9 tick，100 ms RTT 约 15，300 ms 约 33。太短则转发晚于该 tick 到达，那名成员的这个分节从此错相且回滚修不回来（回滚无法重放分节的初始化）；太长只是机关在过线后晚一点启动。
 
 ### 2.2 消息
 
@@ -96,12 +98,13 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | tick_rate | u8（66） |
 | snapshot_interval | u8 |
 | input_delay | u8 |
+| sector_lead | u8（成员给自己 `Sector` 事件盖的提前量，tick；见 2.1） |
 | first_tick | u32（接收者锚点 tick 的编号；实际编号随 `SessionAssign` 到达，两端客户端都不读这里，服务端写 0） |
 | seed | i32 |
 | spawn_impulse | f32（每次出生 Physicalize 的踢出速度 m/s，0 = 无；写在 seed 之后） |
 | players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度；这是原版复活点本身，每个成员都相同——设计 9.10 去掉了出生环偏移） |
 
-`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`，每个 core 各自哈希后无序求和，与刚体列表顺序无关；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64；protocol u32（客户端的 `session::PHYSICS_PROTOCOL_VERSION`，当前为 2）紧跟 first_tick 之后，是必填字段，缺了整条消息不解析。服务端先比 protocol：不等于自己的就 `SessionEnd` 并写明两边版本——新旧构建不得同场。再把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。同时比 `build_id` 的引擎半部（`ballanced-<rev>`）：不同则同样结束会话，任一边为 `unknown` 时不比。`session_start_msg` 在 spawn_impulse 之后同样带服务端的 protocol u32（必填）：客户端不等则拒绝开始会话并提示更新，解析不出来（旧服务端）也提示。
+`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`，每个 core 各自哈希后无序求和，与刚体列表顺序无关；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64；protocol u32（客户端的 `session::PHYSICS_PROTOCOL_VERSION`，当前为 3）紧跟 first_tick 之后，是必填字段，缺了整条消息不解析。服务端先比 protocol：不等于自己的就 `SessionEnd` 并写明两边版本——新旧构建不得同场。再把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。同时比 `build_id` 的引擎半部（`ballanced-<rev>`）：不同则同样结束会话，任一边为 `unknown` 时不比。`session_start_msg` 在 spawn_impulse 之后同样带服务端的 protocol u32（必填）：客户端不等则拒绝开始会话并提示更新，解析不出来（旧服务端）也提示。
 
 `session_input_msg`（client → server，unreliable no-delay）：session u32、first_tick u32、count u8（≤ 8，从 first_tick 起连续 count 个 tick，最新的在最后），每项：keys u8（bit0 叶子 0 … bit3 叶子 3，叶子编号按 `Ball Navigation` 图内 `SetPhysicsForce` 的子块顺序；bit4 Shift、bit5 Space 仅作记录）、cam_right f32×3、cam_up f32×3、cam_dir f32×3（`Cam_OrientRef` 世界矩阵的三条基向量）、ball_type u8、flags u8（bit0 physicalized、bit1 paused、bit2 nav_active——客户端 BallNav activate/deactivate 的当前状态，服务端据此复现 Key Event 的 On/Off；bit1 仅作记录，会话期间暂停不再停摆世界，见设计 9.2）。
 

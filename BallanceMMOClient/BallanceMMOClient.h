@@ -656,16 +656,18 @@ private:
 	void sector_activate_apply();
 	void sector_activate_restore();
 	// Stamp `sector`'s activation sector_lead() ticks ahead of this frame's step,
-	// send the event, and remember to run the manager at that tick.  False when
-	// the hold is not in place (no running assigned session, or N3 failed): the
-	// caller then does what it did before.
+	// send the event, and hand it to the union, which runs the manager at that
+	// tick (session/sector_union.hpp).  False when the hold is not in place (no
+	// running assigned session, or N3 failed): the caller then does what it did
+	// before.
 	bool physics_session_hold_sector(int sector, const char* why);
-	// Run Gameplay_SectorManager for `sector`, deactivating nothing - what the
-	// server's update_sectors() and the automation's `sector` verb write.
+	// One pass of the union: run Gameplay_SectorManager for `sector`,
+	// deactivating nothing - what the server's update_sectors() and the
+	// automation's `sector` verb write.
 	void physics_session_run_sector(int sector, uint32_t tick, const char* how);
-	// One count of the mirrored sector pacer, for the step after this point;
-	// true if a held sector may start before that step.
-	bool physics_session_count_sector_pacer();
+	// Whether Gameplay_SectorManager is walking right now: what the union's
+	// pacer is counted with, once per step.
+	bool physics_session_sector_manager_active();
 	void handle_session_start(bmmo::session_start_msg msg);
 	void handle_session_assign(const bmmo::session_assign_msg& msg);
 	void handle_session_snapshot(bmmo::session_snapshot_msg msg);

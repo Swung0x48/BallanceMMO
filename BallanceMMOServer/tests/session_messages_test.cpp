@@ -60,6 +60,7 @@ TEST(SessionStartMsg, SerializeDeserializeRoundTrip) {
     msg.tick_rate = 66;
     msg.snapshot_interval = 2;
     msg.input_delay = 6;
+    msg.sector_lead = 15;
     msg.first_tick = 132;
     msg.seed = -42;
     msg.spawn_impulse = 2.5f;
@@ -85,6 +86,7 @@ TEST(SessionStartMsg, SerializeDeserializeRoundTrip) {
     EXPECT_EQ(66, parsed.tick_rate);
     EXPECT_EQ(2, parsed.snapshot_interval);
     EXPECT_EQ(6, parsed.input_delay);
+    EXPECT_EQ(15, parsed.sector_lead);
     EXPECT_EQ(132u, parsed.first_tick);
     EXPECT_EQ(-42, parsed.seed);
     EXPECT_FLOAT_EQ(2.5f, parsed.spawn_impulse);

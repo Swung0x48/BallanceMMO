@@ -14,13 +14,18 @@ namespace bmmo::session {
     // session when they differ - old and new builds must never share a
     // session, because they would not simulate alike and nothing would say
     // why.  Bump it for any change to what the two sides compute or compare:
+    //   3  the sector union (session/sector_union.hpp): every member runs
+    //      every sector any member has entered, activated at the stamped tick
+    //      of the Sector event the server relays, and nothing is deactivated
+    //      any more, on the server either; SessionStart carries sector_lead,
+    //      the lead those events are stamped with.
     //   2  sector activation as an input (the server holds the level's own
     //      checkpoint activation; a client stamps its Sector event ahead and
     //      runs the manager at that tick), the order-independent world hash,
     //      lifecycle events sent without Nagle.
     //   1  everything before 2026-10-20 (never sent; a message without the
     //      field reads as 0).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 2;
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 3;
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.

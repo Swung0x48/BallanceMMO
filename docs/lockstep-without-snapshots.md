@@ -1069,12 +1069,98 @@ traps).
 
 ### What it does not cover
 
-* **The sector union across players.** A client still runs only the sectors
-  *it* enters. The server runs every player's, so a trailing player's world
-  lacks the leader's sector until it crosses too (see "Not covered").
 * **A rollback across a sector's setup.** See "Still open": measured at
   0.2-0.7 m when the anchor falls in the fifteen ticks after an activation,
   and the next thing to fix.
+
+The sector union across players - a client ran only the sectors *it* entered
+while the server ran every player's - was the other gap here; the next section
+is its fix.
+
+## The sector union, as built
+
+Every side of a session now runs the same set of sectors, each started at the
+same tick everywhere (`session/sector_union.hpp`, physics protocol 3). The
+rule is one pure struct the server's world, the headless client and the retail
+client all run.
+
+* **A Sector event is an input to everyone.** The member that crosses a
+  checkpoint stamps it `sector_lead` ticks ahead and sends it at once; the
+  server applies it at that tick and relays it without Nagle; every other
+  member applies the relay at the same tick, holding it until then (the
+  retail client used to apply relayed events on arrival; a Sector event now
+  waits for its stamp). The pass that starts the sector - the three writes of
+  `update_sectors()`, under the shared pacer, the lowest owed sector first -
+  then runs at one tick on every side, and the sector's mechanisms are born on
+  the same tick everywhere. The headless `--start-sector` and the automation's
+  `sector` verb go through the same stamp.
+* **The lead is the server's, sized per session** from the worst member round
+  trip like the input delay (`session::sector_lead_for_ping`, in
+  `SessionStart`): the input delay (the one-way budget of the leg to the
+  server), one tick (a client can only run the manager before its next step),
+  and a second one-way budget for the relay leg. 9 ticks on a LAN, about 15 at
+  a 100 ms round trip, 33 at 300 ms. Too short and the relay reaches a member
+  after its tick: that member starts the sector late and stays out of phase on
+  every mechanism of it, which no rollback repairs (it cannot replay a
+  sector's setup). Too long and the mechanisms start a little later after the
+  crossing. The union counts late stamps on every side, so a measurement can
+  tell late from wrong.
+* **Nothing is deactivated, on the server either.** The retail game tears a
+  sector down when its one ball leaves it. The server used to as well, once no
+  player was left in a sector, while the clients never did (their chains are
+  pinned, N2) - so the two worlds were not the same world even in a solo
+  session, and only the absence of the torn-down bodies from the snapshots hid
+  it. A client tearing a sector down would destroy mechanism bodies under its
+  rollback history, and a sector one member left is one another may still be
+  in or come back to. So the union only grows: sector 1 from the anchor, then
+  every sector any member reports, for the rest of the session; the server's
+  `+2 -1` passes became `+2`. What it costs is the scripts of the sectors
+  behind the players, which the retail game would have stopped.
+* **Late joiners and resyncs** get every Sector event of the session re-sent
+  after the members' last Physicalize, so their union grows by the same
+  sectors (one pass per idle manager, so a joiner catches up over a few dozen
+  ticks while the full snapshot corrects it); a stamp of a sector that is
+  already up is a no-op, which is what a resynced member sees.
+* **The measurement knobs are gone.** `--sector-lead`, `--no-sector-pacer`
+  and `--sector-skew` were A/B switches for the single-client measurement
+  above. With the lead the server's and the passes the union's, a client cannot
+  be given a lead or a pacing of its own; the rows above that used them are
+  history.
+
+### Measured
+
+Four headless clients driving the arena on staggered records (the harness's
+`--drive`: player i sets off 120 + 40 i ticks in, the first brakes every 500),
+so one of them leads through all three checkpoints and the others cross into
+sectors that are already up, against the server in Arch WSL. Before this, the
+trailing client took one rollback of 0.6-2.7 m on a mechanism of the sector it
+had just entered at every boundary (docs/mechanism-phase-at-sector-activation.md).
+
+| | lead | passes, server | passes, each of the 4 clients | late relays | mechanism corrections, any client | server journal |
+|---|---|---|---|---|---|---|
+| LAN, 50 s | 9 ticks | +2 @779, +3 @1223, +4 @1667 | the same three ticks | 0 | **0**, max error **0.00000 m**, 52/52 bodies | 2995/2995 replayed |
+| 150 ms each way, 90 s | 35 ticks (530 ms) | +2 @841, +3 @1286, +4 @1730 | the same three ticks | 0 | **0**, max error **0.00000 m**, 52/52 bodies | 5542/5542 replayed, and 6032/6032 on Linux |
+| the retail client hosting 3 driving bots, LAN, 48 s | 9 ticks | +4 @352 (the client's `sector 4` verb), +2 @827, +3 @1321 (the leading bot's crossings) | the same three ticks on the three bots and on the retail client, "as stamped" | 0 | see below | 4045/4045 replayed |
+
+In the 150 ms run two trailers crossed into sector 2 at ticks 867 and 870 and
+one of them went on through 3 and 4: three stamps of sectors already up,
+relayed to everyone, and not one pass or correction came of them. The balls'
+own prediction errors in those runs (`max_err` 20-38 m, four balls shoving each
+other down one lane behind a 300 ms round trip) are the ball story, unchanged
+by this; the mechanisms are the point here, and they are exact.
+
+The retail run has both directions of the relay: the real client's stamp
+started sector 4 on the server and the bots at 352, the leading bot's stamps
+started 2 and 3 on the server, the other bots and the real client at 827 and
+1321, and the two stamps of sectors already up - the bot's sector 4 at 1814,
+the real client's own crossing into sector 2 held for 2380 - started nothing
+anywhere. Sector 4's bodies, born at 352 with no ball within 500 m of them,
+had no mismatch for 1600 ticks, until the balls reached the balloon platform
+at 1982; the phase offset of docs/mechanism-phase-at-sector-activation.md is
+gone. The rollback mismatches that remain (26 on the real client, at the same
+ticks and on the same bodies as on the bots: the pusher at 600, the see-saw at
+1092, the sliding stone at 1388, the balloon platform at 1982) are each where
+a predicted remote ball arrives at a mechanism - the ball story again.
 
 ## Checked on the real networked path, and two things found there
 
@@ -1286,9 +1372,8 @@ at the first rewind is the clean signal; everything after it is Lyapunov growth.
 ## Not covered
 
 Every run here was **single-sector**, with all four players in one bay, so the
-server's sector union equalled each client's own set. A multi-sector room has a
-second, independent problem: the server runs the union of the players' sectors
-while each client runs only its own, so the clients are not simulating the same
-world at all. That has to be settled before any of this generalises — but it is
-not on the critical path, because a single-sector room already diverges at the
-birth tick.
+server's sector union equalled each client's own set. A multi-sector room had a
+second, independent problem - the server ran the union of the players' sectors
+while each client ran only its own, so the clients were not simulating the same
+world at all - which "The sector union, as built" settles: every side runs the
+union now, and nothing is deactivated anywhere.

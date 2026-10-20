@@ -570,6 +570,12 @@ public:
         // from the start with this value in them, and a late joiner cannot be
         // allowed to move the timeline the running members are already on.
         uint32_t input_delay = 6;
+        // Ticks ahead a member stamps the Sector event of a sector it enters
+        // (session::sector_lead_for_ping, session/sector_union.hpp): the
+        // relay has to reach every other member before they simulate that
+        // tick.  Sized with the input delay from the same round trip, sent
+        // in every SessionStart, fixed for the session's life.
+        uint32_t sector_lead = 0;
         // The tick base the members present at the start are numbered from:
         // the same lead a late joiner gets, measured from tick 0 (design 9.2,
         // sim/late_tick.hpp session_start_tick_base).  Fixed here, with the
@@ -585,6 +591,12 @@ public:
         // last Physicalize event of each member (serialized, player set) so a
         // late joiner can build the bodies that already exist
         std::map<HSteamNetConnection, std::string> last_physicalize;
+        // Every Sector event relayed in this session (serialized, player set),
+        // in order: a late joiner's union has to grow by the same sectors the
+        // running members' did (session/sector_union.hpp), and a resynced
+        // member's already has them (a stamp of a sector that is up is a
+        // no-op there).
+        std::vector<std::string> sector_history;
         // The level's Physicalize_GameBall rows (from the world boot): the
         // reference a reported ball recipe is validated against.
         std::vector<bmmo::sim::physics_world::ball_row> ball_rows;
@@ -725,6 +737,9 @@ public:
         s.map = map;
         const session_latency latency = measure_session_latency(r);
         s.input_delay = latency.input_delay;
+        s.sector_lead = bmmo::session::sector_lead_for_ping(s.input_delay, static_cast<int>(latency.worst_rtt_ms));
+        Printf("Room %u: sector lead %u ticks (%.0f ms): a crossing starts its sector that far ahead, on every member.",
+               r.id, s.sector_lead, s.sector_lead * 1000.0 / 66.0);
         // Design 9.2: the members present at the start are anchored at the same
         // lead a late joiner is, measured from tick 0 (the world has not ticked
         // when their SessionAssign goes out).  Their numbering is the server's
@@ -809,6 +824,7 @@ public:
         msg.tick_rate = 66;
         msg.snapshot_interval = static_cast<uint8_t>(std::min<uint32_t>(255, std::max<uint32_t>(1, config_.physics_snapshot_interval)));
         msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, s.input_delay));
+        msg.sector_lead = static_cast<uint8_t>(std::min<uint32_t>(255, s.sector_lead));
         msg.first_tick = first_tick;
         msg.seed = 1;
         msg.spawn_impulse = s.spawn_impulse;
@@ -1147,9 +1163,11 @@ public:
         Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s).", s.id, client_it->second.name,
                 assigned, msg.physics_sha256.substr(0, 12), msg.build_id);
         if (s.late.count(c)) {
-            // catch the late joiner up: everyone's current ball, then a full snapshot
+            // catch the late joiner up: everyone's current ball, every sector
+            // the union has grown by, then a full snapshot
             for (const auto& [member, bytes]: s.last_physicalize)
                 if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+            for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
             runner_->request_full_snapshot(s.id);
         }
     }
@@ -1171,6 +1189,7 @@ public:
         send_session_assign(s, c, assigned);
         for (const auto& [member, bytes]: s.last_physicalize)
             if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+        for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
         runner_->request_full_snapshot(s.id);
         Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u).", s.id, get_client_name(c),
                assigned, msg.last_full_tick);
@@ -1322,8 +1341,12 @@ public:
         const std::string bytes = msg.raw.str();
         if (msg.type == bmmo::session::event_type::Physicalize) s.last_physicalize[c] = bytes;
         else if (msg.type == bmmo::session::event_type::Unphysicalize) s.last_physicalize.erase(c);
+        else if (msg.type == bmmo::session::event_type::Sector) s.sector_history.push_back(bytes);
+        // Without Nagle, like the sender did: a Sector event's relay has to
+        // reach the other members before they simulate its tick, and the
+        // lead was sized for the trip, not for a batching delay on top.
         for (const auto m: s.members)
-            if (m != c) send(m, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+            if (m != c) send(m, bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
     }
 
     void print_physics_sessions() {

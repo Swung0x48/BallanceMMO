@@ -28,7 +28,7 @@
 #include <session/correction.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
-#include <session/sector_pacer.hpp>
+#include <session/sector_union.hpp>
 
 namespace bmmo::session {
     struct physics_session_state {
@@ -231,21 +231,19 @@ namespace bmmo::session {
         uint64_t snapshots_received = 0, snapshots_applied = 0, snapshots_stale = 0;
         uint64_t body_writes = 0, body_write_errors = 0;
         uint64_t events_sent = 0, events_received = 0;
-        // Sector activation as an input (docs/lockstep-without-snapshots.md,
-        // "sector activation as an input").  A crossed checkpoint no longer
-        // runs Gameplay_SectorManager from the retail chain (neutralization N3):
-        // its Sector event is stamped sector_lead() ticks ahead and sent at
-        // once, and the manager is run here at the end of the frame BEFORE the
-        // step it is stamped for - where the server's update_sectors() runs it
-        // relative to its own step.  The held (sector, stamped tick) pairs, in
-        // order; normally at most one.
-        std::deque<std::pair<int, uint32_t>> sector_holds;
-        // The server's update_sectors() pacing, mirrored: counted once per step
-        // with the manager's state after the previous one (the anchor counts
-        // for the first step), so a held sector starts at the tick the
-        // server's own pacer starts it at.
-        bmmo::session::sector_pacer sector_pacer;
-        uint64_t sectors_deferred = 0, sectors_late = 0;
+        // The sectors this session runs (session/sector_union.hpp): every
+        // sector any member has entered, each started at one tick on every
+        // side.  A crossed checkpoint no longer runs Gameplay_SectorManager
+        // from the retail chain (neutralization N3): its Sector event is
+        // stamped sector_lead() ticks ahead and sent, the other members'
+        // arrive relayed with their stamps, and the union runs one pass per
+        // idle manager at the end of the frame BEFORE the step a stamp names -
+        // where the server's update_sectors() runs relative to its own step.
+        // Its pacer is counted once per step with the manager's state after
+        // the previous one (the anchor counts for the first step).
+        bmmo::session::sector_union sector_union;
+        uint64_t sectors_deferred = 0;
+        uint32_t last_sector_due = 0;        // the stamp of the last own hold, for the automation's reply
         // Every sector this session has held or run, sector 1 (the level's own)
         // from the anchor: a sector is an input once, whichever path reports it
         // - the checkpoint hook, the cell poll, the automation - so a second
@@ -254,13 +252,11 @@ namespace bmmo::session {
         // IngameParameter[0][1] as this client last saw or wrote it: the poll
         // in physics_session_frame holds a sector the hook did not report.
         int sector_cell = 0;
-        // The lead inputs effectively get: the server simulates a tick
-        // input_delay tick lengths after its nominal time, and one more because
-        // the client can only run the manager before its NEXT step.  Measured
-        // enough on the headless harness at a 600 ms round trip (the event
-        // arrives before its tick with a 32-tick input delay); a smaller lead
-        // is a measurement, not a guess - see the doc.
-        uint32_t sector_lead() const { return static_cast<uint32_t>(input_delay) + 1; }
+        // SessionStart::sector_lead: the input delay, one tick because the
+        // manager can only run before the NEXT step, and a second one-way
+        // budget for the relay to the other members (session::sector_lead_for_ping).
+        uint8_t sector_lead_ticks = 0;
+        uint32_t sector_lead() const { return sector_lead_ticks; }
         std::set<std::string> revived_reported_this_frame;
 
         // Queues filled by the network thread, drained on the game thread.

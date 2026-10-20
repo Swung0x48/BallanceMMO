@@ -33,7 +33,7 @@
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
 #include <game/sector_activation.hpp>
-#include <session/sector_pacer.hpp>
+#include <session/sector_union.hpp>
 #include <physics/physics_rt_api.h>
 
 #include "headless_engine.hpp"
@@ -172,9 +172,11 @@ namespace bmmo::sim {
         // snapshot() call (a full snapshot is then due).
         bool body_set_changed() const { return body_set_changed_; }
 
-        // The sectors the world is running: the union of the sectors its
-        // players are in, applied by update_sectors() in the tick it changes.
-        const std::set<int>& active_sectors() const { return active_sectors_; }
+        // The sectors the world is running: every sector any member has
+        // entered (session/sector_union.hpp), each started by update_sectors()
+        // before the step of the tick the shared rule picks.
+        const std::set<int>& active_sectors() const { return sectors_.active(); }
+        const bmmo::session::sector_union& sectors() const { return sectors_; }
         void update_sectors();
 
         std::string describe() const;
@@ -267,8 +269,7 @@ namespace bmmo::sim {
         bool callback_pending_ = false;
         CK_ID sector_manager_ = 0;
         CK_ID ingame_parameter_ = 0;
-        std::set<int> active_sectors_;
-        bmmo::session::sector_pacer sector_pacer_;   // one pass per idle manager, counted every tick
+        bmmo::session::sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
         struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };

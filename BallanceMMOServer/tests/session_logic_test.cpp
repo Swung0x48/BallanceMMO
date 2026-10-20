@@ -219,6 +219,23 @@ TEST(InputDelayForPing, CoversOneWayPlusJitterAndRespectsTheFloor) {
     EXPECT_EQ(input_delay_for_ping(-1, 6), 6u);
 }
 
+TEST(SectorLeadForPing, CoversTheRelayLegOnTopOfTheInputDelay) {
+    using bmmo::session::sector_lead_for_ping;
+    using bmmo::session::input_delay_for_ping;
+    using bmmo::session::kInputDelayMaxTicks;
+    // no measurable latency: the input delay floor, one tick, and the margin
+    // term alone for the relay leg (16 ms -> 2 ticks)
+    EXPECT_EQ(sector_lead_for_ping(6, 0), 9u);
+    // the relay leg is a second one-way budget sized from the same round trip
+    EXPECT_EQ(sector_lead_for_ping(7, 100), 7u + 1u + input_delay_for_ping(100, 0));
+    EXPECT_EQ(sector_lead_for_ping(input_delay_for_ping(300, 6), 300),
+              input_delay_for_ping(300, 6) + 1 + input_delay_for_ping(300, 0));
+    EXPECT_GT(sector_lead_for_ping(input_delay_for_ping(300, 6), 300), sector_lead_for_ping(input_delay_for_ping(150, 6), 150));
+    // both terms are capped, so the sum fits the byte SessionStart carries
+    EXPECT_EQ(sector_lead_for_ping(kInputDelayMaxTicks, 100000), 2 * kInputDelayMaxTicks + 1);
+    EXPECT_LE(sector_lead_for_ping(kInputDelayMaxTicks, 100000), 255u);
+}
+
 TEST(TickScheduler, LateJoinerTickIncludesMargin) {
     tick_scheduler scheduler;
     const auto start = tick_scheduler::clock::time_point(0s);
