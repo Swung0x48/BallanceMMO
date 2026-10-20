@@ -935,6 +935,63 @@ at tick 236. On the surviving pair the two agree (tick 26). Unresolved, so the
 harness scripts now copy each run's server journal beside its client journals
 (`server.bmjr`) and a claim like that can be re-checked.
 
+## Sector activation as an input: measured, and it is the whole mechanism error
+
+A harness-only experiment, no server, IVP or retail change: `--sector-lead N`
+makes the headless client treat its start sector's activation the way inputs
+are treated. Instead of activating at the anchor and reporting it after the
+fact, it stamps a Sector event for a tick `lead` ahead (`-1` = `input_delay + 1`,
+the lead inputs already get), sends it first, and activates locally when that
+tick comes - before its engine tick, which is where the server's
+`update_sectors()` runs relative to its own. The server already holds a stamped
+event until its tick (`session_runner::step`, `e.tick <= tick`, join order), so
+nothing on the server had to change for the measurement.
+
+4 players, proxied to a 617-620 ms round trip (input delay 32 ticks), same
+batch, client0 and client3 identically:
+
+| run | client activates | server activates | mechanisms first appear (server / client) | plates first off the server | before the first rollback |
+|---|---|---|---|---|---|
+| today | 12 | 21 (on arrival) | 26 / 18 | 0.07 - 0.26 m at tick 26 | up to 1.6 m |
+| lead = input_delay + 1 | 45 | 47 | 52 / 50 | 0.015 - 0.044 m at tick 54 | |
+| lead = 50 | 62 | 64 | 68 / 66 | 0.003 - 0.011 m at tick 70 | |
+| **lead = 50, client +2** | **64** | **64** | **68 / 68** | **never** | **0.00000 m, every body, until tick 215** |
+
+With the activation tick aligned, every mechanism in the sector - the ten hinged
+plates, the Paper ball riding them, the crate, the stone - agrees with the
+server **exactly** for the hundred and fifty ticks until the client's first
+rollback (the remote births at 216 and the 300 ms input corrections). What
+appears after that is 1-6 mm at tick 258 and 1-3 cm by tick 300: the per-rewind
+contact-state residual, accumulating under frequent rollbacks at a 600 ms round
+trip, and now cleanly separated from everything else.
+
+### The 2-tick residual is the server's guard
+
+In both led runs the server activated exactly two ticks after the stamp
+(45 -> 47, 62 -> 64), whatever `Gameplay_SectorManager` had been doing.
+`physics_world::update_sectors()` returns early while `desired ==
+active_sectors_`, and only *then* runs `sector_idle_ticks_ = IsActive() ? 0 :
++1; if (< 3) return;` - so the idle counter never accumulates while the sets
+agree and always needs three passes once they differ. A fixed two-tick delay on
+every activation, invisible while the server was already a one-way trip late.
+`--sector-skew 2` reproduces it on the client for the measurement; the fix is to
+count idle ticks every tick (move the counter above the early return), which is
+server code, not IVP, and is not done here.
+
+### What it means for the retail client
+
+The headless client can defer `--start-sector` trivially. A retail client's
+sector is activated by the level's own scripts when the ball crosses the sector
+boundary, and the mod observes it after the fact; deferring it means hooking the
+activate chain (`physics_session_client.cpp` already instruments
+`Gameplay_SectorManager`'s call sites and the `Set Cell -> IngameParameter`
+blocks) and holding it `input_delay + 1` frames while sending the stamped event
+at once. The gameplay consequence: a sector's mechanisms exist `lead` ticks
+after the ball enters it - but the ball's own inputs are already delayed by the
+same lead, so the timing between ball and mechanism is preserved. That is the
+decision this measurement was for, and it is complementary to the sector-union
+question (which sectors each side runs), not an alternative to it.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the

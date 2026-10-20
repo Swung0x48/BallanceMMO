@@ -167,6 +167,26 @@ namespace {
         // a pose at a given session tick (the `beam` verb) - together they put
         // a ball on a mechanism in a few seconds instead of a minute of driving.
         int start_sector = 0;
+        // --sector-lead N: treat the start sector's activation as an INPUT.
+        // Instead of activating at the anchor and reporting it after the fact
+        // (which the server applies on arrival, one-way latency later - the
+        // mechanisms then start at different session ticks on the two sides
+        // and never agree again under lockstep), stamp a Sector event for a
+        // tick `lead` ahead, send it first, and activate locally when that tick
+        // comes.  The server holds a stamped event until its tick
+        // (session_runner::step), so no server change is involved.  N > 0 is a
+        // fixed lead in ticks; -1 uses input_delay + 1, the lead inputs
+        // already get; 0 (default) is today's behaviour.  A measurement first,
+        // not a protocol: whether it collapses the mechanism offset is the
+        // number the retail decision needs.
+        int sector_lead = 0;
+        // --sector-skew N: activate locally N ticks AFTER the tick the Sector
+        // event was stamped for.  Measurement only: the server's
+        // update_sectors() guard activates two ticks after an event changes
+        // the desired set (its idle counter only runs once the sets differ),
+        // so a skew of 2 lines the client up with the server as it is today
+        // and shows what a zero offset buys, before that guard is touched.
+        int sector_skew = 0;
         bool beam = false;
         double beam_position[3] = {};
         uint32_t beam_tick = 0;
@@ -225,6 +245,8 @@ namespace {
             else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
             else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
+            else if (arg == "--sector-lead") { if (!(v = next())) return false; out.sector_lead = std::atoi(v); }
+            else if (arg == "--sector-skew") { if (!(v = next())) return false; out.sector_skew = std::atoi(v); }
             else if (arg == "--beam") {
                 for (int k = 0; k < 3; ++k) {
                     if (!(v = next())) return false;
@@ -829,7 +851,18 @@ namespace {
             // (server.cpp ends the session on a world mismatch).  The Sector
             // event this client reports on its first frame makes the server
             // activate the same sector, a relay behind us.
-            if (args_.start_sector > 0) start_sector(args_.start_sector);
+            if (args_.start_sector > 0) {
+                if (args_.sector_lead != 0) {
+                    // Deferred: scheduled on the first running frame, once the
+                    // session tick and input_delay are known (see the frame
+                    // loop).  The anchor hash is unaffected either way.
+                    pending_sector_ = args_.start_sector;
+                    logf("--start-sector %d held for a lead of %s ticks", args_.start_sector,
+                         args_.sector_lead > 0 ? std::to_string(args_.sector_lead).c_str() : "input_delay+1");
+                } else {
+                    start_sector(args_.start_sector);
+                }
+            }
             frames_since_anchor_ = 0;
             phase_ = phase::running;
             origin_ = clock_type::now();
@@ -1101,7 +1134,43 @@ namespace {
             // before its physics step (session_runner::step).  current_tick()
             // is not advanced to this frame yet, so name the tick the engine is
             // about to simulate - the same one the spawn callback above uses.
-            drain_due_events(tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0)));
+            const uint32_t frame_tick = tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
+            // A held --start-sector: on the first frame the session is assigned
+            // (tick base and input_delay known), pick the activation tick and
+            // send the Sector event for it NOW, stamped ahead, so the server
+            // holds it and activates at that tick too.  Then activate here when
+            // the frame for that tick comes - before its engine tick, which is
+            // where the server's update_sectors() runs relative to its own.
+            if (pending_sector_ > 0 && assigned_) {
+                if (sector_activate_tick_ == 0) {
+                    const int lead = args_.sector_lead > 0 ? args_.sector_lead : static_cast<int>(input_delay_) + 1;
+                    sector_activate_tick_ = frame_tick + static_cast<uint32_t>(lead);
+                    bmmo::session_event_msg event;
+                    event.tick = sector_activate_tick_;
+                    event.type = bmmo::session::event_type::Sector;
+                    event.sector = pending_sector_;
+                    send_event(event);
+                    // The detect block below must not report it again when the
+                    // activation flips IngameParameter at the stamped tick.
+                    last_sector_ = pending_sector_;
+                    logf("sector %d scheduled for tick %u (lead %d, input_delay %u), event sent ahead",
+                         pending_sector_, sector_activate_tick_, lead, static_cast<unsigned>(input_delay_));
+                }
+                const uint32_t fire_tick = sector_activate_tick_ + static_cast<uint32_t>(std::max(args_.sector_skew, 0));
+                if (frame_tick == fire_tick) {
+                    start_sector(pending_sector_);
+                    logf("sector %d activated at tick %u (stamped %u, skew %d)", pending_sector_, frame_tick,
+                         sector_activate_tick_, args_.sector_skew);
+                    pending_sector_ = 0;
+                } else if (frame_tick > fire_tick) {
+                    // Should not happen (the schedule is set at least one tick
+                    // ahead); activate anyway rather than never.
+                    start_sector(pending_sector_);
+                    logf("sector %d activated LATE at tick %u (stamped %u)", pending_sector_, frame_tick, sector_activate_tick_);
+                    pending_sector_ = 0;
+                }
+            }
+            drain_due_events(frame_tick);
             // After the events, so a birth and an input correction in the same
             // frame leave the world replayed from the earlier of the two.
             replay_corrected_inputs();
@@ -2580,6 +2649,8 @@ namespace {
         uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
         uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
         int restore_traces_ = 0;
+        int pending_sector_ = 0;             // a --start-sector held for its lead
+        uint32_t sector_activate_tick_ = 0;  // the session tick it is stamped for
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;

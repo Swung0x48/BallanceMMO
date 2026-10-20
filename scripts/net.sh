@@ -20,4 +20,5 @@ python -I scripts/arena_map_test.py --bin build-agent/BallanceMMOServer \
   | grep -E "VERDICT|replay rc|client[0-9] rc"
 S=$(ls -t maps/arena-test/wsl/journals/*.bmjr 2>/dev/null | head -1)
 [ -n "$S" ] && [ -d "maps/arena-test/$L" ] && cp "$S" "maps/arena-test/$L/server.bmjr" && echo "server journal kept as maps/arena-test/$L/server.bmjr"
+[ -f maps/arena-test/wsl/server.log ] && [ -d "maps/arena-test/$L" ] && cp maps/arena-test/wsl/server.log "maps/arena-test/$L/server.log"
 echo "=== done $L"
