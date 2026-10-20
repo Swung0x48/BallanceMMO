@@ -17,8 +17,9 @@ overlap.
 
 ## Layout
 
-A flat arena, 1000 x 60 units, running along +X at z = 0, with **two parallel
-lines**:
+A flat arena, 1000 x 60 units, running along +X at z = 0 - plus a start plate
+that reaches further back and to the side, and a death zone under all of it
+(both below) - with **two parallel lines**:
 
 - **the driving lane, y = 15** — `PS_FourFlames_01` at the start,
   `PC_TwoFlames_01..03` and `PR_Resetpoint_01..04` on the sector boundaries,
@@ -67,15 +68,21 @@ is about a metre across though the swing spans 25; cutting the whole 25 would
 leave a hole a ball could drop through. The only gap left is the
 `RECESS_MARGIN` ring of 0.6 units, far narrower than a ball (radius 2).
 
-Two checks in `build_arena_map.py` keep it that way, and both are clean for the
-map as committed:
+Three checks in `build_arena_map.py` keep it that way:
 
 - `check_clipping()` — every component vertex below the road against every
   floor block, **per vertex, not per bounding box**: a mechanism legitimately
   has a box that spans floor blocks its geometry never touches, so a box test
-  reports phantom overlaps here. Returns zero.
+  reports phantom overlaps here. For the map as committed it reports **426
+  vertices over 9 components** (`P_Modul_01/17/18/19/25/29/34/41`,
+  `PE_Balloon`): the base plates retail itself buries in the 5-thick floor
+  block (see the openings below). Compare against that count; it is not zero
+  and is not meant to be.
 - `check_reach()` — how many components have geometry in the band a rolling
   ball sweeps (z = 0 .. 4.5). Returns 32/32.
+- `check_depth_zone()` — the death zone against everything else (below):
+  18.97 units of clearance under the lowest component vertex, 150 past the
+  footprint on every side, hidden, and still exactly one `PE_Levelende`.
 
 A human playing the arena reached the end and the session recorded a `Finish`
 event at tick 5887, so the level completes.
@@ -116,6 +123,88 @@ why the trafos sit at +0.095, extra points at +2.5 and `P_Modul_03` at +10.76.
 `mount_dz()` raises that figure only where the retail value would sink the
 mechanism into the road.
 
+### The death zone
+
+Retail Ballance kills a ball in `BallManager` (`Gameplay_Ingame`; the level
+flow table in `docs/collision-overhaul-design.md`): every frame, a `Box Box
+Intersection` of the ball against each member of the **`DepthTestCubes`**
+group. A hit takes the controls away, unphysicalizes the ball a second later,
+resets the current sector and physicalizes a new ball at the sector's
+resetpoint. A level without that group has no way to die, and until
+2026-10-20 this one had none: a ball that left the floor fell for ever - in
+one 84 s run to y = -10391, still falling when the session ended.
+
+All 13 retail levels carry the group, and its members look alike: 3-9
+**hidden** boxes (`Quader01`, `DepthTestCube_01`, `Depth_TestCube01`, ...),
+hundreds of units across and 20-200 deep, their tops mostly 1-25 units under
+the floor above them. The arena has one, `DepthCubes_01`: hidden, the
+footprint of everything plus `DEPTH_MARGIN` = 150 on every side - a ball
+driven off an edge at full speed still covers ~30 units sideways on the way
+down - 100 deep, with its top at z = -25, 20 under the slab and 19 under the
+deepest component vertex (`P_Modul_17`'s base).
+
+**bbp_ng trap:** `VirtoolsGroupConvention.set_to_object()` files a
+`DEPTH_CUBE` under **`PE_Levelende`** (its parser reads `DepthTestCubes`
+back), so going through it gives the level a second level end and still no
+death zone. `add_depth_cube()` sets the group by hand, and
+`check_depth_zone()` checks there is exactly one `PE_Levelende` member.
+
+### The start plate
+
+Every spawn and respawn is kicked at 3 m/s (the spawn impulse, design 9.10) in
+a direction that `session/spawn_impulse.hpp` derives from the join order and
+the tick, so the floor round the spawn has to hold a passive ball kicked any
+way at all. It used to end right under it: the first bay's floor begins at
+x = -20 - the spawn - and the old apron stopped 20 units short of it, so the
+resetpoint sat on the floor's back edge with a gap behind. A ball that spawned
+0.09 behind that edge, or was pushed back by a same-tick spawn, dropped
+through.
+
+The plate is now solid from x = -60 (`APRON_BACK`, 40 behind the spawn) to the
+first bay, and reaches `APRON_SIDE` = 25 units south of the arena (y = -25)
+beside the plate and the first bay, so no edge is nearer the spawn than 40.
+The bays, checkpoints, resetpoints and every component are where they were:
+against the previous `.nmo`, the only objects that differ are the floor
+blocks behind and south of the spawn and the new `DepthCubes_01`.
+
+The roll-outs come from `BallanceMMOSimTool --spawn-test N`, which
+physicalizes N balls at the resetpoint in one tick with the spawn flag - the
+way N real clients report a spawn - with `--drop-settle 0..63` moving the
+spawn tick through every rotation of the direction table (64 runs per row):
+
+| balls | type | farthest from the spawn | closest to an edge of the plate | fell |
+| --- | --- | --- | --- | --- |
+| 1 | stone | 8.89 | 31.25 | 0 |
+| 4 | stone | 8.89 | 31.25 | 0 |
+| 8 | stone | 16.57 | 26.75 | 0 |
+| 4 | wood | 5.15 | 35.00 | 0 |
+| 8 | wood | 15.04 | 25.00 | 0 |
+| 1 | paper | 3.08 | 37.75 | 0 |
+| 4 | paper | 25.57 | 16.25 | 0 |
+| 8 | paper | 44.64 | - | 21 of 512 |
+
+A lone kicked ball stops within 8.9 of the spawn whichever way it goes, and
+balls spawned at the very same point do not push each other at birth: a
+coincident pair has no contact normal, and IVP leaves a pair that is moving
+apart alone (the player collision filter in `physics_state.cpp`). What spreads
+them further is colliding afterwards: eight stone balls - a full room - fan
+out to 16.6, and paper balls, which barely roll on their own, stay close
+enough to bounce off each other. Eight paper balls spawned in one tick is the
+one case the plate does not hold, and no session produces it: slot 13 spawns
+every ball as stone.
+
+**The harness does not kick most spawns.** The headless session client flags
+a Physicalize as a spawn only if its ball is still within 0.05 m of the
+resetpoint when it reports it (`report_physicalize`, `session_client.cpp`),
+and with four balls spawning in the same tick it has already moved ~0.09 m by
+then (the client logs `physicalize pose taken from the entity after the tick
+(0.091 m from the resetpoint)`), so in a 4-player harness run the four initial
+spawns carry no kick at all - only a lone respawn at the start does (it
+compares against the level's first resetpoint, so a respawn further on is
+never kicked). A real client reports
+before the body exists (`physics_session_client.cpp`) and always flags. That
+is why the plate is measured with the SimTool rather than with harness runs.
+
 ## Rebuilding the map
 
 With Blender running and `bbp_ng` enabled (its **Ballance texture folder**
@@ -129,6 +218,10 @@ bpy.ops.bbp.export_virtools(filepath=r'D:\repos\BallanceMMO\maps\BMMO_Mechanism_
                             export_mode='4', texture_save_opt='1',
                             use_compress=True, compress_level=5, successive_sector=True)
 ```
+
+Then run the three checks (`ns['check_clipping']()`, `ns['check_reach']()`,
+`ns['check_depth_zone']()`) and compare with the figures above. Export mode 4
+writes every object, hidden ones included, which is what keeps the death zone.
 
 ## Installing it
 
@@ -180,8 +273,12 @@ right and none of them is obvious.
    at this map's hash and rebuild the server and session client:
 
    ```
-   md5sum "<game>/3D Entities/Level/Level_13.NMO"   # c8aa5801d5afc60fb4e61666735decee
+   md5sum "<game>/3D Entities/Level/Level_13.NMO"   # c58a76b97bbb1b66bd824da72c9ec481
    ```
+
+   That is the map as committed (with the death zone and the start plate,
+   2026-10-20). Every rebuild changes the hash, so re-point the entry - and
+   rebuild - whenever a new `.nmo` goes into the slot.
 
    **Keep that edit local.** It is a test convenience, not a feature.
 
@@ -367,6 +464,32 @@ across all three ball types, and the journal bit-exact.
 Four players crossing all three checkpoints together (beamed onto the driving
 lane with `--beam-y 15`, since the checkpoints are 28 units off the mechanism
 row) also passes bit-exact, reaching `sectors entered: 1, 2, 3, 4`.
+
+## Results (2026-10-20): the death zone and the start plate
+
+The plain drive run - `--sectors 1 --players 4 --seconds 50 --drive`, local
+server, `build-agent/` (`ballanced-e620b487c59e+bmmo-d2ab09a22004-dirty`) -
+on the map at two stages. All four balls spawn together at tick 212 in every
+run, so every run gets the same four directions; and in every run the
+server's journal replayed bit-exact with `hard=0`, `resyncs=0`, `starved=0`.
+
+| map | at the start | further on | replay | mechanism bodies touched |
+| --- | --- | --- | --- | --- |
+| death zone only, old start | 2 balls went over the back edge, died 107-108 ticks later and respawned; one went over again, died at tick 710 and respawned again | the others drove off the far end, died and respawned | 2799/2799 | 12 |
+| as committed (twice: a copy of the game directory, then the installed one) | no ball left the plate | all 4 drove off the far end (x ~ 970) 33-36 s in, died 104-106 ticks after leaving the floor and respawned 204 ticks later at the resetpoint each had last crossed (x = 700, 700, 220, -20) | 3033/3033, 2847/2847 | 25, 26 |
+| as committed, `--checkpoint-ticks 2` | the same | the same, checked every 2 ticks: all 8 lives, no ball under the floor without a death | 2832/2832, 1416 checkpoints | 25 |
+
+On the map before either fix, a 4-player drive run that went on for 84 s had
+one ball through the gap behind the spawn and three off the far end, and all
+four were still falling when it ended, the lowest at y = -10391.
+
+Without `--drive` the balls stay where the spawn leaves them. With the death
+zone but the old start, two of the four same-tick balls went through the gap,
+and one of them died three times over: its respawns landed 0.09 behind the
+edge, or beside a ball that pushed it back, and rolled off without any kick.
+As committed, all four come to rest 4.7-9.5 units from the spawn, on the plate
+(replay 1520/1520). That run reports FAIL only because a passive ball never
+reaches a mechanism.
 
 ## Results (2026-10-19, VS 18 build in `build-agent/`)
 

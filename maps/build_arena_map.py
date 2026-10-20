@@ -159,6 +159,24 @@ STOPPERS = {
                    ((-8.6, 2.5, -0.75), 'x'), ((-8.6, 7.5, -0.75), 'x')],
 }
 
+# The death zone.  Retail Ballance kills a ball in BallManager (Gameplay_Ingame):
+# every frame, a Box Box Intersection of the ball against each member of the
+# DepthTestCubes group.  A hit takes the controls away, unphysicalizes the ball
+# a second later, resets the current sector and physicalizes a new ball at the
+# sector's resetpoint (docs/collision-overhaul-design.md).  Without that group
+# a level has no way to die at all: a ball that leaves the floor falls for ever.
+#
+# All 13 retail levels carry it, and their members look alike: 3-9 hidden boxes
+# ("Quader01", "DepthTestCube_01", ...) hundreds of units across and 20-200
+# deep, their tops mostly 1-25 units below the floor above them.  A flat arena needs
+# one: everything's footprint plus DEPTH_MARGIN on every side - a ball driven
+# off an edge at full speed still covers ~30 units sideways on the way down -
+# with its top DEPTH_TOP, 20 under the slab's underside (z = -5) and about 19
+# under the deepest component vertex.  check_depth_zone() measures both.
+DEPTH_TOP = -25.0
+DEPTH_THICKNESS = 100.0
+DEPTH_MARGIN = 150.0
+
 BAY_SPAN = 40.0          # > the widest footprint (P_Modul_03, ~32 units)
 BAYS_PER_SECTOR = 6
 ARENA_WIDTH = 60.0
@@ -173,6 +191,21 @@ ARENA_WIDTH = 60.0
 PLAY_Y = 15.0
 MECH_Y = 43.0
 RAIL_Y = 29.0
+# The start plate.  Every spawn and respawn is kicked at 3 m/s in a direction
+# that depends on the join order and the tick (spawn impulse, design 9.10), so
+# the floor round the spawn has to hold a passive ball kicked any way at all.
+# It used to end exactly under the spawn: the first bay begins at x_start and
+# the old apron stopped 20 units short of it, so the resetpoint sat on the
+# floor's back edge and anything kicked towards -x dropped through the gap.
+# APRON_BACK is floor behind the spawn and APRON_SIDE floor south of the lane
+# (y < 0, beside the plate and the first bay), so no edge is nearer the spawn
+# than 40 units.  A lone ball kicked any way stops within 8.9 of the spawn
+# (stone; wood 5.2, paper 3.1), and balls spawned in the same tick add their
+# collisions: eight stone balls - a full room - fan out to 16.6.  (Four paper
+# balls spawned together bounce to 25.6, but slot 13 spawns stone.)  The
+# measurements are in maps/README.md.
+APRON_BACK = 40.0
+APRON_SIDE = 25.0
 RECESS_MARGIN = 0.6      # clearance between a mechanism and the floor around it
 FLOOR_THICKNESS = 5.0
 MIN_STRIP = 0.35         # drop slivers rather than emit degenerate blocks
@@ -329,6 +362,33 @@ def add_stopper(cx, cy, cz, axis):
     return obj
 
 
+def add_depth_cube(name, x0, x1, y0, y1, z0, z1):
+    """One hidden DepthTestCubes box spanning [x0,x1] x [y0,y1] x [z0,z1].
+
+    The group is set by hand, not through VirtoolsGroupConvention: bbp_ng's
+    setter files a DEPTH_CUBE under PE_Levelende (its parser reads
+    DepthTestCubes back), which would make this box a second level end and
+    leave the level with no death zone at all."""
+    import bmesh
+
+    bm = bmesh.new()
+    v = [bm.verts.new((x, y, z)) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)]
+    for face in ((0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)):
+        bm.faces.new([v[i] for i in face])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    mesh = bpy.data.meshes.new('DepthCube')
+    bm.to_mesh(mesh)
+    bm.free()
+
+    obj = bpy.data.objects.new(name, mesh)
+    with PROP_virtools_group.VirtoolsGroupsHelper(obj) as gp:
+        gp.add_group('DepthTestCubes')
+    scene().collection.objects.link(obj)
+    # the exporter writes Virtools visibility from hide_get(); retail's are hidden
+    obj.hide_set(True)
+    return obj
+
+
 def add_component(type_name, sector, loc, rz_deg=0.0, name=None):
     ty = BET[type_name]
     if ty is BET.PS_FourFlames:
@@ -400,10 +460,12 @@ def build():
 
     # --- the road: solid slab, with an opening under each buried base ------
     x_balloon = x_end + BAY_SPAN * 0.75
-    road_x0 = x_start - BAY_SPAN
+    road_x0 = x_start - APRON_BACK
     road_x1 = x_end + BAY_SPAN * 1.5
-    # the start apron carries nothing sunken
-    add_floor_block(road_x0, y0, x_start - BAY_SPAN / 2 - road_x0, ARENA_WIDTH)
+    # the start plate carries nothing sunken: everything behind the first bay,
+    # which begins right under the spawn, plus a strip south of the lane
+    add_floor_block(road_x0, y0 - APRON_SIDE, x_start - road_x0, ARENA_WIDTH + APRON_SIDE)
+    add_floor_block(x_start, y0 - APRON_SIDE, BAY_SPAN, APRON_SIDE)
     for i, type_name in enumerate(BAYS):
         cx = i * BAY_SPAN
         # a relocated element is not on this bay, so this bay only has to open
@@ -459,6 +521,15 @@ def build():
     # the session recorded a Finish event.
     add_component('PE_Balloon', sector_count, (x_balloon, PLAY_Y, mount_dz('PE_Balloon')),
                   -180.0, 'PE_Balloon_01')
+
+    # --- the death zone: under everything built above ------------------------
+    co = [ob.matrix_world @ v.co for ob in bpy.data.objects if ob.type == 'MESH'
+          for v in ob.data.vertices]
+    m = DEPTH_MARGIN
+    add_depth_cube('DepthCubes_01',
+                   min(c.x for c in co) - m, max(c.x for c in co) + m,
+                   min(c.y for c in co) - m, max(c.y for c in co) + m,
+                   DEPTH_TOP - DEPTH_THICKNESS, DEPTH_TOP)
 
     info = PROP_ballance_map_info.get_raw_ballance_map_info(scene())
     info.mSectorCount = sector_count
@@ -526,8 +597,9 @@ def check_reach():
     out = []
     for ob in bpy.data.objects:
         # stoppers live below the road on purpose - they are what a mechanism
-        # rests against, not something a ball is meant to reach
-        if ob.type != 'MESH' or ob.name.startswith(('A_Floor', 'A_Rail', 'A_Stopper')):
+        # rests against, not something a ball is meant to reach - and so does
+        # the death zone
+        if ob.type != 'MESH' or ob.name.startswith(('A_Floor', 'A_Rail', 'A_Stopper', 'DepthCubes')):
             continue
         zs = [(ob.matrix_world @ v.co).z for v in ob.data.vertices]
         in_band = [z for z in zs if -0.05 <= z <= BALL_SWEEP_Z]
@@ -541,4 +613,44 @@ def check_reach():
         'reachable': sum(1 for r in out if r['reachable']),
         'total': len(out),
         'out_of_reach': [f"{r['name']} z={r['z'][0]}..{r['z'][1]}" for r in out if not r['reachable']],
+    }
+
+
+def check_depth_zone():
+    """The death zone against everything else in the level.
+
+    `clearance` is how far the boxes' top lies below the lowest vertex of any
+    other object - a ball on the floor (or a mechanism carrying one) must never
+    reach it - and `margin` how far they reach past everything's footprint on
+    each side, which is what catches a ball that leaves an edge at speed.  Also
+    checks that the boxes are hidden and that there is still exactly one level
+    end, since bbp_ng's own group setter would have filed them under it."""
+    cubes, rest, level_ends = [], [], 0
+    for ob in bpy.data.objects:
+        if ob.type != 'MESH':
+            continue
+        with PROP_virtools_group.VirtoolsGroupsHelper(ob) as gp:
+            groups = set(gp.iterate_groups())
+        level_ends += 'PE_Levelende' in groups
+        co = [ob.matrix_world @ v.co for v in ob.data.vertices]
+        (cubes if 'DepthTestCubes' in groups else rest).append((ob, co))
+    if not cubes:
+        return {'cubes': 0}
+    cube_co = [c for _, co in cubes for c in co]
+    rest_co = [(ob.name, c) for ob, co in rest for c in co]
+    top = max(c.z for c in cube_co)
+    lowest = min(rest_co, key=lambda nc: nc[1].z)
+    return {
+        'cubes': len(cubes),
+        'hidden': all(ob.hide_get() for ob, _ in cubes),
+        'level_ends': level_ends,
+        'top': round(top, 2),
+        'lowest': f'{lowest[0]} z={lowest[1].z:.2f}',
+        'clearance': round(lowest[1].z - top, 2),
+        'margin': {
+            '-x': round(min(c[1].x for c in rest_co) - min(c.x for c in cube_co), 2),
+            '+x': round(max(c.x for c in cube_co) - max(c[1].x for c in rest_co), 2),
+            '-y': round(min(c[1].y for c in rest_co) - min(c.y for c in cube_co), 2),
+            '+y': round(max(c.y for c in cube_co) - max(c[1].y for c in rest_co), 2),
+        },
     }
