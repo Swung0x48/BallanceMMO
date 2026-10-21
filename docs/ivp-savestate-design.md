@@ -599,11 +599,30 @@ switched off and nothing in the tool re-implements a restore.
 
 Two clients' records can be compared field by field as well:
 `BallanceMMOSessionClient --dump-savestate A B DIR` writes the record's blob of
-every tick in [A, B] (again after a rewind re-recorded it) and
+every tick in [A, B] as `<t>.sav` (again after a rewind re-recorded it), and
+beside it the mechanism scripts' state of that tick as `<t>.scr`;
 `BallanceMMOSimTool --savestate-diff DIR1/<t>.sav DIR2/<t>.sav` prints the
 first field that differs (`--savestate-describe FILE` prints a blob whole),
 the environment identity excepted.  That is how an arena journal's position
-drift is traced to the engine field behind it.
+drift is traced to the engine field behind it.  The scripts' side of the same
+question - where two runs' SCRIPT states part, which neither a journal nor a
+blob diff shows - is `--compare-scripts DIR`: at every tick for which DIR holds
+another run's `<t>.scr`, this run captures its own scripts and logs every
+change of the first difference by script, block and field (the harness runs
+the control with `--dump-savestate` and the arm with `--compare-scripts
+../../../control/sector1/client0/savestates`; the control compares itself with
+its own files and stays quiet).  A replayed record (a rewind re-records the
+ticks it replayed, and re-dumps them) is labelled so in the log: a script
+activated inside the window keeps its live state there by design, so those
+lines are read apart from the live records'.  `--savestate-diff A B --ignore-ov`
+leaves the overlap tree out of the comparison (two runs that inserted a body at
+different moments keep different tree layouts for good; the question is what
+else differs), `--describe-script NAME` prints a root script's graph - blocks
+with prototype, id and flags, links with their activation delay, every
+parameter with its value - the way to read what a script mismatch names, and
+the headless client's `--trace-restore` logs the PreSimulate callback queue
+(class, behavior, script, target, body or not) before and after every forced
+rewind.
 
 ### `BallanceMMOMessageTests` (rollback_engine_test.cpp)
 

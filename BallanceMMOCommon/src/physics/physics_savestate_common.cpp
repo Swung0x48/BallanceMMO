@@ -1107,10 +1107,27 @@ namespace bmmo::physics::savestate {
         return out;
     }
 
-    std::string diff_world(const world_record& a, const world_record& b) {
-        const std::vector<field_entry> ea = flatten(a);
-        const std::vector<field_entry> eb = flatten(b);
+    namespace {
+        // Everything that describes the overlap tree's layout.
+        bool is_ov_field(const field_entry& f) {
+            return f.kind == "ovnode" || (f.kind == "world" && f.field == "ov_nodes") || (f.kind == "clock" && f.field == "ov_root")
+                || (f.kind == "ov" && f.field == "node");
+        }
+        std::vector<field_entry> flatten_without_ov(const world_record& world) {
+            std::vector<field_entry> all = flatten(world), kept;
+            kept.reserve(all.size());
+            for (field_entry& f : all)
+                if (!is_ov_field(f)) kept.push_back(std::move(f));
+            return kept;
+        }
+    }
+
+    std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov, int max_differences) {
+        const std::vector<field_entry> ea = ignore_ov ? flatten_without_ov(a) : flatten(a);
+        const std::vector<field_entry> eb = ignore_ov ? flatten_without_ov(b) : flatten(b);
         const size_t n = std::min(ea.size(), eb.size());
+        std::string out;
+        int listed = 0;
         for (size_t i = 0; i < n; ++i) {
             const field_entry& x = ea[i];
             const field_entry& y = eb[i];
@@ -1119,17 +1136,22 @@ namespace bmmo::physics::savestate {
                 // state: blobs of two processes never share one, and a diff
                 // between two clients' records is what this is for.
                 if (x.kind == "clock" && x.field == "environment") continue;
-                if (x.value != y.value) return x.kind + " " + x.name + " " + x.field + " " + x.value + " " + y.value;
+                if (x.value != y.value) {
+                    out += (out.empty() ? "" : " | ") + x.kind + " " + x.name + " " + x.field + " " + x.value + " " + y.value;
+                    if (++listed >= std::max(1, max_differences)) return out;
+                }
                 continue;
             }
+            if (!out.empty()) return out + " | <records no longer line up>";
             // The two worlds' records no longer line up (a name differs).
             return x.kind + " " + x.name + " " + x.field + " " + x.value + " " + y.kind + "/" + y.name + "/" + y.field + "=" + y.value;
         }
         if (ea.size() != eb.size()) {
             const field_entry& x = ea.size() > n ? ea[n] : eb[n];
-            return x.kind + " " + x.name + " " + x.field + " " + (ea.size() > n ? x.value + " <end>" : "<end> " + x.value);
+            return (out.empty() ? "" : out + " | ") + x.kind + " " + x.name + " " + x.field + " "
+                 + (ea.size() > n ? x.value + " <end>" : "<end> " + x.value);
         }
-        return "";
+        return out;
     }
 }
 
@@ -1170,7 +1192,8 @@ namespace bmmo::physics {
         return savestate::describe_world(world);
     }
 
-    std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size) {
+    std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size, bool ignore_ov,
+                               int max_differences) {
         static const uint8_t empty = 0;
         if (!a) a_size = 0;
         if (!b) b_size = 0;
@@ -1181,10 +1204,10 @@ namespace bmmo::physics {
         if (!savestate::read_world(ra, wa, error)) return "savestate a unreadable: " + error;
         savestate::reader rb(b ? b : &empty, b_size);
         if (!savestate::read_world(rb, wb, error)) return "savestate b unreadable: " + error;
-        std::string d = savestate::diff_world(wa, wb);
+        std::string d = savestate::diff_world(wa, wb, ignore_ov, max_differences);
         if (d.empty())
-            d = "bytes differ but every field renders the same (sizes " + std::to_string(a_size) + " and "
-              + std::to_string(b_size) + ")";
+            d = std::string(ignore_ov ? "no difference outside the overlap tree" : "bytes differ but every field renders the same")
+              + " (sizes " + std::to_string(a_size) + " and " + std::to_string(b_size) + ")";
         return d;
     }
 

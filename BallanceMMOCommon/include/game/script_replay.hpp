@@ -500,7 +500,11 @@ namespace bmmo::game {
         static bool is_opaque(CKParameter* parameter) {
             if (!parameter) return true;
             const CKGUID guid = parameter->GetGUID();
-            return guid == CKPGUID_POINTER || guid == CKPGUID_OBJECTARRAY || guid == CKPGUID_VOIDBUF;
+            // A 2D curve (a block's progression curve) serializes with bytes
+            // that differ from one process to the next; it is an input, never
+            // state, and with it in the capture two runs' scripts never agree.
+            return guid == CKPGUID_POINTER || guid == CKPGUID_OBJECTARRAY || guid == CKPGUID_VOIDBUF
+                || guid == CKPGUID_2DCURVE;
         }
 
         static void count(CKBehavior* beh, stats& s) {
@@ -539,8 +543,21 @@ namespace bmmo::game {
             if (!get_u32(in, pos, size) || pos + size > in.size()) return fail(error, "truncated parameter bytes");
             // A size the parameter does not have now is a graph the capture
             // did not see: leave the value alone rather than write past it.
+            //
+            // Written through the buffer, never with SetValue: on an output
+            // parameter SetValue ends in DataChanged(), which copies the value
+            // into every parameter linked FROM it (CKParameterOut's
+            // destinations - a graph's local fed by a child block's output,
+            // the way Ballance's module scripts keep their permission flags).
+            // Those destinations have their own recorded values, written a
+            // moment earlier or later in this walk; a propagated stale output
+            // overwrote them (measured: P_Modul_18's fan came out of every
+            // replay with TurnON_Permission 0 where the live frames had 1, from
+            // the Identity block's parked output, and never lifted the paper
+            // ball again).  The live frame propagates only when the block
+            // executes, and the replayed frames do that themselves.
             if (parameter && !is_opaque(parameter) && parameter->GetDataSize() == static_cast<int>(size))
-                parameter->SetValue(in.data() + pos, static_cast<int>(size));
+                if (void* buffer = parameter->GetWriteDataPtr()) std::memcpy(buffer, in.data() + pos, size);
             pos += size;
             return true;
         }

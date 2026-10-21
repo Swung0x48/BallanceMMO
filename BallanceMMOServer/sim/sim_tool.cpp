@@ -55,6 +55,7 @@
 #include <session/journal.hpp>
 #include <physics/physics_direct.hpp>
 #include <session/rollback_binding.hpp>
+#include <session/rollback_binding_scripts.hpp>
 #include <session/rollback.hpp>
 
 #include "CKAll.h"
@@ -224,6 +225,9 @@ namespace {
         // two clients' journals only show a position drift.
         std::string savestate_diff[2];
         std::string savestate_describe;
+        std::string describe_script;      // --describe-script NAME: print that root script's graph
+        bool ignore_ov = false;           // --ignore-ov: --savestate-diff leaves the overlap tree out
+        int max_diff = 1;                 // --max-diff N: --savestate-diff lists up to N differing fields
         int savestate_rounds = 50;
         int savestate_max_depth = 48;
         unsigned long long savestate_seed = 1;
@@ -357,6 +361,9 @@ namespace {
                 out.savestate_diff[1] = v;
             }
             else if (arg == "--savestate-describe") { if (!(v = next())) return false; out.savestate_describe = v; }
+            else if (arg == "--describe-script") { if (!(v = next())) return false; out.describe_script = v; }
+            else if (arg == "--ignore-ov") out.ignore_ov = true;
+            else if (arg == "--max-diff") { if (!(v = next())) return false; out.max_diff = std::atoi(v); }
             else if (arg == "--rounds") { if (!(v = next())) return false; out.savestate_rounds = std::atoi(v); }
             else if (arg == "--max-depth") { if (!(v = next())) return false; out.savestate_max_depth = std::atoi(v); }
             else if (arg == "--seed") { if (!(v = next())) return false; out.savestate_seed = std::strtoull(v, nullptr, 0); }
@@ -370,7 +377,7 @@ namespace {
         // --list of a journal and the savestate file verbs are pure file
         // reading: no game data needed.
         return !out.root.empty() || !out.replay_session.empty() || !out.savestate_diff[0].empty()
-            || !out.savestate_describe.empty();
+            || !out.savestate_describe.empty() || !out.describe_script.empty();
     }
 
     bool gameplay_ingame_active(const bmmo::sim::headless_engine& engine) {
@@ -1681,7 +1688,7 @@ namespace {
             }
         }
         const std::string difference = bmmo::physics::diff_savestate(blobs[0].data(), blobs[0].size(), blobs[1].data(),
-                                                                     blobs[1].size());
+                                                                     blobs[1].size(), args.ignore_ov, args.max_diff);
         if (difference.empty()) {
             std::printf("identical (%zu bytes)\n", blobs[0].size());
             return 0;
@@ -1829,12 +1836,6 @@ namespace {
         binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
         binding_options.savestate = !legacy;
         binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
-        if (frames) {
-            binding_options.context = context;
-            binding_options.scripts = &scripts;
-            binding_options.script_hooks = &hooks;
-            binding_options.scripts_replayed = &scripts_replayed;
-        }
         binding_options.before_replayed_tick = [&](uint32_t tick) {
             if (tick != probe_tick) return;
             std::string probe_error;
@@ -1854,6 +1855,15 @@ namespace {
             if (args.verbose) std::printf("  engine: %s\n", text.c_str());
         };
         bmmo::session::rollback_world binding = bmmo::session::bind_rollback_world(backend, binding_options);
+        if (frames) {
+            bmmo::session::script_binding_options script_options;
+            script_options.context = context;
+            script_options.scripts = &scripts;
+            script_options.hooks = &hooks;
+            script_options.scripts_replayed = &scripts_replayed;
+            script_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+            bmmo::session::bind_script_replay(binding, backend, script_options);
+        }
         {
             // The world's own PreSimulate pass before the physics step (the
             // physics-only recipe above), and the blob after it.
@@ -1873,6 +1883,10 @@ namespace {
         engine.thresholds().max_resim_ticks = static_cast<uint32_t>(window) + 2u;
         engine.set_exact_restore(!legacy);
         engine.set_replay_scripts(frames);
+        // A replay re-records every tick it steps, so one round's result would
+        // become the next round's records: every round starts from the engine
+        // as the straight pass left it.
+        bmmo::session::rollback_engine pristine;
         bmmo::session::rollback_tracked tracked;
         for (const auto& name: bmmo::physics::movable_body_names(physics)) tracked.mechanisms.push_back(name);
         const std::map<std::string, bmmo::session::input_frame> no_inputs;
@@ -1957,6 +1971,7 @@ namespace {
             }
         }
         const double straight_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        pristine = engine;
 
         const auto summary = [&](int rounds_run, int rounds_failed) {
             char line[768];
@@ -2004,6 +2019,7 @@ namespace {
             // The world's own per-tick bookkeeping (tick index, RNG cursors,
             // the sector union) at the anchor; the engine knows the physics.
             world->restore_step_state(anchor.counters);
+            engine = pristine;
             probe_tick = t0 + static_cast<uint32_t>(a) + 1u;
             restored_blob.clear();
             replayed_blobs.clear();
@@ -2012,8 +2028,11 @@ namespace {
             engine_log.clear();
             restore_refused = false;
             const uint64_t restored_before = engine.stats().savestates_restored;
+            const uint64_t resim_before = engine.stats().resim_ticks;
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
+            // rewind_to's true says the request was handled, not that a replay
+            // ran: the stats say what happened.
             if (!rewound) {
                 failure = "the engine refused the rewind" + (engine_log.empty() ? std::string() : ": " + engine_log);
             } else if (!legacy && restore_refused) {
@@ -2021,6 +2040,9 @@ namespace {
                 restore_broke = true;
             } else if (!legacy && engine.stats().savestates_restored != restored_before + 1u) {
                 failure = "the engine did not restore the anchor's blob (fell back to the per-body path)";
+            } else if (engine.stats().resim_ticks != resim_before + static_cast<uint64_t>(d)) {
+                failure = "the engine re-simulated " + std::to_string(engine.stats().resim_ticks - resim_before) + " ticks of "
+                        + std::to_string(d);
             } else if (!capture_error.empty()) {
                 failure = "capture error: " + capture_error;
             }
@@ -2035,16 +2057,20 @@ namespace {
                 expected_blob = &anchor.blob;
                 current = restored_blob;
             }
-            // Replay identity: every step's blob.
+            // Replay identity: every replayed tick's blob - the engine's own
+            // re-record of the tick (made after everything it does to a tick,
+            // a window-born body's re-pose included); with the blob switched
+            // off (--legacy-restore) the step wrapper's capture.
             for (int k = 1; failure.empty() && k <= d; ++k) {
                 const int i = a + k;
                 fail_index = i;
                 const straight_tick& expected = straight[static_cast<size_t>(i)];
-                if (static_cast<size_t>(k - 1) >= replayed_blobs.size()) {
+                const std::vector<uint8_t>* recorded = legacy ? nullptr : engine.recorded_savestate(t0 + static_cast<uint32_t>(i));
+                if (!recorded && static_cast<size_t>(k - 1) >= replayed_blobs.size()) {
                     failure = "the replay stepped " + std::to_string(replayed_blobs.size()) + " ticks of " + std::to_string(d);
                     break;
                 }
-                const std::vector<uint8_t>& got = replayed_blobs[static_cast<size_t>(k - 1)];
+                const std::vector<uint8_t>& got = recorded ? *recorded : replayed_blobs[static_cast<size_t>(k - 1)];
                 if (expected.kept) {
                     if (got != expected.blob) {
                         failure = blob_difference(expected.blob, got);
@@ -3090,6 +3116,107 @@ namespace {
         std::fflush(stdout);
         return first_divergence < 0 && first_checkpoint_divergence < 0 && !stopped_at_jump ? 0 : 3;
     }
+    // ------------------------------------------------------------------
+    // --describe-script NAME: the level loaded, that root script's graph as
+    // text - every behaviour with its prototype, flags and active IOs, the
+    // links between them with their activation delay (the "next frame" links
+    // are the ones a replayed frame has to reproduce), and every parameter
+    // whose value fits eight bytes.  The way to read what a replay-fidelity
+    // mismatch names ("P_Modul_18_MF Script / Physics Force: local 20
+    // (TurnON_Permission)"): which block writes it, from which input.
+    // ------------------------------------------------------------------
+    namespace {
+        std::string io_name(CKBehaviorIO* io) {
+            if (!io) return "?";
+            CKBehavior* owner = io->GetOwner();
+            std::string name = owner && owner->GetName() ? owner->GetName() : "?";
+            const bool out = io->GetType() == CK_BEHAVIORIO_OUT;
+            int index = -1;
+            if (owner) {
+                const int count = out ? owner->GetOutputCount() : owner->GetInputCount();
+                for (int i = 0; i < count; ++i)
+                    if ((out ? owner->GetOutput(i) : owner->GetInput(i)) == io) { index = i; break; }
+            }
+            return name + (out ? ".out" : ".in") + std::to_string(index) + (io->GetName() ? std::string("(") + io->GetName() + ")" : "");
+        }
+
+        std::string parameter_text(CKContext* context, CKParameter* p) {
+            if (!p) return "-";
+            const CKGUID guid = p->GetGUID();
+            CKSTRING type = context->GetParameterManager()->ParameterGuidToName(guid);
+            std::string text = type ? type : "?";
+            const int size = p->GetDataSize();
+            const void* data = p->GetReadDataPtr(FALSE);
+            if (!data || size <= 0) return text + " (no data)";
+            char buf[64];
+            if (guid == CKPGUID_FLOAT && size == 4) {
+                float f = 0; std::memcpy(&f, data, 4);
+                std::snprintf(buf, sizeof(buf), " = %g", static_cast<double>(f));
+            } else if (size == 4) {
+                uint32_t u = 0; std::memcpy(&u, data, 4);
+                std::snprintf(buf, sizeof(buf), " = %u", u);
+            } else if (size <= 8) {
+                text += " =";
+                for (int i = 0; i < size; ++i) {
+                    std::snprintf(buf, sizeof(buf), " %02x", static_cast<const uint8_t*>(data)[i]);
+                    text += buf;
+                }
+                return text;
+            } else {
+                std::snprintf(buf, sizeof(buf), " (%d bytes)", size);
+            }
+            return text + buf;
+        }
+
+        void describe_behavior(CKContext* context, CKBehavior* beh, int depth) {
+            const std::string pad(static_cast<size_t>(depth) * 2, ' ');
+            const char* name = beh->GetName() ? beh->GetName() : "?";
+            const std::string proto = beh->IsUsingFunction() && beh->GetPrototypeName() ? std::string("  [") + beh->GetPrototypeName() + "]" : std::string();
+            std::printf("%s%s%s  id=%u flags=0x%08x", pad.c_str(), name, proto.c_str(), static_cast<unsigned>(beh->GetID()),
+                        static_cast<unsigned>(beh->GetFlags()));
+            std::string active;
+            for (int i = 0; i < beh->GetInputCount(); ++i) if (beh->IsInputActive(i)) active += " in" + std::to_string(i);
+            for (int i = 0; i < beh->GetOutputCount(); ++i) if (beh->IsOutputActive(i)) active += " out" + std::to_string(i);
+            if (!active.empty()) std::printf("  active:%s", active.c_str());
+            std::printf("\n");
+            for (int i = 0; i < beh->GetInputParameterCount(); ++i) {
+                CKParameterIn* in = beh->GetInputParameter(i);
+                std::printf("%s    pin %d %s: %s\n", pad.c_str(), i, in && in->GetName() ? in->GetName() : "", parameter_text(context, in ? in->GetRealSource() : nullptr).c_str());
+            }
+            for (int i = 0; i < beh->GetOutputParameterCount(); ++i) {
+                CKParameterOut* out = beh->GetOutputParameter(i);
+                std::printf("%s    pout %d %s: %s\n", pad.c_str(), i, out && out->GetName() ? out->GetName() : "", parameter_text(context, out).c_str());
+            }
+            for (int i = 0; i < beh->GetLocalParameterCount(); ++i) {
+                CKParameterLocal* local = beh->GetLocalParameter(i);
+                std::printf("%s    local %d %s: %s\n", pad.c_str(), i, local && local->GetName() ? local->GetName() : "", parameter_text(context, local).c_str());
+            }
+            if (beh->IsUsingFunction()) return;
+            for (int i = 0; i < beh->GetSubBehaviorLinkCount(); ++i) {
+                CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
+                if (!link) continue;
+                std::printf("%s    link %s -> %s%s\n", pad.c_str(), io_name(link->GetInBehaviorIO()).c_str(), io_name(link->GetOutBehaviorIO()).c_str(),
+                            link->GetActivationDelay() ? (" delay " + std::to_string(link->GetActivationDelay())).c_str() : "");
+            }
+            for (int i = 0; i < beh->GetSubBehaviorCount(); ++i)
+                if (CKBehavior* child = beh->GetSubBehavior(i)) describe_behavior(context, child, depth + 1);
+        }
+    }
+
+    int run_describe_script(const arguments& args) {
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        CKContext* context = world->engine().context();
+        CKBehavior* script = bmmo::game::find_root_script(context, args.describe_script.c_str());
+        if (!script) {
+            std::fprintf(stderr, "no root script named %s\n", args.describe_script.c_str());
+            return 1;
+        }
+        describe_behavior(context, script, 0);
+        std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
+        return 0;
+    }
+
 }
 
 int main(int argc, char** argv) {
@@ -3143,6 +3270,7 @@ int main(int argc, char** argv) {
     }
     if (!args.replay_session.empty()) return run_replay_session(args);
     if (!args.savestate_diff[0].empty() || !args.savestate_describe.empty()) return run_savestate_files(args);
+    if (!args.describe_script.empty()) return run_describe_script(args);
     if (args.root.empty()) {
         std::fprintf(stderr, "--root <game dir> is required\n");
         return 2;

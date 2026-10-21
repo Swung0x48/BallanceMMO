@@ -180,24 +180,71 @@ Backend 测试 + mod 编译）→ S3（§3 的 1-4，(B) 的 API）→ S4（§5 
 （`ivp-savestate-design.md` 的 Tests / plumbing 两节、`engine-changes.md` 桥接笔记）与记忆。
 S1-S2 净新增约 250 行，S2 删零售端约 180 行绑定。
 
-## 7. 实施状态（2026-10-21 晚）
+## 7. 实施状态（2026-10-21 晚起，S1-S3 收口于 10-22）
 
-- S1 **done**：`session/rollback_binding.hpp`（`rollback_binding_options` +
-  `bind_rollback_world<Backend>`）、`physics/physics_direct.hpp`（无头侧 Backend，方法名
-  与 `physics_view` 一致，另带 `movable_body_names`）。
-- S2 **done**：`session_client.cpp` 的 `rollback_world()` 只填选项 + `bind_rollback_world(physics_direct_, o)`；
-  trace 经 `before_replayed_tick` / `on_savestate_restored`（读 `physics_direct_.last_report`）保留，
-  `--replay-scripts` 经 `whole_frame`，`--trace` 的 step 诊断包在返回的 `step` 外面。
-- S3 **done（编译验证）**：`physics_session_rollback_world()` 填选项（`input_muted`、键码表、
-  logger、journal 的 `on_correction`）+ `bind_rollback_world(physics_view_, o)`；x86 零售
-  客户端 `CLIENT-BUILD-OK`。竞技场实跑待做。
-- S4 **done**：`--savestate-check` 的直通段 `engine.record`，回合 `engine.rewind_to`，恢复身份
-  在 `before_replayed_tick` 抓 blob，重放身份在包住的 `step` 里抓；`--legacy-restore` =
-  `set_exact_restore(false)`；`capture_legacy_anchor` / `restore_legacy_anchor` / `step_replay`
-  已删。`--quick` 5/5 格如预期（含 frames 格 PASS，之前自复刻配方的 frames 格失败在
-  P_Modul_18_Particle 的 DEACTIVATENEXTFRAME 标志，引擎配方下不再出现）。
+- S1 **done**（§1 七条）：`nav_poll` 总是调后端，键码表原样传（关闭不需要键码）；重放后的重臂
+  进了绑定——`rollback_binding_options::on_poll_resumed(entity)` 在轮询被重新打开时回调，无头端
+  挂 `rearm_own_navigation()`，零售端挂相机行重臂，两端的手工重臂都删了；脚本门统一为
+  `scripts && context && !scripts->empty()`；`before_replayed_tick` 非空就装 `pre_step`（无头的
+  `drain_pending_births` 不再依赖脚本开关）；`on_write_failed` 错误槽（零售写 `last_error`）；零售的
+  savestate 日志计数改成 `physics_session` 成员并在 `reset()` 清零，`script_reset_ticks` /
+  `script_reset_skips` / `scripts_replayed` 一并清。
+- S2 **done**：模板核心 `session/rollback_binding.hpp` 不含任何 CK 类型；脚本部分拆成
+  `session/rollback_binding_scripts.hpp`（`script_binding_options` + `bind_script_replay(world,
+  backend, o)`，把脚本帧包在 `pre_step` 外面）；三个调用方（`session_client.cpp`、`sim_tool.cpp`、
+  `physics_session_client.cpp`）都是先 `bind_rollback_world` 再按条件 `bind_script_replay`。
+  `BallanceMMOServer/tests/rollback_binding_test.cpp` 用假 Backend 逐 hook 断言（wake_mode /
+  recheck、clock 只在 `restore_clock` 下装、savestate 开关与 outcome / flags、nav_poll 总到后端且
+  只在打开时 resume、`input_muted`、nav active 位、step 的 delta 与 `whole_frame`、`simulating`、
+  接触 16 项上限与 `on_contacts_restored`、`pre_step`、选项按值拷贝）：12 个用例，全部 211 个
+  测试通过。零售 dropped / unknown 缓冲改 16 KB / 32 KB，溢出时桥接返回失败而不是截断。
+- S3 **done（§3 的 1-4）**：直通段后 `pristine = engine`，每回合 `engine = pristine`；回合用
+  `stats()` 增量判定（`resim_ticks == d`、`savestates_restored` 等）；重放身份读
+  `engine.recorded_savestate(t)`（legacy 读包装 `step` 的 blob）；`savestate_check.py` 的 legacy 格
+  要求首个失败字段恰为 `restore identity`，否则该格不算通过。
+  §3.5 的导航 (B) **todo**：`physics_world` 要新增 `player_of_entity(name)`、
+  `navigation_state(id, out)` / `set_navigation_state(id, in)`（转 `player_navigation::get_state /
+  set_state`），`nav_input` 走 `set_input(id, frame)` 只存值、靠 step 包装里的 `pre_simulate` 生效，
+  SimTool 在 `bind_rollback_world` 之后覆盖 `get_nav / set_nav / nav_input` 三个 hook，并把全部
+  玩家输入记进每 tick 的 `inputs_applied`。现有三格场景没有输入，(B) 之前已经正确。
+- S4/S5 **todo**：见 §8 的验收实跑。
 - 验收 1：`grep "world\.set_body = "` 只命中 `rollback_binding.hpp`。
-- S5 **todo**：窗口内出生、重放后首个 live tick 按键沿两个场景（需要 §3.3 的导航 (B)）。
-- S6 部分：`ivp-savestate-design.md` / `engine-changes.md` 的桥接笔记已指向新头文件。
-- 顺带的工具：`BallanceMMOSessionClient --dump-savestate A B DIR` + `BallanceMMOSimTool
-  --savestate-diff / --savestate-describe`，把两端 journal 的位置漂移追到具体引擎字段。
+- 顺带的工具：`BallanceMMOSessionClient --dump-savestate A B DIR` 现在同时写 `<t>.scr`（该 tick
+  的脚本状态），`--compare-scripts DIR` 把本次运行每 tick 的脚本状态与 DIR 里另一次运行的比较，
+  首个差异（脚本 / 块 / 字段）每次变化记一行——两次运行的脚本状态在哪里分叉，journal 和 blob
+  diff 都看不到的那一半；`BallanceMMOSimTool --savestate-diff / --savestate-describe` 仍管 IVP 那一半
+  （`--savestate-diff A B --ignore-ov` 跳过 overlap tree 看下一个差异；`--describe-script NAME` 打印
+  脚本图：块、原型、id、flags、链接与延迟、全部参数值）。
+- 用这套工具找到并修了一个脚本回放保真 bug：`restore_parameter` 用 `SetValue` 写输出参数，
+  `CKParameterOut::SetValue` 末尾的 `DataChanged()` 把值复制进它的全部 destination（模块脚本图的
+  local 就是子块输出的 destination），于是 Identity 块停放的输出把刚恢复的 `TurnON_Permission`
+  又改回 0，风扇再也不吹纸球——20:12 臂纸球 0.32 m、Platte 3 cm 的全部来源。改成
+  `GetWriteDataPtr()` + memcpy（无通知）。详见 lockstep-without-snapshots.md 对应小节。
+
+## 8. 验收实跑（2026-10-22，`scripts/savestate_check.py --journals --server 127.0.0.1:26700 --pairs 7:5,50:48` / `20:12`）
+
+脚本恢复的参数传播 bug 修掉之后（§7 末条）：
+
+| 臂 | forced | 与 control 不同的刚体 | 备注 |
+|---|---|---|---|
+| 7:5 | 348 | **1 / 53**：只剩 `P_Modul_08_Schaukel`（窗口内出生，1814 激活，1848 起 2.1 m） | 球、纸球、Platte、全部机关 0.0 / never |
+| 20:12 | 122 | 11 / 53：Schaukel + 纸球 0.18 m + Platte01-09 ≤ 2.5 cm，首次 >1e-6 m 在 tick 924 | 修前纸球 0.32 m、首次 910 |
+| 50:48 | 48 | 11 / 53：同 20:12 的集合与数值 | |
+
+- 引擎自己的脚本回放检查（"the scripts re-executed to tick N differ from the live record"）整局静默
+  （修前每局 3-4 次：TurnON_Permission、UFO Referential）；`--compare-scripts` 显示臂的 live
+  记录与 control 从 tick 8 到结束逐 tick 相同（958 起只有一个 float：Platte 近邻传感器的距离
+  跟着下面的物理差异走）。
+- 剩余差异的来源（`--savestate-diff --ignore-ov --max-diff`）：臂在 tick 900（重放记录）与
+  control 的 blob 除三个簿记字段外完全相同——overlap tree 布局（自第一次跨出生的回滚起多 2 个
+  节点）、sim unit 顺序、cache reuse index——而 901-908 的 live tick 在 `A_Floor_009` 的 hull
+  条目（Platte 对地面的 mindist）上出现 1-2 ulp 的差异，920 回滚后 924 起放大。**IVP 的
+  链表/树顺序在堆叠里是有数值意义的**；来源是窗口内出生的刚体：恢复时停放、出生 tick 步进后
+  `recheck` 回树，拿到的树节点、unit 槽位、mindist 创建时刻都和 live 的 Physicalize 不同。
+  7:5 的窗口只有 5 tick，跨 831/832 出生的那次回滚没把差异带进 924 的那场碰撞；深窗口会。
+- 下一步（不在本批）：窗口内出生的刚体在重放里**按 live 的方式重建**——恢复时 unphysicalize，
+  出生 tick 的 pre_step 用 Physicalize 自己的参数与姿态（引擎事件日志记下的）`physicalize()`，
+  出生记录的 re-pose 只做校验；同时给无头客户端加上"重放身份"在线检查（最后一个重放 tick 的
+  blob 与 live 记录逐字节比较，不同则记字段）。
+- `--quick` 5/5 格如预期；x86 零售客户端 CLIENT-BUILD-OK；211 个单元测试通过。
+

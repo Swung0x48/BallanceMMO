@@ -938,8 +938,12 @@ A/B, and `--savestate-strict` runs the restore strict. The headless client's
 status line carries `sv=<restored>/<refused>/<capture failures>`,
 `--trace-clock A B` prints the engine clock, the event queue, the factor and the
 physics step after every live tick in the range and before every replayed one,
-and `--dump-savestate A B DIR` writes the record's blob of every tick in the
-range for `BallanceMMOSimTool --savestate-diff` / `--savestate-describe`.
+`--dump-savestate A B DIR` writes the record's blob of every tick in the
+range (`<t>.sav`, for `BallanceMMOSimTool --savestate-diff` /
+`--savestate-describe`) and the mechanism scripts' state beside it (`<t>.scr`),
+and `--compare-scripts DIR` compares this run's scripts, tick by tick, with the
+`<t>.scr` files another run wrote, naming the script, block and field of the
+first difference whenever it changes.
 
 The engine's hooks are bound once for every in-process world in
 `session/rollback_binding.hpp` (`bind_rollback_world`, templated over the in-process backend `physics/physics_direct.hpp` or the retail mod's `physics_view`); the

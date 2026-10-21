@@ -42,6 +42,7 @@
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_direct.hpp>
 #include <session/rollback_binding.hpp>
+#include <session/rollback_binding_scripts.hpp>
 #include <physics/physics_state.hpp>
 #include <cstdlib>
 #include <cstring>
@@ -157,6 +158,13 @@ namespace {
         // --savestate-diff), where a journal only shows positions.
         uint32_t dump_savestate_from = 0, dump_savestate_until = 0;
         std::string dump_savestate_dir;
+        // --compare-scripts DIR: at every tick for which DIR holds another
+        // run's <tick>.scr (what --dump-savestate writes beside the blobs),
+        // this run's mechanism scripts are captured and compared with it,
+        // and every change of the first difference is logged by script, block
+        // and field - the way to find where two runs' SCRIPT states part,
+        // which a journal (poses) and a blob diff (IVP) both miss.
+        std::string compare_scripts_dir;
         // --no-restore-recheck: do not ask IVP to recheck contacts for a
         // body the restore moved.  Isolates the recheck's own cost to
         // replay fidelity from everything else.
@@ -265,7 +273,7 @@ namespace {
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
-                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR]\n"
+                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)");
     }
 
@@ -320,6 +328,10 @@ namespace {
                 out.dump_savestate_until = static_cast<uint32_t>(std::atoi(v));
                 if (!(v = next())) return false;
                 out.dump_savestate_dir = v;
+            }
+            else if (arg == "--compare-scripts") {
+                if (!(v = next())) return false;
+                out.compare_scripts_dir = v;
             }
             else if (arg == "--trace-clock") {
                 if (!(v = next())) return false;
@@ -2029,7 +2041,6 @@ namespace {
                 const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
                 if (rolled && args_.trace && rollback_diag_++ < 16)
                     logf("after rollback: movable=%s", bmmo::physics::describe_movable_objects(physics).c_str());
-                if (rolled) rearm_own_navigation();
                 return;
             }
             for (const auto& body: snapshot.bodies) {
@@ -2197,8 +2208,10 @@ namespace {
         // --dump-savestate: the engine's record of `tick` as a file (see the
         // argument's comment).  Overwrites: after a rewind the replayed ticks'
         // records are the replayed world's.
-        void dump_savestate(uint32_t tick) {
+        void dump_savestate(uint32_t tick, const char* source = "live") {
+            compare_scripts(tick, source);
             if (args_.dump_savestate_dir.empty() || tick < args_.dump_savestate_from || tick > args_.dump_savestate_until) return;
+            dump_scripts(tick);
             const std::vector<uint8_t>* blob = rollback_.recorded_savestate(tick);
             if (savestate_dump_logs_ == 0) {
                 ++savestate_dump_logs_;
@@ -2217,15 +2230,66 @@ namespace {
             }
         }
 
+        // The scripts' state beside the blob: <tick>.scr, the bytes the record
+        // of this tick carries (after a rewind, the replayed state's).
+        void dump_scripts(uint32_t tick) {
+            const std::vector<uint8_t>* recorded = rollback_.recorded_scripts(tick);
+            if (!recorded) return;
+            const std::vector<uint8_t>& bytes = *recorded;
+            std::error_code ec;
+            std::filesystem::create_directories(args_.dump_savestate_dir, ec);
+            const std::filesystem::path path = std::filesystem::path(args_.dump_savestate_dir) / (std::to_string(tick) + ".scr");
+            if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
+                std::fwrite(bytes.data(), 1, bytes.size(), f);
+                std::fclose(f);
+            }
+        }
+
+        // --compare-scripts: this tick's recorded scripts against the other
+        // run's.  `source` says whose record this is: the live frame's, or the
+        // replay's re-record after a rewind (then a difference is the replay's
+        // own, if the live record agreed).
+        void compare_scripts(uint32_t tick, const char* source) {
+            if (args_.compare_scripts_dir.empty() || !args_.script_replay || scripts_.empty()) return;
+            const std::vector<uint8_t>* recorded = rollback_.recorded_scripts(tick);
+            if (!recorded) return;
+            const std::vector<uint8_t>& mine = *recorded;
+            const std::filesystem::path path = std::filesystem::path(args_.compare_scripts_dir) / (std::to_string(tick) + ".scr");
+            FILE* f = std::fopen(path.string().c_str(), "rb");
+            if (!f) return;
+            std::vector<uint8_t> theirs;
+            uint8_t buffer[4096];
+            for (size_t n; (n = std::fread(buffer, 1, sizeof(buffer), f)) > 0;) theirs.insert(theirs.end(), buffer, buffer + n);
+            std::fclose(f);
+            if (compare_scripts_ticks_++ == 0)
+                logf("--compare-scripts: first tick %u compared with %s", tick, args_.compare_scripts_dir.c_str());
+            std::string key;
+            if (mine != theirs) {
+                const auto d = bmmo::game::script_replay::diff(engine_->context(), scripts_, theirs, mine);
+                // Keyed on every logical difference the diff lists, not the
+                // first alone: a standing difference in one script must not
+                // hide a new one in a script after it.
+                key = d.detail.empty() ? d.where : d.detail;
+                key += d.logical ? " [logical]" : " [float]";
+                if (key != compare_scripts_last_ && compare_scripts_logs_++ < 200)
+                    logf("--compare-scripts: tick %u (%s record): this run differs from the other at %s (%d logical, %d float; theirs vs ours)%s%s",
+                         tick, source, d.where.c_str(), d.logical_count, d.float_count, d.detail.empty() ? "" : " :: ", d.detail.c_str());
+            } else if (!compare_scripts_last_.empty() && compare_scripts_logs_++ < 200) {
+                logf("--compare-scripts: tick %u (%s record): the scripts agree again", tick, source);
+            }
+            compare_scripts_last_ = key;
+        }
+
         // The live frame's own navigation input - the camera rows set after the
         // previous tick, pending for this tick's PreSimulate pass, where the
         // replica polls the keys - is consumed by a re-simulation's own input
-        // feed.  Re-armed after every rewind (the snapshot path always did; the
-        // forced and input-correction rewinds did not): without it the first
-        // live tick after a replay ran on the last replayed tick's keys and
-        // camera, and a key edge on that tick landed one tick late (measured
-        // on the arena with --force-rollback 7:5: 6 mm at the edge, a metre
-        // 1300 ticks later; a 20:12 cadence never put an edge on that tick).
+        // feed.  Re-armed by the binding's on_poll_resumed after every rewind
+        // that replayed (the snapshot path used to do it by hand; the forced
+        // and input-correction rewinds did not): without it the first live
+        // tick after a replay ran on the last replayed tick's keys and camera,
+        // and a key edge on that tick landed one tick late (measured on the
+        // arena with --force-rollback 7:5: 6 mm at the edge, a metre 1300
+        // ticks later; a 20:12 cadence never put an edge on that tick).
         void rearm_own_navigation() {
             if (!own_navigation_ || !previous_cam_valid_) return;
             std::string error;
@@ -2261,10 +2325,19 @@ namespace {
                 logf("contacts of %s before the rewind at %u: %s", own_body_entity_.c_str(), now,
                      bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
             }
+            if (args_.trace_restore && queue_traces_ < 24) {
+                ++queue_traces_;
+                logf("PreSimulate queue before the rewind at %u: %s", now,
+                     bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
+            }
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
                 ++forced_rollbacks_;
-                rearm_own_navigation();
-                for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t);
+                for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t, "replayed");
+                if (args_.trace_restore && queue_traces_ < 24) {
+                    ++queue_traces_;
+                    logf("PreSimulate queue after the rewind at %u: %s", now,
+                         bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
+                }
             } else {
                 ++forced_rollbacks_missed_;
             }
@@ -2323,7 +2396,6 @@ namespace {
             if (rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at,
                                     entity + " input corrected at tick " + std::to_string(anchor))) {
                 ++input_rewinds_;
-                rearm_own_navigation();
                 return;
             }
             ++input_rewinds_missed_;
@@ -2744,21 +2816,12 @@ namespace {
             // --restore-clock.
             o.restore_clock = args_.restore_clock;
             o.savestate_flags = args_.savestate_strict ? bmmo::physics::SAVESTATE_STRICT : 0u;
-            if (args_.script_replay && !scripts_.empty()) {
-                o.context = engine_->context();
-                o.scripts = &scripts_;
-                o.script_hooks = &script_hooks_;
-                o.scripts_replayed = &scripts_replayed_;
-                o.script_reset_ticks = &script_reset_ticks_;
-                o.script_reset_skips = &script_reset_skips_;
-                o.script_diff_detail = args_.trace;
-                o.on_script_restore_failed = [this](const std::string& error) {
-                    if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
-                };
-            }
             o.own_key_codes = own_key_codes_;
             o.own_key_blocks = own_key_blocks_;
             o.own_key_count = own_key_count_;
+            // Polling resumed = a rewind replayed: the live frame's own
+            // navigation input is re-armed (see rearm_own_navigation).
+            o.on_poll_resumed = [this](const std::string&) { rearm_own_navigation(); };
             o.log = [](const std::string& text) { logf("%s", text.c_str()); };
             // Before each replayed tick's scripts and step: the births deferred
             // into this replay (apply_event), made at their tick in the world
@@ -2821,6 +2884,27 @@ namespace {
             o.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_rollback_correction(c); };
 
             bmmo::session::rollback_world world = bmmo::session::bind_rollback_world(physics_direct_, o);
+            // Diagnostic (headless only: the mod has no blob diff): a replay
+            // that does not reproduce the live record's blob is logged with
+            // the first three differing fields, the overlap tree aside.
+            world.diff_savestate = [](const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed) {
+                return bmmo::physics::diff_savestate(live.data(), live.size(), replayed.data(), replayed.size(), true, 3);
+            };
+            if (args_.script_replay && !scripts_.empty()) {
+                bmmo::session::script_binding_options so;
+                so.context = engine_->context();
+                so.scripts = &scripts_;
+                so.hooks = &script_hooks_;
+                so.scripts_replayed = &scripts_replayed_;
+                so.reset_ticks = &script_reset_ticks_;
+                so.reset_skips = &script_reset_skips_;
+                so.delta_ms = 1000.0f / 66.0f;
+                so.diff_detail = args_.trace;
+                so.on_restore_failed = [this](const std::string& error) {
+                    if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
+                };
+                bmmo::session::bind_script_replay(world, physics_direct_, so);
+            }
             // The clock before a restore, for the report line above (--trace).
             if (args_.trace && world.set_savestate) {
                 const auto inner = world.set_savestate;
@@ -3230,6 +3314,9 @@ namespace {
         bmmo::physics::physics_direct physics_direct_;         // the binding's in-process backend (session/rollback_binding.hpp)
         std::string savestate_clock_before_;                 // describe_clock() just before the last savestate restore (--trace)
         uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)
+        uint32_t compare_scripts_ticks_ = 0, compare_scripts_logs_ = 0;
+        uint32_t queue_traces_ = 0;                          // --trace-restore PreSimulate queue lines (the first 24)
+        std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
@@ -3364,10 +3451,11 @@ int main(int argc, char** argv) {
     // The engine changes the working directory to the game's Bin while it
     // boots: a relative dump directory means the one the client was started
     // in (the harness gives every client its own).
-    if (!args.dump_savestate_dir.empty()) {
+    for (std::string* dir: {&args.dump_savestate_dir, &args.compare_scripts_dir}) {
+        if (dir->empty()) continue;
         std::error_code ec;
-        const auto absolute = std::filesystem::absolute(args.dump_savestate_dir, ec);
-        if (!ec) args.dump_savestate_dir = absolute.string();
+        const auto absolute = std::filesystem::absolute(*dir, ec);
+        if (!ec) *dir = absolute.string();
     }
     role::init_socket();
     session_client client(args);

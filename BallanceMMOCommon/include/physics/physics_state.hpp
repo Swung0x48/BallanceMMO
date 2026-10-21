@@ -91,6 +91,12 @@ namespace bmmo::physics {
     // (partner, status, length).  What a beam cannot carry: a rewind to an
     // anchor whose contact has since ended re-creates the contact fresh.
     std::string describe_contacts(CKIpionManager* physics, const char* entity_name);
+    // The PreSimulate callback queue: every queued callback's class, the
+    // behavior it belongs to (name, root script), that behavior's target and
+    // whether the target has a body now - the pending ones are blocks whose
+    // target had no body when they fired (PhysicsForce etc. return 0 and are
+    // re-queued until it does).
+    std::string describe_presimulate_queue(CKIpionManager* physics);
     // Diagnostics: the collision state of one body that no record carries -
     // its core's movement state, velocities and queued changes, its contacts
     // (describe_contacts), the friction pairs it is in (easing countdown,

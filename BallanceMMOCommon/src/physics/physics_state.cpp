@@ -28,6 +28,7 @@
 #include <bmmo_build_id.h>
 
 #include <algorithm>
+#include <typeinfo>
 #include <cfloat>
 #include <cstring>
 #include <cstdio>
@@ -937,6 +938,33 @@ namespace bmmo::physics {
         }
         fill_body_state(object->m_RealObject, out);
         return true;
+    }
+
+    std::string describe_presimulate_queue(CKIpionManager* physics) {
+        if (!physics || !physics->m_PreSimulateCallbacks) return "no queue";
+        std::string out;
+        int count = 0;
+        for (int slot = 0; slot < 3; ++slot) {
+            IVP_U_Vector<PhysicsCallback>& callbacks = physics->m_PreSimulateCallbacks->m_Callbacks[slot];
+            for (int i = 0; i < callbacks.len(); ++i) {
+                PhysicsCallback* cb = callbacks.element_at(i);
+                if (!cb) continue;
+                ++count;
+                CKBehavior* beh = cb->GetBehavior();
+                CKBehavior* root = beh;
+                while (root && root->GetParent()) root = root->GetParent();
+                CKObject* target = beh ? beh->GetTarget() : nullptr;
+                CK3dEntity* entity = target && CKIsChildClassOf(target, CKCID_3DENTITY) ? static_cast<CK3dEntity*>(target) : nullptr;
+                const bool has_body = entity && physics->GetPhysicsObject(entity) != nullptr;
+                char text[400];
+                std::snprintf(text, sizeof(text), "%s{slot %d %s beh %u \"%s\" in \"%s\" target \"%s\"%s}", out.empty() ? "" : " ", slot,
+                              typeid(*cb).name(), static_cast<unsigned>(cb->m_BehaviorID),
+                              beh && beh->GetName() ? beh->GetName() : "?", root && root->GetName() ? root->GetName() : "?",
+                              target && target->GetName() ? target->GetName() : "-", entity ? (has_body ? " body" : " NO BODY") : "");
+                out += text;
+            }
+        }
+        return std::to_string(count) + " queued" + (out.empty() ? "" : ": " + out);
     }
 
     std::string describe_contacts(CKIpionManager* physics, const char* entity_name) {

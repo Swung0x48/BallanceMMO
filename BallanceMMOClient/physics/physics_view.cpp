@@ -582,10 +582,13 @@ namespace bmmo::physics {
             return false;
         }
         char text[512] = {};
-        char dropped[2048] = {};
-        char unknown[4096] = {};
-        const int32_t ok = api_->savestate_set(manager_, data, static_cast<uint32_t>(size), flags, text, sizeof(text), dropped,
-                                               sizeof(dropped), unknown, sizeof(unknown));
+        // 64 bytes a name: room for every body a level has; the bridge fails
+        // the restore rather than truncate a list that does not fit.
+        static thread_local std::vector<char> dropped(16384), unknown(32768);
+        dropped[0] = unknown[0] = '\0';
+        const int32_t ok = api_->savestate_set(manager_, data, static_cast<uint32_t>(size), flags, text, sizeof(text),
+                                               dropped.data(), static_cast<uint32_t>(dropped.size()), unknown.data(),
+                                               static_cast<uint32_t>(unknown.size()));
         const auto split_into = [](const char* joined, std::vector<std::string>* out) {
             if (!out) return;
             std::string name;
@@ -595,8 +598,8 @@ namespace bmmo::physics {
             }
             if (!name.empty()) out->push_back(name);
         };
-        split_into(dropped, contacts_dropped);
-        split_into(unknown, unknown_bodies);
+        split_into(dropped.data(), contacts_dropped);
+        split_into(unknown.data(), unknown_bodies);
         if (!ok) {
             error = text[0] ? text : "savestate_set failed";
             return false;

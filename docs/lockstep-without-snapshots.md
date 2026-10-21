@@ -1392,6 +1392,36 @@ mechanism column is a bistable prop ball. The server journals of all six runs
 replay bit for bit.
 
 
+### The restore wrote through CK's parameter links (found 2026-10-22)
+
+The ventilator's `TurnON_Permission` above was not a one-shot the record has no
+bearing on. It is a Boolean local of the `Physics Force` graph in
+`P_Modul_18_MF Script` (`BallanceMMOSimTool --describe-script "P_Modul_18_MF
+Script"` prints the graph): two `Identity` blocks swap the graph's
+`TurnON_Permission` / `TurnOFF_Permission` locals when the ball enters or
+leaves the fan's box, by writing their output parameters, whose
+**destinations** the locals are. The restore wrote every output parameter with
+`CKParameter::SetValue`, and on a `CKParameterOut` that call ends in
+`DataChanged()`, which copies the value into every destination parameter -
+so the Identity block's parked output (0) was propagated into the local the
+restore had written a moment before (1), on every rewind, and the fan never
+lifted the paper ball again: the arm's live scripts agreed with the control's
+on everything else from tick 8 to the end (`BallanceMMOSessionClient
+--compare-scripts`, below), and the paper ball and the plates it bounces on
+were the bodies that drifted (0.32 m and up to 3 cm). The same path wrote the
+balloon's `UFO` referential (an object id) back to 0. The live frame
+propagates only when the block executes, and the replayed frames do that
+themselves, so the restore now writes through `GetWriteDataPtr()` - a plain
+buffer write with no notification - and the mismatch is gone from the
+engine's own check and from the cross-run compare.
+
+How it was found: `--dump-savestate A B DIR` now writes each tick's recorded
+script state beside the blob (`<t>.scr`), and `--compare-scripts DIR` compares
+this run's record, tick by tick and keyed on every listed difference, with
+another run's files, naming script, block and field - the first difference
+that is NOT a replayed record's by-design live state (a script activated
+inside the window keeps its live flags) was this local, at the first rewind.
+
 ## The one the ball still had: a contact that ended inside the window (bridge API v15)
 
 Every forced-rewind arm above, scripts or not, took the same single correction

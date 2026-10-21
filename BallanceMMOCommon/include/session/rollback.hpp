@@ -163,6 +163,12 @@ namespace bmmo::session {
         // Optional: every decision the engine takes about a snapshot, so the
         // session journal can record it without parsing the log lines.
         std::function<void(const rollback_correction&)> on_correction;
+        // Optional, diagnostic: names the first field by which two savestate
+        // blobs differ (bmmo::physics::diff_savestate).  With it installed,
+        // a replay whose last re-simulated tick does not reproduce the live
+        // record's blob byte for byte is logged with that field - the
+        // in-session form of the SimTool's replay identity.
+        std::function<std::string(const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed)> diff_savestate;
     };
 
     // What the caller tracks at a tick: the bodies (entity names) and, for
@@ -258,6 +264,7 @@ namespace bmmo::session {
         uint64_t script_restores = 0;
         uint64_t script_restore_failures = 0;
         uint64_t script_mismatches = 0;        // logical: flags, IOs, controllers, counters
+        uint64_t savestate_replay_mismatches = 0;   // the last replayed tick's blob != the live record's (diagnostic)
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
@@ -678,8 +685,12 @@ namespace bmmo::session {
                                         && window <= thresholds_.max_resim_ticks;
             // The live record of `current_tick`, kept aside before the replay
             // overwrites it: what the re-executed scripts must arrive at.
-            std::vector<uint8_t> live_scripts;
-            bool have_live_scripts = false;
+            std::vector<uint8_t> live_scripts, live_savestate;
+            bool have_live_scripts = false, have_live_savestate = false;
+            if (const tick_state* live = find(current_tick); live && live->have_savestate && world.diff_savestate) {
+                live_savestate = live->savestate;
+                have_live_savestate = true;
+            }
             if (scripts_replayed) {
                 if (const tick_state* live = find(current_tick); live && live->have_scripts) {
                     live_scripts = live->scripts;
@@ -971,6 +982,22 @@ namespace bmmo::session {
                 // the live frames left them?  A difference is state the
                 // snapshot does not carry (solo), or a sensor that decided
                 // differently on the corrected world (networked, by design).
+                // The same question for the engine's whole state: does the
+                // re-simulated world arrive at the blob the live frames left?
+                // Not where a body was born or restored from a row inside the
+                // window (the live record then describes a world this replay
+                // was told to differ from).
+                if (t == current_tick && have_live_savestate && state.have_savestate && state.savestate != live_savestate
+                        && rows.empty()) {
+                    bool births = false;
+                    for (const auto& [entity, item]: plan) births = births || item.repose_tick != 0;
+                    if (!births) {
+                        ++stats_.savestate_replay_mismatches;
+                        if (world.log && savestate_replay_logs_++ < 8)
+                            world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
+                                      + " differs from the live record: " + world.diff_savestate(live_savestate, state.savestate));
+                    }
+                }
                 if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts
                         && state.scripts != live_scripts) {
                     bool logical = true;
@@ -1019,6 +1046,11 @@ namespace bmmo::session {
         const std::vector<uint8_t>* recorded_savestate(uint32_t tick) const {
             const tick_state* at = find_const(tick);
             return at && at->have_savestate ? &at->savestate : nullptr;
+        }
+        // The mechanism scripts' state the record of `tick` carries, or null.
+        const std::vector<uint8_t>* recorded_scripts(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at && at->have_scripts ? &at->scripts : nullptr;
         }
         rollback_thresholds& thresholds() { return thresholds_; }
 
@@ -1299,6 +1331,7 @@ namespace bmmo::session {
         bool replay_scripts_ = true;
         bool exact_restore_ = true;
         uint32_t script_mismatch_logs_ = 0;
+        uint32_t savestate_replay_logs_ = 0;
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;

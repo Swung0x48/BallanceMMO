@@ -12,26 +12,24 @@
 //
 // What is bound here is everything a rollback needs from the world and
 // nothing a transport or a session knows: body poses and leapfrog extras, the
-// clock, friction contacts, the navigation replicas, the IVP savestate, the
-// mechanism scripts' state (game/script_replay.hpp), one physics step and the
-// scripts' frame before it.  Whatever differs between the users - traces,
-// logs, journals, the pause menu's input mute, the deferred births of a
-// replay - comes in through rollback_binding_options and never as a second
+// clock, friction contacts, the navigation replicas, the IVP savestate, one
+// physics step and the caller's work before it.  The mechanism scripts' state
+// (game/script_replay.hpp, which needs the CK headers) is bound on top by
+// session/rollback_binding_scripts.hpp; this header knows no CK type, so the
+// unit tests bind it to a fake backend.  Whatever differs between the users -
+// traces, logs, journals, the pause menu's input mute, the deferred births of
+// a replay - comes in through rollback_binding_options and never as a second
 // copy of a hook (docs/rollback-core-unification-plan.md).
 
-#include <game/script_replay.hpp>
 #include <physics/physics_rt_api.h>
-#include <physics/physics_state.hpp>   // bmmo::physics::wake_mode, SAVESTATE_* flags
+#include <physics/physics_state.hpp>   // bmmo::physics::wake_mode, SAVESTATE_* flags (declarations only)
 #include <session/rollback.hpp>
 
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <string>
 #include <vector>
-
-class CKContext;
 
 namespace bmmo::session {
 
@@ -41,42 +39,37 @@ namespace bmmo::session {
         bool savestate = true;                     // install get_savestate / set_savestate at all
         uint32_t savestate_flags = 0;              // bmmo::physics::SAVESTATE_* bits for set_savestate
 
-        // The script replay (optional; none installed without `scripts`): the
-        // selection and hooks the caller keeps, the scripts the last restore
-        // wrote, and the caller's reset bookkeeping - a script the game reset
-        // after the anchor keeps its live state, since the anchor's record is
-        // what the reset tore down.
-        CKContext* context = nullptr;
-        const bmmo::game::script_replay::selection* scripts = nullptr;
-        const bmmo::game::script_replay_hooks* script_hooks = nullptr;
-        std::vector<CK_ID>* scripts_replayed = nullptr;
-        const std::map<CK_ID, uint32_t>* script_reset_ticks = nullptr;
-        uint64_t* script_reset_skips = nullptr;
-        bool script_diff_detail = false;           // diff_scripts appends every logical difference
-
         // Navigation polling of the own ball (the key codes and Key Event
-        // blocks the replica reads in live frames).  Null: nav_poll is a
-        // no-op that reports success.  `input_muted`: polling is not switched
-        // back on after a replay while it says so (the retail pause menu).
+        // blocks the replica reads in live frames; the backend is called with
+        // whatever is here, as the clients always did - disabling needs no
+        // codes, enabling without them fails in the bridge).  `input_muted`:
+        // polling is not switched back on after a replay while it says so
+        // (the retail pause menu).  `on_poll_resumed`: runs after polling was
+        // switched back on for an entity, i.e. at the end of every rewind
+        // that replayed - the place to re-arm the live frame's own navigation
+        // input, which the replay's own input feed consumed (without it a key
+        // edge on the first live tick after a replay lands a tick late).
         const int* own_key_codes = nullptr;
         const uint32_t* own_key_blocks = nullptr;
         int own_key_count = 0;
         std::function<bool()> input_muted;
+        std::function<void(const std::string& entity)> on_poll_resumed;
 
         // Callbacks, all optional.
-        std::function<void(uint32_t tick)> before_replayed_tick;   // before the scripts' frame of a replayed tick
+        std::function<void(uint32_t tick)> before_replayed_tick;   // before a replayed tick's step (and its scripts' frame)
         std::function<bool()> whole_frame;                         // --replay-scripts: the step is the whole engine frame
         std::function<void(const std::string& entity, int made, const std::string& error,
                            const std::vector<bmmo_physics_contact>& recorded)> on_contacts_restored;
         std::function<void(const std::string& error)> on_savestate_capture_failed;
         std::function<void(bool ok, const std::string& error, const savestate_outcome& outcome)> on_savestate_restored;
-        std::function<void(const std::string& error)> on_script_restore_failed;
         std::function<void(const std::string& error)> on_write_failed;   // a body, recheck or clock write the backend refused
         std::function<void(const std::string&)> log;
         std::function<void(const rollback_correction&)> on_correction;
     };
 
-    // `backend` must outlive the returned world (every hook keeps a pointer).
+    // `backend` must outlive the returned world (every hook keeps a pointer;
+    // both clients rebuild the world on every engine call, so the backend is
+    // a member of theirs, never a temporary).
     template <class Backend>
     rollback_world bind_rollback_world(Backend& backend, const rollback_binding_options& o) {
         Backend* b = &backend;
@@ -94,13 +87,13 @@ namespace bmmo::session {
         // ensure_in_simulation would re-arm its freeze timers (engine change
         // #14); `recheck` only when the write moved the body, because the
         // optimized beam builds no contact when it lands one body inside
-        // another.
+        // another.  The wake_mode overload, never the old `bool wake` beam.
         world.set_body = [b, failed](const std::string& entity, const bmmo_physics_body_state& state, wake_mode mode,
                                      bool recheck) {
             std::string error;
-            const auto bridge_mode = mode == wake_mode::wake   ? bmmo::physics::wake_mode::wake
-                                   : mode == wake_mode::freeze ? bmmo::physics::wake_mode::freeze
-                                                               : bmmo::physics::wake_mode::keep;
+            const bmmo::physics::wake_mode bridge_mode = mode == wake_mode::wake   ? bmmo::physics::wake_mode::wake
+                                                       : mode == wake_mode::freeze ? bmmo::physics::wake_mode::freeze
+                                                                                   : bmmo::physics::wake_mode::keep;
             if (b->set_body_state(entity.c_str(), state.position, state.rotation, state.linear, state.angular, bridge_mode,
                                   recheck, error))
                 return true;
@@ -128,7 +121,9 @@ namespace bmmo::session {
         // The clock is always READ (a restore shifts the calm references it
         // puts back by the live clock's offset); it is written only when the
         // caller asked for the clock rewind (the headless --restore-clock,
-        // where it is measured; never the retail mod).
+        // where it is measured; never the retail mod - the engine's own
+        // restore_clock_ switch defaults on, so not installing the hook is the
+        // mod's one way of saying no).
         world.get_clock = [b](bmmo_physics_clock_state& out) {
             std::string error;
             return b->get_clock_state(out, error);
@@ -141,49 +136,10 @@ namespace bmmo::session {
                 return false;
             };
         }
-        // The mechanism scripts (game/script_replay.hpp): their state with
-        // every record, back at the anchor, their frame before every replayed
-        // step - with the bridge event log muted, so a replayed Physics WakeUp
-        // is not reported to the server as a live BodyRevived.
-        const bool scripts = o.context && o.scripts && o.script_hooks && !o.scripts->scripts.empty();
-        if (scripts) {
-            CKContext* context = o.context;
-            const auto* selection = o.scripts;
-            const auto* hooks = o.script_hooks;
-            world.capture_scripts = [context, selection, hooks](std::vector<uint8_t>& out) {
-                return bmmo::game::script_replay::capture(context, *selection, *hooks, out);
-            };
-            world.restore_scripts = [o, context, selection, hooks](const std::vector<uint8_t>& bytes, uint32_t anchor) {
-                std::vector<CK_ID> kept_live;
-                if (o.script_reset_ticks)
-                    for (const auto& [id, reset_tick]: *o.script_reset_ticks)
-                        if (reset_tick > anchor) kept_live.push_back(id);
-                if (o.script_reset_skips) *o.script_reset_skips += kept_live.size();
-                std::string error;
-                const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error,
-                                                                   o.scripts_replayed, &kept_live);
-                if (!ok && o.on_script_restore_failed) o.on_script_restore_failed(error);
-                return ok;
-            };
-            world.diff_scripts = [o, context, selection](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b,
-                                                         bool& logical) {
-                const auto d = bmmo::game::script_replay::diff(context, *selection, a, b);
-                logical = d.logical;
-                return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count)
-                     + " float)" + (d.logical && o.script_diff_detail ? " :: " + d.detail : std::string());
-            };
-        }
-        // Before each replayed tick's step: the caller's own work first (the
-        // births deferred into this replay, traces), then the scripts' frame.
-        world.pre_step = [b, o, scripts](uint32_t tick) {
-            if (o.before_replayed_tick) o.before_replayed_tick(tick);
-            if (scripts) {
-                std::string error;
-                b->set_event_log_muted(true, error);
-                bmmo::game::script_replay::execute_frame(o.context, *o.scripts, o.delta_ms, o.scripts_replayed);
-                b->set_event_log_muted(false, error);
-            }
-        };
+        // Before each replayed tick's step: the caller's own work (the births
+        // deferred into this replay, traces).  bind_script_replay wraps this
+        // to run the mechanism scripts' frame after it.
+        if (o.before_replayed_tick) world.pre_step = o.before_replayed_tick;
         world.get_nav = [b](const std::string& entity, bmmo_physics_nav_state& out) {
             std::string error;
             return b->navigation_get_state(entity.c_str(), out, error);
@@ -233,11 +189,12 @@ namespace bmmo::session {
         // A replay must not switch the polling back on while the pause menu
         // has it off: the ball would follow the held arrow keys again.
         world.nav_poll = [b, o](const std::string& entity, bool enable) {
-            if (!o.own_key_codes || !o.own_key_blocks || o.own_key_count <= 0) return true;
             std::string error;
             const bool muted = o.input_muted && o.input_muted();
-            return b->navigation_poll(entity.c_str(), enable && !muted, o.own_key_codes, o.own_key_blocks, o.own_key_count,
-                                      error);
+            const bool on = enable && !muted;
+            const bool ok = b->navigation_poll(entity.c_str(), on, o.own_key_codes, o.own_key_blocks, o.own_key_count, error);
+            if (on && o.on_poll_resumed) o.on_poll_resumed(entity);
+            return ok;
         };
         // One physics step with the fixed tick: the primitive the live frame's
         // Simulate() runs, without the frame around it - or the whole frame

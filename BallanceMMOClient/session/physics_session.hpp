@@ -255,6 +255,8 @@ namespace bmmo::session {
         bmmo::game::script_replay_hooks script_hooks;
         uint32_t script_restore_logs = 0;
         uint32_t contact_restore_logs = 0;
+        uint32_t savestate_get_logs = 0;     // savestate capture / restore failures logged this session (the first 8)
+        uint32_t savestate_set_logs = 0;
         std::map<CK_ID, uint32_t> script_reset_ticks;   // the tick each script was last told to reset
         uint64_t script_reset_skips = 0;                 // scripts a restore kept live for having been reset after its anchor
         // Every sector this session has held or run, sector 1 (the level's own)
@@ -358,6 +360,10 @@ namespace bmmo::session {
             generations.clear();
             latest_ball_rows.clear();
             corrections_logged = 0;
+            savestate_get_logs = savestate_set_logs = 0;
+            script_reset_ticks.clear();
+            script_reset_skips = 0;
+            scripts_replayed.clear();
             amend_failures = 0;
             remotes.clear();
             last_snapshot_tick = 0;

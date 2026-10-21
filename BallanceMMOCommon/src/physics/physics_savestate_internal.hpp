@@ -445,7 +445,7 @@ namespace bmmo::physics::savestate {
     void write_world(writer& w, const world_record& world);
     bool read_world(reader& r, world_record& world, std::string& error);
     std::string describe_world(const world_record& world);   // what describe_savestate prints
-    std::string diff_world(const world_record& a, const world_record& b);
+    std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov = false, int max_differences = 1);
 
     // ------------------------------------------------------------------
     // The live world, indexed.  Built by both halves from the manager's

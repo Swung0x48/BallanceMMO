@@ -92,7 +92,13 @@ namespace bmmo::physics {
     // are identical): the record kind, the object or pair it belongs to, the
     // field, both values.  Byte identity is checked first, so an identical
     // pair costs one memcmp.
-    std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size);
+    // `ignore_ov` leaves the overlap tree out (its node count and records, the
+    // root, each object's node): two runs that inserted a body at different
+    // moments keep different tree layouts for good, and the question is then
+    // what ELSE differs.
+    // `max_differences` differing fields are listed, " | "-joined, in record order.
+    std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size, bool ignore_ov = false,
+                               int max_differences = 1);
 
     // FNV-1a over the blob bytes.
     uint64_t hash_savestate(const uint8_t* data, size_t size);

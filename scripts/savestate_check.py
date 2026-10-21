@@ -99,11 +99,22 @@ class Cell:
         self.seconds = 0.0
         self.log = None
 
+    def first_failure_field(self):
+        # 'FAIL round=r anchor=a depth=d tick=t: <field>: <detail>' -> '<field>'
+        m = re.match(r'FAIL round=\d+ anchor=\d+ depth=\d+ tick=\d+: ([^:]+)', self.first_failure)
+        return m.group(1).strip() if m else ''
+
     @property
     def name(self):
         return f'{self.scene.name}.{self.mode}.{self.restore}.s{self.seed}.d{self.cap}'
 
     def ok(self):
+        if self.restore == 'legacy':
+            # the negative control proves something only when it fails where the
+            # old per-body restore is known to fall short: a fresh capture after
+            # the restore differs from the anchor's blob (the collision state a
+            # pose write cannot put back), before any step is replayed
+            return self.result == 'FAIL' and self.first_failure_field() == 'restore identity'
         if self.result == self.expect:
             return True
         # the --full extras may simply hold no contact in their window
@@ -230,6 +241,9 @@ def print_table(cells):
     for c in cells:
         if c.first_failure and (not c.ok() or c.restore == 'legacy'):
             print(f'  {c.name}: {c.first_failure[:300]}')
+        if c.restore == 'legacy' and c.result == 'FAIL' and not c.ok():
+            print(f'  {c.name}: the negative control failed at "{c.first_failure_field()}", '
+                  f'not at the restore identity it is meant to fail at')
         if not c.ok():
             print(f'  {c.name}: see {c.log}')
 

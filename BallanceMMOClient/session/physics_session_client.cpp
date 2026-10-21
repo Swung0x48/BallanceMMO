@@ -19,6 +19,7 @@
 #include <game/menu_driver.hpp>
 #include <session/spawn_impulse.hpp>
 #include <session/rollback_binding.hpp>
+#include <session/rollback_binding_scripts.hpp>
 
 #include "session_journal_client.hpp"
 
@@ -2789,19 +2790,6 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
     // since the anchor must not cost the whole restore.
     o.restore_clock = false;
     o.savestate_flags = 0u;
-    if (!s.script_ids.empty()) {
-        o.context = m_bml->GetCKContext();
-        o.scripts = &s.script_ids;
-        o.script_hooks = &s.script_hooks;
-        o.scripts_replayed = &s.scripts_replayed;
-        o.script_reset_ticks = &s.script_reset_ticks;
-        o.script_reset_skips = &s.script_reset_skips;
-        o.script_diff_detail = s.trace;
-        o.on_script_restore_failed = [this](const std::string& error) {
-            if (physics_session_.script_restore_logs++ < 8)
-                logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
-        };
-    }
     o.own_key_codes = s.own_key_codes;
     o.own_key_blocks = s.own_key_blocks;
     o.own_key_count = s.own_key_count;
@@ -2812,18 +2800,23 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         if (!error.empty() && physics_session_.contact_restore_logs++ < 8)
             logger_->Warn("Physics session: contact restore of %s: %s", entity.c_str(), error.c_str());
     };
-    // The counters are static because physics_session_rollback_world() is
-    // rebuilt on every call; they cap the log lines like the contact restore's.
-    static uint32_t savestate_get_logs = 0;
-    static uint32_t savestate_set_logs = 0;
     o.on_savestate_capture_failed = [this](const std::string& error) {
         physics_session_.last_error = error;
-        if (savestate_get_logs++ < 8) logger_->Warn("Physics session: savestate capture failed: %s", error.c_str());
+        if (physics_session_.savestate_get_logs++ < 8) logger_->Warn("Physics session: savestate capture failed: %s", error.c_str());
     };
     o.on_savestate_restored = [this](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
         if (ok) return;
         physics_session_.last_error = error;
-        if (savestate_set_logs++ < 8) logger_->Warn("Physics session: savestate restore failed: %s", error.c_str());
+        if (physics_session_.savestate_set_logs++ < 8) logger_->Warn("Physics session: savestate restore failed: %s", error.c_str());
+    };
+    // Polling resumed = a rewind replayed: the live input for the next frame
+    // was consumed by the re-simulation, so the camera rows are re-armed.
+    o.on_poll_resumed = [this](const std::string&) {
+        auto& session = physics_session_;
+        if (!session.own_navigation || !session.previous_cam_valid) return;
+        std::string error;
+        physics_view_.navigation_input(session.own_nav_entity.c_str(), 0, session.previous_cam[0], session.previous_cam[1],
+                                       session.previous_cam[2], false, error);
     };
     o.log = [this](const std::string& text) {
         if (++physics_session_.corrections_logged <= 200) logger_->Info("Physics session: %s", text.c_str());
@@ -2848,7 +2841,24 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         journal.correction(record);
         if (c.kind == 1) journal.request_checkpoint();   // a rollback re-simulated every body
     };
-    return bmmo::session::bind_rollback_world(physics_view_, o);
+    bmmo::session::rollback_world world = bmmo::session::bind_rollback_world(physics_view_, o);
+    if (!s.script_ids.empty()) {
+        bmmo::session::script_binding_options so;
+        so.context = m_bml->GetCKContext();
+        so.scripts = &s.script_ids;
+        so.hooks = &s.script_hooks;
+        so.scripts_replayed = &s.scripts_replayed;
+        so.reset_ticks = &s.script_reset_ticks;
+        so.reset_skips = &s.script_reset_skips;
+        so.delta_ms = 1000.0f / 66.0f;
+        so.diff_detail = s.trace;
+        so.on_restore_failed = [this](const std::string& error) {
+            if (physics_session_.script_restore_logs++ < 8)
+                logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
+        };
+        bmmo::session::bind_script_replay(world, physics_view_, so);
+    }
+    return world;
 }
 
 // One authoritative snapshot through the rollback engine (design 9.6).
@@ -2883,14 +2893,9 @@ bool BallanceMMOClient::physics_session_rollback(const bmmo::session_snapshot_ms
         out = it->second;
         return true;
     };
-    const bool rolled = s.rollback.on_snapshot(physics_session_rollback_world(), snapshot, s.current_tick(), entity_of, input_at);
-    if (rolled && s.own_navigation && s.previous_cam_valid) {
-        // the live input for the next frame was consumed by the re-simulation
-        std::string error;
-        physics_view_.navigation_input(s.own_nav_entity.c_str(), 0, s.previous_cam[0], s.previous_cam[1], s.previous_cam[2],
-                                       false, error);
-    }
-    return rolled;
+    // A rollback that replayed re-arms the live input for the next frame
+    // through the binding's on_poll_resumed.
+    return s.rollback.on_snapshot(physics_session_rollback_world(), snapshot, s.current_tick(), entity_of, input_at);
 }
 
 // Input starvation (design 9.2 follow-up).  Every snapshot carries the tick the

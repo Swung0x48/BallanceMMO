@@ -584,16 +584,30 @@ namespace {
         std::string text;
         bmmo::physics::savestate_report report;
         const bool ok = bmmo::physics::set_savestate(static_cast<CKIpionManager*>(manager), data, size, flags, text, &report);
-        const auto join_into = [](char* out, uint32_t out_size, const std::vector<std::string>& names) {
+        // A name list that does not fit is a failure, not a truncation: a body
+        // dropped from it would never be rechecked or given its contacts, and
+        // the caller's per-body fallback is the safer outcome.
+        const auto join_into = [](char* out, uint32_t out_size, const std::vector<std::string>& names, std::string& overflow) {
             if (!out || !out_size) return;
             std::string joined;
             for (const std::string& name: names) joined += (joined.empty() ? "" : ";") + name;
+            if (joined.size() >= out_size) {
+                overflow = "the names of " + std::to_string(names.size()) + " bodies (" + std::to_string(joined.size())
+                         + " bytes) exceed the caller's buffer of " + std::to_string(out_size);
+                out[0] = '\0';
+                return;
+            }
             std::snprintf(out, out_size, "%s", joined.c_str());
         };
-        join_into(dropped, dropped_size, report.contacts_dropped);
-        join_into(unknown, unknown_size, report.unknown_bodies);
+        std::string overflow;
+        join_into(dropped, dropped_size, report.contacts_dropped, overflow);
+        join_into(unknown, unknown_size, report.unknown_bodies, overflow);
         if (!ok) {
             set_error(error, error_size, text);
+            return 0;
+        }
+        if (!overflow.empty()) {
+            set_error(error, error_size, overflow);
             return 0;
         }
         return 1;
