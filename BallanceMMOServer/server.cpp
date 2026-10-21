@@ -1461,10 +1461,26 @@ public:
                s.id, get_client_name(c), assigned, msg.last_full_tick, counted_through);
     }
 
-    void handle_session_input(HSteamNetConnection c, const bmmo::session_input_msg& msg) {
+    // `received` is GameNetworkingSockets' own receive timestamp, taken on its
+    // service thread when the datagram came in.  The main loop only polls
+    // every 15 ms, so the time it handles a message at is up to a whole tick
+    // later than its arrival, and the lateness meter (late-player design 2.1)
+    // judges arrivals to within a tick.  The age is carried over to
+    // steady_clock (both clocks are monotonic).  A main-loop stall is exactly
+    // when the age matters - every member's queued datagrams would otherwise
+    // read late together - so a long age is kept, clamped to 10 s; only a
+    // missing or negative timestamp degrades to "now".
+    void handle_session_input(HSteamNetConnection c, const bmmo::session_input_msg& msg,
+                              SteamNetworkingMicroseconds received) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
-        runner_->submit_input(msg.session, c, msg.first_tick, msg.frames);
+        auto arrival = std::chrono::steady_clock::now();
+        constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
+        const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
+        if (received > 0 && age > 0)
+            arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
+        runner_->submit_input(msg.session, c, msg.first_tick, msg.frames, arrival);
     }
 
     static void copy_name(char* out, size_t size, const std::string& text) {
@@ -2961,7 +2977,7 @@ protected:
             }
             case bmmo::SessionInput: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::session_input_msg>(networking_msg);
-                handle_session_input(networking_msg->m_conn, msg);
+                handle_session_input(networking_msg->m_conn, msg, networking_msg->m_usecTimeReceived);
                 break;
             }
             case bmmo::SessionEvent: {

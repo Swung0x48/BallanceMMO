@@ -29,6 +29,7 @@
 #include <entity/session.hpp>
 #include <session/input_relay.hpp>
 #include <session/journal.hpp>
+#include <session/lateness.hpp>
 #include <session/timeline.hpp>
 
 #include "physics_world.hpp"
@@ -143,9 +144,17 @@ namespace bmmo::sim {
         // and never moves the cursor back, so the client's first batch after
         // the re-anchor is not lost and the last frame applied stays the
         // fallback for the ticks in between.
+        // The assignment also starts that player's lateness meter over
+        // (late-player design 2.1: its reference is measured anew after every
+        // assignment).
         void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
+        // `arrival` is when the datagram reached the server, taken on the
+        // network thread: the command runs on the simulation thread later, and
+        // the lateness meter (design 2.1) measures the path and the client's
+        // schedule, not this queue.
         void submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
-                          std::vector<bmmo::session::input_frame> frames);
+                          std::vector<bmmo::session::input_frame> frames,
+                          std::chrono::steady_clock::time_point arrival);
         // Events due in the same tick are applied in the members' JOIN ORDER,
         // never in arrival order: the order is part of the determinism
         // contract (design 9.15), because it is the only one a client can
@@ -183,6 +192,17 @@ namespace bmmo::sim {
             std::map<uint32_t, uint8_t> join_orders;
             std::set<uint32_t> ready;
             std::map<uint32_t, bmmo::session::input_buffer> inputs;
+            // Late-player design 2.1, observe only (plan step 7): every
+            // player's lateness meter, fed one sample per uplink datagram and
+            // evaluated at every stepped tick.  Nothing acts on it yet: its
+            // decisions are logged as S1 lines and never acknowledged, so each
+            // player gets at most one per assignment.  `reported` keeps the
+            // reference line to one per assignment.
+            struct lateness_entry {
+                bmmo::session::lateness_meter meter;
+                bool reported = false;
+            };
+            std::map<uint32_t, lateness_entry> lateness;
             std::map<uint32_t, uint32_t> acked;
             // The stamp of each player's last applied Physicalize: an
             // Unphysicalize stamped at or before it is a copy that lost its
@@ -221,6 +241,7 @@ namespace bmmo::sim {
             std::chrono::steady_clock::time_point journal_start{};
         };
         bool waiting_for_lifecycle(session_state& s, uint32_t tick);
+        void observe_lateness(session_state& s, uint32_t tick);
         void open_journal(session_state& s, float spawn_impulse, uint64_t anchor_hash,
                           uint64_t anchor_surfaces, uint32_t first_tick);
 

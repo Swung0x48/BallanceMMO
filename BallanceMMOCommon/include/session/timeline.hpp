@@ -226,6 +226,8 @@ namespace bmmo::session {
         }
         bool started() const { return started_; }
         uint32_t next_tick() const { return next_tick_; }
+        // The first tick deadline() is defined for: a tick below it would wrap.
+        uint32_t first_tick() const { return first_tick_; }
 
         // Wall-clock deadline after which `tick` is simulated even without
         // every player's input.

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <system_error>
 
@@ -302,6 +303,7 @@ namespace bmmo::sim {
             s.join_orders.erase(player);
             s.ready.erase(player);
             s.inputs.erase(player);
+            s.lateness.erase(player);
             s.acked.erase(player);
             s.lifecycle_missing.erase(player);
             s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
@@ -340,6 +342,26 @@ namespace bmmo::sim {
             // refuses to move the cursor backwards, so the batch the client
             // sent right after it was told the base survives the re-anchor.
             s.inputs[player].reset(first_tick);
+            // Every assignment measures the reference anew (design 2.8); the
+            // meter keeps only the player's total offset.
+            // Said in the log, so a run whose would-raise count reads 0
+            // because a resync threw the evidence away shows why.
+            auto& lateness = s.lateness[player];
+            {
+                const auto& m = lateness.meter;
+                std::string text = "[session " + std::to_string(s.id) + "] S1 reset player=" + std::to_string(player)
+                    + " tick=" + std::to_string(s.world->tick_index()) + " base=" + std::to_string(first_tick)
+                    + " offset=" + std::to_string(m.offset()) + " samples=" + std::to_string(m.samples_total())
+                    + " misses=" + std::to_string(m.misses_total())
+                    + " streak=" + std::to_string(m.raise_streak()) + "/" + std::to_string(m.lower_streak());
+                if (m.state() == bmmo::session::lateness_state::pending)
+                    text += std::string(" dropped=")
+                          + (m.pending_action() == bmmo::session::lateness_action::raise ? "would-raise" : "would-lower")
+                          + " k=" + std::to_string(m.pending_k());
+                log(text);
+            }
+            lateness.meter.reset(first_tick);
+            lateness.reported = false;
             if (s.running) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
                 // Design 9.26: the first step (tick start_base) is due start_base
@@ -364,13 +386,29 @@ namespace bmmo::sim {
     }
 
     void session_runner::submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
-                                      std::vector<bmmo::session::input_frame> frames) {
-        post([this, session, player, first_tick, frames = std::move(frames)] {
+                                      std::vector<bmmo::session::input_frame> frames, clock::time_point arrival) {
+        post([this, session, player, first_tick, arrival, frames = std::move(frames)] {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
-            auto buffer = it->second->inputs.find(player);
-            if (buffer == it->second->inputs.end()) return;
+            auto& s = *it->second;
+            auto buffer = s.inputs.find(player);
+            if (buffer == s.inputs.end()) return;
+            // The lookahead the buffer judges this datagram by is the one
+            // before it is stored.
+            const uint32_t cursor = buffer->second.next_tick();
             buffer->second.submit(first_tick, frames);
+            // One lateness sample per datagram, from its newest frame
+            // (design 2.1).  Only once the scheduler has deadlines, and never
+            // for a frame the buffer drops as garbage: a far-future tick
+            // would be "newest" for good and block every real sample after it.
+            if (frames.empty() || !s.running || !s.scheduler.started()) return;
+            const uint32_t newest = first_tick + static_cast<uint32_t>(frames.size()) - 1;
+            if (newest < s.scheduler.first_tick()
+                    || newest >= cursor + bmmo::session::input_buffer::kMaxLookahead) return;
+            auto meter = s.lateness.find(player);
+            if (meter == s.lateness.end()) return;
+            meter->second.meter.sample(newest,
+                    bmmo::session::lateness_slack_ticks(s.scheduler.deadline(newest), arrival));
         });
     }
 
@@ -597,6 +635,95 @@ namespace bmmo::sim {
         }
     }
 
+    namespace {
+        std::string fixed2(double value) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%.2f", value);
+            return text;
+        }
+    }
+
+    // Late-player design 2.1, observe only (plan step 7): every stepped tick
+    // advances each player's lateness meter; what it would decide is logged as
+    // an S1 line and changes nothing.  A decision is never acknowledged here,
+    // so the meter stays pending and says it at most once per assignment -
+    // which is what the closing measurement counts (would-raise exactly once
+    // in A5u, never in the burst arms).
+    //
+    // Every 660 ticks one summary line per player, so a run shows the meter's
+    // view of each member's arrivals without a decision having to happen.
+    static constexpr uint32_t kLatenessSummaryTicks = 660;
+
+    void session_runner::observe_lateness(session_state& s, uint32_t tick) {
+        using bmmo::session::lateness_action;
+        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 ";
+        for (auto& [player, entry]: s.lateness) {
+            auto& meter = entry.meter;
+            // A member with no qualifying window after eight takes the median
+            // of the members whose reference was measured.  Nobody's yet:
+            // it waits, and asks again next tick.
+            if (meter.wants_fallback()) {
+                std::vector<double> r10s, r01s;
+                for (const auto& [other, other_entry]: s.lateness) {
+                    if (other == player || !other_entry.meter.reference_measured()) continue;
+                    r10s.push_back(other_entry.meter.r10());
+                    r01s.push_back(other_entry.meter.r01());
+                }
+                if (!r10s.empty())
+                    meter.adopt_reference(bmmo::session::lateness_median(r10s), bmmo::session::lateness_median(r01s));
+            }
+            if (meter.has_reference() && !entry.reported) {
+                entry.reported = true;
+                log(prefix + "reference player=" + std::to_string(player) + " tick=" + std::to_string(tick)
+                    + " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
+                    + " source=" + (meter.reference_measured() ? "measured" : "fallback")
+                    + " windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows())
+                    + " base=" + std::to_string(meter.base()));
+            }
+            const auto decision = meter.on_tick(tick);
+            if (decision.action == lateness_action::raise || decision.action == lateness_action::lower) {
+                const bool raise = decision.action == lateness_action::raise;
+                const std::string text = std::string(raise ? "would-raise" : "would-lower")
+                    + " player=" + std::to_string(player) + " tick=" + std::to_string(tick)
+                    + " k=" + std::to_string(decision.k)
+                    + (raise ? " q10=" : " q05=") + fixed2(decision.quantile)
+                    + " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
+                    + " misses=" + std::to_string(decision.misses) + "/" + std::to_string(decision.samples)
+                    + " streak=" + std::to_string(decision.streak)
+                    + " offset=" + std::to_string(meter.offset());
+                log(prefix + text + " (observe only: nothing sent)");
+                // The box keeps it too, so a journal read offline shows where
+                // the lead would have moved.  A note changes no replay.
+                if (s.journal.is_open() && !s.journal.capped()) s.journal.note(tick, "lateness: " + text);
+            } else if (decision.action == lateness_action::give_up) {
+                log(prefix + "gave-up player=" + std::to_string(player) + " tick=" + std::to_string(tick)
+                    + " misses=" + std::to_string(decision.misses) + "/" + std::to_string(decision.samples)
+                    + ": two raises did not restore its arrivals; no decision until its next assignment");
+            }
+        }
+        if (tick % kLatenessSummaryTicks != 0) return;
+        for (const auto& [player, entry]: s.lateness) {
+            const auto& meter = entry.meter;
+            std::string text = "lateness player=" + std::to_string(player) + " tick=" + std::to_string(tick)
+                + " state=" + bmmo::session::lateness_state_name(meter.state())
+                + " samples=" + std::to_string(meter.samples_total())
+                + " misses=" + std::to_string(meter.misses_total())
+                + " trailing=" + std::to_string(meter.trailing_misses()) + "/" + std::to_string(meter.trailing_count());
+            if (meter.have_sampled()) text += " last=" + fixed2(meter.last_slack());
+            if (meter.trailing_count() > 0)
+                text += " q01=" + fixed2(meter.trailing_quantile(0.01)) + " q10=" + fixed2(meter.trailing_quantile(0.10))
+                      + " q50=" + fixed2(meter.trailing_quantile(0.50));
+            if (meter.has_reference())
+                text += " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
+                      + " ref=" + (meter.reference_measured() ? "measured" : "fallback");
+            else
+                text += " ref=none windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows());
+            text += " streak=" + std::to_string(meter.raise_streak()) + "/" + std::to_string(meter.lower_streak())
+                  + " decisions=" + std::to_string(meter.decisions()) + " offset=" + std::to_string(meter.offset());
+            log(prefix + text);
+        }
+    }
+
     void session_runner::run() {
         std::unique_lock lk(mutex_);
         while (!stopping_) {
@@ -623,6 +750,7 @@ namespace bmmo::sim {
                     if (!all_inputs && !s.scheduler.due(clock::now())) break;
                     if (waiting_for_lifecycle(s, tick)) break;
                     step(s);
+                    if (s.running) observe_lateness(s, tick);
                     ++simulated;
                     if (!s.running) break;
                 }
