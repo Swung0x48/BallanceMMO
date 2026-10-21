@@ -169,13 +169,17 @@ def status_metrics(line):
     """Pull the interesting counters out of a client `status:` line."""
     out = {}
     for key in ('mism', 'hard', 'mech_hard', 'mech_max_err', 'max_err',
-                'unmatched', 'starved', 'rebases', 'tick', 'frames', 'resim'):
+                'unmatched', 'starved', 'rebases', 'tick', 'frames', 'resim',
+                't_rest', 't_rep', 't_max', 't_cap'):
         m = re.search(r'\b' + key + r'=([0-9.]+)', line)
         if m:
             out[key] = float(m.group(1)) if '.' in m.group(1) else int(m.group(1))
     m = re.search(r'resyncs=(\d+)/(\d+)', line)
     if m:
         out['resyncs'] = int(m.group(1))
+    m = re.search(r'snapshots=(\d+)/(\d+)/(\d+)', line)
+    if m:
+        out['snapshots'] = int(m.group(1))
     # mechanisms=<known>/<resolved>: the second number is the one that means
     # the client really has local mechanism bodies (level-reset postmortem).
     m = re.search(r'mechanisms=(\d+)/(\d+)', line)
@@ -433,7 +437,14 @@ def verdict(case):
             problems.append('journal replay diverged')
     inter = case['interaction']
     if not inter['mechanism_bodies_corrected']:
-        problems.append('no mechanism interaction observed')
+        # The interaction is read off the corrections, which need snapshots to
+        # disagree with: a run against a server whose snapshots are off (the
+        # snapshot-free measurements, a few dozen lifecycle-forced ones in
+        # 60 s) has none to show even when every mechanism is tracked and in
+        # step, so there it is a note, not a failure.
+        snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100 for c in case['clients'])
+        (warnings if snapshot_free else problems).append(
+            'no mechanism interaction observed' + (' (snapshot-free run: the corrections cannot show it)' if snapshot_free else ''))
     if len(case['clients']) > 1 and not inter['peer_balls_corrected']:
         problems.append('no ball-to-ball interaction observed')
     return problems, warnings

@@ -388,3 +388,15 @@ local 矩阵 + 父节点标志才逐位相同。
 
 **Quick matrix** 5/5，215 个单元测试通过，x86 零售客户端编译通过。
 
+## 13. 联网实测（2026-10-21，四个 headless 客户端、150 ms、无快照、spacing 4.2）
+
+详见 `docs/lockstep-without-snapshots.md` "The activation replay on the networked path"。
+结论：激活重放修好的是"堆里碰到的机关"和"机关刚体出生处形成的堆"——车道中段的
+Sack / 板排从 0.5-0.9 m 到毫米级，摆台的纸球模块不再飞走，远端复活堆（四球 200 tick 内
+死亡复活）非主机的己球 **三轮九个全部 0.0000 m**（此前 0.3-1.3 m）。未动的两个残差都不是
+出生：起点堆（0-1199 tick 1-5 m，重合出生 + 预测的地板）和主机球最后骑着的终点气球链
+（1.4 m，record 不带的可动体系统）。每次回滚成本：恢复 0.8-1.3 ms/次，重放 0.8-1.3 ms/tick，
+采集 0.8-0.95 ms/tick，与 `--park-births` 同噪声内；状态行新增 `t_rest/t_rep/t_max/t_cap`，
+`--script-diff-logs N` 放开脚本差异日志上限。部署配置（快照 2/66）在 150 ms、四球时每客户端
+每分钟 950-1770 次回滚、1.6-2.6 万 tick 重放，气球阶段每 tick 一次回滚超出 15 ms 帧预算，
+两条路径都会掉队半秒并 rebase + resync——是 interval 2 的负载，不是激活重放的。

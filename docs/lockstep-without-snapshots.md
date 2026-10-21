@@ -1978,6 +1978,92 @@ machines, one world. Everything the four-client table loses is lost in the
 prediction of the other players and in what the replay cannot yet put back
 when their balls pile into ours.
 
+### The activation replay on the networked path (2026-10-21)
+
+The sector activation replayed inside rollbacks ("The sector activation,
+replayed" above; bit-exact on the solo arena arms) measured where the piles
+are: four headless clients at 150 ms each way, 60 s, spawn spacing 4.2, the
+server's snapshots off (100000 / 100000 - only the two dozen that lifecycle
+events force), the lane-kept drive (the start pile, three checkpoints, the
+far-end deaths and the respawn pile) and the swing bay (sector 4, bays 18).
+Every arm against `--park-births` (the v14 path: window-activated scripts kept
+live, window-born bodies parked) in the same batch, three lane runs and three
+swing-bay runs of each; the server's journal replayed bit-exact in all twelve.
+Errors are `scripts/server_client_drift.py` means per 600-tick window against
+the server's journal.
+
+| lane, snapshots off, 150 ms | host's own ball 0-599 / 600-1199 | mechanisms 1200-1799 (host) | the other three own balls, 2400-2999 (the respawn pile) | level-end balloon chain 2400-3599 (host) |
+|---|---|---|---|---|
+| activation replay (3 runs) | 1.47 / 0.72, 1.07 / 0.69, 1.28 / 1.03 m | **0.008, 0.008, 0.006 m** | **0.0000 m on all nine** (one at 0.0019) | 1.42 / 1.42, 1.39 / 1.36, 1.39 / 1.43 m |
+| `--park-births` (3 runs) | 1.17 / 0.96, 1.22 / 0.80, 2.06 / 7.19 m | 0.86, 0.83, 0.49 m (`P_Modul_26_Sack` 13 m, `P_Modul_29_Platte04` 4.4 m) | 1.15 / 1.06 / 15.4, 4.08 / 3.49 / 1.72 m; the third run lost a remote ball by 1.2 km | 1.38-1.47 m |
+| the spacing-4.2 pair of 2026-10-20 (`ct768_l150_s42_*`) | 1.69 / 1.22, 1.52 / 1.24 m | 0.014, 0.054 m | 0.29 / 0.62 / 0.66, 1.25 / 0.89 / 0.46 m | 1.59 / 1.61, 1.63 / 1.61 m |
+
+(All three `--park-births` lane runs rebased their tick schedule and resynced
+between ticks 2611 and 2713, so their last two windows are partly the server's
+snapshot; the three activation-replay lane runs ran clean - no resync, no
+starved input report.)
+
+| swing bay, snapshots off, 150 ms | own balls 1800-2999 | mechanisms 1200-2399 | mechanisms after |
+|---|---|---|---|
+| activation replay (3 runs) | 0.0000-0.0012 m | <= 0.018 m | `PE_Balloon_Platte04` 0.09-0.18 m |
+| `--park-births` (2 runs) | 0.0000-0.0001 m | `P_Modul_26_Sack` 0.09-0.64 m | one run: `P_Ball_Paper_MF` 0.66 -> 3.7 -> 7.9 m mean, 785 m max, on three clients |
+
+So what the replayed activation buys on the networked path is the
+mechanisms a pile touches and the pile that forms where a mechanism's
+bodies are born: the sack and the plate row inside the lane's windows go
+from 0.5-0.9 m to millimetres, the paper-ball module no longer flies, and
+the far-end respawn pile - four balls dying and respawning at x = 700 within
+200 ticks, 0.3-1.3 m off at every spacing before - is **0.0000 m on every
+non-host ball in all three runs**: the respawn is a Physicalize inside the
+window, and the body a replayed script re-makes where the live frame made
+it is in step; a body parked and rechecked was not. Two residuals are
+untouched, as expected, because neither is a birth: the start pile at the
+spawn (1-5 m through ticks 0-1199, the coincident-spawn-plus-prediction floor
+the spacing section measured) and the level-end balloon chain the host's
+ball rides at the end (1.4 m, the chain of movable bodies the record does not
+carry as a system). The host's own ball at the far end is that chain: 0.00,
+2.30 and 0.36 m in the three runs against 1.5-2.3 m before.
+
+**What a rewind costs** (the status line now carries it: `t_rest` the
+restore stages in ms, `t_rep` the replay stages, `t_max` the longest single
+rewind, `t_cap` the per-tick record capture, total / longest). On these runs
+the restore is 0.8-1.3 ms per rewind, the replay 0.8-1.3 ms per re-simulated
+tick, the capture 0.80-0.95 ms per live tick, the longest rewind 48-71 ms
+(one 156 ms); the activation replay and `--park-births` are within noise of
+each other on all three (1.22 against 1.09 ms per restore on the lane). The
+rollback paths take 0.21-0.58 s of every second at this latency with four
+balls; a snapshot-free run sits at 0.2-0.4.
+
+**The deployed configuration is at the edge of a core.** The same lane run
+with the server's snapshots on (2 / 66, as deployed) made 950-1770 rewinds
+and 16-26 thousand re-simulated ticks per client in 60 s, and in the balloon
+phase the corrections arrive every two ticks and each re-simulates 10-20
+(300 rewinds per 330 ticks), which is more than the 15 ms frame holds: in
+four of six such runs this day (three activation-replay, one `--park-births`;
+the other `--park-births` run made 630-800 rewinds and stayed under) every
+client fell half a second behind, rebased its tick schedule (`pace_and_frame`,
+33 frames) and resynced from a full snapshot, with 20-30 % of the server's
+input reports marking it starved. Per-rewind cost being equal, that is the
+load of interval 2 at 150 ms on this host, not the activation replay; the
+interval sweep above already names 8 as the lever if that CPU matters.
+
+Three measurement traps from these runs: a client that rebases and resyncs
+has the server's world from then on, so a snapshot-free number after its
+`resync requested (tick schedule rebased)` line measures nothing (check
+`resyncs=` first); `starved=` on the status line counts the server's input
+reports that said starved - one report per snapshot, so 6 of 27 on a
+snapshot-free run is a sample, not six ticks; and the harness read "no
+mechanism interaction" off the corrections, which a snapshot-free run cannot
+have, so it now notes that instead of failing the run. With
+`--script-diff-logs N` every "scripts re-executed ... differ" line is kept:
+on the deployed-interval lane run the logical differences (24-62 per client
+of 950-1160 rewinds) are the proximity sensors' `Last Check` / `Current
+Distance` of `P_Modul_18_MF` and `PE_Balloon` (the balls moved: legitimate),
+the cells `IngameParameter[0][1]` / `[0][2]` after a far-end death (7-9
+lines), and the particle script's flags - and on `--park-births` once
+`PE_Balloon Script / SetPhysicsForce: force controller 1 vs 0`, the lift
+force the v14 rule kept live.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the

@@ -234,6 +234,7 @@ namespace {
         // restore (the rollback otherwise skips the record and goes on).
         bool savestate = true;
         bool savestate_strict = false;
+        uint32_t script_diff_logs = 8;           // --script-diff-logs N: how many "scripts re-executed ... differ" lines to log
         // --trace-plan: log which branch every body of a restore took.
         bool trace_plan = false;
         bool correct = true;
@@ -364,6 +365,7 @@ namespace {
             else if (arg == "--no-sleep-as-recorded") out.sleep_as_recorded = false;
             else if (arg == "--no-script-replay") out.script_replay = false;
             else if (arg == "--no-savestate") out.savestate = false;
+            else if (arg == "--script-diff-logs") { if (!(v = next())) return false; out.script_diff_logs = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--savestate-strict") out.savestate_strict = true;
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--no-correct") out.correct = false;
@@ -894,6 +896,7 @@ namespace {
             rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
             rollback_.set_replay_scripts(args_.script_replay);
             rollback_.set_exact_restore(args_.savestate);
+            rollback_.set_script_log_cap(args_.script_diff_logs);
             rollback_.set_trace_plan(args_.trace_plan);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
@@ -3383,7 +3386,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -3417,8 +3420,10 @@ namespace {
                  static_cast<unsigned long long>(rs.unknown_rechecks_deferred), static_cast<unsigned long long>(activations_replayed_),
                  static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
                  static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
-                 static_cast<unsigned long long>(script_reset_skips_), rs.max_error,
-                 rs.last_mismatch.c_str(),
+                 static_cast<unsigned long long>(script_reset_skips_),
+                 rs.restore_us / 1000.0, rs.replay_us / 1000.0, rs.rewind_us_max / 1000.0,
+                 rs.capture_us / 1000.0, rs.capture_us_max / 1000.0,
+                 rs.max_error, rs.last_mismatch.c_str(),
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
                  static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error,

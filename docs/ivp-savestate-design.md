@@ -565,7 +565,12 @@ well under 100 KB per tick, so a 96-tick history is under 10 MB.
   own record (`restore::recontact`); the old per-body path stays for records
   without a savestate and as an A/B (`--no-savestate` on the headless client,
   `set_exact_restore(false)` on the engine). Stats: `savestates_restored`,
-  `savestate_failures` (refused blobs), `savestate_capture_failures`.
+  `savestate_failures` (refused blobs), `savestate_capture_failures`; and the
+  wall time of the paths, `restore_us` / `replay_us` / `rewind_us_max` /
+  `capture_us` / `capture_us_max` (the headless status line's `t_rest`,
+  `t_rep`, `t_max`, `t_cap` in ms: measured 0.8-1.3 ms per restore, 0.8-1.3 ms
+  per re-simulated tick, 0.8-0.95 ms per tick captured, on the four-client
+  arena at 150 ms).
 * One binding of the engine's hooks for every user of the engine:
   `session/rollback_binding.hpp` (`bind_rollback_world<Backend>`) binds body,
   extra, clock, contact, navigation, savestate and script-replay hooks plus

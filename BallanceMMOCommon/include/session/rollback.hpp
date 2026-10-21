@@ -11,6 +11,7 @@
 // and the headless session client.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -338,6 +339,13 @@ namespace bmmo::session {
         // Records whose blob the world could not capture (get_savestate said
         // no): those ticks fall back to the per-body path when rewound to.
         uint64_t savestate_capture_failures = 0;
+        // Wall time the rollback paths took, in microseconds: the restore stage
+        // of every rewind (the plan's writes, the blob, the scripts, the
+        // destroyed births), the replay stage (the re-simulated steps and the
+        // births' bookkeeping), the longest single rewind, and the per-tick
+        // capture of the record (its blob and scripts) with the longest one.
+        // What a client's frame budget pays for the rollback - a frame is 15 ms.
+        uint64_t restore_us = 0, replay_us = 0, rewind_us_max = 0, capture_us = 0, capture_us_max = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
@@ -390,7 +398,14 @@ namespace bmmo::session {
             state.tick = tick;
             state.tracked = tracked;
             state.inputs = inputs_applied;
-            capture(world, state);
+            {
+                const auto started = std::chrono::steady_clock::now();
+                capture(world, state);
+                const uint64_t took = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+                stats_.capture_us += took;
+                stats_.capture_us_max = std::max(stats_.capture_us_max, took);
+            }
             if (!history_.empty() && history_.back().tick >= tick) {
                 // re-recording (resim) or a numbering restart: drop from here
                 while (!history_.empty() && history_.back().tick >= tick) history_.pop_back();
@@ -582,6 +597,23 @@ namespace bmmo::session {
                                 const std::function<void(uint8_t)>& report, const std::string& reason) {
             tick_state* at = find(anchor);
             if (!at) return false;
+            // Times the two stages for the stats: everything up to the replay
+            // loop is the restore, the rest is the replay.
+            struct rewind_timer {
+                rollback_stats& stats;
+                std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now(), split{};
+                bool have_split = false;
+                void replay_begins() { split = std::chrono::steady_clock::now(); have_split = true; }
+                ~rewind_timer() {
+                    const auto ended = std::chrono::steady_clock::now();
+                    const auto us = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+                        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
+                    };
+                    stats.restore_us += us(started, have_split ? split : ended);
+                    if (have_split) stats.replay_us += us(split, ended);
+                    stats.rewind_us_max = std::max(stats.rewind_us_max, us(started, ended));
+                }
+            } timer{stats_};
             const bool frozen = world.simulating && !world.simulating();
             const auto generation_now = [&](const std::string& entity) -> uint32_t {
                 for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
@@ -951,6 +983,7 @@ namespace bmmo::session {
             }
 
             // 3. re-simulate T+1 .. current with the recorded inputs
+            timer.replay_begins();
             const uint32_t lag = current_tick > anchor ? current_tick - anchor : 0;
             if (frozen) {
                 // the scripts stopped the local clock: the authoritative
@@ -1181,7 +1214,7 @@ namespace bmmo::session {
                     std::string where;
                     if (world.diff_scripts) where = world.diff_scripts(live_scripts, state.scripts, logical);
                     if (logical) ++stats_.script_mismatches; else ++stats_.script_float_mismatches;
-                    if (world.log && (logical ? script_mismatch_logs_ : script_float_logs_)++ < 8)
+                    if (world.log && (logical ? script_mismatch_logs_ : script_float_logs_)++ < script_log_cap_)
                         world.log(std::string("script replay: the scripts re-executed to tick ") + std::to_string(t)
                                   + (logical ? " differ from the live record: " : " differ in float parameters only: ")
                                   + (where.empty() ? std::to_string(state.scripts.size()) + " vs "
@@ -1266,6 +1299,7 @@ namespace bmmo::session {
         // left to snapshot rows and births.  Off reproduces the per-body restore
         // over the same records (the blobs are still captured), for the A/B in
         // one binary.
+        void set_script_log_cap(uint32_t n) { script_log_cap_ = n; }
         void set_exact_restore(bool enable) { exact_restore_ = enable; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
@@ -1520,6 +1554,7 @@ namespace bmmo::session {
         bool replay_scripts_ = true;
         bool exact_restore_ = true;
         uint32_t script_mismatch_logs_ = 0;
+        uint32_t script_log_cap_ = 8;   // set_script_log_cap: a diagnostic run raises it to name every differing script
         uint32_t savestate_replay_logs_ = 0;
         uint32_t recreate_logs_ = 0;
         uint32_t script_float_logs_ = 0;
