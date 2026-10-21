@@ -1409,6 +1409,29 @@ namespace bmmo::session {
             return true;
         }
 
+        // The own ball's entity the record of `tick` tracked, empty when it
+        // had no body there or the tick is not recorded.  A trafo renames the
+        // own ball, so a correction of an old tick must use this name and not
+        // the one the ball has now (late-player design 1.3).
+        std::string recorded_own_entity(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at ? at->tracked.own_entity : std::string();
+        }
+
+        // Replaces the input the record of `tick` holds for `entity`.  A
+        // replay feeds the own ball from the record (feed() in
+        // restore_and_replay prefers it to input_at), so this, and not the
+        // caller's own input map, is what makes a re-simulation use the frame
+        // the server applied instead of the one this client played.  The
+        // replay re-captures every record with what it fed, so the amendment
+        // survives later replays.  False when the tick is not recorded.
+        bool amend_recorded_input(const std::string& entity, uint32_t tick, const input_frame& frame) {
+            tick_state* at = find(tick);
+            if (!at || entity.empty()) return false;
+            at->inputs[entity] = frame;
+            return true;
+        }
+
         // Whether the record of `tick` holds a body for `entity`: a relayed
         // frame for a tick at which the name had none drove nothing, and is
         // no reason to replay.

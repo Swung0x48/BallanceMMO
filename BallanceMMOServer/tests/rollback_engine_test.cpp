@@ -593,6 +593,105 @@ TEST(RollbackEngine, MismatchRestoresAndResimulatesWithRecordedInputs) {
     EXPECT_EQ(engine.stats().matched, 1u);
 }
 
+// Late-player design 1.3 (plan step 4): the server substituted the own ball's
+// frame at a tick and told its owner, who amends the record of that tick and
+// rewinds.  A replay feeds the own ball from the RECORD and falls back on the
+// caller's input_at only when the record has none, so the amended record -
+// not the caller's own input map, which here still says what the player
+// played - has to be what drives the replayed tick.  And the replay
+// re-captures every record with what it fed, so a later rewind from before
+// that tick feeds the server's frame again.
+TEST(RollbackEngine, AnAmendedOwnRecordDrivesTheReplay) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 6, 100, own_inputs);   // the player never holds the key
+    ASSERT_FLOAT_EQ(world.bodies["Own"].linear[0], 0.0f);
+
+    EXPECT_EQ(engine.recorded_own_entity(4), "Own");
+    EXPECT_EQ(engine.recorded_own_entity(99), "");
+    input_frame held{};
+    held.keys = 1;
+    held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+    EXPECT_FALSE(engine.amend_recorded_input("Own", 99, held));   // not recorded
+    ASSERT_TRUE(engine.amend_recorded_input("Own", 4, held));
+    input_frame recorded{};
+    ASSERT_TRUE(engine.recorded_input("Own", 4, recorded));
+    EXPECT_EQ(recorded.keys, 1u);
+
+    auto w = world.adapter();
+    const auto own_input_at = [&](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Own") return false;
+        const auto it = own_inputs.find(tick);
+        if (it == own_inputs.end()) return false;
+        out = it->second;
+        return true;
+    };
+    ASSERT_TRUE(engine.rewind_to(w, 3, 6, own_input_at, "own input substituted at tick 4"));
+    // tick 4 ran on the server's frame, ticks 5 and 6 on the player's
+    EXPECT_EQ(world.count("nav_input Own keys=1"), 1);
+    EXPECT_EQ(world.count("nav_input Own keys=0"), 2);
+    EXPECT_EQ(world.count("nav_poll Own off"), 1);
+    EXPECT_EQ(world.count("nav_poll Own on"), 1);
+    EXPECT_FLOAT_EQ(world.bodies["Own"].linear[0], 1.0f);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * kDt, 1e-9);
+    ASSERT_TRUE(engine.recorded_input("Own", 4, recorded));
+    EXPECT_EQ(recorded.keys, 1u);
+    ASSERT_TRUE(engine.recorded_input("Own", 5, recorded));
+    EXPECT_EQ(recorded.keys, 0u);
+
+    // A later correction anchored before it (a remote's frame of tick 3)
+    // replays tick 4 from the re-captured record: the server's frame again.
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 2, 6, own_input_at, "Remote input corrected at tick 3"));
+    EXPECT_EQ(world.count("nav_input Own keys=1"), 1);
+    EXPECT_EQ(world.count("nav_input Own keys=0"), 3);
+    EXPECT_FLOAT_EQ(world.bodies["Own"].linear[0], 1.0f);
+    EXPECT_NEAR(world.bodies["Own"].position[0], 3.0 * kDt, 1e-9);
+}
+
+// The own entity a record tracked is the name to amend: a trafo renames the
+// own ball, and a notice of a tick before it must amend the old name, which
+// is the one the replay of that tick feeds.
+TEST(RollbackEngine, TheRecordedOwnEntityIsTheNameAtThatTick) {
+    fake_world world;
+    world.bodies["OwnOld"];
+    world.navs["OwnOld"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    rollback_tracked before;
+    before.own_entity = "OwnOld";
+    before.own_polls = true;
+    rollback_tracked after = before;
+    after.own_entity = "OwnNew";
+    rollback_tracked dead;
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        if (tick == 4) {
+            world.bodies.erase("OwnOld");
+            world.navs.erase("OwnOld");
+            world.bodies["OwnNew"];
+            world.navs["OwnNew"] = {};
+        }
+        w.step();
+        if (tick == 6) engine.record(w, tick, dead, {});
+        else engine.record(w, tick, tick >= 4 ? after : before, {{tick >= 4 ? "OwnNew" : "OwnOld", input_frame{}}});
+    }
+    EXPECT_EQ(engine.recorded_own_entity(2), "OwnOld");
+    EXPECT_EQ(engine.recorded_own_entity(5), "OwnNew");
+    EXPECT_EQ(engine.recorded_own_entity(6), "");   // no ball at that tick
+    input_frame held{};
+    held.keys = 1;
+    ASSERT_TRUE(engine.amend_recorded_input(engine.recorded_own_entity(2), 2, held));
+    input_frame recorded{};
+    ASSERT_TRUE(engine.recorded_input("OwnOld", 2, recorded));
+    EXPECT_EQ(recorded.keys, 1u);
+    EXPECT_FALSE(engine.recorded_input("OwnNew", 2, recorded));
+}
+
 TEST(RollbackEngine, RelayedRemoteInputsReplacePredictionsAndConverge) {
     fake_world world;
     world.bodies["Own"];

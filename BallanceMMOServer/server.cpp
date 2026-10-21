@@ -1444,6 +1444,11 @@ public:
         auto& s = it->second;
         if (!runner_->running(s.id)) return;
         const uint32_t assigned = late_tick_base(s, c);
+        // The newest tick whose held frames were counted: the old epoch's
+        // held_total stops here, and the ticks after it up to the base are
+        // applied held under no numbering the client has (its notices never
+        // carry them).  Logged for the harness's per-epoch count.
+        const uint32_t counted_through = s.relay.newest_tick();
         s.late.insert(c);
         s.ready.insert(c);
         runner_->player_ready(s.id, c, assigned);
@@ -1452,8 +1457,8 @@ public:
             if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
         for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
         runner_->request_full_snapshot(s.id);
-        Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u).", s.id, get_client_name(c),
-               assigned, msg.last_full_tick);
+        Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
+               s.id, get_client_name(c), assigned, msg.last_full_tick, counted_through);
     }
 
     void handle_session_input(HSteamNetConnection c, const bmmo::session_input_msg& msg) {

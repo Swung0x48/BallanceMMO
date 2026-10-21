@@ -234,6 +234,48 @@ under `subst_late_` and also leads to a resync.
 `starved/worst/lead` inputs (2093-2101), so those counters work with
 snapshots off.
 
+*Adapted in step 4:*
+
+- A record whose tick the client has not simulated yet (it runs behind the
+  server's cursor) is kept until that tick's live frame is recorded, then
+  compared and replayed from T-1 like any other. Stored at arrival, the live
+  frame would overwrite it, and its FRESH journal record would follow the
+  SUBSTITUTED one. The forced live frame of §2.4 is step 11.
+- A base record is stored and journaled too, but never amends a record or
+  rewinds. After a resync's full snapshot the floor is `current + 1` (the
+  base, if the snapshot lands before the first step of the new numbering),
+  not the snapshot's tick. The snapshot replaced the world at the current
+  tick and the history went with it, so a held tick in (snapshot, current + 1]
+  would otherwise read as late and answer the resync with another one.
+- `held_seen_` is cleared with every assignment, like the sent ring.
+- The one replay per frame is counted in each class it carries: under
+  `subst rew` and the window's `substrew=count/depth` when an own correction
+  is among the frame's (earliest or not), under `inrew` when a remote's is.
+  An own replay that `rewind_to` refuses asks for a resync and is counted in
+  the status line's `subst_missed`, not under `inrew`'s missed. It is not
+  counted late, because the record was inside the reach when it arrived.
+- A pending replay does not survive a renumbering or a resync's snapshot: its
+  anchor went with the history, and its refusal would answer the resync with
+  another.
+- A lost-notice gap is counted and credited always (later datagrams do not
+  count it again), but asks for a resync only under the rule a received
+  record follows: with `--rollback`, above the floor, and not while a resync
+  is already waiting.
+- A resync this section asks for (late, unresolved, lost, refused) is owed
+  when the client's 2 s limiter holds it back, and asked again once it allows,
+  unless an assignment with a newer base answers it first. While a request is
+  unanswered (up to 10 s) no other goes out: a blackout can hold the answer
+  past 2 s, and its full snapshot covers every reason found meanwhile.
+- A datagram of another epoch still counts for `acked`/starvation (its tick
+  and acked are the server's own numbers), and nothing else. Since `starved`
+  and `worst` now count every substitution with snapshots off too, the
+  harness's verdict reads them as a note, not a problem, on an `--event`'s
+  clients.
+- The server's resync log line names the newest tick the old epoch's
+  `held_total` counted; the ticks after it up to the new base are applied
+  held under no numbering the client has, and the harness's per-client server
+  count leaves them out (`subst_unnumbered`).
+
 ### 1.4 Retail mod (`BallanceMMOClient/session`)
 
 The retail mod has no input rewind yet: `rewind_to` is never called.

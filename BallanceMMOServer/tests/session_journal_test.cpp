@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -666,6 +667,52 @@ TEST(SessionJournal, DuplicateTickRecordsKeepTheLastAndWarn) {
     EXPECT_EQ(2u, out.ticks[0].inputs.size());   // both inputs of tick 200 survive
     EXPECT_NE(std::string::npos, out.warning.find("duplicate TICK")) << out.warning;
     EXPECT_NE(std::string::npos, out.warning.find("tick 200")) << out.warning;
+}
+
+// The headless client journals the frame the server substituted for its own
+// tick (late-player design 1.3) as a SUBSTITUTED record after that tick's
+// FRESH one, often several TICK records later.  The reader keeps both in the
+// tick's group in file order, so a replay that applies them in order (the
+// SimTool's set_input) ends on the server's frame; and the repeat flag of the
+// next record is resolved against the substituted frame, the last one the
+// writer saw, not the fresh one.
+TEST(SessionJournal, ASubstitutedRecordFollowsTheFreshOneAndTheLaterWins) {
+    const temp_dir dir("substituted");
+    const auto path = dir.file("subst.bmjr");
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        writer.input(300, 42, kFrameA, JOURNAL_INPUT_FRESH);
+        writer.tick(300, make_hash(300), 100);
+        writer.input(301, 42, kFrameA, JOURNAL_INPUT_FRESH);   // repeat of A
+        writer.tick(301, make_hash(301), 115);
+        writer.input(300, 42, kFrameB, JOURNAL_INPUT_SUBSTITUTED);   // late, for the earlier tick
+        writer.input(302, 42, kFrameB, JOURNAL_INPUT_FRESH);   // repeat of B, the substituted frame
+        writer.tick(302, make_hash(302), 130);
+        writer.close();
+    }
+
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    ASSERT_EQ(3u, out.ticks.size());
+    const auto& t300 = out.ticks[0];
+    ASSERT_EQ(300u, t300.tick);
+    ASSERT_EQ(2u, t300.inputs.size());
+    EXPECT_EQ(JOURNAL_INPUT_FRESH, t300.inputs[0].flags);
+    expect_same_frame(kFrameA, t300.inputs[0].frame);
+    EXPECT_EQ(JOURNAL_INPUT_SUBSTITUTED, t300.inputs[1].flags);
+    expect_same_frame(kFrameB, t300.inputs[1].frame);
+    // What a replay applying the group in order drives player 42 with.
+    std::map<uint32_t, input_frame> applied;
+    for (const auto& in: t300.inputs) applied[in.id] = in.frame;
+    expect_same_frame(kFrameB, applied.at(42));
+    ASSERT_EQ(1u, out.ticks[1].inputs.size());
+    expect_same_frame(kFrameA, out.ticks[1].inputs[0].frame);
+    ASSERT_EQ(1u, out.ticks[2].inputs.size());
+    EXPECT_TRUE(out.ticks[2].inputs[0].repeat);
+    expect_same_frame(kFrameB, out.ticks[2].inputs[0].frame);
 }
 
 // Somebody quits while the room is still loading: the removal carries

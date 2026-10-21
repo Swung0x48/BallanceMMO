@@ -821,6 +821,10 @@ RE_HOLD = re.compile(r'^hold-event: own (\w+) (?:#\d+ )?stamped tick (\d+) (held
 RE_STALL = re.compile(r'^stall: (\d+) ms at tick (\d+)')
 RE_LATE_BY = re.compile(r'event type (\d+) from (\d+) stamped (\d+) applied at tick (\d+) \(late by (\d+)\)')
 RE_BARRIER = re.compile(r'no Physicalize for player (\d+) at tick (\d+)')
+# A resync's base and the newest tick the old epoch's held_total counted
+# (server.cpp handle_session_resync): the ticks between are applied held under
+# no numbering the client has, so no notice of them ever reaches it.
+RE_RESYNCED = re.compile(r'resynced at tick (\d+) \(last full snapshot it had: \d+; held counted through tick (\d+)\)')
 PHASES = ('B', 'D', 'A')
 
 
@@ -1117,8 +1121,12 @@ def event_report(args, case, case_dir):
                    for e in server.events() if e['tick'] != e['event_tick']]
     server_log = case_dir / 'server.log'
     late_by_lines, barrier_lines = [], []
+    counted_through = {}   # resync base -> the old epoch's last counted tick
     if server_log.exists():
         for line in server_log.read_text(errors='replace').splitlines():
+            m = RE_RESYNCED.search(line)
+            if m:
+                counted_through[int(m.group(1))] = int(m.group(2))
             m = RE_LATE_BY.search(line)
             if m:
                 late_by_lines.append({'type': int(m.group(1)), 'player': int(m.group(2)), 'stamp': int(m.group(3)),
@@ -1151,6 +1159,14 @@ def event_report(args, case, case_dir):
         # Substitutions inside the client's span (the ticks before its base
         # are applied held by construction and precede its numbering).
         mine = [t for t in substituted.get(pid, []) if base <= t <= end]
+        # ...and so are the ones a resync re-anchors: after the old epoch's
+        # last counted tick and before the new base (they precede the new
+        # numbering; the client is told nothing of them).  Without this the
+        # A3 equality "recv + late == server count" fails in any arm with a
+        # resync.  A server older than the log field leaves them in.
+        unnumbered = [(counted_through[b], b) for b in row['resync_bases'] if b in counted_through]
+        row['subst_unnumbered'] = sum(1 for t in mine if any(lo < t < b for lo, b in unnumbered))
+        mine = [t for t in mine if not any(lo < t < b for lo, b in unnumbered)]
         row['subst_server'] = {p: sum(1 for t in mine if cphases[p][0] <= t < cphases[p][1]) for p in PHASES}
         row['subst_total'] = len(mine)
         row['subst_outside_event'] = sum(1 for t in mine if not t_on <= t <= t_off + 2)
@@ -1579,8 +1595,12 @@ def replay(args, journal, out_dir):
     return {'exit_code': proc.returncode, 'summary': summary[-1] if summary else ''}
 
 
-def verdict(case):
-    """Pass only when the run was both clean and actually interactive."""
+def verdict(case, event_clients=()):
+    """Pass only when the run was both clean and actually interactive.
+    `event_clients`: the clients an --event is on.  Their substituted ticks are
+    the event's (since step 4 `starved` and `worst` count every substitution,
+    from the relay header, with snapshots off too), so on them a starvation
+    count is a note, not a problem."""
     problems, warnings = [], []
     for i, c in enumerate(case['clients']):
         if c.get('never_started'):
@@ -1598,7 +1618,10 @@ def verdict(case):
         # recovers, and the journal still replays bit-exact.  Only a sustained
         # rate means the run is not worth trusting.
         starved, ticks = m.get('starved', 0), max(m.get('tick', 1), 1)
-        if starved > max(20, 0.01 * ticks):
+        if starved and i in event_clients:
+            warnings.append(f'client{i} starved {starved}/{ticks} ticks (worst {m.get("worst_starved", 0)}; '
+                            'the substitutions of its event)')
+        elif starved > max(20, 0.01 * ticks):
             problems.append(f'client{i} input starvation {starved}/{ticks}')
         elif starved:
             warnings.append(f'client{i} starved {starved}/{ticks} ticks')
@@ -1621,7 +1644,7 @@ def verdict(case):
         # The server went without this client's frames for a long run of
         # ticks: the client ran behind the server (a late SessionAssign, a
         # stall), every frame stale, every relayed frame in its future.
-        if m.get('worst_starved', 0) > 100:
+        if m.get('worst_starved', 0) > 100 and i not in event_clients:
             problems.append(f'client{i} ran behind the server: {m["worst_starved"]} ticks without a fresh frame '
                             f'(lead {m.get("lead")})')
     for r in case.get('replays', []):
@@ -1984,7 +2007,7 @@ def main():
         for j in case['journal']:
             case.setdefault('replays', []).append(replay(args, j, base))
             case.setdefault('events', []).append(journal_events(args, j))
-        problems, warnings = verdict(case)
+        problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'})
         case['problems'], case['warnings'] = problems, warnings
         failed += bool(problems)
         results.append(case)

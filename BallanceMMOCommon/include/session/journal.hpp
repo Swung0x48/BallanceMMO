@@ -81,6 +81,11 @@ namespace bmmo::session {
     // INPUT `flags`
     constexpr uint8_t JOURNAL_INPUT_FRESH = 1;     // the writer had the player's own frame for this tick
     constexpr uint8_t JOURNAL_INPUT_RELAYED = 2;   // client: the frame came from the server's relay
+    // client, own player: the server substituted this tick and told us which
+    // frame it applied (late-player design 1.3).  Written after the FRESH
+    // record of the same tick, often much later; a reader groups by tick and
+    // the later record wins, so a replay drives the ball the server drove.
+    constexpr uint8_t JOURNAL_INPUT_SUBSTITUTED = 4;
     // CHECKPOINT `flags`
     constexpr uint8_t JOURNAL_CHECKPOINT_FULL = 1;       // server: every movable body, names present
     constexpr uint8_t JOURNAL_CHECKPOINT_LOCAL = 2;      // client: its own world

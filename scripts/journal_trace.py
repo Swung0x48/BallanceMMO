@@ -76,6 +76,9 @@ MAX_PAYLOAD = 1 << 24
 
 INPUT_FRESH = 1
 INPUT_RELAYED = 2
+# the own player's tick the server substituted, the frame it applied (late-player
+# design 1.3); written after the tick's FRESH record, and the later one wins
+INPUT_SUBSTITUTED = 4
 CHECKPOINT_FULL = 1
 CHECKPOINT_LOCAL = 2
 CHECKPOINT_RECEIVED = 4
@@ -1063,7 +1066,8 @@ def _fmt_input(record):
         parts.append("in=" + _flag_names(frame["flags"], INPUT_FRAME_FLAGS))
     if frame["ball_type"]:
         parts.append("ball=%d" % frame["ball_type"])
-    tags = _flag_names(record["flags"], ((INPUT_FRESH, "fresh"), (INPUT_RELAYED, "relayed")))
+    tags = _flag_names(record["flags"], ((INPUT_FRESH, "fresh"), (INPUT_RELAYED, "relayed"),
+                                         (INPUT_SUBSTITUTED, "substituted")))
     if tags != "-":
         parts.append(tags)
     if record["repeat"]:
@@ -1545,6 +1549,10 @@ def _synthetic_client():
                                            _body(1, 7, "Trafo_Piece_01", -3.5)]}))
     plan.append(("input", {"tick": 102, "id": 3, "flags": INPUT_FRESH, "repeat": True,
                            "frame": _frame(0x01, 0.125, 3, 5)}))
+    # the server substituted tick 102 and said so: a second own record of the
+    # tick, with another frame, which a replay takes over the FRESH one
+    plan.append(("input", {"tick": 102, "id": 3, "flags": INPUT_SUBSTITUTED, "repeat": False,
+                           "frame": _frame(0x00, 0.0625, 3, 5)}))
     plan.append(("tick", {"tick": 102, "hash": 7, "pose": 3, "cores": 12, "ms": 31,
                           "probe_name": "Ball_Paper_BMMO_4", "probe_position": (2.0, 0.0, -1.0),
                           "probe_speed": (f32(0.0), f32(0.0), f32(1.0))}))
