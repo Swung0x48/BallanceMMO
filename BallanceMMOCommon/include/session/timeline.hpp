@@ -109,7 +109,11 @@ namespace bmmo::session {
                     // Only for a tick the world has reached: one between the
                     // world's tick and a re-anchor's base (reset) precedes the
                     // client's numbering and is no substitute for anything.
-                    if (have_taken_ && tick <= taken_ && (!have_sub_ || tick > sub_tick_)) {
+                    // Nor below a lead reset's E (reset_hold): the
+                    // substitute of that range was frozen and sent to the
+                    // player as final, so a straggler for it changes nothing.
+                    if (have_taken_ && tick <= taken_ && tick >= hold_until_
+                            && (!have_sub_ || tick > sub_tick_)) {
                         last_ = frame;
                         sub_tick_ = tick;
                         have_sub_ = true;
@@ -133,6 +137,14 @@ namespace bmmo::session {
         // only put the session on deadlines (late-player design 2.3).  The
         // patience step test reads this instead of has().
         bool settled(uint32_t tick) const { return has(tick) || tick < next_tick_; }
+        // `tick` lies in the range the last reset_hold() froze: no frame
+        // will be applied there, the frozen substitute is.  Only that range,
+        // not a resync's re-anchor: the runner's step test without patience
+        // treats these as settled behind physics.lead_adjust and nothing else
+        // (late-player design 2.3).
+        bool held(uint32_t tick) const { return tick >= hold_from_ && tick < hold_until_; }
+        uint32_t hold_from() const { return hold_from_; }
+        uint32_t hold_until() const { return hold_until_; }
         const input_frame* peek(uint32_t tick) const {
             auto it = frames_.find(tick);
             return it == frames_.end() ? nullptr : &it->second;
@@ -198,12 +210,57 @@ namespace bmmo::session {
         // for, so a re-anchor cannot lose input that already arrived.  The last
         // applied frame stays the fallback for the ticks in between, exactly as
         // it is for a frame lost in flight.
+        //
+        // The one exception is a lead reset's range still ahead of the
+        // session (reset_hold, then a resync before the session reached E):
+        // the cursor sits at E only because of the hold, and the client on
+        // its new base knows nothing of it (it drops the SessionLead by its
+        // epoch), so its real frames for [first_tick, E) must count.  The
+        // hold is cut back to the first tick that is both not yet taken and
+        // not below first_tick, and the cursor with it; the ticks of the hold
+        // before that stay held (taken already, or below the new base where
+        // nothing will come).  Ticks not taken are not simulated, so moving
+        // the cursor back over them is safe.
         void reset(uint32_t first_tick) {
+            if (hold_until_ > hold_from_ && first_tick < hold_until_ && next_tick_ == hold_until_) {
+                uint32_t release = hold_from_;
+                if (have_taken_ && taken_ + 1 > release) release = taken_ + 1;
+                if (first_tick > release) release = first_tick;
+                if (release < hold_until_) {
+                    hold_until_ = release;
+                    next_tick_ = release;
+                }
+            }
             if (first_tick < next_tick_) first_tick = next_tick_;
             const auto keep = frames_.lower_bound(first_tick);
             for (auto it = frames_.begin(); it != keep; ++it) ++stale_;
             frames_.erase(frames_.begin(), keep);
             next_tick_ = first_tick;
+        }
+
+        // The lead reset (late-player design 2.3): the player's lead is being
+        // raised, so its frames for the ticks up to `effective` (E) would be
+        // late anyway.  Drops the queued frames below E (counted stale), moves
+        // the cursor to E, and freezes the substitute for every tick below E
+        // to the one the buffer holds now: from here on each of those ticks is
+        // applied with that one frame, and a straggler below E no longer
+        // changes it, so the frame is final at decision time and SessionLead
+        // can carry it.  The range is [cursor, E); an E at or behind the
+        // cursor holds nothing and returns -1.  Otherwise returns how many
+        // queued frames were dropped.  The world does not see the reset: the
+        // ticks are substituted exactly as a missing frame is, so a journal
+        // replays without knowing about it.
+        int reset_hold(uint32_t effective) {
+            if (effective <= next_tick_) return -1;
+            const auto keep = frames_.lower_bound(effective);
+            int dropped = 0;
+            for (auto it = frames_.begin(); it != keep; ++it) ++dropped;
+            stale_ += static_cast<uint64_t>(dropped);
+            frames_.erase(frames_.begin(), keep);
+            hold_from_ = next_tick_;
+            hold_until_ = effective;
+            next_tick_ = effective;
+            return dropped;
         }
 
     private:
@@ -216,6 +273,8 @@ namespace bmmo::session {
         bool have_taken_ = false;
         bool have_sub_ = false;       // a frame has arrived (fresh or stale)
         bool any_ = false;            // a tick was taken fresh
+        // The last reset_hold() range [hold_from_, hold_until_); empty until one.
+        uint32_t hold_from_ = 0, hold_until_ = 0;
         uint64_t received_ = 0, stored_ = 0, stale_ = 0;
     };
 

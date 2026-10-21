@@ -370,7 +370,7 @@ a "lost" classification. The meter is `lateness_meter` (new,
 | quantity | value |
 |---|---|
 | reference | `r10_p`, `r01_p` = q10 and q01 of the samples over the player's first four windows of 66 samples after an assignment, taken only from windows where at most 10 % of samples fall after the deadline. Afterwards it is **frozen**: it is never re-measured downward, it moves only by an acked delta (`r += applied`), and it is measured anew only after the next assignment. |
-| reference that cannot be set | after 8 windows without a qualifying one (a member structurally late from its start), `r10_p` and `r01_p` are set to the median of the other members' references, and the raise rule below applies against them |
+| reference that cannot be set | after 8 windows without a qualifying one (a member structurally late from its start), `r10_p` and `r01_p` are set to the median of the other members' measured references, and the raise rule below applies against them. With no measured peer by window 12 (a solo session, or every peer on the fallback; added in step 10, behind `physics.lead_adjust`) it takes the deadline reference: `r01 = 1` (patience exactly the deadline, a miss is a substituted frame) and `r10 = 3` |
 | miss | a sample below `r01_p - 1`: that frame arrived after the player's patience (§2.6) |
 | raise | in the trailing 66 samples **more than half are misses**, at every stepped tick for **132 consecutive ticks**. Then `k = ceil(r10_p - q10)` over those 66, at least 2. |
 | lower | `q05 > r10_p + 6` over the trailing 66 samples, at every tick for 660 consecutive ticks; `k = -floor(q05 - r10_p - 1)`, and the player's total offset never goes below 0 |
@@ -425,6 +425,39 @@ reliable. The server keeps `lead_offset[player] += applied`.
 
 So a client that cannot or will not apply the raise costs the server nothing
 after one decision, and the others nothing at all.
+
+**As built (step 10).** `seq` is u32: it is the meter's decision id, unique
+per player for the session's life, so it never wraps and the ack names the
+decision directly. The Sector margin is measured on the server: when it takes
+another member's Sector event it relays it at once, so the event reaches p at
+about p's `c_est` (§2.3), and the margin is the stamp less that; the smallest of
+the last 8 binds, `k <= margin - 1`, and with nothing measured there is no
+Sector cap. Only an event that reached the server on time (stamp at or after
+the server's next tick) is a sample: a later one is late for every member
+whatever their leads, the sender's problem, and would otherwise cap everyone
+else's raises at nothing. An acked delta shifts p's samples by `-applied`
+(its clock moved, the same events now land that much closer), so a second
+raise is checked against the margin the first left. When the total cap binds,
+the capped raise is acked like any other and then no further raise is taken
+this assignment, until an acked lower takes the player below the cap (one
+capped to nothing is declined and latches the same way). When the Sector
+margin binds nothing latches: the margin moves with the path and the others'
+crossings, so the next raise is capped anew, and one capped to nothing is
+deferred, the meter taking no decision for 660 ticks. The ack's `applied` is
+bounded by the delta sent (between 0 and k, on k's side), on the server and
+in the meter: the offset is what a resync anchors at, and it must not be
+the client's to set. The per-player path (the late join's uncapped lead,
+from the current round trip and not the peak, and the resync at `L_eff`)
+needs `physics.lead_adjust` AND the client's `CAP_LEAD`: a client that cannot
+apply a lead cannot grow its reach either (steps 12, 15), so it keeps the
+capped leads the 48-tick reach was sized for, and the flag off, or a session
+of clients without `CAP_LEAD`, is the step-9 server exactly. A resync that
+lands while a raise's range [N, E) is still ahead cuts the hold back to the
+new base (or the first untaken tick): the client on the new base dropped the
+SessionLead by its epoch, and its real frames for [base, E) must count.
+Without patience, only a `reset_hold` range counts as settled in the step
+test (a resync's re-anchored cursor does not), behind the same pacing floor
+as §2.6.
 
 ### 2.3 The server's reset of that player's input buffer
 
@@ -523,7 +556,7 @@ reliable copy stands behind them.
 |---|---|---|
 | start base, `session_start_tick_base` (late_tick.hpp:90-94) | the capped `late_tick_lead_ticks`, clamped to `44 - input_delay` | **unchanged.** The start base and the A0 baseline do not move. |
 | first late join | `late_tick_lead_ticks(D, ping_peak)`, round trip capped at 12, lead at 34 (:40-41, 50-54) | a new `late_join_lead_ticks(D, rtt_ms) = D + ceil(rtt) + 2`, capped only at a sanity bound of 80. The joiner's frames then arrive on time from its first tick. |
-| resync | the same capped formula from `ping_peak` (server.cpp:1098-1101) | re-anchor at `L_eff_p` = the lead of the player's last assignment + `lead_offset[p]`, capped at 80. That is the lead measured to work, in the same frame of reference the offset was measured in. |
+| resync | the same capped formula from `ping_peak` (server.cpp:1098-1101) | re-anchor at `L_eff_p` = the lead of the player's first assignment (the start base, or the late join's lead) + `lead_offset[p]`, capped at 80. That is the lead measured to work, in the same frame of reference the offset was measured in. (As built, step 10: "first", not "last" - a resync's own lead is already `L_eff`, so adding the offset to it would count the offset twice. Only for a client that declared `CAP_LEAD`; for a start member that means a resync re-anchors at the start base plus its offset, which is clamped to `44 - D`, instead of the 34-capped late-tick lead it got before.) |
 | `max_resim_ticks` 48, history 96 (rollback.hpp:317-318) | one reach for everyone | per client: `max_resim = clamp(p99 relay lag over the last 4 windows + 8, 48, 120)`. It starts from `L_assigned + ceil(rtt/2) + 8`. History becomes 128 once `max_resim > 48`. The deeper re-simulation is that player's CPU. |
 | pacer 33 (session_client.cpp:1573; fixed_tick.hpp:50) | rebase means resync | `+ |slew|` |
 | `kRelayRing` 128, `own_inputs_` 128, `sent_inputs_` 256 (`kSentInputRing`), retail `kInputRing` | | Sufficient up to a reach of 120. Stated, not changed, except the sent ring: a held reference reaches `reach + 94` ticks back (§1.1). |

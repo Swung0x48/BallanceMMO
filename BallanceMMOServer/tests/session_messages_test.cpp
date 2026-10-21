@@ -204,6 +204,34 @@ TEST(SessionReadyMsg, SerializeDeserializeRoundTrip) {
     EXPECT_EQ("collision-overhaul-m3", parsed.build_id);
 }
 
+TEST(SessionReadyMsg, CarriesTheCapsFromProtocol8) {
+    bmmo::session_ready_msg msg{};
+    msg.session = 3;
+    msg.caps = bmmo::session::CAP_LEAD;
+    msg.build_id = "b";
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
+    EXPECT_EQ(bmmo::session::CAP_LEAD, parsed.caps);
+}
+
+// A protocol 7 client sends no caps: its message still parses (caps 0), so
+// the server can say which protocol it runs instead of dropping it.
+TEST(SessionReadyMsg, AnOlderProtocolParsesWithoutCaps) {
+    bmmo::session_ready_msg msg{};
+    msg.session = 3;
+    msg.protocol = 7;
+    msg.caps = bmmo::session::CAP_LEAD;
+    msg.build_id = "b";
+    ASSERT_TRUE(msg.serialize());
+    std::string bytes = stream_payload(msg.raw);
+    bytes.resize(bytes.size() - sizeof(uint32_t));   // what a protocol 7 build wrote
+    bmmo::session_ready_msg parsed{};
+    parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    EXPECT_EQ(7u, parsed.protocol);
+    EXPECT_EQ(0u, parsed.caps);
+}
+
 TEST(SessionReadyMsg, DeserializeRejectsEveryTruncation) {
     bmmo::session_ready_msg msg{};
     msg.session = 3;
@@ -212,6 +240,100 @@ TEST(SessionReadyMsg, DeserializeRejectsEveryTruncation) {
     msg.physics_sha256 = "abc123";
     msg.build_id = "beta18";
     expect_rejects_every_truncation(msg);
+}
+
+// ---------------------------------------------------------------------
+// session_lead_msg / session_lead_ack_msg (late-player design 2.2)
+// ---------------------------------------------------------------------
+
+namespace {
+    bmmo::session_lead_msg make_lead() {
+        bmmo::session_lead_msg msg{};
+        msg.session = 4;
+        msg.player = 77;
+        msg.seq = 3;
+        msg.delta = 12;
+        msg.held_from = 1000;
+        msg.effective = 1046;
+        msg.held.keys = bmmo::session::KEY_LEAF_2;
+        msg.held.cam_right[0] = 0.5f;
+        msg.held.cam_up[1] = -1.f;
+        msg.held.cam_dir[2] = 0.25f;
+        msg.held.ball_type = 2;
+        msg.held.flags = bmmo::session::INPUT_FLAG_PHYSICALIZED;
+        msg.held_source = 994;
+        msg.epoch = 640;
+        return msg;
+    }
+}
+
+TEST(SessionLeadMsg, SerializeDeserializeRoundTrip) {
+    auto msg = make_lead();
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(4u, parsed.session);
+    EXPECT_EQ(77u, parsed.player);
+    EXPECT_EQ(3u, parsed.seq);
+    EXPECT_EQ(12, parsed.delta);
+    EXPECT_EQ(1000u, parsed.held_from);
+    EXPECT_EQ(1046u, parsed.effective);
+    EXPECT_EQ(bmmo::session::KEY_LEAF_2, parsed.held.keys);
+    EXPECT_EQ(0.5f, parsed.held.cam_right[0]);
+    EXPECT_EQ(-1.f, parsed.held.cam_up[1]);
+    EXPECT_EQ(0.25f, parsed.held.cam_dir[2]);
+    EXPECT_EQ(2, parsed.held.ball_type);
+    EXPECT_EQ(bmmo::session::INPUT_FLAG_PHYSICALIZED, parsed.held.flags);
+    EXPECT_EQ(994u, parsed.held_source);
+    EXPECT_EQ(640u, parsed.epoch);
+}
+
+TEST(SessionLeadMsg, ALowerCarriesNoRange) {
+    bmmo::session_lead_msg msg{};
+    msg.session = 4;
+    msg.player = 1;
+    msg.seq = 9;
+    msg.delta = -5;
+    msg.effective = 2000;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(-5, parsed.delta);
+    EXPECT_EQ(0u, parsed.held_from);
+    EXPECT_EQ(2000u, parsed.effective);
+    EXPECT_EQ(bmmo::session::INPUT_SOURCE_DEFAULT, parsed.held_source);
+}
+
+TEST(SessionLeadMsg, DeserializeRejectsEveryTruncationAndBadFields) {
+    auto msg = make_lead();
+    expect_rejects_every_truncation(msg);
+    const auto parses = [](bmmo::session_lead_msg& m) {
+        EXPECT_TRUE(m.serialize());
+        bmmo::session_lead_msg parsed{};
+        parsed.raw.write(stream_payload(m.raw).data(), static_cast<std::streamsize>(m.size()));
+        return parsed.deserialize();
+    };
+    auto reversed = make_lead();
+    reversed.effective = reversed.held_from;   // an empty range
+    EXPECT_FALSE(parses(reversed));
+    auto nothing = make_lead();
+    nothing.delta = 0;
+    EXPECT_FALSE(parses(nothing));
+    auto unnamed = make_lead();
+    unnamed.seq = 0;
+    EXPECT_FALSE(parses(unnamed));
+}
+
+TEST(SessionLeadAckMsg, RoundTripAndTruncation) {
+    bmmo::session_lead_ack_msg msg{};
+    msg.session = 4;
+    msg.seq = 3;
+    msg.applied = -7;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(4u, parsed.session);
+    EXPECT_EQ(3u, parsed.seq);
+    EXPECT_EQ(-7, parsed.applied);
+    bmmo::session_lead_ack_msg again{};
+    again.session = 4;
+    again.seq = 3;
+    again.applied = 12;
+    expect_rejects_every_truncation(again);
 }
 
 // ---------------------------------------------------------------------

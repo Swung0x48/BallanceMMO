@@ -4,7 +4,7 @@
 
 ```
 RoomRequest, RoomState, RoomEvent,
-SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput
+SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput, SessionLead, SessionLeadAck
 ```
 
 所有新消息都是 `serializable_message`（显式小端编码，`std::stringstream raw`），读取端必须检查长度、数量上限和枚举范围；字符串编码为 `u16 长度 + UTF-8 字节`，上限见各字段。
@@ -70,7 +70,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 影子球会话不需要下面的消息：`SessionStarting` 后各客户端继续走旧逻辑。物理会话的实施设计见 `docs/collision-overhaul-design.md` 第 8 节；本节只定义线上格式。新 opcode 顺序（追加在 `RoomEvent` 之后）：
 
 ```
-SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput
+SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput, SessionLead, SessionLeadAck
 ```
 
 ### 2.1 时间线
@@ -104,7 +104,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | spawn_impulse | f32（每次出生 Physicalize 的踢出速度 m/s，0 = 无；写在 seed 之后） |
 | players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度；这是原版复活点本身，每个成员都相同——设计 9.10 去掉了出生环偏移） |
 
-`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`，每个 core 各自哈希后无序求和，与刚体列表顺序无关；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64；protocol u32（客户端的 `session::PHYSICS_PROTOCOL_VERSION`，当前为 7）紧跟 first_tick 之后，是必填字段，缺了整条消息不解析。服务端先比 protocol：不等于自己的就 `SessionEnd` 并写明两边版本——新旧构建不得同场。再把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。同时比 `build_id` 的引擎半部（`ballanced-<rev>`）：不同则同样结束会话，任一边为 `unknown` 时不比。`session_start_msg` 在 spawn_impulse 之后同样带服务端的 protocol u32（必填）：客户端不等则拒绝开始会话并提示更新，解析不出来（旧服务端）也提示。
+`session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`，每个 core 各自哈希后无序求和，与刚体列表顺序无关；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64；protocol u32（客户端的 `session::PHYSICS_PROTOCOL_VERSION`，当前为 8）紧跟 first_tick 之后，是必填字段，缺了整条消息不解析；caps u32（协议 8 起，放在 build_id 之后，`session::CAP_*`：bit0 `CAP_LEAD` = 客户端会执行 `SessionLead` 并回 `SessionLeadAck`）——protocol < 8 的消息不带它，照样解析（caps 0），好让服务端说出版本不符。服务端先比 protocol：不等于自己的就 `SessionEnd` 并写明两边版本——新旧构建不得同场。再把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。同时比 `build_id` 的引擎半部（`ballanced-<rev>`）：不同则同样结束会话，任一边为 `unknown` 时不比。`session_start_msg` 在 spawn_impulse 之后同样带服务端的 protocol u32（必填）：客户端不等则拒绝开始会话并提示更新，解析不出来（旧服务端）也提示。
 
 `session_input_msg`（client → server，unreliable no-delay）：session u32、first_tick u32、count u8（≤ 8，从 first_tick 起连续 count 个 tick，最新的在最后），每项：keys u8（bit0 叶子 0 … bit3 叶子 3，叶子编号按 `Ball Navigation` 图内 `SetPhysicsForce` 的子块顺序；bit4 Shift、bit5 Space 仅作记录）、cam_right f32×3、cam_up f32×3、cam_dir f32×3（`Cam_OrientRef` 世界矩阵的三条基向量）、ball_type u8、flags u8（bit0 physicalized、bit1 paused、bit2 nav_active——客户端 BallNav activate/deactivate 的当前状态，服务端据此复现 Key Event 的 On/Off；bit1 仅作记录，会话期间暂停不再停摆世界，见设计 9.2）。
 
@@ -123,6 +123,8 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 `session_assign_msg`（server → client，reliable；会话开始时在场的成员在全员 `session_ready_msg` 到齐后**一起**收到 `first_tick = 会话起始基数 = input_delay + min(ceil(最差成员 RTT_ms × 66 / 1000), 12) + 2`，再夹到 `44 − input_delay`（44 = `rollback.hpp` 的 `max_resim_ticks` 48 减 4 tick 余量，下限 1，`sim/late_tick.hpp` 的 `session_start_tick_base`；起始滞后是基数加 `input_delay`，所以基数必须让这个和留在回滚窗口内），迟到加入者与重同步者即时收到 `first_tick = 服务端当前 tick + 同一前导量`；`session_resync_msg{session, last_full_tick}`（client → server，reliable）由客户端在节拍原点重设、连续 3 次硬置或连续 30 个快照对不上历史时发出，服务端按迟到加入处理：重新分配编号、重发各成员最近的 Physicalize、强制一次全量快照；客户端收到新分配后清空历史，用下一个全量快照一次写入全部刚体）：session u32、first_tick u32——客户端锚点帧对应的服务端 tick 编号（服务端世界自己的编号仍从 0 开始，这个基数只是客户端看到的号）：会话开始时在场的成员为会话起始基数（世界此时还没 tick 过，“当前 tick”项因此为 0），迟到加入者为服务端收到 Ready 时的当前 tick 加同一个前导量。给的是前导量而不是服务端当前 tick，是因为这条可靠消息要过半个 RTT 才到：按当前 tick 分配会让客户端落后半个 RTT，输入赶不上调度截止时刻（首次联调 1380/1380 全 unmatched 正是如此）。客户端收到前不发送输入（缓存），收到后按 `first_tick + 锚点后经过的帧数` 编号，旧编号的缓存帧不再补发、直接丢弃。会话开始也用同一个前导量，是因为锚点是各自关卡加载完成的时刻，成员之间可以相差数秒；不重新编号的成员会一直按自己的锚点编号跑在服务端前面，快照与本地历史的差值（编号偏移 + input_delay + 单程）随加载差增长，超过 `rollback.hpp` 的 `max_resim_ticks = 48` 就变成 too_far → 重同步抖动。
 
 `session_remote_input_msg`（server → client，unreliable no-delay，每模拟一个 tick 发一条，M4 设计 9.1；协议 5 起带冗余窗口，`session/input_relay.hpp`；协议 7 起带收件人自己的被替换帧，见下表）：session u32、tick u32（这条里最新的 tick）、count u8、acked u32、held_total u32、epoch u32（协议 7）、count × {player u32、nframes u8（1..`MAX_RELAY_FRAMES` = 32，对应 tick−nframes+1 .. tick，旧的在前）、nframes × 帧}；每帧：header u8（bit0 `FRAME_CAMERA`：后面跟 cam_right/cam_up/cam_dir f32×3）、keys u8、ball_type u8、flags u8、[相机 36 B]。每个成员的第一帧必带相机（读到不带的即拒收），之后的帧与前一帧的三个向量逐位相同时省掉，读方从前一帧复制——每条报文自成一体，不依赖别的报文到达；相机不动时一帧 4 B。一条报文装不超过 1100 B（一个包）的整项，装不下就分成几条同 tick 的报文（GNS 对跨包的 unreliable 报文丢一片即整条丢，超过 16.5 KB 的会悄悄改成 reliable 发）；一项单独放不进一个包时丢掉最旧的帧。内容是服务端在最近 `relay_window`（服务端配置，默认 8，钳到 1..16：input_delay + 一个单程 + 窗口要留在回滚可达的 48 tick 以内）个 tick **实际采用**的每个其他成员的输入帧（新鲜的或沿用上一 tick 的；只带最新 tick 在场的成员，取它连续在场的那一段），去掉了收件成员自己。客户端按 tick 重组（`relay_seen` 保证同一 (player, tick) 只记一次账、只校正一次；`relay_store` 进镜像的输入环；镜像还没建的玩家进 `pending_relay`，Physicalize 时并入），用它驱动远端球的本地导航复制（桥接 API v3 `navigation_*`），快照只做校正；一帧只有 `relay_window` 条报文连续丢失才真正丢；这样的洞（前后都有帧）重放时用最近的前一帧，还没到的尾部沿用记录的预测；到得太晚（超过 48 tick 或超出历史）的帧不再回滚，计入状态行的 `relay=.../late`，`lag=max/p99` 是首达帧的滞后。零售 mod 做同样的重组、去重、暂存、记账和预测推进，但校正仍只来自快照（无头客户端的输入校正回滚尚未移植）。2026-10-19 到 10-21 这条流曾改成 reliable 有序：一次丢包会把后面所有帧压住，10% 丢包下校正到达时已超出回滚可达范围（48 tick），只能写位姿，世界散到 120-150 m，故改回。
+
+`session_lead_msg`（server → client，reliable，之后每 40 ms 一条 unreliable 副本共 3 条，收到 ack 即停；协议 8，迟到玩家设计 2.2-2.3，服务端开关 `physics.lead_adjust`，只发给 SessionReady 声明了 `CAP_LEAD` 的客户端）：session u32、player u32（收件人）、seq u32（服务端的决策 id，每个玩家整个会话内唯一，ack 认它，客户端也用它去重）、delta i16（tick，正 = 跑得更靠前）、held_from u32（N：服务端从这个 tick 起重置了该玩家的输入缓冲，0 = 无区间）、effective u32（E：从这个 tick 起服务端按新节奏收它的帧）、held 帧（keys u8、cam_right/cam_up/cam_dir f32×3、ball_type u8、flags u8：[N, E) 每个 tick 都用它，决策时冻结）、held_source u32（held 原本是哪个 tick 的帧，`INPUT_SOURCE_DEFAULT` = 默认帧）、epoch u32（决策时该玩家分配的基数；客户端基数更新则丢弃）。held_from 非 0 时必须小于 effective，delta 与 seq 不得为 0。降低领先量不动区间（held_from 0，effective = N）。`session_lead_ack_msg`（client → server，reliable）：session u32、seq u32、applied i16（客户端实际执行的 tick 数）；服务端只认尚未确认的那一条，applied 先截到 0 与该条 delta 之间（同号，不超过发出的量），再 `lead_offset += applied`（不低于 0）；声明了 `CAP_LEAD` 的客户端重同步时按 L_eff = 首次分配的前导量 + lead_offset（≤ 80）重新编号。
 
 **协议 7（late-player 设计 1.1-1.2）：被替换的帧回给它的主人。** 服务端在某 tick 没有某成员的新鲜帧时，用该成员**最新到达**的帧（tick 不超过已模拟到的位置，新鲜或迟到的都算；什么都没到过时为默认帧）代替（`input_buffer::take` 同时给出这帧的来源 tick），照常应用、记入 journal（flag 0）、转发给其他成员。以前只有其他成员知道这件事，迟到的那个客户端自己永远不知道；现在每条报文都告诉收件人它自己哪些 tick 被替换了：
 

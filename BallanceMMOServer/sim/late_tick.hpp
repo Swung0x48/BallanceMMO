@@ -36,6 +36,8 @@
 #include <algorithm>
 #include <cstdint>
 
+#include <session/lead.hpp>
+
 namespace bmmo::sim {
     constexpr uint32_t kLateTickRttCapTicks = 12;    // ~180 ms round trip
     constexpr uint32_t kLateTickLeadCapTicks = 34;
@@ -46,6 +48,44 @@ namespace bmmo::sim {
     // for the ordinary corrections the member makes on top of the start.
     constexpr uint32_t kStartBaseLagMarginTicks = 4;
     constexpr uint32_t kStartBaseLagBudgetTicks = 48 - kStartBaseLagMarginTicks;   // 44
+
+    // Late-player design 2.5: with physics.lead_adjust on, a player's lead
+    // is its own, and the caps above stay with the start base only.  A
+    // client's reach grows with its measured relay lag instead (plan step
+    // 12), so the per-player path is bounded by a sanity cap and nothing
+    // else.
+    constexpr uint32_t kLeadSanityCapTicks = bmmo::session::kLeadCapTicks;
+
+    // The first lead of a late joiner with lead_adjust on: the input delay,
+    // the whole round trip the reliable SessionAssign and the first frame
+    // spend in flight, and the margin - uncapped but for the sanity bound,
+    // so the joiner's frames arrive on time from its first tick instead of
+    // being substituted until the meter raises it.
+    inline uint32_t late_join_lead_ticks(uint32_t input_delay, uint32_t rtt_ms) {
+        const uint64_t rtt_ticks = (static_cast<uint64_t>(rtt_ms) * 66 + 999) / 1000;
+        const uint64_t lead = std::max<uint64_t>(1, input_delay) + rtt_ticks + 2;
+        return static_cast<uint32_t>(std::min<uint64_t>(lead, kLeadSanityCapTicks));
+    }
+
+    // L_eff (design 2.5, 2.8): the lead of the player's first assignment
+    // plus the offset its acknowledged SessionLeads added, which is the lead
+    // measured to work, in the frame of reference the offset was measured
+    // in.  A resync re-anchors there with lead_adjust on.  At least 1 and at
+    // most the sanity cap.
+    inline uint32_t effective_lead_ticks(uint32_t assigned_lead, int lead_offset) {
+        const int64_t lead = static_cast<int64_t>(assigned_lead) + lead_offset;
+        return static_cast<uint32_t>(std::clamp<int64_t>(lead, 1, kLeadSanityCapTicks));
+    }
+
+    // Whether a player takes the per-player path above: physics.lead_adjust
+    // on AND its client declared CAP_LEAD.  A client that cannot apply a
+    // SessionLead also cannot grow its reach with its lead (plan steps 12,
+    // 15), so it keeps the capped leads - the 34 cap exists to keep its relay
+    // lag inside the fixed reach - and with the flag on it is anchored
+    // exactly as with the flag off.
+    inline bool uses_player_lead(bool lead_adjust, uint32_t caps) {
+        return lead_adjust && (caps & bmmo::session::CAP_LEAD) != 0;
+    }
 
     inline uint32_t late_tick_lead_ticks(uint32_t input_delay, uint32_t rtt_ms) {
         const uint32_t rtt_ticks = std::min<uint32_t>((rtt_ms * 66 + 999) / 1000, kLateTickRttCapTicks);

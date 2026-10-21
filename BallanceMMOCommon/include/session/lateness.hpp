@@ -149,6 +149,15 @@ namespace bmmo::session {
         uint32_t id = 0;        // what acknowledge() names; unique for the meter's life, across resets
     };
 
+    // What of a decision of `k` ticks an ack's `applied` may move the offset
+    // by: between 0 and k, on k's side of 0.  The ack is the client's word,
+    // and an offset a client could set at will would be the one piece of
+    // lead state it controls (a resync anchors at it, design 2.8).
+    inline int lateness_bound_applied(int applied, int k) {
+        const int lo = k < 0 ? k : 0, hi = k > 0 ? k : 0;
+        return applied < lo ? lo : (applied > hi ? hi : applied);
+    }
+
     class lateness_meter {
     public:
         static constexpr int kWindow = 66;                  // samples per window, and the trailing window
@@ -163,6 +172,24 @@ namespace bmmo::session {
         static constexpr uint32_t kLowerTicks = 660;
         static constexpr uint32_t kCooldownTicks = 132;     // plus |k| * 2 after E
         static constexpr int kMaxUnrestoredRaises = 2;
+        // A member with no reference after this many windows, while no other
+        // member has a measured one either (a solo session, or every peer on
+        // the fallback too), takes the deadline reference below: the
+        // fallback has nothing to take a median of, and without a reference
+        // a structurally late member could never be raised.  Four windows
+        // after the fallback became possible, so a peer still measuring at
+        // the eighth gets the time to finish and be the median instead.
+        static constexpr int kReferenceSelfWindows = kReferenceMaxWindows + 4;
+        // The deadline reference.  r01 such that patience is exactly the
+        // deadline (r01 - kMissMargin = 0): a miss is a frame after the
+        // deadline, i.e. one the server substitutes whatever patience does,
+        // so the raise rule holds only while most of its frames are lost to
+        // the session.  r10 two ticks above it: a raise puts the trailing q10
+        // two ticks before patience, a margin the size of a typical measured
+        // spread (r10 - r01) on a jittered link.  Nothing is measured, so
+        // nothing is assumed about the player beyond "on time".
+        static constexpr double kDeadlineReferenceR01 = kMissMargin;
+        static constexpr double kDeadlineReferenceR10 = kMissMargin + 2.0;
 
         // A new assignment (session start, late join, resync) with the first
         // tick the player was assigned: samples, windows, reference, streaks
@@ -173,6 +200,8 @@ namespace bmmo::session {
         void reset(uint32_t base) {
             const int offset = offset_;
             const uint32_t sequence = sequence_;
+            // Everything else starts over, the cap included: the next raise
+            // is measured and capped anew against the lead the player has.
             *this = lateness_meter{};
             offset_ = offset;
             sequence_ = sequence;
@@ -240,7 +269,10 @@ namespace bmmo::session {
 
             if (pending_ || tick < cooldown_until_) return none;
 
-            if (raise_streak_ >= kRaiseTicks) {
+            // At the total lead cap (cap_pending with latch / decline): no
+            // further raise this assignment (design 2.2), until an acked
+            // lower takes the player below it; lowering stays possible.
+            if (raise_streak_ >= kRaiseTicks && !at_cap_) {
                 if (unrestored_raises_ >= kMaxUnrestoredRaises) {
                     given_up_ = true;
                     lateness_decision d;
@@ -273,9 +305,18 @@ namespace bmmo::session {
         // the reference by the delta would read the restored arrivals as
         // misses and raise again).  The cooldown is the decided k's (design
         // 2.1: E + |k|*2 + 132), whatever part of it was applied.
+        //
+        // `applied` is the client's word, so it is bounded by what was sent:
+        // between 0 and the pending k, whatever its sign (an ack can apply
+        // part of a decision, never more, never the other way).  An acked
+        // lower ends the cap latch: the player is below the cap again.
         bool acknowledge(uint32_t id, int applied, uint32_t effective) {
             if (!pending_ || id != pending_id_) return false;
             const bool was_raise = pending_action_ == lateness_action::raise;
+            if (was_raise && pending_capped_) at_cap_ = true;
+            applied = lateness_bound_applied(applied, pending_k_);
+            if (!was_raise && applied < 0) at_cap_ = false;
+            pending_capped_ = false;
             pending_ = false;
             pending_action_ = lateness_action::none;
             offset_ += applied;
@@ -294,6 +335,43 @@ namespace bmmo::session {
             return true;
         }
 
+        // The pending raise `id` was cut down to `k` by a cap: the cooldown is
+        // that k's.  With `latch` (the total lead cap), once it is
+        // acknowledged the meter takes no further raise until the next
+        // assignment (design 2.2: a capped raise is applied as far as the cap
+        // allows, and no other decision is taken at the cap).  Without it
+        // (the Sector margin until plan step 14, which moves with the path
+        // and with the other members' crossings) the next raise is decided
+        // as usual and capped anew.  False when `id` is not pending.
+        bool cap_pending(uint32_t id, int k, bool latch = true) {
+            if (!pending_ || id != pending_id_) return false;
+            pending_k_ = k;
+            pending_capped_ = latch;
+            return true;
+        }
+
+        // The pending raise `id` cannot be applied at all (the total cap
+        // left nothing of it): withdrawn, as if never taken, and no further
+        // raise this assignment.  It is not a raise that failed to restore
+        // the arrivals, so it counts nothing toward giving up.
+        bool decline(uint32_t id) {
+            if (!withdraw(id)) return false;
+            at_cap_ = true;
+            return true;
+        }
+
+        // The pending raise `id` cannot be applied NOW (the Sector margin
+        // left nothing of it): withdrawn like decline(), but nothing is
+        // latched - the meter takes no decision before `until_tick`, and
+        // after it decides as usual, so a margin that has grown back (or
+        // plan step 14) lets the player be raised.  Counts nothing toward
+        // giving up either.
+        bool defer(uint32_t id, uint32_t until_tick) {
+            if (!withdraw(id)) return false;
+            if (until_tick > cooldown_until_) cooldown_until_ = until_tick;
+            return true;
+        }
+
         // The player's total offset as the session keeps it (design 2.8's
         // lead_offset), for a meter that did not see the adjustments that
         // made it (a player re-created, a test).  Never below 0.
@@ -304,6 +382,22 @@ namespace bmmo::session {
         void adopt_reference(double r10, double r01) {
             if (has_reference_) return;
             set_reference(r10, r01, false);
+        }
+
+        // The deadline reference (kDeadlineReference*), for a member that
+        // wants_deadline_reference(): no peer has a measured reference to
+        // take a median of.
+        bool wants_deadline_reference() const { return !has_reference_ && windows_ >= kReferenceSelfWindows; }
+        void adopt_deadline_reference() {
+            if (has_reference_) return;
+            set_reference(kDeadlineReferenceR10, kDeadlineReferenceR01, false);
+            deadline_reference_ = true;
+        }
+        // "measured", "fallback" (the peers' median), "deadline", or "none".
+        const char* reference_source() const {
+            if (!has_reference_) return "none";
+            if (measured_) return "measured";
+            return deadline_reference_ ? "deadline" : "fallback";
         }
 
         // --- what patience (design 2.6) and the decision (2.3) read ---
@@ -353,6 +447,7 @@ namespace bmmo::session {
             return samples_at_last_tick_ > 0 && tick - last_sample_tick_ <= kFreshTicks;
         }
         uint32_t pending_id() const { return pending_ ? pending_id_ : 0; }
+        bool at_cap() const { return at_cap_; }
         uint32_t lower_streak() const { return lower_streak_; }
         int windows() const { return windows_; }
         int qualifying_windows() const { return qualifying_; }
@@ -376,6 +471,16 @@ namespace bmmo::session {
             if (qualifying_ >= kReferenceWindows || (windows_ >= kReferenceMaxWindows && qualifying_ > 0))
                 set_reference(lateness_quantile(reference_samples_, 0.10),
                               lateness_quantile(reference_samples_, 0.01), true);
+        }
+
+        bool withdraw(uint32_t id) {
+            if (!pending_ || id != pending_id_) return false;
+            pending_ = false;
+            pending_action_ = lateness_action::none;
+            pending_k_ = 0;
+            pending_capped_ = false;
+            raise_streak_ = 0;
+            return true;
         }
 
         void set_reference(double r10, double r01, bool measured) {
@@ -419,7 +524,7 @@ namespace bmmo::session {
         std::vector<double> window_;              // the reference window being filled
         std::vector<double> reference_samples_;   // the qualifying windows so far
         int windows_ = 0, qualifying_ = 0;
-        bool has_reference_ = false, measured_ = false;
+        bool has_reference_ = false, measured_ = false, deadline_reference_ = false;
         double r10_ = 0.0, r01_ = 0.0;
 
         uint32_t raise_streak_ = 0, lower_streak_ = 0;
@@ -432,6 +537,8 @@ namespace bmmo::session {
         bool pending_ = false;
         lateness_action pending_action_ = lateness_action::none;
         int pending_k_ = 0;
+        bool pending_capped_ = false;         // cap_pending() cut the pending raise down
+        bool at_cap_ = false;                 // no further raise this assignment
         uint32_t cooldown_until_ = 0;
         bool judge_restore_ = false;
         int unrestored_raises_ = 0;
@@ -439,6 +546,28 @@ namespace bmmo::session {
         int offset_ = 0;
         int decisions_ = 0;
     };
+
+    // A member that cannot measure its own reference (no qualifying window
+    // in 8, design 2.1) takes the median of the references its peers
+    // MEASURED - `peer_r10s` / `peer_r01s`, the peers' measured references
+    // only, never adopted ones, so a fallback never feeds another.  With no
+    // such peer by kReferenceSelfWindows (a solo session, or every peer on
+    // the fallback too: plan step 7 left these with no reference at all, so
+    // a member structurally late from its start was never raised), it takes
+    // the deadline reference.  Returns what it adopted: "fallback",
+    // "deadline", or nullptr for nothing (it is measuring, has one, or
+    // waits for a peer).
+    inline const char* lateness_settle_reference(lateness_meter& meter, const std::vector<double>& peer_r10s,
+                                                 const std::vector<double>& peer_r01s) {
+        if (meter.has_reference() || !meter.wants_fallback()) return nullptr;
+        if (!peer_r10s.empty()) {
+            meter.adopt_reference(lateness_median(peer_r10s), lateness_median(peer_r01s));
+            return "fallback";
+        }
+        if (!meter.wants_deadline_reference()) return nullptr;
+        meter.adopt_deadline_reference();
+        return "deadline";
+    }
 
     // ---- Patience (late-player design 2.6) ----------------------------------
     //
@@ -469,6 +598,11 @@ namespace bmmo::session {
         double r01 = 0.0;              // that reference's q01, when has_statistics
         double lead = 0.0;             // set by patience_assign_leads
         bool capped = false;           // lead is the statistics-less cap, not its own
+        // input_buffer::held(T): T lies in a lead reset's frozen range
+        // (design 2.3).  Read by the step test without patience, where it is
+        // the only kind of settled that counts; with patience it is part of
+        // `settled` anyway.
+        bool held = false;
         // Assigned after the session's start (a late joiner, a resync): the
         // statistics-less cap applies to it.  A member measuring since the
         // start waits for the deadline until its own reference is set.
@@ -573,8 +707,16 @@ namespace bmmo::session {
                                                double to_deadline, bool patience) {
         patience_verdict v;
         if (!patience) {
+            // A member whose tick lies in a lead reset's held range has
+            // nothing coming for it (design 2.3: settled() replaces has()
+            // there), behind the same pacing floor as below: only while some
+            // member's real frame is here, so a solo held player still steps
+            // at the deadline.  Without a reset no member is held, and this
+            // is exactly the rule the runner had before patience existed.
+            bool paced = false;
+            for (const auto& m: members) if (m.has) { paced = true; break; }
             bool all = true;
-            for (const auto& m: members) if (!m.has) { all = false; break; }
+            for (const auto& m: members) if (!m.has && !(m.held && paced)) { all = false; break; }
             v.step = all || due;
             return v;
         }

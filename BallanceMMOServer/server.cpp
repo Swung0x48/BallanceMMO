@@ -72,6 +72,7 @@ public:
             std::lock_guard lk(state_mutex_);
             check_start_barriers();
             send_assign_repeats();
+            post_player_rtts();
         }
 #endif
         return had_messages;
@@ -625,6 +626,31 @@ public:
             std::chrono::steady_clock::time_point next_due;
         };
         std::vector<assign_repeat> assign_repeats;
+        // Late-player design 2.2-2.5 (physics.lead_adjust): per member, what
+        // its SessionReady declared, the lead of its first assignment (the
+        // start base, or a late joiner's lead) and the offset its
+        // acknowledged SessionLeads added - L_eff, the lead a resync
+        // re-anchors at, is their sum - and the SessionLead it has not
+        // acknowledged yet.  The offset survives a resync; the outstanding
+        // decision does not (the client drops it by its epoch).
+        struct member_lead {
+            uint32_t caps = 0;
+            uint32_t assigned_lead = 0;
+            int offset = 0;
+            uint32_t outstanding = 0;   // seq of the SessionLead not yet acknowledged; 0 = none
+            int outstanding_k = 0;      // its delta: what an ack may apply at most (lateness_bound_applied)
+        };
+        std::map<HSteamNetConnection, member_lead> leads;
+        // A SessionLead's unreliable copies, one every kAssignRepeatSpacing
+        // after the reliable one, retired by its ack or a newer assignment.
+        struct lead_repeat {
+            HSteamNetConnection to;
+            uint32_t seq;
+            std::string bytes;
+            int remaining;
+            std::chrono::steady_clock::time_point next_due;
+        };
+        std::vector<lead_repeat> lead_repeats;
         // Ticks the server waits for this session's inputs, sized at the start
         // from the worst round trip among the members (session_input_delay).
         // Fixed for the session's life: the scheduler's deadlines are measured
@@ -707,6 +733,7 @@ public:
         rc.full_snapshot_interval = std::max<uint32_t>(1, config_.physics_full_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
         rc.patience = config_.physics_patience;
+        rc.lead_adjust = config_.physics_lead_adjust;
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
         // server was started from before the first world boots.
@@ -722,15 +749,17 @@ public:
                                      const std::vector<bmmo::session::applied_input>& applied) {
             on_session_inputs(session, tick, applied);
         };
+        callbacks.on_lead = [this](const bmmo::sim::lead_notice& notice) { on_session_lead(notice); };
         callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
             std::lock_guard lk(state_mutex_);
             end_physics_session(session, "simulation failed: " + reason);
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, full every %u, journal %s, patience %s).", config_.physics_game_root,
+               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).", config_.physics_game_root,
                config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
-               rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off");
+               rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off",
+               rc.lead_adjust ? "on" : "off");
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -1193,6 +1222,8 @@ public:
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
                                s.assign_repeats.end());
+        retire_lead_repeats(s, c);
+        s.leads.erase(c);
         s.event_repeats.forget(c);
         s.ready.erase(c);
         s.assigned.erase(c);
@@ -1242,6 +1273,119 @@ public:
         return runner_->current_tick(s.id) + bmmo::sim::late_tick_lead_ticks(s.input_delay, rtt_ms);
     }
 
+    // The lead a late joiner is anchored at.  On the per-player path
+    // (physics.lead_adjust on and the joiner declared CAP_LEAD,
+    // uses_player_lead) it is the player's own (late-player design 2.5,
+    // late_join_lead_ticks): the whole CURRENT round trip, capped only at
+    // the 80-tick sanity bound, so its frames arrive on time from its first
+    // tick.  Not the peak: uncapped, one old spike in the lobby would anchor
+    // the joiner at the sanity bound, far past its reach.  The caps of 12
+    // and 34 stay with the start base, and with every other joiner: the
+    // capped late-tick lead from the peak, as before the flag.
+    uint32_t late_join_lead(const physics_session_state& s, HSteamNetConnection c, uint32_t caps) const {
+        if (bmmo::sim::uses_player_lead(config_.physics_lead_adjust, caps))
+            return bmmo::sim::late_join_lead_ticks(s.input_delay, current_rtt_ms(c));
+        const auto it = clients_.find(c);
+        const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
+        return bmmo::sim::late_tick_lead_ticks(s.input_delay, rtt_ms);
+    }
+
+    // The member's current round trip (m_nPing), not ping_peak_ms: E is sized
+    // with it (late-player design 2.3), and the peak only ever grows.
+    uint32_t current_rtt_ms(HSteamNetConnection c) const {
+        SteamNetConnectionRealTimeStatus_t status{};
+        interface_->GetConnectionRealTimeStatus(c, &status, 0, nullptr);
+        return static_cast<uint32_t>(std::max(status.m_nPing, 0));
+    }
+
+    // Once a second, every physics member's current round trip to the
+    // runner (set_player_rtt), with lead_adjust on only: off, the runner
+    // gets no extra commands and wakes exactly when it did before.
+    void post_player_rtts() {
+        if (!runner_ || !config_.physics_lead_adjust) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_rtt_post_) return;
+        next_rtt_post_ = now + std::chrono::seconds(1);
+        for (auto& [id, s]: physics_sessions_)
+            for (const auto& [m, lead]: s.leads)
+                runner_->set_player_rtt(id, m, current_rtt_ms(m));
+    }
+
+    void retire_lead_repeats(physics_session_state& s, HSteamNetConnection c) {
+        s.lead_repeats.erase(std::remove_if(s.lead_repeats.begin(), s.lead_repeats.end(),
+                                            [c](const physics_session_state::lead_repeat& r) { return r.to == c; }),
+                             s.lead_repeats.end());
+    }
+
+    // Simulation thread: a lead decision for a member that declared CAP_LEAD
+    // (late-player design 2.2).  Reliable, then three unreliable copies 40 ms
+    // apart from the main loop (the SessionAssign pattern), retired early by
+    // the ack.  A decision taken under an assignment the member has since
+    // left (a resync crossed it on its way here) is not sent: the client
+    // would drop it by its epoch anyway, and nothing would ever ack it.
+    void on_session_lead(const bmmo::sim::lead_notice& notice) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(notice.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        const auto c = static_cast<HSteamNetConnection>(notice.player);
+        if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
+        const auto n = s.notices.find(c);
+        auto lead = s.leads.find(c);
+        if (lead == s.leads.end() || !(lead->second.caps & bmmo::session::CAP_LEAD)) return;
+        if (n == s.notices.end() || !n->second.assigned || n->second.epoch != notice.epoch) {
+            Printf("Physics session %u: SessionLead %u for %s decided under base %u, now %u: not sent.",
+                   s.id, notice.id, get_client_name(c), notice.epoch,
+                   n == s.notices.end() ? 0u : n->second.epoch);
+            return;
+        }
+        bmmo::session_lead_msg msg;
+        msg.session = s.id;
+        msg.player = notice.player;
+        msg.seq = notice.id;
+        msg.delta = static_cast<int16_t>(std::clamp(notice.k, -32768, 32767));
+        msg.held_from = notice.held_from;
+        msg.effective = notice.effective;
+        msg.held = notice.held;
+        msg.held_source = notice.held_source;
+        msg.epoch = notice.epoch;
+        msg.serialize();
+        send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        retire_lead_repeats(s, c);
+        s.lead_repeats.push_back(physics_session_state::lead_repeat{
+            c, notice.id, msg.raw.str(), kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing});
+        lead->second.outstanding = notice.id;
+        lead->second.outstanding_k = notice.k;
+        Printf("Physics session %u: SessionLead %u to %s: %+d ticks, held [%u, %u), base %u.", s.id, notice.id,
+               get_client_name(c), notice.k, notice.held_from, notice.effective, notice.epoch);
+    }
+
+    // The client applied `applied` ticks of SessionLead `seq`.  Only the
+    // outstanding one counts: lead_offset moves by what was applied, bounded
+    // by the delta sent (lateness_bound_applied: between 0 and k, never the
+    // other way - the ack is the client's word, and the offset is what a
+    // resync anchors at) and never below 0, as the meter's own offset; the
+    // runner's meter takes the ack for its cooldown and the restore
+    // judgement, bounded the same way.
+    void handle_session_lead_ack(HSteamNetConnection c, const bmmo::session_lead_ack_msg& msg) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
+        auto it = physics_sessions_.find(msg.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        auto lead = s.leads.find(c);
+        if (lead == s.leads.end() || lead->second.outstanding == 0 || lead->second.outstanding != msg.seq) return;
+        const int applied = bmmo::session::lateness_bound_applied(msg.applied, lead->second.outstanding_k);
+        lead->second.outstanding = 0;
+        lead->second.offset = std::max(0, lead->second.offset + applied);
+        retire_lead_repeats(s, c);
+        runner_->acknowledge_lead(s.id, c, msg.seq, applied);
+        Printf("Physics session %u: %s applied %+d ticks of SessionLead %u (%+d sent, %+d acked); lead offset %d, L_eff %u.",
+               s.id, get_client_name(c), applied, msg.seq, lead->second.outstanding_k, static_cast<int>(msg.applied),
+               lead->second.offset,
+               bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset));
+    }
+
     // A SessionAssign is what starts a member's frames: one that arrives late
     // starts them that late for good (every frame stale at the server, every
     // relayed frame in the member's future).  Measured at 10 % loss: the
@@ -1265,6 +1409,10 @@ public:
         s.assign_repeats.push_back(physics_session_state::assign_repeat{
             c, first_tick, kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing});
         s.assigned.insert(c);
+        // A SessionLead of the previous base is void (the client drops it by
+        // its epoch), so its copies stop and nothing waits for its ack.
+        retire_lead_repeats(s, c);
+        if (auto lead = s.leads.find(c); lead != s.leads.end()) lead->second.outstanding = 0;
         // Protocol 7: the member's numbering starts at the base, and so do its
         // held notices.  Every datagram names the epoch, so a client still on
         // the previous one takes nothing but the ack from them.
@@ -1321,6 +1469,13 @@ public:
                 send(r->to, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
                 r->next_due = now + kAssignRepeatSpacing;
                 if (--r->remaining <= 0) r = s.assign_repeats.erase(r);
+                else ++r;
+            }
+            for (auto r = s.lead_repeats.begin(); r != s.lead_repeats.end();) {
+                if (now < r->next_due) { ++r; continue; }
+                send(r->to, r->bytes.data(), r->bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                r->next_due = now + kAssignRepeatSpacing;
+                if (--r->remaining <= 0) r = s.lead_repeats.erase(r);
                 else ++r;
             }
         }
@@ -1418,12 +1573,27 @@ public:
         // server's tick itself, so its frames arrive before the deadline for
         // the tick they name and every snapshot refers to a tick it has
         // already recorded.
-        const uint32_t assigned = s.late.count(c) ? late_tick_base(s, c) : s.start_tick_base;
+        // The lead of this first assignment, and what the client can apply
+        // (late-player design 2.2, 2.5): the start base for a start member,
+        // the late join's lead for a joiner.  A resync keeps both and moves
+        // only the base.  A repeated SessionReady keeps the first.
+        const uint32_t join_lead = s.late.count(c) ? late_join_lead(s, c, msg.caps) : 0;
+        const uint32_t assigned = s.late.count(c) ? runner_->current_tick(s.id) + join_lead : s.start_tick_base;
+        if (!s.leads.count(c)) {
+            auto& lead = s.leads[c];
+            lead.caps = msg.caps;
+            lead.assigned_lead = s.late.count(c) ? join_lead : s.start_tick_base;
+            // Flag off, the runner gets no command it did not get before.
+            if (config_.physics_lead_adjust) {
+                runner_->set_player_lead(msg.session, c, msg.caps, lead.assigned_lead);
+                runner_->set_player_rtt(msg.session, c, current_rtt_ms(c));
+            }
+        }
         runner_->player_ready(msg.session, c, assigned);
         if (s.late.count(c)) send_session_assign(s, c, assigned);
         else assign_start_members(s);
-        Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s).", s.id, client_it->second.name,
-                assigned, msg.physics_sha256.substr(0, 12), msg.build_id);
+        Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s; caps %08x).", s.id, client_it->second.name,
+                assigned, msg.physics_sha256.substr(0, 12), msg.build_id, msg.caps);
         if (s.late.count(c)) {
             // catch the late joiner up: everyone's current ball, every sector
             // the union has grown by, then a full snapshot
@@ -1444,7 +1614,17 @@ public:
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         if (!runner_->running(s.id)) return;
-        const uint32_t assigned = late_tick_base(s, c);
+        // On the per-player path (lead_adjust on, the member declared
+        // CAP_LEAD), at L_eff (late-player design 2.5, 2.8): the lead of the
+        // member's first assignment plus its acknowledged offset, the lead
+        // measured to work, instead of the capped late-tick lead from the
+        // peak round trip.  The offset is kept; the runner measures the
+        // reference anew.  Every other member resyncs as before the flag.
+        uint32_t assigned = late_tick_base(s, c);
+        if (const auto lead = s.leads.find(c);
+                lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
+            assigned = runner_->current_tick(s.id)
+                     + bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset);
         // The newest tick whose held frames were counted: the old epoch's
         // held_total stops here, and the ticks after it up to the base are
         // applied held under no numbering the client has (its notices never
@@ -2991,6 +3171,11 @@ protected:
                 handle_session_resync(networking_msg->m_conn, msg);
                 break;
             }
+            case bmmo::SessionLeadAck: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_lead_ack_msg>(networking_msg);
+                handle_session_lead_ack(networking_msg->m_conn, msg);
+                break;
+            }
 #endif
             case bmmo::RealWorldTimestamp:
             case bmmo::SoundData:
@@ -3106,6 +3291,7 @@ protected:
     std::unordered_map<uint32_t, uint32_t> room_session_;               // room -> session
     std::unordered_map<HSteamNetConnection, uint32_t> client_session_;  // member -> session
     uint32_t next_session_id_ = 1;
+    std::chrono::steady_clock::time_point next_rtt_post_{};   // post_player_rtts, once a second
     // Declared last so it is destroyed first: its thread calls back into
     // the members above.
     std::unique_ptr<bmmo::sim::session_runner> runner_;

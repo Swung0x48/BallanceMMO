@@ -18,6 +18,12 @@ namespace bmmo {
         // session::PHYSICS_PROTOCOL_VERSION of the client.  Required: a build
         // that does not send it does not parse here.
         uint32_t protocol = session::PHYSICS_PROTOCOL_VERSION;
+        // session::CAP_* bits (protocol 8).  Last on the wire and required
+        // from protocol 8 on: an older client's message still parses (caps
+        // 0), so the server can tell it which protocol it runs instead of
+        // dropping a message it cannot read.  The server only sends what a
+        // client declared it can apply.
+        uint32_t caps = 0;
 
         session_ready_msg() : serializable_message(bmmo::SessionReady) {}
 
@@ -30,6 +36,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&anchor_surfaces), sizeof(anchor_surfaces));
             message_utils::write_string<uint16_t>(physics_sha256.substr(0, session::MAX_NAME), raw);
             message_utils::write_string<uint16_t>(build_id.substr(0, session::MAX_NAME), raw);
+            raw.write(reinterpret_cast<const char*>(&caps), sizeof(caps));
             return raw.good();
         }
 
@@ -45,6 +52,8 @@ namespace bmmo {
             if (physics_sha256.size() > session::MAX_NAME) return false;
             if (!message_utils::read_string<uint16_t>(raw, build_id)) return false;
             if (build_id.size() > session::MAX_NAME) return false;
+            caps = 0;
+            if (protocol >= 8 && !message_utils::read_variable(raw, &caps)) return false;
             return true;
         }
     };

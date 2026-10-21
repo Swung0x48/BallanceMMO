@@ -30,6 +30,7 @@
 #include <session/input_relay.hpp>
 #include <session/journal.hpp>
 #include <session/lateness.hpp>
+#include <session/lead.hpp>
 #include <session/timeline.hpp>
 
 #include "physics_world.hpp"
@@ -56,6 +57,25 @@ namespace bmmo::sim {
         // before patience existed.  Stays off in deployments until the lead
         // adjustment (plan step 11) can lift a player patience cuts off.
         bool patience = false;
+        // Late-player design 2.2-2.3, plan step 10: a lateness decision for a
+        // client that declared CAP_LEAD becomes a SessionLead (on_lead), a
+        // raise resets that player's input buffer over [N, E), and an
+        // acknowledged delta moves its offset.  Without CAP_LEAD the decision
+        // is logged and nothing is sent.  Off, the runner does exactly what it
+        // did before: the decisions are observed and logged, nothing else.
+        bool lead_adjust = false;
+    };
+
+    // One SessionLead for the server to send (late-player design 2.2).
+    struct lead_notice {
+        uint32_t session = 0;
+        uint32_t player = 0;
+        uint32_t id = 0;                 // the meter's decision id: the message's seq
+        int k = 0;                       // the delta
+        uint32_t held_from = 0, effective = 0;
+        bmmo::session::input_frame held{};
+        uint32_t held_source = bmmo::session::INPUT_SOURCE_DEFAULT;
+        uint32_t epoch = 0;              // the base of the assignment it was decided under
     };
 
     struct session_snapshot {
@@ -102,6 +122,10 @@ namespace bmmo::sim {
         // (late-player design 1.2), whose client is otherwise never told.
         std::function<void(uint32_t session, uint32_t tick,
                            const std::vector<bmmo::session::applied_input>& applied)> on_inputs;
+        // Simulation thread: a lead decision to send (runner_config::lead_adjust,
+        // a client that declared CAP_LEAD).  The server sends it reliably with
+        // repeats until the client acknowledges it (acknowledge_lead).
+        std::function<void(const lead_notice&)> on_lead;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
         std::function<void(const std::string&)> log;
@@ -154,6 +178,20 @@ namespace bmmo::sim {
         // (late-player design 2.1: its reference is measured anew after every
         // assignment).
         void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
+        // Late-player design 2.2, 2.5: what the player's SessionReady
+        // declared (session::CAP_*) and the lead of its first assignment (the
+        // start base, or a late joiner's lead), against which the total lead
+        // cap is measured.  Called once per player, before its first
+        // player_ready; a resync keeps both.
+        void set_player_lead(uint32_t session, uint32_t player, uint32_t caps, uint32_t assigned_lead);
+        // The player's current round trip (the connection's m_nPing, not the
+        // peak), which E is sized with (design 2.3).  The server posts it
+        // once a second, with lead_adjust on only.
+        void set_player_rtt(uint32_t session, uint32_t player, uint32_t rtt_ms);
+        // The player's client acknowledged SessionLead `id`, having applied
+        // `applied` ticks of it.  An ack of anything but the outstanding
+        // decision is ignored.
+        void acknowledge_lead(uint32_t session, uint32_t player, uint32_t id, int applied);
         // `arrival` is when the datagram reached the server, taken on the
         // network thread: the command runs on the simulation thread later, and
         // the lateness meter (design 2.1) measures the path and the client's
@@ -239,6 +277,11 @@ namespace bmmo::sim {
                 uint64_t late_events = 0;
             };
             std::map<uint32_t, patience_entry> patience;
+            // Late-player design 2.2-2.3, behind runner_config::lead_adjust:
+            // each player's caps, assigned lead, round trip, newest uplink
+            // tick, Sector margin and the decision outstanding.  Kept apart
+            // from `lateness`, whose presence patience reads as "assigned".
+            std::map<uint32_t, bmmo::session::lead_player> leads;
             uint64_t early_steps = 0;   // ticks stepped before the deadline with a member unsettled
             // The last such ticks, for the late-event attribution above.
             std::deque<uint32_t> early_ticks;
@@ -281,6 +324,10 @@ namespace bmmo::sim {
         };
         bool waiting_for_lifecycle(session_state& s, uint32_t tick);
         void observe_lateness(session_state& s, uint32_t tick);
+        // What a decision does with lead_adjust on (design 2.3): the plan,
+        // the buffer reset, the S1 lead line, the journal note and on_lead.
+        void apply_lead_decision(session_state& s, uint32_t player, const bmmo::session::lateness_decision& d,
+                                 const std::string& text);
         // Every member's view for patience_step_test at `tick`, in `inputs`
         // order, leads assigned (design 2.6).
         std::vector<bmmo::session::patience_member> patience_members(const session_state& s, uint32_t tick) const;

@@ -38,7 +38,17 @@ namespace bmmo::session {
     //      substituted in the last 32 and the frame applied there (late-player
     //      design 1.1); it goes to every member every tick, header-only when
     //      there is nothing else, a solo player included.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 7;   // 4: SessionStart carries spawn_spacing
+    //   8  SessionReady carries the client's capabilities (`caps`,
+    //      CAP_* below), and the server may send SessionLead to a client that
+    //      declared CAP_LEAD, which answers with SessionLeadAck (late-player
+    //      design 2.2).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 8;   // 4: SessionStart carries spawn_spacing
+
+    // session_ready_msg::caps bits: what the client can do beyond the
+    // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
+    // clock, amends and forces the held range) and acknowledges it; the
+    // server sends SessionLead to nobody else (late-player design 2.2).
+    constexpr uint32_t CAP_LEAD = 1u << 0;
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.

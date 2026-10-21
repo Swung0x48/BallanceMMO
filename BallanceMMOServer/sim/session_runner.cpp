@@ -316,6 +316,7 @@ namespace bmmo::sim {
             s.inputs.erase(player);
             s.lateness.erase(player);
             s.patience.erase(player);
+            s.leads.erase(player);
             s.acked.erase(player);
             s.lifecycle_missing.erase(player);
             s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
@@ -354,7 +355,12 @@ namespace bmmo::sim {
             // frames: reset() keeps everything at or after first_tick and
             // refuses to move the cursor backwards, so the batch the client
             // sent right after it was told the base survives the re-anchor.
-            s.inputs[player].reset(first_tick);
+            // A lead reset's range still ahead (lead_adjust) is cut back to
+            // the new base: the client on it knows nothing of the range.
+            auto& buffer = s.inputs[player];
+            const uint32_t hold_until_before = buffer.hold_until();
+            buffer.reset(first_tick);
+            const uint32_t hold_until_after = buffer.hold_until();
             // Every assignment measures the reference anew (design 2.8); the
             // meter keeps only the player's total offset.
             // Said in the log, so a run whose would-raise count reads 0
@@ -371,10 +377,18 @@ namespace bmmo::sim {
                     text += std::string(" dropped=")
                           + (m.pending_action() == bmmo::session::lateness_action::raise ? "would-raise" : "would-lower")
                           + " k=" + std::to_string(m.pending_k());
+                if (const auto l = s.leads.find(player); l != s.leads.end() && l->second.outstanding)
+                    text += " lead-dropped=" + std::to_string(l->second.id);
+                if (hold_until_after != hold_until_before)
+                    text += " hold-released=[" + std::to_string(hold_until_after) + "," + std::to_string(hold_until_before) + ")";
                 log(text);
             }
             lateness.meter.reset(first_tick);
             lateness.reported = false;
+            // The decision sent under the old base goes with it (design 2.8:
+            // the client drops it by its epoch), and so does the newest tick
+            // of the old numbering.  The caps and the assigned lead stay.
+            if (auto l = s.leads.find(player); l != s.leads.end()) l->second.reassigned();
             // Measured anew, waived anew (design 2.8): an episode of the old
             // assignment ends, and its cut ticks lie below the new base where
             // nothing will come for them.  The counters stay.
@@ -403,6 +417,54 @@ namespace bmmo::sim {
                 log_patience_on(s);
             }
             wake_.notify_all();
+        });
+    }
+
+    void session_runner::set_player_lead(uint32_t session, uint32_t player, uint32_t caps, uint32_t assigned_lead) {
+        post([this, session, player, caps, assigned_lead] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end()) return;
+            auto& lead = it->second->leads[player];
+            lead.cap_lead = (caps & bmmo::session::CAP_LEAD) != 0;
+            lead.assigned_lead = assigned_lead;
+        });
+    }
+
+    void session_runner::set_player_rtt(uint32_t session, uint32_t player, uint32_t rtt_ms) {
+        post([this, session, player, rtt_ms] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end()) return;
+            auto lead = it->second->leads.find(player);
+            if (lead == it->second->leads.end()) return;
+            lead->second.rtt_ms = rtt_ms;
+            lead->second.have_rtt = true;
+        });
+    }
+
+    void session_runner::acknowledge_lead(uint32_t session, uint32_t player, uint32_t id, int applied) {
+        post([this, session, player, id, applied] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end()) return;
+            auto& s = *it->second;
+            auto lead = s.leads.find(player);
+            auto meter = s.lateness.find(player);
+            if (lead == s.leads.end() || meter == s.lateness.end()) return;
+            const uint32_t effective = lead->second.effective;
+            const uint32_t tick = s.world ? s.world->tick_index() : 0;
+            const std::string prefix = "[session " + std::to_string(s.id) + "] S1 lead-ack player=" + std::to_string(player)
+                + " id=" + std::to_string(id) + " applied=" + std::to_string(applied) + " tick=" + std::to_string(tick);
+            int counted = 0;
+            if (!bmmo::session::lead_acknowledge(lead->second, meter->second.meter, id, applied, &counted)) {
+                log(prefix + ": not the outstanding decision, ignored");
+                return;
+            }
+            const auto& m = meter->second.meter;
+            log(prefix + (counted != applied ? " counted=" + std::to_string(counted) : std::string())
+                + " effective=" + std::to_string(effective) + " offset=" + std::to_string(m.offset())
+                + " cooldown-until=" + std::to_string(m.cooldown_until()) + (m.at_cap() ? " at-cap" : ""));
+            if (s.journal.is_open() && !s.journal.capped())
+                s.journal.note(tick, "lead ack: p" + std::to_string(player) + " id " + std::to_string(id)
+                               + " applied " + std::to_string(counted) + ", offset " + std::to_string(m.offset()));
         });
     }
 
@@ -445,7 +507,13 @@ namespace bmmo::sim {
             auto meter = s.lateness.find(player);
             if (meter == s.lateness.end()) return;
             const double slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(newest), arrival);
-            if (!meter->second.meter.sample(newest, slack) || !config_.patience) return;
+            const bool sampled = meter->second.meter.sample(newest, slack);
+            // E's c_est (design 2.3) is measured from the newest uplink tick
+            // and the session tick it arrived at.
+            if (sampled && config_.lead_adjust && s.world)
+                if (auto lead = s.leads.find(player); lead != s.leads.end())
+                    lead->second.received(newest, s.world->tick_index());
+            if (!sampled || !config_.patience) return;
             // The streak waiver ends with the first sample inside the
             // player's patience; the next tick the runner decides waits for
             // it again.
@@ -460,6 +528,18 @@ namespace bmmo::sim {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& events = it->second->events;
+            // Every other member's Sector margin (design 2.9): the server
+            // relays the event the moment it takes it, so it reaches member
+            // q at about q's c_est, and the stamp less that is how far ahead
+            // of q's clock it lands.  A raise of q must leave that positive
+            // until a late remote Sector is rewound for (plan step 14).  An
+            // event already late at the server is the sender's lateness, not
+            // q's path, and is no sample (lead_sector_sample).
+            if (config_.lead_adjust && event.type == bmmo::session::event_type::Sector && it->second->world) {
+                const uint32_t now_tick = it->second->world->tick_index();
+                for (auto& [other, lead]: it->second->leads)
+                    if (other != player) bmmo::session::lead_sector_sample(lead, tick, now_tick);
+            }
             pending_event pe{player, tick, std::move(event), arrival};
             auto pos = std::upper_bound(events.begin(), events.end(), tick,
                 [](uint32_t t, const pending_event& e) { return t < e.tick; });
@@ -722,7 +802,11 @@ namespace bmmo::sim {
             auto& meter = entry.meter;
             // A member with no qualifying window after eight takes the median
             // of the members whose reference was measured.  Nobody's yet:
-            // it waits, and asks again next tick.
+            // it waits, and asks again next tick.  With lead_adjust on, a
+            // member still without one after twelve (a solo session, or
+            // every peer on the fallback) takes the deadline reference, so
+            // a member late from its start can still be raised; with the
+            // flag off nothing changes from the observe-only meter.
             if (meter.wants_fallback()) {
                 std::vector<double> r10s, r01s;
                 for (const auto& [other, other_entry]: s.lateness) {
@@ -730,14 +814,15 @@ namespace bmmo::sim {
                     r10s.push_back(other_entry.meter.r10());
                     r01s.push_back(other_entry.meter.r01());
                 }
-                if (!r10s.empty())
+                if (config_.lead_adjust) bmmo::session::lateness_settle_reference(meter, r10s, r01s);
+                else if (!r10s.empty())
                     meter.adopt_reference(bmmo::session::lateness_median(r10s), bmmo::session::lateness_median(r01s));
             }
             if (meter.has_reference() && !entry.reported) {
                 entry.reported = true;
                 log(prefix + "reference player=" + std::to_string(player) + " tick=" + std::to_string(tick)
                     + " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
-                    + " source=" + (meter.reference_measured() ? "measured" : "fallback")
+                    + " source=" + meter.reference_source()
                     + " windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows())
                     + " base=" + std::to_string(meter.base()));
             }
@@ -752,10 +837,14 @@ namespace bmmo::sim {
                     + " misses=" + std::to_string(decision.misses) + "/" + std::to_string(decision.samples)
                     + " streak=" + std::to_string(decision.streak)
                     + " offset=" + std::to_string(meter.offset());
-                log(prefix + text + " (observe only: nothing sent)");
-                // The box keeps it too, so a journal read offline shows where
-                // the lead would have moved.  A note changes no replay.
-                if (s.journal.is_open() && !s.journal.capped()) s.journal.note(tick, "lateness: " + text);
+                if (config_.lead_adjust) {
+                    apply_lead_decision(s, player, decision, text);
+                } else {
+                    log(prefix + text + " (observe only: nothing sent)");
+                    // The box keeps it too, so a journal read offline shows where
+                    // the lead would have moved.  A note changes no replay.
+                    if (s.journal.is_open() && !s.journal.capped()) s.journal.note(tick, "lateness: " + text);
+                }
             } else if (decision.action == lateness_action::give_up) {
                 log(prefix + "gave-up player=" + std::to_string(player) + " tick=" + std::to_string(tick)
                     + " misses=" + std::to_string(decision.misses) + "/" + std::to_string(decision.samples)
@@ -776,12 +865,99 @@ namespace bmmo::sim {
                       + " q50=" + fixed2(meter.trailing_quantile(0.50));
             if (meter.has_reference())
                 text += " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
-                      + " ref=" + (meter.reference_measured() ? "measured" : "fallback");
+                      + " ref=" + meter.reference_source();
             else
                 text += " ref=none windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows());
             text += " streak=" + std::to_string(meter.raise_streak()) + "/" + std::to_string(meter.lower_streak())
                   + " decisions=" + std::to_string(meter.decisions()) + " offset=" + std::to_string(meter.offset());
+            if (config_.lead_adjust) {
+                const auto l = s.leads.find(player);
+                if (l != s.leads.end()) {
+                    const auto& lead = l->second;
+                    text += std::string(" lead: caps=") + (lead.cap_lead ? "lead" : "none")
+                          + " assigned=" + std::to_string(lead.assigned_lead)
+                          + " rtt=" + (lead.have_rtt ? std::to_string(lead.rtt_ms) : std::string("?"))
+                          + " sent=" + std::to_string(lead.sent) + " acked=" + std::to_string(lead.acked)
+                          + " observed=" + std::to_string(lead.observed) + " capped=" + std::to_string(lead.capped)
+                          + " declined=" + std::to_string(lead.declined)
+                          + (lead.outstanding ? " outstanding=" + std::to_string(lead.id) : std::string())
+                          + (lead.sector_margin.known() ? " sector-margin=" + std::to_string(lead.sector_margin.worst())
+                                                        : std::string(" sector-margin=?"))
+                          + (meter.at_cap() ? " at-cap" : "");
+                }
+            }
             log(prefix + text);
+        }
+    }
+
+    // Late-player design 2.2-2.3 (runner_config::lead_adjust).  A decision for
+    // a client that declared CAP_LEAD is sent: a raise first resets the
+    // player's input buffer over [N, E) with the substitute frozen, which
+    // changes nothing in the world (those ticks are substituted the way a
+    // missing frame always is) and so nothing a journal replay needs to know.
+    // Without CAP_LEAD the decision stays pending, unacknowledged, so the
+    // player gets this one logged decision per assignment and nothing is
+    // sent.
+    void session_runner::apply_lead_decision(session_state& s, uint32_t player,
+                                             const bmmo::session::lateness_decision& d, const std::string& text) {
+        using bmmo::session::lead_route;
+        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 ";
+        auto meter = s.lateness.find(player);
+        auto buffer = s.inputs.find(player);
+        if (meter == s.lateness.end() || buffer == s.inputs.end() || !s.world) return;
+        auto& lead = s.leads[player];
+        const uint32_t next_tick = s.world->tick_index();
+        const auto plan = bmmo::session::lead_decide(true, lead, meter->second.meter, d, next_tick, buffer->second);
+        const bool recording = s.journal.is_open() && !s.journal.capped();
+        if (plan.route == lead_route::observe) {
+            log(prefix + text + " (no CAP_LEAD from this client: nothing sent)");
+            if (recording) s.journal.note(next_tick, "lateness: " + text + " (no CAP_LEAD)");
+            return;
+        }
+        if (plan.route == lead_route::declined || plan.route == lead_route::deferred) {
+            const bool declined = plan.route == lead_route::declined;
+            log(prefix + text + (declined ? " declined" : " deferred") + ": the " + (plan.binding ? plan.binding : "?")
+                + " cap leaves nothing of it (caps " + (plan.cap ? plan.cap : "?")
+                + ", assigned " + std::to_string(lead.assigned_lead)
+                + ", offset " + std::to_string(meter->second.meter.offset())
+                + (lead.sector_margin.known() ? ", sector margin " + std::to_string(lead.sector_margin.worst()) : std::string())
+                + (declined ? "); no further raise this assignment"
+                            : "); no decision before tick " + std::to_string(meter->second.meter.cooldown_until())));
+            if (recording)
+                s.journal.note(next_tick, "lateness: " + text + (declined ? " declined at the cap" : " deferred by the sector margin"));
+            return;
+        }
+        if (plan.route != lead_route::send) return;
+        std::string line = "lead player=" + std::to_string(player) + " id=" + std::to_string(d.id)
+            + " k=" + std::to_string(plan.k) + (plan.k != plan.decided_k ? " decided=" + std::to_string(plan.decided_k) : std::string())
+            + (plan.cap ? std::string(" cap=") + plan.cap + " binding=" + plan.binding : std::string())
+            + " N=" + std::to_string(next_tick) + " held-from=" + std::to_string(plan.held_from)
+            + " E=" + std::to_string(plan.effective)
+            + " c-est=" + (plan.have_client_tick ? std::to_string(plan.client_tick) : std::string("?"))
+            + " rtt=" + (lead.have_rtt ? std::to_string(lead.rtt_ms) : std::string("?"))
+            + " held-source=" + (plan.held_source == bmmo::session::INPUT_SOURCE_DEFAULT ? std::string("default")
+                                                                                      : std::to_string(plan.held_source))
+            + " dropped=" + std::to_string(plan.dropped) + " epoch=" + std::to_string(meter->second.meter.base());
+        log(prefix + text + "; " + line);
+        // Design 2.3 (S3): the reset is in the box as a note only; the
+        // range's frames are journaled with flag 0 as every substitute is.
+        if (recording)
+            s.journal.note(next_tick, "lead: p" + std::to_string(player) + " " + (plan.k > 0 ? "+" : "")
+                           + std::to_string(plan.k) + " at " + std::to_string(next_tick) + ", effective "
+                           + std::to_string(plan.effective) + "; buffer reset dropped " + std::to_string(plan.dropped)
+                           + " frames");
+        if (callbacks_.on_lead) {
+            lead_notice notice;
+            notice.session = s.id;
+            notice.player = player;
+            notice.id = d.id;
+            notice.k = plan.k;
+            notice.held_from = plan.held_from;
+            notice.effective = plan.effective;
+            notice.held = plan.held;
+            notice.held_source = plan.held_source;
+            notice.epoch = meter->second.meter.base();
+            callbacks_.on_lead(notice);
         }
     }
 
@@ -793,6 +969,9 @@ namespace bmmo::sim {
             if (!config_.patience) {
                 bmmo::session::patience_member m;
                 m.has = buffer.has(tick);
+                // Only a lead reset (lead_adjust) makes a held range; without
+                // one this is false and the test is the old has-only rule.
+                m.held = buffer.held(tick);
                 members.push_back(m);
                 continue;
             }

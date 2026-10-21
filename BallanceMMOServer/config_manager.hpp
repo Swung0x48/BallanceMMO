@@ -71,6 +71,14 @@ public:
     // whose frames still beat the deadline but not its patience is
     // substituted for as long as its lateness lasts.
     bool physics_patience = false;
+    // Late-player design 2.2-2.5: a lateness decision for a client that
+    // declared CAP_LEAD becomes a SessionLead, a raise resets that player's
+    // input buffer over the slew, and a late joiner's first lead and a
+    // resync's lead are the player's own (uncapped but for 80 ticks) instead
+    // of the capped late-tick lead.  Off by default and in deployments until
+    // the clients apply the lead (plan steps 11 and 15); off, the server does
+    // exactly what it did before the flag existed.
+    bool physics_lead_adjust = false;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

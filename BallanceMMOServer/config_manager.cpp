@@ -80,6 +80,7 @@ bool config_manager::load() {
         // delivers deeper than that cannot be replayed.
         physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
+        physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
         physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
         physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",
@@ -232,6 +233,10 @@ void config_manager::save(bool reload_values) {
                    "#   patience (late-player design 2.6, default false: the session waits for a missing frame\n"
                    "#     only until that player's patience, deadline - (r01 - 1) ticks of its own measured\n"
                    "#     arrivals, instead of the deadline; keep it off until the per-player lead exists),\n"
+                   "#   lead_adjust (late-player design 2.2-2.5, default false: a player whose frames stay late\n"
+                   "#     gets a longer lead of its own through SessionLead, if its client declared it can apply\n"
+                   "#     one; a late joiner's first lead and a resync's lead are then per player instead of\n"
+                   "#     capped at 34 ticks; keep it off until the clients apply the lead),\n"
                    "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
                    "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
                    "#     relative to the server's own directory, empty = record nothing),\n"

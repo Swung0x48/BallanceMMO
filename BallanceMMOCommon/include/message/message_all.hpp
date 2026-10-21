@@ -68,5 +68,6 @@
 #include "session_event_msg.hpp"
 #include "session_assign_msg.hpp"
 #include "session_remote_input_msg.hpp"
+#include "session_lead_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP
