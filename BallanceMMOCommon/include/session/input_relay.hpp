@@ -23,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
@@ -46,25 +47,92 @@ namespace bmmo::session {
     constexpr size_t kRelayRing = 128;
     static_assert(kRelayRing > MAX_RELAY_FRAMES, "a window must fit the ring");
 
-    // Bytes of one datagram's fixed part (opcode, session, tick, count) and of
+    // Bytes of one datagram's fixed part (opcode, session, tick, count, and
+    // since protocol 7 the recipient's acked, held_total and epoch) and of
     // one entry on the wire (session_remote_input_msg): the builder packs to a
     // budget of one GameNetworkingSockets packet, because an unreliable
     // message split over several packets is lost whole when any of them is,
     // and one over k_cbMaxUnreliableMsgSizeSend (16.5 KB) is quietly sent
     // reliable - the stall this relay exists to remove.
-    constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1;   // opcode u32, session, tick, count
+    constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1 + 4 + 4 + 4;   // opcode u32, session, tick, count, acked, held_total, epoch
     constexpr size_t kRelayDatagramBudget = 1100;
 
+    // ------------------------------------------------------------ held notices
+    // Protocol 7 (late-player design 1.1): every datagram also tells its
+    // recipient which of ITS OWN ticks the server substituted, because the
+    // late player's client is the one side that otherwise never learns that
+    // the world drove its ball with another frame.  The section trails the
+    // entries: nheld u8, then one record per substituted tick within the last
+    // kHeldNoticeTicks ticks.  It is longer than the relay window because the
+    // late player's own downlink is the link most likely to be bad.
+    constexpr size_t kHeldNoticeTicks = 32;
+    static_assert(kHeldNoticeTicks <= 32, "a record's back offset is 5 bits");
+    // The source of a substitute when nothing had arrived yet: the default frame.
+    constexpr uint32_t kHeldSourceDefault = INPUT_SOURCE_DEFAULT;
+    // A record names the tick whose frame, as the client sent it, the server
+    // applied - 5 B and exact.  A source this far back or further is carried
+    // inline instead (design 1.1).
+    constexpr uint32_t kHeldInlineDistance = 96;
+    // The ring of the frames a client sent, by tick, that resolves a
+    // reference (plan step 4: the headless sent_inputs_; the retail part one).
+    // A record of T is acted on while its anchor is inside the reach,
+    // current - (T - 1) <= reach, and a reference names a source with
+    // T - source <= kHeldInlineDistance - 1, so current - source can be
+    // reach + kHeldInlineDistance - 2: the ring must reach that far back for
+    // the deepest reach (design 2.5 clamps it at 120).  128 ticks, the
+    // design's first figure, covered a reach of 33 only.
+    constexpr uint32_t kHeldMaxReachTicks = 120;
+    constexpr size_t kSentInputRing = 256;
+    static_assert(kSentInputRing >= kHeldMaxReachTicks + kHeldInlineDistance - 1,
+                  "every reference inside the deepest reach must still be in the sent ring");
+    constexpr size_t kHeldCountBytes = 1;           // nheld, in every datagram
+    constexpr size_t kHeldReferenceBytes = 1 + 4;   // back u8, source u32
+    constexpr size_t kHeldInlineBytes = 1 + 40;     // back u8, the frame with its camera
+
+    // One player's input as the world applied it at a tick: `held` when the
+    // server had no fresh frame for the tick and substituted one, `source`
+    // the tick of the substitute (kHeldSourceDefault for the default frame).
+    struct applied_input {
+        uint32_t player = 0;
+        input_frame frame{};
+        bool held = false;
+        uint32_t source = kHeldSourceDefault;
+    };
+
+    // Whether a held record goes inline rather than by reference: the client
+    // cannot resolve a source its sent ring (kSentInputRing) no longer
+    // holds, nor one from before its current numbering (`epoch`, the base of
+    // its last assignment: the ring is cleared with every re-anchor).
+    inline bool held_inline(uint32_t tick, uint32_t source, uint32_t epoch) {
+        if (source == kHeldSourceDefault) return false;
+        return tick - source >= kHeldInlineDistance || static_cast<int32_t>(source - epoch) < 0;
+    }
+
     // ------------------------------------------------------------ server
-    // The last `window` ticks' applied frames, and the window a recipient gets:
-    // for every other member present at the newest tick, its frames for the
-    // trailing run of consecutive ticks it was present in, oldest first.  A
-    // member absent at the newest tick (left) is not relayed.
+    // The last ticks' applied frames, and what a recipient gets: for every
+    // other member present at the newest tick, its frames for the trailing
+    // run of consecutive ticks it was present in, at most `window` of them,
+    // oldest first; and the recipient's own substituted ticks within the
+    // notice depth (kHeldNoticeTicks).  A member absent at the newest tick
+    // (left) is not relayed.
     class relay_ring {
     public:
         struct window_entry {
             uint32_t player = 0;
             std::vector<input_frame> frames;   // ticks newest - frames.size() + 1 .. newest, oldest first
+        };
+        // One substituted tick of a player: what the world applied there and
+        // the tick that frame came from.
+        struct held_entry {
+            uint32_t tick = 0;
+            uint32_t source = kHeldSourceDefault;
+            input_frame frame{};
+        };
+        // One datagram's worth: whole entries, and the held records that ride
+        // in it (all of them in one datagram unless they cannot fit one).
+        struct datagram {
+            std::vector<window_entry> entries;
+            std::vector<held_entry> held;
         };
 
         explicit relay_ring(size_t window = MAX_INPUT_FRAMES) { set_window(window); }
@@ -74,20 +142,30 @@ namespace bmmo::session {
             trim();
         }
         size_t window() const { return window_; }
+        // How many ticks the ring keeps: the others' window, or the notice
+        // depth when that is longer.
+        size_t depth() const { return std::max(window_, kHeldNoticeTicks); }
         bool empty() const { return ticks_.empty(); }
         uint32_t newest_tick() const { return ticks_.empty() ? 0 : ticks_.back().tick; }
-        void clear() { ticks_.clear(); runs_.clear(); }
+        void clear() { ticks_.clear(); runs_.clear(); held_.clear(); }
 
         // What the world applied at `tick`.  A tick at or behind the newest
         // already held replaces the ring from there (the server never
         // re-simulates, but a re-anchored numbering must not leave two frames
-        // for one tick).  The runs every recipient's window is cut from are
-        // computed here, once per tick.
-        void push(uint32_t tick, const std::vector<std::pair<uint32_t, input_frame>>& applied) {
+        // for one tick).  The runs every recipient's window is cut from, and
+        // every player's held ticks, are computed here, once per tick.
+        void push(uint32_t tick, const std::vector<applied_input>& applied) {
             while (!ticks_.empty() && static_cast<int32_t>(ticks_.back().tick - tick) >= 0) ticks_.pop_back();
             ticks_.push_back(tick_entry{tick, applied});
             trim();
             rebuild_runs();
+        }
+        // Every frame fresh (the tests' and protocol 5's shape).
+        void push(uint32_t tick, const std::vector<std::pair<uint32_t, input_frame>>& applied) {
+            std::vector<applied_input> all;
+            all.reserve(applied.size());
+            for (const auto& [player, frame]: applied) all.push_back(applied_input{player, frame, false, kHeldSourceDefault});
+            push(tick, all);
         }
 
         // Every member's run, oldest first; what a recipient gets is these
@@ -101,6 +179,17 @@ namespace bmmo::session {
             return out;
         }
 
+        // `player`'s substituted ticks within the notice depth of the newest
+        // tick, oldest first, from `from` on (the recipient's numbering).
+        std::vector<held_entry> held(uint32_t player, uint32_t from = 0) const {
+            std::vector<held_entry> out;
+            const auto it = held_.find(player);
+            if (it == held_.end()) return out;
+            for (const auto& h: it->second)
+                if (static_cast<int32_t>(h.tick - from) >= 0) out.push_back(h);
+            return out;
+        }
+
         // The wire size of an entry (player u32, nframes u8, per frame 4 B and
         // the camera where it differs from the frame before).
         static size_t entry_bytes(const window_entry& e) {
@@ -109,6 +198,10 @@ namespace bmmo::session {
                 bytes += 4 + ((i == 0 || !same_camera(e.frames[i - 1], e.frames[i])) ? 36 : 0);
             return bytes;
         }
+        // The wire size of one held record for a recipient numbered from `epoch`.
+        static size_t held_bytes(const held_entry& h, uint32_t epoch) {
+            return held_inline(h.tick, h.source, epoch) ? kHeldInlineBytes : kHeldReferenceBytes;
+        }
 
         // The recipient's window packed into datagrams of at most `budget`
         // bytes each, whole entries per datagram (every entry stands alone,
@@ -116,51 +209,89 @@ namespace bmmo::session {
         // datagram on its own loses its oldest frames until it does; `trimmed`
         // counts them.  `keep` says which players are still members: a leaver
         // the step still applied a frame for is not relayed after PlayerLeft.
+        //
+        // `held_from` is the recipient's epoch, the base of its last
+        // assignment: its held ticks from there on go into the first datagram
+        // with room for all of them, else into datagrams of their own (a
+        // record stands alone as well, so the section can be split).  Without
+        // it (not assigned yet) nothing is noticed.  There is always at least
+        // one datagram, a header-only one when there is nothing else: the
+        // header carries the recipient's ack and held_total, which a solo
+        // player and one with nothing substituted need too.
         template <class Keep>
-        std::vector<std::vector<window_entry>> build_datagrams(uint32_t recipient, size_t budget, const Keep& keep,
-                                                               size_t* trimmed = nullptr) const {
-            std::vector<std::vector<window_entry>> out;
-            size_t used = budget;   // forces a first datagram
+        std::vector<datagram> build_datagrams(uint32_t recipient, size_t budget, const Keep& keep,
+                                              std::optional<uint32_t> held_from = std::nullopt,
+                                              size_t* trimmed = nullptr) const {
+            const size_t fixed = kRelayDatagramHeader + kHeldCountBytes;
+            std::vector<datagram> out;
+            std::vector<size_t> used;
             for (const auto& run: runs_) {
                 if (run.player == recipient || !keep(run.player)) continue;
                 window_entry entry = run;
                 size_t bytes = entry_bytes(entry);
-                while (bytes + kRelayDatagramHeader > budget && entry.frames.size() > 1) {
+                while (bytes + fixed > budget && entry.frames.size() > 1) {
                     entry.frames.erase(entry.frames.begin());
                     if (trimmed) ++*trimmed;
                     bytes = entry_bytes(entry);
                 }
-                if (used + bytes > budget) {
+                if (out.empty() || used.back() + bytes > budget) {
                     out.emplace_back();
-                    used = kRelayDatagramHeader;
+                    used.push_back(fixed);
                 }
-                used += bytes;
-                out.back().push_back(std::move(entry));
+                used.back() += bytes;
+                out.back().entries.push_back(std::move(entry));
             }
+            if (held_from) {
+                const std::vector<held_entry> records = held(recipient, *held_from);
+                size_t section = 0;
+                for (const auto& h: records) section += held_bytes(h, *held_from);
+                bool placed = records.empty();
+                for (size_t i = 0; i < out.size() && !placed; ++i) {
+                    if (used[i] + section > budget) continue;
+                    out[i].held = records;
+                    used[i] += section;
+                    placed = true;
+                }
+                // Inline frames only (a source 96 or more ticks back): 32 of
+                // them are 1312 B, past one packet, so they are split.
+                for (size_t k = 0; !placed && k < records.size(); ++k) {
+                    const size_t bytes = held_bytes(records[k], *held_from);
+                    if (k == 0 || used.back() + bytes > budget) {
+                        out.emplace_back();
+                        used.push_back(fixed);
+                    }
+                    used.back() += bytes;
+                    out.back().held.push_back(records[k]);
+                }
+            }
+            if (out.empty()) out.emplace_back();
             return out;
         }
 
     private:
         struct tick_entry {
             uint32_t tick = 0;
-            std::vector<std::pair<uint32_t, input_frame>> applied;
+            std::vector<applied_input> applied;
         };
-        void trim() { while (ticks_.size() > window_) ticks_.pop_front(); }
+        void trim() { while (ticks_.size() > depth()) ticks_.pop_front(); }
         void rebuild_runs() {
             runs_.clear();
+            held_.clear();
             if (ticks_.empty()) return;
             const tick_entry& newest = ticks_.back();
-            for (const auto& [player, frame]: newest.applied) {
+            for (const auto& a: newest.applied) {
                 window_entry entry;
-                entry.player = player;
-                // Walk back while the ticks stay consecutive and the member is present.
-                std::vector<const input_frame*> run{&frame};
+                entry.player = a.player;
+                // Walk back while the ticks stay consecutive and the member is
+                // present, at most `window` ticks: the ring is deeper than the
+                // window when the notices need it.
+                std::vector<const input_frame*> run{&a.frame};
                 uint32_t expect = newest.tick;
-                for (auto it = ticks_.rbegin() + 1; it != ticks_.rend(); ++it) {
+                for (auto it = ticks_.rbegin() + 1; it != ticks_.rend() && run.size() < window_; ++it) {
                     if (it->tick + 1 != expect) break;
                     const input_frame* found = nullptr;
-                    for (const auto& [p, f]: it->applied)
-                        if (p == player) { found = &f; break; }
+                    for (const auto& b: it->applied)
+                        if (b.player == a.player) { found = &b.frame; break; }
                     if (!found) break;
                     run.push_back(found);
                     expect = it->tick;
@@ -169,9 +300,16 @@ namespace bmmo::session {
                 for (auto it = run.rbegin(); it != run.rend(); ++it) entry.frames.push_back(**it);
                 runs_.push_back(std::move(entry));
             }
+            // Held ticks need no run: a record names its own tick.
+            for (const auto& t: ticks_) {
+                if (newest.tick - t.tick >= kHeldNoticeTicks) continue;
+                for (const auto& a: t.applied)
+                    if (a.held) held_[a.player].push_back(held_entry{t.tick, a.source, a.frame});
+            }
         }
         std::deque<tick_entry> ticks_;
         std::vector<window_entry> runs_;
+        std::map<uint32_t, std::vector<held_entry>> held_;
         size_t window_ = MAX_INPUT_FRAMES;
     };
 

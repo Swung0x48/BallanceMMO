@@ -477,20 +477,26 @@ namespace bmmo::sim {
         // Everything the journal costs hangs off this: a capped or absent box
         // does not even capture a hash.
         const bool recording = s.journal.is_open() && !s.journal.capped();
-        std::vector<std::pair<uint32_t, bmmo::session::input_frame>> applied;
+        std::vector<bmmo::session::applied_input> applied;
         applied.reserve(s.inputs.size());
         for (auto& [player, buffer]: s.inputs) {
             bool fresh = false;
-            const auto& frame = buffer.take(tick, fresh);
+            uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
+            const auto& frame = buffer.take(tick, fresh, source);
             if (fresh) s.acked[player] = tick;
             s.world->set_input(player, frame);
-            applied.emplace_back(player, frame);
+            applied.push_back(bmmo::session::applied_input{player, frame, !fresh, source});
             // What the world consumed, not what arrived on the wire: the wire
-            // can lose, duplicate and reorder, the world cannot.
+            // can lose, duplicate and reorder, the world cannot.  The source
+            // of a substitute is not recorded: the applied bytes are what a
+            // replay needs, and the server's S2 log lines carry the source.
             if (recording)
                 s.journal.input(tick, player, frame, fresh ? bmmo::session::JOURNAL_INPUT_FRESH : 0);
         }
-        if (callbacks_.on_inputs && applied.size() > 1) callbacks_.on_inputs(s.id, tick, applied);
+        // Every step, one player or several: the relay's header and held
+        // section are the owner's, and a solo player needs them as much as
+        // anyone (late-player design 1.2).
+        if (callbacks_.on_inputs && !applied.empty()) callbacks_.on_inputs(s.id, tick, applied);
         // Every event due this tick, in the members' JOIN ORDER - not in the
         // order the network happened to deliver them.  The order two events of
         // the same tick are applied in changes the world (two balls

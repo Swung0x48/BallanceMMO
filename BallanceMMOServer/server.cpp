@@ -577,6 +577,37 @@ public:
         // relayed datagram repeats (session/input_relay.hpp, protocol 5).
         bmmo::session::relay_ring relay;
         bool relay_trim_logged = false;
+        // Protocol 7 (late-player design 1.2): what each member's relayed
+        // datagrams tell it about its OWN inputs.  `epoch` is the base of its
+        // last SessionAssign and `held_total` counts its substituted ticks at
+        // or after it: a resync or a late join re-anchors the cursor at the
+        // base and the ticks up to it are applied held, but they precede the
+        // client's own numbering, so they are never counted (nor noticed).
+        // Both are reset by send_session_assign.  `acked` is its last tick
+        // applied fresh; an assignment moves it to the base - 1, since every
+        // tick before the base is outside the new numbering and an ack from
+        // the old one would read as starvation for the whole lead.  `run` is
+        // the S2 line being gathered: consecutive held ticks, logged once the
+        // run ends.
+        struct held_run {
+            bool open = false;
+            uint32_t first = 0, last = 0, count = 0, sent = 0;
+            uint32_t source_min = 0, source_max = 0;
+            // (tick - source, ticks) runs; delay 0xFFFFFFFF = the default frame
+            std::vector<std::pair<uint32_t, uint32_t>> delays;
+        };
+        struct held_notice {
+            bool assigned = false;
+            uint32_t epoch = 0;
+            uint32_t held_total = 0;
+            uint32_t acked = 0;
+            // Held records handed to the socket, every copy (a record rides
+            // 32 ticks of datagrams), this epoch: the S2 line's `copies`.
+            uint64_t copies = 0;
+            held_run run;
+        };
+        std::map<HSteamNetConnection, held_notice> notices;
+        uint32_t s2_lines = 0;
         // Lifecycle events (protocol 6): the copies members' events still owe
         // the others, one per tick from on_session_inputs, and which events
         // from each member this server has already taken (the members repeat
@@ -687,7 +718,7 @@ public:
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
         callbacks.on_snapshot = [this](const bmmo::sim::session_snapshot& snapshot) { on_session_snapshot(snapshot); };
         callbacks.on_inputs = [this](uint32_t session, uint32_t tick,
-                                     const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied) {
+                                     const std::vector<bmmo::session::applied_input>& applied) {
             on_session_inputs(session, tick, applied);
         };
         callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
@@ -837,6 +868,8 @@ public:
         if (it == physics_sessions_.end()) return;
         auto s = std::move(it->second);
         physics_sessions_.erase(it);
+        // A run of substitutions still open is logged with the rest (S2).
+        for (auto& [m, n]: s.notices) close_held_run(s, m, n);
         for (const auto m: s.members) {
             client_session_.erase(m);
             send_session_end(session, m, reason);
@@ -927,14 +960,13 @@ public:
     // can now overtake the relayed inputs of earlier ticks; the clients land
     // every frame by its tick and park a frame for a mirror not yet made.
     void on_session_inputs(uint32_t session, uint32_t tick,
-                           const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied) {
+                           const std::vector<bmmo::session::applied_input>& applied) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         if (s.relay.window() != config_.physics_relay_window) s.relay.set_window(config_.physics_relay_window);
         s.relay.push(tick, applied);
-        if (applied.size() < 2) return;
         // Unreliable, no delay, with the window: a lost datagram costs nothing
         // unless `relay_window` in a row are lost, and no frame ever waits
         // behind a loss.  (Reliable and ordered, 2026-10-19 .. 10-21, a loss
@@ -950,21 +982,66 @@ public:
         const auto is_member = [&s](uint32_t player) {
             return std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(player)) != s.members.end();
         };
+        // Protocol 7: each member's own ack and substitutions, before its
+        // datagrams are built from them.
+        for (const auto& a: applied) {
+            if (!is_member(a.player)) continue;
+            auto& n = s.notices[static_cast<HSteamNetConnection>(a.player)];
+            if (!a.held) {
+                // Never backwards: a frame of the old numbering applied fresh
+                // after the assignment (the runner re-anchors the cursor a
+                // little later) must not undo the move to the base - 1.
+                if (static_cast<int32_t>(tick - n.acked) > 0) n.acked = tick;
+                close_held_run(s, static_cast<HSteamNetConnection>(a.player), n);
+                continue;
+            }
+            if (!n.assigned || static_cast<int32_t>(tick - n.epoch) < 0) continue;
+            ++n.held_total;
+            note_held_tick(s, static_cast<HSteamNetConnection>(a.player), n, tick, a.source);
+        }
+        // Every member every tick, even with nothing else to say: the header
+        // and the held section are the recipient's own, and a solo player,
+        // or one whose window happens to be empty, needs them as much as
+        // anyone (the header-only datagram is 26 bytes).
         for (const auto m: s.members) {
+            auto& n = s.notices[m];
             size_t trimmed = 0;
-            for (auto& datagram: s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, &trimmed)) {
+            const std::optional<uint32_t> held_from = n.assigned ? std::optional<uint32_t>(n.epoch) : std::nullopt;
+            for (auto& datagram: s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, held_from,
+                                                         &trimmed)) {
                 bmmo::session_remote_input_msg msg;
                 msg.session = session;
                 msg.tick = tick;
-                for (auto& w: datagram) {
+                msg.acked = n.acked;
+                msg.held_total = n.held_total;
+                msg.epoch = n.epoch;
+                for (auto& w: datagram.entries) {
                     bmmo::session_remote_input_msg::entry e;
                     e.player = w.player;
                     e.frames = std::move(w.frames);
                     msg.entries.push_back(std::move(e));
                 }
-                if (msg.entries.empty()) continue;
+                for (const auto& h: datagram.held) {
+                    bmmo::session_remote_input_msg::held_record r;
+                    r.back = static_cast<uint8_t>(tick - h.tick);
+                    if (bmmo::session::held_inline(h.tick, h.source, n.epoch)) {
+                        r.has_frame = true;
+                        r.frame = h.frame;
+                    } else {
+                        r.source = h.source;
+                    }
+                    msg.held.push_back(r);
+                }
                 msg.serialize();
-                send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                const EResult result = send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                if (result != k_EResultOK || msg.held.empty()) continue;
+                // A record's first trip is the datagram of its own tick (back
+                // 0); the next 31 ticks' datagrams repeat it.  Counted only
+                // once the socket took the datagram, so S2 `sent` below `n`
+                // means first trips the server itself failed to send.
+                n.copies += msg.held.size();
+                if (n.run.open && n.run.last == tick)
+                    for (const auto& r: msg.held) if (r.back == 0) ++n.run.sent;
             }
             if (trimmed && !s.relay_trim_logged) {
                 s.relay_trim_logged = true;
@@ -972,6 +1049,65 @@ public:
                        "its oldest frames were dropped.", s.id, static_cast<unsigned>(bmmo::session::kRelayDatagramBudget));
             }
         }
+    }
+
+    // The S2 lines (late-player design 5.1): one per run of consecutive
+    // substituted ticks of a member, at or after its epoch, with the sources
+    // the substitutes came from as (tick - source) runs, `d` the default
+    // frame.  `n` is how many ticks the run held, `sent` how many of their
+    // records the socket took in their own tick's datagram, `total` the
+    // member's held_total, which every datagram's header carries, `copies`
+    // every held record the socket took for the member this epoch, repeats
+    // included.  The end-to-end check is per member: the S2 lines' n summed
+    // against the client's subst recv + late + base.  A run longer than
+    // a second is cut into lines of 66 ticks, so persistent lateness still
+    // shows up while it lasts.
+    static constexpr uint32_t kHeldRunLineTicks = 66;
+    static constexpr uint32_t kHeldRunLines = 20000;   // per session; past it one line says so
+
+    void note_held_tick(physics_session_state& s, HSteamNetConnection m, physics_session_state::held_notice& n,
+                        uint32_t tick, uint32_t source) {
+        auto& r = n.run;
+        if (r.open && (r.last + 1 != tick || r.count >= kHeldRunLineTicks)) close_held_run(s, m, n);
+        const uint32_t delay = source == bmmo::session::INPUT_SOURCE_DEFAULT ? 0xFFFFFFFFu : tick - source;
+        if (!r.open) {
+            r = physics_session_state::held_run{};
+            r.open = true;
+            r.first = tick;
+            r.source_min = r.source_max = source;
+        }
+        r.last = tick;
+        ++r.count;
+        if (source != bmmo::session::INPUT_SOURCE_DEFAULT) {
+            if (r.source_min == bmmo::session::INPUT_SOURCE_DEFAULT || source < r.source_min) r.source_min = source;
+            if (r.source_max == bmmo::session::INPUT_SOURCE_DEFAULT || source > r.source_max) r.source_max = source;
+        }
+        if (!r.delays.empty() && r.delays.back().first == delay) ++r.delays.back().second;
+        else r.delays.emplace_back(delay, 1u);
+    }
+
+    void close_held_run(physics_session_state& s, HSteamNetConnection m, physics_session_state::held_notice& n) {
+        auto& r = n.run;
+        if (!r.open) return;
+        r.open = false;
+        if (s.s2_lines > kHeldRunLines) return;
+        if (++s.s2_lines > kHeldRunLines) {
+            Printf("Physics session %u: S2 lines capped at %u.", s.id, kHeldRunLines);
+            return;
+        }
+        std::string delays;
+        for (size_t i = 0; i < r.delays.size(); ++i) {
+            if (i == 12) { delays += ",+" + std::to_string(r.delays.size() - i); break; }
+            if (i) delays += ',';
+            delays += r.delays[i].first == 0xFFFFFFFFu ? std::string("d") : std::to_string(r.delays[i].first);
+            delays += '*' + std::to_string(r.delays[i].second);
+        }
+        const auto source = [](uint32_t t) {
+            return t == bmmo::session::INPUT_SOURCE_DEFAULT ? std::string("d") : std::to_string(t);
+        };
+        Printf("Physics session %u: S2 held player=%u ticks=%u..%u n=%u sent=%u total=%u copies=%llu epoch=%u src=%s..%s delay=%s",
+               s.id, static_cast<unsigned>(m), r.first, r.last, r.count, r.sent, n.held_total,
+               static_cast<unsigned long long>(n.copies), n.epoch, source(r.source_min), source(r.source_max), delays);
     }
 
     void on_session_snapshot(const bmmo::sim::session_snapshot& snapshot) {
@@ -1059,6 +1195,10 @@ public:
         s.event_repeats.forget(c);
         s.ready.erase(c);
         s.assigned.erase(c);
+        if (const auto notice = s.notices.find(c); notice != s.notices.end()) {
+            close_held_run(s, c, notice->second);
+            s.notices.erase(notice);
+        }
         s.late.erase(c);
         s.join_orders.erase(c);
         const auto last_physicalize = s.last_physicalize.find(c);
@@ -1124,6 +1264,16 @@ public:
         s.assign_repeats.push_back(physics_session_state::assign_repeat{
             c, first_tick, kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing});
         s.assigned.insert(c);
+        // Protocol 7: the member's numbering starts at the base, and so do its
+        // held notices.  Every datagram names the epoch, so a client still on
+        // the previous one takes nothing but the ack from them.
+        auto& n = s.notices[c];
+        close_held_run(s, c, n);
+        n.assigned = true;
+        n.epoch = first_tick;
+        n.held_total = 0;
+        n.copies = 0;
+        n.acked = first_tick - 1;
     }
 
     // The session's start base for every member present at the start, sent

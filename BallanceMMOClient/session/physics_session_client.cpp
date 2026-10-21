@@ -2186,6 +2186,32 @@ void BallanceMMOClient::physics_session_apply_queues() {
     auto& journal = bmmo::session::client_journal::instance();
     for (const auto& msg: inputs) {
         if (msg.session != s.session) continue;
+        // Protocol 7: our own substituted ticks (late-player design 1.4).
+        // Received, deduplicated and counted only; the records of a datagram
+        // numbered from another base (an assignment applied late here, or
+        // notices from before it) say nothing about this numbering.
+        if (s.assigned) {
+            if (msg.epoch != s.tick_base) {
+                for (const auto& record: msg.held)
+                    if (s.held_stale_seen.first(msg.epoch, msg.held_tick(record))) ++s.subst_stale_epoch;
+            } else {
+                if (!s.held_header_known || s.held_header_epoch != s.tick_base
+                    || static_cast<int32_t>(msg.tick - s.held_header_tick) >= 0) {
+                    s.held_header_known = true;
+                    s.held_header_epoch = msg.epoch;
+                    s.held_header_tick = msg.tick;
+                    s.held_header_acked = msg.acked;
+                    s.held_header_total = msg.held_total;
+                }
+                const uint32_t own = db_.get_client_id();
+                for (const auto& record: msg.held) {
+                    const uint32_t tick = msg.held_tick(record);
+                    if (static_cast<int32_t>(tick - s.tick_base) < 0) continue;   // before our numbering
+                    if (s.held_seen.first(own, tick)) ++s.subst_recv;
+                    else ++s.subst_dup;
+                }
+            }
+        }
         for (const auto& entry: msg.entries) {
             auto it = s.remotes.find(entry.player);
             // The black box: a frame for a player the roster never had is how
@@ -3513,9 +3539,11 @@ std::string BallanceMMOClient::physics_session_status_text() {
         remote_blended += rs.blended;
         remote_hard += rs.hard;
     }
+    // acked/held_total: the newest relay header of our own epoch (protocol 7).
+    const bool held_header_now = s.held_header_known && s.held_header_epoch == s.tick_base;
     return std::format(
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
-        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
+        "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} subst={}/{}/{} acked={} held_total={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
         "events={}/{} phys_resends={} sectors={} held={} late={} lead={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} ct={}/{} scr={}/{}/{}/{}/{} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
@@ -3527,7 +3555,10 @@ std::string BallanceMMOClient::physics_session_status_text() {
         static_cast<long long>(s.frames_since_anchor),
         s.inputs_sent, s.navigation_keys_known ? 1 : 0, s.own_physicalized ? 1 : 0, s.own_group_set ? 1 : 0,
         s.snapshots_received, s.snapshots_applied, s.snapshots_stale, s.last_snapshot_tick, s.remotes.size(),
-        s.remote_inputs_received, remote_compared, remote_ignored, remote_blended, remote_hard,
+        // subst=recv/dup/stale_epoch: our own substituted ticks the server
+        // noticed (protocol 7), not yet corrected here (plan step 6).
+        s.remote_inputs_received, s.subst_recv, s.subst_dup, s.subst_stale_epoch, held_header_now ? s.held_header_acked : 0u,
+        held_header_now ? s.held_header_total : 0u, remote_compared, remote_ignored, remote_blended, remote_hard,
         // mechanisms=<in the dictionary>/<tracked here> (design 9.25: the
         // second number is how many of them this client simulates and can be
         // corrected on), generations=<tracked names with a lifetime counter>

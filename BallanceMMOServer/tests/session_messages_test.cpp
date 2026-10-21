@@ -702,8 +702,10 @@ TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithTheWindow) {
     for (int i = 0; i < 8; ++i) se.frames.push_back(relay_frame(static_cast<uint8_t>(i), -1.0f));
     still.entries.push_back(se);
     ASSERT_TRUE(still.serialize());
-    const size_t header = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) + 1;
-    EXPECT_EQ(still.size(), header + 4 + 36 + 7 * 4);
+    // opcode, session, tick, count, acked, held_total, epoch; then the
+    // entry's player and nframes; and the empty held section's count.
+    const size_t header = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + sizeof(uint32_t) + 1;
+    EXPECT_EQ(still.size(), header + 4 + 36 + 7 * 4 + 1);
 }
 
 TEST(SessionRemoteInputMsg, RejectsTruncationBadCountsAndUnknownHeaders) {
@@ -716,10 +718,13 @@ TEST(SessionRemoteInputMsg, RejectsTruncationBadCountsAndUnknownHeaders) {
     e.frames.push_back(relay_frame(2, 1.0f));
     msg.entries.push_back(e);
     expect_rejects_every_truncation(msg);
+    // serialize() appends: start the stream again, or the payload is two
+    // messages (nothing may follow the held section since protocol 7).
+    msg.raw = std::stringstream{};
     ASSERT_TRUE(msg.serialize());
     const std::string payload = stream_payload(msg.raw);
     const size_t count_offset = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2;
-    const size_t nframes_offset = count_offset + 1 + sizeof(uint32_t);
+    const size_t nframes_offset = count_offset + 1 + sizeof(uint32_t) * 3 + sizeof(uint32_t);
     const size_t first_header_offset = nframes_offset + 1;
     const size_t second_header_offset = first_header_offset + 4 + 36;
     auto parses = [&](size_t offset, char value) {
@@ -772,4 +777,155 @@ TEST(SessionRemoteInputMsg, ClampsAnEntryToTheNewestFrames) {
     EXPECT_EQ(parsed.entries[0].frames.front().keys, 40 - static_cast<int>(bmmo::session::MAX_RELAY_FRAMES));
     EXPECT_EQ(parsed.entries[0].frames.back().keys, 39);
     EXPECT_EQ(parsed.frame_tick(parsed.entries[0], 0), 100u - static_cast<uint32_t>(bmmo::session::MAX_RELAY_FRAMES) + 1);
+}
+
+// Protocol 7 (late-player design 1.1): the recipient's acked, held_total and
+// epoch in the header, and the held section after the entries - by
+// reference, inline, and the default frame.
+TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
+    bmmo::session_remote_input_msg msg{};
+    msg.session = 4;
+    msg.tick = 1234;
+    msg.acked = 1201;
+    msg.held_total = 17;
+    msg.epoch = 1000;
+    bmmo::session_remote_input_msg::entry e;
+    e.player = 77;
+    e.frames.push_back(relay_frame(5, -1.0f));
+    e.frames.push_back(relay_frame(1, -1.0f));
+    msg.entries.push_back(e);
+    bmmo::session_remote_input_msg::held_record by_reference;
+    by_reference.back = 0;
+    by_reference.source = 1229;
+    msg.held.push_back(by_reference);
+    bmmo::session_remote_input_msg::held_record inline_frame;
+    inline_frame.back = 5;
+    inline_frame.has_frame = true;
+    inline_frame.frame = relay_frame(9, 0.5f);
+    msg.held.push_back(inline_frame);
+    bmmo::session_remote_input_msg::held_record by_default;
+    by_default.back = 31;
+    msg.held.push_back(by_default);
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(parsed.session, 4u);
+    EXPECT_EQ(parsed.tick, 1234u);
+    EXPECT_EQ(parsed.acked, 1201u);
+    EXPECT_EQ(parsed.held_total, 17u);
+    EXPECT_EQ(parsed.epoch, 1000u);
+    ASSERT_EQ(parsed.entries.size(), 1u);
+    ASSERT_EQ(parsed.entries[0].frames.size(), 2u);
+    EXPECT_FLOAT_EQ(parsed.entries[0].frames[1].cam_dir[2], -1.0f);
+    ASSERT_EQ(parsed.held.size(), 3u);
+    EXPECT_EQ(parsed.held_tick(parsed.held[0]), 1234u);
+    EXPECT_FALSE(parsed.held[0].has_frame);
+    EXPECT_EQ(parsed.held[0].source, 1229u);
+    EXPECT_EQ(parsed.held_tick(parsed.held[1]), 1229u);
+    ASSERT_TRUE(parsed.held[1].has_frame);
+    EXPECT_EQ(parsed.held[1].frame.keys, 9);
+    EXPECT_EQ(parsed.held[1].frame.ball_type, 2);
+    EXPECT_EQ(parsed.held[1].frame.flags, 5);
+    EXPECT_FLOAT_EQ(parsed.held[1].frame.cam_dir[2], 0.5f);
+    EXPECT_FLOAT_EQ(parsed.held[1].frame.cam_right[0], 1.0f);
+    EXPECT_EQ(parsed.held_tick(parsed.held[2]), 1203u);
+    EXPECT_FALSE(parsed.held[2].has_frame);
+    EXPECT_EQ(parsed.held[2].source, bmmo::session::kHeldSourceDefault);
+    // 5 B a reference, 41 B inline, 1 B of count.
+    const size_t entry_bytes = 4 + 1 + 40 + 4;
+    EXPECT_EQ(msg.size(), bmmo::session::kRelayDatagramHeader + entry_bytes + 1 + 5 + 41 + 5);
+    msg.raw = std::stringstream{};   // serialize() appends
+    expect_rejects_every_truncation(msg);
+    // A header-only datagram: nothing relayed, nothing substituted.
+    bmmo::session_remote_input_msg header_only{};
+    header_only.tick = 50;
+    header_only.acked = 50;
+    header_only.epoch = 40;
+    auto parsed_header = round_trip(header_only);
+    EXPECT_EQ(header_only.size(), bmmo::session::kRelayDatagramHeader + 1);
+    EXPECT_TRUE(parsed_header.entries.empty());
+    EXPECT_TRUE(parsed_header.held.empty());
+    EXPECT_EQ(parsed_header.acked, 50u);
+    EXPECT_EQ(parsed_header.epoch, 40u);
+    // More than 32 records, or a back the 5 bits cannot name, are not written.
+    bmmo::session_remote_input_msg many{};
+    many.tick = 100;
+    for (uint8_t b = 0; b < 40; ++b) {
+        bmmo::session_remote_input_msg::held_record r;
+        r.back = b;
+        r.source = 50;
+        many.held.push_back(r);
+    }
+    auto parsed_many = round_trip(many);
+    EXPECT_EQ(parsed_many.held.size(), bmmo::session::kHeldNoticeTicks);
+    EXPECT_EQ(parsed_many.held.back().back, 31);
+}
+
+// The reader rejects a count past 32, a back with bits 5-6 set, a record
+// before tick 0, trailing bytes, and a protocol 6 datagram (no acked,
+// held_total, epoch nor held section) of any shape.
+TEST(SessionRemoteInputMsg, V3RejectsBadHeldSectionsAndAV6Datagram) {
+    bmmo::session_remote_input_msg msg{};
+    msg.session = 1;
+    msg.tick = 1000;
+    bmmo::session_remote_input_msg::held_record r;
+    r.back = 3;
+    r.source = 990;
+    msg.held.push_back(r);
+    ASSERT_TRUE(msg.serialize());
+    const std::string payload = stream_payload(msg.raw);
+    const size_t nheld_offset = bmmo::session::kRelayDatagramHeader;   // no entries
+    const size_t back_offset = nheld_offset + 1;
+    auto parses = [](const std::string& bytes) {
+        bmmo::session_remote_input_msg parsed{};
+        parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        return parsed.deserialize();
+    };
+    ASSERT_TRUE(parses(payload));
+    auto with = [&](size_t offset, char value) {
+        std::string copy = payload;
+        copy[offset] = value;
+        return copy;
+    };
+    // 33 records, with the bytes for all of them there: the count is refused.
+    std::string thirty_three = with(nheld_offset, 33);
+    for (int i = 0; i < 32; ++i) thirty_three += payload.substr(back_offset, 5);
+    EXPECT_FALSE(parses(thirty_three));
+    std::string thirty_two = with(nheld_offset, 32);
+    for (int i = 0; i < 31; ++i) thirty_two += payload.substr(back_offset, 5);
+    EXPECT_TRUE(parses(thirty_two));
+    EXPECT_FALSE(parses(with(back_offset, 3 | 0x20)));
+    EXPECT_FALSE(parses(with(back_offset, 3 | 0x40)));
+    EXPECT_FALSE(parses(payload + std::string(1, '\0')));   // nothing may follow the section
+    bmmo::session_remote_input_msg early{};
+    early.tick = 2;
+    bmmo::session_remote_input_msg::held_record before_zero;
+    before_zero.back = 3;
+    early.held.push_back(before_zero);
+    ASSERT_TRUE(early.serialize());
+    EXPECT_EQ(early.size(), bmmo::session::kRelayDatagramHeader + 1);   // the serializer drops it ...
+    std::string early_payload = stream_payload(early.raw);
+    early_payload.back() = 1;
+    early_payload += std::string(1, 3) + std::string(4, '\0');
+    EXPECT_FALSE(parses(early_payload));                                // ... and the reader refuses it
+    early_payload[early_payload.size() - 5] = 2;
+    EXPECT_TRUE(parses(early_payload));                                 // back 2 at tick 2 is tick 0
+    // A v6 datagram is a v7 one without the three header fields and the
+    // section: with no entries, with one, with several.
+    for (const size_t members: {0u, 1u, 3u}) {
+        bmmo::session_remote_input_msg v7{};
+        v7.session = 2;
+        v7.tick = 500;
+        for (size_t p = 0; p < members; ++p) {
+            bmmo::session_remote_input_msg::entry e;
+            e.player = static_cast<uint32_t>(10 + p);
+            for (int k = 0; k < 8; ++k) e.frames.push_back(relay_frame(static_cast<uint8_t>(k), -1.0f + 0.1f * k));
+            v7.entries.push_back(e);
+        }
+        ASSERT_TRUE(v7.serialize());
+        const std::string bytes = stream_payload(v7.raw);
+        ASSERT_TRUE(parses(bytes));
+        const size_t fields = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1;
+        std::string v6 = bytes.substr(0, fields) + bytes.substr(fields + 12);
+        v6.pop_back();   // the empty section's count
+        EXPECT_FALSE(parses(v6)) << members << " entries";
+    }
 }

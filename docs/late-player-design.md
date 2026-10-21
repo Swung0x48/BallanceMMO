@@ -74,8 +74,12 @@ A held record is `back` u8 and `source` u32:
 - `source`: the tick whose frame, **as the client sent it**, the server
   applied at T (§1.2), or `0xFFFFFFFF` for the default frame (nothing has
   arrived yet).
-- The server writes the frame inline only when `T - source >= 96`, the
-  client's sent ring being 128 ticks.
+- The server writes the frame inline only when `T - source >= 96`, or when
+  `source` is before `epoch` (the client clears its own input history on
+  every re-anchor). *Adapted in step 3:* a reference is acted on while
+  `current - (T-1) <= reach`, so the client's sent ring must reach back
+  `reach + 94` ticks; `kSentInputRing` = 256 (input_relay.hpp) covers the
+  deepest reach of 120 (a 128-tick ring covered a reach of 33 only).
 
 A record is 5 B, so 32 of them and the count are 161 B. The section goes
 into the first of the recipient's datagrams with room, or into one of its own
@@ -162,7 +166,8 @@ only `acked`. For each record at tick T the client:
 
 - deduplicates by tick (`held_seen_`, bounded like `relay_seen_`);
 - resolves the frame. Inline and default records are taken as they are.
-  Otherwise the frame comes from `sent_inputs_[source]`, a new 128-tick ring
+  Otherwise the frame comes from `sent_inputs_[source]`, a new
+  `kSentInputRing`-tick (256) ring
   of the bytes each uplink datagram carried, which is never amended. It cannot
   be `own_inputs_`: a source tick can itself have been substituted, and
   `own_inputs_` is amended below. A source the ring no longer holds counts
@@ -444,7 +449,7 @@ reliable copy stands behind them.
 | resync | the same capped formula from `ping_peak` (server.cpp:1098-1101) | re-anchor at `L_eff_p` = the lead of the player's last assignment + `lead_offset[p]`, capped at 80. That is the lead measured to work, in the same frame of reference the offset was measured in. |
 | `max_resim_ticks` 48, history 96 (rollback.hpp:317-318) | one reach for everyone | per client: `max_resim = clamp(p99 relay lag over the last 4 windows + 8, 48, 120)`. It starts from `L_assigned + ceil(rtt/2) + 8`. History becomes 128 once `max_resim > 48`. The deeper re-simulation is that player's CPU. |
 | pacer 33 (session_client.cpp:1573; fixed_tick.hpp:50) | rebase means resync | `+ |slew|` |
-| `kRelayRing` 128, `own_inputs_` 128, `sent_inputs_` 128, retail `kInputRing` | | Sufficient up to a reach of 120. Stated, not changed. |
+| `kRelayRing` 128, `own_inputs_` 128, `sent_inputs_` 256 (`kSentInputRing`), retail `kInputRing` | | Sufficient up to a reach of 120. Stated, not changed, except the sent ring: a held reference reaches `reach + 94` ticks back (§1.1). |
 
 The reach is keyed on what the client measures, its relay lag (lead +
 downlink), and not on `lead_offset`. Keyed on the offset, a late joiner at

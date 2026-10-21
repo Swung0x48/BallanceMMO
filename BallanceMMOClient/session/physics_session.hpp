@@ -335,6 +335,17 @@ namespace bmmo::session {
         // player whose mirror did not exist yet.  A datagram this queue drops
         // under load is re-delivered by the next ones.
         uint64_t relay_new = 0, relay_dup = 0, relay_parked = 0;
+        // Protocol 7 (late-player design 1.4): the server's notices of our own
+        // substituted ticks, taken once per tick and counted.  Plan step 3
+        // only receives them; resolving, amending and journaling them is the
+        // retail part one (plan step 6).  The records of a datagram numbered
+        // from another base are counted once per (epoch, tick).  The header
+        // of the newest datagram of our own epoch: the server's ack and
+        // held_total (status line).
+        relay_seen held_seen, held_stale_seen;
+        uint64_t subst_recv = 0, subst_dup = 0, subst_stale_epoch = 0;
+        bool held_header_known = false;
+        uint32_t held_header_epoch = 0, held_header_tick = 0, held_header_acked = 0, held_header_total = 0;
         uint32_t last_assign_first_tick = 0;    // the assignment applied last: its redundant copies are ignored
         // Lifecycle events (protocol 6): the first arrival of each counts; our
         // own are repeated unreliably on the next ticks; and, this client
@@ -450,6 +461,10 @@ namespace bmmo::session {
             acked_input.reset();
             remote_inputs_received = 0;
             relay_new = relay_dup = relay_parked = 0;
+            subst_recv = subst_dup = subst_stale_epoch = 0;
+            held_seen.clear();
+            held_stale_seen.clear();
+            held_header_known = false;
             last_assign_first_tick = 0;
             events_seen.clear();
             own_event_repeats.clear();

@@ -158,6 +158,89 @@ TEST(InputBuffer, TakeAcrossAGapReusesTheLastFrameAndSkipsForward) {
     EXPECT_TRUE(fresh);
 }
 
+// Late-player design 1.2: the substitute for a missing tick is the newest
+// frame that has arrived for a tick at or below the cursor, fresh or STALE,
+// and take() names the tick it came from - the source the held notice sends
+// back to the owner.
+TEST(InputBuffer, TheSubstituteIsTheNewestArrivalStaleIncluded) {
+    input_buffer buffer;
+    buffer.reset(0);
+    bool fresh = false;
+    uint32_t source = 0;
+    EXPECT_EQ(buffer.submit(0, std::vector<input_frame>{frame_with_keys(1)}), 1);
+    EXPECT_EQ(buffer.take(0, fresh, source).keys, 1);
+    EXPECT_TRUE(fresh);
+    EXPECT_EQ(source, 0u);
+    for (uint32_t t = 1; t <= 3; ++t) {
+        EXPECT_EQ(buffer.take(t, fresh, source).keys, 1);
+        EXPECT_FALSE(fresh);
+        EXPECT_EQ(source, 0u);
+    }
+    // 1 and 2 arrive after they were simulated: stale, never applied at
+    // their own ticks, but 2 is now the newest arrival.
+    EXPECT_EQ(buffer.submit(1, std::vector<input_frame>{frame_with_keys(2), frame_with_keys(3)}), 0);
+    EXPECT_EQ(buffer.stale(), 2u);
+    EXPECT_EQ(buffer.substitute_tick(), 2u);
+    EXPECT_EQ(buffer.take(4, fresh, source).keys, 3);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 2u);
+    // An older straggler changes nothing.
+    EXPECT_EQ(buffer.submit(1, std::vector<input_frame>{frame_with_keys(9)}), 0);
+    EXPECT_EQ(buffer.take(5, fresh, source).keys, 3);
+    EXPECT_EQ(source, 2u);
+    // A fresh frame is the newest arrival by construction ...
+    EXPECT_EQ(buffer.submit(6, std::vector<input_frame>{frame_with_keys(6)}), 1);
+    EXPECT_EQ(buffer.take(6, fresh, source).keys, 6);
+    EXPECT_TRUE(fresh);
+    EXPECT_EQ(source, 6u);
+    // ... and a stale one older than it does not replace it.
+    EXPECT_EQ(buffer.submit(5, std::vector<input_frame>{frame_with_keys(5)}), 0);
+    EXPECT_EQ(buffer.take(7, fresh, source).keys, 6);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 6u);
+    EXPECT_EQ(buffer.last_fresh_tick(), 6u);
+    // A frame waiting ahead of the cursor is not a substitute: it has not
+    // been reached yet.
+    EXPECT_EQ(buffer.submit(9, std::vector<input_frame>{frame_with_keys(10)}), 1);
+    EXPECT_EQ(buffer.take(8, fresh, source).keys, 6);
+    EXPECT_EQ(source, 6u);
+    // A re-anchor ahead of the world (a resync's base): a straggler between
+    // the world's tick and the base precedes the client's numbering and is
+    // no substitute, not even for the ticks the world still runs up to it.
+    buffer.reset(20);
+    EXPECT_EQ(buffer.submit(15, std::vector<input_frame>{frame_with_keys(15)}), 0);
+    EXPECT_EQ(buffer.take(9, fresh, source).keys, 6);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 6u);
+}
+
+TEST(InputBuffer, NothingArrivedYetIsTheDefaultFrameAndPersistentLatenessFollowsTheKeys) {
+    input_buffer buffer;
+    buffer.reset(10);
+    bool fresh = true;
+    uint32_t source = 0;
+    EXPECT_EQ(buffer.take(10, fresh, source).keys, 0);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, INPUT_SOURCE_DEFAULT);
+    EXPECT_EQ(buffer.substitute_tick(), INPUT_SOURCE_DEFAULT);
+    EXPECT_FALSE(buffer.received_any());
+    // Every frame 3 ticks late: none is ever fresh, and each tick applies
+    // the frame sent 3 ticks before it, not the default frame for ever.
+    for (uint32_t t = 11; t <= 60; ++t) {
+        if (t >= 13) EXPECT_EQ(buffer.submit(t - 3, std::vector<input_frame>{frame_with_keys(static_cast<uint8_t>(t - 3))}), 0);
+        const input_frame& applied = buffer.take(t, fresh, source);
+        EXPECT_FALSE(fresh);
+        if (t >= 13) {
+            EXPECT_EQ(source, t - 3);
+            EXPECT_EQ(applied.keys, static_cast<uint8_t>(t - 3));
+        } else {
+            EXPECT_EQ(source, INPUT_SOURCE_DEFAULT);
+        }
+    }
+    EXPECT_FALSE(buffer.received_any());   // nothing was ever taken fresh
+    EXPECT_EQ(buffer.stale(), 48u);
+}
+
 TEST(SessionInputMsg, FullRetransmitWindowRoundTrips) {
     // The client sends its whole input ring in one message, so the ring can
     // only be as wide as the wire cap: a message of exactly MAX_INPUT_FRAMES

@@ -87,18 +87,34 @@ namespace bmmo::session {
         static constexpr uint32_t kMaxLookahead = 660;
 
         // Stores `count` consecutive frames starting at first_tick; frames
-        // behind the consumption point are counted stale and dropped.
-        // Returns how many were new.
+        // behind the consumption point are counted stale and are never
+        // applied at their own tick.  Returns how many were new.
+        //
+        // A stale frame newer than the current substitute becomes the
+        // substitute (late-player design 1.2): under persistent lateness
+        // every frame arrives stale, and a substitute only a fresh take
+        // updated would drive the ball for seconds with the last frame from
+        // before the shift - every correction the late client gets would then
+        // be the whole lateness instead of the delay.
         template <class Frames>
         int submit(uint32_t first_tick, const Frames& frames) {
             int stored = 0;
             uint32_t tick = first_tick;
             for (const auto& frame: frames) {
                 ++received_;
-                if (tick >= next_tick_ && tick < next_tick_ + kMaxLookahead)
+                if (tick >= next_tick_ && tick < next_tick_ + kMaxLookahead) {
                     stored += frames_.emplace(tick, frame).second ? 1 : 0;
-                else if (tick < next_tick_)
+                } else if (tick < next_tick_) {
                     ++stale_;   // simulated, or re-anchored past, before this frame arrived
+                    // Only for a tick the world has reached: one between the
+                    // world's tick and a re-anchor's base (reset) precedes the
+                    // client's numbering and is no substitute for anything.
+                    if (have_taken_ && tick <= taken_ && (!have_sub_ || tick > sub_tick_)) {
+                        last_ = frame;
+                        sub_tick_ = tick;
+                        have_sub_ = true;
+                    }
+                }
                 ++tick;
             }
             stored_ += static_cast<uint64_t>(stored);
@@ -117,31 +133,50 @@ namespace bmmo::session {
         }
 
         // The input to apply for `tick`: the client's frame when it arrived,
-        // else the last one applied (or a default frame before any arrived).
+        // else the substitute - the newest frame that has arrived for a tick
+        // at or below the cursor, fresh or stale (or a default frame before
+        // any arrived).  `source` is the tick the returned frame was sent
+        // for, INPUT_SOURCE_DEFAULT for the default frame; the server
+        // relays it back to the owner with every substituted tick
+        // (late-player design 1.2), so the owner's client can re-run its
+        // ball with the bytes it sent for `source`.
         //
         // Consumption only ever moves forward, one call at a time: frames up
         // to and including `tick` are discarded and the cursor moves to the
         // first tick after it.  A missing frame is not waited for and does not
         // hold the cursor back - the world has already simulated those ticks
         // with the reused frame - so a frame that arrives after its tick was
-        // consumed is counted stale by submit() and never applied late.  A
+        // consumed is counted stale by submit() and never applied at its own
+        // tick (only, when it is the newest arrival, as a later tick's
+        // substitute).  A
         // cursor held ahead by reset() stays ahead: take() cannot pull it back
         // to a tick the buffer was re-anchored past.
-        const input_frame& take(uint32_t tick, bool& fresh) {
+        const input_frame& take(uint32_t tick, bool& fresh, uint32_t& source) {
             auto it = frames_.find(tick);
             fresh = it != frames_.end();
             if (fresh) {
                 last_ = it->second;
                 last_tick_ = tick;
+                sub_tick_ = tick;
+                have_sub_ = true;
                 any_ = true;
             }
             frames_.erase(frames_.begin(), frames_.upper_bound(tick));
             if (tick >= next_tick_)
                 next_tick_ = tick + 1;
+            if (!have_taken_ || tick > taken_) taken_ = tick;
+            have_taken_ = true;
+            source = have_sub_ ? sub_tick_ : INPUT_SOURCE_DEFAULT;
             return last_;
         }
+        const input_frame& take(uint32_t tick, bool& fresh) {
+            uint32_t source = 0;
+            return take(tick, fresh, source);
+        }
 
+        // The substitute (the frame a missing tick gets) and its tick.
         const input_frame& last() const { return last_; }
+        uint32_t substitute_tick() const { return have_sub_ ? sub_tick_ : INPUT_SOURCE_DEFAULT; }
         uint32_t last_fresh_tick() const { return last_tick_; }
         bool received_any() const { return any_; }
         size_t pending() const { return frames_.size(); }
@@ -167,10 +202,14 @@ namespace bmmo::session {
 
     private:
         std::map<uint32_t, input_frame> frames_;
-        input_frame last_{};
-        uint32_t last_tick_ = 0;
+        input_frame last_{};          // the substitute
+        uint32_t last_tick_ = 0;      // the last tick taken fresh
+        uint32_t sub_tick_ = 0;       // the substitute's tick, when have_sub_
         uint32_t next_tick_ = 0;
-        bool any_ = false;
+        uint32_t taken_ = 0;          // the newest tick take() was called for, when have_taken_
+        bool have_taken_ = false;
+        bool have_sub_ = false;       // a frame has arrived (fresh or stale)
+        bool any_ = false;            // a tick was taken fresh
         uint64_t received_ = 0, stored_ = 0, stale_ = 0;
     };
 

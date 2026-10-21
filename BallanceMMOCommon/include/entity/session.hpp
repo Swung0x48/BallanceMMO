@@ -32,7 +32,13 @@ namespace bmmo::session {
     //   6  a lifecycle event is on the wire more than once: reliable, then
     //      repeated unreliably on the following ticks, the first arrival
     //      counts (session/lifecycle.hpp event_seen / event_repeats).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 6;   // 4: SessionStart carries spawn_spacing
+    //   7  the substituted frames go back to their owner: every relayed
+    //      datagram carries the recipient's acked tick, held_total and
+    //      epoch, and a held section naming each of its own ticks the server
+    //      substituted in the last 32 and the frame applied there (late-player
+    //      design 1.1); it goes to every member every tick, header-only when
+    //      there is nothing else, a solo player included.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 7;   // 4: SessionStart carries spawn_spacing
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.
@@ -79,6 +85,11 @@ namespace bmmo::session {
     constexpr uint8_t INPUT_FLAG_PHYSICALIZED = 1u << 0;
     constexpr uint8_t INPUT_FLAG_PAUSED       = 1u << 1;
     constexpr uint8_t INPUT_FLAG_NAV_ACTIVE   = 1u << 2;
+
+    // The tick a substituted input came from when it is the default frame:
+    // nothing of the player had arrived yet (session/timeline.hpp
+    // input_buffer::take, the held records of session_remote_input_msg).
+    constexpr uint32_t INPUT_SOURCE_DEFAULT = 0xFFFFFFFFu;
 
     // session_snapshot_msg::body_state::flags bits.
     constexpr uint8_t BODY_FLAG_SIMULATED         = 1u << 0;

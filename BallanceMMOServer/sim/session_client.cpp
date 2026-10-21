@@ -740,6 +740,7 @@ namespace {
                     // Resync (design 9.2): numbering restarts from the server's
                     // current tick; the next full snapshot rebuilds every body.
                     tick_base_ = msg.first_tick;
+                    held_floor_ = tick_base_;
                     frames_since_anchor_ = 0;
                     input_history_.clear();
                     corrector_.clear();
@@ -785,6 +786,7 @@ namespace {
                     origin_ = clock_type::now();
                 }
                 tick_base_ = msg.first_tick;
+                held_floor_ = tick_base_;
                 // The anchor hold ends here: the next frame is the world's
                 // first step and it is numbered `tick_base_`, exactly like the
                 // server's own first step (design 9.25 phase alignment).
@@ -834,6 +836,7 @@ namespace {
                 if (!fill(msg)) return;
                 ++remote_inputs_received_;
                 if (msg.session != session_) return;
+                note_held_section(msg);
                 for (const auto& entry: msg.entries) {
                     auto it = remotes_.find(entry.player);
                     // The journal's PLAYER record goes in at the oldest tick this
@@ -1076,6 +1079,10 @@ namespace {
             held_lifecycle_.clear();
             remotes_.clear();
             relay_seen_.clear();
+            held_seen_.clear();
+            held_stale_seen_.clear();
+            held_header_known_ = false;
+            held_floor_ = 0;
             pending_relay_.clear();
             event_seen_.clear();
             own_event_repeats_.clear();
@@ -1102,6 +1109,8 @@ namespace {
                 }
                 remotes_.clear();
                 relay_seen_.clear();
+                held_seen_.clear();
+                held_stale_seen_.clear();
                 pending_relay_.clear();
                 event_seen_.clear();
                 own_event_repeats_.clear();
@@ -2413,6 +2422,9 @@ namespace {
                                                   body.owner == own_id_ ? true : wake, error);
                 }
                 resync_pending_ = false;
+                // Every own tick up to the snapshot's is the server's now,
+                // substituted ones included: no held notice of them is late.
+                if (static_cast<int32_t>(snapshot.tick - held_floor_) > 0) held_floor_ = snapshot.tick;
                 ++resyncs_done_;
                 logf("resync applied from the full snapshot of tick %u (%zu bodies)", snapshot.tick, snapshot.bodies.size());
                 journal_body_correction(4, {}, snapshot.tick, 0.0, nullptr);
@@ -2588,11 +2600,66 @@ namespace {
             return kRelayLagBuckets - 1;
         }
 
+        // Protocol 7 (late-player design 1.3): the held section of a relayed
+        // datagram names our own ticks the server substituted and the frame
+        // it applied there.  Plan step 3 receives, deduplicates and counts
+        // them; nothing is corrected or journaled yet.  A datagram numbered
+        // from another base (a SessionAssign processed late here, or notices
+        // from before it) says nothing about this numbering: its records are
+        // only counted as such, once per (epoch, tick).  Of our own epoch's
+        // records, one no rewind could ever reach counts as base: without
+        // --rollback, while a resync waits for its full snapshot, or at or
+        // below held_floor_ (the base tick, whose anchor precedes the
+        // numbering, and every tick a resync's full snapshot overwrote - the
+        // server's frame is in that snapshot already).  Step 4 must not
+        // resync on those: a resync's first tick held again would loop.  Of
+        // the rest, a record inside the reach - the anchor its rewind would
+        // use, tick - 1, still re-simulable and in the history, the gate
+        // note_input_correction applies - or one not simulated yet counts as
+        // recv, one past the reach as late.  recv + late + base is what the
+        // server's S2 lines count for this epoch.
+        void note_held_section(const bmmo::session_remote_input_msg& msg) {
+            if (!assigned_) return;
+            if (msg.epoch != tick_base_) {
+                for (const auto& record: msg.held)
+                    if (held_stale_seen_.first(msg.epoch, msg.held_tick(record))) ++subst_stale_epoch_;
+                return;
+            }
+            if (!held_header_current() || static_cast<int32_t>(msg.tick - held_header_tick_) >= 0) {
+                held_header_known_ = true;
+                held_header_epoch_ = msg.epoch;
+                held_header_tick_ = msg.tick;
+                held_header_acked_ = msg.acked;
+                held_header_total_ = msg.held_total;
+            }
+            for (const auto& record: msg.held) {
+                const uint32_t tick = msg.held_tick(record);
+                if (static_cast<int32_t>(tick - tick_base_) < 0) continue;   // before our numbering: never noticed
+                if (!held_seen_.first(own_id_, tick)) { ++subst_dup_; continue; }
+                if (!args_.rollback || resync_pending_ || static_cast<int32_t>(tick - held_floor_) <= 0) {
+                    ++subst_base_;
+                    continue;
+                }
+                if (static_cast<int32_t>(tick - current_tick()) > 0) {   // not simulated yet
+                    ++subst_recv_;
+                    continue;
+                }
+                const uint32_t anchor = tick - 1;
+                const bool reachable = current_tick() - anchor <= rollback_.thresholds().max_resim_ticks
+                                    && rollback_.knows_tick(anchor);
+                if (reachable) ++subst_recv_;
+                else ++subst_late_;
+            }
+        }
+
+        bool held_header_current() const { return held_header_known_ && held_header_epoch_ == tick_base_; }
+
         // A relayed frame for a tick this client has already simulated: if it
         // differs from the frame the prediction used, that tick and every tick
         // after it ran on the wrong input.  Remember the earliest such tick and
         // let frame() replay from it once, before the next step - the frames of
         // several remotes arrive together, and one rewind covers them all.
+
         void note_input_correction(const remote_ball& remote, uint32_t tick,
                                    const bmmo::session::input_frame& relayed) {
             const std::string& entity = remote.entity;
@@ -3990,6 +4057,8 @@ namespace {
             }
             remotes_.clear();
             relay_seen_.clear();
+            held_seen_.clear();
+            held_stale_seen_.clear();
             pending_relay_.clear();
             event_seen_.clear();
             own_event_repeats_.clear();
@@ -4065,7 +4134,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu snapshots=%llu/%llu/%llu "
-                 "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -4083,6 +4152,20 @@ namespace {
                  static_cast<unsigned long long>(relay_new_), static_cast<unsigned long long>(relay_dup_),
                  static_cast<unsigned long long>(relay_parked_), static_cast<unsigned long long>(relay_late_),
                  relay_lag_max_, relay_lag_p99(),
+                 // subst=recv/diff/same/bodiless/rew/late (late-player design
+                 // 1.3); the own correction that sorts recv into diff, same and
+                 // bodiless and rewinds is plan step 4, so those are 0 here.
+                 // subst_skip=dup/stale_epoch/base: re-deliveries, records of
+                 // a datagram numbered from another base, and records no
+                 // rewind could reach (the base tick, a resync's snapshot).
+                 // acked/held_total: the newest header of our own epoch (0/0
+                 // until one arrives).  recv + late + base per epoch is what
+                 // the server's S2 lines count.
+                 static_cast<unsigned long long>(subst_recv_), 0ull, 0ull, 0ull, 0ull,
+                 static_cast<unsigned long long>(subst_late_),
+                 static_cast<unsigned long long>(subst_dup_), static_cast<unsigned long long>(subst_stale_epoch_),
+                 static_cast<unsigned long long>(subst_base_),
+                 held_header_current() ? held_header_acked_ : 0u, held_header_current() ? held_header_total_ : 0u,
                  static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
                  mechanism_tracking_.known(), mechanism_tracking_.resolved(),
@@ -4502,6 +4585,23 @@ namespace {
         uint64_t snapshot_rollbacks_ = 0, snapshot_rollback_depth_ = 0;
         bmmo::session::relay_seen relay_seen_;
         bmmo::session::pending_relay pending_relay_;
+        // Protocol 7 (late-player design 1.3): the server's notices of our own
+        // substituted ticks, taken once per tick (keyed by our own id) and
+        // counted.  Plan step 3 only receives them: recv inside the reach,
+        // late past it, base when no rewind could ever have reached it (see
+        // note_held_section), dup a re-delivery, stale_epoch the records of a
+        // datagram numbered from another base (taken once per (epoch, tick)
+        // in held_stale_seen_).  The own correction (diff, same, bodiless,
+        // rew) is step 4.  `held_floor_`: a record at or below it has no
+        // anchor this numbering ever recorded - the base itself, or a tick a
+        // resync's full snapshot overwrote.  The header of the newest
+        // datagram of our own epoch: the server's ack and held_total.
+        bmmo::session::relay_seen held_seen_;
+        bmmo::session::relay_seen held_stale_seen_;
+        uint64_t subst_recv_ = 0, subst_late_ = 0, subst_base_ = 0, subst_dup_ = 0, subst_stale_epoch_ = 0;
+        uint32_t held_floor_ = 0;
+        bool held_header_known_ = false;
+        uint32_t held_header_epoch_ = 0, held_header_tick_ = 0, held_header_acked_ = 0, held_header_total_ = 0;
         // Lifecycle events (protocol 6): the first arrival of each counts, and
         // our own are repeated unreliably on the next ticks (flush_inputs).
         bmmo::session::event_seen event_seen_;
