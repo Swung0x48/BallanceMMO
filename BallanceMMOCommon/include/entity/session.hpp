@@ -29,7 +29,10 @@ namespace bmmo::session {
     //      window: session_remote_input_msg carries, per other member, the
     //      frames of the last `relay_window` ticks, the camera omitted where
     //      it did not move (session/input_relay.hpp).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 5;   // 4: SessionStart carries spawn_spacing
+    //   6  a lifecycle event is on the wire more than once: reliable, then
+    //      repeated unreliably on the following ticks, the first arrival
+    //      counts (session/lifecycle.hpp event_seen / event_repeats).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 6;   // 4: SessionStart carries spawn_spacing
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.

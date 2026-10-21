@@ -2205,6 +2205,78 @@ measured in "The activation replay on the networked path"), and one lane
 client crashed at shutdown in `PhysicsHingeCallBack` under
 `CKContext::Reset` after reporting exit code 0 - noted as open.
 
+### The lifecycle events, repeated (2026-10-21, protocol 6)
+
+The relay's loss runs left the lifecycle events as the next late thing: a
+Physicalize, Unphysicalize or Sector event travelled reliable and ordered, so
+a lost one came back by retransmit ~400 ms later - 20-40 ticks, past the
+rollback's 48-tick reach (`far` 1-7 per client) - and a mirror whose respawn
+or beam was applied that late sat 10-30 m from the server's ball until the
+next forced snapshot. The events now get what the inputs got: the reliable
+copy stays (the backstop for a burst longer than the repeats), and the sender
+repeats the same bytes unreliably on each of the next six ticks, one per tick
+so each copy rides its own packet - the server from `on_session_inputs` to the
+members still present (and for the leaver's Unphysicalize), the clients from
+their per-tick input send (`session/lifecycle.hpp`: `event_repeats`). Every
+receiver takes the first arrival of (stamp, player, type, ball type, sector,
+name) and ignores the rest (`event_seen`): the server before its rate limit,
+so six copies are one event; the headless client before queueing, so the
+journal and the stamp-ordered drain see it once; the retail mod in its queue
+drain, which also sorts a batch by stamp and join order (the server's order)
+and - applying on arrival with no rewind - drops a Physicalize or
+Unphysicalize older than the lifecycle event it already applied for that
+player, and an Unphysicalize stamped at or before the last applied
+Physicalize, so a late copy of a death cannot take down the mirror of the
+respawn that followed it. Nothing needs the copies in order - with one rule
+every receiver applies, because the ordered stream used to supply it: the
+events of one player with one stamp go Unphysicalize before Physicalize
+(a beam sends both at one tick; `lifecycle_event_rank`), in the server's
+runner, the headless drain and the retail batch alike, and the server's runner
+and the headless client also drop an Unphysicalize stamped at or before the
+player's last applied Physicalize. The server keeps a member's last
+Physicalize with its stamp for late joiners and lets only a later-stamped
+Unphysicalize erase it; the Unphysicalize it sends on a leaver's behalf is
+stamped after that Physicalize, since the members stamp theirs ahead of the
+server's tick. The copies go out from the server's main loop, so a session
+with one member left still gets the leaver's. Found by the review before the
+measurement, and worth recording: the headless client's per-frame input send
+is not `flush_inputs` (that runs once, at the assignment), so the first cut
+sent no copies of its own events at all; and a dedup judged before the
+client's phase check would have eaten the server's catch-up for a late joiner,
+whose relays during the load are byte-identical to the catch-up.
+
+**Measured** (four headless clients, 150 ms each way, snapshots off, spawn
+spacing 4.2, the swing bay; the host quiet - a first batch ran beside six
+ffmpeg processes and a disk scan, every per-tick cost rose by half and every
+client rebased, which is in the record as the host-load trap it is):
+
+| swing bay, 4 clients | mirrors 1200-1799 (after the beam) | own balls 1200-1799 | after 1800, own / mirrors | `far` (rewinds refused as too deep) | frames too late |
+|---|---|---|---|---|---|
+| 10 % loss, events reliable only (`r5_sw_loss10`) | 20-28 m | 7-28 m | 0-5 m / 0.04-0.1 m | 2-5 | 1-5 % |
+| 10 % loss, events repeated (`ev_sw_loss10`) | **1.4-4.7 m** | **0-4.7 m** | 0.000 / 0.04-0.05 m | **0** | **0** |
+| 10 % loss, events repeated, second run | 1.4-20 m | 0-21 m (one client) | 0.000-0.02 / 0.05-0.07 m | 0-4 | 0-360 |
+| bursts of 12, events repeated | 15-23 m | 1-16 m | 0.000 / 0.09-1 m | 2 | 117-291 |
+| lossless, events repeated | 2.8-8.2 m | 0-5.5 m | 0.000 / 0.04 m | 0 | 0 |
+
+The server journal replayed bit-exact in every run, no lifecycle rewind was
+missed in the clean loss run (`life=15-17/0`), and the server dropped no
+event as superseded. What the repeats bought is the clean loss run's column:
+the mirrors after the beam, 20-28 m off with the reliable events, are 1.4-4.7
+m off now, and the own balls they knock are back to zero after the pile where
+they were 7-28 m. What remains shows in the other two loss rows and has one
+cause: the lifecycle-forced *full snapshots* are still reliable, a lost one is
+retransmitted past the 48-tick reach, and the snapshot path's too-far branch
+then writes every body back to the rows and drops the history - the clients
+with `far` 2-4 are the ones with 195-360 frames "too late" (the ~95 ticks of
+history a wipe takes, times the three remotes) and the 20 m excursions. A
+burst of twelve datagrams (180 ms) also outlasts the six repeats (90 ms), so
+there the reliable backstop still carries events late. The levers: a
+too-late forced snapshot should be refused like a too-deep rewind now that
+the relay and the events carry the correction, and the repeats could be
+spread over twelve ticks for bursts. The lane at 10 % loss hit the host-load
+rebase on all four clients in both runs of the day (the lane's rewind storm
+is the heavier one); its numbers are not quoted.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the

@@ -393,3 +393,90 @@ TEST(StartBarrierArming, ADisarmedBarrierIsArmedAgainForTheNextJoin) {
     barrier.arm_if_idle(later);
     EXPECT_EQ(barrier.deadline, later + std::chrono::seconds(8));
 }
+
+// ---------------------------------------------------------------------
+// Protocol 6: a lifecycle event on the wire more than once (lifecycle.hpp
+// event_seen / event_repeats).
+// ---------------------------------------------------------------------
+
+namespace {
+    struct fake_event {
+        uint32_t tick = 0;
+        bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
+        uint8_t ball_type = 0;
+        int32_t sector = 0;
+        std::string name;
+    };
+}
+
+TEST(LifecycleEventRedundancy, TheFirstArrivalCountsAndTheCopiesDoNot) {
+    bmmo::session::event_seen seen(4);
+    fake_event e;
+    e.tick = 100;
+    EXPECT_TRUE(seen.first(bmmo::session::lifecycle_key_of(e, 7)));
+    EXPECT_FALSE(seen.first(bmmo::session::lifecycle_key_of(e, 7)));   // the reliable copy, or a repeat
+    EXPECT_TRUE(seen.first(bmmo::session::lifecycle_key_of(e, 8)));    // another player's, same stamp
+    // A trafo: Unphysicalize and Physicalize at one stamp are two events.
+    fake_event down = e;
+    down.type = bmmo::session::event_type::Unphysicalize;
+    EXPECT_TRUE(seen.first(bmmo::session::lifecycle_key_of(down, 7)));
+    // Another sector at the same stamp is another event; the same one is not.
+    fake_event sector;
+    sector.tick = 100;
+    sector.type = bmmo::session::event_type::Sector;
+    sector.sector = 3;
+    EXPECT_TRUE(seen.first(bmmo::session::lifecycle_key_of(sector, 7)));
+    EXPECT_FALSE(seen.first(bmmo::session::lifecycle_key_of(sector, 7)));
+    sector.sector = 4;
+    EXPECT_TRUE(seen.first(bmmo::session::lifecycle_key_of(sector, 7)));
+    // The bound is per player and by stamp: the oldest goes first.
+    bmmo::session::event_seen small(2);
+    for (uint32_t t = 10; t < 13; ++t) {
+        fake_event f;
+        f.tick = t;
+        EXPECT_TRUE(small.first(bmmo::session::lifecycle_key_of(f, 1)));
+    }
+    fake_event oldest;
+    oldest.tick = 10;
+    EXPECT_TRUE(small.first(bmmo::session::lifecycle_key_of(oldest, 1)));   // evicted, so taken again
+    fake_event newest;
+    newest.tick = 12;
+    EXPECT_FALSE(small.first(bmmo::session::lifecycle_key_of(newest, 1)));
+}
+
+TEST(LifecycleEventRedundancy, RepeatsGoOutOncePerCallToEveryRecipientAndStop) {
+    bmmo::session::event_repeats repeats;
+    repeats.push("A", {1, 2, 3}, 2);
+    repeats.push("B", {2}, 1);
+    repeats.push("C", {}, 5);     // nobody to send to: dropped
+    repeats.push("D", {1}, 0);    // no copies: dropped
+    EXPECT_EQ(repeats.pending(), 2u);
+    std::vector<std::pair<uint32_t, std::string>> sent;
+    const auto record = [&sent](uint32_t to, const std::string& bytes) { sent.emplace_back(to, bytes); };
+    repeats.send_due(record);
+    ASSERT_EQ(sent.size(), 4u);   // A to 1, 2, 3 and B to 2
+    EXPECT_EQ(sent[0], (std::pair<uint32_t, std::string>{1, "A"}));
+    EXPECT_EQ(sent[3], (std::pair<uint32_t, std::string>{2, "B"}));
+    EXPECT_EQ(repeats.pending(), 1u);   // B is done
+    repeats.forget(2);                   // 2 left
+    sent.clear();
+    repeats.send_due(record);
+    ASSERT_EQ(sent.size(), 2u);   // A to 1 and 3
+    EXPECT_EQ(sent[0].first, 1u);
+    EXPECT_EQ(sent[1].first, 3u);
+    EXPECT_EQ(repeats.pending(), 0u);
+    sent.clear();
+    repeats.send_due(record);
+    EXPECT_TRUE(sent.empty());
+    repeats.push("E", {1}, 3);
+    repeats.forget(1);
+    EXPECT_EQ(repeats.pending(), 0u);
+}
+
+TEST(LifecycleEventRedundancy, OneStampOrdersTheDeathBeforeTheBirth) {
+    using bmmo::session::event_type;
+    using bmmo::session::lifecycle_event_rank;
+    EXPECT_LT(lifecycle_event_rank(event_type::Unphysicalize), lifecycle_event_rank(event_type::Physicalize));
+    EXPECT_LT(lifecycle_event_rank(event_type::Physicalize), lifecycle_event_rank(event_type::Sector));
+    EXPECT_EQ(lifecycle_event_rank(event_type::Sector), lifecycle_event_rank(event_type::BodyRevived));
+}

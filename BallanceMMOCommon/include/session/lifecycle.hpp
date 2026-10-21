@@ -8,9 +8,15 @@
 //                            for this player already queued within reach?
 //   repeat_event_duplicate - the intake guard: has this exact repeat event
 //                            (BodyRevived) been accepted recently?
+//   event_seen / event_repeats - protocol 6: every lifecycle event is sent
+//                            reliably and then repeated unreliably on the next
+//                            ticks; the first arrival counts.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -73,4 +79,130 @@ namespace bmmo::session {
         recent.push_back({tick, ball_type, name});
         if (recent.size() > kRepeatEventRing) recent.erase(recent.begin());
     }
+
+    // ------------------------------------------------------------------
+    // A lifecycle event on the wire more than once (protocol 6).
+    //
+    // The events (Physicalize, Unphysicalize, Sector, BodyRevived) travelled
+    // reliable and ordered.  Under 10 % loss that made a lost event ~400 ms
+    // late by retransmit - 20-40 ticks, past the rollback's 48-tick reach -
+    // so a respawn or a beam applied that late left the mirror 10-30 m from
+    // where the server has the ball until the next forced snapshot.  So, as
+    // with the input relay, the reliable copy is backed by unreliable ones:
+    // the sender repeats the same bytes on each of the next
+    // kLifecycleEventRepeats ticks (one per tick, each in its own packet),
+    // and every receiver takes the first arrival of a (player, stamp, type,
+    // ball type, sector, name) and ignores the rest.  Nothing needs the
+    // copies in order: the server applies events by stamp in join order,
+    // the headless client queues them by stamp and rewinds for a late one,
+    // and the retail mod applies a batch in stamp order and drops a
+    // lifecycle event older than the one it already applied for that player.
+    struct lifecycle_event_key {
+        uint32_t tick = 0;
+        uint32_t player = 0;
+        uint8_t type = 0;
+        uint8_t ball_type = 0;
+        int32_t sector = 0;
+        std::string name;
+
+        bool operator<(const lifecycle_event_key& o) const {
+            if (tick != o.tick) return tick < o.tick;
+            if (player != o.player) return player < o.player;
+            if (type != o.type) return type < o.type;
+            if (ball_type != o.ball_type) return ball_type < o.ball_type;
+            if (sector != o.sector) return sector < o.sector;
+            return name < o.name;
+        }
+        bool operator==(const lifecycle_event_key& o) const {
+            return tick == o.tick && player == o.player && type == o.type && ball_type == o.ball_type
+                && sector == o.sector && name == o.name;
+        }
+    };
+
+    // The key of a session_event_msg (or anything with .tick, .type,
+    // .ball_type, .sector, .name) as sent by `player` (0 = the connection on
+    // the uplink, where the server keys by the connection instead).
+    template <class Msg>
+    inline lifecycle_event_key lifecycle_key_of(const Msg& m, uint32_t player) {
+        lifecycle_event_key k;
+        k.tick = m.tick;
+        k.player = player;
+        k.type = static_cast<uint8_t>(m.type);
+        k.ball_type = m.ball_type;
+        k.sector = m.sector;
+        k.name = m.name;
+        return k;
+    }
+
+    // Copies of an event sent after the reliable one, one per tick.
+    inline constexpr int kLifecycleEventRepeats = 6;
+
+    // The order two events of one player with one stamp are applied in: the
+    // Unphysicalize before the Physicalize (a beam sends both at one tick), the
+    // rest after.  The ordered stream used to guarantee the sender's order;
+    // with copies that can overtake each other, every receiver sorts a stamp's
+    // events by this rank (the server's runner, the headless client's drain,
+    // the retail mod's batch) - and ignores an Unphysicalize stamped at or
+    // before the player's last applied Physicalize, which a late copy of a
+    // death would otherwise take out the respawn with.
+    inline int lifecycle_event_rank(event_type t) {
+        if (t == event_type::Unphysicalize) return 0;
+        if (t == event_type::Physicalize) return 1;
+        return 2;
+    }
+
+    // Which events a receiver has already taken: the first arrival counts.
+    // Bounded per player by stamp; a copy arriving later than the bound
+    // (seconds, at a few copies over ~100 ms) would be taken again.
+    class event_seen {
+    public:
+        explicit event_seen(size_t cap = 256) : cap_(cap) {}
+        bool first(const lifecycle_event_key& key) {
+            auto& keys = seen_[key.player];
+            if (!keys.insert(key).second) return false;
+            while (keys.size() > cap_) keys.erase(keys.begin());
+            return true;
+        }
+        void clear() { seen_.clear(); }
+    private:
+        std::map<uint32_t, std::set<lifecycle_event_key>> seen_;
+        size_t cap_;
+    };
+
+    // The copies still to send: the serialized message, its recipients (the
+    // uplink has one, named 0) and how many are left.  send_due() sends one
+    // copy of every entry per call, so a caller that calls it once per tick
+    // spaces the copies a tick apart, each in its own packet.
+    class event_repeats {
+    public:
+        struct entry {
+            std::string bytes;
+            std::vector<uint32_t> to;
+            int remaining = 0;
+        };
+        void push(std::string bytes, std::vector<uint32_t> to, int copies = kLifecycleEventRepeats) {
+            if (copies <= 0 || to.empty()) return;
+            entries_.push_back(entry{std::move(bytes), std::move(to), copies});
+        }
+        template <class Send>
+        void send_due(Send send) {
+            for (auto it = entries_.begin(); it != entries_.end();) {
+                for (uint32_t to: it->to) send(to, it->bytes);
+                if (--it->remaining <= 0) it = entries_.erase(it);
+                else ++it;
+            }
+        }
+        // A recipient that left gets no more copies.
+        void forget(uint32_t to) {
+            for (auto it = entries_.begin(); it != entries_.end();) {
+                it->to.erase(std::remove(it->to.begin(), it->to.end(), to), it->to.end());
+                if (it->to.empty()) it = entries_.erase(it);
+                else ++it;
+            }
+        }
+        size_t pending() const { return entries_.size(); }
+        void clear() { entries_.clear(); }
+    private:
+        std::vector<entry> entries_;
+    };
 }

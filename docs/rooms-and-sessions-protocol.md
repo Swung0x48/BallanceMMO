@@ -108,7 +108,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 `session_input_msg`（client → server，unreliable no-delay）：session u32、first_tick u32、count u8（≤ 8，从 first_tick 起连续 count 个 tick，最新的在最后），每项：keys u8（bit0 叶子 0 … bit3 叶子 3，叶子编号按 `Ball Navigation` 图内 `SetPhysicsForce` 的子块顺序；bit4 Shift、bit5 Space 仅作记录）、cam_right f32×3、cam_up f32×3、cam_dir f32×3（`Cam_OrientRef` 世界矩阵的三条基向量）、ball_type u8、flags u8（bit0 physicalized、bit1 paused、bit2 nav_active——客户端 BallNav activate/deactivate 的当前状态，服务端据此复现 Key Event 的 On/Off；bit1 仅作记录，会话期间暂停不再停摆世界，见设计 9.2）。
 
-`session_event_msg`（双向，reliable）：session u32、player u32（服务端转发时为来源，客户端发送时为 0）、tick u32、type u8、按 type 附加：
+`session_event_msg`（双向，reliable）：session u32、player u32（服务端转发时为来源，客户端发送时为 0）、tick u32、type u8、按 type 附加： **协议 6 起**：两个方向都仍先 reliable（NoNagle）发一份，随后由发送方在接下来的 6 个 tick 里每 tick 不可靠重发一份（服务端在 `on_session_inputs` 里对仍在场的成员发，客户端在每帧发输入的地方发；`session/lifecycle.hpp` `event_repeats`）；接收方以 (tick, player, type, ball_type, sector, name) 为键只取首达的一份（`event_seen`：服务端按连接在限速之前去重，无头客户端在入队前，零售 mod 在排空队列时），其余忽略。这样一次丢包不再把事件拖到 ~400 ms 的重传之后（超出回滚 48 tick 的可达范围）；事件仍然按戳记应用：服务端按 tick + 入场顺序，无头客户端按戳记排队、迟到则回滚，零售 mod 把一批按 (tick, 入场顺序) 排序后应用，并丢弃比该玩家已应用的生命周期事件更旧的 Physicalize/Unphysicalize（它只能到达即应用、不能回滚）。
 
 | type | 附加字段 |
 | --- | --- |

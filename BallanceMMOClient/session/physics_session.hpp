@@ -27,6 +27,7 @@
 #include <message/message_all.hpp>
 #include <session/correction.hpp>
 #include <session/input_relay.hpp>
+#include <session/lifecycle.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
 #include <session/sector_union.hpp>
@@ -335,6 +336,15 @@ namespace bmmo::session {
         // under load is re-delivered by the next ones.
         uint64_t relay_new = 0, relay_dup = 0, relay_parked = 0;
         uint32_t last_assign_first_tick = 0;    // the assignment applied last: its redundant copies are ignored
+        // Lifecycle events (protocol 6): the first arrival of each counts; our
+        // own are repeated unreliably on the next ticks; and, this client
+        // applying on arrival with no rewind, a lifecycle event older than the
+        // one already applied for that player is superseded.
+        event_seen events_seen;
+        event_repeats own_event_repeats;
+        uint64_t event_dups = 0, events_superseded = 0;
+        std::map<uint32_t, uint32_t> last_lifecycle_tick;     // Physicalize or Unphysicalize applied, per player
+        std::map<uint32_t, uint32_t> last_physicalize_tick;
         relay_seen relay_seen_frames;
         pending_relay pending_relay_frames;
         static constexpr size_t kMaxQueuedSnapshots = 64;
@@ -441,6 +451,11 @@ namespace bmmo::session {
             remote_inputs_received = 0;
             relay_new = relay_dup = relay_parked = 0;
             last_assign_first_tick = 0;
+            events_seen.clear();
+            own_event_repeats.clear();
+            event_dups = events_superseded = 0;
+            last_lifecycle_tick.clear();
+            last_physicalize_tick.clear();
             relay_seen_frames.clear();
             pending_relay_frames.clear();
             ball_forces.clear();

@@ -1966,6 +1966,10 @@ void BallanceMMOClient::physics_session_frame() {
         msg.serialize();
         send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
         ++s.inputs_sent;
+        s.own_event_repeats.send_due([this](uint32_t, const std::string& bytes) {
+            std::string copy = bytes;   // client::send takes a mutable buffer
+            send(copy.data(), copy.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+        });
     } else if (s.input_history.size() > 660) {
         s.input_history.pop_front();
     }
@@ -2134,6 +2138,9 @@ void BallanceMMOClient::physics_session_send_event(bmmo::session_event_msg& even
     // after the input that lets the server step it, and be applied a tick late
     // (the server logs it: "late by 1", seen on BodyRevived and Physicalize).
     send(event.raw.str().data(), event.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+    // ...and again, unreliably, on each of the next ticks (the per-frame
+    // input send): the server takes the first copy to arrive.
+    s.own_event_repeats.push(event.raw.str(), {0u});
     ++s.events_sent;
     // The black box: our own events carry player 0 on the wire; in the file
     // they are ours by id, like the relayed ones are their sender's.
@@ -2159,7 +2166,23 @@ void BallanceMMOClient::physics_session_apply_queues() {
         for (const auto& body: snapshot.bodies)
             if (body.kind == bmmo::session::body_kind::Ball)
                 physics_session_cache_ball_row(snapshot.tick, body);
-    for (auto& event: events) physics_session_apply_event(event);
+    // Protocol 6: an event may arrive several times (the server repeats it
+    // unreliably beside the reliable copy) and out of order.  The first
+    // arrival counts; the batch is applied in stamp order and join order, as
+    // the server applies them.
+    std::vector<bmmo::session_event_msg> fresh;
+    for (auto& event: events) {
+        if (event.session != s.session) continue;
+        if (!s.events_seen.first(bmmo::session::lifecycle_key_of(event, event.player))) { ++s.event_dups; continue; }
+        fresh.push_back(std::move(event));
+    }
+    std::stable_sort(fresh.begin(), fresh.end(), [&s](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
+        if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
+        const uint8_t ja = mirror_join_order(s, a.player), jb = mirror_join_order(s, b.player);
+        if (ja != jb) return ja < jb;
+        return bmmo::session::lifecycle_event_rank(a.type) < bmmo::session::lifecycle_event_rank(b.type);
+    });
+    for (auto& event: fresh) physics_session_apply_event(event);
     auto& journal = bmmo::session::client_journal::instance();
     for (const auto& msg: inputs) {
         if (msg.session != s.session) continue;
@@ -2222,6 +2245,24 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
                             state ? state->name : std::string{});
     }
     journal.event(to_journal_event(event, event.player));
+    // Applied on arrival, with no rewind: a lifecycle event that arrives after
+    // a newer one for the same player (its reliable copy retransmitted, the
+    // unreliable ones lost) describes a body the newer event already replaced
+    // - an Unphysicalize of a ball that has since respawned would take the
+    // new mirror down.  The newer state stands.
+    if (event.type == bmmo::session::event_type::Physicalize || event.type == bmmo::session::event_type::Unphysicalize) {
+        const uint32_t last = s.last_lifecycle_tick.count(event.player) ? s.last_lifecycle_tick[event.player] : 0;
+        const uint32_t last_birth = s.last_physicalize_tick.count(event.player) ? s.last_physicalize_tick[event.player] : 0;
+        const bool older = last != 0 && static_cast<int32_t>(event.tick - last) < 0;
+        const bool unphysicalize_of_a_replaced_body = event.type == bmmo::session::event_type::Unphysicalize
+            && last_birth != 0 && static_cast<int32_t>(event.tick - last_birth) <= 0;
+        if (older || unphysicalize_of_a_replaced_body) {
+            ++s.events_superseded;
+            return;
+        }
+        s.last_lifecycle_tick[event.player] = event.tick;
+        if (event.type == bmmo::session::event_type::Physicalize) s.last_physicalize_tick[event.player] = event.tick;
+    }
     std::string error;
     switch (event.type) {
     case bmmo::session::event_type::Physicalize: {

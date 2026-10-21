@@ -577,6 +577,13 @@ public:
         // relayed datagram repeats (session/input_relay.hpp, protocol 5).
         bmmo::session::relay_ring relay;
         bool relay_trim_logged = false;
+        // Lifecycle events (protocol 6): the copies members' events still owe
+        // the others, one per tick from on_session_inputs, and which events
+        // from each member this server has already taken (the members repeat
+        // theirs the same way).
+        bmmo::session::event_repeats event_repeats;
+        bmmo::session::event_seen events_seen;
+        uint64_t duplicate_events = 0;
         // Assignments still to be repeated unreliably, one copy every
         // kAssignRepeatSpacing from the main loop (send_session_assign,
         // send_assign_repeats).
@@ -613,7 +620,11 @@ public:
         std::map<HSteamNetConnection, uint8_t> join_orders;
         // last Physicalize event of each member (serialized, player set) so a
         // late joiner can build the bodies that already exist
-        std::map<HSteamNetConnection, std::string> last_physicalize;
+        // Each member's last Physicalize as relayed (for a late joiner) with
+        // its stamp: an Unphysicalize erases it only when stamped later, and
+        // the Unphysicalize sent on a leaver's behalf is stamped after it.
+        struct last_physicalize_entry { uint32_t tick = 0; std::string bytes; };
+        std::map<HSteamNetConnection, last_physicalize_entry> last_physicalize;
         // Every Sector event relayed in this session (serialized, player set),
         // in order: a late joiner's union has to grow by the same sectors the
         // running members' did (session/sector_union.hpp), and a resynced
@@ -1045,21 +1056,30 @@ public:
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
                                s.assign_repeats.end());
+        s.event_repeats.forget(c);
         s.ready.erase(c);
         s.assigned.erase(c);
         s.late.erase(c);
         s.join_orders.erase(c);
-        if (s.last_physicalize.erase(c) && runner_) {
+        const auto last_physicalize = s.last_physicalize.find(c);
+        const uint32_t last_physicalize_tick = last_physicalize == s.last_physicalize.end() ? 0 : last_physicalize->second.tick;
+        if (last_physicalize != s.last_physicalize.end()) s.last_physicalize.erase(last_physicalize);
+        if (last_physicalize_tick && runner_) {
             // The others still mirror this ball: relay an Unphysicalize on the
-            // leaver's behalf (design 9.3).
+            // leaver's behalf (design 9.3).  Stamped after the ball's own
+            // Physicalize (the members stamp theirs ahead of the server's tick
+            // by the start lead): every receiver orders a player's lifecycle
+            // events by stamp, and one stamped before the birth would be the
+            // death of an earlier ball.
             bmmo::session_event_msg gone;
             gone.session = session;
             gone.player = c;
-            gone.tick = runner_->current_tick(session);
+            gone.tick = std::max(runner_->current_tick(session), last_physicalize_tick + 1);
             gone.type = bmmo::session::event_type::Unphysicalize;
             gone.serialize();
             for (const auto m: s.members)
                 send(m, gone.raw.str().data(), gone.size(), k_nSteamNetworkingSend_Reliable);
+            s.event_repeats.push(gone.raw.str(), std::vector<uint32_t>(s.members.begin(), s.members.end()));
         }
         if (runner_) runner_->remove_player(session, c);
         if (s.members.empty()) end_physics_session(session, "everyone left");
@@ -1129,11 +1149,18 @@ public:
     // session_runner::player_ready only starts ticking when all of them are
     // ready.  Once the deadline has passed the silent members are dropped and
     // the rest start without them; a session that loses everybody ends.
-    // The unreliable copies of recent assignments (send_session_assign), each
-    // from its own main-loop iteration so each rides its own packet.
+    // The unreliable copies of recent assignments (send_session_assign) and of
+    // recent lifecycle events (handle_session_event), each from its own
+    // main-loop iteration so each rides its own packet - and from the main
+    // loop rather than a tick, so a session with one member left (the
+    // leaver's Unphysicalize) still gets them.
     void send_assign_repeats() {
         const auto now = std::chrono::steady_clock::now();
         for (auto& [id, s]: physics_sessions_) {
+            s.event_repeats.send_due([this, &s](uint32_t to, const std::string& bytes) {
+                if (std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(to)) != s.members.end())
+                    send(to, bytes.data(), bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+            });
             for (auto r = s.assign_repeats.begin(); r != s.assign_repeats.end();) {
                 if (now < r->next_due) { ++r; continue; }
                 bmmo::session_assign_msg assign;
@@ -1249,8 +1276,8 @@ public:
         if (s.late.count(c)) {
             // catch the late joiner up: everyone's current ball, every sector
             // the union has grown by, then a full snapshot
-            for (const auto& [member, bytes]: s.last_physicalize)
-                if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+            for (const auto& [member, last]: s.last_physicalize)
+                if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
             for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
             runner_->request_full_snapshot(s.id);
         }
@@ -1271,8 +1298,8 @@ public:
         s.ready.insert(c);
         runner_->player_ready(s.id, c, assigned);
         send_session_assign(s, c, assigned);
-        for (const auto& [member, bytes]: s.last_physicalize)
-            if (member != c) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+        for (const auto& [member, last]: s.last_physicalize)
+            if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
         for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
         runner_->request_full_snapshot(s.id);
         Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u).", s.id, get_client_name(c),
@@ -1294,6 +1321,13 @@ public:
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
+        // The member sends every event several times (protocol 6): the first
+        // arrival is the event, the rest are nothing - not a rate-limit hit,
+        // not a second submit, not a second relay.
+        if (!s.events_seen.first(bmmo::session::lifecycle_key_of(msg, c))) {
+            ++s.duplicate_events;
+            return;
+        }
         bmmo::sim::lifecycle_event event;
         event.type = msg.type;
         event.ball_type = msg.ball_type;
@@ -1433,14 +1467,30 @@ public:
         msg.clear();
         msg.serialize();
         const std::string bytes = msg.raw.str();
-        if (msg.type == bmmo::session::event_type::Physicalize) s.last_physicalize[c] = bytes;
-        else if (msg.type == bmmo::session::event_type::Unphysicalize) s.last_physicalize.erase(c);
+        if (msg.type == bmmo::session::event_type::Physicalize) {
+            auto& last = s.last_physicalize[c];
+            if (last.bytes.empty() || static_cast<int32_t>(msg.tick - last.tick) >= 0) last = {msg.tick, bytes};
+        } else if (msg.type == bmmo::session::event_type::Unphysicalize) {
+            // Only a death stamped after the last birth ends it (protocol 6:
+            // the copies of a beam's pair can arrive in either order).
+            const auto last = s.last_physicalize.find(c);
+            if (last != s.last_physicalize.end() && static_cast<int32_t>(msg.tick - last->second.tick) > 0)
+                s.last_physicalize.erase(last);
+        }
         else if (msg.type == bmmo::session::event_type::Sector) s.sector_history.push_back(bytes);
         // Without Nagle, like the sender did: a Sector event's relay has to
         // reach the other members before they simulate its tick, and the
         // lead was sized for the trip, not for a batching delay on top.
         for (const auto m: s.members)
             if (m != c) send(m, bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        // ...and again, unreliably, on each of the next ticks (on_session_inputs):
+        // a lost reliable copy is otherwise ~400 ms late by retransmit, past
+        // the rollback's reach, and a mirror whose respawn or beam is applied
+        // that late sits metres off until the next forced snapshot.
+        std::vector<uint32_t> others;
+        for (const auto m: s.members)
+            if (m != c) others.push_back(m);
+        s.event_repeats.push(bytes, std::move(others));
     }
 
     void print_physics_sessions() {

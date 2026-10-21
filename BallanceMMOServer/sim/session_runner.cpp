@@ -510,9 +510,28 @@ namespace bmmo::sim {
             return it == s.join_orders.end() ? 256u : static_cast<uint32_t>(it->second);
         };
         std::stable_sort(due.begin(), due.end(), [&join_rank](const pending_event& a, const pending_event& b) {
-            return join_rank(a.player) < join_rank(b.player);
+            const uint32_t ja = join_rank(a.player), jb = join_rank(b.player);
+            if (ja != jb) return ja < jb;
+            if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
+            return bmmo::session::lifecycle_event_rank(a.event.type) < bmmo::session::lifecycle_event_rank(b.event.type);
         });
         for (pending_event& e: due) {
+            // Protocol 6: the copies of a stamp's events can overtake each
+            // other, so an Unphysicalize stamped at or before the player's
+            // last applied Physicalize is one that lost its place; applied, it
+            // would take the newer ball out.
+            if (e.event.type == bmmo::session::event_type::Unphysicalize) {
+                const auto last = s.last_physicalize_tick.find(e.player);
+                if (last != s.last_physicalize_tick.end() && static_cast<int32_t>(e.tick - last->second) <= 0) {
+                    if (++s.superseded_events <= 20)
+                        log("[session " + std::to_string(s.id) + "] Unphysicalize from " + std::to_string(e.player)
+                            + " stamped " + std::to_string(e.tick) + " is older than its Physicalize at "
+                            + std::to_string(last->second) + ": superseded");
+                    continue;
+                }
+            } else if (e.event.type == bmmo::session::event_type::Physicalize) {
+                s.last_physicalize_tick[e.player] = e.tick;
+            }
             // An event that arrives after its tick was simulated is applied
             // now, which the client that stamped it did not do: the two sides
             // apply it at different ticks from here on (a Sector event moves

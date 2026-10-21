@@ -414,3 +414,17 @@ relay_store / pending_relay / relay_frame_or_earlier，两个客户端共用）�
 "未来"），pacer 只会追墙钟不会追服务端。先试的客户端侧"按服务端 ack 把 origin 往前拉"一轮就证明是错的（瞬时缺帧
 误触发把准时的客户端推到超前 14 tick、55% 转发帧迟到；两步 16 tick 也拉不回落后 66 tick 的），改为在源头修：
 服务端 SessionAssign 可靠发一份、之后从主循环每 40 ms 不可靠补发一份共三份（同一瞬间发的副本会被 GNS 打进同一个包一起丢；从会话前几个 tick 发则太晚——第一个 tick 在 barrier 之后 start_base 个周期 410 ms 才来；两种都实测无效），两端忽略已应用过的重复分配。另：车道 10% 丢包一轮有一个客户端在退出时崩在 PhysicsHingeCallBack（CKContext::Reset 期间，自身已打印 exit code 0），待查。
+
+## 15. 生命周期事件也加冗余（2026-10-21，协议 6）
+
+§14 的丢包实测把下一个瓶颈留给了生命周期事件：reliable 有序流上丢一次 = 重传 ~400 ms = 20-40 tick，超出回滚
+48 tick 的可达范围（状态行 `far=`），复活/beam 迟到的镜像离服务端 10-30 m 直到下一次强制快照。现在事件两个方向
+都保留 reliable 一份作兜底，再由发送方在随后 6 个 tick 每 tick 不可靠重发一份（`session/lifecycle.hpp`
+`event_repeats`；服务端 `on_session_inputs`，客户端每帧发输入处），接收方以 (tick, player, type, ball_type,
+sector, name) 取首达（`event_seen`：服务端限速之前、无头客户端入队前、零售 mod 排空队列时）；零售 mod 还把一批
+按 (tick, 入场顺序) 排序，并丢弃比该玩家已应用的生命周期事件更旧的 Physicalize/Unphysicalize。同一戳记内按类型
+排序（Unphysicalize 在 Physicalize 之前，`lifecycle_event_rank`；beam 两个事件同戳），服务端 runner 与无头客户端还
+丢弃戳记不晚于该玩家最近 Physicalize 的 Unphysicalize。实测（摆台，10% 丢包，主机安静）：beam 后的镜像 20-28 m ->
+1.4-4.7 m，被撞的己球 7-28 m -> 0-4.7 m，`far` 0，迟到帧 0；剩下的 `far`/迟到来自仍然 reliable 的强制全量快照——
+丢了就重传超出可达范围，快照路径的 too_far 分支把全部刚体写回行并清空历史（之后 ~95 tick 的帧都"迟到"）；
+12 个报文的突发（180 ms）也超过 6 次重发（90 ms）。下一步：过晚的强制快照像过深回滚一样拒绝；重发间隔拉到 12 tick。

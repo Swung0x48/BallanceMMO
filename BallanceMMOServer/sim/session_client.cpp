@@ -50,6 +50,7 @@
 #include <role/role.hpp>
 #include <session/correction.hpp>
 #include <session/input_relay.hpp>
+#include <session/lifecycle.hpp>
 #include <session/journal.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
@@ -735,12 +736,22 @@ namespace {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
                 ++events_received_;
+                if (msg.session != session_ || phase_ != phase::running) break;
+                // The server sends every event several times (protocol 6): the
+                // first arrival is the event, the rest are nothing.  Judged
+                // only once this client runs: an event relayed while it loads
+                // is dropped, and the server's catch-up after SessionReady
+                // sends the same bytes again - those must not read as copies.
+                if (!event_seen_.first(bmmo::session::lifecycle_key_of(msg, msg.player))) {
+                    ++event_dups_;
+                    break;
+                }
                 // Queued, not applied here: an event applied on arrival lands
                 // at an arbitrary point relative to this client's physics step
                 // and in network arrival order, while the server applies every
                 // due event before its step in the members' join order.  The
                 // drain in frame() matches the server; see drain_due_events.
-                if (msg.session == session_ && phase_ == phase::running) pending_events_.push_back(std::move(msg));
+                pending_events_.push_back(std::move(msg));
                 break;
             }
             case bmmo::SessionRemoteInput: {
@@ -979,6 +990,9 @@ namespace {
             remotes_.clear();
             relay_seen_.clear();
             pending_relay_.clear();
+            event_seen_.clear();
+            own_event_repeats_.clear();
+            remote_last_physicalize_.clear();
             own_group_set_ = false;
             own_physicalized_ = false;
             own_body_entity_.clear();
@@ -1002,6 +1016,9 @@ namespace {
                 remotes_.clear();
                 relay_seen_.clear();
                 pending_relay_.clear();
+                event_seen_.clear();
+                own_event_repeats_.clear();
+                remote_last_physicalize_.clear();
                 if (!boot_engine()) { ended_ = true; return; }
             }
             engine_->clear_keys();
@@ -1800,6 +1817,11 @@ namespace {
                 msg.serialize();
                 send_bytes(msg.raw.str(), k_nSteamNetworkingSend_UnreliableNoDelay);
                 ++inputs_sent_;
+                // The unreliable copies of our recent lifecycle events, one per
+                // frame (send_event; protocol 6).
+                own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
+                    send_bytes(bytes, k_nSteamNetworkingSend_UnreliableNoDelay);
+                });
             } else if (input_history_.size() > 660) {
                 input_history_.pop_front();
             }
@@ -2003,6 +2025,9 @@ namespace {
             // step it, and be applied a tick late (the server logs it: "late
             // by 1", seen on BodyRevived and Physicalize).
             send_bytes(event.raw.str(), k_nSteamNetworkingSend_ReliableNoNagle);
+            // ...and again, unreliably, on each of the next ticks
+            // (flush_inputs): the server takes the first copy to arrive.
+            own_event_repeats_.push(event.raw.str(), {0u});
             ++events_sent_;
             // Own events go on the wire with player 0; the box names the
             // player the server will fill in.
@@ -2010,7 +2035,11 @@ namespace {
         }
 
         void flush_inputs() {
-            if (!assigned_ || input_history_.empty()) return;
+            if (!assigned_) return;
+            own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
+                send_bytes(bytes, k_nSteamNetworkingSend_UnreliableNoDelay);
+            });
+            if (input_history_.empty()) return;
             size_t index = 0;
             while (index < input_history_.size()) {
                 bmmo::session_input_msg msg;
@@ -2696,7 +2725,10 @@ namespace {
             };
             std::stable_sort(due.begin(), due.end(),
                              [&join_rank](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
-                                 return join_rank(a.player) < join_rank(b.player);
+                                 const uint32_t ja = join_rank(a.player), jb = join_rank(b.player);
+                                 if (ja != jb) return ja < jb;
+                                 if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
+                                 return bmmo::session::lifecycle_event_rank(a.type) < bmmo::session::lifecycle_event_rank(b.type);
                              });
             for (const auto& event: due) apply_event(event);
         }
@@ -2744,6 +2776,7 @@ namespace {
             std::string error;
             switch (event.type) {
             case bmmo::session::event_type::Physicalize: {
+                remote_last_physicalize_[event.player] = event.tick;
                 // A birth stamped in the past, with its tick still in the
                 // rollback history, is not made here: the world is rewound to
                 // the tick before it and the body is made inside the replay,
@@ -2785,6 +2818,14 @@ namespace {
                      static_cast<int32_t>(event.tick - current_tick()) <= 0 ? " (LATE: the server started it already)" : "");
                 break;
             case bmmo::session::event_type::Unphysicalize: {
+                // A death stamped at or before the player's last applied birth
+                // is a copy that lost its place (protocol 6); applied, it would
+                // take the newer mirror out.
+                if (const auto last = remote_last_physicalize_.find(event.player);
+                        last != remote_last_physicalize_.end() && static_cast<int32_t>(event.tick - last->second) <= 0) {
+                    ++events_superseded_;
+                    return;
+                }
                 auto it = remotes_.find(event.player);
                 if (it == remotes_.end()) return;
                 if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
@@ -3482,6 +3523,9 @@ namespace {
             remotes_.clear();
             relay_seen_.clear();
             pending_relay_.clear();
+            event_seen_.clear();
+            own_event_repeats_.clear();
+            remote_last_physicalize_.clear();
             report();
             phase_ = phase::idle;
             session_ = 0;
@@ -3499,7 +3543,7 @@ namespace {
             }
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
-            logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
+            logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
@@ -3507,7 +3551,8 @@ namespace {
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
                  static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
-                 static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(snapshots_received_),
+                 static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(event_dups_),
+                 static_cast<unsigned long long>(snapshots_received_),
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
                  static_cast<unsigned long long>(life_rewinds_), static_cast<unsigned long long>(life_rewinds_missed_),
                  static_cast<unsigned long long>(input_rewinds_), static_cast<unsigned long long>(input_rewinds_missed_),
@@ -3891,6 +3936,12 @@ namespace {
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
         bmmo::session::relay_seen relay_seen_;
         bmmo::session::pending_relay pending_relay_;
+        // Lifecycle events (protocol 6): the first arrival of each counts, and
+        // our own are repeated unreliably on the next ticks (flush_inputs).
+        bmmo::session::event_seen event_seen_;
+        bmmo::session::event_repeats own_event_repeats_;
+        uint64_t event_dups_ = 0, events_superseded_ = 0;
+        std::map<uint32_t, uint32_t> remote_last_physicalize_;   // stamp of each remote's last applied Physicalize
         bool resync_pending_ = false;
         bool paused_once_ = false;
         int consecutive_hard_ = 0;

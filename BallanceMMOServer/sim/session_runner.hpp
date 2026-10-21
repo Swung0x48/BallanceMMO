@@ -181,6 +181,11 @@ namespace bmmo::sim {
             std::set<uint32_t> ready;
             std::map<uint32_t, bmmo::session::input_buffer> inputs;
             std::map<uint32_t, uint32_t> acked;
+            // The stamp of each player's last applied Physicalize: an
+            // Unphysicalize stamped at or before it is a copy that lost its
+            // place (protocol 6) and would take the newer ball out.
+            std::map<uint32_t, uint32_t> last_physicalize_tick;
+            uint64_t superseded_events = 0;
             std::vector<pending_event> events;   // sorted by tick on insertion
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs
             uint32_t late_events = 0;   // applied after the tick they were stamped for (logged, capped)
