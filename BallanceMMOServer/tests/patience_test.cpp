@@ -41,7 +41,7 @@ namespace {
 
     // The slack (ticks before its deadline) the datagram whose newest frame is
     // t arrives with; NaN = lost.
-    using link = std::function<double(uint32_t)>;
+    using slack_link = std::function<double(uint32_t)>;
 
     struct sim_options {
         bool patience = true;            // runner_config::patience
@@ -61,7 +61,7 @@ namespace {
         }
     };
 
-    sim_result run_sim(const std::vector<link>& links, uint32_t ticks, sim_options o = {}) {
+    sim_result run_sim(const std::vector<slack_link>& links, uint32_t ticks, sim_options o = {}) {
         const size_t n = links.size();
         struct datagram { double at; size_t player; uint32_t newest; };
         std::vector<datagram> datagrams;
@@ -145,7 +145,7 @@ namespace {
     // Two members whose frames are in about ten ticks before the deadline, and
     // one structurally last: about three ticks before it, every frame inside
     // the deadline (the worst ping, which input_delay was sized for).
-    link early_member(uint32_t salt) {
+    slack_link early_member(uint32_t salt) {
         return [salt](uint32_t t) { return 10.0 + unit_noise(t, salt); };
     }
     double last_member_slack(uint32_t t) { return 3.0 + unit_noise(t, 7); }
@@ -364,7 +364,7 @@ TEST(Patience, WaiverStartsAtASubstitutionAndEndsInsidePatience) {
 // patience changes nothing about who is fresh, and the session steps when the
 // structurally last member's frame is in, as before.
 TEST(Patience, SteadyLinksAreNeverCutOff) {
-    const std::vector<link> links{early_member(1), early_member(2), last_member_slack};
+    const std::vector<slack_link> links{early_member(1), early_member(2), last_member_slack};
     for (const bool patience: {false, true}) {
         sim_options o;
         o.patience = patience;
@@ -387,7 +387,7 @@ TEST(Patience, StructurallyLastMemberIsNeverStuckSubstituted) {
     const auto late_episode = [](uint32_t t) {
         return t >= kEpisode && t <= kEpisode + 30 ? -4.0 : last_member_slack(t);
     };
-    const std::vector<link> links{early_member(1), early_member(2), late_episode};
+    const std::vector<slack_link> links{early_member(1), early_member(2), late_episode};
 
     const auto r = run_sim(links, kTicks);
     EXPECT_GE(r.substituted(2, kEpisode, kEpisode + 31), 31);
@@ -411,7 +411,7 @@ TEST(Patience, StructurallyLastMemberIsNeverStuckSubstituted) {
 TEST(Patience, BlackoutWaitsOnceAtPatienceWithTheWaiverAndEveryTickWithout) {
     const uint32_t from = kEpisode, to = kEpisode + 66;
     const auto blackout = [from, to](uint32_t t) { return t >= from && t < to ? kLost : last_member_slack(t); };
-    const std::vector<link> links{early_member(1), early_member(2), blackout};
+    const std::vector<slack_link> links{early_member(1), early_member(2), blackout};
 
     const auto on = run_sim(links, kTicks);
     const double lead = on.lead[2];
@@ -446,7 +446,7 @@ TEST(Patience, BlackoutWaitsOnceAtPatienceWithTheWaiverAndEveryTickWithout) {
 // a member missing then is waited for until the deadline, as before.
 TEST(Patience, WithoutStatisticsTheFirstMissWaitsForTheDeadline) {
     const auto early_gap = [](uint32_t t) { return t >= 100 && t < 110 ? kLost : last_member_slack(t); };
-    const std::vector<link> links{early_member(1), early_member(2), early_gap};
+    const std::vector<slack_link> links{early_member(1), early_member(2), early_gap};
     const auto r = run_sim(links, 300);
     EXPECT_NEAR(r.step_ms[100], deadline_ms(100), 1e-6);
 }
@@ -456,7 +456,7 @@ TEST(Patience, WithoutStatisticsTheFirstMissWaitsForTheDeadline) {
 // until the deadline: the structurally last member, joining late, is cut off
 // (and waived) until its own reference is set, then never again.
 TEST(Patience, LateAssignedMemberIsCappedAtTheOthersScheduleUntilItsReference) {
-    const std::vector<link> links{early_member(1), early_member(2), last_member_slack};
+    const std::vector<slack_link> links{early_member(1), early_member(2), last_member_slack};
     sim_options late;
     late.late_member = 2;
     const auto r = run_sim(links, kTicks, late);
@@ -490,10 +490,10 @@ TEST(Patience, SoloBlackoutNeverStepsBeforePatience) {
 // the latest of their patiences - never before - and nobody stays substituted.
 TEST(Patience, SharedOutageStepsAtTheLatestPatience) {
     const uint32_t from = kEpisode, to = kEpisode + 66;
-    const auto out = [from, to](link l) {
+    const auto out = [from, to](slack_link l) {
         return [l, from, to](uint32_t t) { return t >= from && t < to ? kLost : l(t); };
     };
-    const std::vector<link> links{out(early_member(1)), out(early_member(2)), out(last_member_slack)};
+    const std::vector<slack_link> links{out(early_member(1)), out(early_member(2)), out(last_member_slack)};
     const auto r = run_sim(links, kTicks);
     const double latest = *std::min_element(r.lead.begin(), r.lead.end());
     ASSERT_GT(latest, 0.5);
