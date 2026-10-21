@@ -1090,7 +1090,7 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
     // The caller's record of the birth: the state the body was created with,
     // before its first step.
     std::map<std::string, fake_body> births;
-    w.destroy_body = [&](const std::string& entity) {
+    w.destroy_body = [&](const std::string& entity, uint32_t) {
         world.calls.push_back("destroy " + entity);
         if (!births.count(entity)) return false;
         return world.bodies.erase(entity) > 0;
@@ -1196,6 +1196,59 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsInsertedBeforeItsBirthTicksStepWh
     EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 }
 
+// Plan doc 10: with destroy_body alone, the replayed scripts are expected to
+// make the body again by its birth tick.  A fake step that does so leaves the
+// body on its record with nothing written; one that does not is counted.
+TEST(RollbackEngine, ABodyDestroyedAtTheRestoreIsMadeAgainByTheReplayedStepOrCounted) {
+    for (const bool scripts_make_it: {true, false}) {
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Remote"] = {};
+        rollback_engine engine;
+        auto w = world.adapter();
+        fake_body born;
+        born.position[0] = 10.0;
+        born.linear[0] = 3.0f;
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        // The replayed scripts' Physicalize, as the pre_step of the birth tick.
+        if (scripts_make_it)
+            w.pre_step = [&](uint32_t tick) { if (tick == 4) world.bodies["Prop"] = born; };
+        rollback_tracked before;
+        before.remote_entities = {"Remote"};
+        rollback_tracked after = before;
+        after.mechanisms = {"Prop"};
+        for (uint32_t tick = 1; tick <= 6; ++tick) {
+            if (tick == 4) world.bodies["Prop"] = born;
+            w.step();
+            engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
+        }
+        world.calls.clear();
+        const double born_at = 10.0 + 3.0 * kDt;
+        fake_body server_remote = world.bodies["Remote"];
+        server_remote.position[0] += 1.0;
+        const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+        auto entity_now = [](const body_state& body) -> std::string {
+            return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+        };
+        EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+        EXPECT_EQ(world.count("destroy Prop@4"), 1);
+        EXPECT_EQ(engine.stats().births_recreated, 1u);
+        if (scripts_make_it) {
+            EXPECT_EQ(engine.stats().births_recreated_exact, 1u);
+            EXPECT_EQ(engine.stats().births_missing, 0u);
+            EXPECT_EQ(world.count("set_body Prop"), 0);
+            EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+        } else {
+            EXPECT_EQ(engine.stats().births_missing, 1u);
+            EXPECT_FALSE(world.bodies.contains("Prop"));
+        }
+    }
+}
+
 // The same rewind without a recipe for the body: destroy_body says no, and the
 // body is parked and re-posed as before.
 TEST(RollbackEngine, ABodyBornInsideTheWindowIsParkedWhenTheWorldCannotMakeItAgain) {
@@ -1205,7 +1258,7 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsParkedWhenTheWorldCannotMakeItAga
     world.navs["Remote"] = {};
     rollback_engine engine;
     auto w = world.adapter();
-    w.destroy_body = [&](const std::string& entity) {
+    w.destroy_body = [&](const std::string& entity, uint32_t) {
         world.calls.push_back("destroy " + entity);
         return false;
     };

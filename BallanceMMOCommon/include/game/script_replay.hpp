@@ -74,7 +74,10 @@ namespace bmmo::game {
     class script_replay {
     public:
         static constexpr uint32_t kMagic = 0x52534d42u;   // "BMSR"
-        static constexpr uint32_t kVersion = 1;
+        // v2: the joint blocks' handle presence, a graph's in-flight delayed
+        // links, the three data-array cells the sector manager and the modules
+        // read (plan doc 10).
+        static constexpr uint32_t kVersion = 2;
         // The flags a restore writes: the engine's per-frame activation
         // bookkeeping.  Everything else in the flag word describes the graph.
         static constexpr CKDWORD kRuntimeFlags = CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME
@@ -100,6 +103,38 @@ namespace bmmo::game {
         };
         static bool is_force_block(CKBehavior* beh) {
             return beh && beh->IsUsingFunction() && beh->GetPrototypeGuid() == force_block_guid();
+        }
+        // The blocks that keep an IVP constraint or spring in local 0 (Set
+        // Physics Ball Joint, Hinge, Slider, Spring): the handle is a pointer
+        // and never written, but whether the block HAS one is state - a
+        // restore to an anchor at which the block had none deletes the live
+        // one through the block's own reset callback, so a body destroyed at
+        // the restore carries no joint and the replayed Create makes a new one
+        // from nothing (Hinge's Create would otherwise delete a freed pointer).
+        static bool is_joint_block(CKBehavior* beh) {
+            if (!beh || !beh->IsUsingFunction()) return false;
+            const CKGUID g = beh->GetPrototypeGuid();
+            return g == CKGUID(0x5e624f0a, 0x35160450) || g == CKGUID(0x41cd3653, 0x0de60c1d)
+                || g == CKGUID(0x2973360e, 0x23d31aa7) || g == CKGUID(0x24a06a3a, 0x07100fce);
+        }
+        static void* joint_handle(CKBehavior* beh) {
+            void* handle = nullptr;
+            if (beh->GetLocalParameterCount() > 0) beh->GetLocalParameterValue(0, &handle);
+            return handle;
+        }
+
+        // What the last restore did beyond writing bytes: joints reset to
+        // their anchor absence, joints the anchor had and the live world has
+        // lost (nothing can make those), delayed links re-armed, links that
+        // could not be (their output has a plain link too), live in-flight
+        // links the anchor did not have (the SDK cannot clear a graph's list).
+        struct restore_counters {
+            uint32_t joints_reset = 0, joints_missing = 0, links_rearmed = 0, links_unrestorable = 0, links_live_pending = 0;
+            uint32_t cells_written = 0;
+        };
+        static restore_counters& last_restore() {
+            static restore_counters counters;
+            return counters;
         }
 
         // Whether a root script is one of the mechanisms': owned by a level
@@ -131,6 +166,17 @@ namespace bmmo::game {
                 if (!beh) continue;
                 if (is_mechanism_script(beh)) {
                     picked.emplace_back(-beh->GetOwner()->GetPriority(), beh->GetID());
+                    continue;
+                }
+                // Gameplay_SectorManager (plan doc 10): a sector activation is
+                // an input with a known tick, and the replay re-issues it; the
+                // manager then has to run inside the replayed frames - its
+                // delay-4 walk, the modules' Activate Script with reset, the
+                // Type 2/3 Physicalize - so it travels with the records like
+                // the modules do.  As a script, not a satellite: the next-frame
+                // flags the activation sets are processed for scripts only.
+                if (!beh->GetParent() && beh->GetName() && std::strcmp(beh->GetName(), "Gameplay_SectorManager") == 0) {
+                    picked.emplace_back(beh->GetOwner() ? -beh->GetOwner()->GetPriority() : 0, beh->GetID());
                     continue;
                 }
                 // No satellites (see the top of the file).
@@ -248,7 +294,41 @@ namespace bmmo::game {
                     if (beh) capture_behavior(beh, hooks, out);
                 }
             }
+            // The data-array cells the manager and the modules read and the
+            // activation chain writes: CurrentLevel[0][4] ("Activation Phase?",
+            // the modules' first-frame branch), IngameParameter[0][1] and
+            // [0][2] (the sector to activate and to deactivate).
+            for (int c = 0; c < kCellCount; ++c) {
+                int value = 0;
+                const bool present = read_cell(context, c, value);
+                put_u8(out, present ? 1 : 0);
+                put_u32(out, static_cast<uint32_t>(value));
+            }
             return true;
+        }
+
+        static constexpr int kCellCount = 3;
+        static bool cell_of(int c, const char*& array, int& row, int& column) {
+            static const struct { const char* array; int row, column; } kCells[kCellCount] = {
+                {"CurrentLevel", 0, 4}, {"IngameParameter", 0, 1}, {"IngameParameter", 0, 2}};
+            if (c < 0 || c >= kCellCount) return false;
+            array = kCells[c].array; row = kCells[c].row; column = kCells[c].column;
+            return true;
+        }
+        static CKDataArray* find_array(CKContext* context, const char* name) {
+            return CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>(name), CKCID_DATAARRAY, nullptr));
+        }
+        static bool read_cell(CKContext* context, int c, int& value) {
+            const char* array = nullptr; int row = 0, column = 0;
+            if (!cell_of(c, array, row, column)) return false;
+            CKDataArray* a = find_array(context, array);
+            return a && a->GetElementValue(row, column, &value);
+        }
+        static bool write_cell(CKContext* context, int c, int value) {
+            const char* array = nullptr; int row = 0, column = 0;
+            if (!cell_of(c, array, row, column)) return false;
+            CKDataArray* a = find_array(context, array);
+            return a && a->SetElementValue(row, column, &value, sizeof(value));
         }
 
         // Writes a capture back.  The walk has to meet the same graph the
@@ -268,11 +348,18 @@ namespace bmmo::game {
         // a teardown in progress (measured: a death's sector reset crossed by
         // a rewind put the level-end balloons' lift back on bodies the reset
         // was rebuilding, and the bridge flew 1800 m).
+        // `replay_activation` (plan doc 10): the caller re-issues every sector
+        // activation inside the replayed window, so a script inactive at the
+        // anchor IS written back inactive - the replayed manager activates it
+        // again, with the reset, and it re-makes its bodies, joints and forces
+        // the live way.  Without it the v14 rule holds: such a script keeps its
+        // live state and is not executed.
         static bool restore(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             const std::vector<uint8_t>& in, std::string* error, std::vector<CK_ID>* replayed = nullptr,
-                            const std::vector<CK_ID>* kept_live = nullptr) {
+                            const std::vector<CK_ID>* kept_live = nullptr, bool replay_activation = false) {
             if (error) error->clear();
             if (replayed) replayed->clear();
+            last_restore() = restore_counters{};
             if (!context) return fail(error, "no context");
             size_t pos = 0;
             uint32_t magic = 0, version = 0;
@@ -296,10 +383,16 @@ namespace bmmo::game {
                     if (!get_u32(in, peek, peek_id) || !get_u32(in, peek, flags)) return fail(error, "truncated root");
                     const bool was_active = (flags & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME)) != 0;
                     const bool reset_since = kept_live && std::find(kept_live->begin(), kept_live->end(), id) != kept_live->end();
-                    const bool write = !scripts || (was_active && !reset_since);
+                    const bool write = !scripts || replay_activation || (was_active && !reset_since);
                     if (!restore_behavior(beh, hooks, in, pos, error, write)) return false;
                     if (write && scripts && replayed) replayed->push_back(id);
                 }
+            }
+            for (int c = 0; c < kCellCount; ++c) {
+                uint8_t present = 0;
+                uint32_t value = 0;
+                if (!get_u8(in, pos, present) || !get_u32(in, pos, value)) return fail(error, "truncated cells");
+                if (present && replay_activation && write_cell(context, c, static_cast<int>(value))) ++last_restore().cells_written;
             }
             return pos == in.size() || fail(error, "trailing bytes");
         }
@@ -387,6 +480,20 @@ namespace bmmo::game {
                     auto* beh = context ? CKBehavior::Cast(context->GetObject(id)) : nullptr;
                     const std::string script_name = beh && beh->GetName() ? beh->GetName() : std::to_string(id);
                     if (!diff_behavior(beh, script_name, a, pa, b, pb, d)) return d;
+                }
+            }
+            for (int c = 0; c < kCellCount; ++c) {
+                uint8_t qa = 0, qb = 0;
+                uint32_t va = 0, vb = 0;
+                if (!get_u8(a, pa, qa) || !get_u8(b, pb, qb) || !get_u32(a, pa, va) || !get_u32(b, pb, vb)) break;
+                if (qa != qb || va != vb) {
+                    d.logical = true; ++d.logical_count;
+                    const char* array = nullptr; int row = 0, column = 0;
+                    cell_of(c, array, row, column);
+                    const std::string what = std::string("cell ") + (array ? array : "?") + "[" + std::to_string(row) + "][" + std::to_string(column)
+                                           + "] " + std::to_string(va) + " vs " + std::to_string(vb);
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
                 }
             }
             return d;
@@ -482,6 +589,18 @@ namespace bmmo::game {
                     if (da != db) { ++d.float_count; if (d.where.empty()) d.where = block + ": force vector [float]"; }
                 }
             }
+            uint8_t ja = 0, jb = 0;
+            if (!get_u8(a, pa, ja) || !get_u8(b, pb, jb) || ja != jb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": joint presence"; return false; }
+            if (ja) {
+                uint8_t ha = 0, hb = 0;
+                if (!get_u8(a, pa, ha) || !get_u8(b, pb, hb)) return false;
+                if (ha != hb) {
+                    d.logical = true; ++d.logical_count;
+                    const std::string what = block + ": joint handle " + std::to_string(ha) + " vs " + std::to_string(hb);
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
+                }
+            }
             uint16_t ca = 0, cb = 0;
             if (!get_u16(a, pa, ca) || !get_u16(b, pb, cb) || ca != cb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": children"; return false; }
             for (int i = 0; i < ca; ++i) {
@@ -490,6 +609,18 @@ namespace bmmo::game {
                 if (!qa) continue;
                 CKBehavior* child = beh ? beh->GetSubBehavior(i) : nullptr;
                 if (!diff_behavior(child, script, a, pa, b, pb, d)) return false;
+            }
+            uint16_t la = 0, lb = 0;
+            if (!get_u16(a, pa, la) || !get_u16(b, pb, lb) || la != lb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": delayed link count"; return false; }
+            for (int i = 0; i < la; ++i) {
+                uint16_t da = 0, db = 0;
+                if (!get_u16(a, pa, da) || !get_u16(b, pb, db)) return false;
+                if (da != db) {
+                    d.logical = true; ++d.logical_count;
+                    const std::string what = block + ": delayed link " + std::to_string(i) + " countdown " + std::to_string(da) + " vs " + std::to_string(db);
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
+                }
             }
             return true;
         }
@@ -590,7 +721,13 @@ namespace bmmo::game {
             } else {
                 put_u8(out, 0);
             }
-            if (beh->IsUsingFunction()) { put_u16(out, 0); return; }
+            if (is_joint_block(beh)) {
+                put_u8(out, 1);
+                put_u8(out, joint_handle(beh) ? 1 : 0);
+            } else {
+                put_u8(out, 0);
+            }
+            if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
             const int children = beh->GetSubBehaviorCount();
             put_u16(out, static_cast<uint16_t>(children));
             for (int i = 0; i < children; ++i) {
@@ -598,6 +735,41 @@ namespace bmmo::game {
                 put_u8(out, child ? 1 : 0);
                 if (child) capture_behavior(child, hooks, out);
             }
+            // The graph's delayed links (initial delay above one frame): a
+            // link in flight between frames lives in the graph's own list with
+            // a countdown, which the SDK does not expose - but the countdown is
+            // on the link, and a link is in flight exactly when its delay is
+            // between zero and its initial value (queued: set to the initial
+            // and counted down each frame; fired or reset: zero or initial).
+            uint16_t delayed = 0;
+            const int links = beh->GetSubBehaviorLinkCount();
+            for (int i = 0; i < links; ++i)
+                if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1) ++delayed;
+            put_u16(out, delayed);
+            for (int i = 0; i < links; ++i) {
+                CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
+                if (!link || link->GetInitialActivationDelay() <= 1) continue;
+                put_u16(out, static_cast<uint16_t>(std::max(0, std::min(65535, link->GetActivationDelay()))));
+            }
+        }
+
+        // The output IO a sub-link starts from, as (owner, output index).
+        static bool link_source(CKBehaviorLink* link, CKBehavior*& owner, int& index) {
+            CKBehaviorIO* io = link ? link->GetInBehaviorIO() : nullptr;
+            owner = io ? io->GetOwner() : nullptr;
+            if (!owner) return false;
+            for (int k = 0; k < owner->GetOutputCount(); ++k)
+                if (owner->GetOutput(k) == io) { index = k; return true; }
+            return false;
+        }
+        // Whether every link out of that IO is delayed: re-activating the
+        // output to re-arm one in-flight link must not fire a plain one.
+        static bool all_links_delayed(CKBehavior* graph, CKBehaviorIO* io) {
+            for (int i = 0; i < graph->GetSubBehaviorLinkCount(); ++i) {
+                CKBehaviorLink* other = graph->GetSubBehaviorLink(i);
+                if (other && other->GetInBehaviorIO() == io && other->GetInitialActivationDelay() == 0) return false;
+            }
+            return true;
         }
 
         static bool restore_behavior(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
@@ -630,6 +802,24 @@ namespace bmmo::game {
                 for (int k = 0; k < 3; ++k) if (!get_f64(in, pos, force.force[k])) return fail(error, "truncated force");
                 if (write && hooks.restore_force) hooks.restore_force(beh, force);
             }
+            uint8_t has_joint = 0;
+            if (!get_u8(in, pos, has_joint)) return fail(error, "truncated joint");
+            if (has_joint) {
+                uint8_t had_handle = 0;
+                if (!get_u8(in, pos, had_handle)) return fail(error, "truncated joint");
+                if (write && is_joint_block(beh)) {
+                    const bool has_handle = joint_handle(beh) != nullptr;
+                    if (!had_handle && has_handle) {
+                        // The block's own reset: deletes its constraint or
+                        // spring while both cores still exist and nulls the
+                        // handle, as physics_RT's own ResetPhysicsBehaviorHandles does.
+                        beh->CallCallbackFunction(CKM_BEHAVIORRESET);
+                        ++last_restore().joints_reset;
+                    } else if (had_handle && !has_handle) {
+                        ++last_restore().joints_missing;
+                    }
+                }
+            }
             if (!get_u16(in, pos, children)) return fail(error, "truncated children");
             const int now = beh->IsUsingFunction() ? 0 : beh->GetSubBehaviorCount();
             if (children != now) return fail(error, "sub-behaviour count");
@@ -639,6 +829,43 @@ namespace bmmo::game {
                 CKBehavior* child = beh->GetSubBehavior(i);
                 if (present != (child ? 1 : 0)) return fail(error, "sub-behaviour presence");
                 if (child && !restore_behavior(child, hooks, in, pos, error, write)) return false;
+            }
+            uint16_t delayed = 0;
+            if (!get_u16(in, pos, delayed)) return fail(error, "truncated links");
+            uint16_t now_delayed = 0;
+            const int links = beh->IsUsingFunction() ? 0 : beh->GetSubBehaviorLinkCount();
+            for (int i = 0; i < links; ++i)
+                if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1) ++now_delayed;
+            if (delayed != now_delayed) return fail(error, "delayed link count");
+            for (int i = 0; i < links; ++i) {
+                CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
+                if (!link || link->GetInitialActivationDelay() <= 1) continue;
+                uint16_t recorded = 0;
+                if (!get_u16(in, pos, recorded)) return fail(error, "truncated link");
+                if (!write) continue;
+                const int initial = link->GetInitialActivationDelay();
+                const int live = link->GetActivationDelay();
+                const bool pending_recorded = recorded > 0 && recorded < initial;
+                const bool pending_live = live > 0 && live < initial;
+                if (pending_recorded) {
+                    // Re-armed: the countdown set to the anchor's, the source
+                    // output active again; the next execution of this graph
+                    // queues the link (keeping the countdown) and its end-of-
+                    // frame check counts it down as the live frame did.
+                    CKBehavior* owner = nullptr;
+                    int index = 0;
+                    if (all_links_delayed(beh, link->GetInBehaviorIO()) && link_source(link, owner, index)) {
+                        link->SetActivationDelay(recorded);
+                        owner->ActivateOutput(index, TRUE);
+                        ++last_restore().links_rearmed;
+                    } else {
+                        ++last_restore().links_unrestorable;
+                    }
+                } else if (pending_live) {
+                    // In flight live, not at the anchor: the graph's list is
+                    // not reachable through the SDK, so it fires anyway.
+                    ++last_restore().links_live_pending;
+                }
             }
             return true;
         }

@@ -33,6 +33,12 @@ namespace bmmo::session {
         uint64_t* reset_skips = nullptr;
         float delta_ms = 1000.0f / 66.0f;
         bool diff_detail = false;                           // diff_scripts appends every logical difference
+        // The caller re-issues every sector activation inside the replayed
+        // window (plan doc 10): every selected script is then written back,
+        // the inactive ones included, and the recorded data-array cells with
+        // them.  Off, the v14 rule: a script inactive at the anchor, or reset
+        // after it, keeps its live state and is not executed.
+        bool replay_activation = false;
         std::function<void(const std::string& error)> on_restore_failed;
     };
 
@@ -56,7 +62,7 @@ namespace bmmo::session {
             if (o.reset_skips) *o.reset_skips += kept_live.size();
             std::string error;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
-                                                               &kept_live);
+                                                               &kept_live, o.replay_activation);
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);
             return ok;
         };

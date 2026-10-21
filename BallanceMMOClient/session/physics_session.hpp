@@ -200,11 +200,26 @@ namespace bmmo::session {
         struct local_birth {
             std::string name, group;
             bmmo_physics_ball_recipe recipe{};
-            float matrix[16] = {};
+            float matrix[16] = {};         // the entity's world matrix at the Physicalize
+            float local_matrix[16] = {};   // ...and its local one, for a parented entity
+            bool has_parent = false;
         };
         std::map<uint32_t, std::vector<local_birth>> local_births;
         uint32_t birth_logs = 0;
         bool insert_births = false;              // the insert_birth A/B (see physics_session_rollback_world)
+        // Every activation of Gameplay_SectorManager the live frames made, by
+        // the tick whose frame consumed it: the union's passes
+        // (physics_session_run_sector) and the ones scripts outside the
+        // replay asked for, seen as next-frame flags after their frame.  A
+        // rewind re-issues them inside its window (plan doc 10), and for the
+        // frame about to run when the replay ended one tick short of one.
+        struct manager_activation {
+            bool reset = false;
+            int activate = 0, deactivate = 0;   // IngameParameter[0][1], [0][2] as they were
+        };
+        std::map<uint32_t, manager_activation> manager_activations;
+        uint64_t activations_replayed = 0;
+        bool park_births = false;                // the v14 path (no activation replay, births parked): the A/B
         const local_birth* find_local_birth(const std::string& entity, uint32_t tick) const {
             if (tick) {
                 const auto it = local_births.find(tick);
@@ -388,6 +403,8 @@ namespace bmmo::session {
             generations.clear();
             local_births.clear();
             birth_logs = 0;
+            manager_activations.clear();
+            activations_replayed = 0;
             latest_ball_rows.clear();
             corrections_logged = 0;
             savestate_get_logs = savestate_set_logs = 0;

@@ -49,6 +49,44 @@ namespace {
     }
 
     // Wire recipe (strings/vectors) -> bridge recipe (fixed arrays).
+    // The three data-array cells the replay rewinds and the replayed
+    // activations re-write (plan doc 10): CurrentLevel[0][4] and
+    // IngameParameter[0][1], [0][2].
+    CKDataArray* cell_array(IBML* bml, int i) { return bml->GetArrayByName(i == 0 ? "CurrentLevel" : "IngameParameter"); }
+    int cell_column(int i) { return i == 0 ? 4 : i; }
+    bool read_cell(IBML* bml, int i, int& value) {
+        CKDataArray* a = cell_array(bml, i);
+        return a && a->GetElementValue(0, cell_column(i), &value);
+    }
+    void write_cell(IBML* bml, int i, int value) {
+        if (CKDataArray* a = cell_array(bml, i)) a->SetElementValue(0, cell_column(i), &value, sizeof(int));
+    }
+    void record_manager_activation(bmmo::session::physics_session_state& s, IBML* bml, uint32_t tick, bool reset) {
+        bmmo::session::physics_session_state::manager_activation a;
+        a.reset = reset;
+        if (CKDataArray* parameters = bml->GetArrayByName("IngameParameter")) {
+            parameters->GetElementValue(0, 1, &a.activate);
+            parameters->GetElementValue(0, 2, &a.deactivate);
+        }
+        s.manager_activations[tick] = a;
+        while (!s.manager_activations.empty() && s.manager_activations.begin()->first + 4096 < tick)
+            s.manager_activations.erase(s.manager_activations.begin());
+    }
+    bool replay_manager_activation(bmmo::session::physics_session_state& s, IBML* bml, uint32_t tick) {
+        if (s.park_births) return false;
+        const auto it = s.manager_activations.find(tick);
+        if (it == s.manager_activations.end()) return false;
+        CKContext* context = bml->GetCKContext();
+        CKDataArray* parameters = bml->GetArrayByName("IngameParameter");
+        CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
+        if (!parameters || !manager) return false;
+        parameters->SetElementValue(0, 1, &it->second.activate, sizeof(int));
+        parameters->SetElementValue(0, 2, &it->second.deactivate, sizeof(int));
+        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, it->second.reset ? TRUE : FALSE);
+        ++s.activations_replayed;
+        return true;
+    }
+
     bmmo_physics_ball_recipe to_bridge_recipe(const bmmo::session::ball_recipe& r) {
         bmmo_physics_ball_recipe p{};
         p.fixed = r.fixed;
@@ -1970,7 +2008,25 @@ void BallanceMMOClient::physics_session_frame() {
     const uint64_t too_far_before = s.rollback.stats().too_far;
     const uint64_t frozen_before = s.rollback.stats().frozen;
     const uint64_t unmatched_before = s.rollback.stats().unmatched;
+    // An activation of Gameplay_SectorManager this frame's scripts asked for
+    // (Init Ingame at the level start, Event_handler), pending as next-frame
+    // flags for the frame tick + 1: recorded before any rewind below can
+    // write the manager's anchor flags over it, re-issued after one.
+    if (!s.park_births) {
+        if (CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
+                manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
+            record_manager_activation(s, m_bml, tick + 1, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
+    }
+    int live_cells[3] = {};
+    bool have_cells[3] = {};
+    if (!s.park_births)
+        for (int i = 0; i < 3; ++i) have_cells[i] = read_cell(m_bml, i, live_cells[i]);
+    const uint64_t rollbacks_before = s.rollback.stats().rollbacks;
     physics_session_apply_queues();
+    // The live chains that write these cells (the crossing, the death) are not
+    // replayed: the live values stay the live world's.
+    for (int i = 0; i < 3; ++i) if (have_cells[i]) write_cell(m_bml, i, live_cells[i]);
+    if (s.rollback.stats().rollbacks != rollbacks_before) replay_manager_activation(s, m_bml, tick + 1);
     // The sector union (session/sector_union.hpp): this frame's step was
     // `tick`, the next is tick + 1, and the server counts its pacer and makes
     // its pass after the events of a tick and before that tick's step.  One
@@ -2558,8 +2614,13 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
             r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
         birth.recipe = to_bridge_recipe(r);
         const VxMatrix& m = target->GetWorldMatrix();
+        const VxMatrix& l = target->GetLocalMatrix();
         for (int row = 0; row < 4; ++row)
-            for (int k = 0; k < 4; ++k) birth.matrix[row * 4 + k] = m[row][k];
+            for (int k = 0; k < 4; ++k) {
+                birth.matrix[row * 4 + k] = m[row][k];
+                birth.local_matrix[row * 4 + k] = l[row][k];
+            }
+        birth.has_parent = target->GetParent() != nullptr;
         auto& at = s.local_births[tick];
         for (auto& existing: at)
             if (existing.name == birth.name) { existing = birth; return; }
@@ -2784,6 +2845,7 @@ void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, co
     // A peer's sector in the cell is not this ball's (update_current_sector).
     if (sector != current_sector_) sector_cell_is_own_ = false;
     if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+    record_manager_activation(s, m_bml, tick, true);
     bmmo::session::client_journal::instance().note(s.current_tick(), std::format("sector {} activated for tick {} ({})", sector, tick, how));
     logger_->Info("Physics session: sector %d activated for tick %u (%s)", sector, tick, how);
 }
@@ -2852,6 +2914,7 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
     };
     // Polling resumed = a rewind replayed: the live input for the next frame
     // was consumed by the re-simulation, so the camera rows are re-armed.
+    o.before_replayed_tick = [this](uint32_t tick) { replay_manager_activation(physics_session_, m_bml, tick); };
     o.on_poll_resumed = [this](const std::string&) {
         auto& session = physics_session_;
         if (!session.own_navigation || !session.previous_cam_valid) return;
@@ -2893,6 +2956,43 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
     // doc 9): the way the live creation entered IVP's overlap tree, which
     // parking and re-posing it after the step did not reproduce.  Its joints
     // and controllers stay what they are.
+    // Plan doc 10 (the default): a mechanism body born inside the window is
+    // destroyed at the restore, its entity put back to the scene's initial
+    // conditions (what the module's TT Restore IC does), and the replayed
+    // module script - restored and activated again by the re-issued sector
+    // activation - makes it again the live way, with its joints and forces.
+    // The balls keep the parking path.  The event log is muted: the destroy
+    // is not a lifetime change of the body the records describe.
+    if (!s.park_births) world.destroy_body = [this](const std::string& entity, uint32_t birth_tick) {
+        auto& s = physics_session_;
+        if (entity.rfind("Ball_", 0) == 0) return false;
+        if (CK3dObject* ball = get_current_ball(); ball && ball->GetName() && entity == ball->GetName()) return false;
+        std::string error, mute_error;
+        physics_view_.set_event_log_muted(true, mute_error);
+        const bool ok = physics_view_.unphysicalize(entity.c_str(), error);
+        if (ok) {
+            CKContext* context = m_bml->GetCKContext();
+            // The matrix the live Physicalize found: the local one for a
+            // parented entity (the replayed manager's Set World Matrix on the
+            // parent recomputes the same world matrix), the world one otherwise.
+            const auto* birth = s.find_local_birth(entity, birth_tick);
+            if (!birth) birth = s.find_local_birth(entity, 0);
+            if (birth) {
+                if (auto* ck = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(entity.c_str()), CKCID_3DENTITY, nullptr))) {
+                    VxMatrix matrix;
+                    const bool local = birth->has_parent && ck->GetParent();
+                    const float* source = local ? birth->local_matrix : birth->matrix;
+                    for (int r = 0; r < 4; ++r)
+                        for (int k = 0; k < 4; ++k) matrix[r][k] = source[r * 4 + k];
+                    if (local) ck->SetLocalMatrix(matrix);
+                    else ck->SetWorldMatrix(matrix);
+                }
+            }
+        }
+        physics_view_.set_event_log_muted(false, mute_error);
+        if (!ok && s.birth_logs++ < 8) logger_->Warn("Physics session: birth: destroying %s at the restore failed: %s", entity.c_str(), error.c_str());
+        return ok;
+    };
     // Not installed: measured on the headless arms, an insertion that misses
     // its birth record in the last bit (a beam normalizes the quaternion, the
     // creation does not) falls back to a second recheck and leaves more bodies
@@ -2938,6 +3038,7 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         so.reset_skips = &s.script_reset_skips;
         so.delta_ms = 1000.0f / 66.0f;
         so.diff_detail = s.trace;
+        so.replay_activation = !s.park_births;
         so.on_restore_failed = [this](const std::string& error) {
             if (physics_session_.script_restore_logs++ < 8)
                 logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());

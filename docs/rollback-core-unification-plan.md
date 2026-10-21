@@ -326,3 +326,65 @@ S1-S2 净新增约 250 行，S2 删零售端约 180 行绑定。
 4. 风险：选择之外的激活源（Gameplay_Ingame 的死亡/关卡事件）；用引擎自带的脚本一致性检查、
    出生校验计数和三臂 journal 衡量。
 
+## 11. §10 的实施（2026-10-22）
+
+先用一个三视角的对抗性设计评审（CK 脚本语义 / IVP 与引擎顺序 / 测量）审了 §10，16 条确认的风险里
+有 5 条是 blocker，全部进了实现：
+
+1. **脚本回放 v2 格式**（`game/script_replay.hpp`，`kVersion = 2`）：
+   - 图的**延迟链接**：Gameplay_SectorManager 的 `Deactivate Sector.out0 -> Set Cell.in0 delay 4` 在帧间
+     以链接自身的倒计时存活（图的 `m_Links` 列表 SDK 不暴露）。capture 对每条初始延迟 >1 的子链接记
+     `GetActivationDelay()`；restore 时 0 < d < initial 即"在飞"，`SetActivationDelay(d)` 并把源输出重新
+     激活（只在该输出的所有链接都带延迟时），下一次图执行把它重新排进列表并按 live 的节拍倒数。
+     锚在管理器 4 帧走程中间的回滚因此能恢复（7:5 臂每次 pass 有 3/7 的概率落在里面）。
+   - **关节块的句柄存在位**（Ball Joint / Hinge / Slider / Spring 的 local 0 是指针，不写）：锚点记录
+     为"无句柄"而 live 有 → `CallCallbackFunction(CKM_BEHAVIORRESET)`，块自己删掉约束并清空句柄（两个
+     core 都还在）；随后 destroy_body 销毁的刚体身上没有关节，重放的 Create 从空开始（Hinge 的 Create
+     否则会 delete 一个已释放的指针）。
+   - **三个数据数组格**：`CurrentLevel[0][4]`（模块首帧的 Physicalize / Restore-IC 分叉）、
+     `IngameParameter[0][1]`、`[0][2]`，随记录保存，`replay_activation` 下在锚点写回。
+   - `select()` 把 **Gameplay_SectorManager 放进 `scripts`**（不是 satellite：下一帧标志只对 scripts 处理）。
+   - `restore(..., replay_activation)`：写**全部**选中脚本（含锚点未激活的），`replayed` = 全部；
+     `kept_live` 规则在该模式下不再生效。
+2. **无头客户端**：`frame()` 里回滚挪到扇区 pass 之前（否则恢复会把 pass 刚设的下一帧标志写掉，重放
+   又在 pass 的 tick 之前一格结束）；每次 pass 记 `manager_activations_[tick]`（reset 位 + 两个格的值），
+   帧后检查管理器的 `ACTIVATENEXTFRAME`（Init Ingame、Event_handler 发的）记到 tick+1；
+   `before_replayed_tick(t)` 重发（写格 + `scene->Activate(manager, reset)`）；任何回滚之后对 `now+1`
+   再发一次（重放的末态没有选择之外脚本发的请求）；三个格在回滚前后保存/写回（crossing / death 链不重放）。
+   `destroy_body(entity, birth_tick)`：机关刚体（球除外）在 blob 之前 unphysicalize，实体放回
+   Physicalize 当时的矩阵——有父节点的用 **local** 矩阵（父节点由重放的管理器 Set World Matrix 重算出
+   逐位相同的世界矩阵；直接写世界矩阵让气球部件差 1 µm；用场景 IC 则完全错——那是关卡文件的位置，
+   箔子跑到 900 m 外，球掉死）。`--park-births` = v14 路径 A/B。
+3. **引擎**：`destroy_body` 不再配 `recreate_body` 也可（刚体由重放脚本自己造），出生 tick 步进后不在
+   → `births_missing`；在线重放身份检查对重建的出生照常检查。
+4. **harness 存在性门**：`worst_bodies.py` / `exact_difference` 把 control 有、臂没有的刚体记为 MISSING
+   并判 FAIL（否则"整个扇区没启动"会以"全部精确"通过）。
+5. **零售端**同样接上：`physics_session_run_sector` 记 pass，`apply_queues` 前查管理器标志、后重发，
+   `before_replayed_tick` 重发，`destroy_body` 走 `physics_view_.unphysicalize` + 矩阵回写，
+   `so.replay_activation = !park_births`；x86 编译通过（真机跑待做）。
+
+量到的结果见 §12。
+
+## 12. 验收结果（2026-10-22，§10/§11 实施后，`--pairs 50:48,20:12,7:5`，新 control）
+
+| 臂 | forced | 与 control 不同的刚体 | 窗口内出生（重建 / 逐字节相同 / 不同 / 缺失） | 重发的激活 |
+|---|---|---|---|---|
+| 50:48 | 48 | **0 / 53**，unrounded worst 0.000e+00 m，1625 对 | 49 / 49 / 0 / 0 | 3（827、1321、1814） |
+| 20:12 | 123 | **0 / 53** | 46 / 46 / 0 / 0 | 2 |
+| 7:5 | 351 | **0 / 53** | 50 / 50 / 0 / 0 | 2 |
+
+harness 判 **PASS**（§4 的标准：`worst_bodies.py` 全部 0.0 / never，`exact_difference` 为 0，存在性门无缺失）。
+这是第一次深窗口（48 tick，跨整个扇区激活）的回滚与无回滚 control 逐刚体逐 tick 相同；之前 50:48 是
+11/53 不同（Schaukel 5.67 m、纸球 0.18 m、Platte 到 2.5 cm）。
+
+过程中的两次反例：场景 IC（`CKReadObjectState`）放回实体是错的（关卡文件位置，不是管理器放置后的；
+箔子 900 m 外，球掉死）；直接写世界矩阵让有父节点的气球部件差 1 µm（父节点 Set World Matrix 后重算）；
+local 矩阵 + 父节点标志才逐位相同。
+
+仍留在日志里、不影响刚体的差异：引擎的脚本一致性检查每局 1–4 行——`P_Modul_18_Particle Script`
+的 `DEACTIVATENEXTFRAME` 位、以及重放末态的三个数据格与 live 记录不同（live 的 crossing/death 链写了格，
+重放不跑它们；守卫在回滚后把 live 值写回，但重放记录里的末态仍是重放的）。在线重放身份检查每局 3–4 行，
+都是簿记（unit 编号、cache 槽）或球死亡前后的控制器列表，物理字段无差。
+
+**Quick matrix** 5/5，215 个单元测试通过，x86 零售客户端编译通过。
+

@@ -50,6 +50,13 @@ for tick in sorted(set(control) & set(arm)):
     arm_row = pair_balls(control[tick], arm[tick])
     for key, pos in control[tick].items():
         if key not in arm_row:
+            # A body the control has and the arm lacks is not "no difference":
+            # a sector that never started or a body destroyed and never made
+            # again would otherwise pass as exact.
+            name = key[1] if key[0] == 'body' else 'ball:%s' % key[1]
+            worst[name] = float('inf')
+            if name not in first:
+                first[name] = (tick, float('inf'))
             continue
         err = max(abs(a - b) for a, b in zip(pos, arm_row[key]))
         name = key[1] if key[0] == 'body' else 'ball:%s' % key[1]
@@ -61,4 +68,7 @@ for tick in sorted(set(control) & set(arm)):
 print('%-28s %12s   %s' % ('body', 'max err (m)', 'first > 1e-6 m'))
 for name, err in sorted(worst.items(), key=lambda kv: -kv[1]):
     got = first.get(name)
+    if err == float('inf'):
+        print('%-28s %12s   %s' % (name, 'MISSING', 'tick %d (absent from the arm)' % got[0] if got else 'absent'))
+        continue
     print('%-28s %12.4f   %s' % (name, err, 'tick %d (%.3e m)' % got if got else 'never'))

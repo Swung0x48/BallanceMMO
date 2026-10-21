@@ -514,6 +514,20 @@ namespace bmmo::physics {
                         std::snprintf(line, sizeof(line), "%s%a", (r || k) ? "," : "", static_cast<double>(m[r][k]));
                         out += line;
                     }
+                // The local matrix too, and whether the entity has a parent: a
+                // body re-made under a module's parent gets its local matrix
+                // back, so the manager's Set World Matrix on that parent
+                // recomputes the same world matrix the live creation saw
+                // (writing the world matrix left a parented piece a micrometre off).
+                out += "|parent=";
+                out += p.target->GetParent() ? "1" : "0";
+                out += "|lmtx=";
+                const VxMatrix& l = p.target->GetLocalMatrix();
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) {
+                        std::snprintf(line, sizeof(line), "%s%a", (r || k) ? "," : "", static_cast<double>(l[r][k]));
+                        out += line;
+                    }
                 out += ';';
                 text += out;
             }

@@ -460,8 +460,16 @@ on six bodies with it.  The plate row still drifts after a deep rewind through
 it: `--savestate-diff --ignore-ov --ignore-order` puts the first physical
 difference in the hull entries of the plates' mindists, the collision state a
 recheck creates at a different moment than the creation.  The end of this
-road is plan doc 10: re-run the module scripts inside the replay, so the
-Physicalize, the joints and the forces are made the live way.
+road is plan doc 10, built 2026-10-22 (plan doc 11-12): the sector activation
+is re-issued inside the replay at its recorded tick, every selected script is
+restored (the manager among them, its in-flight delayed links and the joint
+blocks' handle presence in the record, three data-array cells with them), the
+window-born mechanism bodies are destroyed at the restore with their entities
+put back at the matrix the Physicalize found (the local one under a parent),
+and the replayed module scripts make them again with their joints and forces.
+Result: the 50:48, 20:12 and 7:5 arms are EXACT against the control on all 53
+bodies (49/46/50 births made again, all bit-identical after their birth step);
+the parking path remains as the A/B (`--park-births`).
 
 ## Pitfalls already found
 

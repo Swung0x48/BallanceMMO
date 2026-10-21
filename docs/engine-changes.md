@@ -725,6 +725,23 @@ is null between calls.
 
 ---
 
+## Bridge notes: the script replay's record, version 2 (no engine change)
+
+`game/script_replay.hpp` `kVersion = 2`: after a block's force section a byte
+says whether the block is a joint block (Set Physics Ball Joint, Hinge, Slider,
+Spring) and, if so, whether its handle is set; after a graph's children, the
+countdown of every sub-link whose initial activation delay is above one frame;
+after the script lists, three data-array cells (`CurrentLevel[0][4]`,
+`IngameParameter[0][1]`, `[0][2]`).  The restore re-arms an in-flight link by
+setting its countdown and re-activating its source output (only when every
+link out of that output is delayed), resets a joint block whose handle the
+anchor did not have through `CKM_BEHAVIORRESET`, and writes the cells when the
+caller replays the sector activation (`replay_activation`), in which mode every
+selected script is written and executed.  `select()` takes
+`Gameplay_SectorManager` into the scripts.  Public CK API throughout.
+
+---
+
 ## Bridge notes: a body put where its Physicalize made it (bridge API v19, engine change #19 for the record only)
 
 `set_body_matrix(entity, matrix[16], simulated)` sets the entity's world matrix

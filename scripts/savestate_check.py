@@ -339,6 +339,7 @@ def exact_difference(control, arm):
     a = fd.worlds(jt.read_journal(str(control)), want_local=True)
     b = fd.worlds(jt.read_journal(str(arm)), want_local=True)
     worst, name, at, compared = 0.0, '-', -1, 0
+    missing, extra, first_missing = 0, 0, None
     for tick in sorted(set(a) & set(b)):
         # The player's ball is keyed by a session-specific player id: the one
         # ball of each solo journal is the same body (worst_bodies.py pairs
@@ -349,6 +350,14 @@ def exact_difference(control, arm):
         if len(balls_a) == 1 and len(balls_b) == 1 and balls_a[0] != balls_b[0]:
             row_b = dict(row_b)
             row_b[balls_a[0]] = row_b.pop(balls_b[0])
+        # Presence: a body the control has and the arm lacks (a sector that never
+        # started, a body destroyed and never made again) is not "no difference".
+        for key in a[tick]:
+            if key not in row_b:
+                missing += 1
+                if first_missing is None:
+                    first_missing = (tick, key[1] if key[0] == 'body' else 'ball:%s' % key[1])
+        extra += sum(1 for key in row_b if key not in a[tick])
         for key, pos in a[tick].items():
             other = row_b.get(key)
             if other is None:
@@ -358,7 +367,7 @@ def exact_difference(control, arm):
             if err > worst:
                 worst, at = err, tick
                 name = key[1] if key[0] == 'body' else 'ball:%s' % key[1]
-    return worst, name, at, compared
+    return worst, name, at, compared, {'missing': missing, 'extra': extra, 'first_missing': first_missing}
 
 
 def worst_bodies(control, arm):
@@ -419,8 +428,14 @@ def run_journals(args):
         off = [r for r in rows if r[1] != 0.0 or r[2] != 'never']
         if off:
             problems.append(f'{label}: {len(off)} of {len(rows)} bodies off the control')
-        if unrounded is not None and unrounded[0] != 0.0:
+        if unrounded is None:
+            problems.append(f'{label}: no unrounded comparison (the journal readers did not import)')
+        elif unrounded[0] != 0.0:
             problems.append(f'{label}: {unrounded[1]} is {unrounded[0]:.3e} m off at tick {unrounded[2]}')
+        if unrounded is not None and (unrounded[4]['missing'] or unrounded[4]['extra']):
+            fm = unrounded[4]['first_missing']
+            problems.append(f"{label}: presence differs - {unrounded[4]['missing']} control body-ticks missing from the arm"
+                            f"{', first ' + fm[1] + ' at tick ' + str(fm[0]) if fm else ''}, {unrounded[4]['extra']} arm body-ticks absent from the control")
         if not arm['forced']:
             problems.append(f'{label}: the arm took no forced rollback (forced={arm["forced"]}), so it proves nothing')
     print()

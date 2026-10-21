@@ -182,7 +182,13 @@ namespace bmmo::session {
         // step - the same insertion into IVP's tree, units and caches the live
         // Physicalize made.  Without the pair, or when the savestate is not
         // applied, the parking path runs.
-        std::function<bool(const std::string& entity)> destroy_body;
+        // destroy_body gets the body's birth tick too (the caller puts the
+        // entity back at the matrix its Physicalize found).  Without
+        // recreate_body the body is expected to be made again by the replayed
+        // scripts themselves at its birth tick (plan doc 10: the sector
+        // activation re-issued, the module scripts restored and re-run); a
+        // body still missing after that tick's step is counted (births_missing).
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> destroy_body;
         std::function<bool(const std::string& entity, uint32_t birth_tick)> recreate_body;
         // Optional, the default way for a body born inside the window when the
         // caller has its Physicalize matrix: the parked body is put where and
@@ -318,6 +324,7 @@ namespace bmmo::session {
         uint64_t births_recreated_exact = 0;        // ...and found at exactly their birth record after that tick's step
         uint64_t birth_recreate_mismatches = 0;     // ...or not: re-posed from the record as a parked body would be
         uint64_t birth_recreate_failures = 0;       // destroy or recreate refused: the body was parked / is missing
+        uint64_t births_missing = 0;                // destroyed at a restore and not made again by its birth tick's replayed scripts
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
@@ -774,10 +781,10 @@ namespace bmmo::session {
                 // Bodies born inside the window go first, when the caller can
                 // make them again at their birth tick: destroyed here, the
                 // blob meets the object set it recorded and nothing is parked.
-                if (world.destroy_body && world.recreate_body) {
+                if (world.destroy_body) {
                     for (auto& [entity, item]: plan) {
                         if (!item.repose_tick) continue;
-                        if (world.destroy_body(entity)) {
+                        if (world.destroy_body(entity, item.repose_tick)) {
                             item.recreate = true;
                             ++stats_.births_recreated;
                         } else {
@@ -1059,7 +1066,7 @@ namespace bmmo::session {
                 }
                 for (const std::string& entity: born_now) {
                     restore& item = plan[entity];
-                    if (!item.recreate) continue;
+                    if (!item.recreate || !world.recreate_body) continue;   // no hook: the replayed scripts make it
                     if (!world.recreate_body(entity, t)) {
                         ++stats_.birth_recreate_failures;
                         item.recreate = false;   // nothing to compare after the step; the re-pose below finds no body
@@ -1080,7 +1087,18 @@ namespace bmmo::session {
                 for (const std::string& entity: born_now) {
                     restore& item = plan[entity];
                     bmmo_physics_body_state live{};
-                    if (!world.get_body(entity, live)) continue;
+                    if (!world.get_body(entity, live)) {
+                        // Destroyed at the restore and not made again by this
+                        // tick's replayed scripts: the activation the live
+                        // frame had is missing from the replay.
+                        if (item.recreate) {
+                            ++stats_.births_missing;
+                            if (world.log && recreate_logs_++ < 8)
+                                world.log("birth: " + entity + " was destroyed at the restore and is not back after its birth tick "
+                                          + std::to_string(t));
+                        }
+                        continue;
+                    }
                     // A re-created body is expected exactly where its birth
                     // record has it: the record is the state the live frame
                     // left at the end of this tick, and this replay made the
@@ -1145,10 +1163,16 @@ namespace bmmo::session {
                     bool births = false;
                     for (const auto& [entity, item]: plan) births = births || (item.repose_tick != 0 && !item.recreate && !item.inserted);
                     if (!births) {
-                        ++stats_.savestate_replay_mismatches;
-                        if (world.log && savestate_replay_logs_++ < 8)
-                            world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
-                                      + " differs from the live record: " + world.diff_savestate(live_savestate, state.savestate));
+                        // An empty answer from the hook means the bytes differ
+                        // only in what it was told to ignore (the order
+                        // bookkeeping): not a mismatch.
+                        const std::string where = world.diff_savestate(live_savestate, state.savestate);
+                        if (!where.empty()) {
+                            ++stats_.savestate_replay_mismatches;
+                            if (world.log && savestate_replay_logs_++ < 8)
+                                world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
+                                          + " differs from the live record: " + where);
+                        }
                     }
                 }
                 if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts

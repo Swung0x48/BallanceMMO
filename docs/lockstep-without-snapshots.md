@@ -1422,6 +1422,53 @@ another run's files, naming script, block and field - the first difference
 that is NOT a replayed record's by-design live state (a script activated
 inside the window keeps its live flags) was this local, at the first rewind.
 
+### The sector activation, replayed (script replay v2, 2026-10-22)
+
+The v14 rule left one class of rewind inexact by construction: a window that
+spanned a sector activation.  The scripts the activation starts were kept live
+and not re-run, the bodies they made inside the window were parked at their
+birth pose and rechecked back in after their birth tick, and what a recheck
+cannot reproduce - IVP's overlap-tree layout, the moment a body's mindists and
+hull entries are created, a fresh core's age - left the plate row and the swing
+off the control after every deep rewind (20:12 and 50:48: 11 of 53 bodies,
+the swing 5.7 m).  Re-creating the bodies from their recorded Physicalize made
+45 of 46 births bit-identical but severed the joints the kept-live scripts had
+attached.
+
+So the activation is treated as the input it is.  Every activation of
+`Gameplay_SectorManager` the live frames made is recorded by the tick whose
+frame consumed it - the union's own passes, and the ones scripts outside the
+replay asked for (Init Ingame at the level start), seen as next-frame flags
+after their frame - and the replay re-issues it at that tick, before the tick's
+scripts.  The manager travels with the records like the modules do; a restore
+writes EVERY selected script, the inactive ones included, since the replayed
+manager activates them again with the reset; a mechanism body born inside the
+window is destroyed before the blob is applied, its entity put back at the
+matrix its Physicalize found (the local matrix under a module's parent, which
+the replayed manager then places), and the replayed module script makes it
+again - body, joints, force controllers - the live way.  Three things the
+capture had to learn for that, found by an adversarial review of the design
+before it was built: a graph's in-flight delayed links (the manager's walk is
+a four-frame link the SDK does not expose; the countdown on the link is
+captured and re-armed), the joint blocks' handle presence (a block that had no
+joint at the anchor deletes its live one through its own reset callback, so
+the destroyed body carries none and the replayed Create starts from nothing),
+and the three data-array cells the chain reads.  The headless frame runs its
+rewinds before the union's pass, as the retail client always did, so a pass is
+never written over by a restore in the same frame; the live cells are kept
+across a rewind; a pending activation is re-issued for the frame about to run
+after any rewind.  A presence gate in the harness fails an arm that loses a
+body the control has.
+
+Measured (`scripts/savestate_check.py --journals`, fresh controls):
+50:48 (48 rewinds), 20:12 (123) and 7:5 (351) are **EXACT on all 53 bodies**,
+unrounded worst 0.000e+00 m; 49, 46 and 50 bodies made again inside replays,
+every one bit-identical to its birth record after its birth tick's step.  Two
+wrong turns on the way, both measured: putting the entity back to the scene's
+initial conditions (the level file's poses, before the manager placed the
+module: a box 900 m off, the ball fell to its death), and writing the world
+matrix of a parented piece (a micrometre off once the parent is placed).
+
 ## The one the ball still had: a contact that ended inside the window (bridge API v15)
 
 Every forced-rewind arm above, scripts or not, took the same single correction

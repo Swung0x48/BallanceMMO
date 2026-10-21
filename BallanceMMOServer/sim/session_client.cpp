@@ -165,12 +165,14 @@ namespace {
         // and field - the way to find where two runs' SCRIPT states part,
         // which a journal (poses) and a blob diff (IVP) both miss.
         std::string compare_scripts_dir;
-        // --recreate-births: destroy a body born inside a rewind's window at
-        // the restore and make it again at its birth tick from its recorded
-        // Physicalize recipe, instead of putting the parked body where the
-        // Physicalize made it before that tick's step (the default).  An A/B
-        // that severs the joints and controllers scripts attached to the body.
-        bool recreate_births = false;
+        // --park-births: the bridge API v14 rule for a rewind across a sector
+        // activation - the activation is not re-issued, a script inactive at
+        // the anchor keeps its live state, a body born inside the window is
+        // parked at its birth pose and re-posed after its birth tick.  The
+        // default re-issues the activation inside the replay and lets the
+        // restored module scripts make the bodies, joints and forces again
+        // (plan doc 10).  The A/B.
+        bool park_births = false;
         // --insert-births: put a parked window-born body where its Physicalize
         // made it before its birth tick's step (see the hook).  An A/B.
         bool insert_births = false;
@@ -282,7 +284,7 @@ namespace {
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
-                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--recreate-births] [--insert-births]\n"
+                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--park-births] [--insert-births]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)");
     }
 
@@ -338,7 +340,7 @@ namespace {
                 if (!(v = next())) return false;
                 out.dump_savestate_dir = v;
             }
-            else if (arg == "--recreate-births") out.recreate_births = true;
+            else if (arg == "--park-births") out.park_births = true;
             else if (arg == "--insert-births") out.insert_births = true;
             else if (arg == "--compare-scripts") {
                 if (!(v = next())) return false;
@@ -928,6 +930,8 @@ namespace {
             mechanism_tracking_.clear();
             generations_.clear();
             local_births_.clear();
+            manager_activations_.clear();
+            activations_replayed_ = 0;
             amend_failures_ = 0;
             beam_done_ = false;
             remotes_.clear();
@@ -1460,6 +1464,15 @@ namespace {
             // sector is up: this client has resolved a mechanism of its own).
             for (const auto& chain: reset_guard_.apply(engine_->context(), mechanism_tracking_.resolved() > 0))
                 logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
+            // After the events, so a birth and an input correction in the same
+            // frame leave the world replayed from the earlier of the two - and
+            // BEFORE the union's pass below: the pass sets next-frame flags on
+            // Gameplay_SectorManager, which the restore (the manager travels
+            // with the records now) would write back to the anchor's and lose,
+            // and the replay ends one tick short of re-issuing it.  The retail
+            // client has this order already.
+            replay_corrected_inputs();
+            maybe_force_rollback();
             // The sector union (session/sector_union.hpp), the rule the server's
             // update_sectors() runs: one count of the pacer per step, before
             // it, from the manager's state after the previous step, and one
@@ -1475,15 +1488,12 @@ namespace {
                 if (pass) {
                     sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
                     start_sector(pass.sector);
+                    record_manager_activation(frame_tick, true);
                     logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s", pass.sector, frame_tick,
                          pass.player, pass.stamped_tick, frame_tick > pass.stamped_tick ? ", held by the pacer" : "",
                          [this] { std::string s; for (int x: sectors_.active()) s += std::to_string(x) + " "; return s; }().c_str());
                 }
             }
-            // After the events, so a birth and an input correction in the same
-            // frame leave the world replayed from the earlier of the two.
-            replay_corrected_inputs();
-            maybe_force_rollback();
             // The own ball's Physicalize is captured inside this tick's
             // Simulate(), before the PSIs (capture_own_physicalize).  Armed
             // here, after the rewinds above: a replayed step runs the
@@ -1494,6 +1504,16 @@ namespace {
             live_tick_serial_ = 0;
             if (!ticked) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             frames_since_anchor_ = f;
+            // An activation of Gameplay_SectorManager this frame's scripts asked
+            // for (Init Ingame's Execute Script at the level start, Event_handler):
+            // pending as next-frame flags now, consumed by the next frame.  A
+            // pass of ours never shows here - its flags were consumed by this
+            // frame.  Recorded for the replay like a pass (plan doc 10).
+            if (sector_manager_id_) {
+                if (auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
+                        manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
+                    record_manager_activation(frame_tick + 1, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
+            }
             const uint32_t tick = current_tick();
             CKIpionManager* physics = engine_->physics();
             CKContext* context = engine_->context();
@@ -2064,6 +2084,7 @@ namespace {
                 auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
                     return recorded_input_at(entity, tick, out);
                 };
+                const live_cells_guard keep_cells(*this);
                 const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
                 if (rolled && args_.trace && rollback_diag_++ < 16)
                     logf("after rollback: movable=%s", bmmo::physics::describe_movable_objects(physics).c_str());
@@ -2356,6 +2377,7 @@ namespace {
                 logf("PreSimulate queue before the rewind at %u: %s", now,
                      bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
             }
+            const live_cells_guard keep_cells(*this);
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
                 ++forced_rollbacks_;
                 for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t, "replayed");
@@ -2419,6 +2441,7 @@ namespace {
             auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
                 return recorded_input_at(name, tick, out);
             };
+            const live_cells_guard keep_cells(*this);
             if (rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at,
                                     entity + " input corrected at tick " + std::to_string(anchor))) {
                 ++input_rewinds_;
@@ -2605,6 +2628,7 @@ namespace {
             };
             const std::string reason = "ball of " + std::to_string(event.player) + " born at tick "
                                      + std::to_string(event.tick);
+            const live_cells_guard keep_cells(*this);
             if (rollback_.rewind_to(rollback_world(), event.tick - 1, now, input_at, reason)) {
                 ++life_rewinds_;
                 return;
@@ -2854,6 +2878,7 @@ namespace {
             // as it stands then, and the traces.
             o.before_replayed_tick = [this](uint32_t tick) {
                 drain_pending_births(tick);
+                replay_manager_activation(tick);
                 if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
                     logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
                          bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
@@ -2914,7 +2939,13 @@ namespace {
             // that does not reproduce the live record's blob is logged with
             // the first three differing fields, the overlap tree aside.
             world.diff_savestate = [](const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed) {
-                return bmmo::physics::diff_savestate(live.data(), live.size(), replayed.data(), replayed.size(), true, 3);
+                // The overlap tree's layout, the cache ring and the unit
+                // numbering are left out: a replay that destroys and re-makes a
+                // body orders them differently without any value differing (the
+                // 7:5 arm is exact with them shifted), and they would hide the
+                // physical field this check is for.
+                const std::string where = bmmo::physics::diff_savestate(live.data(), live.size(), replayed.data(), replayed.size(), true, 3, true);
+                return where.rfind("no difference", 0) == 0 ? std::string() : where;   // bookkeeping only: not a mismatch
             };
             // A body born inside the window is made again inside the replay,
             // at its birth tick, with the recipe and matrix its Physicalize
@@ -2961,49 +2992,57 @@ namespace {
                     for (const auto& b: it->second) names.push_back(b.name);
                 return names;
             };
-            // --recreate-births: the experiment that destroys the body at the
-            // restore and makes it again at its birth tick.  45 of 46 births
-            // came back bit-exact on the arena, but a body's joints and force
-            // controllers are made by scripts that were activated inside the
-            // window and are kept live, not re-run, so they are lost with the
-            // body: the plate row fell off its joints.  Kept as the A/B.
-            if (args_.recreate_births) {
-                world.destroy_body = [this](const std::string& entity) {
-                    // The balls keep the parking path: a navigated body has the
-                    // replica's controllers on it, and its lifecycle has its own
-                    // events (the ball is exact under parking in every arm).
+            // Plan doc 10 (the default): a mechanism body born inside the
+            // window is destroyed at the restore, with its entity put back at
+            // the matrix its Physicalize found, and the replayed module script
+            // - restored to its anchor state and activated again by the
+            // re-issued sector activation - makes it again the live way, with
+            // its joints and forces.  The balls keep the parking path.  The
+            // event log is muted: the destroy is not a lifetime change of the
+            // body the records describe (the replayed Physicalize runs muted
+            // inside execute_frame already).
+            if (!args_.park_births) {
+                world.destroy_body = [this](const std::string& entity, uint32_t birth_tick) {
                     if (entity.rfind("Ball_", 0) == 0 || entity == own_body_entity_) return false;
                     for (const auto& [id, remote]: remotes_) if (remote.entity == entity) return false;
-                    if (!find_local_birth(entity, 0)) return false;   // no recipe: parked as before
+                    const local_birth* birth = find_local_birth(entity, birth_tick);
+                    if (!birth) birth = find_local_birth(entity, 0);
                     std::string error;
                     bmmo::physics::set_event_log_muted(true);
                     const bool ok = bmmo::physics::unphysicalize(engine_->physics(), entity.c_str(), error);
+                    if (ok) {
+                        // The entity back where the live Physicalize found it.
+                        // The scene's initial conditions first, the way the
+                        // module scripts' own TT Restore IC puts it: the LOCAL
+                        // matrix the level file has, so the manager's Set World
+                        // Matrix on the module's parent recomputes the same
+                        // world matrix bit for bit (writing the recorded world
+                        // matrix directly left the balloon's pieces a
+                        // micrometre off after that recomputation).  The
+                        // recorded matrix is the fallback for an entity the
+                        // scene holds no initial conditions for.
+                        // The matrix the live Physicalize found: the LOCAL one
+                        // for a parented entity (the replayed manager's Set
+                        // World Matrix on the parent then recomputes the same
+                        // world matrix), the world one otherwise.  (The scene's
+                        // initial conditions are NOT it: they are the level
+                        // file's poses, before the manager placed the module -
+                        // measured: a box 900 m off, the ball fell to its death.)
+                        if (birth) {
+                            if (auto* ck = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
+                                    const_cast<CKSTRING>(entity.c_str()), CKCID_3DENTITY, nullptr))) {
+                                VxMatrix matrix;
+                                const bool local = birth->has_parent && birth->has_local && ck->GetParent();
+                                const float* source = local ? birth->local_matrix : birth->matrix;
+                                for (int r = 0; r < 4; ++r)
+                                    for (int k = 0; k < 4; ++k) matrix[r][k] = source[r * 4 + k];
+                                if (local) ck->SetLocalMatrix(matrix);
+                                else ck->SetWorldMatrix(matrix);
+                            }
+                        }
+                    }
                     bmmo::physics::set_event_log_muted(false);
                     if (!ok && recreate_logs_++ < 8) logf("birth: destroying %s at the restore failed: %s", entity.c_str(), error.c_str());
-                    return ok;
-                };
-                world.recreate_body = [this](const std::string& entity, uint32_t birth_tick) {
-                    const local_birth* birth = find_local_birth(entity, birth_tick);
-                    if (!birth) {
-                        if (recreate_logs_++ < 8) logf("birth: no recipe for %s at tick %u", entity.c_str(), birth_tick);
-                        return false;
-                    }
-                    CKContext* context = engine_->context();
-                    // ParentClass: the level's bodies are CK3dObjects.
-                    auto* ck = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(entity.c_str()), CKCID_3DENTITY, nullptr));
-                    if (!ck) {
-                        if (recreate_logs_++ < 8) logf("birth: no entity named %s to re-create", entity.c_str());
-                        return false;
-                    }
-                    VxMatrix matrix;
-                    for (int r = 0; r < 4; ++r)
-                        for (int k = 0; k < 4; ++k) matrix[r][k] = birth->matrix[r * 4 + k];
-                    std::string error;
-                    bmmo::physics::set_event_log_muted(true);
-                    ck->SetWorldMatrix(matrix);
-                    const bool ok = bmmo::physics::physicalize(engine_->physics(), entity.c_str(), birth->recipe, birth->group.c_str(), error);
-                    bmmo::physics::set_event_log_muted(false);
-                    if (!ok && recreate_logs_++ < 8) logf("birth: re-creating %s at tick %u failed: %s", entity.c_str(), birth_tick, error.c_str());
                     return ok;
                 };
             }
@@ -3017,6 +3056,7 @@ namespace {
                 so.reset_skips = &script_reset_skips_;
                 so.delta_ms = 1000.0f / 66.0f;
                 so.diff_detail = args_.trace;
+                so.replay_activation = !args_.park_births;
                 so.on_restore_failed = [this](const std::string& error) {
                     if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };
@@ -3343,7 +3383,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu deferred=%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -3373,7 +3413,8 @@ namespace {
                  static_cast<unsigned long long>(rs.birth_insert_mismatches),
                  static_cast<unsigned long long>(rs.births_recreated), static_cast<unsigned long long>(rs.births_recreated_exact),
                  static_cast<unsigned long long>(rs.birth_recreate_mismatches), static_cast<unsigned long long>(rs.birth_recreate_failures),
-                 static_cast<unsigned long long>(rs.unknown_rechecks_deferred),
+                 static_cast<unsigned long long>(rs.births_missing),
+                 static_cast<unsigned long long>(rs.unknown_rechecks_deferred), static_cast<unsigned long long>(activations_replayed_),
                  static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
                  static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
                  static_cast<unsigned long long>(script_reset_skips_), rs.max_error,
@@ -3438,6 +3479,82 @@ namespace {
         uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)
         uint32_t compare_scripts_ticks_ = 0, compare_scripts_logs_ = 0;
         uint32_t recipe_parse_logs_ = 0, recreate_logs_ = 0;
+        // Every activation of Gameplay_SectorManager the live frames made, by
+        // the tick whose frame consumed it: the union's own passes (start_sector
+        // before the frame) and the ones scripts outside the replay asked for
+        // (Init Ingame at the level start, Event_handler), seen as next-frame
+        // flags after their frame.  The replay re-issues them at that tick,
+        // before the tick's scripts, with the two IngameParameter cells as they
+        // were (plan doc 10).
+        struct manager_activation {
+            bool reset = false;
+            int activate = 0, deactivate = 0;   // IngameParameter[0][1], [0][2]
+        };
+        std::map<uint32_t, manager_activation> manager_activations_;
+        uint64_t activations_replayed_ = 0;
+        void record_manager_activation(uint32_t tick, bool reset) {
+            manager_activation a;
+            a.reset = reset;
+            if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
+                parameters->GetElementValue(0, 1, &a.activate);
+                parameters->GetElementValue(0, 2, &a.deactivate);
+            }
+            manager_activations_[tick] = a;
+            while (!manager_activations_.empty() && manager_activations_.begin()->first + 4096 < tick)
+                manager_activations_.erase(manager_activations_.begin());
+        }
+        // The three data-array cells the replay rewinds and re-writes (the
+        // record's, then the replayed activations') while the LIVE chains that
+        // wrote them - Gameplay_Events' crossing, the death chain - are not
+        // replayed: kept across a rewind, so the live world ends the frame
+        // with the values its own chains left, and only the replay sees the
+        // anchor's (the next live pass writes them anyway; this keeps the
+        // engine's end-of-replay script check honest about them).
+        struct live_cells_guard {
+            session_client& client;
+            int values[3] = {};
+            bool have[3] = {};
+            uint64_t rollbacks_before = 0;
+            explicit live_cells_guard(session_client& c) : client(c), rollbacks_before(c.rollback_.stats().rollbacks) {
+                if (client.args_.park_births) return;
+                for (int i = 0; i < 3; ++i) have[i] = client.read_cell(i, values[i]);
+            }
+            ~live_cells_guard() {
+                for (int i = 0; i < 3; ++i) if (have[i]) client.write_cell(i, values[i]);
+                // A rewind that ended at `now` replaced the live world with the
+                // replayed one, which never saw an activation a script outside
+                // the replay asked for during the live frame `now` (Init Ingame
+                // at the level start, Event_handler): pending as next-frame
+                // flags in the live record of `now`, absent from the replayed
+                // state.  Re-issued for the frame about to run, as the replay
+                // re-issues them inside its window.
+                if (client.rollback_.stats().rollbacks != rollbacks_before) client.replay_manager_activation(client.current_tick() + 1);
+            }
+        };
+        static const char* cell_array(int i) { return i == 0 ? "CurrentLevel" : "IngameParameter"; }
+        static int cell_column(int i) { return i == 0 ? 4 : i; }
+        bool read_cell(int i, int& value) {
+            CKDataArray* a = engine_->data_array(cell_array(i));
+            return a && a->GetElementValue(0, cell_column(i), &value);
+        }
+        void write_cell(int i, int value) {
+            if (CKDataArray* a = engine_->data_array(cell_array(i))) a->SetElementValue(0, cell_column(i), &value, sizeof(int));
+        }
+        void replay_manager_activation(uint32_t tick) {
+            if (args_.park_births) return;
+            const auto it = manager_activations_.find(tick);
+            if (it == manager_activations_.end()) return;
+            CKDataArray* parameters = engine_->data_array("IngameParameter");
+            CKBehavior* manager = sector_manager_id_ ? CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_)) : nullptr;
+            if (!parameters || !manager) return;
+            parameters->SetElementValue(0, 1, &it->second.activate, sizeof(int));
+            parameters->SetElementValue(0, 2, &it->second.deactivate, sizeof(int));
+            if (CKScene* scene = engine_->context()->GetCurrentScene()) scene->Activate(manager, it->second.reset ? TRUE : FALSE);
+            ++activations_replayed_;
+            if (args_.trace_restore && recreate_logs_ < 24)
+                logf("replay: sector manager activation re-issued at tick %u (activate %d, deactivate %d%s)", tick,
+                     it->second.activate, it->second.deactivate, it->second.reset ? ", reset" : "");
+        }
         // Every body this world made, by the tick of the record that first
         // carries it: the Physicalize recipe, collision group and the entity's
         // matrix at that moment (the event log's "recipe" line, engine change
@@ -3446,7 +3563,9 @@ namespace {
         struct local_birth {
             std::string name, group;
             bmmo_physics_ball_recipe recipe{};
-            float matrix[16] = {};
+            float matrix[16] = {};         // the entity's world matrix at the Physicalize
+            float local_matrix[16] = {};   // ...and its local one, for a parented entity
+            bool has_parent = false, has_local = false;
         };
         std::map<uint32_t, std::vector<local_birth>> local_births_;
         // The birth of `entity` recorded at `tick`, or - tick 0 - its latest.
@@ -3537,6 +3656,13 @@ namespace {
                     if (parts.size() != 16) return false;
                     for (size_t k = 0; k < 16; ++k) out.matrix[k] = static_cast<float>(number(parts[k]));
                     matrix_values = 16;
+                } else if (key == "lmtx") {
+                    const auto parts = split(value, ',');
+                    if (parts.size() != 16) return false;
+                    for (size_t k = 0; k < 16; ++k) out.local_matrix[k] = static_cast<float>(number(parts[k]));
+                    out.has_local = true;
+                } else if (key == "parent") {
+                    out.has_parent = value == "1";
                 }
             }
             return matrix_values == 16;
