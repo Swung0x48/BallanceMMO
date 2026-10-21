@@ -1007,6 +1007,10 @@ def aggregate(wins, late_ids, index_of):
     ph['rb'] = {'input': pair('inrew'), 'life': pair('life'), 'snap': pair('snaprb'), 'forced': pair('forced'),
                 # the own-correction rewinds of plan step 4; no field before it
                 'subst': pair('substrew') if any('substrew' in w for w in wins) else None}
+    # step 4b's coalescing of the own replays: deferred frames / unseen diffs /
+    # waiting replays another rewind carried / amendments with no own replay
+    ph['substco'] = [sum(w['substco'][k] for w in wins if isinstance(w.get('substco'), list) and len(w['substco']) > k)
+                     for k in range(4)] if any('substco' in w for w in wins) else None
     ph['inrew_late'] = sum(n for w in wins for src, n in w['inrew_src'].items() if src in late_ids)
     overall, by_src = {}, {}
     for w in wins:
@@ -1558,11 +1562,13 @@ def format_report(report, crit):
             rb = ph['rb']
             fmt_rb = lambda v: 'n/a' if v is None else ('%d/%.1f' % (v[0], v[1] / v[0]) if v[0] else '0')
             lines.append('  %s %5d-%-5d own %.4f oth %.4f late %.4f mech %.4f | windows %d rb input %s life %s snap %s '
-                         'forced %s subst %s, naming late %d | lag %d/%d (n %d) %s | relay_late %d snaps %d resyncs %d '
+                         'forced %s subst %s co %s, naming late %d | lag %d/%d (n %d) %s | relay_late %d snaps %d resyncs %d '
                          'rebases %d lead_adj %s moved %s' % (
                              p, ph['ticks'][0], ph['ticks'][1] - 1, ph['own_max'], ph['oth_max'], ph['late_mirror_max'],
                              ph['mech_max'], ph['windows'], fmt_rb(rb['input']), fmt_rb(rb['life']), fmt_rb(rb['snap']),
-                             fmt_rb(rb['forced']), fmt_rb(rb['subst']), ph['inrew_late'], ph['lag']['max'],
+                             fmt_rb(rb['forced']), fmt_rb(rb['subst']),
+                             'n/a' if ph.get('substco') is None else '/'.join(map(str, ph['substco'])),
+                             ph['inrew_late'], ph['lag']['max'],
                              ph['lag']['p99'], ph['lag']['n'],
                              ' '.join('%s:%d/%d' % (src, st['max'], st['p99']) for src, st in ph['lag_src'].items()),
                              ph['relay_late'], ph['snaps'], ph['resyncs'], ph['rebases'],
@@ -1688,10 +1694,11 @@ def selftest():
     ev = parse_event('2:1500:step=300:dir=up:until=2700')
     check('parse_event step until', ev.t_off == 2700 and ev.until == 2700)
     w = parse_window('window: tick=1559 inrew=3/41 life=0/0 forced=0/0 snaprb=1/12 snaps=1 resyncs=0/0 rebases=0 '
-                     'relay=180 late=2 lag[11]=23*4,24*50,49*2 lag[12]=30*60 inrew[11]=3 subst=5/4/1/0/1/0 lead_adj=1')
+                     'relay=180 late=2 lag[11]=23*4,24*50,49*2 lag[12]=30*60 inrew[11]=3 subst=5/4/1/0/1/0 '
+                     'substco=7/1/1/9 lead_adj=1')
     check('parse_window', w and w['tick'] == 1559 and w['inrew'] == [3, 41] and w['late'] == 2
           and w['lag'] == {11: {23: 4, 24: 50, 49: 2}, 12: {30: 60}} and w['inrew_src'] == {11: 3}
-          and w['subst'] == [5, 4, 1, 0, 1, 0] and w['lead_adj'] == 1, str(w))
+          and w['subst'] == [5, 4, 1, 0, 1, 0] and w['substco'] == [7, 1, 1, 9] and w['lead_adj'] == 1, str(w))
     st = hist_stats({23: 4, 24: 50, 49: 2})
     check('hist_stats p99', st == {'n': 56, 'max': 49, 'p99': 49}, str(st))
     st = hist_stats({i: 1 for i in range(1, 201)})

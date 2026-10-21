@@ -6,9 +6,11 @@
 
 #include <message/message_all.hpp>
 
+#include <algorithm>
 #include <string>
 
 #include <session/correction.hpp>
+#include <session/own_correction.hpp>
 #include <session/timeline.hpp>
 
 using namespace bmmo::session;
@@ -389,4 +391,148 @@ TEST(OwnBallCorrector, HardSetsLargeErrorsAndDropsHistory) {
     // a snapshot for a tick with no local state is counted, not applied
     EXPECT_EQ(corrector.compare(pose_at(2, 5.0, 0.0f)).action, correction_step::kind::none);
     EXPECT_EQ(corrector.stats().unmatched, 1u);
+}
+
+// The owner's own corrections (late-player design 1.3, step 4b): a
+// difference the replay cannot see needs no replay, and while the notices
+// keep coming one replay per kOwnReplayCoalesceFrames frames carries them,
+// never later than the frame after which the earliest would leave the reach.
+TEST(OwnCorrection, ReplaySeesOnlyWhatTheNavigationConsumes) {
+    input_frame a{};
+    a.flags = INPUT_FLAG_NAV_ACTIVE;
+    a.cam_dir[2] = 1.0f;
+    input_frame b = a;
+    EXPECT_FALSE(replay_sees_difference(a, b));
+    // a camera turned with no leaf key down, Shift/Space, ball type, flags
+    // other than NAV_ACTIVE: nothing a replay feeds
+    b.cam_dir[0] = 0.5f;
+    b.keys = KEY_SHIFT | KEY_SPACE;
+    b.ball_type = 2;
+    b.flags |= INPUT_FLAG_PHYSICALIZED | INPUT_FLAG_PAUSED;
+    EXPECT_FALSE(replay_sees_difference(a, b));
+    // the same leaf down: now the camera steers the force
+    a.keys = KEY_LEAF_0;
+    b.keys = KEY_LEAF_0 | KEY_SPACE;
+    EXPECT_TRUE(replay_sees_difference(a, b));
+    b.cam_dir[0] = a.cam_dir[0];
+    EXPECT_FALSE(replay_sees_difference(a, b));
+    // a different leaf, and NAV_ACTIVE differing
+    b.keys = KEY_LEAF_1;
+    EXPECT_TRUE(replay_sees_difference(a, b));
+    b = a;
+    b.flags = 0;
+    EXPECT_TRUE(replay_sees_difference(a, b));
+    // navigation off in both: neither keys nor camera drive anything
+    a.flags = 0;
+    b.keys = KEY_LEAF_3;
+    b.cam_up[1] = -1.0f;
+    EXPECT_FALSE(replay_sees_difference(a, b));
+}
+
+TEST(OwnCorrection, PacerCoalescesAStreamInsideTheReach) {
+    constexpr uint32_t kReach = 48;
+    for (uint32_t delay: {30u, 41u, 42u, 46u, 47u}) {
+        own_replay_pacer pacer;
+        bool pending = false;
+        uint32_t earliest = 0;
+        uint32_t replays = 0, amended = 0, carried = 0;
+        // one notice per frame for 120 frames, `delay` ticks after its tick
+        // (the gate of note_held_section: now - (tick - 1) <= reach), then
+        // nothing; `now` is the newest simulated tick at the frame's start
+        // (the network is polled before the frame, at the same `now`)
+        for (uint32_t now = 1000; now < 1200; ++now) {
+            if (now < 1120) {
+                const uint32_t tick = now - delay;
+                ASSERT_LE(now - (tick - 1), kReach);
+                ++amended;
+                if (pending) ++carried;
+                if (!pending || static_cast<int32_t>(tick - earliest) < 0) earliest = tick;
+                pending = true;
+            }
+            pacer.frame();
+            if (pending && pacer.due(now, earliest, kReach, true)) {
+                EXPECT_LE(now - (earliest - 1), kReach) << "delay " << delay << " at " << now;
+                ++replays;
+                pacer.ran();
+                pending = false;
+            }
+        }
+        EXPECT_FALSE(pending) << "delay " << delay;
+        // every notice amended; one replay per window of frames, the window
+        // kOwnReplayCoalesceFrames or what the reach leaves after the delay
+        // (a notice 47 deep has to replay on its own frame)
+        const uint32_t window = std::min(kOwnReplayCoalesceFrames, kReach - delay);
+        EXPECT_EQ(amended, 120u);
+        EXPECT_LE(replays, 120u / window + 1) << "delay " << delay;
+        EXPECT_GE(replays + 1, 120u / window) << "delay " << delay;
+        EXPECT_EQ(amended, replays + carried) << "delay " << delay;
+    }
+}
+
+TEST(OwnCorrection, PacerRunsTheFirstAtOnceAndAtTheReachDeadline) {
+    own_replay_pacer pacer;
+    pacer.frame();
+    // nothing ran yet: due at once
+    EXPECT_TRUE(pacer.due(500, 460, 48, true));
+    pacer.ran();
+    pacer.frame();
+    // one frame later: may wait while the next frame still reaches 459
+    EXPECT_FALSE(pacer.due(501, 460, 48, true));   // 502 - 459 = 43
+    EXPECT_FALSE(pacer.due(501, 455, 48, true));   // 502 - 454 = 48
+    EXPECT_TRUE(pacer.due(501, 454, 48, true));    // 502 - 453 = 49: the last frame it can run
+    // a tick not simulated yet is the caller's to drop
+    EXPECT_TRUE(pacer.due(501, 502, 48, true));
+    // the server has our frames again: nothing will join it, run now
+    EXPECT_TRUE(pacer.due(501, 460, 48, false));
+    for (uint32_t k = 1; k < kOwnReplayCoalesceFrames; ++k) pacer.frame();
+    EXPECT_TRUE(pacer.due(506, 500, 48, true));
+    // a new numbering: the previous epoch's replay holds nothing back
+    pacer.ran();
+    pacer.frame();
+    EXPECT_FALSE(pacer.due(507, 505, 48, true));
+    pacer.reset();
+    EXPECT_TRUE(pacer.due(507, 505, 48, true));
+}
+
+// The end of an episode: the last notices arrive, then the server's header
+// says it has our frames again.  The waiting replay runs on that frame, not
+// at the rate limit's or the reach's edge, so the own ball is right as soon
+// as before the coalescing (the A1 criterion "own ball 0.0000 from T_off+48").
+TEST(OwnCorrection, PacerRunsAtOnceWhenTheNoticesStop) {
+    constexpr uint32_t kReach = 48, kDelay = 42;
+    own_replay_pacer pacer;
+    bool pending = false;
+    uint32_t earliest = 0, last_amended = 0, replays = 0, last_replay = 0;
+    for (uint32_t now = 1000; now < 1100; ++now) {
+        const bool coming = now < 1030;   // the header turns at 1030
+        if (now < 1031) {                 // one late notice still arrives after it
+            const uint32_t tick = now - kDelay;
+            if (!pending || static_cast<int32_t>(tick - earliest) < 0) earliest = tick;
+            pending = true;
+            last_amended = now;
+        }
+        pacer.frame();
+        if (pending && pacer.due(now, earliest, kReach, coming)) {
+            ASSERT_LE(now - (earliest - 1), kReach);
+            ++replays;
+            last_replay = now;
+            pacer.ran();
+            pending = false;
+        }
+    }
+    EXPECT_FALSE(pending);
+    EXPECT_EQ(last_replay, last_amended);   // the frame the last amendment arrived on
+    EXPECT_LE(replays, 30u / std::min(kOwnReplayCoalesceFrames, kReach - kDelay) + 3);
+}
+
+// A lifecycle or forced rewind carries a waiting own replay when it started
+// at or before that replay's anchor (the earliest amended tick - 1).
+TEST(OwnCorrection, AnEarlierRewindCarriesTheWaitingReplay) {
+    EXPECT_TRUE(replay_subsumes(459, 460));
+    EXPECT_TRUE(replay_subsumes(440, 460));
+    EXPECT_FALSE(replay_subsumes(460, 460));   // tick 460 itself was not replayed
+    EXPECT_FALSE(replay_subsumes(470, 460));
+    // across the wrap of the tick counter
+    EXPECT_TRUE(replay_subsumes(0xFFFFFFF0u, 5u));
+    EXPECT_FALSE(replay_subsumes(5u, 0xFFFFFFF0u));
 }

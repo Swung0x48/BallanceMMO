@@ -276,6 +276,41 @@ snapshots off.
   held under no numbering the client has, and the harness's per-client server
   count leaves them out (`subst_unnumbered`).
 
+*Adapted in step 4b:* the replay no longer runs on the next frame for every
+own correction. Measured on the lane (lp4_a0/a1), every client stalls on the
+sector activation around tick 2675, its frames reach the server late, and one
+notice per server tick cost one replay of about 42 ticks per frame across the
+activation, which lengthened the stall and the episode until five of seven
+runs rebased into a resync. So:
+
+- the record is amended at once as before, but a pending replay that carries
+  only own corrections runs at most once per `kOwnReplayCoalesceFrames` = 6
+  frames (session/own_correction.hpp `own_replay_pacer`), and always on the
+  last frame its earliest tick's anchor is still inside the reach; it starts
+  at the earliest amended tick, so it carries every one. A remote's
+  correction is never held back and takes a waiting own one along;
+- it waits only while the notices keep coming: once the newest relay header
+  of our epoch says the server had our frame for the tick it simulated
+  (`acked >= tick`), the waiting replay runs on that frame, so the own ball
+  converges as early as before the coalescing and not at the reach's edge
+  (a pure rate limit would have let the last replay of an episode run as
+  late as T_off+47, on the A1 criterion's boundary);
+- a snapshot rollback, lifecycle rewind or forced rewind that already
+  carried a waiting own-only replay drops it (`replay_subsumes`: the rewind
+  started at or before the replay's anchor and fed the amended records; a
+  snapshot rollback that wrote our own ball's row from any anchor, since its
+  rows are the server's world, which ran on the substituted frames). Run
+  after it, the replay would step the same ticks again, and one anchored
+  before a snapshot's tick would also restore our prediction over that
+  snapshot's rows;
+- a `diff` the replay cannot see is amended and not replayed
+  (`replay_sees_difference`: the replay feeds only the leaf keys, NAV_ACTIVE
+  and, while a leaf key is down, the camera); counted in `diff`;
+- counted on the status line's `subst_coalesce=` and the window line's
+  `substco=` as deferred frames / unseen diffs / waiting replays another
+  rewind carried / amendments that needed no own replay of their own; the
+  harness prints the last per phase (`co`).
+
 ### 1.4 Retail mod (`BallanceMMOClient/session`)
 
 The retail mod has no input rewind yet: `rewind_to` is never called.

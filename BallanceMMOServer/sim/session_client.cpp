@@ -54,6 +54,7 @@
 #include <session/lifecycle.hpp>
 #include <session/journal.hpp>
 #include <session/mechanism_tracking.hpp>
+#include <session/own_correction.hpp>
 #include <session/rollback.hpp>
 #include <session/sector_union.hpp>
 #include <game/script_replay.hpp>
@@ -2500,6 +2501,15 @@ namespace {
                 if (rolled) {
                     ++snapshot_rollbacks_;
                     snapshot_rollback_depth_ += current_tick() - snapshot.tick;
+                    // The rows were the server's world at the anchor, our own
+                    // ball's among them when it has one here: that world ran on
+                    // the frames the server substituted, and the replay after it
+                    // fed our amended records.
+                    bool own_row = false;
+                    for (const auto& body: snapshot.bodies)
+                        if (body.kind == bmmo::session::body_kind::Ball && body.owner == own_id_ && !entity_of(body).empty())
+                            own_row = true;
+                    drop_carried_own_replay(snapshot.tick, own_row);
                 }
                 if (rolled && args_.trace && rollback_diag_++ < 16)
                     logf("after rollback: movable=%s", bmmo::physics::describe_movable_objects(physics).c_str());
@@ -2813,19 +2823,27 @@ namespace {
         // ball since.  No ball at the tick: the frame drove nothing.  The
         // frame we played: the server's ball and ours ran on the same input,
         // nothing to replay.  Otherwise the record takes the server's frame
-        // and the next frame replays from tick - 1 (replay_corrected_inputs:
-        // one replay from the earliest tick for every correction of the
-        // frame, own and remote).
+        // and a later frame replays from tick - 1 (replay_corrected_inputs:
+        // one replay from the earliest tick for every correction pending,
+        // own and remote; an own-only one may wait a few frames for the
+        // notices still coming, own_replay_pacer).
         void correct_own_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
             const std::string entity = rollback_.recorded_own_entity(tick);
             if (entity.empty()) { ++subst_bodiless_; return; }
             bmmo::session::input_frame played{};
-            if (rollback_.recorded_input(entity, tick, played) && same_frame(played, frame)) { ++subst_same_; return; }
+            const bool have_played = rollback_.recorded_input(entity, tick, played);
+            if (have_played && same_frame(played, frame)) { ++subst_same_; return; }
             ++subst_diff_;
             if (!rollback_.amend_recorded_input(entity, tick, frame)) return;   // the tick was dropped meanwhile
+            // A difference no replay can see (a camera turned with no leaf
+            // key down, Shift or Space, navigation off in both): the record
+            // holds the server's frame now, which every later replay feeds,
+            // and a replay of its own would step the same world again.
+            if (have_played && !bmmo::session::replay_sees_difference(played, frame)) { ++subst_unseen_; return; }
             // Earliest or not, the replay carries an own correction: counted
             // under subst rew, and a refusal resyncs (replay_corrected_inputs).
             input_rewind_has_own_ = true;
+            ++input_rewind_own_amends_;
             if (!input_rewind_pending_ || static_cast<int32_t>(tick - input_rewind_tick_) < 0) {
                 input_rewind_pending_ = true;
                 input_rewind_tick_ = tick;
@@ -2897,6 +2915,7 @@ namespace {
         // not run into a refusal - a refused own replay asks for a resync.
         void reset_held_epoch() {
             drop_pending_rewind();
+            own_replay_pacer_.reset();
             held_seen_.clear();
             held_ahead_.clear();
             sent_inputs_.clear();
@@ -2910,7 +2929,32 @@ namespace {
             input_rewind_pending_ = false;
             input_rewind_own_ = false;
             input_rewind_has_own_ = false;
+            input_rewind_own_amends_ = 0;
             input_rewind_entities_.clear();
+        }
+
+        // Whether the server is still substituting our ticks: its newest
+        // header of our epoch says it lacked our frame for the tick it
+        // simulated (acked < tick).  Unknown (no header of this epoch yet)
+        // counts as yes - the pacer's reach deadline still bounds the wait.
+        bool own_notices_coming() const {
+            return !held_header_current() || static_cast<int32_t>(held_header_tick_ - held_header_acked_) > 0;
+        }
+
+        // Another rewind that replayed from `anchor` already carried a
+        // waiting own-only replay (bmmo::session::replay_subsumes; any
+        // anchor when `server_rows`: a snapshot rollback that wrote the
+        // server's own-ball row at its anchor): dropped instead of run.  Run
+        // after it, a replay from an earlier anchor would also restore our
+        // prediction over the snapshot's rows.  A pending replay that carries
+        // a remote's correction is left to replay_corrected_inputs as before.
+        void drop_carried_own_replay(uint32_t anchor, bool server_rows) {
+            if (!input_rewind_pending_ || !input_rewind_own_ || !input_rewind_entities_.empty()) return;
+            if (!server_rows && !bmmo::session::replay_subsumes(anchor, input_rewind_tick_)) return;
+            ++subst_subsumed_;
+            subst_saved_ += input_rewind_own_amends_;
+            own_replay_pacer_.ran();
+            drop_pending_rewind();
         }
 
         bool held_header_current() const { return held_header_known_ && held_header_epoch_ == tick_base_; }
@@ -3131,6 +3175,7 @@ namespace {
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
                 ++forced_rollbacks_;
                 forced_rollback_depth_ += now - anchor;
+                drop_carried_own_replay(anchor, false);
                 for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t, "replayed");
                 if (args_.trace_restore && queue_traces_ < 24) {
                     ++queue_traces_;
@@ -3183,7 +3228,27 @@ namespace {
 
         // One replay for every input correction this frame collected.
         void replay_corrected_inputs() {
+            own_replay_pacer_.frame();
             if (!input_rewind_pending_) return;
+            // Our own corrections alone are coalesced (own_replay_pacer): while
+            // the server keeps substituting our ticks, one notice per server
+            // tick would otherwise be one replay per frame across whatever the
+            // last ~42 ticks hold - the sector activation on the lane - and
+            // that cost kept the client late, which kept the notices coming
+            // (lp4_a0/a1: five of seven runs ended in a schedule rebase).  The
+            // records are amended already and the pending replay keeps the
+            // earliest tick, so the one that runs carries them all; it runs
+            // before that tick's anchor would leave the reach.  A remote's
+            // correction is never held back, and takes ours along.
+            // Only while the server still substitutes our ticks: once its
+            // header says it has our frames again no notice will join the
+            // waiting replay, which then runs at once.
+            if (input_rewind_own_ && input_rewind_entities_.empty()
+                    && !own_replay_pacer_.due(current_tick(), input_rewind_tick_, rollback_.thresholds().max_resim_ticks,
+                                              own_notices_coming())) {
+                ++subst_deferred_;
+                return;
+            }
             const uint32_t anchor = input_rewind_tick_;
             const std::string entity = input_rewind_entity_;
             // The earliest correction names the replay: our own frame the
@@ -3194,6 +3259,7 @@ namespace {
             // is (both, when both are).
             const bool own = input_rewind_own_;
             const bool has_own = input_rewind_has_own_ || own;
+            const uint32_t own_amends = input_rewind_own_amends_;
             std::set<std::string> corrected;
             corrected.swap(input_rewind_entities_);
             const bool has_remote = !corrected.empty() || !own;
@@ -3206,10 +3272,12 @@ namespace {
             const live_cells_guard keep_cells(*this);
             const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
                                            : entity + " input corrected at tick " + std::to_string(anchor);
+            if (has_own) own_replay_pacer_.ran();
             if (rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at, reason)) {
                 if (has_own) {
                     ++subst_rewinds_;
                     subst_rewind_depth_ += now - (anchor - 1);
+                    if (own_amends > 1) subst_saved_ += own_amends - 1;   // amendments that rode along
                 }
                 if (has_remote) {
                     ++input_rewinds_;
@@ -3465,6 +3533,7 @@ namespace {
             if (rollback_.rewind_to(rollback_world(), event.tick - 1, now, input_at, reason)) {
                 ++life_rewinds_;
                 life_rewind_depth_ += now - (event.tick - 1);
+                drop_carried_own_replay(event.tick - 1, false);
                 return;
             }
             ++life_rewinds_missed_;
@@ -4408,6 +4477,8 @@ namespace {
             now.subst_recv = subst_recv_; now.subst_diff = subst_diff_; now.subst_same = subst_same_;
             now.subst_bodiless = subst_bodiless_; now.subst_late = subst_late_;
             now.substrew = subst_rewinds_; now.substrew_depth = subst_rewind_depth_;
+            now.subst_deferred = subst_deferred_; now.subst_unseen = subst_unseen_;
+            now.subst_subsumed = subst_subsumed_; now.subst_saved = subst_saved_;
             const window_base& was = window_base_;
             if (!first) {
                 auto d = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
@@ -4424,13 +4495,19 @@ namespace {
                 // The own correction (late-player design 1.3): subst= as on
                 // the status line, this window's share, and substrew= the
                 // replays it named as count/depth (a rollback class of its
-                // own; inrew= counts the replays a remote's frame named).
-                char subst[160];
-                std::snprintf(subst, sizeof(subst), " subst=%llu/%llu/%llu/%llu/%llu/%llu substrew=%llu/%llu",
+                // own; inrew= counts the replays a remote's frame named),
+                // and substco= the coalescing: deferred frames / unseen
+                // diffs / waiting replays another rewind carried /
+                // amendments that needed no own replay (the status line's
+                // subst_coalesce).
+                char subst[240];
+                std::snprintf(subst, sizeof(subst), " subst=%llu/%llu/%llu/%llu/%llu/%llu substrew=%llu/%llu substco=%llu/%llu/%llu/%llu",
                               d(now.subst_recv, was.subst_recv), d(now.subst_diff, was.subst_diff),
                               d(now.subst_same, was.subst_same), d(now.subst_bodiless, was.subst_bodiless),
                               d(now.substrew, was.substrew), d(now.subst_late, was.subst_late),
-                              d(now.substrew, was.substrew), d(now.substrew_depth, was.substrew_depth));
+                              d(now.substrew, was.substrew), d(now.substrew_depth, was.substrew_depth),
+                              d(now.subst_deferred, was.subst_deferred), d(now.subst_unseen, was.subst_unseen),
+                              d(now.subst_subsumed, was.subst_subsumed), d(now.subst_saved, was.subst_saved));
                 text += subst;
                 for (const auto& [player, hist]: window_lag_) {
                     text += " lag[" + std::to_string(player) + "]=";
@@ -4461,7 +4538,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu snapshots=%llu/%llu/%llu "
-                 "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -4490,7 +4567,13 @@ namespace {
                  // a datagram numbered from another base, and records no
                  // rewind could reach (the base tick, a resync's snapshot).
                  // subst_missed: own replays rewind_to refused (a resync
-                 // each; inrew's second number is the remotes' only).  recv
+                 // each; inrew's second number is the remotes' only).
+                 // subst_coalesce=deferred/unseen/subsumed/saved: frames on
+                 // which a waiting own replay was put off (own_replay_pacer),
+                 // diffs no replay could see (amended, never replayed; also
+                 // counted in diff), waiting own replays a snapshot,
+                 // lifecycle or forced rewind carried, and amendments that
+                 // needed no own replay of their own.  recv
                  // can exceed diff + same + bodiless by the notices held
                  // for a tick not simulated yet and dropped by a resync.
                  // acked/held_total: the newest header of our own epoch (0/0
@@ -4503,6 +4586,8 @@ namespace {
                  static_cast<unsigned long long>(subst_dup_), static_cast<unsigned long long>(subst_stale_epoch_),
                  static_cast<unsigned long long>(subst_base_),
                  static_cast<unsigned long long>(subst_rewinds_missed_),
+                 static_cast<unsigned long long>(subst_deferred_), static_cast<unsigned long long>(subst_unseen_),
+                 static_cast<unsigned long long>(subst_subsumed_), static_cast<unsigned long long>(subst_saved_),
                  held_header_current() ? held_header_acked_ : 0u, held_header_current() ? held_header_total_ : 0u,
                  static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
@@ -4786,6 +4871,7 @@ namespace {
         std::string input_rewind_entity_;
         bool input_rewind_own_ = false;       // the earliest correction is our own substituted frame
         bool input_rewind_has_own_ = false;   // an own correction is among this frame's, earliest or not
+        uint32_t input_rewind_own_amends_ = 0;   // own amendments the pending replay carries (subst_saved_)
         std::set<std::string> input_rewind_entities_;   // every remote ball corrected this frame (window: inrew[P])
         // Lifecycle events waiting for the tick they are due at (drain_due_events).
         std::vector<bmmo::session_event_msg> pending_events_;
@@ -4921,6 +5007,7 @@ namespace {
             uint64_t relay_new = 0, relay_late = 0;
             uint64_t subst_recv = 0, subst_diff = 0, subst_same = 0, subst_bodiless = 0, subst_late = 0;
             uint64_t substrew = 0, substrew_depth = 0;
+            uint64_t subst_deferred = 0, subst_unseen = 0, subst_subsumed = 0, subst_saved = 0;
             int rebases = 0;
         } window_base_;
         uint64_t input_rewind_depth_ = 0, life_rewind_depth_ = 0, forced_rollback_depth_ = 0;
@@ -4945,6 +5032,13 @@ namespace {
         uint64_t subst_recv_ = 0, subst_late_ = 0, subst_base_ = 0, subst_dup_ = 0, subst_stale_epoch_ = 0;
         uint64_t subst_diff_ = 0, subst_same_ = 0, subst_bodiless_ = 0, subst_rewinds_ = 0, subst_rewind_depth_ = 0;
         uint64_t subst_rewinds_missed_ = 0;   // own replays rewind_to refused (a resync each)
+        // Frames a waiting own replay was put off (own_replay_pacer_), diffs
+        // no replay can see (amended without a replay; in diff too), waiting
+        // own replays another rewind carried (drop_carried_own_replay), and
+        // the amendments that needed no own replay of their own (rode along
+        // with another's, or carried by such a rewind).
+        uint64_t subst_deferred_ = 0, subst_unseen_ = 0, subst_subsumed_ = 0, subst_saved_ = 0;
+        bmmo::session::own_replay_pacer own_replay_pacer_;
         uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
         // The frames each uplink datagram carried (remember_sent), and the
         // notices of ticks not simulated yet with whether to correct them
