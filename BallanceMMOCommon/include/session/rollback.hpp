@@ -347,7 +347,7 @@ namespace bmmo::session {
         // What a client's frame budget pays for the rollback - a frame is 15 ms.
         uint64_t restore_us = 0, replay_us = 0, rewind_us_max = 0, capture_us = 0, capture_us_max = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
-        uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
+        uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
         double last_error = 0.0, max_error = 0.0;
         std::string last_mismatch;     // entity of the last mismatch
@@ -575,6 +575,25 @@ namespace bmmo::session {
             ++stats_.mismatched;
             stats_.last_mismatch = worst_entity;
             report(0);
+            // Deeper than the engine re-simulates: refused, nothing written.
+            // The branch this replaces wrote every tracked body back to the
+            // rows without a replay and dropped the history, which put the
+            // world 49-96 ticks into the past with nothing to carry it forward
+            // and left the next history's worth of relayed frames with nothing
+            // to replay from (measured: a lifecycle-forced full snapshot
+            // retransmitted past the reach under 10 % loss, then 95 ticks of
+            // frames "too late" per remote and a 20 m excursion).  The relayed
+            // inputs and events correct the prediction on their own now, and a
+            // snapshot this late is also the stale one.  (A resync applies its
+            // full snapshot outside this engine and is unaffected.)
+            if (window > thresholds_.max_resim_ticks) {
+                ++stats_.too_far;
+                if (world.log && too_far_logs_++ < 8)
+                    world.log("snapshot of tick " + std::to_string(snapshot.tick) + " is " + std::to_string(window)
+                              + " ticks deep at tick " + std::to_string(current_tick) + ": past the rollback's reach, refused");
+                report(5);
+                return false;
+            }
             const bool frozen = world.simulating && !world.simulating();
             if (!detail.empty() && world.log && !frozen && detailed_logs_++ < 40)
                 world.log("mismatch at tick " + std::to_string(snapshot.tick) + " (local " + std::to_string(current_tick) + "):"
@@ -1000,6 +1019,9 @@ namespace bmmo::session {
             }
             ++stats_.rollbacks;
             if (lag > thresholds_.max_resim_ticks) {
+                // Unreachable since both callers refuse a window this deep
+                // before restoring (on_snapshot, rewind_to); kept as the guard
+                // it was, with its old behaviour.
                 ++stats_.too_far;
                 if (world.log) world.log("rollback: lag " + std::to_string(lag) + " ticks, bodies set without re-simulation");
                 report(5);
@@ -1565,6 +1587,7 @@ namespace bmmo::session {
         bool replay_scripts_ = true;
         bool exact_restore_ = true;
         uint32_t script_mismatch_logs_ = 0;
+        uint32_t too_far_logs_ = 0;
         uint32_t script_log_cap_ = 8;   // set_script_log_cap: a diagnostic run raises it to name every differing script
         uint32_t savestate_replay_logs_ = 0;
         uint32_t recreate_logs_ = 0;

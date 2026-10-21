@@ -2214,8 +2214,8 @@ rollback's 48-tick reach (`far` 1-7 per client) - and a mirror whose respawn
 or beam was applied that late sat 10-30 m from the server's ball until the
 next forced snapshot. The events now get what the inputs got: the reliable
 copy stays (the backstop for a burst longer than the repeats), and the sender
-repeats the same bytes unreliably on each of the next six ticks, one per tick
-so each copy rides its own packet - the server from `on_session_inputs` to the
+repeats the same bytes unreliably six times, two ticks apart (twelve ticks,
+longer than a burst of a dozen datagrams), each copy in its own packet - the server from `on_session_inputs` to the
 members still present (and for the leaver's Unphysicalize), the clients from
 their per-tick input send (`session/lifecycle.hpp`: `event_repeats`). Every
 receiver takes the first arrival of (stamp, player, type, ball type, sector,
@@ -2276,6 +2276,46 @@ the relay and the events carry the correction, and the repeats could be
 spread over twelve ticks for bursts. The lane at 10 % loss hit the host-load
 rebase on all four clients in both runs of the day (the lane's rewind storm
 is the heavier one); its numbers are not quoted.
+
+### A snapshot past the reach is refused (2026-10-21)
+
+The last destructive branch on the snapshot path went the way of the
+rewind's: a snapshot deeper than the engine re-simulates (48 ticks) used to
+write every tracked body back to its rows without a replay and drop the
+history, which put the world 49-96 ticks into the past with nothing to carry
+it forward and left the next history's worth of relayed frames with nothing
+to replay from. The repeated-events loss runs showed exactly that: the
+lifecycle-forced full snapshots are still reliable, a lost one is
+retransmitted past the reach, and the clients that took one had 195-360
+frames "too late" (95 ticks times three remotes) and a 20 m excursion. Now
+`on_snapshot` refuses such a snapshot - counted as too far, nothing written,
+the history kept; a resync still applies its full snapshot outside the
+engine - because the relayed inputs and the events correct the prediction on
+their own, and a snapshot that late is also the stale one. The event repeats
+also went to two ticks apart (six copies over twelve ticks), since a burst of
+a dozen datagrams had outlasted six consecutive ones.
+
+**Measured** (four headless clients, 150 ms each way, snapshots off, spawn
+spacing 4.2, host quiet; `far` is now the count of refused snapshots):
+
+| arm | own balls 1200-1799 (the pile after the beam / the lane's checkpoint) | own balls 1800-3599 | mirrors 1200-1799 | mirrors after | `far` | frames too late | resyncs |
+|---|---|---|---|---|---|---|---|
+| swing bay, 10 % loss (2 runs) | 0.000 x 4; 8.1 / 5.4 / 0.7 / 3.3 m | 0.000-0.05 m, one client 9.5 m to tick 2400 | 1.6-6.9 m | 0.04-0.06 m | 0-6 | 0 | 0 |
+| swing bay, bursts of 12 | 0.2 / 2.5 / 3.6 / 0.04 m | 0.000-4 m | 4.9-10 m | 0.8-7 m on two clients | 0-2 | 15-51 | 0 |
+| lane, 10 % loss | 0.000-0.0006 m | 0.000-0.2 m, respawn pile 0.000 | 0.05-1.4 m | 0.0-2.8 m, one respawned mirror 9 m | 1-7 | 0 | 0 |
+| swing bay, lossless | 1.1 / 0 / 1.8 / 1.7 m | 0.000-0.5 m | 7-9 m | 0.04 m | 0 | 0 | 0 |
+
+The server journal replayed bit-exact in every run. For the first time the
+lane at 10 % loss ran clean on all four clients: no frame too late, no
+resync, the far-end respawn pile 0.000 m. Against the morning's reliable
+stream at the same 10 % loss (own balls 25-230 m, mirrors 13-3600 m for the
+rest of the run) the input relay with a window, the repeated events and the
+refused snapshot are the three steps that got here. What is left at 10 %
+loss is the pile itself - mirrors a few metres off for the 600 ticks after
+the beam, the floor the prop probe measured under a 20-tick prediction, and
+the own ball knocked by one in two of eight clients - and the bursts, where
+the reliable copy still carries an event late and the reach is exceeded by
+a few ticks for a few dozen frames.
 
 ## Checked on the real networked path, and two things found there
 

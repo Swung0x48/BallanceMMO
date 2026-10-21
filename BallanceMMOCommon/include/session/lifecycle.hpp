@@ -134,8 +134,13 @@ namespace bmmo::session {
         return k;
     }
 
-    // Copies of an event sent after the reliable one, one per tick.
+    // Copies of an event sent after the reliable one, and how many ticks
+    // apart: six copies two ticks apart span twelve ticks (180 ms), longer
+    // than a burst of a dozen datagrams (measured: six copies one tick apart
+    // were all inside such a burst, and the reliable copy carried the event
+    // late again).
     inline constexpr int kLifecycleEventRepeats = 6;
+    inline constexpr int kLifecycleEventRepeatSpacing = 2;
 
     // The order two events of one player with one stamp are applied in: the
     // Unphysicalize before the Physicalize (a beam sends both at one tick), the
@@ -170,24 +175,30 @@ namespace bmmo::session {
     };
 
     // The copies still to send: the serialized message, its recipients (the
-    // uplink has one, named 0) and how many are left.  send_due() sends one
-    // copy of every entry per call, so a caller that calls it once per tick
-    // spaces the copies a tick apart, each in its own packet.
+    // uplink has one, named 0), how many are left and how many calls apart
+    // they go.  send_due() is called once per tick; an entry sends a copy
+    // every `spacing` calls, each in its own packet, the first on the call
+    // after the push.
     class event_repeats {
     public:
         struct entry {
             std::string bytes;
             std::vector<uint32_t> to;
             int remaining = 0;
+            int spacing = 1;
+            int wait = 0;
         };
-        void push(std::string bytes, std::vector<uint32_t> to, int copies = kLifecycleEventRepeats) {
+        void push(std::string bytes, std::vector<uint32_t> to, int copies = kLifecycleEventRepeats,
+                  int spacing = kLifecycleEventRepeatSpacing) {
             if (copies <= 0 || to.empty()) return;
-            entries_.push_back(entry{std::move(bytes), std::move(to), copies});
+            entries_.push_back(entry{std::move(bytes), std::move(to), copies, std::max(spacing, 1), 0});
         }
         template <class Send>
         void send_due(Send send) {
             for (auto it = entries_.begin(); it != entries_.end();) {
+                if (it->wait > 0) { --it->wait; ++it; continue; }
                 for (uint32_t to: it->to) send(to, it->bytes);
+                it->wait = it->spacing - 1;
                 if (--it->remaining <= 0) it = entries_.erase(it);
                 else ++it;
             }

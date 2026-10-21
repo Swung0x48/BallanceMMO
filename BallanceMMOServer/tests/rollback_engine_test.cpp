@@ -851,7 +851,11 @@ TEST(RollbackEngine, FrozenClockSnapsWithoutResimulation) {
     EXPECT_NEAR(world.bodies["Remote"].position[0], 7.0, 1e-9);
 }
 
-TEST(RollbackEngine, LagBeyondLimitSetsBodiesWithoutResimulation) {
+// A snapshot deeper than the engine re-simulates is refused: nothing is
+// written, the history stays, and the next snapshot of a tick the history
+// holds is matched as usual.  (It used to write every body to the rows
+// without a replay and drop the history.)
+TEST(RollbackEngine, LagBeyondLimitRefusesTheSnapshotAndKeepsTheHistory) {
     fake_world world;
     world.bodies["Own"];
     world.bodies["Remote"];
@@ -861,49 +865,28 @@ TEST(RollbackEngine, LagBeyondLimitSetsBodiesWithoutResimulation) {
     rollback_engine engine(thresholds);
     std::map<uint32_t, input_frame> own_inputs;
     run_ticks(world, engine, 8, 100, own_inputs);
+    const size_t history = engine.history_size();
+    ASSERT_GT(history, 1u);
+    const double own_before = world.bodies["Own"].position[2];
 
     fake_body server_own;
     server_own.position[2] = 1.0;
     const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
+    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
     EXPECT_EQ(engine.stats().too_far, 1u);
-    EXPECT_EQ(engine.stats().rollbacks, 1u);
+    EXPECT_EQ(engine.stats().mismatched, 1u);
+    EXPECT_EQ(engine.stats().rollbacks, 0u);
     EXPECT_EQ(world.steps, 0);
-    EXPECT_NEAR(world.bodies["Own"].position[2], 1.0, 1e-9);
-    // no re-simulation recorded the lag, so the whole history went with it and
-    // tick 8 is unmatched now
-    EXPECT_EQ(engine.history_size(), 0u);
+    EXPECT_EQ(world.count("set_body "), 0);
+    EXPECT_NEAR(world.bodies["Own"].position[2], own_before, 1e-9);
+    EXPECT_EQ(engine.history_size(), history);
+    // the history is intact: a snapshot of the current tick is compared, not unmatched
     const auto later = snapshot_of(8, {ball_body(1, world.bodies["Own"])});
     EXPECT_FALSE(engine.on_snapshot(world.adapter(), later, 8, entity_of, no_input));
-    EXPECT_EQ(engine.stats().unmatched, 1u);
+    EXPECT_EQ(engine.stats().unmatched, 0u);
+    EXPECT_EQ(engine.stats().matched, 1u);
 }
 
-// D1: a lag beyond the limit cannot be re-simulated, so the engine must not
-// keep a record for the tick it just snapped to either - the tick counter runs
-// on, and a surviving record would answer snapshots for a world state that no
-// longer corresponds to that tick's inputs.
-TEST(RollbackEngine, LagBeyondLimitLeavesNoHistoryToMatch) {
-    fake_world world;
-    world.bodies["Own"];
-    world.bodies["Remote"];
-    bmmo::session::rollback_thresholds thresholds;
-    thresholds.max_resim_ticks = 3;
-    rollback_engine engine(thresholds);
-    std::map<uint32_t, input_frame> own_inputs;
-    run_ticks(world, engine, 8, 100, own_inputs);
-    ASSERT_GT(engine.history_size(), 1u);
-
-    fake_body server_own;
-    server_own.position[2] = 1.0;
-    const auto snapshot = snapshot_of(2, {ball_body(1, server_own), ball_body(2, world.bodies["Remote"])});
-    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
-    EXPECT_EQ(engine.stats().too_far, 1u);
-    EXPECT_EQ(engine.history_size(), 0u);
-    // the applied tick itself is gone too: the caller has to re-anchor
-    EXPECT_FALSE(engine.on_snapshot(world.adapter(), snapshot, 8, entity_of, no_input));
-    EXPECT_EQ(engine.stats().unmatched, 1u);
-    EXPECT_EQ(engine.stats().matched, 0u);
-}
 
 // D2: the live frame records a tick before the corrections of that tick are
 // applied.  amend_record re-captures it, so a later rollback restores the

@@ -446,10 +446,10 @@ TEST(LifecycleEventRedundancy, TheFirstArrivalCountsAndTheCopiesDoNot) {
 
 TEST(LifecycleEventRedundancy, RepeatsGoOutOncePerCallToEveryRecipientAndStop) {
     bmmo::session::event_repeats repeats;
-    repeats.push("A", {1, 2, 3}, 2);
-    repeats.push("B", {2}, 1);
-    repeats.push("C", {}, 5);     // nobody to send to: dropped
-    repeats.push("D", {1}, 0);    // no copies: dropped
+    repeats.push("A", {1, 2, 3}, 2, 1);
+    repeats.push("B", {2}, 1, 1);
+    repeats.push("C", {}, 5, 1);     // nobody to send to: dropped
+    repeats.push("D", {1}, 0, 1);    // no copies: dropped
     EXPECT_EQ(repeats.pending(), 2u);
     std::vector<std::pair<uint32_t, std::string>> sent;
     const auto record = [&sent](uint32_t to, const std::string& bytes) { sent.emplace_back(to, bytes); };
@@ -468,9 +468,21 @@ TEST(LifecycleEventRedundancy, RepeatsGoOutOncePerCallToEveryRecipientAndStop) {
     sent.clear();
     repeats.send_due(record);
     EXPECT_TRUE(sent.empty());
-    repeats.push("E", {1}, 3);
+    repeats.push("E", {1}, 3, 1);
     repeats.forget(1);
     EXPECT_EQ(repeats.pending(), 0u);
+    // Two ticks apart (the default): a copy on the first call, none on the
+    // next, one again - six copies over twelve calls.
+    bmmo::session::event_repeats spaced;
+    spaced.push("F", {1});
+    std::vector<int> calls_with_a_copy;
+    for (int call = 0; call < 14; ++call) {
+        bool any = false;
+        spaced.send_due([&any](uint32_t, const std::string&) { any = true; });
+        if (any) calls_with_a_copy.push_back(call);
+    }
+    EXPECT_EQ(calls_with_a_copy, (std::vector<int>{0, 2, 4, 6, 8, 10}));
+    EXPECT_EQ(spaced.pending(), 0u);
 }
 
 TEST(LifecycleEventRedundancy, OneStampOrdersTheDeathBeforeTheBirth) {
