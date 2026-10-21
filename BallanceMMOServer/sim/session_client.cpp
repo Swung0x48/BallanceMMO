@@ -49,6 +49,7 @@
 #include <physics/tick_record.hpp>
 #include <role/role.hpp>
 #include <session/correction.hpp>
+#include <session/input_relay.hpp>
 #include <session/journal.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
@@ -58,6 +59,7 @@
 #include <session/spawn_impulse.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -652,6 +654,17 @@ namespace {
                 bmmo::session_assign_msg msg;
                 if (!fill(msg)) return;
                 if (msg.session != session_ || phase_ != phase::running) return;
+                // The server sends an assignment several times, unreliably,
+                // beside the reliable one (a lost reliable copy used to arrive
+                // ~400 ms late and start this client that far behind for good):
+                // a copy of the one already applied changes nothing.
+                // ...and a copy of an older one (a resync's base is always
+                // newer than the start's) must not be taken for a re-assignment.
+                if (assigned_ && static_cast<int32_t>(msg.first_tick - last_assign_first_tick_) <= 0) {
+                    ++duplicate_assigns_;
+                    return;
+                }
+                last_assign_first_tick_ = msg.first_tick;
                 if (assigned_) {
                     // Resync (design 9.2): numbering restarts from the server's
                     // current tick; the next full snapshot rebuilds every body.
@@ -736,30 +749,56 @@ namespace {
                 ++remote_inputs_received_;
                 if (msg.session != session_) return;
                 for (const auto& entry: msg.entries) {
-                    // What the server applied for that player at that tick,
-                    // whether or not this client mirrors the ball.
-                    if (journalling()) {
-                        journal_announce_player(entry.player, msg.tick);
-                        journal_.input(msg.tick, entry.player, entry.frame, bmmo::session::JOURNAL_INPUT_RELAYED);
-                    }
                     auto it = remotes_.find(entry.player);
-                    if (it == remotes_.end()) continue;
-                    auto& remote = it->second;
-                    // A reordered frame is still authoritative for its
-                    // historical tick: keep it for the rollback without
-                    // letting it replace the live predictor with an older
-                    // input.  The retail mod has always done it in this order
-                    // (physics_session_client.cpp); doing the guard first, as
-                    // this client used to, dropped a late frame on the floor
-                    // and left the rollback replaying a prediction the server
-                    // had already corrected.
-                    remote.inputs[msg.tick] = entry.frame;
-                    while (remote.inputs.size() > 128) remote.inputs.erase(remote.inputs.begin());
-                    note_input_correction(remote.entity, msg.tick, entry.frame);
-                    if (remote.have_input && msg.tick < remote.input_tick) continue;   // out of order
-                    remote.input = entry.frame;
-                    remote.input_tick = msg.tick;
-                    remote.have_input = true;
+                    // The journal's PLAYER record goes in at the oldest tick this
+                    // entry covers, so no INPUT record of the player can precede
+                    // it in tick order (a replay needs the player before its
+                    // inputs); after the first time it is a no-op.
+                    if (journalling()) journal_announce_player(entry.player, msg.frame_tick(entry, 0));
+                    for (size_t i = 0; i < entry.frames.size(); ++i) {
+                        const uint32_t tick = msg.frame_tick(entry, i);
+                        const auto& frame = entry.frames[i];
+                        // The window re-delivers a frame up to relay_window
+                        // times: the first arrival is the truth, the rest change
+                        // nothing (no record, no correction, no predictor move).
+                        if (!relay_seen_.first(entry.player, tick)) { ++relay_dup_; continue; }
+                        ++relay_new_;
+                        // How late the first arrival is, in ticks already
+                        // simulated: what the rollback has to reach to apply it.
+                        if (assigned_ && static_cast<int32_t>(current_tick() - tick) > 0) {
+                            const uint32_t lag = current_tick() - tick;
+                            relay_lag_max_ = std::max(relay_lag_max_, lag);
+                            ++relay_lag_hist_[std::min<uint32_t>(lag, kRelayLagBuckets - 1)];
+                        }
+                        // What the server applied for that player at that tick,
+                        // whether or not this client mirrors the ball.
+                        if (journalling())
+                            journal_.input(tick, entry.player, frame, bmmo::session::JOURNAL_INPUT_RELAYED);
+                        if (it == remotes_.end()) {
+                            // No mirror yet: the datagram beat the Physicalize
+                            // here (the ordered stream used to mask this).  Parked
+                            // by tick, moved into the ring when the mirror is made.
+                            pending_relay_.store(entry.player, tick, frame);
+                            ++relay_parked_;
+                            continue;
+                        }
+                        auto& remote = it->second;
+                        // A reordered frame is still authoritative for its
+                        // historical tick: keep it for the rollback without
+                        // letting it replace the live predictor with an older
+                        // input.  The retail mod has always done it in this order
+                        // (physics_session_client.cpp); doing the guard first, as
+                        // this client used to, dropped a late frame on the floor
+                        // and left the rollback replaying a prediction the server
+                        // had already corrected.
+                        if (bmmo::session::relay_store(remote.inputs, tick, frame, bmmo::session::kRelayRing)
+                                == bmmo::session::relay_store_result::stored)
+                            note_input_correction(remote.entity, tick, frame);
+                        if (remote.have_input && static_cast<int32_t>(tick - remote.input_tick) < 0) continue;   // out of order
+                        remote.input = frame;
+                        remote.input_tick = tick;
+                        remote.have_input = true;
+                    }
                 }
                 break;
             }
@@ -938,6 +977,8 @@ namespace {
             amend_failures_ = 0;
             beam_done_ = false;
             remotes_.clear();
+            relay_seen_.clear();
+            pending_relay_.clear();
             own_group_set_ = false;
             own_physicalized_ = false;
             own_body_entity_.clear();
@@ -959,6 +1000,8 @@ namespace {
                     if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 }
                 remotes_.clear();
+                relay_seen_.clear();
+                pending_relay_.clear();
                 if (!boot_engine()) { ended_ = true; return; }
             }
             engine_->clear_keys();
@@ -1497,6 +1540,21 @@ namespace {
                          [this] { std::string s; for (int x: sectors_.active()) s += std::to_string(x) + " "; return s; }().c_str());
                 }
             }
+            // A rewind above replayed up to the previous tick and left every
+            // mirror's navigation input at the frame it last fed there; this
+            // tick's step is driven by the frame recorded as applied for it
+            // (remote.applied, chosen at the end of the previous frame), or
+            // the record and the step disagree and the relayed frame for this
+            // tick compares equal to a prediction the step never ran on.
+            for (auto& [id, remote]: remotes_) {
+                if (!remote.physicalized || !remote.navigation) continue;
+                const bool active = (remote.applied.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+                std::string drive_error;
+                if (!bmmo::physics::navigation_input(engine_->physics(), remote.entity.c_str(), remote.applied.keys,
+                                                     remote.applied.cam_right, remote.applied.cam_up, remote.applied.cam_dir,
+                                                     active, drive_error))
+                    logf("remote navigation input %s: %s", remote.entity.c_str(), drive_error.c_str());
+            }
             // The own ball's Physicalize is captured inside this tick's
             // Simulate(), before the PSIs (capture_own_physicalize).  Armed
             // here, after the rewinds above: a replayed step runs the
@@ -1796,16 +1854,23 @@ namespace {
                 for (auto& [id, remote]: remotes_)
                     if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
             }
-            // Next tick's input of every predicted remote ball: the last relayed frame.
+            // Next tick's input of every predicted remote ball: the frame the
+            // server applied at that tick when the relay has it already (a
+            // client running behind the relay), else the last relayed frame.
             for (auto& [id, remote]: remotes_) {
                 if (!remote.physicalized || !remote.navigation) continue;
-                const uint8_t keys = remote.have_input ? remote.input.keys : 0;
-                const bool active = remote.have_input && (remote.input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
-                remote.applied = remote.input;
+                // The predictor (remote.input) stays the newest relayed frame;
+                // the step is driven from the exact one when the ring has it.
+                const auto exact = remote.inputs.find(tick + 1);
+                const bool have = exact != remote.inputs.end() || remote.have_input;
+                const bmmo::session::input_frame& drive = exact != remote.inputs.end() ? exact->second : remote.input;
+                const uint8_t keys = have ? drive.keys : 0;
+                const bool active = have && (drive.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+                remote.applied = drive;
                 remote.applied.keys = keys;
                 if (!active) remote.applied.flags &= static_cast<uint8_t>(~bmmo::session::INPUT_FLAG_NAV_ACTIVE);
-                if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), keys, remote.input.cam_right,
-                                                     remote.input.cam_up, remote.input.cam_dir, active, error))
+                if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), keys, drive.cam_right,
+                                                     drive.cam_up, drive.cam_dir, active, error))
                     logf("remote navigation input %s: %s", remote.entity.c_str(), error.c_str());
             }
             // --beam (design 9.25 harness): at its tick, once.
@@ -2210,6 +2275,19 @@ namespace {
             return true;
         }
 
+        // The 99th percentile of the relayed frames' arrival lag, in ticks.
+        uint32_t relay_lag_p99() const {
+            uint64_t total = 0;
+            for (uint32_t n: relay_lag_hist_) total += n;
+            if (!total) return 0;
+            uint64_t seen = 0;
+            for (uint32_t b = 0; b < kRelayLagBuckets; ++b) {
+                seen += relay_lag_hist_[b];
+                if (seen * 100 >= total * 99) return b;
+            }
+            return kRelayLagBuckets - 1;
+        }
+
         // A relayed frame for a tick this client has already simulated: if it
         // differs from the frame the prediction used, that tick and every tick
         // after it ran on the wrong input.  Remember the earliest such tick and
@@ -2219,7 +2297,16 @@ namespace {
                                    const bmmo::session::input_frame& relayed) {
             if (!args_.rollback || entity.empty() || tick == 0) return;
             if (static_cast<int32_t>(tick - current_tick()) > 0) return;   // not simulated yet
-            if (!rollback_.knows_tick(tick)) return;   // outside the history: nothing to replay from
+            // Deeper than the engine re-simulates (48 ticks), or past the
+            // history: nothing to replay from.  Measured at the anchor the
+            // rewind will use, the tick before the corrected one
+            // (replay_corrected_inputs rewinds to tick - 1).  Counted - the
+            // relay's pass criterion is that this never happens.
+            const uint32_t anchor = tick - 1;
+            if (current_tick() - anchor > rollback_.thresholds().max_resim_ticks || !rollback_.knows_tick(anchor)) {
+                ++relay_late_;
+                return;
+            }
             // No record of an input for this body at this tick is NEWS, not a
             // reason to do nothing: we stepped that tick without driving the
             // body at all.  It is the normal state of a mirror that was just
@@ -2551,10 +2638,10 @@ namespace {
                  tick, queued, bodies, worst_name.empty() ? "-" : worst_name.c_str(), worst);
         }
 
-        // The input a navigated ball had at `tick`, for a re-simulation.  Only
-        // an exact hit counts, like the mod: the engine feeds a relayed frame
-        // instead of the recorded prediction when this succeeds, and a frame
-        // from an earlier tick would replay a key edge the tick did not have.
+        // The input a navigated ball had at `tick`, for a re-simulation.  The
+        // own ball: only an exact hit.  A remote: the relayed frame, or for a
+        // hole between relayed frames the nearest earlier one (at most a
+        // window old, where the recorded prediction is a round trip old).
         bool recorded_input_at(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) const {
             const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
             if (entity == own_nav_entity_) inputs = &own_inputs_;
@@ -2562,9 +2649,19 @@ namespace {
                 for (const auto& [id, remote]: remotes_)
                     if (remote.entity == entity) inputs = &remote.inputs;
             if (!inputs) return false;
-            auto it = inputs->find(tick);
-            if (it == inputs->end()) return false;
-            out = it->second;
+            if (inputs == &own_inputs_) {
+                auto it = inputs->find(tick);
+                if (it == inputs->end()) return false;
+                out = it->second;
+                return true;
+            }
+            // A remote: the relayed frame, or for a hole the window did not
+            // cover the nearest earlier one (session/input_relay.hpp); none for
+            // the tail the relay has not reached, where the recorded prediction
+            // stands.
+            const auto* frame = bmmo::session::relay_frame_or_earlier(*inputs, tick);
+            if (!frame) return false;
+            out = *frame;
             return true;
         }
 
@@ -2759,6 +2856,22 @@ namespace {
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
                 remote.corrector.clear();
+                // Frames relayed before this mirror existed move into its ring:
+                // the newest becomes the live predictor, and a rewind that later
+                // reads the ring finds them.  (The replay of the birth itself
+                // drives only the mirrors the live record tracked, so a frame
+                // older than this mirror's first live record is never fed to a
+                // replay.)  Frames of an earlier lifetime stay: a rewind across
+                // the death still drives that body at those ticks.
+                {
+                    bmmo::session::input_frame newest{};
+                    const uint32_t newest_tick = pending_relay_.take(event.player, remote.inputs, bmmo::session::kRelayRing, &newest);
+                    if (newest_tick && (!remote.have_input || static_cast<int32_t>(newest_tick - remote.input_tick) >= 0)) {
+                        remote.input = newest;
+                        remote.input_tick = newest_tick;
+                        remote.have_input = true;
+                    }
+                }
                 if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && spawn_impulse_ > 0.0f) {
                     const uint32_t idx = bmmo::session::spawn_direction_index(seed_, static_cast<uint8_t>(join_order), event.tick);
                     std::string impulse_error;
@@ -3367,6 +3480,8 @@ namespace {
                 if (remote.physicalized) bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
             }
             remotes_.clear();
+            relay_seen_.clear();
+            pending_relay_.clear();
             report();
             phase_ = phase::idle;
             session_ = 0;
@@ -3385,7 +3500,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
-                 "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -3398,6 +3513,9 @@ namespace {
                  static_cast<unsigned long long>(input_rewinds_), static_cast<unsigned long long>(input_rewinds_missed_),
                  static_cast<unsigned long long>(forced_rollbacks_), static_cast<unsigned long long>(forced_rollbacks_missed_),
                  own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
+                 static_cast<unsigned long long>(relay_new_), static_cast<unsigned long long>(relay_dup_),
+                 static_cast<unsigned long long>(relay_parked_), static_cast<unsigned long long>(relay_late_),
+                 relay_lag_max_, relay_lag_p99(),
                  static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
                  mechanism_tracking_.known(), mechanism_tracking_.resolved(),
@@ -3709,6 +3827,8 @@ namespace {
         int load_waited_ = 0;
         uint64_t anchor_hash_ = 0;
         bool assigned_ = false;
+        uint32_t last_assign_first_tick_ = 0;  // the assignment applied last: its redundant copies are ignored
+        uint64_t duplicate_assigns_ = 0;
         // Design 9.25 phase alignment: between the anchor and the assignment
         // the world does not step.  The server's world takes its own first step
         // under the start base it hands out, so a client that ran k frames in
@@ -3757,6 +3877,20 @@ namespace {
         uint64_t snapshots_received_ = 0, snapshots_applied_ = 0, snapshots_stale_ = 0;
         uint64_t remote_writes_ = 0, mechanism_blends_ = 0, mechanism_hard_ = 0;
         uint64_t remote_inputs_received_ = 0;
+        // The relayed frames, reassembled (session/input_relay.hpp): first
+        // arrivals, re-deliveries of the window, and frames parked for a
+        // player whose mirror did not exist yet.
+        uint64_t relay_new_ = 0, relay_dup_ = 0, relay_parked_ = 0;
+        // ...first arrivals too late for the rollback (deeper than it
+        // re-simulates, or past the history), and the arrival lag of the first
+        // arrivals in ticks (max, and a histogram for the 99th percentile): the
+        // numbers that say whether the relay reaches the rollback in time.
+        uint64_t relay_late_ = 0;
+        uint32_t relay_lag_max_ = 0;
+        static constexpr uint32_t kRelayLagBuckets = 129;
+        std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
+        bmmo::session::relay_seen relay_seen_;
+        bmmo::session::pending_relay pending_relay_;
         bool resync_pending_ = false;
         bool paused_once_ = false;
         int consecutive_hard_ = 0;

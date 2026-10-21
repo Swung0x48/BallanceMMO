@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <fstream>
 
 #define PICOJSON_USE_INT64
@@ -73,6 +74,11 @@ bool config_manager::load() {
         physics_event_rate_limit = yaml_load_value(physics, "event_rate_limit", physics_event_rate_limit);
         physics_spawn_impulse = yaml_load_value(physics, "spawn_impulse", physics_spawn_impulse);
         physics_spawn_spacing = yaml_load_value(physics, "spawn_spacing", physics_spawn_spacing);
+        physics_relay_window = yaml_load_value(physics, "relay_window", physics_relay_window);
+        // input_delay + a trip + window - 1 has to stay under the rollback's
+        // reach (rollback_thresholds::max_resim_ticks, 48): a frame the window
+        // delivers deeper than that cannot be replayed.
+        physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
         physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
         physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",
@@ -220,6 +226,8 @@ void config_manager::save(bool reload_values) {
                    "#   spawn_spacing (map units between the members' birth cells around the resetpoint, by join\n"
                    "#     order, default 4.2: a ball is 4 units across, so same-tick spawns are not born inside\n"
                    "#     each other; 0 = every ball at the resetpoint, the design 9.10 layout),\n"
+                   "#   relay_window (ticks of applied input each unreliable relayed datagram repeats per\n"
+                   "#     member, default 8: a loss costs a gap only when that many in a row are lost),\n"
                    "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
                    "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
                    "#     relative to the server's own directory, empty = record nothing),\n"

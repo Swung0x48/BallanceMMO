@@ -30,6 +30,7 @@
 #include "sim/late_tick.hpp"
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
+#include <session/input_relay.hpp>
 #include <cmath>
 #endif
 
@@ -70,6 +71,7 @@ public:
         {
             std::lock_guard lk(state_mutex_);
             check_start_barriers();
+            send_assign_repeats();
         }
 #endif
         return had_messages;
@@ -546,6 +548,9 @@ public:
     // All of these run with state_mutex_ held; the runner callbacks take it
     // themselves because they arrive on the simulation thread.
 
+    static constexpr int kAssignRepeats = 3;   // unreliable copies of a SessionAssign after the reliable one
+    static constexpr std::chrono::milliseconds kAssignRepeatSpacing{40};   // ...this far apart, each in its own packet
+
     struct physics_session_state {
         uint32_t id = 0, room = 0;
         bmmo::map map{};
@@ -568,6 +573,20 @@ public:
         // fixed at on_world_ready so a late joiner gets the same value.
         float spawn_impulse = 0;
         float spawn_spacing = 0;   // birth cell spacing (SessionStart), fixed with the impulse
+        // The last relay_window ticks' applied frames: what every member's
+        // relayed datagram repeats (session/input_relay.hpp, protocol 5).
+        bmmo::session::relay_ring relay;
+        bool relay_trim_logged = false;
+        // Assignments still to be repeated unreliably, one copy every
+        // kAssignRepeatSpacing from the main loop (send_session_assign,
+        // send_assign_repeats).
+        struct assign_repeat {
+            HSteamNetConnection to;
+            uint32_t first_tick;
+            int remaining;
+            std::chrono::steady_clock::time_point next_due;
+        };
+        std::vector<assign_repeat> assign_repeats;
         // Ticks the server waits for this session's inputs, sized at the start
         // from the worst round trip among the members (session_input_delay).
         // Fixed for the session's life: the scheduler's deadlines are measured
@@ -880,47 +899,67 @@ public:
 
     // Simulation thread: fan a snapshot out to the room.
     // Relay of the inputs the world applied at `tick` (design 9.1): every
-    // member gets the other members' frames, one message per tick.
+    // member gets the other members' frames.
     //
-    // Reliable, not unreliable.  This stream is what every client replays to
-    // reproduce the shared world - it is the same stream --replay-session
-    // rebuilds a room from, bit for bit - so a frame that never arrives is a
-    // divergence that nothing but a snapshot can repair.  The message carries
-    // one tick and no redundancy, so unreliably it survived zero packet loss;
-    // it only looked harmless because a snapshot lands every other tick and
-    // overwrites the consequence.
-    //
-    // A redundancy window would have been the other way to close it, and it is
-    // the wrong one here: at 39 bytes a frame this relay already costs
-    // 83 KB/s per client in a 30-player room (N clients x N-1 frames x 66/s,
-    // so O(N^2) in the room), and a window multiplies exactly that.  Reliable
-    // delivery costs nothing in the steady state and spends only latency on
-    // loss - which is what the client's prediction is for, and what its
-    // rollback window absorbs up to rollback_thresholds::history_ticks.
-    //
-    // Being reliable also puts the relay in the same ordered stream as the
-    // lifecycle events, which is what lockstep wants: a client cannot now see
-    // an event before the inputs of the ticks that preceded it.
+    // Unreliable, with a redundancy window (protocol 5; session/input_relay.hpp).
+    // This stream is what every client replays to reproduce the shared world,
+    // so a frame that never arrives is a divergence only a snapshot repairs -
+    // and reliable delivery (2026-10-19 .. 10-21) turned out to be the wrong
+    // way to make it complete: a lost datagram held every frame behind it
+    // until the retransmit, and under 10 % loss the corrections reached the
+    // clients past the rollback's 48-tick reach, where they could only be
+    // written as poses.  Now every datagram repeats the last relay_window
+    // ticks per member, so a frame is lost only when that many datagrams in a
+    // row are, and nothing waits behind a loss; the camera is omitted where
+    // it did not move, which is most ticks, so the window costs 4 bytes a
+    // frame.  The lifecycle events keep their own reliable ordered stream and
+    // can now overtake the relayed inputs of earlier ticks; the clients land
+    // every frame by its tick and park a frame for a mirror not yet made.
     void on_session_inputs(uint32_t session, uint32_t tick,
                            const std::vector<std::pair<uint32_t, bmmo::session::input_frame>>& applied) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(session);
-        if (it == physics_sessions_.end() || applied.size() < 2) return;
+        if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        if (s.relay.window() != config_.physics_relay_window) s.relay.set_window(config_.physics_relay_window);
+        s.relay.push(tick, applied);
+        if (applied.size() < 2) return;
+        // Unreliable, no delay, with the window: a lost datagram costs nothing
+        // unless `relay_window` in a row are lost, and no frame ever waits
+        // behind a loss.  (Reliable and ordered, 2026-10-19 .. 10-21, a loss
+        // held every frame behind it until the retransmit landed, and under
+        // 10 % loss the corrections reached the clients past the rollback's
+        // reach and were applied as pose writes.)
+        // Members only: a step already running when a member left still has
+        // its frame in `applied`, and a datagram about it after PlayerLeft
+        // would re-announce it in every client's journal.  Whole entries per
+        // datagram of one packet's worth: an unreliable message split over
+        // packets is lost whole when any of them is, and one past 16.5 KB
+        // GameNetworkingSockets quietly sends reliable.
+        const auto is_member = [&s](uint32_t player) {
+            return std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(player)) != s.members.end();
+        };
         for (const auto m: s.members) {
-            bmmo::session_remote_input_msg msg;
-            msg.session = session;
-            msg.tick = tick;
-            for (const auto& [player, frame]: applied) {
-                if (player == m) continue;
-                bmmo::session_remote_input_msg::entry e;
-                e.player = player;
-                e.frame = frame;
-                msg.entries.push_back(e);
+            size_t trimmed = 0;
+            for (auto& datagram: s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, &trimmed)) {
+                bmmo::session_remote_input_msg msg;
+                msg.session = session;
+                msg.tick = tick;
+                for (auto& w: datagram) {
+                    bmmo::session_remote_input_msg::entry e;
+                    e.player = w.player;
+                    e.frames = std::move(w.frames);
+                    msg.entries.push_back(std::move(e));
+                }
+                if (msg.entries.empty()) continue;
+                msg.serialize();
+                send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
             }
-            if (msg.entries.empty()) continue;
-            msg.serialize();
-            send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            if (trimmed && !s.relay_trim_logged) {
+                s.relay_trim_logged = true;
+                Printf("Physics session %u: a member's relayed input window did not fit one datagram (%u bytes); "
+                       "its oldest frames were dropped.", s.id, static_cast<unsigned>(bmmo::session::kRelayDatagramBudget));
+            }
         }
     }
 
@@ -1003,6 +1042,9 @@ public:
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
+        s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
+                                              [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
+                               s.assign_repeats.end());
         s.ready.erase(c);
         s.assigned.erase(c);
         s.late.erase(c);
@@ -1039,12 +1081,28 @@ public:
         return runner_->current_tick(s.id) + bmmo::sim::late_tick_lead_ticks(s.input_delay, rtt_ms);
     }
 
+    // A SessionAssign is what starts a member's frames: one that arrives late
+    // starts them that late for good (every frame stale at the server, every
+    // relayed frame in the member's future).  Measured at 10 % loss: the
+    // reliable copy's retransmit came ~400 ms after the others' assignments
+    // and left two members of four 26 ticks behind for the whole session.  So
+    // the reliable copy is backed by unreliable ones 40 ms apart from the
+    // main loop (send_assign_repeats): copies sent in the same instant share
+    // the reliable one's packet and its loss, and the session's first tick -
+    // start_base periods after the barrier - comes too late to carry them.
+    // The clients apply the first to arrive and ignore the rest.
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick) {
         bmmo::session_assign_msg assign;
         assign.session = s.id;
         assign.first_tick = first_tick;
         assign.serialize();
         send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_Reliable);
+        // A newer assignment retires the copies of the previous one still due.
+        s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
+                                              [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
+                               s.assign_repeats.end());
+        s.assign_repeats.push_back(physics_session_state::assign_repeat{
+            c, first_tick, kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing});
         s.assigned.insert(c);
     }
 
@@ -1071,6 +1129,25 @@ public:
     // session_runner::player_ready only starts ticking when all of them are
     // ready.  Once the deadline has passed the silent members are dropped and
     // the rest start without them; a session that loses everybody ends.
+    // The unreliable copies of recent assignments (send_session_assign), each
+    // from its own main-loop iteration so each rides its own packet.
+    void send_assign_repeats() {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& [id, s]: physics_sessions_) {
+            for (auto r = s.assign_repeats.begin(); r != s.assign_repeats.end();) {
+                if (now < r->next_due) { ++r; continue; }
+                bmmo::session_assign_msg assign;
+                assign.session = s.id;
+                assign.first_tick = r->first_tick;
+                assign.serialize();
+                send(r->to, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                r->next_due = now + kAssignRepeatSpacing;
+                if (--r->remaining <= 0) r = s.assign_repeats.erase(r);
+                else ++r;
+            }
+        }
+    }
+
     void check_start_barriers() {
         if (!runner_) return;
         const auto now = std::chrono::steady_clock::now();

@@ -64,7 +64,7 @@ class DelayProxy:
     link.  Loss applies per datagram in both directions; `dropped` counts them.
     """
 
-    def __init__(self, listen_port, server_addr, latency_ms, loss_pct=0.0):
+    def __init__(self, listen_port, server_addr, latency_ms, loss_pct=0.0, jitter_ms=0.0, loss_burst=1):
         self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.front.bind(('127.0.0.1', listen_port))
         self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -74,9 +74,22 @@ class DelayProxy:
         self.delay = latency_ms / 1000.0
         # Seeded, so two runs of one case drop the same datagrams.
         self.loss = loss_pct / 100.0
+        # Jitter: each datagram waits an extra uniform(0, jitter) on top of the
+        # delay, so datagrams overtake each other (the relay's reassembly has
+        # to land them by tick).  Burst: a drop takes the next loss_burst - 1
+        # datagrams with it, so an outage longer than the relay's window
+        # happens and the hole path runs.
+        self.jitter = jitter_ms / 1000.0
+        self.burst = max(1, int(loss_burst))
+        # Per direction.  A burst of b started with probability p per datagram
+        # drops p*b of every 1 + p*(b-1); p is solved so that is the loss rate.
+        self.burst_left = {}
+        self.burst_start = self.loss / (self.burst - self.loss * (self.burst - 1)) if self.loss > 0.0 else 0.0
         self.rng = random.Random(0x10CC + listen_port)
         self.dropped = 0
         self.passed = 0
+        self.bytes_up = 0      # client -> server, after the loss
+        self.bytes_down = 0    # server -> client, after the loss
         self.running = True
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
@@ -97,12 +110,22 @@ class DelayProxy:
                     out, dest = self.front, self.client
                 else:
                     continue
-                if self.loss > 0.0 and self.rng.random() < self.loss:
+                if self.burst_left.get(sock, 0) > 0:
+                    self.burst_left[sock] -= 1
+                    self.dropped += 1
+                    continue
+                if self.loss > 0.0 and self.rng.random() < self.burst_start:
+                    self.burst_left[sock] = self.burst - 1
                     self.dropped += 1
                     continue
                 self.passed += 1
+                if sock is self.front:
+                    self.bytes_up += len(data)
+                else:
+                    self.bytes_down += len(data)
                 seq += 1
-                heapq.heappush(queue, (time.monotonic() + self.delay, seq, out, dest, data))
+                extra = self.rng.random() * self.jitter if self.jitter > 0.0 else 0.0
+                heapq.heappush(queue, (time.monotonic() + self.delay + extra, seq, out, dest, data))
             while queue and queue[0][0] <= time.monotonic():
                 _, _, out, dest, data = heapq.heappop(queue)
                 out.sendto(data, dest)
@@ -180,6 +203,20 @@ def status_metrics(line):
     m = re.search(r'snapshots=(\d+)/(\d+)/(\d+)', line)
     if m:
         out['snapshots'] = int(m.group(1))
+    # relay=new/dup/parked/late lag=max/p99: the relayed frames reassembled,
+    # and how late their first arrivals were (the rollback reaches 48 ticks).
+    m = re.search(r'\brelay=(\d+)/(\d+)/(\d+)/(\d+)', line)
+    if m:
+        out['relay_new'], out['relay_dup'], out['relay_parked'], out['relay_late'] = (int(g) for g in m.groups())
+    m = re.search(r'\blag=(\d+)/(\d+)', line)
+    if m:
+        out['relay_lag_max'], out['relay_lag_p99'] = int(m.group(1)), int(m.group(2))
+    # input: reports=N starved=S (..%) worst=W lead=L - the server's reports
+    # that found no fresh frame from this client, the longest such run in
+    # ticks, and how far this client's own tick runs ahead of the snapshots.
+    m = re.search(r'\bworst=(\d+) lead=([0-9.]+)', line)
+    if m:
+        out['worst_starved'], out['lead'] = int(m.group(1)), float(m.group(2))
     # mechanisms=<known>/<resolved>: the second number is the one that means
     # the client really has local mechanism bodies (level-reset postmortem).
     m = re.search(r'mechanisms=(\d+)/(\d+)', line)
@@ -287,9 +324,9 @@ def run_case(args, sector, case_dir):
             cf = open(case_dir / f'client{i}.log', 'wb')
             handles.append(cf)
             connect_host, connect_port = server_addr
-            if (args.latency_ms > 0 or args.loss_pct > 0) and (not laggy or i in laggy):
+            if (args.latency_ms > 0 or args.loss_pct > 0 or args.jitter_ms > 0) and (not laggy or i in laggy):
                 pport = args.port + 400 + i
-                proxies.append(DelayProxy(pport, server_addr, args.latency_ms, args.loss_pct))
+                proxies.append(DelayProxy(pport, server_addr, args.latency_ms, args.loss_pct, args.jitter_ms, args.loss_burst))
                 connect_host, connect_port = '127.0.0.1', pport
             cmd = [str(bindir / f'BallanceMMOSessionClient{EXE}'),
                    '--root', args.root,
@@ -371,15 +408,26 @@ def run_case(args, sector, case_dir):
         if any(q.loss for q in proxies):
             proxy_stats['dropped'] = sum(q.dropped for q in proxies)
             proxy_stats['passed'] = sum(q.passed for q in proxies)
+        # The link's load per client, from what the proxies passed: the relayed
+        # input stream is the bulk of the downlink in a room without snapshots.
+        if proxies:
+            proxy_stats['bytes_down'] = [q.bytes_down for q in proxies]
+            proxy_stats['bytes_up'] = [q.bytes_up for q in proxies]
         for q in proxies:
             q.close()
 
     result = {'sector': sector, 'dir': str(case_dir), 'clients': []}
-    if proxy_stats:
+    if 'dropped' in proxy_stats:
         result['proxy_dropped'] = proxy_stats['dropped']
         result['proxy_passed'] = proxy_stats['passed']
         print('  proxy dropped %d of %d datagrams'
               % (proxy_stats['dropped'], proxy_stats['dropped'] + proxy_stats['passed']))
+    if 'bytes_down' in proxy_stats:
+        result['proxy_bytes_down'] = proxy_stats['bytes_down']
+        result['proxy_bytes_up'] = proxy_stats['bytes_up']
+        print('  proxy per client: down %s KB/s, up %s KB/s'
+              % (' / '.join('%.1f' % (b / 1024.0 / max(args.seconds, 1)) for b in proxy_stats['bytes_down']),
+                 ' / '.join('%.1f' % (b / 1024.0 / max(args.seconds, 1)) for b in proxy_stats['bytes_up'])))
     for i, p in enumerate(clients):
         text = (case_dir / f'client{i}.log').read_text(errors='replace')
         statuses = [s for s in text.splitlines() if s.startswith('status:')]
@@ -432,6 +480,18 @@ def verdict(case):
         known, _, resolved = (m.get('mechanisms') or '0/0').partition('/')
         if resolved == '0':
             problems.append(f'client{i} resolved no mechanism bodies ({m.get("mechanisms")})')
+        # A relayed frame that arrived too late for the rollback to replay it
+        # (deeper than its reach, or past the history) left that tick on the
+        # prediction for good: the relay's own pass criterion.
+        if m.get('relay_late'):
+            problems.append(f'client{i} relayed frames past the rollback reach: {m["relay_late"]} '
+                            f'(lag max/p99 {m.get("relay_lag_max")}/{m.get("relay_lag_p99")})')
+        # The server went without this client's frames for a long run of
+        # ticks: the client ran behind the server (a late SessionAssign, a
+        # stall), every frame stale, every relayed frame in its future.
+        if m.get('worst_starved', 0) > 100:
+            problems.append(f'client{i} ran behind the server: {m["worst_starved"]} ticks without a fresh frame '
+                            f'(lead {m.get("lead")})')
     for r in case.get('replays', []):
         if r['exit_code'] != 0 or 'first_divergence=-1' not in r['summary']:
             problems.append('journal replay diverged')
@@ -485,6 +545,10 @@ def main():
     ap.add_argument('--loss-pct', type=float, default=0.0,
                     help='percentage of datagrams the proxy drops, each way; on its own it '
                          'puts a lossless-latency proxy in the path with loss only')
+    ap.add_argument('--jitter-ms', type=float, default=0.0,
+                    help='extra delay, uniform in [0, this), per datagram: datagrams overtake each other')
+    ap.add_argument('--loss-burst', type=int, default=1,
+                    help='a dropped datagram takes this many in a row with it (the loss rate is kept)')
     ap.add_argument('--latency-clients', default='',
                     help='client indices to put behind the delay proxy; empty = all')
     ap.add_argument('--stall-client', type=int, default=-1,

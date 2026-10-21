@@ -163,11 +163,16 @@ are not new, only their authority is.
 
 ## What was changed to get here
 
-* The relayed input stream is now **reliable**. It was `UnreliableNoDelay`, one
-  tick per message, no redundancy, so it survived zero packet loss; a snapshot
-  every other tick was hiding that. A redundancy window was the wrong fix: the
-  relay is already O(N²) in the room (N clients × N−1 frames × 66/s, 39 bytes a
-  frame, so 83 KB/s per client at 30 players) and a window multiplies it.
+* The relayed input stream was made **reliable** here (2026-10-19). It had been
+  `UnreliableNoDelay`, one tick per message, no redundancy, so it survived zero
+  packet loss; a snapshot every other tick was hiding that. The argument
+  against a redundancy window was the stream's size - O(N²) in the room, 39
+  bytes a frame, 83 KB/s per client at 30 players - and it was wrong on two
+  counts, measured two days later ("The relay, unreliable again" below): a
+  reliable stream stalls every frame behind a loss until the retransmit
+  lands, which under 10 % loss put the corrections past the rollback's reach,
+  and the 39 bytes were the camera, which does not move most ticks. Since
+  2026-10-21 (protocol 5) the relay is unreliable with a window again.
 * The headless client no longer drops a reordered input frame before recording
   it for the rollback, and no longer applies lifecycle events out of order.
 * `physics.full_snapshot_interval` is configurable.
@@ -1856,16 +1861,26 @@ is:
   burst longer than eight frames costs the player's intent for those ticks,
   never the consistency of the world: what the server applied is what the
   session is.
-* **The applied inputs reach every other client, losslessly.** The server
-  relays, once per tick, every other member's applied frame in one message,
-  **reliable** (`server.cpp`, `on_session_inputs`): a redundancy window would
-  have multiplied an O(N²) stream, and reliable delivery costs nothing in the
-  steady state and only latency under loss - which the prediction and the
-  rollback window absorb. Being in the same ordered stream as the lifecycle
-  events, a client never sees an event before the inputs of the ticks that
-  preceded it. A frame that differs from the one the client predicted with
-  triggers the rewind ("input corrected at tick T") that re-simulates from
-  there with the truth.
+* **The applied inputs reach every other client, and a loss costs a gap,
+  never a stall.** The server relays, once per tick, every other member's
+  applied frames for the last `relay_window` ticks (8, like the uplink's
+  history) in one **unreliable** datagram (`server.cpp`, `on_session_inputs`;
+  `session/input_relay.hpp`), so a frame is lost only when that many datagrams
+  in a row are, and no frame ever waits behind a lost one. The client lands
+  every frame by its tick: the first arrival of a (player, tick) is the truth,
+  the window's re-deliveries change nothing, a frame for a mirror not yet made
+  is parked and moved in at its Physicalize. The lifecycle events keep their
+  own reliable ordered stream; correctness never needed the inputs in order
+  with them - an event carries its tick and rewinds to the tick before it, an
+  input lands by its tick. A frame that differs from the one the client
+  predicted with triggers the rewind ("input corrected at tick T") that
+  re-simulates from there with the truth. (From 2026-10-19 to 10-21 this
+  stream was reliable and ordered, on the argument that a window multiplies
+  an O(N²) stream; under 10 % loss the head-of-line blocking delivered the
+  corrections past the rollback's 48-tick reach - `far` 5-9, `unmatched` 6-18
+  per client - and a correction that cannot be replayed is a pose write, so
+  the world came apart by 120-150 m. The window costs 4 bytes a frame while
+  the camera is still, which is most of the time.)
 * **The replay is faithful**, which the preceding sections measured piece by
   piece: the restore bit-exact for a quiet window (v11-v13), the scripts
   re-executed (v14), a contact a beam cannot carry re-created (v15), the
@@ -2063,6 +2078,132 @@ the cells `IngameParameter[0][1]` / `[0][2]` after a far-end death (7-9
 lines), and the particle script's flags - and on `--park-births` once
 `PE_Balloon Script / SetPhysicsForce: force controller 1 vs 0`, the lift
 force the v14 rule kept live.
+
+### The relay, unreliable again: a window, local reassembly, and what the loss run found (2026-10-21)
+
+The relayed input stream went back to `UnreliableNoDelay` with a redundancy
+window (protocol 5; `session/input_relay.hpp`, `session_remote_input_msg`):
+every tick, to every member, the frames the server applied for every other
+member at the last `relay_window` ticks (8, like the uplink's history), each
+datagram standing alone - the first frame of an entry carries the camera, a
+later one omits it when the three vectors did not move bit for bit (4 bytes a
+frame while the camera is still, which for the arena bots is always). The
+server packs whole entries into datagrams of one packet (1100 bytes), because
+GameNetworkingSockets loses an unreliable message whole when any of its
+packets is lost and quietly sends one over 16.5 KB *reliable*; a member that
+left is not relayed after its PlayerLeft; `relay_window` is clamped to 16 so
+input delay + a trip + the window stays inside the rollback's 48-tick reach.
+The clients land every frame by its tick: the first arrival of a (player,
+tick) is the truth (`relay_seen`, cleared only with the session), the window's
+re-deliveries change nothing, a frame for a player whose mirror is not made
+yet is parked and moved into the mirror's ring at its Physicalize, and the
+journal's PLAYER record goes in at the oldest tick an entry covers so no
+INPUT record of a player precedes it. A hole the window did not cover (a
+relayed frame on both sides) is replayed with the nearest earlier relayed
+frame, at most a window old, where the engine's fallback - the recorded live
+prediction - is a round trip old; the tail the relay has not reached keeps
+the prediction. A client running behind the relay drives a mirror with the
+frame the server applied at the next tick when it already has it.
+
+An adversarial three-lens review of the design before the build found what
+the first measurement could not have shown: `far` counts snapshots only (the
+lifecycle-forced full snapshots stay reliable and are retransmitted under
+loss, so `far` stays above 0 with a perfect relay), while a relayed frame that
+arrives too late for the rollback was dropped uncounted. The headless status
+line now carries the relay's own numbers: `relay=new/dup/parked/late` (first
+arrivals, the window's re-deliveries, frames parked for a mirror not yet
+made, first arrivals too late to replay - deeper than 48 ticks or past the
+history) and `lag=max/p99` (ticks already simulated when a first arrival
+landed). The pass criterion is `late` 0 with p99 well under 48. Two more of
+its findings landed: an input-corrected rewind deeper than 48 ticks used to
+take the engine's too-far branch - every tracked body written back to a
+record up to 96 ticks old, nothing re-simulated, the history dropped - which
+is the destructive pose write this change exists to remove, so
+`rewind_to` now refuses it (counted as too far) and the client counts the
+frame as late; and the retail mod has no input-corrected rewind at all - it
+reassembles, dedups, parks, journals and advances its live predictor the same
+way, and is corrected by the snapshots it always ran on; porting the
+headless client's input rewind to it is its own change.
+
+The 10 % loss run then found a second thing the reliable stream had been
+blamed for: two clients of four had every input frame stale for the whole
+session (the server's reports: starved 100 %, worst run 3200 ticks; `lead` 9
+against 46-50 on the other two; 13 rewinds against 350) - their SessionAssign,
+reliable, had been lost once and retransmitted ~390 ms later, so they released
+the anchor hold 26 ticks after the others and ran 26 ticks behind for good:
+every frame they sent arrived after the server had consumed its tick, and
+every relayed frame reached them before they had simulated its tick, where
+nothing corrects it. The pacer only knew how to catch up with the wall clock,
+not with the server. The first fix tried was a client-side one - pull the
+schedule's origin back when the server reports the frames missing for two
+reports in a row while the pacer is on time - and it was wrong twice over in
+one run: it fired on a transient (14 ticks short at the far-end deaths) and
+pushed an on-time client 14 ticks *ahead*, where 55 % of the relayed frames
+then arrived too late to replay, and two steps of 16 could not pull a client
+66 ticks behind back before its own report count ran out. The signal (ticks
+since the last fresh frame) is not the offset, and the reports come every
+few seconds without snapshots. So the fix is where the fault is: the server
+sends the SessionAssign reliably and then three unreliable copies 40 ms
+apart from its main loop, and both clients ignore a copy of the assignment
+they already applied. Two wrong placements measured on the way: copies sent
+in the same instant as the reliable one did nothing (GameNetworkingSockets
+packs what is sent together into one packet, so the loss that took the
+reliable copy took them too), and copies sent from the session's first ticks
+came too late (the first tick is `start_base` periods, 410 ms, after the
+barrier - when the reliable retransmit is already on its way). The lane run
+at 10 % loss also ended with one client crashing at shutdown, in
+`PhysicsHingeCallBack` under `CKContext::Reset` (after its own "exit code 0"
+line): a hinge block's callback on a stale handle at teardown, noted as open.
+
+The harness's proxy gained `--jitter-ms` (datagrams overtake each other) and
+`--loss-burst K` (a drop takes K in a row: outages longer than the window, so
+the hole path runs) and reports each client's downlink and uplink in KB/s.
+
+**Measured** (four headless clients, 150 ms each way, snapshots off, spawn
+spacing 4.2, 60 s; errors are `server_client_drift.py` means per 600-tick
+window; the swing bay's 600-1199 window is the beam at tick 700, a 550 m
+teleport whose event lands on the server and the clients at different ticks,
+in every arm alike):
+
+| swing bay, 4 clients | frames too late for the rollback (`late`) | first-arrival lag p99 / max (ticks) | own balls 1200-2999 | the other balls 1200-2999 | server journal |
+|---|---|---|---|---|---|
+| lossless (2 runs) | 0 | 34-41 / 40-45 | 0.000-0.52 m | 0.03-2.6 m | bit-exact |
+| 60 ms jitter (datagrams overtake by up to 4 ticks, 2 runs) | 0 | 33-41 / 39-45 | 0.000-5.7 m | 0.03-12 m; one respawned mirror, 2.8 m off 25 ticks after its respawn, drifted off the lane edge and fell for the rest of the run | bit-exact |
+| 10 % loss, reliable stream (2026-10-20, `ns_sw_loss`) | - (far 5-9, unmatched 6-18) | - | 3.6-229 m, 120-150 m typical | 13-3600 m | bit-exact |
+| 10 % loss, the window (5 runs) | 1-5 % (96-495 of ~10 000 per client) | 39-48 / 43-77 | 0-28 m in the pile window, 0.000-4.8 m after | 0.05-28 m | bit-exact |
+| 10 % loss in bursts of 12 (3 runs) | 0.1-2.7 % | 43-46 / 49 | 0-31 m in the pile window, 0.000-0.5 m after | 0.05-25 m | bit-exact |
+
+The downlink is 15-18 KB/s per client (the uplink 18-21, the unchanged
+8 x 39 B history); the reliable stream was ~8.5 KB/s, so the window costs
+about twice, with the camera still. What the window fixed is what it was
+for: no frame waits behind a lost one, so where the reliable stream left
+every ball 25-230 m off for the rest of the run, the balls now come back to
+millimetres once a forced snapshot or the next relayed frames land. What it
+did not fix shows in the same numbers. First, the reach: input delay 17 +
+a 20-tick round trip puts the first arrival at 38-45 ticks when nothing is
+lost, against a rollback reach of 48, so a frame re-delivered one or two
+windows late is past it - 1-5 % of the frames at 10 % loss, each leaving its
+tick on the prediction for good (`late` on the status line, a FAIL in the
+harness). Second, the lifecycle events: reliable and ordered, a lost one is
+retransmitted 20-40 ticks late, past the reach too (`far` 1-7 per client:
+rewinds refused as too deep), and a mirror whose respawn or beam is applied
+that late sits 10-30 m from where the server has it until the next forced
+snapshot - and a ball that should have hit it is knocked the wrong way on
+one side only, which is the own-ball excursion in the pile window of three
+of the five loss runs (0-28 m) and of one lossless run (5.7 m under jitter).
+The levers are the same two the relay just used: redundancy for the
+lifecycle events, and a deeper reach (or a smaller input delay) so that
+input delay + a trip + a window stays well inside it. A third item is older
+than the relay and shows in every arm: a mirror re-made at a respawn starts
+a few metres from where the server has the ball (5-12 m worst in the
+lossless runs, the runaway above under jitter), and the owner's lane-keeping
+keys then steer the mirror off the lane - the respawn is a birth inside the
+window for the other players too, and nothing yet puts the mirror where the
+server's ball is at its birth tick. Two of the five loss
+runs also had every client rebase and resync mid-run (the host-load edge
+measured in "The activation replay on the networked path"), and one lane
+client crashed at shutdown in `PhysicsHingeCallBack` under
+`CKContext::Reset` after reporting exit code 0 - noted as open.
 
 ## Checked on the real networked path, and two things found there
 

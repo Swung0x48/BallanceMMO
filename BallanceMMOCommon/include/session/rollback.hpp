@@ -1300,6 +1300,7 @@ namespace bmmo::session {
         // over the same records (the blobs are still captured), for the A/B in
         // one binary.
         void set_script_log_cap(uint32_t n) { script_log_cap_ = n; }
+        const rollback_thresholds& thresholds() const { return thresholds_; }
         void set_exact_restore(bool enable) { exact_restore_ = enable; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
@@ -1330,6 +1331,16 @@ namespace bmmo::session {
                        const std::string& reason) {
             if (!find(anchor)) {
                 ++stats_.unmatched;
+                return false;
+            }
+            // Deeper than the engine re-simulates is never right without a
+            // snapshot's rows: the too_far branch would write every tracked
+            // body back to a record up to the whole history old, re-simulate
+            // nothing and drop the history.  A caller's own rewind that deep
+            // (an input corrected 49-96 ticks late, a lifecycle event that
+            // late) is refused and counted as too far instead.
+            if (current_tick - anchor > thresholds_.max_resim_ticks) {
+                ++stats_.too_far;
                 return false;
             }
             // NOT stats_.mismatched: that counts authoritative snapshots this

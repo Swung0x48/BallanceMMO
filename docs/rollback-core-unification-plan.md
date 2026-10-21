@@ -400,3 +400,17 @@ Sack / 板排从 0.5-0.9 m 到毫米级，摆台的纸球模块不再飞走，�
 `--script-diff-logs N` 放开脚本差异日志上限。部署配置（快照 2/66）在 150 ms、四球时每客户端
 每分钟 950-1770 次回滚、1.6-2.6 万 tick 重放，气球阶段每 tick 一次回滚超出 15 ms 帧预算，
 两条路径都会掉队半秒并 rebase + resync——是 interval 2 的负载，不是激活重放的。
+
+## 14. 输入转发改回不可靠 + 冗余窗口（2026-10-21，协议 5）
+
+见 `docs/lockstep-without-snapshots.md` "The relay, unreliable again"、`docs/rooms-and-sessions-protocol.md`
+`session_remote_input_msg`、`session/input_relay.hpp`（服务端 ring + 按包预算分报文，客户端 relay_seen /
+relay_store / pending_relay / relay_frame_or_earlier，两个客户端共用）。设计评审（三视角）在动手前指出：
+`far` 只数快照、迟到的转发帧没有计数（现在状态行 `relay=new/dup/parked/late lag=max/p99`）；没有报文字节预算
+（GNS 跨包即整丢、>16.5 KB 悄悄变 reliable，现按 1100 B 装整项分条）；输入校正回滚只按 96 tick 历史门控、49-96 深
+会走破坏性的 too_far 恢复（`rewind_to` 现在拒绝并计数）；**零售 mod 根本没有输入校正回滚**（S2 的遗留：
+零售只靠快照校正，移植 `note_input_correction` + 输入校正 rewind 是下一项独立工作，要有自己的零售实测）。
+10% 丢包实测又发现 SessionAssign 重传迟到的客户端整场落后 26-66 tick（每帧都 stale、每条转发帧都在它的
+"未来"），pacer 只会追墙钟不会追服务端。先试的客户端侧"按服务端 ack 把 origin 往前拉"一轮就证明是错的（瞬时缺帧
+误触发把准时的客户端推到超前 14 tick、55% 转发帧迟到；两步 16 tick 也拉不回落后 66 tick 的），改为在源头修：
+服务端 SessionAssign 可靠发一份、之后从主循环每 40 ms 不可靠补发一份共三份（同一瞬间发的副本会被 GNS 打进同一个包一起丢；从会话前几个 tick 发则太晚——第一个 tick 在 barrier 之后 start_base 个周期 410 ms 才来；两种都实测无效），两端忽略已应用过的重复分配。另：车道 10% 丢包一轮有一个客户端在退出时崩在 PhysicsHingeCallBack（CKContext::Reset 期间，自身已打印 exit code 0），待查。

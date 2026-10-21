@@ -26,6 +26,7 @@
 #include <game/navigation_graph.hpp>
 #include <message/message_all.hpp>
 #include <session/correction.hpp>
+#include <session/input_relay.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/rollback.hpp>
 #include <session/sector_union.hpp>
@@ -328,7 +329,19 @@ namespace bmmo::session {
         struct assign_notice { uint32_t session = 0, first_tick = 0; };
         std::deque<assign_notice> assign_queue;
         uint64_t remote_inputs_received = 0;
+        // The relayed frames, reassembled (session/input_relay.hpp, protocol
+        // 5): first arrivals, re-deliveries of the window, frames parked for a
+        // player whose mirror did not exist yet.  A datagram this queue drops
+        // under load is re-delivered by the next ones.
+        uint64_t relay_new = 0, relay_dup = 0, relay_parked = 0;
+        uint32_t last_assign_first_tick = 0;    // the assignment applied last: its redundant copies are ignored
+        relay_seen relay_seen_frames;
+        pending_relay pending_relay_frames;
         static constexpr size_t kMaxQueuedSnapshots = 64;
+        // Relayed-input datagrams, one per tick: more than the rollback's
+        // history (96 ticks) plus a window, so a game-thread stall that long
+        // drops nothing a rewind could still have replayed.
+        static constexpr size_t kRelayQueue = 160;
 
         // Resync (design 9.2): after a re-assignment the next full snapshot
         // rebuilds every body; triggers are a tick-driver rebase (pause, long
@@ -426,6 +439,10 @@ namespace bmmo::session {
             resyncs_sent = resyncs_done = 0;
             acked_input.reset();
             remote_inputs_received = 0;
+            relay_new = relay_dup = relay_parked = 0;
+            last_assign_first_tick = 0;
+            relay_seen_frames.clear();
+            pending_relay_frames.clear();
             ball_forces.clear();
             rng_last_seed = 0;
             rng_last_cores = -1;

@@ -2368,8 +2368,11 @@ TEST(RollbackEngine, SavestateRefusedFallsBackToThePerBodyPath) {
 }
 
 // The savestate belongs to a restore a replay follows, like the clock and the
-// scripts: a frozen clock or a window past max_resim_ticks snaps the bodies
-// and drops the history, and never applies a blob.
+// scripts: a frozen clock snaps the bodies and drops the history and never
+// applies a blob; a caller's rewind deeper than max_resim_ticks is refused
+// outright (counted as too far, nothing written) - without a snapshot's rows
+// a restore that deep is never right, and it used to write every tracked body
+// back to a record up to the whole history old.
 TEST(RollbackEngine, SavestateGates) {
     {
         SCOPED_TRACE("frozen clock");
@@ -2394,13 +2397,17 @@ TEST(RollbackEngine, SavestateGates) {
         thresholds.max_resim_ticks = 3;
         rollback_engine engine(thresholds);
         record_with_blobs(world, engine, 8);
-        EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 8, no_input, "test"));
+        EXPECT_FALSE(engine.rewind_to(world.adapter(), 2, 8, no_input, "test"));
         EXPECT_EQ(engine.stats().too_far, 1u);
+        EXPECT_EQ(engine.stats().rewinds, 0u);
         EXPECT_EQ(world.count("set_savestate"), 0);
         EXPECT_EQ(world.count("set_clock"), 0);
-        EXPECT_GT(world.count("set_body "), 0);
+        EXPECT_EQ(world.count("set_body "), 0);
         EXPECT_EQ(engine.stats().savestates_restored, 0u);
         EXPECT_EQ(world.steps, 0);
+        // At the bound itself the rewind runs.
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 5, 8, no_input, "test"));
+        EXPECT_EQ(engine.stats().too_far, 1u);
     }
 }
 

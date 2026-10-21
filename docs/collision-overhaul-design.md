@@ -242,7 +242,7 @@ M3 留下的清单（8.7）按"对玩家可感知的收益 / 风险"排序，M4 
 - `nav_input(manager, ball_entity, keys, cam_right, cam_up, cam_dir, active)`：登记下一次物理步之前要施加的输入；桥接把它排进 `CKIpionManager::m_PreSimulateCallbacks`（与服务端 `tick_callback` 相同的时机：在该 tick 的 `simulate_dtime` 之前、原版脚本之后），回调里先写相机参照矩阵再 `apply(keys, active)`。
 - `nav_set_ball(manager, ball_entity, new_entity)`（变球）、`nav_destroy(manager, ball_entity)`。
 
-**输入转发**：新增 opcode `SessionRemoteInput`（追加在 `SessionAssign` 之后）与消息 `session_remote_input_msg{session, tick, entries[]: {player, input_frame}}`。服务端每模拟一个 tick，把这一 tick 各玩家**实际采用**的输入帧（新鲜的或沿用的）打包成一条消息发给每个成员（去掉成员自己的那项），不可靠、不延迟。带宽为每 tick 每成员 (N−1)×~50 B。客户端为每个远端玩家保存最近的输入帧；模拟 tick T 时若已有 T 的转发就用它，否则沿用最近一帧（预测）；转发晚到不回放。
+**输入转发**：新增 opcode `SessionRemoteInput`（追加在 `SessionAssign` 之后）与消息 `session_remote_input_msg{session, tick, entries[]: {player, input_frame}}`（协议 5 起每项带最近 `relay_window` 个 tick 的帧、相机不动时省略，见 `docs/rooms-and-sessions-protocol.md` 与 `session/input_relay.hpp`）。服务端每模拟一个 tick，把这一 tick 各玩家**实际采用**的输入帧（新鲜的或沿用的）打包成一条消息发给每个成员（去掉成员自己的那项），不可靠、不延迟。带宽为每 tick 每成员 (N−1)×~50 B。客户端为每个远端玩家保存最近的输入帧；模拟 tick T 时若已有 T 的转发就用它，否则沿用最近一帧（预测）；转发晚到不回放。
 
 **客户端**（`physics_session_client.cpp`）：远端 `Physicalize` 事件仍按配方物理化镜像实体，随后 `nav_create`（叶子方向来自本地 `navigation_graph`，力值来自 `Physicalize_GameBall` 行，球型来自事件）；每帧末为每个远端球 `nav_input`（下一 tick 的预测输入）；每帧记录远端球状态到各自的 `body_corrector` 历史；快照里对方的球改为 `compare`，只在阶梯判定时写刚体。`Unphysicalize` → `nav_destroy` + 去刚体。诊断：`/mmo room session` 增加 `remote_compared/ignored/blended/hard`。
 

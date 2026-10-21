@@ -25,12 +25,17 @@ namespace bmmo::session {
     //      lifecycle events sent without Nagle.
     //   1  everything before 2026-10-20 (never sent; a message without the
     //      field reads as 0).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 4;   // 4: SessionStart carries spawn_spacing
+    //   5  the relayed input stream is unreliable again, with a redundancy
+    //      window: session_remote_input_msg carries, per other member, the
+    //      frames of the last `relay_window` ticks, the camera omitted where
+    //      it did not move (session/input_relay.hpp).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 5;   // 4: SessionStart carries spawn_spacing
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.
     constexpr size_t MAX_PLAYERS_PER_SESSION = 64;
     constexpr size_t MAX_INPUT_FRAMES = 8;
+    constexpr size_t MAX_RELAY_FRAMES = 32;     // frames per member in one relayed datagram (the window's cap)
     constexpr size_t MAX_BODIES_PER_SNAPSHOT = 1024;
     constexpr size_t MAX_NAME = 64;
     constexpr size_t MAX_REASON = 256;
