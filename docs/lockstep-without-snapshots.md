@@ -2317,6 +2317,59 @@ the own ball knocked by one in two of eight clients - and the bursts, where
 the reliable copy still carries an event late and the reach is exceeded by
 a few ticks for a few dozen frames.
 
+### A remote born late is driven from its stamp (2026-10-21)
+
+The lane's respawned mirrors were the next thing measured: a remote player's
+Physicalize always reaches a mirror client 13-32 ticks after its stamp, the
+client rewinds to the tick before the stamp and makes the body inside the
+replay, and the body was then left to roll on its spawn impulse alone. The
+replay fed input only to the remotes the old records tracked, and those
+records were captured while the player was dead; the re-captured records kept
+that set, so the newborn's first record was the live tick after the replay,
+every later correction anchored inside that window parked it there, and the
+live step drove it with the frame its previous body had before it died. The
+signature in the data: birth pose, ball type and impulse index identical on
+every side, the mirror moving in the server's direction at half the speed
+without turning, the offset growing from the stamp on (1 m at +20, 2-4 m at
++60, 9-32 m where no snapshot reached it) while the owner stayed at 0.000.
+
+The engine now asks the client, after each replayed tick's pre-step, which
+navigated remotes are alive at that tick and under which lifetime; a remote
+the record does not name is added to the tick's set and fed its relayed frame
+(or the nearest earlier one) before the step, a remote named under the
+lifetime that just ended is fed again, and one whose birth the history places
+later in the window stays parked. The re-captured records keep the extended
+set, so the birth record is the stamp. On the client a mirror records the
+first tick this world stepped it (the stamp for a replay birth, the next live
+tick for one made live), removing a mirror mutes the event log so the drained
+"deleted" entry cannot bump the lifetime a second time, a newborn's first live
+step uses the end-of-frame rule, and a relayed frame for a tick at which the
+mirror had no body no longer triggers a rewind (`bodiless=` on the status
+line).
+
+**Measured** (four headless clients, 150 ms each way, snapshots off, spacing
+4.2, host quiet; the respawned mirrors' distance from the server's ball, the
+owner's own ball in the last column):
+
+| lane | at the live tick the Physicalize lands (+14..+32) | +40 | +60 | worst in 200 ticks | owner |
+|---|---|---|---|---|---|
+| 10 % loss, before (`sn_lane_loss10`) | 0.5-2.4 m | 2.6-3.3 m | 3.0-5.3 m | 3.8-14 m | 0.000 |
+| 10 % loss, after (`bi_lane_loss10`) | 0.9-1.4 m | 0.0-0.6 m | 0.0-1.4 m | 1.0-2.7 m | 0.000 |
+| lossless, after (`bi_lane_0`) | 0.6-1.5 m | 0.3-0.7 m | 0.0-2.6 m | 1.1-3.8 m | 0.000 |
+
+The offset at the live tick is prediction, not the bug: the frames for the
+window arrive a relay lag (34-41 ticks) after the event, so the replay can
+only hold the last frame it has, and the corrections that follow now reach the
+body. Rewinds per client fell from 370-548 to 203-333 (595 corrections per
+client skipped as bodiless at 10 % loss, about 1000 lossless), the lane's
+own balls and mechanisms and the swing bay's pile were unchanged, and the
+server journal replayed bit-exact in all three runs. What the swing bay run
+showed next is on the own-ball path: the harness beam at tick 701 was undone
+on three of the four owners (the own ball back on the pre-beam path from
+tick 702, 540 m off until the next snapshot) and 0.003 m off at +1 on the
+fourth, growing to 1-2 m; this is the 600-1199 window's own-ball error in
+that arm and the next thing to fix.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the

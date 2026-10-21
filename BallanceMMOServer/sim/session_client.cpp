@@ -804,7 +804,7 @@ namespace {
                         // had already corrected.
                         if (bmmo::session::relay_store(remote.inputs, tick, frame, bmmo::session::kRelayRing)
                                 == bmmo::session::relay_store_result::stored)
-                            note_input_correction(remote.entity, tick, frame);
+                            note_input_correction(remote, tick, frame);
                         if (remote.have_input && static_cast<int32_t>(tick - remote.input_tick) < 0) continue;   // out of order
                         remote.input = frame;
                         remote.input_tick = tick;
@@ -842,6 +842,15 @@ namespace {
             uint32_t input_tick = 0;
             bmmo::session::input_frame input{};
             bmmo::session::input_frame applied{};
+            // The first tick this world stepped the current body: the stamp of
+            // a birth made inside a replay, the live tick after the frame that
+            // made it otherwise.  Its record is the body's birth record, which
+            // every rewind across it re-poses the body to.
+            uint32_t born_tick = 0;
+            // The first tick a replay drives it from (rollback_world::
+            // replay_remotes): born_tick, or the tick its navigation was
+            // attached when that came later.
+            uint32_t driven_from = 0;
             std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
             bmmo::session::body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
@@ -1604,7 +1613,14 @@ namespace {
                     navigation_ = graph;
                     navigation_known_ = true;
                     logf("navigation keys known at tick %u (%zu leaves)", tick, graph.leaves.size());
-                    for (auto& [id, remote]: remotes_) attach_remote_navigation(id, remote);
+                    for (auto& [id, remote]: remotes_) {
+                        const bool navigated = remote.navigation;
+                        attach_remote_navigation(id, remote);
+                        // The ticks before this one ran it undriven: a replay
+                        // across them must not start driving it.
+                        if (!navigated && remote.navigation && static_cast<int32_t>(tick - remote.driven_from) > 0)
+                            remote.driven_from = tick;
+                    }
                 }
             }
 
@@ -1881,18 +1897,10 @@ namespace {
             // client running behind the relay), else the last relayed frame.
             for (auto& [id, remote]: remotes_) {
                 if (!remote.physicalized || !remote.navigation) continue;
-                // The predictor (remote.input) stays the newest relayed frame;
-                // the step is driven from the exact one when the ring has it.
-                const auto exact = remote.inputs.find(tick + 1);
-                const bool have = exact != remote.inputs.end() || remote.have_input;
-                const bmmo::session::input_frame& drive = exact != remote.inputs.end() ? exact->second : remote.input;
-                const uint8_t keys = have ? drive.keys : 0;
-                const bool active = have && (drive.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
-                remote.applied = drive;
-                remote.applied.keys = keys;
-                if (!active) remote.applied.flags &= static_cast<uint8_t>(~bmmo::session::INPUT_FLAG_NAV_ACTIVE);
-                if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), keys, drive.cam_right,
-                                                     drive.cam_up, drive.cam_dir, active, error))
+                remote.applied = live_drive(remote, tick + 1);
+                const bool active = (remote.applied.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
+                if (!bmmo::physics::navigation_input(physics, remote.entity.c_str(), remote.applied.keys, remote.applied.cam_right,
+                                                     remote.applied.cam_up, remote.applied.cam_dir, active, error))
                     logf("remote navigation input %s: %s", remote.entity.c_str(), error.c_str());
             }
             // --beam (design 9.25 harness): at its tick, once.
@@ -2322,8 +2330,9 @@ namespace {
         // after it ran on the wrong input.  Remember the earliest such tick and
         // let frame() replay from it once, before the next step - the frames of
         // several remotes arrive together, and one rewind covers them all.
-        void note_input_correction(const std::string& entity, uint32_t tick,
+        void note_input_correction(const remote_ball& remote, uint32_t tick,
                                    const bmmo::session::input_frame& relayed) {
+            const std::string& entity = remote.entity;
             if (!args_.rollback || entity.empty() || tick == 0) return;
             if (static_cast<int32_t>(tick - current_tick()) > 0) return;   // not simulated yet
             // Deeper than the engine re-simulates (48 ticks), or past the
@@ -2334,6 +2343,31 @@ namespace {
             const uint32_t anchor = tick - 1;
             if (current_tick() - anchor > rollback_.thresholds().max_resim_ticks || !rollback_.knows_tick(anchor)) {
                 ++relay_late_;
+                return;
+            }
+            // A frame also stands in for the holes after it (the nearest
+            // earlier one, relay_frame_or_earlier): it can still change the
+            // replay of tick + 1 when the ring has no frame there but has a
+            // later one, and the body was there at tick + 1.
+            const bool feeds_next = remote.inputs.find(tick + 1) == remote.inputs.end()
+                                 && remote.inputs.upper_bound(tick + 1) != remote.inputs.end()
+                                 && rollback_.recorded_body(entity, tick + 1);
+            // No body behind the name at that tick - the player was dead there,
+            // or the birth that makes the mirror has not arrived yet: the frame
+            // drove nothing, and a replay from it reproduces what the records
+            // have (measured: 154-200 rewinds per client in a lane run spent
+            // on dead players' mirrors).  The frame is in the ring already, so
+            // the replay of a late birth still feeds it.
+            if (!rollback_.recorded_body(entity, tick) && !feeds_next) {
+                ++relay_bodiless_;
+                return;
+            }
+            // The birth tick: every rewind across it parks the body and re-poses
+            // it at that tick's record after the step, so a different frame for
+            // it changes nothing a replay can reach - a whole replay for the
+            // same world.  (The one-tick error stays until a snapshot.)
+            if (remote.physicalized && tick == remote.born_tick && !feeds_next) {
+                ++relay_birth_frozen_;
                 return;
             }
             // No record of an input for this body at this tick is NEWS, not a
@@ -2798,12 +2832,12 @@ namespace {
                     for (auto it = pending_births_.begin(); it != pending_births_.end();)
                         if (it->player == event.player) {
                             logf("remote physicalize of %u: the replay did not reach tick %u, made live", event.player, event.tick);
-                            physicalize_remote(*it);
+                            physicalize_remote(*it, live_first_tick(event.tick));
                             it = pending_births_.erase(it);
                         } else ++it;
                     break;
                 }
-                physicalize_remote(pending_birth::of(event));
+                physicalize_remote(pending_birth::of(event), live_first_tick(event.tick));
                 rewind_for_lifecycle(event);
                 break;
             }
@@ -2832,7 +2866,7 @@ namespace {
                 it->second.navigation = false;
                 if (it->second.physicalized) {
                     ++generations_[it->second.entity];   // the body goes: a new lifetime
-                    bmmo::physics::unphysicalize(engine_->physics(), it->second.entity.c_str(), error);
+                    unphysicalize_mirror(it->second.entity);
                 }
                 it->second.physicalized = false;
                 logf("remote player %u unphysicalized at tick %u", event.player, event.tick);
@@ -2861,15 +2895,83 @@ namespace {
         };
         // Births deferred into a replay (apply_event): made at their tick,
         // before its step.
+        // The event log is muted around them: physicalize_remote bumps the
+        // mirror's generation itself, and the replay labels the records it
+        // re-captures from the birth tick on with that generation
+        // (rollback_world::replay_remotes).  The "created" entry the live
+        // frame would drain afterwards bumped it a second time, so the live
+        // records after the replay named another lifetime than the replayed
+        // ones and none of those could restore the body.
         void drain_pending_births(uint32_t tick) {
             for (auto it = pending_births_.begin(); it != pending_births_.end();)
                 if (it->tick == tick) {
-                    physicalize_remote(*it);
+                    {
+                        const event_log_mute mute(*this);
+                        physicalize_remote(*it, tick);
+                    }
+                    mechanism_tracking_.mark_dirty();
                     it = pending_births_.erase(it);
                 } else ++it;
         }
 
-        void physicalize_remote(const pending_birth& event) {
+        // The event log muted for a scope, nesting: a trafo inside a birth made
+        // in a replay mutes inside the birth's mute, and must not end it.
+        // (The bridge keeps one flag; the script replay's and destroy_body's
+        // mutes never overlap these.)
+        struct event_log_mute {
+            session_client& owner;
+            const bool was;
+            explicit event_log_mute(session_client& o) : owner(o), was(o.event_log_muted_) {
+                owner.event_log_muted_ = true;
+                bmmo::physics::set_event_log_muted(true);
+            }
+            ~event_log_mute() {
+                owner.event_log_muted_ = was;
+                bmmo::physics::set_event_log_muted(was);
+            }
+            event_log_mute(const event_log_mute&) = delete;
+            event_log_mute& operator=(const event_log_mute&) = delete;
+        };
+
+        // The first tick the live run steps a mirror made in this frame (before
+        // the step of current_tick() + 1): that tick, or the stamp if it is
+        // still ahead.
+        uint32_t live_first_tick(uint32_t stamp) const {
+            const uint32_t next = current_tick() + 1;
+            return stamp != 0 && static_cast<int32_t>(stamp - next) > 0 ? stamp : next;
+        }
+
+        // A mirror's body goes, with the event log muted: the caller bumps the
+        // generation itself, and the "deleted" entry the live frame drains
+        // later bumped it a second time - after a replay had labelled the
+        // records of a same-stamp rebirth with the generation in between
+        // (beam, or a late death and respawn in one frame), so the live
+        // records named another lifetime than the replayed ones.
+        void unphysicalize_mirror(const std::string& entity) {
+            std::string error;
+            {
+                const event_log_mute mute(*this);
+                bmmo::physics::unphysicalize(engine_->physics(), entity.c_str(), error);
+            }
+            mechanism_tracking_.mark_dirty();
+        }
+
+        // The frame a live step of `tick` drives a predicted mirror with: the
+        // relayed frame for that tick when the ring has it, else the newest
+        // relayed frame (the predictor), else no keys with the navigation off.
+        static bmmo::session::input_frame live_drive(const remote_ball& remote, uint32_t tick) {
+            const auto exact = remote.inputs.find(tick);
+            const bool have = exact != remote.inputs.end() || remote.have_input;
+            bmmo::session::input_frame drive = exact != remote.inputs.end() ? exact->second : remote.input;
+            if (!have) drive.keys = 0;
+            if (!have || !(drive.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE))
+                drive.flags &= static_cast<uint8_t>(~bmmo::session::INPUT_FLAG_NAV_ACTIVE);
+            return drive;
+        }
+
+        // `first_tick`: the first tick this world steps the body (the stamp
+        // inside a replay, live_first_tick otherwise).
+        void physicalize_remote(const pending_birth& event, uint32_t first_tick) {
             std::string error;
             {
                 CK3dEntity* entity = remote_entity(event.player, event.ball_type, error);
@@ -2879,7 +2981,7 @@ namespace {
                 remote.navigation = false;
                 if (remote.physicalized && remote.entity != entity->GetName()) {
                     ++generations_[remote.entity];   // a trafo: the old mirror's lifetime ends here
-                    bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
+                    unphysicalize_mirror(remote.entity);
                 }
                 entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
                 const auto recipe = to_bridge_recipe(event.recipe);
@@ -2896,14 +2998,16 @@ namespace {
                 remote.entity = entity->GetName();
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
+                remote.born_tick = first_tick;
+                remote.driven_from = first_tick;
                 remote.corrector.clear();
                 // Frames relayed before this mirror existed move into its ring:
                 // the newest becomes the live predictor, and a rewind that later
-                // reads the ring finds them.  (The replay of the birth itself
-                // drives only the mirrors the live record tracked, so a frame
-                // older than this mirror's first live record is never fed to a
-                // replay.)  Frames of an earlier lifetime stay: a rewind across
-                // the death still drives that body at those ticks.
+                // reads the ring finds them - the replay of a late birth too,
+                // which drives the newborn from its stamp on
+                // (rollback_world::replay_remotes).  Frames of an earlier
+                // lifetime stay: a rewind across the death still drives that
+                // body at those ticks.
                 {
                     bmmo::session::input_frame newest{};
                     const uint32_t newest_tick = pending_relay_.take(event.player, remote.inputs, bmmo::session::kRelayRing, &newest);
@@ -2923,6 +3027,12 @@ namespace {
                         logf("remote spawn impulse index=%u for player %u at tick %u", idx, event.player, event.tick);
                 }
                 attach_remote_navigation(event.player, remote);
+                // The next live step (current_tick() + 1: the birth tick when
+                // made live, the tick after the replay when made inside one)
+                // is driven by remote.applied, which still held the frame the
+                // previous body had when it died - the end-of-frame loop skips
+                // a dead mirror.  Driven as that loop would have.
+                remote.applied = live_drive(remote, current_tick() + 1);
                 logf("remote player %u physicalized (%s) at tick %u%s", event.player, remote.entity.c_str(), event.tick,
                      remote.navigation ? ", predicted" : ", mirrored");
                 // (The rewind for a late birth happens in apply_event, once the
@@ -3045,6 +3155,23 @@ namespace {
                     ++contact_traces_;
                     logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
                          bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+                }
+            };
+            // The mirrors a replayed tick drives: every predicted remote this
+            // world has stepped and driven by then (driven_from: the stamp of
+            // a birth made inside a replay, never a tick before a live make),
+            // with the generation it has now.  A late
+            // birth made by before_replayed_tick is not in the records of the
+            // window it lands in (they were captured while the player was
+            // dead); named here, it is fed its relayed frames from its stamp
+            // and recorded from there, instead of coasting on its spawn
+            // impulse to the live tick and being parked at that record by
+            // every later correction.
+            o.replay_remotes = [this](uint32_t tick, std::map<std::string, uint32_t>& out) {
+                for (const auto& [id, remote]: remotes_) {
+                    if (!remote.physicalized || !remote.navigation || static_cast<int32_t>(remote.driven_from - tick) > 0) continue;
+                    const auto generation = generations_.find(remote.entity);
+                    out[remote.entity] = generation == generations_.end() ? 0u : generation->second;
                 }
             };
             if (args_.replay_scripts) {
@@ -3544,7 +3671,7 @@ namespace {
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu snapshots=%llu/%llu/%llu "
-                 "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -3556,6 +3683,7 @@ namespace {
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
                  static_cast<unsigned long long>(life_rewinds_), static_cast<unsigned long long>(life_rewinds_missed_),
                  static_cast<unsigned long long>(input_rewinds_), static_cast<unsigned long long>(input_rewinds_missed_),
+                 static_cast<unsigned long long>(relay_bodiless_), static_cast<unsigned long long>(relay_birth_frozen_),
                  static_cast<unsigned long long>(forced_rollbacks_), static_cast<unsigned long long>(forced_rollbacks_missed_),
                  own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
                  static_cast<unsigned long long>(relay_new_), static_cast<unsigned long long>(relay_dup_),
@@ -3931,6 +4059,12 @@ namespace {
         // arrivals in ticks (max, and a histogram for the 99th percentile): the
         // numbers that say whether the relay reaches the rollback in time.
         uint64_t relay_late_ = 0;
+        // ...and first arrivals for a tick at which the mirror had no body
+        // (dead, or not born here yet): stored, not replayed.
+        uint64_t relay_bodiless_ = 0;
+        bool event_log_muted_ = false;   // event_log_mute
+        // ...and for a mirror's birth tick, which no replay can change.
+        uint64_t relay_birth_frozen_ = 0;
         uint32_t relay_lag_max_ = 0;
         static constexpr uint32_t kRelayLagBuckets = 129;
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};

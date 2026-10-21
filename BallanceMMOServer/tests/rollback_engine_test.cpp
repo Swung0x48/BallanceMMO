@@ -2115,6 +2115,214 @@ TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
     EXPECT_EQ(world.calls.size(), calls_before);
 }
 
+// A remote ball born late: its Physicalize (stamped tick 5) reaches the client
+// at tick 10, and the rewind to tick 4 makes the body inside the replay, at
+// its stamp (pre_step).  The records of 5..10 were captured while the player
+// was dead and do not name it.  It must still be fed its relayed input from
+// its birth tick on (rollback_world::replay_remotes), and the re-captured
+// records must carry it - with the generation it has now - so that a later
+// rewind anchored inside that window restores it from its own record, and
+// one anchored before it re-poses it at its birth tick.  The old replay fed it
+// nothing (it coasted to tick 10) and recorded it first at the live tick 11,
+// where every later rewind parked it.
+TEST(RollbackEngine, ARemoteBornInsideTheReplayIsDrivenAndRecordedFromItsBirthTick) {
+    fake_world world;
+    world.bodies["Own"];
+    rollback_engine engine;
+    auto w = world.adapter();
+    rollback_tracked dead;
+    dead.own_entity = "Own";
+    dead.generations = {{"Own", 1}, {"Remote", 1}};
+    for (uint32_t tick = 1; tick <= 10; ++tick) {
+        w.step();
+        engine.record(w, tick, dead, {{"Own", input_frame{}}});
+    }
+    world.calls.clear();
+
+    constexpr uint32_t kBorn = 5;
+    bool born = false;
+    uint32_t generation = 1;
+    std::map<uint32_t, double> remote_x_before;   // the remote's x before each replayed tick's step
+    w.pre_step = [&](uint32_t tick) {
+        if (tick == kBorn && !born) {
+            born = true;
+            ++generation;   // the caller's new lifetime for the name
+            world.bodies["Remote"].position[0] = 50.0;
+        }
+        if (const auto it = world.bodies.find("Remote"); it != world.bodies.end())
+            remote_x_before[tick] = it->second.position[0];
+    };
+    w.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) {
+        if (born && tick >= kBorn) out["Remote"] = generation;
+    };
+    input_frame held{};
+    held.keys = 1;
+    held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+    // The relay holds the owner's frames from the stamp on: key 0 held.
+    const auto relayed = [&](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Remote" || tick < kBorn) return false;
+        out = held;
+        return true;
+    };
+
+    ASSERT_TRUE(engine.rewind_to(w, kBorn - 1, 10, relayed, "ball of 2 born at tick 5"));
+    // driven from its birth tick: six steps with the key held
+    EXPECT_EQ(world.count("nav_input Remote keys=1"), 6);
+    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 6.0f);
+    // and the re-captured records carry its input from that tick
+    input_frame recorded{};
+    EXPECT_FALSE(engine.recorded_input("Remote", kBorn - 1, recorded));
+    for (uint32_t tick = kBorn; tick <= 10; ++tick) {
+        EXPECT_TRUE(engine.recorded_input("Remote", tick, recorded)) << "tick " << tick;
+        EXPECT_EQ(recorded.keys, 1u) << "tick " << tick;
+        EXPECT_TRUE(engine.recorded_body("Remote", tick)) << "tick " << tick;
+    }
+    EXPECT_FALSE(engine.recorded_body("Remote", kBorn - 1));
+    const double x_after_birth_tick = remote_x_before.at(kBorn + 1);
+
+    // The live tick 11 tracks it, under the generation it has now.
+    rollback_tracked alive = dead;
+    alive.remote_entities = {"Remote"};
+    alive.generations["Remote"] = generation;
+    world.pending_keys["Remote"] = 1;
+    w.step();
+    engine.record(w, 11, alive, {{"Own", input_frame{}}, {"Remote", held}});
+    const fake_body live = world.bodies["Remote"];
+
+    // A correction anchored inside the birth window restores the newborn from
+    // its own record of that tick: one write, no parking and re-pose.
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 7, 11, relayed, "input corrected at tick 8"));
+    EXPECT_EQ(world.count("set_body Remote"), 1);
+    EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], live.position[0]);
+    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], live.linear[0]);
+
+    // One anchored before the birth finds its birth record at the stamp: it is
+    // parked there and re-posed after that tick's step, not at tick 11.
+    world.calls.clear();
+    remote_x_before.clear();
+    ASSERT_TRUE(engine.rewind_to(w, kBorn - 1, 11, relayed, "input corrected at tick 5"));
+    EXPECT_EQ(world.count("set_body Remote"), 2);
+    EXPECT_DOUBLE_EQ(remote_x_before.at(kBorn + 1), x_after_birth_tick);
+    EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], live.position[0]);
+    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], live.linear[0]);
+}
+
+// A remote whose history has its birth later in the window than the caller
+// claims (a Physicalize made live at tick 10, first recorded at 11, while
+// replay_remotes names it from its stamp 5): parked until its birth record, so
+// the replay neither drives nor records it before tick 11.  Recorded, the
+// parked pose would be restored by the next rewind as an ordinary body and
+// released ticks early.
+TEST(RollbackEngine, ARemoteParkedUntilItsBirthRecordIsNeitherDrivenNorRecordedBeforeIt) {
+    fake_world world;
+    world.bodies["Own"];
+    rollback_engine engine;
+    auto w = world.adapter();
+    rollback_tracked dead;
+    dead.own_entity = "Own";
+    dead.generations = {{"Own", 1}, {"Remote", 1}};
+    for (uint32_t tick = 1; tick <= 10; ++tick) {
+        w.step();
+        engine.record(w, tick, dead, {{"Own", input_frame{}}});
+    }
+    input_frame held{};
+    held.keys = 1;
+    held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+    // made live before the step of tick 11: its first record is 11
+    world.bodies["Remote"].position[0] = 50.0;
+    rollback_tracked alive = dead;
+    alive.remote_entities = {"Remote"};
+    alive.generations["Remote"] = 2;
+    world.pending_keys["Remote"] = 1;
+    w.step();
+    engine.record(w, 11, alive, {{"Own", input_frame{}}, {"Remote", held}});
+
+    w.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) {
+        if (tick >= 5) out["Remote"] = 2;   // the stamp, not the first stepped tick
+    };
+    const auto relayed = [&](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Remote" || tick < 5) return false;
+        out = held;
+        return true;
+    };
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 5, 11, relayed, "input corrected at tick 6"));
+    EXPECT_EQ(world.count("nav_input Remote keys=1"), 1);   // tick 11 only
+    for (uint32_t tick = 6; tick <= 10; ++tick)
+        EXPECT_FALSE(engine.recorded_body("Remote", tick)) << "tick " << tick;
+    EXPECT_TRUE(engine.recorded_body("Remote", 11));
+}
+
+// A same-name death and birth at one stamp (the beam): the records of the
+// window name the remote under the lifetime that ended, so the replay feeds it
+// before pre_step - on navigation the new body has not got yet.  The body
+// made by pre_step is fed again, and the records from its birth on carry its
+// generation: a later rewind inside the window restores it from its own
+// record instead of parking it at the live tick.
+TEST(RollbackEngine, ARemoteRebornUnderTheSameNameIsFedAfterItsBirthAndRelabelled) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"];
+    rollback_engine engine;
+    auto w = world.adapter();
+    // the navigation exists only while a body does
+    const auto base_input = w.nav_input;
+    w.nav_input = [&](const std::string& entity, const input_frame& frame) {
+        if (entity == "Remote" && world.bodies.find("Remote") == world.bodies.end()) {
+            world.calls.push_back("nav_input " + entity + " refused");
+            return false;
+        }
+        return base_input(entity, frame);
+    };
+    input_frame held{};
+    held.keys = 1;
+    held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+    rollback_tracked old_life;
+    old_life.own_entity = "Own";
+    old_life.remote_entities = {"Remote"};
+    old_life.generations = {{"Own", 1}, {"Remote", 1}};
+    for (uint32_t tick = 1; tick <= 10; ++tick) {
+        w.step();
+        engine.record(w, tick, old_life, {{"Own", input_frame{}}, {"Remote", input_frame{}}});
+    }
+    // The late Unphysicalize: the old body is gone (its own rewind is not
+    // what this test is about).
+    world.bodies.erase("Remote");
+
+    constexpr uint32_t kBorn = 5;
+    bool born = false;
+    w.pre_step = [&](uint32_t tick) {
+        if (tick == kBorn && !born) {
+            born = true;
+            world.bodies["Remote"].position[0] = 50.0;
+        }
+    };
+    w.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) {
+        if (born && tick >= kBorn) out["Remote"] = 3;
+    };
+    const auto relayed = [&](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Remote" || tick < kBorn) return false;
+        out = held;
+        return true;
+    };
+    ASSERT_TRUE(engine.rewind_to(w, kBorn - 1, 10, relayed, "ball of 2 born at tick 5"));
+    // driven at its birth tick too: six steps with the key held
+    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 6.0f);
+
+    rollback_tracked new_life = old_life;
+    new_life.generations["Remote"] = 3;
+    world.pending_keys["Remote"] = 1;
+    w.step();
+    engine.record(w, 11, new_life, {{"Own", input_frame{}}, {"Remote", held}});
+    const fake_body live = world.bodies["Remote"];
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 7, 11, relayed, "input corrected at tick 8"));
+    EXPECT_EQ(world.count("set_body Remote"), 1);
+    EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], live.position[0]);
+    EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], live.linear[0]);
+}
+
 // The IVP savestate (docs/ivp-savestate-design.md): an anchor whose record
 // carries a blob is put back by set_savestate, after the navigation replicas
 // (set_nav re-creates the controllers the blob orders) and before anything

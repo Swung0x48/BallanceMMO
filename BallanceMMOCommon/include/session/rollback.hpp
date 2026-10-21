@@ -146,6 +146,23 @@ namespace bmmo::session {
         // (game/script_replay.hpp), where the live frame runs them - before
         // the physics step.  Null on the server/tests.
         std::function<void(uint32_t tick)> pre_step;
+        // Optional: the navigated remote balls whose current body was born at
+        // or before `tick`, each with the lifetime generation that body has
+        // now.  Asked after pre_step(tick), which is where a birth deferred
+        // into the replay is made.  A late remote birth is made inside the
+        // replay at its stamp, but the records of the window it lands in were
+        // captured while the player was dead, so their tracked sets do not
+        // name it: without this the newborn rolled from its stamp to the live
+        // tick on its spawn impulse alone, fed no input, and was recorded for
+        // the first time at the live tick after the replay - every later
+        // correction anchored inside that window parked it at that record and
+        // re-posed it there.  A name missing from the record's set is added
+        // to the replayed tick's set and fed its input before the step, and
+        // the re-captured record carries it with this generation.  `tick`
+        // must not precede the first tick this world stepped that body: a
+        // body the history has born later in the window is parked until then
+        // and is skipped whatever the caller says.
+        std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
         // The mechanism scripts' runtime state as bytes (game/script_replay.hpp):
         // captured with every record, put back at the anchor so the replayed
         // frames start the scripts where the live frames had them.  Optional;
@@ -1046,9 +1063,17 @@ namespace bmmo::session {
             stop_polling(tracked);
             for (uint32_t t = anchor + 1; t <= current_tick; ++t)
                 if (tick_state* recorded = find(t)) stop_polling(recorded->tracked);
+            // rollback_world::replay_remotes, asked once per replayed tick, and
+            // the last frame each remote the records do not name was fed in
+            // this replay (carried into the tail the relay has not reached).
+            std::map<std::string, uint32_t> alive;
+            std::map<std::string, input_frame> carried;
             for (uint32_t t = anchor + 1; t <= current_tick; ++t) {
                 tick_state* recorded = find(t);
-                const rollback_tracked& step_tracked = recorded ? recorded->tracked : tracked;
+                // A copy: a remote born inside the replay is added to it below
+                // (rollback_world::replay_remotes), and the re-captured record
+                // takes the extended set.
+                rollback_tracked step_tracked = recorded ? recorded->tracked : tracked;
                 std::map<std::string, input_frame> inputs;
                 auto feed = [&](const std::string& entity, bool remote) {
                     input_frame frame{};
@@ -1130,6 +1155,50 @@ namespace bmmo::session {
                     }
                 }
                 if (world.pre_step) world.pre_step(t);
+                // The remotes alive at this tick that the record does not name
+                // (a late birth made by pre_step just now, or at an earlier
+                // replayed tick): driven like the others from here on, with
+                // the frame the relay has for this tick or the nearest earlier
+                // one.  Every remote the caller names gets the generation of
+                // the body it has now, so the re-captured records are of the
+                // same lifetime as the live ones that follow them.
+                if (world.replay_remotes) {
+                    alive.clear();
+                    world.replay_remotes(t, alive);
+                    auto& remotes = step_tracked.remote_entities;
+                    for (const auto& [entity, generation]: alive) {
+                        // Parked at this tick: the history has its birth later
+                        // in this window, and until that re-pose it is a body
+                        // held out of the world - neither driven nor recorded
+                        // (recorded, a later rewind would restore the parked
+                        // pose as an ordinary body and release it early).
+                        if (const auto parked = plan.find(entity); parked != plan.end() && parked->second.repose_tick != 0
+                                && static_cast<int32_t>(parked->second.repose_tick - t) > 0)
+                            continue;
+                        const bool named = std::find(remotes.begin(), remotes.end(), entity) != remotes.end();
+                        const auto was = step_tracked.generations.find(entity);
+                        const bool same_life = was != step_tracked.generations.end() && was->second == generation;
+                        step_tracked.generations[entity] = generation;
+                        if (named && same_life) continue;
+                        // Named, but under the lifetime that went (a same-name
+                        // death and birth at one stamp): the feed above ran
+                        // before pre_step, on the navigation the new body
+                        // replaced, so it is fed again.  Not named: added.
+                        if (!named) remotes.push_back(entity);
+                        feed(entity, true);
+                        if (const auto fed = inputs.find(entity); fed != inputs.end()) {
+                            carried[entity] = fed->second;
+                        } else if (const auto last = carried.find(entity); last != carried.end()) {
+                            // The tail the relay has not reached, and no record
+                            // of a prediction for a body the record did not
+                            // have: its navigation keeps the frame it was fed
+                            // last, which is what drove this step - recorded
+                            // so, an arrival equal to it is no news.
+                            world.nav_input(entity, last->second);
+                            inputs[entity] = last->second;
+                        }
+                    }
+                }
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
                 // A body born inside the replayed window has been sitting at
@@ -1198,7 +1267,11 @@ namespace bmmo::session {
                 }
                 tick_state state;
                 state.tick = t;
-                state.tracked = recorded ? recorded->tracked : tracked;
+                // The set this tick was replayed with: a remote born inside the
+                // window is recorded from its birth tick on, so a later rewind
+                // anchored there restores it from its own record and the
+                // oldest record of its lifetime (birth_record) is its birth.
+                state.tracked = std::move(step_tracked);
                 state.inputs = std::move(inputs);
                 capture(world, state);
                 // The last replayed tick: do the re-executed scripts stand where
@@ -1334,6 +1407,14 @@ namespace bmmo::session {
             if (it == at->inputs.end()) return false;
             out = it->second;
             return true;
+        }
+
+        // Whether the record of `tick` holds a body for `entity`: a relayed
+        // frame for a tick at which the name had none drove nothing, and is
+        // no reason to replay.
+        bool recorded_body(const std::string& entity, uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at && at->bodies.find(entity) != at->bodies.end();
         }
 
         // Re-anchor on a tick in the past because the WORLD changed there, not
