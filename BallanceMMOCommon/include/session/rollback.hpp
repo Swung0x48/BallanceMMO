@@ -60,6 +60,13 @@ namespace bmmo::session {
     constexpr double kRecheckPositionM = 0.001;
     constexpr double kRecheckVelocityMs = 0.01;
 
+    // What a savestate restore (rollback_world::set_savestate) leaves to the
+    // engine: see the hook's comment.
+    struct savestate_outcome {
+        std::vector<std::string> contacts_dropped;   // covered bodies whose contacts the blob could not carry
+        std::vector<std::string> unknown_bodies;     // live bodies the blob does not know, out of collision detection
+    };
+
     struct rollback_world {
         std::function<bool(const std::string& entity, bmmo_physics_body_state& out)> get_body;
         // mode: keep = leave the sleep state alone; wake/freeze as above.
@@ -93,6 +100,28 @@ namespace bmmo::session {
         // replaces, which the freeze logic and the event queue both read.
         std::function<bool(bmmo_physics_clock_state& out)> get_clock;
         std::function<bool(const bmmo_physics_clock_state& state)> set_clock;
+        // The IVP savestate (docs/ivp-savestate-design.md,
+        // physics/physics_savestate.hpp): the engine's whole collision state -
+        // cores, hull managers, the overlap tree, every mindist and its
+        // scheduled event, the friction systems and their contact points, the
+        // simulation units, the object caches and the clock - as one opaque,
+        // local blob.  Optional.  get captures it with every record (true and a
+        // non-empty vector; an empty vector counts as no blob).  set puts it
+        // back at an anchor INSTEAD of the per-body pose / extra / contact /
+        // clock writes for every body it covers (each body the restore takes
+        // from our own record), before any body is written and after the
+        // scripts and the navigation replicas are back; snapshot rows and
+        // bodies born inside the window are still written on top with the
+        // beam.  false: the blob was refused, the world may be damaged, and the
+        // restore falls back to the per-body path for everything.
+        // `outcome` (out): what the blob could not settle by itself - the
+        // bodies whose friction contacts it could not put back (their system
+        // had a body the world no longer has; the engine re-creates them from
+        // its own record) and the live bodies it does not know, left out of
+        // collision detection (the engine keeps a body it will re-pose at its
+        // birth tick inert until then and rechecks the rest back in).
+        std::function<bool(std::vector<uint8_t>& out)> get_savestate;
+        std::function<bool(const std::vector<uint8_t>& blob, savestate_outcome& outcome)> set_savestate;
         std::function<bool(const std::string& entity, bmmo_physics_nav_state& out)> get_nav;
         std::function<bool(const std::string& entity, const bmmo_physics_nav_state& state)> set_nav;
         // A body's friction contacts (bmmo_physics_contact, bridge v15).
@@ -231,6 +260,17 @@ namespace bmmo::session {
         uint64_t script_mismatches = 0;        // logical: flags, IOs, controllers, counters
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
+        // The IVP savestate (rollback_world::set_savestate): restores that put
+        // the engine's whole collision state back at the anchor in place of the
+        // per-body writes (each also counts as a clock rewind: the blob carries
+        // the clock), restores whose blob the world refused (each fell back to
+        // the per-body path), and the size of the last blob applied.
+        uint64_t savestates_restored = 0;
+        uint64_t savestate_failures = 0;
+        uint64_t savestate_bytes = 0;
+        // Records whose blob the world could not capture (get_savestate said
+        // no): those ticks fall back to the per-body path when rewound to.
+        uint64_t savestate_capture_failures = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // lag beyond max_resim_ticks: bodies set, no re-simulation
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
@@ -599,6 +639,13 @@ namespace bmmo::session {
             // history, and a clock left behind with nothing to advance it
             // would stay behind.
             const uint32_t window = current_tick > anchor ? current_tick - anchor : 0;
+            // Whether a replay follows this restore (the clock, the scripts and
+            // the savestate are put back only then).
+            const bool replay_follows = !frozen && window <= thresholds_.max_resim_ticks;
+            // The savestate path (rollback_world::set_savestate): decided here,
+            // before the clock, because the blob carries the clock and the
+            // separate clock write is skipped when the blob is applied.
+            const bool try_savestate = exact_restore_ && at->have_savestate && world.set_savestate && replay_follows;
             // The clock offset the restored calm references have to carry
             // when the clock itself stays live (the rewind is opt-in: IVP
             // keeps other time-anchored state a rewound clock turns into
@@ -612,12 +659,16 @@ namespace bmmo::session {
                 if (at->have_clock && world.get_clock && world.get_clock(now_clock))
                     calm_shift = now_clock.current_time - at->clock.current_time;
             }
-            if (restore_clock_ && at->have_clock && world.set_clock && !frozen
-                    && window <= thresholds_.max_resim_ticks) {
+            // Skipped when the savestate will be tried (its blob carries the
+            // clock); a refused blob runs it below, after the scripts but still
+            // before any body.
+            const auto rewind_clock = [&]() {
+                if (!restore_clock_ || !at->have_clock || !world.set_clock) return;
                 world.set_clock(at->clock);
                 ++stats_.clock_rewinds;
                 calm_shift = 0.0;
-            }
+            };
+            if (replay_follows && !try_savestate) rewind_clock();
             // The mechanism scripts' state at T, before the bodies: a force
             // block restored here re-creates or deletes its IVP controller,
             // and the replayed frames then toggle it from the right phase.
@@ -636,6 +687,59 @@ namespace bmmo::session {
                 }
                 if (world.restore_scripts(at->scripts, anchor)) ++stats_.script_restores;
                 else ++stats_.script_restore_failures;
+            }
+            // The IVP savestate: the whole engine back to T in one write, after
+            // the scripts (a force block restored above re-creates or deletes
+            // its IVP controller) and before any body.  The navigation replicas
+            // go first: set_nav re-creates the navigation force controllers,
+            // and the savestate puts every core's and every unit's controller
+            // list back in its recorded order, so they have to be there to be
+            // ordered.  Every body the restore takes from our own record is
+            // then covered - its pose, integrator state, freeze bookkeeping,
+            // contacts and collision state all came back with the blob, and a
+            // beam would only zero what the blob restored.  Snapshot rows and
+            // bodies born inside the window are written on top as before.  A
+            // refused blob falls back to the per-body path for everything (the
+            // world may be damaged by then; that path is the best effort left)
+            // and is dropped: it would only be refused again.
+            bool savestate_applied = false;
+            if (try_savestate) {
+                for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
+                savestate_outcome outcome;
+                if (world.set_savestate(at->savestate, outcome)) {
+                    savestate_applied = true;
+                    ++stats_.savestates_restored;
+                    stats_.savestate_bytes = at->savestate.size();
+                    // The blob carries the clock: no separate write, but the
+                    // clock did go back.
+                    ++stats_.clock_rewinds;
+                    calm_shift = 0.0;
+                    for (auto& [entity, item]: plan)
+                        if (!item.from_row && !item.repose_tick) item.covered = true;
+                    // A covered body whose contacts the blob could not carry
+                    // (its friction system had a body the world lost) gets
+                    // them from our own record below, like an uncovered one.
+                    for (const std::string& name: outcome.contacts_dropped)
+                        if (auto it = plan.find(name); it != plan.end()) it->second.recontact = true;
+                    // A live body the blob does not know is out of collision
+                    // detection now.  One born inside the window has a plan
+                    // item that parks it and re-poses it at its birth tick
+                    // with a recheck: it stays inert until then, as the live
+                    // run had no such body before that tick.  One with no
+                    // record at all (physicalized in this very frame) would
+                    // stay out for good: rechecked back in at once.
+                    for (const std::string& name: outcome.unknown_bodies)
+                        if (plan.find(name) == plan.end() && world.recheck_body) world.recheck_body(name);
+                } else {
+                    ++stats_.savestate_failures;
+                    if (world.log && stats_.savestate_failures % 8 == 1)
+                        world.log("savestate: the blob of tick " + std::to_string(anchor) + " ("
+                                  + std::to_string(at->savestate.size()) + " bytes) was refused, per-body restore instead ("
+                                  + std::to_string(stats_.savestate_failures) + " so far)");
+                    at->have_savestate = false;
+                    at->savestate.clear();
+                    rewind_clock();
+                }
             }
             // What a record's extra may write back, by switch and by sleep
             // state: a body being frozen gets no queue (a frozen body's queue
@@ -664,7 +768,11 @@ namespace bmmo::session {
                     if (extra.fields & BMMO_PHYSICS_EXTRA_UNIT) ++stats_.units_restored;
                 }
             };
+            bool rows_written = false;   // a snapshot row went into the world at T (below)
             for (auto& [entity, item]: plan) {
+                // Put back whole by the savestate: no beam (it zeroes the
+                // integrator state the blob restored), no recheck, no queue.
+                if (item.covered) continue;
                 bmmo_physics_body_state live{};
                 // A body destroyed after its last record simply has nothing to
                 // restore: skip it and correct the rest of the world.  (The
@@ -678,11 +786,20 @@ namespace bmmo::session {
                 // the rollback does not record - so it is also a candidate
                 // CAUSE of a replay's infidelity, and this flag is how that is
                 // measured rather than argued about.
-                const bool recheck = recheck_on_restore_
+                // A body born inside the window stays inert while it is parked
+                // on the savestate path: the restore left it out of collision
+                // detection, the live run had no such body before its birth
+                // tick, and the re-pose after that tick rechecks it in.
+                // (Measured without this: a box born inside a 48-tick window
+                // left its spot 5 m up in the first live tick after the
+                // replay.)
+                const bool parked_inert = savestate_applied && item.repose_tick != 0;
+                const bool recheck = recheck_on_restore_ && !parked_inert
                                    && (item.force_recheck || write_moves_body(live, item.state));
                 const bool deferred = recheck && two_pass_recheck_ && world.recheck_body;
                 world.set_body(entity, item.state, item.mode, recheck && !deferred);
                 if (deferred) rechecks.push_back(entity);
+                if (item.from_row) rows_written = true;
                 // After the pose write, which zeroed the queue.  A body born in
                 // the window is parked here and gets its record's extra at the
                 // re-pose instead.
@@ -700,7 +817,7 @@ namespace bmmo::session {
             // IVP after the rechecks above, so the write lands on the units as
             // they are now (last writer wins within a unit).
             for (auto& [entity, item]: plan)
-                if (!item.repose_tick) write_extra(entity, item, true);
+                if (!item.repose_tick && !item.covered) write_extra(entity, item, true);
             // The friction contacts the anchor's record had and the live world
             // lacks - a contact that ended inside the window.  IVP creates a
             // contact only on an impact, and a body put back on the floor it
@@ -711,14 +828,31 @@ namespace bmmo::session {
             // did; a body born in the window has no record of its own here.
             if (restore_contacts_ && world.set_contacts)
                 for (auto& [entity, item]: plan) {
-                    if (item.repose_tick) continue;
+                    if (item.repose_tick || (item.covered && !item.recontact)) continue;
                     const auto it = at->contacts.find(entity);
                     if (it == at->contacts.end()) continue;
                     const int made = world.set_contacts(entity, it->second, contact_flags_);
                     if (made < 0) ++stats_.contact_restore_failures;
                     else stats_.contacts_restored += static_cast<uint64_t>(made);
                 }
-            for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
+            // The navigation replicas: here on the per-body path (a refused
+            // savestate included, whose early write may not have survived); the
+            // savestate path wrote them before the blob.
+            if (!savestate_applied)
+                for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
+            // Snapshot rows changed the world at T, so the anchor's blob must
+            // say so: a later rewind to T would otherwise restore the
+            // prediction the rows replaced.  Written on top of the savestate,
+            // the corrected world is captured again (with any body born in the
+            // window parked in it, which that rewind parks again anyway); on the
+            // per-body path the blob no longer describes the anchor and is
+            // dropped.
+            if (rows_written && at->have_savestate) {
+                at->savestate.clear();
+                at->have_savestate = savestate_applied && world.get_savestate && world.get_savestate(at->savestate)
+                                   && !at->savestate.empty();
+                if (!at->have_savestate) at->savestate.clear();
+            }
 
             // 3. re-simulate T+1 .. current with the recorded inputs
             const uint32_t lag = current_tick > anchor ? current_tick - anchor : 0;
@@ -878,6 +1012,15 @@ namespace bmmo::session {
         // a reason to do nothing - we simulated the tick with no input for a
         // body that in fact had one.
         bool knows_tick(uint32_t tick) const { return find_const(tick) != nullptr; }
+        // The savestate blob the record of `tick` carries: what a rewind to
+        // that tick restores, and after a replay the state the replayed tick
+        // left (the replay re-records every tick it steps).  Null when the
+        // tick is not recorded or its record has no blob.
+        const std::vector<uint8_t>* recorded_savestate(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at && at->have_savestate ? &at->savestate : nullptr;
+        }
+        rollback_thresholds& thresholds() { return thresholds_; }
 
         // Diagnostic only (see the recheck comment in restore_and_replay).
         void set_recheck_on_restore(bool enable) { recheck_on_restore_ = enable; }
@@ -908,6 +1051,13 @@ namespace bmmo::session {
         // The script replay (game/script_replay.hpp).  Off: the records carry
         // no script state and a replay is physics only, as before.
         void set_replay_scripts(bool enable) { replay_scripts_ = enable; }
+        // The IVP savestate (rollback_world::get_savestate / set_savestate,
+        // docs/ivp-savestate-design.md).  On (the default), an anchor whose
+        // record carries a blob is restored from it and the per-body writes are
+        // left to snapshot rows and births.  Off reproduces the per-body restore
+        // over the same records (the blobs are still captured), for the A/B in
+        // one binary.
+        void set_exact_restore(bool enable) { exact_restore_ = enable; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
 
@@ -971,6 +1121,12 @@ namespace bmmo::session {
             // The friction contacts each recorded body had at the end of this
             // tick (bodies with none are absent).
             std::map<std::string, std::vector<bmmo_physics_contact>> contacts;
+            // The IVP savestate at the end of this tick (rollback_world::get_savestate),
+            // when the world provides one.  A restore that writes snapshot rows
+            // on top of it captures it again, so it describes the world the
+            // replay of T+1.. starts from.
+            std::vector<uint8_t> savestate;
+            bool have_savestate = false;
         };
 
 
@@ -980,6 +1136,14 @@ namespace bmmo::session {
             wake_mode mode = wake_mode::keep;
             bool from_row = false;
             bool force_recheck = false;
+            // Put back by the anchor's savestate (rollback_world::set_savestate):
+            // only an item from our own record, never a row or a birth.  Gets
+            // no pose, extra or contact write of its own.
+            bool covered = false;
+            // Covered, but its friction contacts were not in the blob (its
+            // system was skipped): the contact write from our record runs for
+            // it anyway.
+            bool recontact = false;
             uint32_t repose_tick = 0;    // 0: none - re-pose at this replayed tick
             // Only set when the state came from our OWN record (the recorded
             // branch of the planning loop) or from the birth record of a body
@@ -1050,7 +1214,7 @@ namespace bmmo::session {
             return names;
         }
 
-        void capture(const rollback_world& world, tick_state& state) const {
+        void capture(const rollback_world& world, tick_state& state) {
             auto grab = [&](const std::string& entity) {
                 if (entity.empty()) return;
                 bmmo_physics_body_state body{};
@@ -1081,6 +1245,12 @@ namespace bmmo::session {
             if (state.have_clock) state.clock = clock;
             state.have_scripts = replay_scripts_ && world.capture_scripts && world.capture_scripts(state.scripts);
             if (!state.have_scripts) state.scripts.clear();
+            // Recorded whatever set_exact_restore says, so the switch is an A/B
+            // over the same records.  An empty blob counts as none.
+            state.savestate.clear();
+            state.have_savestate = world.get_savestate && world.get_savestate(state.savestate) && !state.savestate.empty();
+            if (!state.have_savestate) state.savestate.clear();
+            if (world.get_savestate && !state.have_savestate) ++stats_.savestate_capture_failures;
         }
 
         tick_state* find(uint32_t tick) {
@@ -1127,6 +1297,7 @@ namespace bmmo::session {
         bool restore_unit_ = true;
         bool sleep_as_recorded_ = true;
         bool replay_scripts_ = true;
+        bool exact_restore_ = true;
         uint32_t script_mismatch_logs_ = 0;
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;

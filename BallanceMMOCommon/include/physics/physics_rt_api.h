@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 16u  /* v16: the collision recheck as a pass of its own (v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 18u  /* v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -526,7 +526,47 @@ typedef struct bmmo_physics_api_v2 {
      * no body's pairs are built against a partner still at its live pose.
      * Returns 1, or -1 with a message. */
     int32_t (*body_recheck)(void* ipion_manager, const char* entity, char* error, uint32_t error_size);
+
+    /* ---- v17: the IVP savestate (docs/ivp-savestate-design.md) ---- */
+
+    /* The engine's whole dynamic state at a tick boundary as one byte blob:
+     * every core, every object's hull manager and overlap element, every
+     * collision checker (mindists, recursive mindists, watchers) with its
+     * scheduled event, every friction system with its contact points and
+     * pairs, the simulation units, the revive list, the clock, the object
+     * cache ring and the physics_RT side (the movable-object list, the CK
+     * world matrices, the manager's three clock floats).  Where the other
+     * entries restore a body and leave IVP's collision bookkeeping as the
+     * LIVE world had it, savestate_set tears that bookkeeping down and
+     * rebuilds it from the blob, so a replay from the restored tick is meant
+     * to be bit for bit the straight run.  The blob is LOCAL: its layout is
+     * private to one build, little-endian and versioned, it is only ever read
+     * back by the binary that wrote it, and it never goes on the wire.
+     *
+     * savestate_get writes at most `max` bytes and returns the blob's full
+     * size (like snprintf; `out` may be NULL to query it), or -1 with a
+     * message in error.  savestate_set returns 1 on success, 0 on failure with
+     * a message in error; on a failure past the teardown the world is put
+     * back into a runnable (not exact) state and the caller falls back to its
+     * per-body restore.  `flags` are the BMMO_PHYSICS_SAVESTATE_* bits below.
+     * v18: `dropped` (may be NULL) receives the ';'-separated names of the
+     * bodies whose friction contacts the blob could not put back (their
+     * system had a body the world no longer has), truncated to
+     * `dropped_size`; the caller re-creates those from its own record.
+     * `unknown` (may be NULL) receives, the same way, the live bodies the
+     * blob does not know: they keep their place in the movable list but are
+     * left out of collision detection, and the caller decides (a body it
+     * re-poses at its birth tick stays inert until then; one it has no record
+     * of it rechecks back in at once). */
+    int32_t (*savestate_get)(void* ipion_manager, uint8_t* out, uint32_t max, char* error, uint32_t error_size);
+    int32_t (*savestate_set)(void* ipion_manager, const uint8_t* data, uint32_t size, uint32_t flags, char* error,
+                             uint32_t error_size, char* dropped, uint32_t dropped_size, char* unknown, uint32_t unknown_size);
 } bmmo_physics_api_v2;
+
+/* savestate_set flags: the same values as SAVESTATE_STRICT and
+ * SAVESTATE_KEEP_UNKNOWN in physics/physics_savestate.hpp. */
+#define BMMO_PHYSICS_SAVESTATE_STRICT       1u  /* the first blob/world inconsistency fails the restore instead of being skipped */
+#define BMMO_PHYSICS_SAVESTATE_KEEP_UNKNOWN 2u  /* a body alive now but absent from the blob keeps its live collision state */
 
 /* Signature of the exported entry point: returns the table for the requested
  * major version, or NULL when that version is not provided. */

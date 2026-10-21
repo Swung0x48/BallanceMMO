@@ -122,6 +122,7 @@ namespace bmmo::physics {
         manager_ = nullptr;
         api_ = nullptr;
         build_id_.clear();
+        savestate_size_hint_ = 0;
     }
 
     bool physics_view::capture(world_hash& out, std::string& error) const {
@@ -518,6 +519,89 @@ namespace bmmo::physics {
         const bool ok = api_->body_recheck(manager_, entity, text, sizeof(text)) > 0;
         if (text[0]) error = text;
         return ok;
+    }
+
+    bool physics_view::savestate_get(std::vector<uint8_t>& out, std::string& error) const {
+        error.clear();
+        out.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->savestate_get) {
+            error = "the physics_RT bridge lacks savestate_get";
+            return false;
+        }
+        char text[512] = {};
+        // The size is asked with a NULL buffer, the blob fetched into a buffer
+        // of that size.  The last blob's size (plus a margin) stands in for the
+        // query, so the usual call captures once: the bridge returns the full
+        // size whatever the buffer held, and only a blob that outgrew the guess
+        // is fetched again (capture is deterministic, the second call returns
+        // the same size).
+        uint32_t capacity = savestate_size_hint_ ? savestate_size_hint_ + (savestate_size_hint_ >> 3) + 4096u : 0u;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            int32_t need = 0;
+            if (capacity == 0) {
+                need = api_->savestate_get(manager_, nullptr, 0, text, sizeof(text));
+            } else {
+                out.resize(capacity);
+                need = api_->savestate_get(manager_, out.data(), capacity, text, sizeof(text));
+            }
+            if (need < 0) {
+                error = text[0] ? text : "savestate_get failed";
+                out.clear();
+                return false;
+            }
+            if (need == 0) {
+                error = "the physics_RT bridge returned an empty savestate";
+                out.clear();
+                return false;
+            }
+            if (capacity != 0 && static_cast<uint32_t>(need) <= capacity) {
+                out.resize(static_cast<size_t>(need));
+                savestate_size_hint_ = static_cast<uint32_t>(need);
+                return true;
+            }
+            capacity = static_cast<uint32_t>(need);
+        }
+        error = "the savestate changed size between two captures";
+        out.clear();
+        return false;
+    }
+
+    bool physics_view::savestate_set(const uint8_t* data, size_t size, uint32_t flags, std::string& error,
+                                     std::vector<std::string>* contacts_dropped, std::vector<std::string>* unknown_bodies) const {
+        error.clear();
+        if (contacts_dropped) contacts_dropped->clear();
+        if (unknown_bodies) unknown_bodies->clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->savestate_set) {
+            error = "the physics_RT bridge lacks savestate_set";
+            return false;
+        }
+        if (!data || size == 0 || size > 0xFFFFFFFFull) {
+            error = "no savestate to restore";
+            return false;
+        }
+        char text[512] = {};
+        char dropped[2048] = {};
+        char unknown[4096] = {};
+        const int32_t ok = api_->savestate_set(manager_, data, static_cast<uint32_t>(size), flags, text, sizeof(text), dropped,
+                                               sizeof(dropped), unknown, sizeof(unknown));
+        const auto split_into = [](const char* joined, std::vector<std::string>* out) {
+            if (!out) return;
+            std::string name;
+            for (const char* p = joined; *p; ++p) {
+                if (*p == ';') { if (!name.empty()) out->push_back(name); name.clear(); }
+                else name += *p;
+            }
+            if (!name.empty()) out->push_back(name);
+        };
+        split_into(dropped, contacts_dropped);
+        split_into(unknown, unknown_bodies);
+        if (!ok) {
+            error = text[0] ? text : "savestate_set failed";
+            return false;
+        }
+        return true;
     }
 
     bool physics_view::set_event_log_muted(bool muted, std::string& error) const {

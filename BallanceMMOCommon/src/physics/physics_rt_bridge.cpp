@@ -4,13 +4,17 @@
 
 #include <physics/physics_rt_api.h>
 #include <physics/physics_state.hpp>
+#include <physics/physics_savestate.hpp>
 #include <physics/ball_navigation.hpp>
 
 #include "CKIpionManager.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include <bmmo_build_id.h>
 
@@ -551,6 +555,50 @@ namespace {
         return 1;
     }
 
+    // v17: the IVP savestate.  The blob is captured into a vector and copied
+    // out, snprintf style: at most `max` bytes written, the full size returned
+    // (`out` may be NULL to query it).
+    int32_t api_savestate_get(void* manager, uint8_t* out, uint32_t max, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::vector<uint8_t> blob;
+        std::string text;
+        if (!bmmo::physics::get_savestate(static_cast<CKIpionManager*>(manager), blob, text)) {
+            set_error(error, error_size, text);
+            return -1;
+        }
+        if (out && max && !blob.empty()) std::memcpy(out, blob.data(), blob.size() < max ? blob.size() : static_cast<size_t>(max));
+        return static_cast<int32_t>(blob.size());
+    }
+
+    int32_t api_savestate_set(void* manager, const uint8_t* data, uint32_t size, uint32_t flags, char* error,
+                              uint32_t error_size, char* dropped, uint32_t dropped_size, char* unknown, uint32_t unknown_size) {
+        if (dropped && dropped_size) dropped[0] = '\0';
+        if (unknown && unknown_size) unknown[0] = '\0';
+        if (!manager || (!data && size)) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        bmmo::physics::savestate_report report;
+        const bool ok = bmmo::physics::set_savestate(static_cast<CKIpionManager*>(manager), data, size, flags, text, &report);
+        const auto join_into = [](char* out, uint32_t out_size, const std::vector<std::string>& names) {
+            if (!out || !out_size) return;
+            std::string joined;
+            for (const std::string& name: names) joined += (joined.empty() ? "" : ";") + name;
+            std::snprintf(out, out_size, "%s", joined.c_str());
+        };
+        join_into(dropped, dropped_size, report.contacts_dropped);
+        join_into(unknown, unknown_size, report.unknown_bodies);
+        if (!ok) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -605,6 +653,8 @@ namespace {
         api_contacts_get,
         api_contacts_set,
         api_body_recheck,
+        api_savestate_get,
+        api_savestate_set,
     };
 }
 

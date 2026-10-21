@@ -8,6 +8,8 @@
 class IVP_Environment;
 class IVP_Time_Manager;
 class IVP_Time;
+class IVP_Core;
+template <class T> class IVP_U_Vector;
 
 namespace bmmo::physics::ivp_access {
     template <class Tag, typename Tag::type Member>
@@ -20,7 +22,9 @@ namespace bmmo::physics::ivp_access {
     struct env_time_of_next_psi { using type = IVP_Time IVP_Environment::*; friend type steal(env_time_of_next_psi); };
     struct env_time_of_last_psi { using type = IVP_Time IVP_Environment::*; friend type steal(env_time_of_last_psi); };
     struct env_next_movement_check { using type = short IVP_Environment::*; friend type steal(env_next_movement_check); };
+    struct env_core_revive_list { using type = IVP_U_Vector<IVP_Core> IVP_Environment::*; friend type steal(env_core_revive_list); };
 
+    template struct thief<env_core_revive_list, &IVP_Environment::core_revive_list>;
     template struct thief<env_time_manager, &IVP_Environment::time_manager>;
     template struct thief<env_current_time, &IVP_Environment::current_time>;
     template struct thief<env_time_of_next_psi, &IVP_Environment::time_of_next_psi>;
@@ -32,4 +36,7 @@ namespace bmmo::physics::ivp_access {
     inline IVP_Time& time_of_next_psi(IVP_Environment& env) { return env.*steal(env_time_of_next_psi()); }
     inline IVP_Time& time_of_last_psi(IVP_Environment& env) { return env.*steal(env_time_of_last_psi()); }
     inline short& next_movement_check(IVP_Environment& env) { return env.*steal(env_next_movement_check()); }
+    // The delayed-revive list (IVP_Environment::add_revive_core, drained at
+    // the next PSI): read by the body diagnostics.
+    inline IVP_U_Vector<IVP_Core>& revive_list(IVP_Environment& env) { return env.*steal(env_core_revive_list()); }
 }

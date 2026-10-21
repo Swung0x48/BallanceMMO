@@ -136,6 +136,35 @@ namespace bmmo::sim {
         // the input buffers, the scheduler, the snapshot cadence and the
         // journal all take their first tick from tick_index().
         void set_tick_index(uint32_t tick) { tick_ = tick; }
+
+        // The world's own counters that a re-step reads and the IVP savestate
+        // (physics/physics_savestate.hpp) does not carry: the blob holds the
+        // environment, the manager's floats, the RNG cursors as the
+        // generators have them and the entity matrices, but tick() starts
+        // with ivp_srand(rng_cursor_) / random_set_state(random_cursor_) - so a
+        // whole-frame re-step after a restore would put the LIVE world's
+        // cursors back over the restored ones - and update_sectors() runs the
+        // sector union (pacer included) against tick_.  The pending flag of
+        // the per-tick PreSimulate callback rides along: at a tick boundary it
+        // is false (the frame's Simulate consumed the callback).
+        //
+        // Test and diagnostics only (BallanceMMOSimTool --savestate-check
+        // records one per tick of its straight pass and puts the anchor's
+        // back before every restore).  Nothing else in the world is rewound
+        // by it: players, inputs, navigation replicas, proximity probes and
+        // the body bookkeeping of snapshot() stay as they are, so a caller
+        // must not change any of those inside the window it rewinds.  The
+        // session runner never rewinds a world.
+        struct step_state {
+            uint32_t tick = 0;
+            int rng_cursor = 0;
+            int random_cursor = 0;
+            bool callback_pending = false;
+            bmmo::session::sector_union sectors;
+        };
+        step_state capture_step_state() const;
+        void restore_step_state(const step_state& state);
+
         int level() const { return options_.level; }
         const bmmo::game::navigation_graph& navigation() const { return navigation_; }
         // Force value of a ball type (Physicalize_GameBall "Force"), 0 if unknown.

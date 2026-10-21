@@ -84,6 +84,20 @@ namespace bmmo::physics {
         int contacts_set(const char* entity, const bmmo_physics_contact* in, int count, uint32_t flags, std::string& error) const;
         // v16: rebuild the body's collision pairs against the world as it stands now.
         bool body_recheck(const char* entity, std::string& error) const;
+        // ---- bridge API v17: the IVP savestate (docs/ivp-savestate-design.md) ----
+        // The engine's whole dynamic state as a local byte blob; never on the
+        // wire.  savestate_get replaces `out`; savestate_set takes the
+        // BMMO_PHYSICS_SAVESTATE_* flags and, on a false return, leaves the
+        // world in no guaranteed state (the caller re-anchors).
+        bool savestate_get(std::vector<uint8_t>& out, std::string& error) const;
+        // `contacts_dropped` (optional out): the bodies whose friction
+        // contacts the blob could not put back; the rollback engine
+        // re-creates them from its own record.  `unknown_bodies` (optional
+        // out): the live bodies the blob does not know, left out of collision
+        // detection for the engine to park or recheck.
+        bool savestate_set(const uint8_t* data, size_t size, uint32_t flags, std::string& error,
+                           std::vector<std::string>* contacts_dropped = nullptr,
+                           std::vector<std::string>* unknown_bodies = nullptr) const;
 
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,
@@ -148,5 +162,9 @@ namespace bmmo::physics {
         std::string dll_sha256_;
         std::string dll_path_;
         std::string build_id_;
+        // The size of the last blob savestate_get fetched: the next fetch
+        // starts from it, so the common case is one capture instead of a size
+        // query plus a fetch.
+        mutable uint32_t savestate_size_hint_ = 0;
     };
 }

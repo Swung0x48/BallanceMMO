@@ -28,15 +28,30 @@ args = ap.parse_args()
 control = fd.worlds(jt.read_journal(args.control), want_local=True)
 arm = fd.worlds(jt.read_journal(args.arm), want_local=True)
 
+
+def pair_balls(row_a, row_b):
+    """A ball is keyed by its owner's player id, which differs between two sessions
+    of the same recording: when each row holds exactly one ball, they are the same
+    body and are compared under one name.  (Before this, the one body a solo test
+    is about was silently never compared.)"""
+    balls_a = [k for k in row_a if k[0] == 'ball']
+    balls_b = [k for k in row_b if k[0] == 'ball']
+    if len(balls_a) == 1 and len(balls_b) == 1 and balls_a[0] != balls_b[0]:
+        row_b = dict(row_b)
+        row_b[balls_a[0]] = row_b.pop(balls_b[0])
+    return row_b
+
+
 worst = {}
 first = {}
 for tick in sorted(set(control) & set(arm)):
     if tick < args.tick_from or tick > args.tick_until:
         continue
+    arm_row = pair_balls(control[tick], arm[tick])
     for key, pos in control[tick].items():
-        if key not in arm[tick]:
+        if key not in arm_row:
             continue
-        err = max(abs(a - b) for a, b in zip(pos, arm[tick][key]))
+        err = max(abs(a - b) for a, b in zip(pos, arm_row[key]))
         name = key[1] if key[0] == 'body' else 'ball:%s' % key[1]
         if err > worst.get(name, -1):
             worst[name] = err

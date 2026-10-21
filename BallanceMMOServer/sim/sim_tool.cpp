@@ -7,6 +7,9 @@
 //       [--ticks K] [--report-every R]
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK [--ticks N]
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --restore-at TICK [ENTITY] [--ticks N]
+//   BallanceMMOSimTool --root <game dir> --level N --savestate-check [scene switches] [--ticks N] [--rounds R]
+//       [--max-depth D] [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]
+//       [--savestate-trace PATH] [--stop-on-divergence] [--verbose]
 //
 // Replay mode boots base.cmo, loads the recorded level, waits for the retail
 // Gameplay_Ingame script to activate (the record's frame 0 anchor), performs
@@ -32,13 +35,27 @@
 // --body-guard a free run can play the session's side of a second trafo:
 // explode, reset, move the ball, explode again, and the guarded run must come
 // out like the unguarded one (design 9.14 / engine change #13).
+//
+// --savestate-check is the IVP savestate's robustness matrix
+// (docs/ivp-savestate-design.md, "Tests that prove it"; see run_savestate_check
+// for the exact contract): a straight pass keeps the savestate blob of every
+// tick of a window, then chained rounds of seeded (anchor, depth) restores
+// must reproduce those blobs byte for byte, before and after re-stepping.  The
+// scene is whatever the physics_world switches set up: --spawn-test N (the
+// coincident spawn), --drop (a ball dropped onto a bay, --drop-prop beams a
+// prop there too) or, with neither, the sector union started by --drop-sector.
 
 #include "headless_engine.hpp"
 #include "crash_report.hpp"
 #include "physics_world.hpp"
 #include <entity/session.hpp>
+#include <game/script_replay.hpp>
+#include <physics/physics_savestate.hpp>
 #include <physics/physics_state.hpp>
 #include <session/journal.hpp>
+#include <physics/physics_direct.hpp>
+#include <session/rollback_binding.hpp>
+#include <session/rollback.hpp>
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
@@ -57,11 +74,20 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <limits>
 #include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+// The IVP environment's random generator (ivp_utility), as physics_world.cpp
+// declares it: --legacy-restore puts the cursor back the way the old per-body
+// restore path did not need to (the blob path carries it itself).
+int ivp_srand_read();
+void ivp_srand(int seed);
 
 namespace {
     struct arguments {
@@ -178,6 +204,34 @@ namespace {
         // every tick, one line each, so two runs can be subtracted body by
         // body instead of only compared by hash.
         std::vector<std::string> tracked;
+        // --savestate-check: the IVP savestate's robustness matrix (see
+        // run_savestate_check).  --ticks is the straight pass's length (200
+        // when not given), --rounds the number of chained restores, --max-depth
+        // the deepest replay, --seed the schedule's seed (NOT the world's: the
+        // world keeps seed 1 like every physics_world mode here),
+        // --savestate-every K keeps the full blob of every K-th tick plus every
+        // tick the schedule anchors at or ends on (every other tick is still
+        // compared by its blob hash), --savestate-lead L the whole world ticks
+        // between the scene's last event and the window, --frames steps whole
+        // engine frames instead of physics-only steps, --legacy-restore is the
+        // negative control (the per-body restore path, which must FAIL on a
+        // scene with contacts) and --savestate-trace appends per-tick and
+        // per-round lines to a file for cross-process diffs.
+        bool savestate_check = false;
+        // --savestate-diff A B / --savestate-describe FILE: blobs the headless
+        // client wrote with --dump-savestate, compared field by field or
+        // printed whole - the tool that names the first differing field when
+        // two clients' journals only show a position drift.
+        std::string savestate_diff[2];
+        std::string savestate_describe;
+        int savestate_rounds = 50;
+        int savestate_max_depth = 48;
+        unsigned long long savestate_seed = 1;
+        int savestate_every = 1;
+        int savestate_lead = 1;
+        bool savestate_frames = false;
+        bool legacy_restore = false;
+        std::string savestate_trace;
     };
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -295,10 +349,28 @@ namespace {
                 if (i + 1 < argc && std::string_view(argv[i + 1]).substr(0, 2) != "--") entity = argv[++i];
                 out.restores.emplace_back(tick, std::move(entity));
             }
+            else if (arg == "--savestate-check") out.savestate_check = true;
+            else if (arg == "--savestate-diff") {
+                if (!(v = next())) return false;
+                out.savestate_diff[0] = v;
+                if (!(v = next())) return false;
+                out.savestate_diff[1] = v;
+            }
+            else if (arg == "--savestate-describe") { if (!(v = next())) return false; out.savestate_describe = v; }
+            else if (arg == "--rounds") { if (!(v = next())) return false; out.savestate_rounds = std::atoi(v); }
+            else if (arg == "--max-depth") { if (!(v = next())) return false; out.savestate_max_depth = std::atoi(v); }
+            else if (arg == "--seed") { if (!(v = next())) return false; out.savestate_seed = std::strtoull(v, nullptr, 0); }
+            else if (arg == "--savestate-every") { if (!(v = next())) return false; out.savestate_every = std::atoi(v); }
+            else if (arg == "--savestate-lead") { if (!(v = next())) return false; out.savestate_lead = std::atoi(v); }
+            else if (arg == "--frames") out.savestate_frames = true;
+            else if (arg == "--legacy-restore") out.legacy_restore = true;
+            else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
             else return false;
         }
-        // --list of a journal is pure file reading: no game data needed.
-        return !out.root.empty() || !out.replay_session.empty();
+        // --list of a journal and the savestate file verbs are pure file
+        // reading: no game data needed.
+        return !out.root.empty() || !out.replay_session.empty() || !out.savestate_diff[0].empty()
+            || !out.savestate_describe.empty();
     }
 
     bool gameplay_ingame_active(const bmmo::sim::headless_engine& engine) {
@@ -988,56 +1060,79 @@ namespace {
 }
 
 namespace {
-    // Server-side mechanism check (design 8.3): boots a physics-session world
-    // the way a room does, puts its player (and optionally a second one) in a
-    // sector so the union starts that sector's mechanisms, and drops the
-    // player's ball of the given type onto a mechanism part, then prints that
-    // part's height every report interval.  A mechanism that reacts to the
-    // ball (the rope bridge P_Modul_29 tearing under a stone ball) moves; one
-    // that does not holds its anchor pose.
-    int run_drop(const arguments& args) {
+    // ------------------------------------------- the physics_world family
+    // The session world a room builds and the scenes its switches describe,
+    // shared by --drop, --spawn-test and --savestate-check.  Every helper that
+    // can fail prints its own message and returns the exit code (0 = done),
+    // so each mode keeps the codes and the output it always had.
+
+    std::unique_ptr<bmmo::sim::physics_world> create_session_world(const arguments& args, float spawn_impulse) {
         bmmo::sim::world_options options;
         options.game_root = args.root;
         options.level = args.level > 0 ? args.level : 1;
         options.seed = 1;
+        options.spawn_impulse = spawn_impulse;
         options.boot_ticks = args.boot_ticks;
         options.anchor_timeout = args.anchor_timeout;
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         std::string error;
         auto world = bmmo::sim::physics_world::create(options, error);
-        if (!world) {
-            std::fprintf(stderr, "world create failed: %s\n", error.c_str());
-            return 1;
-        }
-        if (!world->add_player(1, 0, error)) {
+        if (!world) std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+        return world;
+    }
+
+    // The sector union follows the players: report where each of them is and
+    // the world starts the right mechanisms on its own.
+    void report_sector(bmmo::sim::physics_world& world, uint32_t player, int sector) {
+        bmmo::sim::lifecycle_event where;
+        where.type = bmmo::session::event_type::Sector;
+        where.sector = sector;
+        std::string error;
+        if (!world.apply_event(player, where, error))
+            std::fprintf(stderr, "sector event failed: %s\n", error.c_str());
+    }
+
+    // `ticks` whole world ticks; false (after printing why) on a failed tick.
+    bool settle_world(bmmo::sim::physics_world& world, int ticks) {
+        std::string error;
+        for (int i = 0; i < ticks; ++i)
+            if (!world.tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return false; }
+        return true;
+    }
+
+    // The sector scene: player 1 (and, with --drop-second-sector, player 2
+    // parked there) reports its sector, then --drop-settle world ticks run
+    // the union's passes and let the sector's bodies come to rest.
+    int setup_sector_scene(const arguments& args, bmmo::sim::physics_world& world) {
+        std::string error;
+        if (!world.add_player(1, 0, error)) {
             std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
             return 1;
         }
-        // The sector union follows the players: report where each of them is
-        // and the world starts (and stops) the right mechanisms on its own.
-        const auto report_sector = [&](uint32_t player, int sector) {
-            bmmo::sim::lifecycle_event where;
-            where.type = bmmo::session::event_type::Sector;
-            where.sector = sector;
-            if (!world->apply_event(player, where, error))
-                std::fprintf(stderr, "sector event failed: %s\n", error.c_str());
-        };
         if (args.drop_second_sector > 0) {
-            if (!world->add_player(2, 1, error)) {
+            if (!world.add_player(2, 1, error)) {
                 std::fprintf(stderr, "add_player 2 failed: %s\n", error.c_str());
                 return 1;
             }
-            report_sector(2, args.drop_second_sector);
+            report_sector(world, 2, args.drop_second_sector);
         }
-        report_sector(1, args.drop_sector);
-        for (int i = 0; i < args.drop_settle; ++i)
-            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
-        if (!args.dump_array.empty()) dump_array(world->engine(), args.dump_array);
+        report_sector(world, 1, args.drop_sector);
+        if (!settle_world(world, args.drop_settle)) return 1;
+        if (!args.dump_array.empty()) dump_array(world.engine(), args.dump_array);
+        return 0;
+    }
+
+    // The drop scene: the sector scene, then player 1's ball of --drop's type
+    // physicalized --drop-height above --drop-at (or the --drop entity) - or
+    // at --drop-player-at - and the --drop-prop prop beamed to the drop spot.
+    int setup_drop_scene(const arguments& args, bmmo::sim::physics_world& world) {
+        if (const int code = setup_sector_scene(args, world)) return code;
+        std::string error;
         VxVector spawn(args.drop_at[0], args.drop_at[1], args.drop_at[2]);
         if (!args.have_drop_at) {
             // Module parts share names across sectors, so --drop-at (the PH
             // table's matrix for the module) is the reliable way in.
-            auto* target = CK3dEntity::Cast(world->engine().context()->GetObjectByNameAndParentClass(
+            auto* target = CK3dEntity::Cast(world.engine().context()->GetObjectByNameAndParentClass(
                 const_cast<CKSTRING>(args.drop_entity.c_str()), CKCID_3DENTITY, nullptr));
             if (!target) {
                 std::fprintf(stderr, "no 3D entity named %s (pass --drop-at X Y Z)\n", args.drop_entity.c_str());
@@ -1046,6 +1141,92 @@ namespace {
             target->GetPosition(&spawn);
         }
         spawn.y += args.drop_height;
+        VxVector player_spawn = args.have_drop_player_at
+            ? VxVector(args.drop_player_at[0], args.drop_player_at[1], args.drop_player_at[2]) : spawn;
+        bmmo::sim::lifecycle_event event;
+        event.type = bmmo::session::event_type::Physicalize;
+        event.ball_type = static_cast<uint8_t>(args.drop_ball);
+        event.position[0] = player_spawn.x;
+        event.position[1] = player_spawn.y;
+        event.position[2] = player_spawn.z;
+        event.recipe = world.retail_recipe(event.ball_type);
+        if (!world.apply_event(1, event, error)) {
+            std::fprintf(stderr, "physicalize failed: %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("dropped ball type %d (%s) at (%.3f,%.3f,%.3f), watching %s\n", args.drop_ball,
+            world.ball_rows()[args.drop_ball].name.c_str(), player_spawn.x, player_spawn.y, player_spawn.z,
+            args.drop_entity.c_str());
+        if (!args.drop_prop.empty()) {
+            // The level's own ball, physicalized by the sector activation: beam
+            // it to the drop spot the same way a player would have pushed it.
+            const double position[3] = {spawn.x, spawn.y, spawn.z};
+            const double upright[4] = {0.0, 0.0, 0.0, 1.0};   // beaming needs a rotation as well
+            const float still[3] = {0.0f, 0.0f, 0.0f};
+            if (!bmmo::physics::set_body_state(world.physics(), args.drop_prop.c_str(), position, upright,
+                                               still, still, true, error))
+                std::fprintf(stderr, "prop %s: %s\n", args.drop_prop.c_str(), error.c_str());
+            else
+                std::printf("prop %s beamed to (%.3f,%.3f,%.3f)\n", args.drop_prop.c_str(), spawn.x, spawn.y, spawn.z);
+        }
+        return 0;
+    }
+
+    // The spawn scene: --spawn-test N players, --drop-settle world ticks, then
+    // every player physicalizes its --spawn-ball at the level's resetpoint in
+    // the same tick with the SPAWN flag, the way N retail clients spawning
+    // together would report it.  `ids` gets the players.
+    int setup_spawn_scene(const arguments& args, bmmo::sim::physics_world& world, std::vector<uint32_t>& ids) {
+        std::string error;
+        const uint8_t ball_type = static_cast<uint8_t>(args.spawn_ball);
+        if (ball_type >= world.ball_rows().size()) {
+            std::fprintf(stderr, "--spawn-ball %d is out of range (%zu ball types)\n", args.spawn_ball, world.ball_rows().size());
+            return 2;
+        }
+        const int n = std::max(1, args.spawn_test);
+        ids.clear();
+        for (int i = 0; i < n; ++i) {
+            const uint32_t id = static_cast<uint32_t>(i + 1);
+            if (!world.add_player(id, static_cast<uint8_t>(i), error)) {
+                std::fprintf(stderr, "add_player %u failed: %s\n", id, error.c_str());
+                return 1;
+            }
+            ids.push_back(id);
+        }
+        if (!settle_world(world, args.drop_settle)) return 1;
+        const VxMatrix& spawn = world.spawn_matrix();
+        for (const uint32_t id: ids) {
+            bmmo::sim::lifecycle_event event;
+            event.type = bmmo::session::event_type::Physicalize;
+            event.ball_type = ball_type;
+            event.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+            for (int k = 0; k < 3; ++k) event.position[k] = spawn[3][k];
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) event.rotation[r * 3 + k] = spawn[r][k];
+            event.recipe = world.retail_recipe(ball_type);
+            event.tick = world.tick_index();
+            if (!world.apply_event(id, event, error)) {
+                std::fprintf(stderr, "physicalize player %u failed: %s\n", id, error.c_str());
+                return 1;
+            }
+        }
+        std::printf("spawned %d players (ball type %d, %s) at tick %u, impulse %.3f m/s\n", n, ball_type,
+            world.ball_rows()[ball_type].name.c_str(), world.tick_index(), static_cast<double>(args.spawn_impulse));
+        return 0;
+    }
+
+    // Server-side mechanism check (design 8.3): boots a physics-session world
+    // the way a room does, puts its player (and optionally a second one) in a
+    // sector so the union starts that sector's mechanisms, and drops the
+    // player's ball of the given type onto a mechanism part, then prints that
+    // part's height every report interval.  A mechanism that reacts to the
+    // ball (the rope bridge P_Modul_29 tearing under a stone ball) moves; one
+    // that does not holds its anchor pose.
+    int run_drop(const arguments& args) {
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        if (const int code = setup_drop_scene(args, *world)) return code;
+        std::string error;
         // The parts of the mechanism this run watches: every physics body whose
         // name carries the --drop name.
         const auto watched = [&args](const bmmo::sim::physics_world& w) {
@@ -1070,40 +1251,12 @@ namespace {
             std::printf("tick=%d parts:%s\n  %s\n", tick, text.empty() ? " none physicalized" : text.c_str(),
                         root_scripts(world->engine()).c_str());
         };
-        VxVector player_spawn = args.have_drop_player_at
-            ? VxVector(args.drop_player_at[0], args.drop_player_at[1], args.drop_player_at[2]) : spawn;
-        bmmo::sim::lifecycle_event event;
-        event.type = bmmo::session::event_type::Physicalize;
-        event.ball_type = static_cast<uint8_t>(args.drop_ball);
-        event.position[0] = player_spawn.x;
-        event.position[1] = player_spawn.y;
-        event.position[2] = player_spawn.z;
-        event.recipe = world->retail_recipe(event.ball_type);
-        if (!world->apply_event(1, event, error)) {
-            std::fprintf(stderr, "physicalize failed: %s\n", error.c_str());
-            return 1;
-        }
-        std::printf("dropped ball type %d (%s) at (%.3f,%.3f,%.3f), watching %s\n", args.drop_ball,
-            world->ball_rows()[args.drop_ball].name.c_str(), player_spawn.x, player_spawn.y, player_spawn.z,
-            args.drop_entity.c_str());
-        if (!args.drop_prop.empty()) {
-            // The level's own ball, physicalized by the sector activation: beam
-            // it to the drop spot the same way a player would have pushed it.
-            const double position[3] = {spawn.x, spawn.y, spawn.z};
-            const double upright[4] = {0.0, 0.0, 0.0, 1.0};   // beaming needs a rotation as well
-            const float still[3] = {0.0f, 0.0f, 0.0f};
-            if (!bmmo::physics::set_body_state(world->physics(), args.drop_prop.c_str(), position, upright,
-                                               still, still, true, error))
-                std::fprintf(stderr, "prop %s: %s\n", args.drop_prop.c_str(), error.c_str());
-            else
-                std::printf("prop %s beamed to (%.3f,%.3f,%.3f)\n", args.drop_prop.c_str(), spawn.x, spawn.y, spawn.z);
-        }
         report_parts(-1);
         std::map<std::string, double> start;
         for (const auto& body: watched(*world)) start.emplace(body.name, body.position[1]);
         for (int i = 0; i < args.ticks; ++i) {
             if (args.drop_move_sector > 0 && i == args.drop_move_tick) {
-                report_sector(1, args.drop_move_sector);
+                report_sector(*world, 1, args.drop_move_sector);
                 std::printf("tick=%d player 1 moved to sector %d\n", i, args.drop_move_sector);
             }
             if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
@@ -1124,57 +1277,12 @@ namespace {
     // flag; the deterministic kick should move them apart without ever
     // producing NaN.  Windows vs Linux builds diff the per-tick pose hashes.
     int run_spawn_test(const arguments& args) {
-        bmmo::sim::world_options options;
-        options.game_root = args.root;
-        options.level = args.level > 0 ? args.level : 1;
-        options.seed = 1;
-        options.spawn_impulse = args.spawn_impulse;
-        options.boot_ticks = args.boot_ticks;
-        options.anchor_timeout = args.anchor_timeout;
-        options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
-        std::string error;
-        auto world = bmmo::sim::physics_world::create(options, error);
-        if (!world) {
-            std::fprintf(stderr, "world create failed: %s\n", error.c_str());
-            return 1;
-        }
-        const uint8_t ball_type = static_cast<uint8_t>(args.spawn_ball);
-        if (ball_type >= world->ball_rows().size()) {
-            std::fprintf(stderr, "--spawn-ball %d is out of range (%zu ball types)\n", args.spawn_ball, world->ball_rows().size());
-            return 2;
-        }
-        const int n = std::max(1, args.spawn_test);
+        auto world = create_session_world(args, args.spawn_impulse);
+        if (!world) return 1;
         std::vector<uint32_t> ids;
-        for (int i = 0; i < n; ++i) {
-            const uint32_t id = static_cast<uint32_t>(i + 1);
-            if (!world->add_player(id, static_cast<uint8_t>(i), error)) {
-                std::fprintf(stderr, "add_player %u failed: %s\n", id, error.c_str());
-                return 1;
-            }
-            ids.push_back(id);
-        }
-        for (int i = 0; i < args.drop_settle; ++i)
-            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
-        // Every player physicalizes at the resetpoint in the same tick, the
-        // way N retail clients spawning together would report it.
-        const VxMatrix& spawn = world->spawn_matrix();
-        for (const uint32_t id: ids) {
-            bmmo::sim::lifecycle_event event;
-            event.type = bmmo::session::event_type::Physicalize;
-            event.ball_type = ball_type;
-            event.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
-            for (int k = 0; k < 3; ++k) event.position[k] = spawn[3][k];
-            for (int r = 0; r < 3; ++r)
-                for (int k = 0; k < 3; ++k) event.rotation[r * 3 + k] = spawn[r][k];
-            event.recipe = world->retail_recipe(ball_type);
-            event.tick = world->tick_index();
-            if (!world->apply_event(id, event, error)) {
-                std::fprintf(stderr, "physicalize player %u failed: %s\n", id, error.c_str());
-                return 1;
-            }
-        }
-        std::printf("spawned %d players (ball type %d, %s) at tick %u, impulse %.3f m/s\n", n, ball_type,
-            world->ball_rows()[ball_type].name.c_str(), world->tick_index(), static_cast<double>(args.spawn_impulse));
+        if (const int code = setup_spawn_scene(args, *world, ids)) return code;
+        std::string error;
+        const uint8_t ball_type = static_cast<uint8_t>(args.spawn_ball);
         const int ticks = args.ticks_explicit ? args.ticks : 200;
         const int report_every = args.report_every_explicit ? args.report_every : 10;
         const std::string entity_prefix = world->ball_rows()[ball_type].name + "_BMMO_";
@@ -1263,6 +1371,768 @@ namespace {
         std::printf("summary: %s\n", (ok && !any_nan) ? "ok" : "FAILED");
         std::fflush(stdout);
         return (ok && !any_nan) ? 0 : 2;
+    }
+
+    // --------------------------------------------------- --savestate-check
+    //
+    // The IVP savestate's robustness matrix (docs/ivp-savestate-design.md,
+    // "Tests that prove it").  The claim under test: the physics after any
+    // number of rewinds is bit for bit the physics of the straight run, and
+    // every comparison is of WHOLE savestate blobs - a blob is the engine's
+    // entire dynamic state, so two equal blobs mean the next step cannot
+    // differ, and the first differing field names the bug.
+    //
+    //   scene     what the physics_world switches set up, with whole world
+    //             ticks: --spawn-test N (the coincident spawn), --drop (a ball
+    //             dropped onto a bay, --drop-prop beams a prop there too) or,
+    //             with neither, the sector union of --drop-sector /
+    //             --drop-second-sector; then --savestate-lead more world
+    //             ticks.  Every event happens BEFORE the window.  A body born
+    //             inside it is out of scope (a restore anchored before its
+    //             birth tears its collision state down with the rest - the
+    //             rollback parks and re-poses such a body, this mode would only
+    //             report the difference), and so is --drop-move.
+    //   straight  for t in [T0, T0+N), at the tick boundary: the blob B[t]
+    //             (get_savestate: the whole world), its hash and size, the
+    //             world hash H[t] (every field), the exact core dump E[t], the
+    //             world's own counters (physics_world::step_state) and, with
+    //             --frames, the script replay's bytes S[t]; then one step -
+    //             world.pre_simulate() + bmmo::physics::step_physics (the
+    //             primitive the headless client re-steps with), or with
+    //             --frames one whole world.tick() in the straight pass and,
+    //             in a round, the selected scripts' execute_frame + the same
+    //             physics step (the client's own replay recipe).  B, E and S are kept for
+    //             every --savestate-every K-th tick and every tick a round
+    //             anchors at or ends on; H, the blob hash and the counters for
+    //             every tick.
+    //   rounds    R (anchor a, depth d) pairs from a seeded LCG - the depth
+    //             uniform in [0, min(D, N-1)], then the anchor uniform over the
+    //             ticks that leave room for it - CHAINED: the world is wherever
+    //             the previous round left it, which is the live case (the world
+    //             has moved on with another history).  A round puts the
+    //             counters back, with --frames the scripts (before the blob, so
+    //             the force blocks' controllers exist when the savestate orders
+    //             them), then set_savestate(B[a], STRICT), and checks
+    //               restore identity  a fresh capture equals B[a] byte for byte
+    //               replay identity   after each of the d steps the blob equals
+    //                                 B[t] (byte for byte where kept, by hash
+    //                                 and size elsewhere), and at a+d the world
+    //                                 hash, the exact core dump and (--frames)
+    //                                 the script bytes equal the straight pass's.
+    //             The first mismatch of a round prints
+    //               FAIL round=r anchor=a depth=d tick=t: <what>
+    //             (<what> is diff_savestate's line for a blob).  A restore that
+    //             returns false ends the check: the world is not guaranteed
+    //             consistent after it (physics_savestate.hpp).
+    //   result    'summary: savestate-check ...' and 'PASS rounds=R failed=0'
+    //             (exit 0) or 'FAIL rounds=R failed=F' (exit 3); with
+    //             --stop-on-divergence the rounds stop at the first failure.  A
+    //             window none of whose captures holds a contact point or a
+    //             friction system proves nothing about the collision state:
+    //             'vacuous scene', exit 2, before any round runs.
+    //
+    // --legacy-restore is the negative control: the anchor is put back the
+    // old per-body way - the clock (set_clock_state), the manager's floats and
+    // the RNG cursors, then every movable body through set_body_state
+    // (wake_mode keep, no recheck) and set_core_extra, like restore_bodies -
+    // which keeps the live world's collision bookkeeping and must FAIL on a
+    // scene with contacts.
+    //
+    // --frames is the integration check for the mechanism levels.  Beyond the
+    // blob, H and E it compares the script replay's bytes of the mechanism
+    // scripts (script_replay::select at T0).  It does not restore, and so
+    // assumes unchanged across the window, the CK state of every script
+    // outside that selection (Gameplay_*, the checkpoints, the extras) and the
+    // engine's own clock - neither does the session's rollback; a difference
+    // they make shows up as a blob or script mismatch like any other.  Every
+    // selected script active at the anchor is written back; one the frame
+    // told to reset (script_replay::resets_pending) inside a round's window
+    // cannot be reproduced by construction, so such rounds are flagged in the
+    // verbose line and the count is in the summary (script_resets=).
+    //
+    // --savestate-trace PATH appends one line per straight tick and per round
+    // and the summary: world hashes, blob sizes and counts only - never the
+    // blob's hash, which carries the environment's address - so the files of
+    // two builds or platforms can be diffed directly.  On the first failure
+    // whose expected blob was kept, describe_savestate of both blobs goes to
+    // PATH.round<r>.expected.txt / .actual.txt.
+
+    struct savestate_round { int anchor = 0; int depth = 0; };   // window indices
+
+    // Knuth's MMIX LCG; the high half per draw.  The same seed gives the same
+    // schedule on every platform.
+    std::vector<savestate_round> savestate_schedule(unsigned long long seed, int rounds, int max_depth, int window) {
+        uint64_t state = static_cast<uint64_t>(seed);
+        const auto next = [&state]() {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            return static_cast<uint32_t>(state >> 32);
+        };
+        const auto upto = [&next](int n) {   // [0, n]
+            return n <= 0 ? 0 : static_cast<int>(next() % (static_cast<uint32_t>(n) + 1u));
+        };
+        static_cast<void>(next());   // mix the seed in before the first draw
+        static_cast<void>(next());
+        std::vector<savestate_round> out;
+        const int deepest = std::max(0, std::min(max_depth, window - 1));
+        for (int r = 0; r < rounds; ++r) {
+            savestate_round entry;
+            entry.depth = upto(deepest);
+            entry.anchor = upto(window - 1 - entry.depth);
+            out.push_back(entry);
+        }
+        return out;
+    }
+
+    // --legacy-restore: what the old per-body restore path wrote back.
+    template <class T> bool same_bits(const T& a, const T& b) { return std::memcmp(&a, &b, sizeof(T)) == 0; }
+
+    // The first field two world hashes differ in ("" when every field is the
+    // same, floats compared bit for bit), with both values.
+    std::string diff_world_hashes(const bmmo::physics::world_hash& expected, const bmmo::physics::world_hash& actual) {
+        char text[320] = {};
+        const auto u64 = [&text](const char* field, uint64_t a, uint64_t b) {
+            if (a == b) return false;
+            std::snprintf(text, sizeof(text), "%s %016llx vs %016llx", field, static_cast<unsigned long long>(a),
+                          static_cast<unsigned long long>(b));
+            return true;
+        };
+        const auto integer = [&text](const char* field, long long a, long long b) {
+            if (a == b) return false;
+            std::snprintf(text, sizeof(text), "%s %lld vs %lld", field, a, b);
+            return true;
+        };
+        const auto f64 = [&text](const char* field, const double* a, const double* b, int n) {
+            for (int k = 0; k < n; ++k) {
+                if (same_bits(a[k], b[k])) continue;
+                std::snprintf(text, sizeof(text), "%s[%d] %a vs %a", field, k, a[k], b[k]);
+                return true;
+            }
+            return false;
+        };
+        const auto f32 = [&text](const char* field, const float* a, const float* b, int n) {
+            for (int k = 0; k < n; ++k) {
+                if (same_bits(a[k], b[k])) continue;
+                std::snprintf(text, sizeof(text), "%s[%d] %a vs %a", field, k, static_cast<double>(a[k]),
+                              static_cast<double>(b[k]));
+                return true;
+            }
+            return false;
+        };
+        // The named fields first, the folded hashes last: a field says more.
+        if (integer("cores", expected.cores, actual.cores)) return text;
+        if (std::strncmp(expected.probe_name, actual.probe_name, sizeof(expected.probe_name)) != 0) {
+            std::snprintf(text, sizeof(text), "probe_name %.*s vs %.*s", static_cast<int>(sizeof(expected.probe_name)),
+                          expected.probe_name, static_cast<int>(sizeof(actual.probe_name)), actual.probe_name);
+            return text;
+        }
+        if (f64("probe_position", expected.probe_position, actual.probe_position, 3)
+                || f32("probe_speed", expected.probe_speed, actual.probe_speed, 3)
+                || f32("probe_rot_speed", expected.probe_rot_speed, actual.probe_rot_speed, 3)
+                || f64("ivp_time", &expected.ivp_time, &actual.ivp_time, 1)
+                || integer("ivp_seed", expected.ivp_seed, actual.ivp_seed)
+                || integer("next_movement_check", expected.next_movement_check, actual.next_movement_check)
+                || f64("time_of_last_psi", &expected.time_of_last_psi, &actual.time_of_last_psi, 1)
+                || f64("time_of_next_psi", &expected.time_of_next_psi, &actual.time_of_next_psi, 1)
+                || f32("delta_time_ms", &expected.delta_time_ms, &actual.delta_time_ms, 1)
+                || f32("physics_delta_time", &expected.physics_delta_time, &actual.physics_delta_time, 1)
+                || f32("time_factor", &expected.time_factor, &actual.time_factor, 1)
+                || u64("surfaces", expected.surfaces, actual.surfaces) || u64("pose", expected.pose, actual.pose)
+                || u64("hash", expected.hash, actual.hash))
+            return text;
+        return {};
+    }
+
+    // Which named fields of which cores differ between two
+    // describe_cores_exact dumps ("name field=... field=..." per line, sorted
+    // by name): the token-wise compare of session_client.cpp's
+    // diff_core_dumps, capped for a one-line report.
+    std::string diff_exact_dumps(const std::string& expected, const std::string& actual) {
+        const auto split = [](const std::string& text) {
+            std::map<std::string, std::vector<std::string>> out;
+            size_t pos = 0;
+            while (pos < text.size()) {
+                const size_t end = text.find('\n', pos);
+                const std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+                pos = end == std::string::npos ? text.size() : end + 1;
+                if (line.empty()) continue;
+                std::vector<std::string> tokens;
+                size_t t = 0;
+                while (t < line.size()) {
+                    const size_t space = line.find(' ', t);
+                    tokens.push_back(line.substr(t, space == std::string::npos ? std::string::npos : space - t));
+                    t = space == std::string::npos ? line.size() : space + 1;
+                }
+                if (!tokens.empty()) out[tokens[0]] = std::move(tokens);
+            }
+            return out;
+        };
+        const auto a = split(expected), b = split(actual);
+        std::string out;
+        int changed = 0;
+        const auto add = [&out, &changed](const std::string& body) {
+            if (++changed <= 4) out += " " + (body.size() > 400 ? body.substr(0, 400) + "..." : body) + ";";
+        };
+        static const std::string missing = "<none>";
+        for (const auto& [name, tokens]: a) {
+            const auto other = b.find(name);
+            if (other == b.end()) { add(name + " GONE"); continue; }
+            std::string fields;
+            const size_t n = std::max(tokens.size(), other->second.size());
+            for (size_t i = 1; i < n; ++i) {
+                const std::string& x = i < tokens.size() ? tokens[i] : missing;
+                const std::string& y = i < other->second.size() ? other->second[i] : missing;
+                if (x != y) fields += " " + x + "->" + y;
+            }
+            if (!fields.empty()) add(name + fields);
+        }
+        for (const auto& [name, tokens]: b)
+            if (a.find(name) == a.end()) add(name + " NEW");
+        if (changed > 4) out += " (+" + std::to_string(changed - 4) + " more bodies)";
+        if (out.empty()) out = " the dumps differ in text but in no body's fields";
+        return out;
+    }
+
+    std::string blob_difference(const std::vector<uint8_t>& expected, const std::vector<uint8_t>& actual) {
+        std::string line = bmmo::physics::diff_savestate(expected.data(), expected.size(), actual.data(), actual.size());
+        if (line.empty())
+            line = "the blobs differ (" + std::to_string(expected.size()) + " vs " + std::to_string(actual.size())
+                 + " bytes) but diff_savestate names no field";
+        return line;
+    }
+
+    // --savestate-trace: appended to, closed with the check.
+    class trace_file {
+    public:
+        explicit trace_file(const std::string& path) {
+            if (!path.empty()) file_ = std::fopen(path.c_str(), "a");
+        }
+        ~trace_file() { if (file_) std::fclose(file_); }
+        trace_file(const trace_file&) = delete;
+        trace_file& operator=(const trace_file&) = delete;
+        bool open() const { return file_ != nullptr; }
+        void put(const char* line) {
+            if (!file_) return;
+            std::fputs(line, file_);
+            std::fputc('\n', file_);
+        }
+    private:
+        std::FILE* file_ = nullptr;
+    };
+
+    bool write_text_file(const std::string& path, const std::string& text) {
+        std::FILE* file = std::fopen(path.c_str(), "wb");
+        if (!file) return false;
+        const bool ok = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+        std::fclose(file);
+        return ok;
+    }
+
+    // What the straight pass keeps of one tick boundary.
+    struct straight_tick {
+        uint64_t blob_hash = 0;
+        size_t blob_size = 0;
+        bool kept = false;
+        std::vector<uint8_t> blob;       // kept ticks
+        std::string exact;               // kept ticks: describe_cores_exact
+        std::vector<uint8_t> scripts;    // kept ticks, --frames: script_replay::capture
+        bmmo::physics::world_hash hash;
+        bmmo::sim::physics_world::step_state counters;
+    };
+
+    // --savestate-diff A B and --savestate-describe FILE: savestate blobs
+    // written by BallanceMMOSessionClient --dump-savestate.  The diff is
+    // diff_savestate's first differing field (the environment identity
+    // excepted: two processes never share one); describe prints the whole
+    // record as text.  Needs no game: the blob is self-contained.
+    int run_savestate_files(const arguments& args) {
+        const auto read_file = [](const std::string& path, std::vector<uint8_t>& out) {
+            out.clear();
+            FILE* f = std::fopen(path.c_str(), "rb");
+            if (!f) return false;
+            uint8_t buffer[65536];
+            size_t n;
+            while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) out.insert(out.end(), buffer, buffer + n);
+            std::fclose(f);
+            return true;
+        };
+        std::string error;
+        if (!args.savestate_describe.empty()) {
+            std::vector<uint8_t> blob;
+            if (!read_file(args.savestate_describe, blob)) {
+                std::fprintf(stderr, "cannot read %s\n", args.savestate_describe.c_str());
+                return 1;
+            }
+            if (!bmmo::physics::check_savestate(blob.data(), blob.size(), error)) {
+                std::fprintf(stderr, "%s: %s\n", args.savestate_describe.c_str(), error.c_str());
+                return 1;
+            }
+            std::printf("%s", bmmo::physics::describe_savestate(blob.data(), blob.size()).c_str());
+            return 0;
+        }
+        std::vector<uint8_t> blobs[2];
+        for (int k = 0; k < 2; ++k) {
+            if (!read_file(args.savestate_diff[k], blobs[k])) {
+                std::fprintf(stderr, "cannot read %s\n", args.savestate_diff[k].c_str());
+                return 1;
+            }
+            if (!bmmo::physics::check_savestate(blobs[k].data(), blobs[k].size(), error)) {
+                std::fprintf(stderr, "%s: %s\n", args.savestate_diff[k].c_str(), error.c_str());
+                return 1;
+            }
+        }
+        const std::string difference = bmmo::physics::diff_savestate(blobs[0].data(), blobs[0].size(), blobs[1].data(),
+                                                                     blobs[1].size());
+        if (difference.empty()) {
+            std::printf("identical (%zu bytes)\n", blobs[0].size());
+            return 0;
+        }
+        std::printf("differ: %s\n", difference.c_str());
+        return 3;
+    }
+
+    int run_savestate_check(const arguments& args) {
+        const int window = args.ticks_explicit ? args.ticks : 200;
+        if (window < 1 || args.savestate_rounds < 0 || args.savestate_max_depth < 0 || args.savestate_every < 1
+                || args.savestate_lead < 0) {
+            std::fprintf(stderr, "--savestate-check needs --ticks >= 1, --rounds >= 0, --max-depth >= 0, "
+                                 "--savestate-every >= 1 and --savestate-lead >= 0\n");
+            return 2;
+        }
+        if (args.drop_move_sector > 0) {
+            std::fprintf(stderr, "--drop-move is an event inside the window; --savestate-check sets every event up "
+                                 "before it\n");
+            return 2;
+        }
+        const bool frames = args.savestate_frames;
+        const bool legacy = args.legacy_restore;
+        const bool drop = !args.drop_entity.empty();
+        const bool spawn = !drop && args.spawn_test > 0;
+
+        // ---- the scene, with whole world ticks
+        auto world = create_session_world(args, spawn ? args.spawn_impulse : 0.0f);
+        if (!world) return 1;
+        std::string scene;
+        if (drop) {
+            if (const int code = setup_drop_scene(args, *world)) return code;
+            scene = "drop:" + args.drop_entity + ":" + std::to_string(args.drop_ball);
+        } else if (spawn) {
+            std::vector<uint32_t> ids;
+            if (const int code = setup_spawn_scene(args, *world, ids)) return code;
+            scene = "spawn-test:" + std::to_string(ids.size());
+        } else {
+            if (const int code = setup_sector_scene(args, *world)) return code;
+            scene = "sector:" + std::to_string(args.drop_sector);
+            if (args.drop_second_sector > 0) scene += "+" + std::to_string(args.drop_second_sector);
+        }
+        if (!settle_world(*world, args.savestate_lead)) return 1;
+        scene = "level" + std::to_string(world->level()) + ":" + scene;
+        CKIpionManager* physics = world->physics();
+        CKContext* context = world->engine().context();
+        if (!physics || !physics->GetEnvironment()) {
+            std::fprintf(stderr, "savestate-check: no physics environment after the scene\n");
+            return 1;
+        }
+
+        // ---- the script replay (--frames): the mechanism scripts and the
+        // hooks that carry the force blocks' controllers, as the headless
+        // client installs them.
+        bmmo::game::script_replay::selection scripts;
+        bmmo::game::script_replay_hooks hooks;
+        if (frames) {
+            scripts = bmmo::game::script_replay::select(context);
+            hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
+                bmmo_physics_force_block state{};
+                std::string error;
+                if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, error))
+                    return false;
+                out.exists = state.exists != 0;
+                for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+                return true;
+            };
+            hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
+                bmmo_physics_force_block state{};
+                state.exists = in.exists ? 1 : 0;
+                for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+                std::string error;
+                return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
+            };
+            const auto st = bmmo::game::script_replay::describe(context, scripts);
+            std::printf("savestate-check: script replay: %d scripts (%d active), %d blocks, %d parameters, "
+                        "%d force blocks, %d opaque\n", st.scripts, st.active, st.blocks, st.parameters,
+                        st.force_blocks, st.opaque);
+        }
+
+        // ---- the schedule first: it decides which blobs are kept
+        const std::vector<savestate_round> schedule = savestate_schedule(
+            args.savestate_seed, args.savestate_rounds, args.savestate_max_depth, window);
+        std::vector<char> keep(static_cast<size_t>(window), 0);
+        for (int i = 0; i < window; i += args.savestate_every) keep[static_cast<size_t>(i)] = 1;
+        for (const auto& entry: schedule) {
+            keep[static_cast<size_t>(entry.anchor)] = 1;
+            keep[static_cast<size_t>(entry.anchor + entry.depth)] = 1;
+        }
+        int kept = 0;
+        for (char k: keep) kept += k ? 1 : 0;
+
+        const uint32_t t0 = world->tick_index();
+        const char* mode = frames ? "frames" : "physics";
+        const char* restore = legacy ? "legacy" : "savestate";
+        trace_file trace(args.savestate_trace);
+        if (!args.savestate_trace.empty() && !trace.open()) {
+            std::fprintf(stderr, "cannot open --savestate-trace %s\n", args.savestate_trace.c_str());
+            return 1;
+        }
+        {
+            char line[512];
+            std::snprintf(line, sizeof(line),
+                "savestate-check scene=%s mode=%s restore=%s window=%u..%u ticks=%d rounds=%zu max_depth=%d seed=%llu"
+                " every=%d kept=%d lead=%d", scene.c_str(), mode, restore, t0, t0 + static_cast<uint32_t>(window) - 1u,
+                window, schedule.size(), args.savestate_max_depth, args.savestate_seed, args.savestate_every, kept,
+                args.savestate_lead);
+            std::printf("%s\n", line);
+            trace.put(line);
+        }
+
+        // The straight pass steps whole engine frames (--frames) or physics
+        // only.  A replayed tick steps the way the headless client re-steps
+        // (session_client.cpp, rollback_world::pre_step + step): the selected
+        // scripts' frame through script_replay::execute_frame, the world's
+        // PreSimulate pass, one physics step - never a whole frame, whose
+        // other scripts (Gameplay_*, the checkpoints, the extras) are not
+        // rewound and would run on from where the live run left them.  So a
+        // --frames mismatch is a defect of the recipe the client uses, not of
+        // the harness.
+        // One physics world, bound for the rollback engine the way the headless
+        // client binds it (session/rollback_binding.hpp): the straight
+        // pass records every tick through the engine, and every round is the
+        // engine's own rewind_to - the restore (the savestate, or the per-body
+        // path as the --legacy-restore negative control), the mechanism
+        // scripts' frame and the physics step are the client's code paths, not
+        // a copy of them.  The straight pass steps whole engine frames
+        // (--frames) or physics only; a replayed tick is what the binding
+        // steps: the selected scripts' frame, the world's PreSimulate pass,
+        // one physics step - never a whole frame, whose other scripts
+        // (Gameplay_*, the checkpoints) are not rewound.
+        const auto step = [&](std::string& step_error) -> bool {
+            if (frames) return world->tick(step_error);
+            world->pre_simulate();
+            return bmmo::physics::step_physics(physics, bmmo::sim::kFixedDeltaMs, step_error);
+        };
+        std::vector<CK_ID> scripts_replayed;
+        uint32_t probe_tick = 0;                            // a round's first replayed tick: the restored world
+        std::vector<uint8_t> restored_blob;                 // ... captured there, before any step
+        std::vector<std::vector<uint8_t>> replayed_blobs;   // the blob after each replayed step
+        std::string restore_error, capture_error, engine_log;
+        bool restore_refused = false;
+        bmmo::physics::physics_direct backend(physics);
+        bmmo::session::rollback_binding_options binding_options;
+        binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+        binding_options.savestate = !legacy;
+        binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
+        if (frames) {
+            binding_options.context = context;
+            binding_options.scripts = &scripts;
+            binding_options.script_hooks = &hooks;
+            binding_options.scripts_replayed = &scripts_replayed;
+        }
+        binding_options.before_replayed_tick = [&](uint32_t tick) {
+            if (tick != probe_tick) return;
+            std::string probe_error;
+            if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) capture_error = probe_error;
+        };
+        binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
+            if (!ok) {
+                restore_refused = true;
+                restore_error = error;
+                return;
+            }
+            if (args.verbose)
+                for (const auto& warning: backend.last_report.warnings) std::printf("  restore warning: %s\n", warning.c_str());
+        };
+        binding_options.log = [&](const std::string& text) {
+            engine_log = text;
+            if (args.verbose) std::printf("  engine: %s\n", text.c_str());
+        };
+        bmmo::session::rollback_world binding = bmmo::session::bind_rollback_world(backend, binding_options);
+        {
+            // The world's own PreSimulate pass before the physics step (the
+            // physics-only recipe above), and the blob after it.
+            const auto inner_step = binding.step;
+            binding.step = [&, inner_step]() {
+                world->pre_simulate();
+                const bool ok = inner_step();
+                std::vector<uint8_t> after;
+                std::string after_error;
+                if (!bmmo::physics::get_savestate(physics, after, after_error)) capture_error = after_error;
+                replayed_blobs.push_back(std::move(after));
+                return ok;
+            };
+        }
+        bmmo::session::rollback_engine engine;
+        engine.thresholds().history_ticks = static_cast<size_t>(window) + 2u;
+        engine.thresholds().max_resim_ticks = static_cast<uint32_t>(window) + 2u;
+        engine.set_exact_restore(!legacy);
+        engine.set_replay_scripts(frames);
+        bmmo::session::rollback_tracked tracked;
+        for (const auto& name: bmmo::physics::movable_body_names(physics)) tracked.mechanisms.push_back(name);
+        const std::map<std::string, bmmo::session::input_frame> no_inputs;
+        const auto no_input = [](const std::string&, uint32_t, bmmo::session::input_frame&) { return false; };
+
+        // ---- the straight pass
+        std::string error;
+        std::vector<straight_tick> straight(static_cast<size_t>(window));
+        std::vector<int> reset_ticks;   // --frames: window indices at which a selected script had a reset pending
+        int script_resets = 0;
+        uint32_t contacts_min = std::numeric_limits<uint32_t>::max(), collisions_min = contacts_min,
+                 systems_min = contacts_min;
+        uint32_t contacts_max = 0, collisions_max = 0, systems_max = 0;
+        size_t blob_max = 0;
+        std::vector<uint8_t> blob;
+        const auto started = std::chrono::steady_clock::now();
+        for (int i = 0; i < window; ++i) {
+            straight_tick& rec = straight[static_cast<size_t>(i)];
+            const uint32_t t = t0 + static_cast<uint32_t>(i);
+            const bool keep_this = keep[static_cast<size_t>(i)] != 0;
+            rec.counters = world->capture_step_state();
+            if (frames) {
+                const auto pending = bmmo::game::script_replay::resets_pending(context, scripts);
+                if (!pending.empty()) {
+                    reset_ticks.push_back(i);
+                    script_resets += static_cast<int>(pending.size());
+                }
+                if (keep_this && !bmmo::game::script_replay::capture(context, scripts, hooks, rec.scripts)) {
+                    std::fprintf(stderr, "savestate-check: script capture failed at tick %u\n", t);
+                    return 1;
+                }
+            }
+            bmmo::physics::savestate_report report;
+            if (!bmmo::physics::get_savestate(physics, blob, error, &report)) {
+                std::fprintf(stderr, "savestate-check: capture failed at tick %u: %s\n", t, error.c_str());
+                return 1;
+            }
+            rec.blob_hash = bmmo::physics::hash_savestate(blob.data(), blob.size());
+            rec.blob_size = blob.size();
+            blob_max = std::max(blob_max, blob.size());
+            contacts_min = std::min(contacts_min, report.contacts);
+            collisions_min = std::min(collisions_min, report.collisions);
+            systems_min = std::min(systems_min, report.systems);
+            contacts_max = std::max(contacts_max, report.contacts);
+            collisions_max = std::max(collisions_max, report.collisions);
+            systems_max = std::max(systems_max, report.systems);
+            if (i == 0)
+                std::printf("savestate-check: at t0=%u objects=%u cores=%u collisions=%u contacts=%u systems=%u units=%u"
+                            " events=%u hull_entries=%u blob_bytes=%zu\n", t, report.objects, report.cores,
+                            report.collisions, report.contacts, report.systems, report.units, report.events,
+                            report.hull_entries, blob.size());
+            if (!bmmo::physics::capture_world_hash(physics, rec.hash, error)) {
+                std::fprintf(stderr, "savestate-check: world hash failed at tick %u: %s\n", t, error.c_str());
+                return 1;
+            }
+            if (keep_this) {
+                rec.kept = true;
+                rec.blob = blob;
+                rec.exact = bmmo::physics::describe_cores_exact(physics);
+            }
+            // The engine's record of this tick: bodies, extras, contacts,
+            // scripts and (unless --legacy-restore) the blob - what a rewind
+            // to this tick restores.
+            engine.record(binding, t, tracked, no_inputs);
+            if (!legacy) {
+                const std::vector<uint8_t>* recorded = engine.recorded_savestate(t);
+                if (!recorded || *recorded != blob) {
+                    std::fprintf(stderr, "savestate-check: the engine's record of tick %u does not carry this tick's blob\n", t);
+                    return 1;
+                }
+            }
+            char line[320];
+            std::snprintf(line, sizeof(line),
+                "straight t=%u hash=%016llx pose=%016llx cores=%d blob_bytes=%zu contacts=%u collisions=%u systems=%u",
+                t, static_cast<unsigned long long>(rec.hash.hash), static_cast<unsigned long long>(rec.hash.pose),
+                rec.hash.cores, blob.size(), report.contacts, report.collisions, report.systems);
+            trace.put(line);
+            if (args.verbose || (args.report_every > 0 && i % args.report_every == 0)) std::printf("%s\n", line);
+            if (!step(error)) {
+                std::fprintf(stderr, "savestate-check: the straight pass's step at tick %u failed: %s\n", t, error.c_str());
+                return 1;
+            }
+        }
+        const double straight_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+
+        const auto summary = [&](int rounds_run, int rounds_failed) {
+            char line[768];
+            std::snprintf(line, sizeof(line),
+                "summary: savestate-check rounds=%d failed=%d ticks=%d blob_bytes=%zu contacts_min=%u collisions_min=%u"
+                " systems_min=%u contacts_max=%u collisions_max=%u systems_max=%u scheduled=%zu kept=%d mode=%s"
+                " restore=%s scene=%s seed=%llu max_depth=%d every=%d t0=%u script_resets=%d",
+                rounds_run, rounds_failed, window, blob_max, contacts_min, collisions_min, systems_min, contacts_max,
+                collisions_max, systems_max, schedule.size(), kept, mode, restore, scene.c_str(), args.savestate_seed,
+                args.savestate_max_depth, args.savestate_every, t0, script_resets);
+            std::printf("%s\n", line);
+            trace.put(line);
+        };
+        if (contacts_max == 0 && systems_max == 0) {
+            summary(0, 0);
+            std::printf("vacuous scene: no tick of the window holds a contact point or a friction system (contacts_max=0"
+                        " systems_max=0), so a pass would prove nothing about the collision state\n");
+            return 2;
+        }
+
+        // ---- the rounds, chained: the world is wherever the previous round
+        // left it, which is the live case (the world has moved on with another
+        // history).  Every round is the engine's rewind_to from a+d to a: the
+        // engine restores the anchor from its own record and re-steps a+1..a+d
+        // through the binding, re-recording each tick.
+        int run = 0, failed = 0;
+        bool dumped = false;
+        std::vector<uint8_t> current;
+        const auto rounds_started = std::chrono::steady_clock::now();
+        for (size_t r = 0; r < schedule.size(); ++r) {
+            const int a = schedule[r].anchor, d = schedule[r].depth, e = a + d;
+            const straight_tick& anchor = straight[static_cast<size_t>(a)];
+            if (!anchor.kept) {
+                std::fprintf(stderr, "savestate-check: round %zu anchors at an unkept tick (harness bug)\n", r);
+                return 1;
+            }
+            ++run;
+            std::string failure;
+            int fail_index = a;
+            bool restore_broke = false;
+            const std::vector<uint8_t>* expected_blob = nullptr;   // set when a kept blob differed
+            bool crosses_reset = false;
+            for (int t: reset_ticks) crosses_reset = crosses_reset || (t > a && t <= e);
+
+            // The world's own per-tick bookkeeping (tick index, RNG cursors,
+            // the sector union) at the anchor; the engine knows the physics.
+            world->restore_step_state(anchor.counters);
+            probe_tick = t0 + static_cast<uint32_t>(a) + 1u;
+            restored_blob.clear();
+            replayed_blobs.clear();
+            restore_error.clear();
+            capture_error.clear();
+            engine_log.clear();
+            restore_refused = false;
+            const uint64_t restored_before = engine.stats().savestates_restored;
+            const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
+                                                  no_input, "savestate-check");
+            if (!rewound) {
+                failure = "the engine refused the rewind" + (engine_log.empty() ? std::string() : ": " + engine_log);
+            } else if (!legacy && restore_refused) {
+                failure = "restore error: " + restore_error;
+                restore_broke = true;
+            } else if (!legacy && engine.stats().savestates_restored != restored_before + 1u) {
+                failure = "the engine did not restore the anchor's blob (fell back to the per-body path)";
+            } else if (!capture_error.empty()) {
+                failure = "capture error: " + capture_error;
+            }
+            // Restore identity: the world the first replayed tick starts from
+            // (d == 0: the world the rewind left) is the anchor's blob.
+            if (failure.empty() && restored_blob.empty()) {
+                std::string probe_error;
+                if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) failure = "capture error: " + probe_error;
+            }
+            if (failure.empty() && restored_blob != anchor.blob) {
+                failure = "restore identity: " + blob_difference(anchor.blob, restored_blob);
+                expected_blob = &anchor.blob;
+                current = restored_blob;
+            }
+            // Replay identity: every step's blob.
+            for (int k = 1; failure.empty() && k <= d; ++k) {
+                const int i = a + k;
+                fail_index = i;
+                const straight_tick& expected = straight[static_cast<size_t>(i)];
+                if (static_cast<size_t>(k - 1) >= replayed_blobs.size()) {
+                    failure = "the replay stepped " + std::to_string(replayed_blobs.size()) + " ticks of " + std::to_string(d);
+                    break;
+                }
+                const std::vector<uint8_t>& got = replayed_blobs[static_cast<size_t>(k - 1)];
+                if (expected.kept) {
+                    if (got != expected.blob) {
+                        failure = blob_difference(expected.blob, got);
+                        expected_blob = &expected.blob;
+                        current = got;
+                    }
+                } else if (got.size() != expected.blob_size
+                           || bmmo::physics::hash_savestate(got.data(), got.size()) != expected.blob_hash) {
+                    char text[256];
+                    std::snprintf(text, sizeof(text),
+                        "blob hash %016llx vs %016llx, %zu vs %zu bytes (not kept at this tick: --savestate-every 1"
+                        " names the field)", static_cast<unsigned long long>(expected.blob_hash),
+                        static_cast<unsigned long long>(bmmo::physics::hash_savestate(got.data(), got.size())),
+                        expected.blob_size, got.size());
+                    failure = text;
+                }
+            }
+            // The independent witnesses at the end of the round.
+            bmmo::physics::world_hash end_hash;
+            if (failure.empty()) {
+                fail_index = e;
+                const straight_tick& expected = straight[static_cast<size_t>(e)];
+                if (!bmmo::physics::capture_world_hash(physics, end_hash, error)) {
+                    failure = "world hash error: " + error;
+                } else {
+                    const std::string what = diff_world_hashes(expected.hash, end_hash);
+                    if (!what.empty()) failure = "world hash: " + what;
+                }
+                if (failure.empty()) {
+                    const std::string exact = bmmo::physics::describe_cores_exact(physics);
+                    if (exact != expected.exact) failure = "exact cores:" + diff_exact_dumps(expected.exact, exact);
+                }
+                if (failure.empty() && frames) {
+                    std::vector<uint8_t> bytes;
+                    if (!bmmo::game::script_replay::capture(context, scripts, hooks, bytes)) {
+                        failure = "script capture error";
+                    } else if (bytes != expected.scripts) {
+                        const auto difference = bmmo::game::script_replay::diff(context, scripts, expected.scripts, bytes);
+                        failure = "scripts: " + difference.where + " (" + std::to_string(difference.logical_count)
+                                + " logical, " + std::to_string(difference.float_count) + " float)";
+                    }
+                }
+            }
+
+            char line[1024];
+            if (!failure.empty()) {
+                ++failed;
+                std::snprintf(line, sizeof(line), "FAIL round=%zu anchor=%u depth=%d tick=%u: %s", r,
+                              t0 + static_cast<uint32_t>(a), d, t0 + static_cast<uint32_t>(fail_index), failure.c_str());
+                std::printf("%s%s\n", line, crosses_reset ? " (the window crosses a script reset)" : "");
+                trace.put(line);
+                if (!dumped && expected_blob && !args.savestate_trace.empty()) {
+                    dumped = true;
+                    const std::string base = args.savestate_trace + ".round" + std::to_string(r);
+                    const bool ok = write_text_file(base + ".expected.txt",
+                                        bmmo::physics::describe_savestate(expected_blob->data(), expected_blob->size()))
+                                 && write_text_file(base + ".actual.txt",
+                                        bmmo::physics::describe_savestate(current.data(), current.size()));
+                    std::printf("  %s both blobs of round %zu: %s.expected.txt / .actual.txt\n",
+                                ok ? "wrote" : "could not write", r, base.c_str());
+                }
+            } else {
+                std::snprintf(line, sizeof(line), "round=%zu anchor=%u depth=%d ok end_hash=%016llx%s", r,
+                              t0 + static_cast<uint32_t>(a), d, static_cast<unsigned long long>(end_hash.hash),
+                              crosses_reset ? " (crosses a script reset)" : "");
+                trace.put(line);
+                if (args.verbose) std::printf("%s\n", line);
+            }
+            std::fflush(stdout);
+            if (restore_broke) {
+                std::printf("the world was salvaged, not restored, after a refused blob (physics_savestate.hpp): "
+                            "no further round runs on it\n");
+                break;
+            }
+            if (!failure.empty() && args.stop_on_divergence) {
+                std::printf("stopping at the first failed round (--stop-on-divergence)\n");
+                break;
+            }
+        }
+        const double rounds_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - rounds_started).count();
+        std::fprintf(stderr, "savestate-check: straight pass %.2f s, %d rounds %.2f s\n", straight_seconds, run,
+                     rounds_seconds);
+        summary(run, failed);
+        const bool pass = failed == 0 && run == static_cast<int>(schedule.size());
+        std::printf("%s rounds=%d failed=%d\n", pass ? "PASS" : "FAIL", run, failed);
+        std::fflush(stdout);
+        return pass ? 0 : 3;
     }
 
     // Replays a client recording through the physics-session machinery
@@ -2262,10 +3132,17 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK\n"
             "           [--explode ... AT_TICK] [--activate SCRIPT TICK] [--body-guard ENTITY TICK]\n"
             "           [--beam X Y Z TICK] [--ticks N]\n"
-            "           (trafo-explosion determinism check, prints the pose hash for 200 ticks)\n");
+            "           (trafo-explosion determinism check, prints the pose hash for 200 ticks)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --savestate-check [--spawn-test N | --drop <entity> <ball type>\n"
+            "           [--drop-at X Y Z] [--drop-prop ENTITY] ... | --drop-sector N] [--ticks N] [--rounds R] [--max-depth D]\n"
+            "           [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]\n"
+            "           [--savestate-trace PATH] [--stop-on-divergence] [--verbose]\n"
+            "           (IVP savestate robustness check: chained seeded rollbacks must reproduce the straight run's\n"
+            "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n");
         return 2;
     }
     if (!args.replay_session.empty()) return run_replay_session(args);
+    if (!args.savestate_diff[0].empty() || !args.savestate_describe.empty()) return run_savestate_files(args);
     if (args.root.empty()) {
         std::fprintf(stderr, "--root <game dir> is required\n");
         return 2;
@@ -2277,6 +3154,8 @@ int main(int argc, char** argv) {
         }
         return run_replay_nav(args);
     }
+    // Before --drop and --spawn-test: it composes with their scenes.
+    if (args.savestate_check) return run_savestate_check(args);
     if (!args.drop_entity.empty()) return run_drop(args);
     if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;

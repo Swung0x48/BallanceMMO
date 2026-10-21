@@ -7,7 +7,8 @@ engine change unless proven necessary, and every change recorded.
 **One macro for the IVP changes.** Every BallanceMMO change inside the IVP
 sources - the scalar vector-FPU path (1), the portable transcendental entry
 points (3), the per-unit movement check (5), the ball-ball synapse order (7),
-the merged compact-surface layout (12) and the overlap-grid rounding (16) -
+the merged compact-surface layout (12), the overlap-grid rounding (16) and the
+savestate's access declarations (17) -
 compiles only when the build defines `IVP_PORTABLE_BMMO`. Without it each file is the upstream code, platform
 branches included. BallanceMMO's CMake defines the macro on every IVP target
 it builds, the headless server's and the client plugin's alike
@@ -593,9 +594,97 @@ The Windows retail game is the reference, so the float variant is the one
 every platform keeps. Inert for the simulation on Windows (its own build was
 already this); on Linux it changes only ties of this kind.
 
+## 17. Access declarations for the savestate (physics_RT / IVP, header only)
+
+Files, all under `Source/BuildingBlocks/physics_RT/ivp/`:
+`ivp_physics/ivp_mindist.hxx` (`IVP_Synapse_OO`, `IVP_OO_Watcher`,
+`IVP_Synapse_Real`, `IVP_Mindist_Base`, `IVP_Mindist`),
+`ivp_intern/ivp_friction.hxx` (`IVP_Synapse_Friction`,
+`IVP_Contact_Point_Fast_Static`, `IVP_Contact_Point_Fast`, `IVP_Contact_Point`,
+`IVP_Friction_Core_Pair`, `IVP_Friction_System`),
+`ivp_physics/ivp_listener_hull.hxx` (`IVP_Listener_Hull`),
+`ivp_physics/ivp_real_object.hxx` (`IVP_Hull_Manager_Base`, `IVP_Real_Object`),
+`ivp_utility/ivu_min_list.hxx` (`IVP_U_Min_List`),
+`ivp_physics/ivp_environment.hxx` (`IVP_Environment`),
+`ivp_intern/ivp_sim_unit.hxx` (`IVP_Simulation_Unit`),
+`ivp_intern/ivp_clustering_longrange.hxx` (`IVP_OV_Node`,
+`IVP_OV_Tree_Manager`) and `ivp_intern/ivp_cache_object.hxx`
+(`IVP_Cache_Object`, `IVP_Cache_Object_Manager`).
+
+Every one of them gains the same line inside the class, under
+`IVP_PORTABLE_BMMO`: `friend class IVP_BMMO_State;`. That class is not part of
+the engine. It is declared by the bridge
+(`BallanceMMOCommon/src/physics/physics_savestate_internal.hpp`) as a bundle of
+static functions, and it is the one place the savestate's capture and restore
+read and write the engine's protected and private members. No IVP function
+changed, nothing was added to a class, no layout moved; without the macro every
+file is the upstream one.
+
+Why a friend and not the member-pointer shim the bridge already uses
+(`ivp_private_access.hpp`, `thief<>`: an explicit instantiation is exempt from
+access checks): a pointer to member cannot name a bitfield, and four of the
+fields the savestate has to carry are protected bitfields that are genuine
+history rather than something a constructor or a recalculation reproduces -
+`IVP_Mindist_Base::coll_type` (the predicted event type the scheduled event
+reads), `IVP_Mindist_Base::synapse_sort_flag` (toggled by the minimizer; it
+decides which synapse is "sorted 0", i.e. the sign of the contact normal and the
+core roles in the impact and the contact point),
+`IVP_Contact_Point_Fast::cp_status` (NORMAL / NEEDS_RECHECK / BROKEN) and
+`IVP_Contact_Point_Fast_Static::two_friction_values`. The other road, byte-level
+writes into the unit, depends on how the compiler packs the bitfields
+(`cp_status` sits at `&has_negative_pull_since - 4` under MSVC and `- 2` under
+GCC/Clang) and rots with the next member anyone adds. The rest of the list is
+reachable by the shim in principle - the overlap tree's root and hash table, the
+cache ring (`n_cache_objects`, `reuse_loop_index`, the slot buffer), the hull
+min-list's element array, a listener's `minlist_index`, the OO watcher's private
+children - but a savestate that is two translation units reading and writing the
+same fields wants one access point, and a second explicit instantiation of the
+same `thief<>` specialization in another translation unit is ill-formed.
+
+Evidence for needing the state at all: a rewind restores every core bit for bit
+and still replays a touched body metres away from the straight run, because the
+collision bookkeeping IVP builds only by running the impacts (which pairs hold
+contact points, the per-point friction state, the mindists' lengths and
+features, the scheduled events) stays as the live world had it
+(`docs/lockstep-without-snapshots.md`, "What the trace shows"). The design and
+the inventory are in `docs/ivp-savestate-design.md`.
+
+Inert for the simulation: a friend declaration compiles to nothing. The
+submodule is `Swung0x48/Ballanced`, branch `bmmo-collision-overhaul`; CI fetches
+it, so push the submodule before the superproject.
+
 Like every BallanceMMO change inside IVP, this compiles only under
 `IVP_PORTABLE_BMMO` (see the note at the top); without it the file is the
 upstream code with its platform branches.
+
+## 18. Force controllers named after their block (physics_RT)
+
+File: `Source/BuildingBlocks/physics_RT/Behaviors/PhysicsForce.cpp`
+(`PhysicsControllerForce`, the class the Physics Force block and the bridge's
+`BmmoPhysicsForceBlockRestore` instantiate).
+
+`IVP_Controller::get_controller_name()` is a diagnostic hook that every retail
+controller leaves at its default, `"sys:unknown"`. The savestate (#17, bridge
+API v17) puts a core's controller order back by matching each recorded
+controller to a live one by (priority, name), because the order is history IVP
+keeps nowhere else: `IVP_Simulation_Unit::add_controller_of_core` appends and
+then runs a stable sort by priority, and `simulate_single_sim_unit_psi` calls the
+controllers in that order, each adding into `speed_change`. Two Physics Force
+blocks on one body are two controllers of priority `IVP_CP_ACTUATOR` named
+`"sys:unknown"`, and a restore could only keep whatever order the script replay
+re-created them in - identical descriptors, so neither the restore-identity nor
+the replay-identity check could see a swap, and the float sum of three or more
+pushes into one core then depends on it (the adversarial review of the
+savestate found this; the same held for BallanceMMO's own navigation leaves,
+which now carry `"bmmo:force/<leaf>"`).
+
+The controller now carries the block that made it: `SetBehavior(beh->GetID())`
+is called at both creation sites and `get_controller_name()` returns
+`"rt:force/<behavior id>"` (the default name until it is set, so a controller
+made any other way is unchanged). A behavior's CK_ID is stable for the life of
+the loaded level, which is all a blob needs (it never leaves its process). The
+member is appended to a class private to the translation unit; nothing in the
+retail layout moves, and IVP reads the name only to print it.
 
 ## Bridge notes: restoring a body's leapfrog state (no engine change)
 
@@ -756,7 +845,109 @@ themselves (a second contact point on the same plate from an impact in the
 anchor tick, the pair's last-impact time and easing countdown, the mindists'
 lengths before the next PSI). Nothing under `submodule/Ballanced` changed.
 
-## Notes on things that were verified *not* to need engine changes
+## Bridge notes: the IVP savestate (bridge API v17, engine change #17 for access only)
+
+The only engine change is the header-only friend declarations of #17; the
+savestate itself is bridge code (`BallanceMMOCommon/src/physics/physics_savestate_common.cpp`,
+`physics_savestate_capture.cpp` and `physics_savestate_restore.cpp`, compiled
+into the headless library and into the client's physics_RT plugin alike). The design,
+the inventory of what a tick boundary holds, the restore order and the tests
+that prove it are in `docs/ivp-savestate-design.md`; this is the summary.
+
+`get_savestate` captures the environment's whole dynamic state at a tick
+boundary as one byte blob: the clock and the event queue (the PSI event and
+every scheduled mindist, in queue order), every core's integrator scalars, the
+simulation units in manager-list order with their cores and controller order,
+every object's hull manager (scalars and the sorted listener list), every
+overlap element and the overlap tree itself (nodes, children and elements in
+insertion order), every collision checker - mindists, recursive mindists and
+OO watchers - with its features, statuses and the protected bitfields, the
+exact and invalid lists, every friction system with its contact points,
+core-pair records and per-core infos in list order, the revive list, the object
+cache ring, and on the physics_RT side the movable-object list, the CK world
+matrices, the manager's clock floats, the RNG cursors and the PreSimulate
+queue's descriptors. Order is part of the state (the friction solver's matrix
+follows the contact-point list, the time manager breaks ties newest first, a
+simulation unit integrates its cores in vector order), so every list is
+recorded and restored in the engine's own order. The blob is local: its layout
+is private to one build and versioned, it is only read back by the binary that
+wrote it, and it never goes on the wire (the protocol is unchanged). Four balls
+and their props are well under 100 KB a tick.
+
+`set_savestate` tears the live collision state down (contact points through
+their friction systems, every collision checker through its destructor, every
+overlap element) and rebuilds it from the blob with IVP's own constructors and
+list calls, then overwrites every value those calls computed with the recorded
+one. No IVP transition - revive, freeze, recheck, impact - runs during the
+restore, because each of them rebuilds exactly what the teardown removed, from
+the live world's history; cores are written directly and never beamed. The
+environment's collision listeners and the bridge event log are muted for the
+duration, the monotonic caches (`current_time_code`,
+`mindist_event_timestamp_reference`) are bumped, never rewound. It fails closed
+on a world with a phantom (buoyancy) object, which no retail script uses.
+`SAVESTATE_STRICT` turns the first blob/world inconsistency into a failed
+restore, `SAVESTATE_KEEP_UNKNOWN` leaves a body born after the anchor with its
+live collision checkers as well. A false return before the teardown leaves the
+world untouched; one past it leaves a world the restore has salvaged into a
+runnable, not exact, state (the PSI event queued, a unit per core, every body
+rechecked into collision detection) and the caller falls back to its per-body
+path.
+
+What stays LIVE on purpose, because it belongs to scripts the replay does not
+re-execute: the physics time factor (`SetPhysicsGlobals`, written by the
+Gameplay script: 1.0 while the level loads, 2.0 once it runs, 0 in the pause
+menu) and the gravity. Both are recorded and compared, neither is written back;
+a blob captured before the Gameplay script wrote 2.0 would otherwise have put
+1.0 back for good and the whole world ran at half rate from then on (measured
+on the arena map: ball x 29.99 against the control's 122.53 after 400 ticks).
+The frame delta's moving average is restored and the physics step recomputed
+from it with the live factor, as `CKIpionManager::SetDeltaTime` does.
+
+What the blob does not know but the world has - a body born after the anchor,
+a sector physicalized inside the window - keeps its place in
+`CKIpionManager::m_MovableObjects` (after the recorded entries, where a later
+birth sat live) and in the revive list, and is left out of collision detection
+and named to the caller (`unknown`): the rollback engine keeps a body it will
+re-pose at its birth tick inert until then and rechecks the rest back in
+through `rollback_world::recheck_body`. Without the first a body kept rolling
+in IVP while its CK entity, the one thing the scripts' proximity sensors read,
+stayed where the anchor left it; without the second nothing would ever give a
+recordless body a tree node or a hull entry again, and a parked body with
+collision detection on left its spot 5 m up in the first live tick after a
+replay. A recorded overlap-tree node left empty because its only
+occupants are gone from the world (an unphysicalized ball) is pruned the way
+`cleanup_node` would have; same-named bodies (two instances of one element type
+on a map) are told apart by the entity id the record carries.
+
+The bridge entries are `savestate_get(manager, out, max, error)` (writes at most
+`max` bytes, returns the blob's full size like snprintf, `out` may be NULL to
+ask the size) and `savestate_set(manager, data, size, flags, error, dropped)`
+(API v18: `dropped` receives the `;`-joined names of the bodies whose friction
+contacts the blob could not carry because their system had a body the world
+lost; the rollback engine re-creates those from its own per-body record), with
+`BMMO_PHYSICS_SAVESTATE_STRICT` and `_KEEP_UNKNOWN`; the C++ entries are
+`bmmo::physics::get_savestate`, `set_savestate`, `check_savestate`,
+`describe_savestate`, `diff_savestate` and `hash_savestate`
+(`physics/physics_savestate.hpp`). The translation units do no floating-point
+arithmetic of their own - the headless library is built without the physics FP
+flags - so every value is copied, never re-derived. The rollback engine records
+a blob with every tick and restores it first at an anchor that has one, then
+writes the snapshot rows on top; `--no-savestate` on the headless client
+(`rollback_engine::set_exact_restore(false)`) is the per-body restore, for the
+A/B, and `--savestate-strict` runs the restore strict. The headless client's
+status line carries `sv=<restored>/<refused>/<capture failures>`,
+`--trace-clock A B` prints the engine clock, the event queue, the factor and the
+physics step after every live tick in the range and before every replayed one,
+and `--dump-savestate A B DIR` writes the record's blob of every tick in the
+range for `BallanceMMOSimTool --savestate-diff` / `--savestate-describe`.
+
+The engine's hooks are bound once for every in-process world in
+`session/rollback_binding.hpp` (`bind_rollback_world`, templated over the in-process backend `physics/physics_direct.hpp` or the retail mod's `physics_view`); the
+headless client and the SimTool's savestate check share it, and the SimTool's
+rounds are the engine's own `rewind_to` rather than a copy of the restore. The
+retail client binds the same hooks through the plugin API (`physics_view`),
+the one copy that cannot share the in-process code.
+ that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
   -fexcess-precision=standard` (GCC/Clang) give bit-identical arithmetic

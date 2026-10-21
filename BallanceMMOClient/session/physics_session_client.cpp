@@ -18,6 +18,7 @@
 
 #include <game/menu_driver.hpp>
 #include <session/spawn_impulse.hpp>
+#include <session/rollback_binding.hpp>
 
 #include "session_journal_client.hpp"
 
@@ -2775,152 +2776,62 @@ void BallanceMMOClient::physics_session_log_correction(const std::string& name, 
 }
 
 // Design 9.6: the world adapter of the rollback engine over the physics bridge.
+// The rollback engine's view of the mod's world: the one binding every user of
+// the engine shares (session/rollback_binding.hpp) over the plugin-API backend
+// (physics_view), plus what only the mod has - the pause menu's input mute,
+// its logger, its journal - as options.
 bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world() {
-    bmmo::session::rollback_world world;
-    world.get_body = [this](const std::string& entity, bmmo_physics_body_state& out) {
-        std::string error;
-        return physics_view_.get_body_state(entity.c_str(), out, error);
-    };
-    // Design 9.25: the engine decides the sleep handling and the contact
-    // recheck per write.  `keep` is the common case - most restores move a body
-    // that is already in the state the server reports, and ensure_in_simulation
-    // would re-arm its freeze timers (engine change #14); `recheck` is asked for
-    // only when the write actually moved the body, because the optimized beam
-    // builds no contact when it lands one body inside another.
-    world.set_body = [this](const std::string& entity, const bmmo_physics_body_state& state,
-                            bmmo::session::wake_mode mode, bool recheck) {
-        std::string error;
-        const auto bridge_mode = mode == bmmo::session::wake_mode::wake   ? bmmo::physics::wake_mode::wake
-                               : mode == bmmo::session::wake_mode::freeze ? bmmo::physics::wake_mode::freeze
-                                                                          : bmmo::physics::wake_mode::keep;
-        if (physics_view_.set_body_state(entity.c_str(), state.position, state.rotation, state.linear, state.angular,
-                                         bridge_mode, recheck, error))
-            return true;
-        physics_session_.last_error = error;
-        return false;
-    };
-    // Design 9.29 / bridge API v11: the queued impulses a restore used to drop.
-    // physics_view requires api_version == BMMO_PHYSICS_API_VERSION exactly, so
-    // the mod and the physics_RT bridge always ship together; there is no
-    // version in which these are absent at run time.
-    world.get_body_extra = [this](const std::string& entity, bmmo_physics_core_extra& out) {
-        std::string error;
-        return physics_view_.get_core_extra(entity.c_str(), out, error);
-    };
-    world.set_body_extra = [this](const std::string& entity, const bmmo_physics_core_extra& state) {
-        std::string error;
-        return physics_view_.set_core_extra(entity.c_str(), state, error);
-    };
-    // Bridge API v13: the clock is read so a restore can shift the calm
-    // references it puts back by the live clock's offset.  Not rewound: the
-    // clock rewind stays opt-in on the headless client, where it is measured.
-    world.get_clock = [this](bmmo_physics_clock_state& out) {
-        std::string error;
-        return physics_view_.get_clock_state(out, error);
-    };
-    // The script replay (game/script_replay.hpp): the mechanism scripts' state
-    // with every record, back at the anchor, and their frame before every
-    // replayed step - with the bridge event log muted, so a replayed Physics
-    // WakeUp is not reported to the server as a live BodyRevived.
-    if (!physics_session_.script_ids.empty()) {
-        world.capture_scripts = [this](std::vector<uint8_t>& out) {
-            auto& s = physics_session_;
-            return bmmo::game::script_replay::capture(m_bml->GetCKContext(), s.script_ids, s.script_hooks, out);
-        };
-        world.restore_scripts = [this](const std::vector<uint8_t>& bytes, uint32_t anchor) {
-            auto& s = physics_session_;
-            // A script the game reset after the anchor keeps its live state:
-            // the anchor's record is what the reset tore down.
-            std::vector<CK_ID> kept_live;
-            for (const auto& [id, reset_tick]: s.script_reset_ticks)
-                if (reset_tick > anchor) kept_live.push_back(id);
-            s.script_reset_skips += kept_live.size();
-            std::string error;
-            const bool ok = bmmo::game::script_replay::restore(m_bml->GetCKContext(), s.script_ids, s.script_hooks, bytes, &error,
-                                                               &s.scripts_replayed, &kept_live);
-            if (!ok && s.script_restore_logs++ < 8)
+    auto& s = physics_session_;
+    bmmo::session::rollback_binding_options o;
+    o.delta_ms = 1000.0f / 66.0f;
+    // Not rewound: the clock rewind stays opt-in on the headless client, where
+    // it is measured.  Lenient savestate (flags 0): one body that vanished
+    // since the anchor must not cost the whole restore.
+    o.restore_clock = false;
+    o.savestate_flags = 0u;
+    if (!s.script_ids.empty()) {
+        o.context = m_bml->GetCKContext();
+        o.scripts = &s.script_ids;
+        o.script_hooks = &s.script_hooks;
+        o.scripts_replayed = &s.scripts_replayed;
+        o.script_reset_ticks = &s.script_reset_ticks;
+        o.script_reset_skips = &s.script_reset_skips;
+        o.script_diff_detail = s.trace;
+        o.on_script_restore_failed = [this](const std::string& error) {
+            if (physics_session_.script_restore_logs++ < 8)
                 logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
-            return ok;
-        };
-        world.diff_scripts = [this](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical) {
-            auto& s = physics_session_;
-            const auto d = bmmo::game::script_replay::diff(m_bml->GetCKContext(), s.script_ids, a, b);
-            logical = d.logical;
-            return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
-                 + (d.logical && s.trace ? " :: " + d.detail : std::string());
-        };
-        world.pre_step = [this](uint32_t) {
-            auto& s = physics_session_;
-            std::string error;
-            physics_view_.set_event_log_muted(true, error);
-            bmmo::game::script_replay::execute_frame(m_bml->GetCKContext(), s.script_ids, 1000.0f / 66.0f, &s.scripts_replayed);
-            physics_view_.set_event_log_muted(false, error);
         };
     }
-    world.get_nav = [this](const std::string& entity, bmmo_physics_nav_state& out) {
-        std::string error;
-        return physics_view_.navigation_get_state(entity.c_str(), out, error);
-    };
-    world.set_nav = [this](const std::string& entity, const bmmo_physics_nav_state& state) {
-        std::string error;
-        return physics_view_.navigation_set_state(entity.c_str(), state, error);
-    };
-    world.get_contacts = [this](const std::string& entity, std::vector<bmmo_physics_contact>& out) {
-        std::string error;
-        bmmo_physics_contact buffer[16];
-        const int n = physics_view_.contacts_get(entity.c_str(), buffer, 16, error);
-        if (n < 0) return -1;
-        out.assign(buffer, buffer + std::min(n, 16));
-        return n;
-    };
-    // Bridge API v16: the restore's collision recheck as a pass of its own,
-    // after every pose is written.
-    world.recheck_body = [this](const std::string& entity) {
-        std::string error;
-        if (physics_view_.body_recheck(entity.c_str(), error)) return true;
-        physics_session_.last_error = error;
-        return false;
-    };
-    world.set_contacts = [this](const std::string& entity, const std::vector<bmmo_physics_contact>& in, uint32_t flags) {
-        std::string error;
-        const int made = physics_view_.contacts_set(entity.c_str(), in.data(), static_cast<int>(in.size()), flags, error);
+    o.own_key_codes = s.own_key_codes;
+    o.own_key_blocks = s.own_key_blocks;
+    o.own_key_count = s.own_key_count;
+    o.input_muted = [this]() { return physics_session_.input_muted; };
+    o.on_write_failed = [this](const std::string& error) { physics_session_.last_error = error; };
+    o.on_contacts_restored = [this](const std::string& entity, int, const std::string& error,
+                                    const std::vector<bmmo_physics_contact>&) {
         if (!error.empty() && physics_session_.contact_restore_logs++ < 8)
             logger_->Warn("Physics session: contact restore of %s: %s", entity.c_str(), error.c_str());
-        return made;
     };
-    world.nav_input = [this](const std::string& entity, const bmmo::session::input_frame& frame) {
-        std::string error;
-        const bool active = (frame.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
-        return physics_view_.navigation_input(entity.c_str(), frame.keys, frame.cam_right, frame.cam_up, frame.cam_dir, active, error);
+    // The counters are static because physics_session_rollback_world() is
+    // rebuilt on every call; they cap the log lines like the contact restore's.
+    static uint32_t savestate_get_logs = 0;
+    static uint32_t savestate_set_logs = 0;
+    o.on_savestate_capture_failed = [this](const std::string& error) {
+        physics_session_.last_error = error;
+        if (savestate_get_logs++ < 8) logger_->Warn("Physics session: savestate capture failed: %s", error.c_str());
     };
-    world.nav_poll = [this](const std::string& entity, bool enable) {
-        auto& s = physics_session_;
-        std::string error;
-        // A replay must not switch the polling back on while the pause menu
-        // has it off: the ball would follow the held arrow keys again.
-        return physics_view_.navigation_poll(entity.c_str(), enable && !s.input_muted, s.own_key_codes,
-                                            s.own_key_blocks, s.own_key_count, error);
+    o.on_savestate_restored = [this](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
+        if (ok) return;
+        physics_session_.last_error = error;
+        if (savestate_set_logs++ < 8) logger_->Warn("Physics session: savestate restore failed: %s", error.c_str());
     };
-    world.step = [this]() {
-        std::string error;
-        return physics_view_.step_physics(1000.0f / 66.0f, error);
-    };
-    // No pre_step hook since 9.25: the mechanisms are tracked bodies and the
-    // re-simulation steps them like everything else.  The hook stays in the
-    // engine for the script-edge replay of findings/A5 section 2j.
-    world.simulating = [this]() {
-        float factor = 0.0f, delta = 0.0f;
-        std::string error;
-        return !physics_view_.get_clock(factor, delta, error) || (factor > 0.0f && delta > 0.0f);
-    };
-    world.log = [this](const std::string& text) {
-        auto& s = physics_session_;
-        if (++s.corrections_logged <= 200) logger_->Info("Physics session: %s", text.c_str());
+    o.log = [this](const std::string& text) {
+        if (++physics_session_.corrections_logged <= 200) logger_->Info("Physics session: %s", text.c_str());
     };
     // The black box: every decision the engine takes about a snapshot (kinds 0
     // mismatch, 1 rollback, 5 too far, 6 frozen, 7 unmatched), structured, so
     // the timeline does not have to be parsed back out of the log lines.
-    world.on_correction = [](const bmmo::session::rollback_correction& c) {
+    o.on_correction = [](const bmmo::session::rollback_correction& c) {
         auto& journal = bmmo::session::client_journal::instance();
         if (!journal.recording()) return;
         bmmo::session::journal_correction record;
@@ -2937,7 +2848,7 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         journal.correction(record);
         if (c.kind == 1) journal.request_checkpoint();   // a rollback re-simulated every body
     };
-    return world;
+    return bmmo::session::bind_rollback_world(physics_view_, o);
 }
 
 // One authoritative snapshot through the rollback engine (design 9.6).

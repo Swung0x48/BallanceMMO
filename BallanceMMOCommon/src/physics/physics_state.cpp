@@ -997,6 +997,20 @@ namespace bmmo::physics {
                       static_cast<double>(core->speed_change.k[0]), static_cast<double>(core->speed_change.k[1]), static_cast<double>(core->speed_change.k[2]),
                       static_cast<double>(core->rot_speed_change.k[0]), static_cast<double>(core->rot_speed_change.k[1]), static_cast<double>(core->rot_speed_change.k[2]));
         std::string out = text;
+        // Sleep bookkeeping in one place: the object's own movement state
+        // (IVP_Real_Object::ensure_in_simulation branches on this one, not the
+        // core's), the unit's type and size, the delayed-revive flag, the
+        // environment's revive list, and where the CK entity says the body is.
+        {
+            IVP_Simulation_Unit* unit = core->sim_unit_of_core;
+            const VxVector& p = entity->GetWorldMatrix()[3];
+            std::snprintf(text, sizeof(text), " obj_ms=%d unit=%d/%d wakeup=%d revive_len=%d entity=(%.4f,%.4f,%.4f)",
+                          static_cast<int>(real->get_movement_state()),
+                          unit ? static_cast<int>(unit->get_unit_movement_type()) : -1, unit ? unit->sim_unit_cores.len() : -1,
+                          core->is_in_wakeup_vec ? 1 : 0, ivp_access::revive_list(*env).len(),
+                          static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z));
+            out += text;
+        }
         out += " | " + describe_contacts(physics, entity_name);
         // The friction pairs this core is in, with the pair state that lives
         // on neither body: the easing countdown, the integrated anti-energy,

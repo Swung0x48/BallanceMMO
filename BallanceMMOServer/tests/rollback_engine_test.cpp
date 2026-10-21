@@ -6,6 +6,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -38,6 +41,13 @@ namespace {
         // a re-derived one.
         float speed_change[3] = {};
         double q_last_w = 1.0;
+        // The collision bookkeeping neither a body state nor its extra carries
+        // - what only the IVP savestate puts back (docs/ivp-savestate-design.md).
+        // Stepped, and fed into the motion, only in a world with
+        // `savestates` on; zeroed by every pose write, as the beam zeroes
+        // current_speed / abs_omega.
+        double contact_energy = 0.0;
+        uint32_t pair_age = 0;
     };
 
     const char* mode_name(wake_mode mode) {
@@ -52,6 +62,86 @@ namespace {
         bool clock_running = true;
         int steps = 0;
         double clock = 0.0;   // the environment's time, advanced by each step
+        // Opt-in (the other tests never set these): the hidden per-body state
+        // above runs, get_savestate / set_savestate carry the whole world
+        // (bodies, hidden fields, clock) as bytes, and get_contacts /
+        // set_contacts are installed so a test can see the per-body contact
+        // restore run or not.
+        bool savestates = false;
+        bool empty_blobs = false;        // get_savestate succeeds with no bytes
+        bool refuse_savestate = false;   // set_savestate logs, then returns false
+        std::vector<std::string> drop_contacts_of;   // set_savestate reports these bodies' contacts as not carried
+        std::vector<uint8_t> last_set_blob;               // the last blob set_savestate was given
+        std::vector<uint8_t> last_get_blob;               // the last blob get_savestate returned
+        std::vector<std::vector<uint8_t>> got_blobs;      // every blob get_savestate returned
+
+        // The whole world as bytes: every body in name order with every field
+        // (copied, not converted), then the clock.
+        std::vector<uint8_t> serialize() const {
+            std::vector<uint8_t> out;
+            const auto put = [&out](const void* data, size_t size) {
+                const auto* bytes = static_cast<const uint8_t*>(data);
+                out.insert(out.end(), bytes, bytes + size);
+            };
+            const uint32_t body_count = static_cast<uint32_t>(bodies.size());
+            put(&body_count, sizeof body_count);
+            for (const auto& [name, body]: bodies) {
+                const uint32_t length = static_cast<uint32_t>(name.size());
+                put(&length, sizeof length);
+                put(name.data(), length);
+                put(body.position, sizeof body.position);
+                put(body.linear, sizeof body.linear);
+                const uint8_t simulated = body.simulated ? 1 : 0;
+                put(&simulated, sizeof simulated);
+                put(body.speed_change, sizeof body.speed_change);
+                put(&body.q_last_w, sizeof body.q_last_w);
+                put(&body.contact_energy, sizeof body.contact_energy);
+                put(&body.pair_age, sizeof body.pair_age);
+            }
+            put(&clock, sizeof clock);
+            return out;
+        }
+
+        // The inverse, leniently like the rollback's restore: a body in the
+        // blob that is gone now is skipped, a body alive now that the blob
+        // does not know keeps its live state.  false (and nothing changed) on
+        // a malformed blob.
+        bool apply(const std::vector<uint8_t>& blob) {
+            size_t at = 0;
+            const auto get = [&](void* data, size_t size) {
+                if (blob.size() - at < size) return false;
+                if (size) std::memcpy(data, blob.data() + at, size);
+                at += size;
+                return true;
+            };
+            uint32_t body_count = 0;
+            if (!get(&body_count, sizeof body_count)) return false;
+            std::map<std::string, fake_body> stored;
+            for (uint32_t i = 0; i < body_count; ++i) {
+                uint32_t length = 0;
+                if (!get(&length, sizeof length) || blob.size() - at < length) return false;
+                std::string name(reinterpret_cast<const char*>(blob.data()) + at, length);
+                at += length;
+                fake_body body;
+                uint8_t simulated = 0;
+                if (!get(body.position, sizeof body.position) || !get(body.linear, sizeof body.linear)
+                        || !get(&simulated, sizeof simulated) || !get(body.speed_change, sizeof body.speed_change)
+                        || !get(&body.q_last_w, sizeof body.q_last_w)
+                        || !get(&body.contact_energy, sizeof body.contact_energy)
+                        || !get(&body.pair_age, sizeof body.pair_age))
+                    return false;
+                body.simulated = simulated != 0;
+                stored[name] = body;
+            }
+            double stored_clock = 0.0;
+            if (!get(&stored_clock, sizeof stored_clock) || at != blob.size()) return false;
+            for (const auto& [name, body]: stored) {
+                auto it = bodies.find(name);
+                if (it != bodies.end()) it->second = body;
+            }
+            clock = stored_clock;
+            return true;
+        }
 
         rollback_world adapter() {
             rollback_world w;
@@ -84,6 +174,10 @@ namespace {
                 // re-derives the rotation rather than restoring it.
                 for (int k = 0; k < 3; ++k) body.speed_change[k] = 0.0f;
                 body.q_last_w = -1.0;   // "whatever the derivation produced"
+                // ...and the collision bookkeeping, as the real beam zeroes
+                // current_speed / abs_omega: only a savestate brings it back.
+                body.contact_energy = 0.0;
+                body.pair_age = 0;
                 return true;
             };
             w.get_body_extra = [this](const std::string& entity, bmmo_physics_core_extra& out) {
@@ -147,6 +241,15 @@ namespace {
                     if (!body.simulated) continue;
                     auto keys = pending_keys.find(name);
                     if (keys != pending_keys.end() && (keys->second & 1u)) body.linear[0] += 1.0f;
+                    if (savestates) {
+                        // The hidden state ages, accumulates from the motion
+                        // and drives one velocity component, so a restore that
+                        // loses it moves the body from then on.
+                        ++body.pair_age;
+                        body.contact_energy = body.contact_energy * 0.75 + static_cast<double>(body.linear[0]) * 0.125
+                                            + static_cast<double>(body.pair_age % 5u) * 0.0625;
+                        body.linear[1] = static_cast<float>(body.contact_energy * 0.5);
+                    }
                     for (int k = 0; k < 3; ++k) body.position[k] += body.linear[k] * kDt;
                 }
                 pending_keys.clear();
@@ -154,7 +257,43 @@ namespace {
             };
             w.simulating = [this]() { return clock_running; };
             w.log = [this](const std::string& text) { calls.push_back("log " + text); };
+            if (savestates) {
+                w.get_savestate = [this](std::vector<uint8_t>& out) {
+                    calls.push_back("get_savestate");
+                    out = empty_blobs ? std::vector<uint8_t>() : serialize();
+                    last_get_blob = out;
+                    got_blobs.push_back(out);
+                    return true;
+                };
+                w.set_savestate = [this](const std::vector<uint8_t>& blob, bmmo::session::savestate_outcome& outcome) {
+                    calls.push_back("set_savestate");
+                    last_set_blob = blob;
+                    if (refuse_savestate) return false;
+                    outcome.contacts_dropped = drop_contacts_of;
+                    return apply(blob);
+                };
+                // One resting contact per body, so the per-body path has
+                // something to re-create.
+                w.get_contacts = [this](const std::string& entity, std::vector<bmmo_physics_contact>& out) -> int {
+                    if (bodies.find(entity) == bodies.end()) return -1;
+                    out.assign(1, bmmo_physics_contact{});
+                    std::snprintf(out[0].partner, sizeof out[0].partner, "%s", "Floor");
+                    return 1;
+                };
+                w.set_contacts = [this](const std::string& entity, const std::vector<bmmo_physics_contact>&,
+                                        uint32_t) -> int {
+                    calls.push_back("set_contacts " + entity);
+                    return bodies.find(entity) == bodies.end() ? -1 : 0;
+                };
+            }
             return w;
+        }
+
+        // Index of the first call with this prefix; calls.size() when none.
+        size_t first(const std::string& prefix) const {
+            for (size_t i = 0; i < calls.size(); ++i)
+                if (calls[i].rfind(prefix, 0) == 0) return i;
+            return calls.size();
         }
 
         int count(const std::string& prefix) const {
@@ -244,6 +383,128 @@ namespace {
             w.step();
             engine.record(w, tick, tracked, {});
         }
+    }
+
+    // The savestate tests' world: the hidden state on, the own ball and a
+    // remote ball under navigation, and a mechanism holding a queued push.
+    void seed_savestate_world(fake_world& world) {
+        world.savestates = true;
+        world.bodies["Own"];
+        world.bodies["Remote"].position[0] = 5.0;
+        world.bodies["Remote"].linear[0] = 0.5f;
+        world.bodies["Plate"].position[0] = 40.0;
+        world.bodies["Plate"].speed_change[0] = 1.212f;
+        world.navs["Own"] = {};
+        world.navs["Remote"] = {};
+    }
+
+    rollback_tracked savestate_tracked() {
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.own_polls = true;
+        tracked.remote_entities = {"Remote"};
+        tracked.mechanisms = {"Plate"};
+        return tracked;
+    }
+
+    // Records ticks 1..last (the own ball holds key 0 from tick 3) and returns
+    // the blob each record captured, by tick.  Clears the call log after.
+    std::map<uint32_t, std::vector<uint8_t>> record_with_blobs(fake_world& world, rollback_engine& engine,
+                                                               uint32_t last) {
+        std::map<uint32_t, std::vector<uint8_t>> blobs;
+        const rollback_tracked tracked = savestate_tracked();
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= last; ++tick) {
+            input_frame own{};
+            own.keys = tick >= 3 ? 1 : 0;
+            own.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+            world.pending_keys["Own"] = own.keys;
+            w.step();
+            world.last_get_blob.clear();
+            engine.record(w, tick, tracked, {{"Own", own}, {"Remote", input_frame{}}});
+            blobs[tick] = world.last_get_blob;
+        }
+        world.calls.clear();
+        world.got_blobs.clear();
+        world.steps = 0;
+        return blobs;
+    }
+
+    // The first field in which two worlds differ by bit pattern, then their
+    // blobs; "" when they are the same.
+    std::string bit_difference(const fake_world& a, const fake_world& b) {
+        if (std::memcmp(&a.clock, &b.clock, sizeof a.clock) != 0) return "clock";
+        if (a.bodies.size() != b.bodies.size()) return "body count";
+        for (const auto& [name, x]: a.bodies) {
+            const auto it = b.bodies.find(name);
+            if (it == b.bodies.end()) return name + " missing";
+            const fake_body& y = it->second;
+            if (std::memcmp(x.position, y.position, sizeof x.position) != 0) return name + ".position";
+            if (std::memcmp(x.linear, y.linear, sizeof x.linear) != 0) return name + ".linear";
+            if (std::memcmp(x.speed_change, y.speed_change, sizeof x.speed_change) != 0) return name + ".speed_change";
+            if (std::memcmp(&x.q_last_w, &y.q_last_w, sizeof x.q_last_w) != 0) return name + ".q_last_w";
+            if (std::memcmp(&x.contact_energy, &y.contact_energy, sizeof x.contact_energy) != 0)
+                return name + ".contact_energy";
+            if (x.pair_age != y.pair_age) return name + ".pair_age";
+            if (x.simulated != y.simulated) return name + ".simulated";
+        }
+        if (a.serialize() != b.serialize()) return "blob";
+        return "";
+    }
+
+    struct lockstep_outcome {
+        bool exact = true;
+        std::string first_difference;   // the field, and when it first differed
+        uint64_t rewinds = 0;           // rewinds the engine ran
+        uint64_t refused = 0;           // rewinds the engine refused (anchor not recorded)
+        uint64_t savestates_restored = 0;
+        uint64_t savestate_failures = 0;
+    };
+
+    // Two identical savestate worlds fed identical inputs: the control is
+    // stepped straight through, the arm is recorded and rewound `depth` ticks
+    // every `every` ticks (the window replayed from the records), and the two
+    // are compared by bit pattern after every rewind and at the end.
+    lockstep_outcome run_lockstep(uint32_t depth, uint32_t every, bool exact_restore) {
+        constexpr uint32_t kTicks = 200;
+        fake_world control, arm;
+        seed_savestate_world(control);
+        seed_savestate_world(arm);
+        rollback_engine engine;
+        engine.set_exact_restore(exact_restore);
+        const rollback_tracked tracked = savestate_tracked();
+        auto straight = control.adapter();
+        auto rewound = arm.adapter();
+        lockstep_outcome outcome;
+        const auto compare = [&](uint32_t tick, const char* when) {
+            if (!outcome.exact) return;
+            const std::string where = bit_difference(control, arm);
+            if (where.empty()) return;
+            outcome.exact = false;
+            outcome.first_difference = where + " " + when + " " + std::to_string(tick);
+        };
+        for (uint32_t tick = 1; tick <= kTicks; ++tick) {
+            input_frame own{}, remote{};
+            own.keys = (tick / 9) % 2 == 1 ? 1 : 0;
+            own.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+            remote.keys = (tick / 13) % 3 == 1 ? 1 : 0;
+            remote.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+            for (fake_world* world: {&control, &arm}) {
+                world->pending_keys["Own"] = own.keys;
+                world->pending_keys["Remote"] = remote.keys;
+            }
+            straight.step();
+            rewound.step();
+            engine.record(rewound, tick, tracked, {{"Own", own}, {"Remote", remote}});
+            if (tick % every != 0 || tick <= depth) continue;
+            if (engine.rewind_to(rewound, tick - depth, tick, no_input, "lockstep")) ++outcome.rewinds;
+            else ++outcome.refused;
+            compare(tick, "after the rewind at tick");
+        }
+        compare(kTicks, "at the end, tick");
+        outcome.savestates_restored = engine.stats().savestates_restored;
+        outcome.savestate_failures = engine.stats().savestate_failures;
+        return outcome;
     }
 }
 
@@ -1652,4 +1913,302 @@ TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
                                     5, entity_of, no_input));
     EXPECT_EQ(posed, (std::vector<uint32_t>{3, 4, 5}));
     EXPECT_EQ(world.calls.size(), calls_before);
+}
+
+// The IVP savestate (docs/ivp-savestate-design.md): an anchor whose record
+// carries a blob is put back by set_savestate, after the navigation replicas
+// (set_nav re-creates the controllers the blob orders) and before anything
+// else touches a body - and every body restored from our own record then gets
+// no write of its own: no beam (which zeroes what the blob restored), no queue,
+// no contact, no clock (the blob carries it).
+TEST(RollbackEngine, SavestateRestoredBeforeBodyWritesAndSkipsThem) {
+    fake_world world;
+    seed_savestate_world(world);
+    rollback_engine engine;
+    const auto blobs = record_with_blobs(world, engine, 4);
+    ASSERT_EQ(blobs.size(), 4u);
+    ASSERT_FALSE(blobs.at(2).empty());
+    ASSERT_NE(blobs.at(2), blobs.at(4));
+    const std::vector<uint8_t> live_at_4 = world.serialize();
+
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    ASSERT_EQ(world.count("set_savestate"), 1);
+    EXPECT_EQ(world.last_set_blob, blobs.at(2));
+    const size_t blob_at = world.first("set_savestate");
+    EXPECT_LT(world.first("set_nav Own"), blob_at);
+    EXPECT_LT(world.first("set_nav Remote"), blob_at);
+    EXPECT_LT(blob_at, world.first("set_body "));   // calls.size() when there is none
+    EXPECT_LT(blob_at, world.first("step"));
+    EXPECT_EQ(world.count("set_body "), 0);
+    EXPECT_EQ(world.count("set_body_extra"), 0);
+    EXPECT_EQ(world.count("set_contacts"), 0);
+    EXPECT_EQ(world.count("set_clock"), 0);
+    EXPECT_EQ(world.count("set_nav"), 2);           // once each, before the blob only
+    // no row was written on top, so the anchor's blob is not captured again:
+    // one capture per replayed tick
+    EXPECT_EQ(world.count("get_savestate"), 2);
+    EXPECT_EQ(engine.stats().savestates_restored, 1u);
+    EXPECT_EQ(engine.stats().savestate_failures, 0u);
+    EXPECT_EQ(engine.stats().savestate_bytes, blobs.at(2).size());
+    EXPECT_EQ(engine.stats().clock_rewinds, 1u);    // the blob's clock, counted
+    EXPECT_EQ(engine.stats().impulses_restored, 0u);
+    EXPECT_EQ(engine.stats().contacts_restored, 0u);
+    EXPECT_EQ(engine.stats().resim_ticks, 2u);
+    // ...and the replay lands on the live world bit for bit, the hidden state
+    // and the clock included
+    EXPECT_EQ(world.serialize(), live_at_4);
+}
+
+// A snapshot row is the server's pose, not ours: it is written on top of the
+// savestate with the beam (and its recheck), the other bodies stay as the
+// blob put them, and the anchor's blob is captured again afterwards so a later
+// rewind to the same tick restores the corrected world rather than the
+// prediction the row replaced.
+TEST(RollbackEngine, SavestateRowsWrittenOnTop) {
+    fake_world world;
+    seed_savestate_world(world);
+    rollback_engine engine;
+    const auto blobs = record_with_blobs(world, engine, 4);
+
+    // the server had the own ball 0.5 m further at tick 2; the snapshot
+    // carries its row alone
+    fake_body server_own;
+    server_own.position[0] = 0.5;
+    EXPECT_TRUE(engine.on_snapshot(world.adapter(), snapshot_of(2, {ball_body(1, server_own)}), 4, entity_of,
+                                   no_input));
+    ASSERT_EQ(world.count("set_savestate"), 1);
+    EXPECT_EQ(world.last_set_blob, blobs.at(2));
+    EXPECT_EQ(world.count("set_body "), 1);
+    EXPECT_EQ(world.count("set_body Own wake recheck"), 1);
+    EXPECT_LT(world.first("set_savestate"), world.first("set_body Own"));
+    // a row is a hard set (no queue), the others are covered
+    EXPECT_EQ(world.count("set_body_extra"), 0);
+    // the row keeps today's contact restore; the covered bodies get none
+    EXPECT_EQ(world.count("set_contacts Own"), 1);
+    EXPECT_EQ(world.count("set_contacts Remote"), 0);
+    EXPECT_EQ(world.count("set_contacts Plate"), 0);
+    EXPECT_EQ(world.count("set_clock"), 0);
+    // captured again after the row and before the replay: once there, then
+    // once per replayed tick
+    EXPECT_EQ(world.count("get_savestate"), 3);
+    const size_t recapture = world.first("get_savestate");
+    EXPECT_GT(recapture, world.first("set_body Own"));
+    EXPECT_LT(recapture, world.first("step"));
+    ASSERT_EQ(world.got_blobs.size(), 3u);
+    const std::vector<uint8_t> corrected = world.got_blobs.front();
+    EXPECT_NE(corrected, blobs.at(2));
+    EXPECT_EQ(engine.stats().savestates_restored, 1u);
+    EXPECT_EQ(engine.stats().resim_ticks, 2u);
+
+    // a later rewind to tick 2 puts the corrected world back, with no row and
+    // so no body write at all
+    world.calls.clear();
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_savestate"), 1);
+    EXPECT_EQ(world.last_set_blob, corrected);
+    EXPECT_EQ(world.count("set_body "), 0);
+    EXPECT_EQ(engine.stats().savestates_restored, 2u);
+}
+
+// No blob, no savestate path: a world without the hooks, a world whose blobs
+// come back empty (which count as none) and a world that can capture but not
+// restore all get the per-body restore, exactly as before.
+TEST(RollbackEngine, SavestateFallsBackWithoutBlob) {
+    {
+        SCOPED_TRACE("no hooks");
+        fake_world world;
+        seed_savestate_world(world);
+        world.savestates = false;
+        rollback_engine engine;
+        record_with_blobs(world, engine, 4);
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+        EXPECT_EQ(world.count("set_savestate"), 0);
+        EXPECT_EQ(world.count("set_body "), 3);
+        EXPECT_EQ(world.count("set_clock"), 1);
+        EXPECT_EQ(engine.stats().savestates_restored, 0u);
+        EXPECT_EQ(engine.stats().savestate_failures, 0u);
+    }
+    {
+        SCOPED_TRACE("empty blobs");
+        fake_world world;
+        seed_savestate_world(world);
+        world.empty_blobs = true;
+        rollback_engine engine;
+        record_with_blobs(world, engine, 4);
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+        EXPECT_EQ(world.count("set_savestate"), 0);
+        EXPECT_EQ(world.count("set_body "), 3);
+        EXPECT_GT(world.count("set_body_extra"), 0);
+        EXPECT_EQ(world.count("set_contacts"), 3);
+        EXPECT_EQ(world.count("set_clock"), 1);
+        EXPECT_EQ(engine.stats().savestates_restored, 0u);
+        EXPECT_EQ(engine.stats().savestate_failures, 0u);
+    }
+    {
+        SCOPED_TRACE("capture only");
+        fake_world world;
+        seed_savestate_world(world);
+        rollback_engine engine;
+        record_with_blobs(world, engine, 4);
+        auto adapter = world.adapter();
+        adapter.set_savestate = nullptr;
+        EXPECT_TRUE(engine.rewind_to(adapter, 2, 4, no_input, "test"));
+        EXPECT_EQ(world.count("set_savestate"), 0);
+        EXPECT_EQ(world.count("set_body "), 3);
+        EXPECT_EQ(world.count("set_clock"), 1);
+        EXPECT_EQ(engine.stats().savestates_restored, 0u);
+    }
+}
+
+// set_exact_restore(false) is the per-body restore over the same records: the
+// blobs are still captured, never applied - the A/B in one binary.
+TEST(RollbackEngine, SavestateWithSwitchOff) {
+    fake_world world;
+    seed_savestate_world(world);
+    rollback_engine engine;
+    engine.set_exact_restore(false);
+    const auto blobs = record_with_blobs(world, engine, 4);
+    ASSERT_FALSE(blobs.at(2).empty());
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_savestate"), 0);
+    EXPECT_EQ(world.count("set_body "), 3);
+    EXPECT_GT(world.count("set_body_extra"), 0);
+    EXPECT_EQ(world.count("set_contacts"), 3);
+    EXPECT_EQ(world.count("set_clock"), 1);
+    EXPECT_EQ(world.count("set_nav"), 2);
+    EXPECT_EQ(world.count("get_savestate"), 2);   // the replayed ticks are still captured
+    EXPECT_EQ(engine.stats().savestates_restored, 0u);
+    EXPECT_EQ(engine.stats().savestate_failures, 0u);
+}
+
+// A body whose friction contacts the blob could not carry (its system had a
+// body the world lost) is still covered - no beam, no extra - but gets its
+// contacts from our own record, like an uncovered body would.
+TEST(RollbackEngine, SavestateDroppedContactsAreRewrittenFromTheRecord) {
+    fake_world world;
+    seed_savestate_world(world);
+    world.drop_contacts_of = {"Own"};
+    rollback_engine engine;
+    record_with_blobs(world, engine, 4);
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    ASSERT_EQ(world.count("set_savestate"), 1);
+    EXPECT_EQ(world.count("set_body "), 0);
+    EXPECT_EQ(world.count("set_body_extra"), 0);
+    EXPECT_EQ(world.count("set_contacts Own"), 1);
+    EXPECT_EQ(world.count("set_contacts Remote"), 0);
+    EXPECT_EQ(world.count("set_contacts Plate"), 0);
+    EXPECT_LT(world.first("set_savestate"), world.first("set_contacts Own"));
+    EXPECT_LT(world.first("set_contacts Own"), world.first("step"));
+    EXPECT_EQ(engine.stats().savestates_restored, 1u);
+    EXPECT_EQ(engine.stats().contact_restore_failures, 0u);   // the fake's set_contacts makes 0 and fails none
+}
+
+// A record whose blob the world could not capture is counted: the stat tells a
+// persistent capture failure (a body the capture refuses) apart from a world
+// that simply has no savestate hook.
+TEST(RollbackEngine, SavestateCaptureFailuresAreCounted) {
+    fake_world world;
+    seed_savestate_world(world);
+    world.empty_blobs = true;
+    rollback_engine engine;
+    record_with_blobs(world, engine, 4);
+    EXPECT_EQ(engine.stats().savestate_capture_failures, 4u);
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_savestate"), 0);   // nothing to restore from
+    EXPECT_EQ(engine.stats().savestates_restored, 0u);
+    EXPECT_EQ(engine.stats().savestate_failures, 0u);   // a missing blob is not a refused one
+}
+
+// A blob the world refuses costs the anchor its savestate, not the rollback:
+// the per-body path runs for everything (the clock included, still before any
+// body), the failure is counted and logged, and the refused blob is dropped so
+// the next rewind to that tick does not try it again.
+TEST(RollbackEngine, SavestateRefusedFallsBackToThePerBodyPath) {
+    fake_world world;
+    seed_savestate_world(world);
+    world.refuse_savestate = true;
+    rollback_engine engine;
+    record_with_blobs(world, engine, 4);
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_savestate"), 1);
+    EXPECT_EQ(engine.stats().savestate_failures, 1u);
+    EXPECT_EQ(engine.stats().savestates_restored, 0u);
+    EXPECT_EQ(world.count("log savestate:"), 1);
+    EXPECT_EQ(world.count("set_clock"), 1);
+    EXPECT_LT(world.first("set_savestate"), world.first("set_clock"));
+    EXPECT_LT(world.first("set_clock"), world.first("set_body "));
+    EXPECT_EQ(world.count("set_body "), 3);
+    EXPECT_GT(world.count("set_body_extra"), 0);
+    EXPECT_EQ(world.count("set_contacts"), 3);
+    EXPECT_EQ(world.count("set_nav"), 4);   // before the refused blob, and again on the per-body path
+    EXPECT_EQ(engine.stats().resim_ticks, 2u);
+
+    world.calls.clear();
+    EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+    EXPECT_EQ(world.count("set_savestate"), 0);
+    EXPECT_EQ(engine.stats().savestate_failures, 1u);
+    EXPECT_EQ(world.count("set_body "), 3);
+}
+
+// The savestate belongs to a restore a replay follows, like the clock and the
+// scripts: a frozen clock or a window past max_resim_ticks snaps the bodies
+// and drops the history, and never applies a blob.
+TEST(RollbackEngine, SavestateGates) {
+    {
+        SCOPED_TRACE("frozen clock");
+        fake_world world;
+        seed_savestate_world(world);
+        rollback_engine engine;
+        record_with_blobs(world, engine, 4);
+        world.clock_running = false;
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 4, no_input, "test"));
+        EXPECT_EQ(engine.stats().frozen, 1u);
+        EXPECT_EQ(world.count("set_savestate"), 0);
+        EXPECT_EQ(world.count("set_clock"), 0);
+        EXPECT_GT(world.count("set_body "), 0);
+        EXPECT_EQ(engine.stats().savestates_restored, 0u);
+        EXPECT_EQ(world.steps, 0);
+    }
+    {
+        SCOPED_TRACE("lag beyond max_resim_ticks");
+        fake_world world;
+        seed_savestate_world(world);
+        bmmo::session::rollback_thresholds thresholds;
+        thresholds.max_resim_ticks = 3;
+        rollback_engine engine(thresholds);
+        record_with_blobs(world, engine, 8);
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 2, 8, no_input, "test"));
+        EXPECT_EQ(engine.stats().too_far, 1u);
+        EXPECT_EQ(world.count("set_savestate"), 0);
+        EXPECT_EQ(world.count("set_clock"), 0);
+        EXPECT_GT(world.count("set_body "), 0);
+        EXPECT_EQ(engine.stats().savestates_restored, 0u);
+        EXPECT_EQ(world.steps, 0);
+    }
+}
+
+// The claim itself: with the savestate, the physics after any number of
+// rewinds is bit for bit the physics of the straight run.  Two worlds, the
+// same inputs; one is stepped straight through, the other is rewound `depth`
+// ticks every `every` ticks and replayed from its records, and the two are
+// compared field by field (bit patterns) and blob by blob after every rewind
+// and at the end.  The per-body restore over the same records must drift -
+// the beam zeroes the hidden state - which is what makes the positive half
+// mean something.
+TEST(RollbackEngine, ManyRewindsStayBitExact) {
+    for (const uint32_t depth: {1u, 2u, 5u, 12u, 40u, 48u})
+        for (const uint32_t every: {3u, 7u, 20u}) {
+            SCOPED_TRACE("depth " + std::to_string(depth) + ", every " + std::to_string(every));
+            const lockstep_outcome exact = run_lockstep(depth, every, true);
+            EXPECT_GT(exact.rewinds, 0u);
+            EXPECT_EQ(exact.refused, 0u);
+            EXPECT_TRUE(exact.exact) << exact.first_difference;
+            EXPECT_EQ(exact.savestates_restored, exact.rewinds);
+            EXPECT_EQ(exact.savestate_failures, 0u);
+
+            const lockstep_outcome beam = run_lockstep(depth, every, false);
+            EXPECT_EQ(beam.rewinds, exact.rewinds);
+            EXPECT_EQ(beam.savestates_restored, 0u);
+            EXPECT_FALSE(beam.exact) << "the per-body restore stayed bit-exact: the hidden state is not exercised";
+        }
 }

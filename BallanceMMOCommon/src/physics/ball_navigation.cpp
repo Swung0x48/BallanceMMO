@@ -17,10 +17,14 @@ namespace bmmo::physics {
     // ball driven by the script.
     class force_controller final : public IVP_Controller_Independent {
     public:
-        force_controller(IVP_Real_Object* object, const IVP_U_Point& position, const IVP_U_Point& force) {
+        force_controller(IVP_Real_Object* object, const IVP_U_Point& position, const IVP_U_Point& force, int leaf) {
             core_ = object->get_core();
             position_ = position;
             force_ = force;
+            // One name per leaf: the savestate matches a controller by
+            // (priority, name) to put the core's controller order back, and
+            // two held keys are two controllers of one priority on one core.
+            std::snprintf(name_, sizeof(name_), "bmmo:force/%d", leaf);
             if (core_) IVP_Controller_Manager::add_controller_to_core(this, core_);
         }
 
@@ -49,11 +53,12 @@ namespace bmmo::physics {
         }
 
         IVP_CONTROLLER_PRIORITY get_controller_priority() override { return IVP_CP_ACTUATOR; }
-        const char* get_controller_name() override { return "bmmo:force"; }
+        const char* get_controller_name() override { return name_; }
 
         IVP_Core* core_;
         IVP_U_Point position_;
         IVP_U_Point force_;
+        char name_[24] = "bmmo:force";
     };
 
     player_navigation::player_navigation(CKContext* context, CKIpionManager* physics, CK3dEntity* ball,
@@ -128,7 +133,7 @@ namespace bmmo::physics {
         force.mult(force_value_);
 
         IVP_U_Point position(0.0, 0.0, 0.0);
-        l.controller = new force_controller(real, position, force);
+        l.controller = new force_controller(real, position, force, l.definition.index);
         return true;
     }
 
@@ -139,7 +144,7 @@ namespace bmmo::physics {
         if (!object || !object->m_RealObject) return false;
         IVP_U_Point force(force_ws[0], force_ws[1], force_ws[2]);
         IVP_U_Point position(0.0, 0.0, 0.0);
-        l.controller = new force_controller(object->m_RealObject, position, force);
+        l.controller = new force_controller(object->m_RealObject, position, force, l.definition.index);
         return true;
     }
 

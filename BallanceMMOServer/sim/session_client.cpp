@@ -39,6 +39,9 @@
 #include <game/script_state.hpp>
 #include <message/message_all.hpp>
 #include <physics/ball_navigation.hpp>
+#include <physics/physics_savestate.hpp>
+#include <physics/physics_direct.hpp>
+#include <session/rollback_binding.hpp>
 #include <physics/physics_state.hpp>
 #include <cstdlib>
 #include <cstring>
@@ -141,6 +144,19 @@ namespace {
         // for diffing a rewound run against a control.
         std::string trace_body;
         uint32_t trace_from = 0, trace_until = 0;
+        // --trace-clock A B: the engine clock and the frame step after every
+        // live tick in [A, B] and before every replayed tick in it (IVP
+        // times, the PSI event queue, the manager's smoothed delta, the time
+        // factor and the physics step) - for a rate or phase drift between a
+        // rewound run and a control, which a body trace only shows as motion.
+        uint32_t trace_clock_from = 0, trace_clock_until = 0;
+        // --dump-savestate A B DIR: the record's savestate blob of every tick
+        // in [A, B] written to DIR/<tick>.sav, after the live tick and again
+        // after a rewind re-recorded it - so two clients' blobs of one tick
+        // can be diffed field by field offline (BallanceMMOSimTool
+        // --savestate-diff), where a journal only shows positions.
+        uint32_t dump_savestate_from = 0, dump_savestate_until = 0;
+        std::string dump_savestate_dir;
         // --no-restore-recheck: do not ask IVP to recheck contacts for a
         // body the restore moved.  Isolates the recheck's own cost to
         // replay fidelity from everything else.
@@ -192,6 +208,13 @@ namespace {
         // frame before its physics step.  --no-script-replay is the physics-only
         // replay, for the A/B.
         bool script_replay = true;
+        // The IVP savestate (docs/ivp-savestate-design.md): every tick's record
+        // carries the engine's whole collision state and a rollback rebuilds it
+        // at the anchor.  --no-savestate is the per-body restore, for the A/B;
+        // --savestate-strict makes the first blob/world inconsistency fail the
+        // restore (the rollback otherwise skips the record and goes on).
+        bool savestate = true;
+        bool savestate_strict = false;
         // --trace-plan: log which branch every body of a restore took.
         bool trace_plan = false;
         bool correct = true;
@@ -241,7 +264,9 @@ namespace {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
-                  "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]");
+                  "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
+                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR]\n"
+                  "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)");
     }
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -288,6 +313,20 @@ namespace {
                 if (!(v = next())) return false;
                 out.trace_until = static_cast<uint32_t>(std::atoi(v));
             }
+            else if (arg == "--dump-savestate") {
+                if (!(v = next())) return false;
+                out.dump_savestate_from = static_cast<uint32_t>(std::atoi(v));
+                if (!(v = next())) return false;
+                out.dump_savestate_until = static_cast<uint32_t>(std::atoi(v));
+                if (!(v = next())) return false;
+                out.dump_savestate_dir = v;
+            }
+            else if (arg == "--trace-clock") {
+                if (!(v = next())) return false;
+                out.trace_clock_from = static_cast<uint32_t>(std::atoi(v));
+                if (!(v = next())) return false;
+                out.trace_clock_until = static_cast<uint32_t>(std::atoi(v));
+            }
             else if (arg == "--no-restore-recheck") out.restore_recheck = false;
             else if (arg == "--no-restore-impulses") out.restore_impulses = false;
             else if (arg == "--no-restore-quats") out.restore_quaternions = false;
@@ -299,6 +338,8 @@ namespace {
             else if (arg == "--contact-flags") { if (!(v = next())) return false; out.contact_flags = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--no-sleep-as-recorded") out.sleep_as_recorded = false;
             else if (arg == "--no-script-replay") out.script_replay = false;
+            else if (arg == "--no-savestate") out.savestate = false;
+            else if (arg == "--savestate-strict") out.savestate_strict = true;
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
@@ -827,6 +868,7 @@ namespace {
             rollback_.set_contact_flags(args_.contact_flags);
             rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
             rollback_.set_replay_scripts(args_.script_replay);
+            rollback_.set_exact_restore(args_.savestate);
             rollback_.set_trace_plan(args_.trace_plan);
             session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
@@ -1628,6 +1670,7 @@ namespace {
                     }
                 }
                 rollback_.record(rollback_world(), tick, tracked, applied);
+                dump_savestate(tick);
             }
             if (assigned_) {
                 while (input_history_.size() > bmmo::session::MAX_INPUT_FRAMES) input_history_.pop_front();
@@ -1721,6 +1764,8 @@ namespace {
             if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
                 logf("body %s after live tick %u: %s", args_.trace_body.c_str(), tick,
                      bmmo::physics::describe_body(physics, args_.trace_body.c_str()).c_str());
+            if (args_.trace_clock_until && tick >= args_.trace_clock_from && tick <= args_.trace_clock_until)
+                logf("clock after live tick %u: %s", tick, describe_clock().c_str());
             // --trace: what pushes the own ball - the navigation replica's
             // leaves, every controller on its core, the mechanism force blocks
             // whose target it is - logged whenever that changes.
@@ -1984,9 +2029,7 @@ namespace {
                 const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
                 if (rolled && args_.trace && rollback_diag_++ < 16)
                     logf("after rollback: movable=%s", bmmo::physics::describe_movable_objects(physics).c_str());
-                if (rolled && own_navigation_ && previous_cam_valid_)
-                    bmmo::physics::navigation_input(physics, own_nav_entity_.c_str(), 0, previous_cam_[0], previous_cam_[1],
-                                                    previous_cam_[2], false, error);
+                if (rolled) rearm_own_navigation();
                 return;
             }
             for (const auto& body: snapshot.bodies) {
@@ -2133,6 +2176,64 @@ namespace {
             }
         }
 
+        // The engine clock and the frame step on one line, in hex floats: the
+        // IVP times, the event queue, the manager's smoothed delta, the time
+        // factor and the physics step it yields (--trace-clock and the
+        // savestate restore report).
+        std::string describe_clock() {
+            bmmo_physics_clock_state clock{};
+            float factor = 0.0f, physics_delta = 0.0f;
+            std::string error;
+            bmmo::physics::get_clock_state(engine_->physics(), clock, error);
+            bmmo::physics::get_clock(engine_->physics(), factor, physics_delta, error);
+            char text[400];
+            std::snprintf(text, sizeof(text), "t=%a tlast=%a tnext=%a base=%a last=%a nmc=%d q=%d qmin=%a factor=%a pdt=%a",
+                          clock.current_time, clock.time_of_last_psi, clock.time_of_next_psi, clock.base_time, clock.last_time,
+                          static_cast<int>(clock.next_movement_check), static_cast<int>(clock.queued_events),
+                          static_cast<double>(clock.queue_min), static_cast<double>(factor), static_cast<double>(physics_delta));
+            return text;
+        }
+
+        // --dump-savestate: the engine's record of `tick` as a file (see the
+        // argument's comment).  Overwrites: after a rewind the replayed ticks'
+        // records are the replayed world's.
+        void dump_savestate(uint32_t tick) {
+            if (args_.dump_savestate_dir.empty() || tick < args_.dump_savestate_from || tick > args_.dump_savestate_until) return;
+            const std::vector<uint8_t>* blob = rollback_.recorded_savestate(tick);
+            if (savestate_dump_logs_ == 0) {
+                ++savestate_dump_logs_;
+                logf("--dump-savestate: first tick %u in range, record %s, into %s (cwd %s)", tick, blob ? "has a blob" : "HAS NO BLOB",
+                     args_.dump_savestate_dir.c_str(), std::filesystem::current_path().string().c_str());
+            }
+            if (!blob) return;
+            std::error_code ec;
+            std::filesystem::create_directories(args_.dump_savestate_dir, ec);
+            const std::filesystem::path path = std::filesystem::path(args_.dump_savestate_dir) / (std::to_string(tick) + ".sav");
+            if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
+                std::fwrite(blob->data(), 1, blob->size(), f);
+                std::fclose(f);
+            } else if (savestate_dump_logs_++ < 4) {
+                logf("--dump-savestate: cannot write %s", path.string().c_str());
+            }
+        }
+
+        // The live frame's own navigation input - the camera rows set after the
+        // previous tick, pending for this tick's PreSimulate pass, where the
+        // replica polls the keys - is consumed by a re-simulation's own input
+        // feed.  Re-armed after every rewind (the snapshot path always did; the
+        // forced and input-correction rewinds did not): without it the first
+        // live tick after a replay ran on the last replayed tick's keys and
+        // camera, and a key edge on that tick landed one tick late (measured
+        // on the arena with --force-rollback 7:5: 6 mm at the edge, a metre
+        // 1300 ticks later; a 20:12 cadence never put an edge on that tick).
+        void rearm_own_navigation() {
+            if (!own_navigation_ || !previous_cam_valid_) return;
+            std::string error;
+            if (!bmmo::physics::navigation_input(engine_->physics(), own_nav_entity_.c_str(), 0, previous_cam_[0], previous_cam_[1],
+                                                 previous_cam_[2], false, error))
+                logf("own navigation rows after a rewind: %s", error.c_str());
+        }
+
         // Rewind for no reason at all, on a fixed cadence (--force-rollback).
         // A solo session's world is a pure function of its recorded inputs, so
         // the hashes of a run with these must equal those of a run without; any
@@ -2160,8 +2261,13 @@ namespace {
                 logf("contacts of %s before the rewind at %u: %s", own_body_entity_.c_str(), now,
                      bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
             }
-            if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) ++forced_rollbacks_;
-            else ++forced_rollbacks_missed_;
+            if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
+                ++forced_rollbacks_;
+                rearm_own_navigation();
+                for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t);
+            } else {
+                ++forced_rollbacks_missed_;
+            }
             if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
                 ++contact_traces_;
                 if (!args_.trace_body.empty() && now >= args_.trace_from && now <= args_.trace_until)
@@ -2217,6 +2323,7 @@ namespace {
             if (rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at,
                                     entity + " input corrected at tick " + std::to_string(anchor))) {
                 ++input_rewinds_;
+                rearm_own_navigation();
                 return;
             }
             ++input_rewinds_missed_;
@@ -2228,20 +2335,8 @@ namespace {
         // Every movable body in this client's world except the balls, which
         // the tracked set carries separately as own/remote entities.
         std::vector<std::string> movable_body_names() {
-            std::vector<bmmo_physics_body_state> bodies(256);
-            int count = bmmo::physics::list_bodies(engine_->physics(), bodies.data(), static_cast<int>(bodies.size()));
-            if (count > static_cast<int>(bodies.size())) {
-                bodies.resize(static_cast<size_t>(count));
-                count = bmmo::physics::list_bodies(engine_->physics(), bodies.data(), static_cast<int>(bodies.size()));
-            }
-            std::vector<std::string> names;
-            for (int i = 0; i < count && i < static_cast<int>(bodies.size()); ++i) {
-                const auto& body = bodies[static_cast<size_t>(i)];
-                if (!body.movable || !body.name[0]) continue;
-                if (std::strncmp(body.name, "Ball_", 5) == 0) continue;   // own and remote balls are tracked by entity
-                names.emplace_back(body.name);
-            }
-            return names;
+            // Own and remote balls are tracked by entity, not as mechanisms.
+            return bmmo::physics::movable_body_names(engine_->physics(), "Ball_");
         }
 
         // How many bodies have an impulse queued for the next PSI at the moment
@@ -2634,123 +2729,67 @@ namespace {
             }
         }
 
+        // The rollback engine's view of this client's world: the one binding
+        // every user of the engine shares (session/rollback_binding.hpp, with
+        // the in-process backend physics/physics_direct.hpp), plus what only
+        // this client has - its deferred births, its trace switches, its
+        // journal - as options.
         bmmo::session::rollback_world rollback_world() {
-            bmmo::session::rollback_world world;
-            CKIpionManager* physics = engine_->physics();
-            world.get_body = [physics](const std::string& entity, bmmo_physics_body_state& out) {
-                std::string error;
-                return bmmo::physics::get_body_state(physics, entity.c_str(), out, error);
-            };
-            // Design 9.25: the engine decides the sleep handling and the
-            // contact recheck per write (see the mod's adapter for why).
-            world.set_body = [physics](const std::string& entity, const bmmo_physics_body_state& state,
-                                       bmmo::session::wake_mode mode, bool recheck) {
-                std::string error;
-                const auto bridge_mode = mode == bmmo::session::wake_mode::wake   ? bmmo::physics::wake_mode::wake
-                                       : mode == bmmo::session::wake_mode::freeze ? bmmo::physics::wake_mode::freeze
-                                                                                  : bmmo::physics::wake_mode::keep;
-                return bmmo::physics::set_body_state(physics, entity.c_str(), state.position, state.rotation, state.linear,
-                                                     state.angular, bridge_mode, recheck, error);
-            };
-            // Bridge API v16: the restore's collision recheck as a pass of its
-            // own, after every pose is written.
-            world.recheck_body = [physics](const std::string& entity) {
-                std::string error;
-                return bmmo::physics::recheck_body(physics, entity.c_str(), error);
-            };
-            // Not installed at all when neither half is wanted: a caller that
-            // restores nothing should not pay to capture it either, and it
-            // makes --no-restore-impulses --no-restore-quats a true pre-v11
-            // control rather than one that still runs the new capture.
-            // The extra state is always captured; the engine's switches
-            // decide what of it a restore writes back (so every half is an
-            // A/B in one binary).
-            world.get_body_extra = [physics](const std::string& entity, bmmo_physics_core_extra& out) {
-                std::string error;
-                return bmmo::physics::get_core_extra(physics, entity.c_str(), out, error);
-            };
-            world.set_body_extra = [physics](const std::string& entity, const bmmo_physics_core_extra& state) {
-                std::string error;
-                return bmmo::physics::set_core_extra(physics, entity.c_str(), state, error);
-            };
-            // The clock is always READ (a restore shifts the calm references
-            // it puts back by the live clock's offset); it is rewound only on
+            physics_direct_.manager = engine_->physics();
+            CKIpionManager* physics = physics_direct_.manager;
+            bmmo::session::rollback_binding_options o;
+            o.delta_ms = 1000.0f / 66.0f;
+            // The clock is always read (a restore shifts the calm references it
+            // puts back by the live clock's offset); rewound only on
             // --restore-clock.
-            world.get_clock = [physics](bmmo_physics_clock_state& out) {
-                std::string error;
-                return bmmo::physics::get_clock_state(physics, out, error);
-            };
-            if (args_.restore_clock) {
-                world.set_clock = [physics](const bmmo_physics_clock_state& state) {
-                    std::string error;
-                    return bmmo::physics::set_clock_state(physics, state, error);
-                };
-            }
+            o.restore_clock = args_.restore_clock;
+            o.savestate_flags = args_.savestate_strict ? bmmo::physics::SAVESTATE_STRICT : 0u;
             if (args_.script_replay && !scripts_.empty()) {
-                CKContext* context = engine_->context();
-                world.capture_scripts = [this, context](std::vector<uint8_t>& out) {
-                    return bmmo::game::script_replay::capture(context, scripts_, script_hooks_, out);
-                };
-                world.restore_scripts = [this, context](const std::vector<uint8_t>& bytes, uint32_t anchor) {
-                    // A script the game reset after the anchor keeps its live
-                    // state: the anchor's record is what the reset tore down.
-                    std::vector<CK_ID> kept_live;
-                    for (const auto& [id, reset_tick]: script_reset_ticks_)
-                        if (reset_tick > anchor) kept_live.push_back(id);
-                    script_reset_skips_ += kept_live.size();
-                    std::string error;
-                    const bool ok = bmmo::game::script_replay::restore(context, scripts_, script_hooks_, bytes, &error,
-                                                                       &scripts_replayed_, &kept_live);
-                    if (!ok && script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
-                    return ok;
-                };
-                world.diff_scripts = [this, context](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, bool& logical) {
-                    const auto d = bmmo::game::script_replay::diff(context, scripts_, a, b);
-                    logical = d.logical;
-                    return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
-                         + (d.logical && args_.trace ? " :: " + d.detail : std::string());
+                o.context = engine_->context();
+                o.scripts = &scripts_;
+                o.script_hooks = &script_hooks_;
+                o.scripts_replayed = &scripts_replayed_;
+                o.script_reset_ticks = &script_reset_ticks_;
+                o.script_reset_skips = &script_reset_skips_;
+                o.script_diff_detail = args_.trace;
+                o.on_script_restore_failed = [this](const std::string& error) {
+                    if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };
             }
-            // Before each replayed tick's step: the births deferred into this
-            // replay (apply_event), made at their tick in the world as it
-            // stands then; then the mechanism scripts' frame, where the live
-            // frame runs it (the bridge event log is muted for it - a
-            // replayed Physics WakeUp is not a live event for the server).
-            world.pre_step = [this](uint32_t tick) {
+            o.own_key_codes = own_key_codes_;
+            o.own_key_blocks = own_key_blocks_;
+            o.own_key_count = own_key_count_;
+            o.log = [](const std::string& text) { logf("%s", text.c_str()); };
+            // Before each replayed tick's scripts and step: the births deferred
+            // into this replay (apply_event), made at their tick in the world
+            // as it stands then, and the traces.
+            o.before_replayed_tick = [this](uint32_t tick) {
                 drain_pending_births(tick);
                 if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
                     logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
                          bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
+                if (args_.trace_clock_until && tick >= args_.trace_clock_from && tick <= args_.trace_clock_until)
+                    logf("clock before replayed tick %u: %s", tick, describe_clock().c_str());
                 if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
                     ++contact_traces_;
                     logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
                          bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
                 }
-                if (!scripts_.empty()) {
-                    bmmo::physics::set_event_log_muted(true);
-                    bmmo::game::script_replay::execute_frame(engine_->context(), scripts_, 1000.0f / 66.0f, &scripts_replayed_);
-                    bmmo::physics::set_event_log_muted(false);
-                }
             };
-            world.get_nav = [physics](const std::string& entity, bmmo_physics_nav_state& out) {
-                std::string error;
-                return bmmo::physics::navigation_get_state(physics, entity.c_str(), out, error);
-            };
-            world.set_nav = [physics](const std::string& entity, const bmmo_physics_nav_state& state) {
-                std::string error;
-                return bmmo::physics::navigation_set_state(physics, entity.c_str(), state, error);
-            };
-            world.get_contacts = [physics](const std::string& entity, std::vector<bmmo_physics_contact>& out) {
-                std::string error;
-                bmmo_physics_contact buffer[16];
-                const int n = bmmo::physics::get_contacts(physics, entity.c_str(), buffer, 16, error);
-                if (n < 0) return -1;
-                out.assign(buffer, buffer + std::min(n, 16));
-                return n;
-            };
-            world.set_contacts = [this, physics](const std::string& entity, const std::vector<bmmo_physics_contact>& in, uint32_t flags) {
-                std::string error;
-                const int made = bmmo::physics::set_contacts(physics, entity.c_str(), in.data(), static_cast<int>(in.size()), flags, error);
+            if (args_.replay_scripts) {
+                // --replay-scripts: the whole frame, so every script runs for
+                // the replayed tick too (an experiment, not the lockstep
+                // recipe: the scripts outside the replay's selection are not
+                // rewound).
+                o.whole_frame = [this]() {
+                    std::string error;
+                    const bool ok = engine_->tick(error);
+                    if (!ok) logf("replay frame: %s", error.c_str());
+                    return ok;
+                };
+            }
+            o.on_contacts_restored = [this](const std::string& entity, int made, const std::string& error,
+                                            const std::vector<bmmo_physics_contact>& in) {
                 if (!error.empty() && contact_restore_logs_++ < 8) logf("contact restore of %s: %s", entity.c_str(), error.c_str());
                 if (made > 0 && args_.trace && contact_made_logs_++ < 40) {
                     std::string partners;
@@ -2758,53 +2797,56 @@ namespace {
                     logf("contact restore of %s at tick %u: %d re-created of %zu recorded (%s)", entity.c_str(), current_tick(), made,
                          in.size(), partners.c_str());
                 }
-                return made;
             };
-            world.nav_input = [physics](const std::string& entity, const bmmo::session::input_frame& frame) {
-                std::string error;
-                const bool active = (frame.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
-                return bmmo::physics::navigation_input(physics, entity.c_str(), frame.keys, frame.cam_right, frame.cam_up,
-                                                       frame.cam_dir, active, error);
+            // The first eight only: a failure that never clears (a body the
+            // capture refuses) would otherwise log every tick.  The engine
+            // counts them (stats: savestate_capture_failures).
+            o.on_savestate_capture_failed = [this](const std::string& error) {
+                if (savestate_get_failures_++ < 8) logf("savestate capture failed: %s", error.c_str());
             };
-            world.nav_poll = [this, physics](const std::string& entity, bool enable) {
-                std::string error;
-                return bmmo::physics::navigation_poll(physics, entity.c_str(), enable, own_key_codes_, own_key_blocks_,
-                                                      own_key_count_, error);
+            o.on_savestate_restored = [this](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
+                const bmmo::physics::savestate_report& report = physics_direct_.last_report;
+                if (!ok && savestate_set_failures_++ < 8) logf("savestate restore failed: %s", error.c_str());
+                for (const auto& warning: report.warnings)
+                    if (savestate_warning_logs_++ < 8) logf("savestate restore: %s", warning.c_str());
+                if (args_.trace)
+                    logf("savestate restore at tick %u: %s objects=%u cores=%u collisions=%u contacts=%u systems=%u units=%u "
+                         "events=%u hull=%u skipped=%u unknown=%zu dropped=%zu warnings=%zu | clock before {%s} after {%s}", current_tick(),
+                         ok ? "ok" : "FAILED", report.objects, report.cores, report.collisions, report.contacts, report.systems, report.units,
+                         report.events, report.hull_entries, report.skipped, report.unknown_bodies.size(), report.contacts_dropped.size(),
+                         report.warnings.size(), savestate_clock_before_.c_str(), describe_clock().c_str());
             };
-            world.step = [this, physics]() {
-                std::string error;
-                if (args_.replay_scripts) {
-                    // The whole frame, so the scripts that drive the mechanisms
-                    // run for the replayed tick too.
-                    const bool ok = engine_->tick(error);
-                    if (!ok) logf("replay frame: %s", error.c_str());
-                    return ok;
-                }
-                const bool diag = args_.trace && step_diag_ < 24;
-                if (diag)
-                    for (const auto& [id, remote]: remotes_)
-                        if (remote.navigation)
-                            logf("core before step: %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
-                const bool ok = bmmo::physics::step_physics(physics, 1000.0f / 66.0f, error);
-                if (diag) {
-                    ++step_diag_;
-                    for (const auto& [id, remote]: remotes_)
-                        if (remote.navigation)
-                            logf("core after step:  %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
-                }
-                return ok;
-            };
-            world.simulating = [physics]() {
-                float factor = 0.0f, delta = 0.0f;
-                std::string error;
-                return !bmmo::physics::get_clock(physics, factor, delta, error) || (factor > 0.0f && delta > 0.0f);
-            };
-            world.log = [](const std::string& text) { logf("%s", text.c_str()); };
             // Every decision the engine takes about a snapshot, straight into
             // the box: no log parsing needed to know what this client did.
-            world.on_correction = [this](const bmmo::session::rollback_correction& c) {
-                journal_rollback_correction(c);
-            };
+            o.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_rollback_correction(c); };
+
+            bmmo::session::rollback_world world = bmmo::session::bind_rollback_world(physics_direct_, o);
+            // The clock before a restore, for the report line above (--trace).
+            if (args_.trace && world.set_savestate) {
+                const auto inner = world.set_savestate;
+                world.set_savestate = [this, inner](const std::vector<uint8_t>& blob, bmmo::session::savestate_outcome& outcome) {
+                    savestate_clock_before_ = describe_clock();
+                    return inner(blob, outcome);
+                };
+            }
+            if (args_.trace && !args_.replay_scripts) {
+                const auto inner = world.step;
+                world.step = [this, inner, physics]() {
+                    const bool diag = step_diag_ < 24;
+                    if (diag)
+                        for (const auto& [id, remote]: remotes_)
+                            if (remote.navigation)
+                                logf("core before step: %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
+                    const bool ok = inner();
+                    if (diag) {
+                        ++step_diag_;
+                        for (const auto& [id, remote]: remotes_)
+                            if (remote.navigation)
+                                logf("core after step:  %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
+                    }
+                    return ok;
+                };
+            }
             return world;
         }
 
@@ -3100,7 +3142,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -3124,6 +3166,8 @@ namespace {
                  static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen),
                  static_cast<unsigned long long>(rs.impulses_restored),
                  static_cast<unsigned long long>(rs.contacts_restored), static_cast<unsigned long long>(rs.contact_restore_failures),
+                 static_cast<unsigned long long>(rs.savestates_restored), static_cast<unsigned long long>(rs.savestate_failures),
+                 static_cast<unsigned long long>(rs.savestate_capture_failures),
                  static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
                  static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
                  static_cast<unsigned long long>(script_reset_skips_), rs.max_error,
@@ -3180,7 +3224,13 @@ namespace {
         std::string last_ball_contacts_;                     // --trace: the shape of the last "ball contacts" line
         uint32_t contact_restore_logs_ = 0;
         uint32_t contact_made_logs_ = 0;
-        int contact_traces_ = 0;                             // --trace-restore: contact lines logged around rewinds
+        uint32_t savestate_get_failures_ = 0;                // the IVP savestate: capture and restore failures (logged once per 8)
+        uint32_t savestate_set_failures_ = 0;
+        uint32_t savestate_warning_logs_ = 0;
+        bmmo::physics::physics_direct physics_direct_;         // the binding's in-process backend (session/rollback_binding.hpp)
+        std::string savestate_clock_before_;                 // describe_clock() just before the last savestate restore (--trace)
+        uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)
+        int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;
@@ -3311,6 +3361,14 @@ int main(int argc, char** argv) {
     bmmo::sim::install_crash_reporter();
     arguments args;
     if (!parse(argc, argv, args)) { usage(); return 1; }
+    // The engine changes the working directory to the game's Bin while it
+    // boots: a relative dump directory means the one the client was started
+    // in (the harness gives every client its own).
+    if (!args.dump_savestate_dir.empty()) {
+        std::error_code ec;
+        const auto absolute = std::filesystem::absolute(args.dump_savestate_dir, ec);
+        if (!ec) args.dump_savestate_dir = absolute.string();
+    }
     role::init_socket();
     session_client client(args);
     if (!client.boot()) return 1;

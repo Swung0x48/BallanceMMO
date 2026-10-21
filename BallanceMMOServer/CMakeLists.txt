@@ -110,6 +110,9 @@ if (BMMO_BUILD_SIM)
             sim/physics_world.cpp sim/physics_world.hpp
             sim/session_runner.cpp sim/session_runner.hpp
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_state.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_savestate_common.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_savestate_capture.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/src/physics/physics_savestate_restore.cpp"
             "${BMMO_PLAYER_SRC_DIR}/Hotfix.cpp"
             "${BMMO_PLAYER_SRC_DIR}/GameConfig.cpp"
             "${BMMO_PLAYER_SRC_DIR}/IniFile.cpp"
@@ -120,7 +123,8 @@ if (BMMO_BUILD_SIM)
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config"
             "${BMMO_PLAYER_SRC_DIR}" "${BMMO_PLAYER_GENERATED_DIR}")
     target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET})
-    # The bridge (physics_state.cpp) reads IVP classes whose layout the macro
+    # The bridge (physics_state.cpp, and the savestate's three translation
+    # units physics_savestate_*.cpp) reads IVP classes whose layout the macro
     # changes - engine change #5 adds the per-unit movement-check countdown to
     # IVP_Simulation_Unit - so it is compiled under the same macro as the IVP
     # libraries it links (cmake/PortableMath.cmake); the client plugin's copy
@@ -141,6 +145,10 @@ if (BMMO_BUILD_SIM)
     # member would be skipped by GNU ld, which scans libraries in order).
     add_executable(BallanceMMOSimTool sim/sim_tool.cpp sim/rasterizer_stub.cpp sim/crash_report.cpp)
     target_link_libraries(BallanceMMOSimTool PRIVATE BallanceMMOSim)
+    # The savestate check drives the rollback engine (session/rollback.hpp),
+    # whose message types carry GameNetworkingSockets' typedefs: headers only,
+    # the tool links no transport.
+    target_include_directories(BallanceMMOSimTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets/include)
     if (WIN32)
         target_link_libraries(BallanceMMOSimTool PRIVATE dbghelp)
     elseif (ANDROID)

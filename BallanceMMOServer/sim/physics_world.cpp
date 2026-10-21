@@ -997,6 +997,24 @@ namespace bmmo::sim {
         return true;
     }
 
+    physics_world::step_state physics_world::capture_step_state() const {
+        step_state state;
+        state.tick = tick_;
+        state.rng_cursor = rng_cursor_;
+        state.random_cursor = random_cursor_;
+        state.callback_pending = callback_pending_;
+        state.sectors = sectors_;
+        return state;
+    }
+
+    void physics_world::restore_step_state(const step_state& state) {
+        tick_ = state.tick;
+        rng_cursor_ = state.rng_cursor;
+        random_cursor_ = state.random_cursor;
+        callback_pending_ = state.callback_pending;
+        sectors_ = state.sectors;
+    }
+
     void physics_world::pre_simulate() {
         callback_pending_ = false;
         if (options_.park_retail_ball || options_.auto_clone_players) park_retail_ball();
