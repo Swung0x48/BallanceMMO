@@ -44,6 +44,7 @@
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
 #include <physics/physics_state.hpp>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <physics/tick_record.hpp>
@@ -246,6 +247,24 @@ namespace {
         int anchor_timeout = 3000;
         int64_t pause_at = -1;        // test knob: stop ticking at this tick ...
         int pause_ms = 0;             // ... for this long (design 9.2 resync path)
+        // --stall-ms T:MS is the same knob in the late-player harness's
+        // spelling (docs/late-player-design.md 5.1 C7): a CPU stall at tick T,
+        // nothing polled or stepped while it lasts.
+        bool stall_named = false;
+        // --hold-event TYPE:N:MS|drop (late-player design 5.1 C6): the N-th own
+        // lifecycle event of TYPE (1-based) leaves this client MS ms after it
+        // was made, or never.  The client applies and journals it at once, as
+        // it would anyway: only the wire is gated, the reliable copy and both
+        // paths of the unreliable repeats alike, so the server sees an event
+        // that is late (or lost for good) and nothing else changes.
+        // --window-origin T: the window: line's 60-tick grid starts at tick
+        // T (a line at T - 1 closes the window before it), so an episode at T
+        // begins a window instead of falling in the middle of one.
+        uint32_t window_shift = 0;   // the grid's offset, (T - 1) mod 60; 0 = lines at multiples of 60
+        int hold_event_type = -1;
+        uint32_t hold_event_nth = 0;
+        int hold_event_ms = 0;
+        bool hold_event_drop = false;
         // Harness knobs (design 9.25): no level has a mechanism at its
         // resetpoint, so a recorded run that keeps the ball near the spawn
         // never touches one.  --start-sector activates a later sector at the
@@ -286,10 +305,42 @@ namespace {
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
-                  "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
+                  "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
+                  "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
+                  "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
                   "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--park-births] [--insert-births]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)");
+    }
+
+    const char* event_type_name(int type) {
+        switch (type) {
+        case 0: return "physicalize";
+        case 1: return "unphysicalize";
+        case 2: return "sector";
+        case 3: return "finish";
+        case 4: return "bodyrevived";
+        default: return "?";
+        }
+    }
+
+    // TYPE:N:MS or TYPE:N:drop, TYPE a name (physicalize, unphysicalize,
+    // sector, finish, bodyrevived) or its number.
+    bool parse_hold_event(const std::string& spec, arguments& out) {
+        const size_t a = spec.find(':');
+        const size_t b = a == std::string::npos ? std::string::npos : spec.find(':', a + 1);
+        if (b == std::string::npos) return false;
+        std::string type = spec.substr(0, a);
+        for (char& c: type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        out.hold_event_type = -1;
+        for (int t = 0; t <= 4; ++t)
+            if (type == event_type_name(t) || type == std::to_string(t)) out.hold_event_type = t;
+        if (out.hold_event_type < 0) return false;
+        out.hold_event_nth = static_cast<uint32_t>(std::max(1, std::atoi(spec.substr(a + 1, b - a - 1).c_str())));
+        const std::string what = spec.substr(b + 1);
+        out.hold_event_drop = what == "drop";
+        out.hold_event_ms = out.hold_event_drop ? 0 : std::atoi(what.c_str());
+        return out.hold_event_drop || out.hold_event_ms > 0;
     }
 
     bool parse(int argc, char** argv, arguments& out) {
@@ -376,6 +427,24 @@ namespace {
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
             else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
             else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
+            else if (arg == "--stall-ms") {
+                if (!(v = next())) return false;
+                const std::string spec = v;
+                const size_t colon = spec.find(':');
+                if (colon == std::string::npos) return false;
+                out.pause_at = std::atoll(spec.substr(0, colon).c_str());
+                out.pause_ms = std::atoi(spec.substr(colon + 1).c_str());
+                out.stall_named = true;
+            }
+            else if (arg == "--window-origin") {
+                if (!(v = next())) return false;
+                const long long origin = std::atoll(v);
+                out.window_shift = static_cast<uint32_t>((((origin - 1) % 60) + 60) % 60);
+            }
+            else if (arg == "--hold-event") {
+                if (!(v = next())) return false;
+                if (!parse_hold_event(v, out)) return false;
+            }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
             else if (arg == "--beam") {
                 for (int k = 0; k < 3; ++k) {
@@ -538,6 +607,7 @@ namespace {
             const char* stopped = "the client stopped";
             while (running_) {
                 update();
+                release_held_events();
                 if (ended_) { stopped = "the client ended the session"; break; }
                 if (std::chrono::duration<double>(clock_type::now() - started).count() > args_.seconds) {
                     logf("time limit reached");
@@ -785,6 +855,7 @@ namespace {
                             const uint32_t lag = current_tick() - tick;
                             relay_lag_max_ = std::max(relay_lag_max_, lag);
                             ++relay_lag_hist_[std::min<uint32_t>(lag, kRelayLagBuckets - 1)];
+                            ++window_lag_[entry.player][lag];
                         }
                         // What the server applied for that player at that tick,
                         // whether or not this client mirrors the ball.
@@ -1156,6 +1227,14 @@ namespace {
             phase_ = phase::running;
             origin_ = clock_type::now();
             rebases_ = 0;
+            // The window: line starts over with the session (its first call
+            // takes the base, prints nothing), and --hold-event counts the
+            // N-th own event of this session.
+            window_index_ = 0xFFFFFFFFu;
+            window_lag_.clear();
+            window_inrew_src_.clear();
+            input_rewind_entities_.clear();
+            hold_event_seen_ = 0;
             // Hold the world here until the tick base arrives (design 9.25
             // phase alignment): the first frame this client steps must be the
             // first frame the server's world steps, the one both of them number
@@ -1567,6 +1646,7 @@ namespace {
             if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
                 paused_once_ = true;
                 logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
+                if (args_.stall_named) logf("stall: %d ms at tick %u (--stall-ms)", args_.pause_ms, current_tick());
                 std::this_thread::sleep_for(std::chrono::milliseconds(args_.pause_ms));
             }
             const double expected = std::chrono::duration<double>(clock_type::now() - origin_).count() * bmmo::sim::kTickRate;
@@ -2107,6 +2187,7 @@ namespace {
                     p = nl + 1;
                 }
             }
+            if (assigned_) report_window(tick);
             // The box's own view of this frame, last: the fingerprint of the
             // world the corrections above have finished with, and the bodies
             // when a checkpoint is due.
@@ -2152,20 +2233,72 @@ namespace {
         void send_event(bmmo::session_event_msg& event) {
             event.session = session_;
             event.serialize();
+            ++events_sent_;
+            // Own events go on the wire with player 0; the box names the
+            // player the server will fill in.
+            journal_lifecycle_event(own_id_, event);
+            if (hold_event(event)) return;
+            put_event_on_wire(event.raw.str());
+        }
+
+        void put_event_on_wire(const std::string& bytes) {
             // ReliableNoNagle, not Reliable: a reliable message waits up to the
             // Nagle delay to be batched, and this frame's input goes out
             // unreliable with no delay a moment later - so an event stamped
             // for this tick could arrive after the input that lets the server
             // step it, and be applied a tick late (the server logs it: "late
             // by 1", seen on BodyRevived and Physicalize).
-            send_bytes(event.raw.str(), k_nSteamNetworkingSend_ReliableNoNagle);
+            send_bytes(bytes, k_nSteamNetworkingSend_ReliableNoNagle);
             // ...and again, unreliably, on each of the next ticks
             // (flush_inputs): the server takes the first copy to arrive.
-            own_event_repeats_.push(event.raw.str(), {0u});
-            ++events_sent_;
-            // Own events go on the wire with player 0; the box names the
-            // player the server will fill in.
-            journal_lifecycle_event(own_id_, event);
+            own_event_repeats_.push(bytes, {0u});
+        }
+
+        // --hold-event: true when this event is the one to hold back.  Held
+        // here, before the reliable copy and before the repeat queue, so the
+        // one gate covers every path the event leaves by; the bytes go out
+        // whole at the release (release_held_events), the repeats after them.
+        bool hold_event(const bmmo::session_event_msg& event) {
+            if (args_.hold_event_type < 0 || static_cast<int>(event.type) != args_.hold_event_type) return false;
+            if (++hold_event_seen_ != args_.hold_event_nth) return false;
+            if (args_.hold_event_drop) {
+                logf("hold-event: own %s #%u stamped tick %u dropped at tick %u: it never leaves this client",
+                     event_type_name(args_.hold_event_type), hold_event_seen_, event.tick, current_tick());
+                journal_note("hold-event: dropped " + std::string(event_type_name(args_.hold_event_type)) + " stamped "
+                             + std::to_string(event.tick));
+                return true;
+            }
+            held_events_.push_back(held_event{event.raw.str(), event.tick, current_tick(),
+                                              clock_type::now() + std::chrono::milliseconds(args_.hold_event_ms)});
+            logf("hold-event: own %s #%u stamped tick %u held at tick %u for %d ms",
+                 event_type_name(args_.hold_event_type), hold_event_seen_, event.tick, current_tick(), args_.hold_event_ms);
+            journal_note("hold-event: held " + std::string(event_type_name(args_.hold_event_type)) + " stamped "
+                         + std::to_string(event.tick) + " for " + std::to_string(args_.hold_event_ms) + " ms");
+            return true;
+        }
+
+        // Called on every pass of the main loop, so a release is late by one
+        // poll at most, not by a frame.
+        void release_held_events() {
+            if (held_events_.empty()) return;
+            const auto now = clock_type::now();
+            for (auto it = held_events_.begin(); it != held_events_.end();) {
+                if (now < it->release) { ++it; continue; }
+                if (phase_ != phase::running) {
+                    // end_session clears the list, so this is a safety net;
+                    // said aloud either way, so a hold never ends silently.
+                    logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: no session running",
+                         event_type_name(args_.hold_event_type), it->stamp, it->held_at);
+                    it = held_events_.erase(it);
+                    continue;
+                }
+                if (!assigned_) { ++it; continue; }   // a session but no tick base yet: wait for it
+                put_event_on_wire(it->bytes);
+                logf("hold-event: own %s stamped tick %u (held at tick %u) released at tick %u",
+                     event_type_name(args_.hold_event_type), it->stamp, it->held_at, current_tick());
+                journal_note("hold-event: released stamped " + std::to_string(it->stamp));
+                it = held_events_.erase(it);
+            }
         }
 
         void flush_inputs() {
@@ -2317,6 +2450,10 @@ namespace {
                 };
                 const live_cells_guard keep_cells(*this);
                 const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
+                if (rolled) {
+                    ++snapshot_rollbacks_;
+                    snapshot_rollback_depth_ += current_tick() - snapshot.tick;
+                }
                 if (rolled && args_.trace && rollback_diag_++ < 16)
                     logf("after rollback: movable=%s", bmmo::physics::describe_movable_objects(physics).c_str());
                 return;
@@ -2511,6 +2648,11 @@ namespace {
                 input_rewind_tick_ = tick;
                 input_rewind_entity_ = entity;
             }
+            // Every ball corrected this frame, not only the earliest: the one
+            // replay below re-runs them all, and the window: line credits it
+            // to each source (late-player design 5.2, input rewinds naming the
+            // late ball).
+            input_rewind_entities_.insert(entity);
         }
 
         // The engine clock and the frame step on one line, in hex floats: the
@@ -2659,6 +2801,7 @@ namespace {
             const live_cells_guard keep_cells(*this);
             if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
                 ++forced_rollbacks_;
+                forced_rollback_depth_ += now - anchor;
                 for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t, "replayed");
                 if (args_.trace_restore && queue_traces_ < 24) {
                     ++queue_traces_;
@@ -2714,6 +2857,8 @@ namespace {
             if (!input_rewind_pending_) return;
             const uint32_t anchor = input_rewind_tick_;
             const std::string entity = input_rewind_entity_;
+            std::set<std::string> corrected;
+            corrected.swap(input_rewind_entities_);
             input_rewind_pending_ = false;
             const uint32_t now = current_tick();
             if (static_cast<int32_t>(anchor - now) > 0) return;
@@ -2724,6 +2869,12 @@ namespace {
             if (rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at,
                                     entity + " input corrected at tick " + std::to_string(anchor))) {
                 ++input_rewinds_;
+                input_rewind_depth_ += now - (anchor - 1);
+                // Named by every source ball it corrects: the harness asks
+                // whether rewinds naming a late player grow (late-player
+                // design 5.2), and one replay covers all of this frame's.
+                for (const auto& [id, remote]: remotes_)
+                    if (corrected.count(remote.entity)) ++window_inrew_src_[id];
                 return;
             }
             ++input_rewinds_missed_;
@@ -2962,6 +3113,7 @@ namespace {
             const live_cells_guard keep_cells(*this);
             if (rollback_.rewind_to(rollback_world(), event.tick - 1, now, input_at, reason)) {
                 ++life_rewinds_;
+                life_rewind_depth_ += now - (event.tick - 1);
                 return;
             }
             ++life_rewinds_missed_;
@@ -3822,6 +3974,9 @@ namespace {
         // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
         // same room reloads the level (host restart) through begin_session().
         void end_session(const std::string& reason = "session ended") {
+            for (const auto& held: held_events_)
+                logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: the session ended first",
+                     event_type_name(args_.hold_event_type), held.stamp, held.held_at);
             close_journal(reason);
             std::string error;
             if (body_guard_) {
@@ -3838,12 +3993,65 @@ namespace {
             pending_relay_.clear();
             event_seen_.clear();
             own_event_repeats_.clear();
+            held_events_.clear();
             remote_last_physicalize_.clear();
             report();
             phase_ = phase::idle;
             session_ = 0;
             assigned_ = false;
             ++sessions_ended_;
+        }
+
+        // One line per kWindowTicks ticks (late-player design 5.1 C1): what
+        // happened since the previous line, up to the end of frame `tick`.
+        // lag[P]=L*N,... is the first-arrival lag histogram of source player
+        // P's relayed frames (the status line's semantics: ticks already
+        // simulated at arrival, early frames not counted); inrew[P] the input
+        // rewinds whose correction named P's ball.  Pairs are count/depth in
+        // ticks.  scripts/arena_map_test.py event_report() reads it.
+        void report_window(uint32_t tick) {
+            // A line closes the window on the first frame of the next index:
+            // the ticks t with (t - shift) % 60 == 0 (--window-origin).
+            const uint32_t index = (tick + kWindowTicks - args_.window_shift) / kWindowTicks;
+            if (window_index_ == index) return;
+            const bool first = window_index_ == 0xFFFFFFFFu;
+            window_index_ = index;
+            window_base now;
+            now.inrew = input_rewinds_; now.inrew_depth = input_rewind_depth_;
+            now.life = life_rewinds_; now.life_depth = life_rewind_depth_;
+            now.forced = forced_rollbacks_; now.forced_depth = forced_rollback_depth_;
+            now.snaprb = snapshot_rollbacks_; now.snaprb_depth = snapshot_rollback_depth_;
+            now.snaps = snapshots_applied_; now.resyncs_sent = resyncs_sent_; now.resyncs_done = resyncs_done_;
+            now.relay_new = relay_new_; now.relay_late = relay_late_; now.rebases = rebases_;
+            const window_base& was = window_base_;
+            if (!first) {
+                auto d = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
+                char head[400];
+                std::snprintf(head, sizeof(head),
+                              "window: tick=%u inrew=%llu/%llu life=%llu/%llu forced=%llu/%llu snaprb=%llu/%llu snaps=%llu "
+                              "resyncs=%llu/%llu rebases=%d relay=%llu late=%llu",
+                              tick, d(now.inrew, was.inrew), d(now.inrew_depth, was.inrew_depth), d(now.life, was.life),
+                              d(now.life_depth, was.life_depth), d(now.forced, was.forced), d(now.forced_depth, was.forced_depth),
+                              d(now.snaprb, was.snaprb), d(now.snaprb_depth, was.snaprb_depth), d(now.snaps, was.snaps),
+                              d(now.resyncs_sent, was.resyncs_sent), d(now.resyncs_done, was.resyncs_done),
+                              now.rebases - was.rebases, d(now.relay_new, was.relay_new), d(now.relay_late, was.relay_late));
+                std::string text = head;
+                for (const auto& [player, hist]: window_lag_) {
+                    text += " lag[" + std::to_string(player) + "]=";
+                    bool comma = false;
+                    for (const auto& [lag, n]: hist) {
+                        if (comma) text += ',';
+                        text += std::to_string(lag) + '*' + std::to_string(n);
+                        comma = true;
+                    }
+                }
+                for (const auto& [player, n]: window_inrew_src_)
+                    text += " inrew[" + std::to_string(player) + "]=" + std::to_string(n);
+                logf("%s", text.c_str());
+            }
+            window_base_ = now;
+            window_lag_.clear();
+            window_inrew_src_.clear();
         }
 
         void report() {
@@ -4155,6 +4363,7 @@ namespace {
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;
+        std::set<std::string> input_rewind_entities_;   // every ball corrected this frame (window: inrew[P])
         // Lifecycle events waiting for the tick they are due at (drain_due_events).
         std::vector<bmmo::session_event_msg> pending_events_;
         int32_t seed_ = 1;
@@ -4273,12 +4482,40 @@ namespace {
         uint32_t relay_lag_max_ = 0;
         static constexpr uint32_t kRelayLagBuckets = 129;
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
+        // The window: line (report_window).  The status line's counters are
+        // cumulative and five seconds apart, which cannot say whether a
+        // rollback or a late frame fell before, during or after a burst at
+        // one player; these are reset every kWindowTicks.  The lag histogram
+        // is kept per source player because a late player shows up in the
+        // others' lag for its frames alone.
+        static constexpr uint32_t kWindowTicks = 60;
+        uint32_t window_index_ = 0xFFFFFFFFu;
+        std::map<uint32_t, std::map<uint32_t, uint32_t>> window_lag_;   // source -> lag -> first arrivals
+        std::map<uint32_t, uint32_t> window_inrew_src_;                 // source -> input rewinds naming its ball
+        struct window_base {
+            uint64_t inrew = 0, inrew_depth = 0, life = 0, life_depth = 0, forced = 0, forced_depth = 0;
+            uint64_t snaprb = 0, snaprb_depth = 0, snaps = 0, resyncs_sent = 0, resyncs_done = 0;
+            uint64_t relay_new = 0, relay_late = 0;
+            int rebases = 0;
+        } window_base_;
+        uint64_t input_rewind_depth_ = 0, life_rewind_depth_ = 0, forced_rollback_depth_ = 0;
+        uint64_t snapshot_rollbacks_ = 0, snapshot_rollback_depth_ = 0;
         bmmo::session::relay_seen relay_seen_;
         bmmo::session::pending_relay pending_relay_;
         // Lifecycle events (protocol 6): the first arrival of each counts, and
         // our own are repeated unreliably on the next ticks (flush_inputs).
         bmmo::session::event_seen event_seen_;
         bmmo::session::event_repeats own_event_repeats_;
+        // --hold-event: how many own events of the held type were made, and
+        // the one held back until its release time.
+        struct held_event {
+            std::string bytes;
+            uint32_t stamp = 0;
+            uint32_t held_at = 0;
+            clock_type::time_point release{};
+        };
+        uint32_t hold_event_seen_ = 0;
+        std::vector<held_event> held_events_;
         uint64_t event_dups_ = 0, events_superseded_ = 0;
         std::map<uint32_t, uint32_t> remote_last_physicalize_;   // stamp of each remote's last applied Physicalize
         bool resync_pending_ = false;

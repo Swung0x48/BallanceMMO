@@ -25,15 +25,62 @@ a single ball never exercises.
 runs the mechanisms of the sector the ball is in, so a map whose mechanisms are
 spread over four sectors needs one session per sector.
 
+The late-player additions (docs/late-player-design.md 5.1, H1-H8):
+
+  --link N:lat=,loss=,burst=,jitter=   client N's own link (a proxy per client)
+  --event N:T:KIND=MS[:dur=MS][:dir=up|down|both][:until=T2]
+                                       an episode on client N's link at its tick T:
+                                       blackout (drop), spike (+MS for dur), step
+                                       (+MS from T, until T2 or for good), stall
+                                       (a CPU stall, the client's --stall-ms) or
+                                       none (a control: only the phases)
+  --event-client/--event-tick/--blackout-ms/--spike-ms/--step-ms/--event-dir/
+  --event-ms/--event-until             the same, one event, in the design's spelling
+  --client-arg-for N:"..."             arguments for client N alone
+  --join-late N:T                      client N starts at tick T of the host
+  --server-log PATH                    an external server's log, copied and read
+  --control DIR                        a control run (repeatable): the band the
+                                       criteria compare with
+  --arm NAME                           which arm of 5.2 this is (A0 .. A9c), for
+                                       its own criteria; inferred when absent
+
+An event is armed at the client's own tick from its "tick base N assigned" /
+"resynced: tick base N" log line, so it lands on the tick asked for whatever
+the client's start-up took.  Loss draws stay seeded per proxy port and an
+event takes the same draws as the control for every datagram it sees, so a
+control and an event run lose the same datagrams up to T_on; after it the
+datagrams themselves differ (resends, resyncs), and so do the draws.  A spike
+or a step keeps each direction in order: a datagram never overtakes one the
+event delayed (jitter alone still reorders).  Every client gets
+--window-origin T_on, so its window: lines start a 60-tick window at T_on.
+
+The event report (event_report.txt/json, and in summary.json) splits the run
+into B (before T_on), D (T_on .. T_off + 47) and A (after) and gives per
+client: the ticks the server substituted (its journal's INPUT records without
+the FRESH flag), own/other/mechanism error against the server's checkpoints,
+rollbacks by class with their depth, relay lag per source player and
+relay_late (the client's window: lines; a window that overlaps D at all is
+D's), snapshots, resyncs and lead changes; and per server: TICK gaps and late
+events.  The criteria of 5.2 follow it, the others' for every arm and the
+arm's own (--arm), each pass, fail, masked or n/a (a counter this revision
+does not have yet).  A control's counters are re-cut on this run's phases
+from its stored windows, so a longer D is not compared with a shorter one.
+A join-late run alone is an episode too: T_on is the joiner's tick base, D
+its first four windows.
+
 usage:
   python scripts/arena_map_test.py --bin build-agent/BallanceMMOServer \\
       --root "C:/Users/geekerwan/Desktop/Ballance-Agent" --level 13 \\
       --players 4 --seconds 60 --drive
+  python scripts/arena_map_test.py --selftest
 """
 import argparse
 import collections
 import json
+import math
+import os
 import pathlib
+import shlex
 import random
 import re
 import shutil
@@ -43,6 +90,9 @@ import sys
 import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+# journal_trace / first_divergence, for the event report: the batch scripts
+# run this with python -I, which leaves the script's own directory off the path.
+sys.path.insert(0, str(REPO / 'scripts'))
 FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 EXE = '.exe' if sys.platform == 'win32' else ''
 
@@ -90,9 +140,37 @@ class DelayProxy:
         self.passed = 0
         self.bytes_up = 0      # client -> server, after the loss
         self.bytes_down = 0    # server -> client, after the loss
+        # Link events (LinkEvent): armed from the client's log by EventArmer,
+        # read here per datagram.  Blackout drops are counted apart from the
+        # loss, so `dropped` keeps meaning the random loss.
+        self.events = []
+        self.index = -1        # the client this proxy serves
+        self.blacked = {'up': 0, 'down': 0}
+        self.delayed = {'up': 0, 'down': 0}
+        # The due time of the last datagram a spike or step delayed, per
+        # direction: nothing after it may land before it.  A link whose delay
+        # grows is a queue, not a reordering, and a datagram that overtook the
+        # spiked ones would deliver the "late" ticks early (the input stream's
+        # redundancy window carries them).
+        self.event_due = {'up': 0.0, 'down': 0.0}
         self.running = True
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
+
+    def link_effect(self, direction, now):
+        """(drop, extra delay in s) the armed events give a datagram that
+        moves in `direction` ('up' = client to server) at `now`."""
+        drop, extra = False, 0.0
+        for ev in self.events:
+            if ev.start is None or direction not in ev.dirs or now < ev.start:
+                continue
+            if ev.kind == 'blackout' and now < ev.start + ev.ms / 1000.0:
+                drop = True
+            elif ev.kind == 'spike' and now < ev.start + ev.dur_ms / 1000.0:
+                extra += ev.ms / 1000.0
+            elif ev.kind == 'step' and (ev.end is None or now < ev.end):
+                extra += ev.ms / 1000.0
+        return drop, extra
 
     def run(self):
         queue, seq = [], 0
@@ -118,14 +196,31 @@ class DelayProxy:
                     self.burst_left[sock] = self.burst - 1
                     self.dropped += 1
                     continue
+                # The jitter draw comes before the event's verdict, so a
+                # datagram an event drops still takes its draw and the rest of
+                # the run draws exactly what the control drew.
+                extra = self.rng.random() * self.jitter if self.jitter > 0.0 else 0.0
+                direction = 'up' if sock is self.front else 'down'
+                now = time.monotonic()
+                due = None
+                if self.events:
+                    blackout, added = self.link_effect(direction, now)
+                    if blackout:
+                        self.blacked[direction] += 1
+                        continue
+                    if added > 0.0:
+                        self.delayed[direction] += 1
+                        extra += added
+                    due = max(now + self.delay + extra, self.event_due[direction])
+                    if added > 0.0:
+                        self.event_due[direction] = due
                 self.passed += 1
                 if sock is self.front:
                     self.bytes_up += len(data)
                 else:
                     self.bytes_down += len(data)
                 seq += 1
-                extra = self.rng.random() * self.jitter if self.jitter > 0.0 else 0.0
-                heapq.heappush(queue, (time.monotonic() + self.delay + extra, seq, out, dest, data))
+                heapq.heappush(queue, (due if due is not None else now + self.delay + extra, seq, out, dest, data))
             while queue and queue[0][0] <= time.monotonic():
                 _, _, out, dest, data = heapq.heappop(queue)
                 out.sendto(data, dest)
@@ -135,6 +230,161 @@ class DelayProxy:
         self.thread.join(timeout=1)
         self.front.close()
         self.back.close()
+
+
+# The session's tick (headless_engine.hpp kTickRate = 66) and the rollback's
+# reach (rollback.hpp max_resim_ticks): the event report's phases are cut on them.
+TICK_S = 1.0 / 66.0
+REACH = 48
+# "0.0000 m" as the criteria print it.
+ZERO_M = 0.00005
+
+LINK_KEYS = {'lat': 'latency_ms', 'latency': 'latency_ms', 'loss': 'loss_pct',
+             'burst': 'loss_burst', 'jitter': 'jitter_ms'}
+EVENT_KINDS = ('blackout', 'spike', 'step', 'stall', 'none')
+PROXY_KINDS = ('blackout', 'spike', 'step')
+
+
+def parse_link(spec):
+    """'N:lat=150,loss=10,burst=8,jitter=3' -> (N, {link fields})."""
+    index, _, rest = spec.partition(':')
+    out = {}
+    for item in rest.split(','):
+        if not item.strip():
+            continue
+        key, _, value = item.partition('=')
+        name = LINK_KEYS.get(key.strip())
+        if name is None:
+            raise ValueError('unknown link field %r in %r' % (key, spec))
+        out[name] = int(value) if name == 'loss_burst' else float(value)
+    return int(index), out
+
+
+class LinkEvent(object):
+    """One episode on one client's link (or a stall in the client itself).
+
+    `tick` is in the session's numbering, which the client's own ticks share
+    once it is assigned; `start`/`end` are the harness's monotonic clock, set
+    when the client's log says which tick it is at (EventArmer)."""
+
+    def __init__(self, client, tick, kind, ms=0.0, dur_ms=0.0, direction='both', until=0):
+        if kind not in EVENT_KINDS:
+            raise ValueError('unknown event kind %r' % kind)
+        if direction not in ('up', 'down', 'both'):
+            raise ValueError('unknown event direction %r' % direction)
+        self.client, self.tick, self.kind = int(client), int(tick), kind
+        self.ms, self.dur_ms, self.direction, self.until = float(ms), float(dur_ms), direction, int(until)
+        if self.kind == 'spike' and self.dur_ms <= 0.0:
+            self.dur_ms = 1000.0
+        self.dirs = ('up', 'down') if direction == 'both' else (direction,)
+        self.start = None
+        self.end = None
+        self.armed = []        # (base, monotonic) of every arming, for the report
+
+    @property
+    def t_off(self):
+        """The last tick the episode itself touches; recovery is the report's concern."""
+        if self.kind in ('blackout', 'stall'):
+            return self.tick + int(math.ceil(self.ms / 1000.0 / TICK_S))
+        if self.kind == 'spike':
+            # the last datagram the spike delays leaves at dur and lands ms later
+            return self.tick + int(math.ceil((self.dur_ms + self.ms) / 1000.0 / TICK_S))
+        if self.kind == 'step':
+            return self.until if self.until else self.tick
+        return self.tick + int(math.ceil(self.dur_ms / 1000.0 / TICK_S))
+
+    def describe(self):
+        text = 'client%d %s' % (self.client, self.kind)
+        if self.kind != 'none':
+            text += ' %g ms' % self.ms
+        if self.kind == 'spike' or (self.kind == 'none' and self.dur_ms):
+            text += ' for %g ms' % self.dur_ms
+        if self.kind in PROXY_KINDS:
+            text += ' ' + self.direction
+        text += ' at tick %d' % self.tick
+        if self.until:
+            text += ' until tick %d' % self.until
+        return text
+
+    def as_dict(self):
+        return {'client': self.client, 'tick': self.tick, 'kind': self.kind, 'ms': self.ms,
+                'dur_ms': self.dur_ms, 'dir': self.direction, 'until': self.until, 't_off': self.t_off,
+                'armed': [{'base': b, 'starts_in_s': round(s - t, 3)} for b, t, s in self.armed]}
+
+
+def parse_event(spec):
+    """'N:T:KIND=MS[:dur=MS][:dir=up|down|both][:until=T2]' -> LinkEvent."""
+    parts = spec.split(':')
+    if len(parts) < 3:
+        raise ValueError('event %r: want N:T:KIND=MS' % spec)
+    kind, _, ms = parts[2].partition('=')
+    fields = {}
+    for part in parts[3:]:
+        key, _, value = part.partition('=')
+        fields[key.strip()] = value.strip()
+    return LinkEvent(int(parts[0]), int(parts[1]), kind.strip(), float(ms or 0),
+                     float(fields.get('dur', 0)), fields.get('dir', 'both'), int(fields.get('until', 0)))
+
+
+RE_BASE = re.compile(r'(?:^tick base (\d+) assigned|^resynced: tick base (\d+))')
+
+
+class LogWatch(object):
+    """Follows a client's log as the client writes it and reports every tick
+    base it is given (`tick base N assigned` / `resynced: tick base N`) with
+    the moment it was read.  The client starts frame N right after printing
+    that line, so its tick T is due (T - N) ticks later."""
+
+    def __init__(self, path, on_base, done=None):
+        self.path = path
+        self.on_base = on_base
+        # Stops polling once `done()` says nothing is left to arm, so the
+        # harness process (whose threads are also the proxies) stays idle.
+        self.done = done or (lambda: False)
+        self.bases = []
+        self.running = True
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def run(self):
+        offset, pending = 0, b''
+        while self.running and not self.done():
+            try:
+                with open(self.path, 'rb') as log:
+                    log.seek(offset)
+                    data = log.read()
+            except OSError:
+                data = b''
+            if data:
+                offset += len(data)
+                pending += data
+                *lines, pending = pending.split(b'\n')
+                now = time.monotonic()
+                for raw in lines:
+                    m = RE_BASE.search(raw.decode('utf8', 'replace').replace('\x00', '').strip())
+                    if m:
+                        base = int(m.group(1) or m.group(2))
+                        self.bases.append((base, now))
+                        self.on_base(base, now)
+            time.sleep(0.01)
+
+    def close(self):
+        self.running = False
+        self.thread.join(timeout=1)
+
+
+def arm_events(events):
+    """The on_base callback that arms `events` from a tick base.  An event
+    that has already begun is not moved; one still ahead follows a resync's
+    new numbering."""
+    def on_base(base, now):
+        for ev in events:
+            if ev.start is not None and ev.start <= now:
+                continue
+            ev.start = now + (ev.tick - base) * TICK_S
+            ev.end = now + (ev.until - base) * TICK_S if ev.until else None
+            ev.armed.append((base, now, ev.start))
+    return on_base
 
 
 DIK_UP, DIK_DOWN, DIK_LEFT, DIK_RIGHT = 200, 208, 203, 205
@@ -273,6 +523,20 @@ def journal_events(args, journal):
             'distinct_sectors_entered': sorted(set(sectors))}
 
 
+def client_links(args):
+    """Every client's link: the shared one (for the clients --latency-clients
+    names, all when it is empty), then that client's --link fields on top."""
+    laggy = {int(x) for x in args.latency_clients.split(',') if x.strip()}
+    out = {}
+    for i in range(args.players):
+        link = {'latency_ms': 0.0, 'loss_pct': 0.0, 'jitter_ms': 0.0, 'loss_burst': args.loss_burst}
+        if not laggy or i in laggy:
+            link.update(latency_ms=args.latency_ms, loss_pct=args.loss_pct, jitter_ms=args.jitter_ms)
+        link.update(args.links.get(i, {}))
+        out[i] = link
+    return out
+
+
 def run_case(args, sector, case_dir):
     case_dir.mkdir(parents=True, exist_ok=False)
     # an external server writes its journal wherever its own config says;
@@ -298,9 +562,13 @@ def run_case(args, sector, case_dir):
     (case_dir / 'config.yml').write_text(config, encoding='utf8')
 
     bindir = pathlib.Path(args.bin).resolve()
-    handles, children, clients, proxies = [], [], [], []
+    handles, children, proxies = [], [], []
+    clients = {}
+    proxy_of, watches = {}, []
     proxy_stats = {}
     server = None
+    case_started = time.time()
+    links = client_links(args)
     # --external-server points the clients at a server someone else is running
     # (the Arch WSL one, say).  Its journal still has to land somewhere this
     # side can read, which is what journal_dir in its own config decides.
@@ -317,23 +585,47 @@ def run_case(args, sector, case_dir):
             children.append(server)
             time.sleep(1.5)
 
-        laggy = {int(x) for x in args.latency_clients.split(',') if x.strip()}
-        for i in range(args.players):
+        late = dict(args.join_late)
+        host_bases = []
+
+        def launch(i, seconds):
             client_dir = case_dir / f'client{i}'
             client_dir.mkdir()
-            cf = open(case_dir / f'client{i}.log', 'wb')
+            log_path = case_dir / f'client{i}.log'
+            cf = open(log_path, 'wb')
             handles.append(cf)
             connect_host, connect_port = server_addr
-            if (args.latency_ms > 0 or args.loss_pct > 0 or args.jitter_ms > 0) and (not laggy or i in laggy):
+            link = links[i]
+            link_events = [ev for ev in args.events if ev.client == i and ev.kind in PROXY_KINDS]
+            # A proxy per client, kept by index: its own link, and the place
+            # an event on that client's link happens.
+            if link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events:
                 pport = args.port + 400 + i
-                proxies.append(DelayProxy(pport, server_addr, args.latency_ms, args.loss_pct, args.jitter_ms, args.loss_burst))
+                proxy = DelayProxy(pport, server_addr, link['latency_ms'], link['loss_pct'], link['jitter_ms'],
+                                   link['loss_burst'])
+                proxy.events = link_events
+                proxy.index = i
+                proxies.append(proxy)
+                proxy_of[i] = proxy
                 connect_host, connect_port = '127.0.0.1', pport
+            # The events of this client are armed from its own log, and the
+            # host's log also says when a late joiner is due.
+            stall_events = [ev for ev in args.events if ev.client == i and ev.kind == 'stall']
+            if link_events or (i == 0 and late):
+                def on_base(base, now, armer=arm_events(link_events), host=(i == 0)):
+                    armer(base, now)
+                    if host:
+                        host_bases.append((base, now))
+                def done(events=link_events, host=(i == 0 and bool(late))):
+                    now = time.monotonic()
+                    return all(ev.start is not None and ev.start < now for ev in events) and (not host or host_bases)
+                watches.append(LogWatch(log_path, on_base, done))
             cmd = [str(bindir / f'BallanceMMOSessionClient{EXE}'),
                    '--root', args.root,
                    '--server', f'{connect_host}:{connect_port}',
                    '--name', f'Arena{i}',
                    '--level', str(args.level),
-                   '--seconds', str(args.seconds),
+                   '--seconds', str(seconds),
                    '--trace',
                    '--journal', str(case_dir / f'client{i}.bmjr'),
                    # the client's own world at the same cadence as the server's,
@@ -379,14 +671,42 @@ def run_case(args, sector, case_dir):
                         str(args.beam_tick)]
             if args.stall_client == i and args.stall_ms > 0:
                 cmd += ['--pause-at', str(args.stall_at), '--pause-ms', str(args.stall_ms)]
-            cmd += ['--host', '--expect', str(args.players)] if i == 0 else ['--join-first']
+            for ev in stall_events:
+                cmd += ['--stall-ms', '%d:%d' % (ev.tick, ev.ms)]
+            if args.window_origin:
+                cmd += ['--window-origin', str(args.window_origin)]
+            cmd.extend(args.client_arg_for.get(i, []))
+            # The host waits for the members that start with it; a late joiner
+            # comes into the running session.
+            cmd += ['--host', '--expect', str(args.players - len(late))] if i == 0 else ['--join-first']
             p = subprocess.Popen(cmd, cwd=client_dir, stdin=subprocess.DEVNULL,
                                  stdout=cf, stderr=subprocess.STDOUT, creationflags=FLAGS)
-            clients.append(p)
+            clients[i] = p
             children.append(p)
-            time.sleep(0.4)
 
-        for p in clients:
+        host_started = time.monotonic()
+        for i in range(args.players):
+            if i in late:
+                continue
+            launch(i, args.seconds)
+            time.sleep(0.4)
+        # --join-late N:T: client N starts when the host reaches tick T, which
+        # the host's tick base and the tick length say; it plays out the rest
+        # of the host's time.
+        while late:
+            if host_bases:
+                base, at = host_bases[0]
+                for i, tick in sorted(late.items()):
+                    if time.monotonic() >= at + (tick - base) * TICK_S:
+                        remaining = args.seconds - (time.monotonic() - host_started)
+                        print('  client%d joins late at host tick ~%d (%.0f s left)' % (i, tick, remaining), flush=True)
+                        launch(i, max(15, int(remaining)))
+                        del late[i]
+            if clients[0].poll() is not None:
+                break
+            time.sleep(0.01)
+
+        for i, p in sorted(clients.items()):
             p.wait(timeout=args.seconds + 180)
         if server is not None:
             server.stdin.write(b'sessions\nstop\n')
@@ -400,8 +720,17 @@ def run_case(args, sector, case_dir):
         for p in children:
             if p.poll() is None:
                 p.terminate()
+        for w in watches:
+            w.close()
         for h in handles:
             h.close()
+        # What each link event did, from the proxy that ran it.
+        for q in proxies:
+            if q.events:
+                proxy_stats.setdefault('events', []).append(
+                    {'client': q.index, 'blacked_up': q.blacked['up'], 'blacked_down': q.blacked['down'],
+                     'delayed_up': q.delayed['up'], 'delayed_down': q.delayed['down'],
+                     'events': [ev.as_dict() for ev in q.events]})
         # Prove the loss actually happened: a run that claims to survive
         # dropped datagrams has to show that some were dropped.  Counted here,
         # while the proxies are alive; attached to the result once it exists.
@@ -411,8 +740,10 @@ def run_case(args, sector, case_dir):
         # The link's load per client, from what the proxies passed: the relayed
         # input stream is the bulk of the downlink in a room without snapshots.
         if proxies:
-            proxy_stats['bytes_down'] = [q.bytes_down for q in proxies]
-            proxy_stats['bytes_up'] = [q.bytes_up for q in proxies]
+            ordered = sorted(proxies, key=lambda q: q.index)
+            proxy_stats['bytes_down'] = [q.bytes_down for q in ordered]
+            proxy_stats['bytes_up'] = [q.bytes_up for q in ordered]
+            proxy_stats['links'] = {q.index: links[q.index] for q in ordered}
         for q in proxies:
             q.close()
 
@@ -428,7 +759,27 @@ def run_case(args, sector, case_dir):
         print('  proxy per client: down %s KB/s, up %s KB/s'
               % (' / '.join('%.1f' % (b / 1024.0 / max(args.seconds, 1)) for b in proxy_stats['bytes_down']),
                  ' / '.join('%.1f' % (b / 1024.0 / max(args.seconds, 1)) for b in proxy_stats['bytes_up'])))
-    for i, p in enumerate(clients):
+    if 'links' in proxy_stats:
+        result['links'] = proxy_stats['links']
+        if args.links:
+            print('  proxy links: %s' % '; '.join(
+                'client%d %g ms loss %g%% burst %d jitter %g ms' % (i, l['latency_ms'], l['loss_pct'], l['loss_burst'], l['jitter_ms'])
+                for i, l in sorted(proxy_stats['links'].items())))
+    for e in proxy_stats.get('events', []):
+        result.setdefault('link_events', []).append(e)
+        for ev in e['events']:
+            print('  proxy event: %s; armed from tick base %s; blacked %d up / %d down, delayed %d up / %d down datagrams'
+                  % (LinkEvent(ev['client'], ev['tick'], ev['kind'], ev['ms'], ev['dur_ms'], ev['dir'], ev['until']).describe(),
+                     ', '.join(str(a['base']) for a in ev['armed']) or 'NEVER',
+                     e['blacked_up'], e['blacked_down'], e['delayed_up'], e['delayed_down']))
+    # One row per client index, launched or not: a late joiner the host
+    # outlived is a row that says so, so client k is always row k.
+    for i in range(args.players):
+        p = clients.get(i)
+        if p is None:
+            print(f'  note: client{i} was never started (its --join-late tick came after the host ended)', flush=True)
+            result['clients'].append({'exit_code': None, 'metrics': None, 'never_started': True})
+            continue
         text = (case_dir / f'client{i}.log').read_text(errors='replace')
         statuses = [s for s in text.splitlines() if s.startswith('status:')]
         result['clients'].append({
@@ -436,8 +787,786 @@ def run_case(args, sector, case_dir):
             'metrics': status_metrics(statuses[-1]) if statuses else None,
         })
     result['interaction'] = interaction_report(case_dir, args.players)
-    result['journal'] = sorted(str(q) for q in journals.glob('*.bmjr')) if journals.exists() else []
+    # H5: an external server's log next to the clients', so the report can
+    # read its late events and barrier lines.
+    if args.server_log and pathlib.Path(args.server_log).exists():
+        shutil.copy(args.server_log, case_dir / 'server.log')
+    journal_paths = sorted(journals.glob('*.bmjr')) if journals.exists() else []
+    if args.external_server:
+        # The external server's directory may hold earlier sessions' journals:
+        # only the ones this case wrote are its own.
+        # None of them is: no replay and no event report, said aloud, rather
+        # than an older session's journal replayed and reported as this one.
+        fresh = [q for q in journal_paths if q.stat().st_mtime >= case_started - 5]
+        if not fresh:
+            print(f'  note: the external server wrote no journal for this case in {journals} '
+                  f'({len(journal_paths)} older ones ignored): no replay, no event report', flush=True)
+        journal_paths = fresh
+    result['journal'] = [str(q) for q in journal_paths]
     return result
+
+
+# --------------------------------------------------------------------------
+# H6: the event report.  Everything in it is read back out of what the run
+# recorded: the server journal (substitutions, checkpoints, TICK times, late
+# events), the clients' journals (their own world, received snapshots) and
+# the clients' window: lines (rollbacks, relay lag, resyncs).
+
+RE_WINDOW = re.compile(r'^window: tick=(\d+)\s*(.*)$')
+RE_OWN_ID = re.compile(r'own id (\d+)')
+RE_SUBST = re.compile(r'\bsubst=([0-9/]+)')
+RE_LEAD_ADJ = re.compile(r'\blead_adj=(\d+)')
+RE_HOLD = re.compile(r'^hold-event: own (\w+) (?:#\d+ )?stamped tick (\d+) (held at tick (\d+)|dropped at tick (\d+)|'
+                     r'\(held at tick (\d+)\) released at tick (\d+)|\(held at tick \d+\) discarded(:))')
+RE_STALL = re.compile(r'^stall: (\d+) ms at tick (\d+)')
+RE_LATE_BY = re.compile(r'event type (\d+) from (\d+) stamped (\d+) applied at tick (\d+) \(late by (\d+)\)')
+RE_BARRIER = re.compile(r'no Physicalize for player (\d+) at tick (\d+)')
+PHASES = ('B', 'D', 'A')
+
+
+def parse_window(line):
+    """A client's window: line -> dict, or None.  Unknown fields are kept as
+    strings, so a later revision's additions (subst=, lead_adj=, ...) read."""
+    m = RE_WINDOW.match(line)
+    if not m:
+        return None
+    out = {'tick': int(m.group(1)), 'lag': {}, 'inrew_src': {}}
+    for token in m.group(2).split():
+        key, _, value = token.partition('=')
+        lm = re.match(r'^(lag|inrew)\[(\d+)\]$', key)
+        if lm and lm.group(1) == 'lag':
+            hist = out['lag'].setdefault(int(lm.group(2)), {})
+            for pair in value.split(','):
+                if '*' in pair:
+                    lag, _, n = pair.partition('*')
+                    hist[int(lag)] = hist.get(int(lag), 0) + int(n)
+        elif lm:
+            out['inrew_src'][int(lm.group(2))] = int(value)
+        elif re.fullmatch(r'-?\d+(/\d+)*', value or 'x'):
+            parts = [int(v) for v in value.split('/')]
+            out[key] = parts if len(parts) > 1 else parts[0]
+        else:
+            out[key] = value
+    return out
+
+
+def hist_stats(hist):
+    """max and 99th percentile (the client's own rule) of a lag histogram."""
+    total = sum(hist.values())
+    if not total:
+        return {'n': 0, 'max': 0, 'p99': 0}
+    seen = 0
+    p99 = max(hist)
+    for lag in sorted(hist):
+        seen += hist[lag]
+        if seen * 100 >= total * 99:
+            p99 = lag
+            break
+    return {'n': total, 'max': max(hist), 'p99': p99}
+
+
+def merge_hist(into, hist):
+    for lag, n in hist.items():
+        into[lag] = into.get(lag, 0) + n
+
+
+def phase_of(tick, phases):
+    for name in PHASES:
+        lo, hi = phases[name]
+        if lo <= tick < hi:
+            return name
+    return None
+
+
+def distance(a, b):
+    return math.sqrt(sum((a[k] - b[k]) ** 2 for k in range(3)))
+
+
+RE_INPUT_DELAY = re.compile(r'^session \d+ starting: .*\binput delay (\d+)')
+RE_STATUS_LEAD = re.compile(r'\bworst=\d+ lead=([0-9.]+)')
+# A join-late episode's D: the joiner's first four windows (5.2 A8).
+JOIN_WINDOWS = 4
+WINDOW_TICKS = 60
+
+
+def read_client_log(path):
+    """What the report needs from one client log."""
+    out = {'own_id': 0, 'bases': [], 'windows': [], 'subst': None, 'lead_adj': None, 'holds': [], 'stalls': [],
+           'last_tick': 0, 'input_delays': [], 'status_lead': None, 'exists': path.exists()}
+    if not path.exists():
+        return out
+    for line in path.read_text(errors='replace').replace('\x00', '').splitlines():
+        if not out['own_id']:
+            m = RE_OWN_ID.search(line)
+            if m:
+                out['own_id'] = int(m.group(1))
+        m = RE_BASE.search(line)
+        if m:
+            out['bases'].append(int(m.group(1) or m.group(2)))
+        w = parse_window(line)
+        if w:
+            out['windows'].append(w)
+            out['last_tick'] = max(out['last_tick'], w['tick'])
+            continue
+        m = RE_INPUT_DELAY.match(line)
+        if m:
+            out['input_delays'].append(int(m.group(1)))
+        if line.startswith('status:'):
+            m = RE_SUBST.search(line)
+            if m:
+                out['subst'] = m.group(1)
+            m = RE_LEAD_ADJ.search(line)
+            if m:
+                out['lead_adj'] = int(m.group(1))
+            m = RE_STATUS_LEAD.search(line)
+            if m:
+                out['status_lead'] = float(m.group(1))
+            m = re.search(r'\btick=(\d+)', line)
+            if m:
+                out['last_tick'] = max(out['last_tick'], int(m.group(1)))
+        m = RE_HOLD.match(line)
+        if m:
+            if m.group(4):
+                out['holds'].append({'type': m.group(1), 'stamp': int(m.group(2)), 'held_at': int(m.group(4))})
+            elif m.group(5):
+                out['holds'].append({'type': m.group(1), 'stamp': int(m.group(2)), 'dropped_at': int(m.group(5))})
+            elif m.group(7) and out['holds']:
+                out['holds'][-1]['released_at'] = int(m.group(7))
+            elif m.group(8) and out['holds']:
+                out['holds'][-1]['discarded'] = True
+        m = RE_STALL.match(line)
+        if m:
+            out['stalls'].append({'ms': int(m.group(1)), 'tick': int(m.group(2))})
+    # Each window covers the ticks after the previous line up to its own (a
+    # new session's numbering starts the chain again).
+    prev = None
+    for w in out['windows']:
+        w['lo'] = prev + 1 if prev is not None and prev < w['tick'] else w['tick'] - WINDOW_TICKS + 1
+        prev = w['tick']
+    return out
+
+
+def episode(args, logs):
+    """The episode the report is cut on: T_on, T_off, the clients it is on,
+    what it was and where it came from (an --event, else the hold or stall a
+    client log reports, else a late join), or None."""
+    if args.events:
+        return {'t_on': min(ev.tick for ev in args.events), 't_off': max(ev.t_off for ev in args.events),
+                'clients': sorted({ev.client for ev in args.events}), 'describe': [ev.describe() for ev in args.events],
+                'source': 'event'}
+    for i, log in sorted(logs.items()):
+        for h in log['holds']:
+            on = h.get('held_at', h.get('dropped_at'))
+            off = h.get('released_at', on)
+            what = 'dropped' if 'dropped_at' in h else ('discarded' if h.get('discarded') else 'held')
+            return {'t_on': on, 't_off': off, 'clients': [i], 'source': 'hold', 'drop': 'dropped_at' in h,
+                    'describe': ['client%d hold-event %s stamped %d, %s' % (i, h['type'], h['stamp'], what)]}
+        for s in log['stalls']:
+            return {'t_on': s['tick'], 't_off': s['tick'] + int(math.ceil(s['ms'] / 1000.0 / TICK_S)), 'clients': [i],
+                    'source': 'stall', 'describe': ['client%d stall %d ms at tick %d' % (i, s['ms'], s['tick'])]}
+    for i, asked in sorted(getattr(args, 'join_late', {}).items()):
+        bases = logs.get(i, {}).get('bases') or []
+        if bases:
+            # The joiner's tick base, not the tick asked: the engine boots
+            # first, so the session meets it a few hundred ticks later.
+            on = bases[0]
+            return {'t_on': on, 't_off': on + JOIN_WINDOWS * WINDOW_TICKS - REACH, 'clients': [i], 'source': 'join',
+                    'describe': ['client%d joins late: asked at host tick %d, tick base %d (%+d)' % (i, asked, on, on - asked)]}
+    return None
+
+
+def window_phase(w, phases):
+    """The phase a window: line belongs to: D when it overlaps D at all (the
+    episode's tail must not leak into A, nor its first tick into B), else the
+    phase it overlaps."""
+    lo, hi = w.get('lo', w['tick'] - WINDOW_TICKS + 1), w['tick']
+
+    def overlaps(p):
+        a, b = phases[p]
+        return a < b and lo < b and hi >= a
+    if overlaps('D'):
+        return 'D'
+    for p in ('B', 'A'):
+        if overlaps(p):
+            return p
+    return None
+
+
+def aggregate(wins, late_ids, index_of):
+    """The window counters of one phase."""
+    ph = {'windows': len(wins)}
+
+    def pair(key):
+        n = sum(w[key][0] for w in wins if isinstance(w.get(key), list))
+        d = sum(w[key][1] for w in wins if isinstance(w.get(key), list))
+        return [n, d]
+    ph['rb'] = {'input': pair('inrew'), 'life': pair('life'), 'snap': pair('snaprb'), 'forced': pair('forced'),
+                # the own-correction rewinds of plan step 4; no field before it
+                'subst': pair('substrew') if any('substrew' in w for w in wins) else None}
+    ph['inrew_late'] = sum(n for w in wins for src, n in w['inrew_src'].items() if src in late_ids)
+    overall, by_src = {}, {}
+    for w in wins:
+        for src, hist in w['lag'].items():
+            merge_hist(overall, hist)
+            merge_hist(by_src.setdefault(src, {}), hist)
+    ph['lag'] = hist_stats(overall)
+    ph['lag_src'] = {('c%d' % index_of[src]) if src in index_of else str(src): hist_stats(h)
+                     for src, h in sorted(by_src.items())}
+    ph['relay_late'] = sum(w.get('late', 0) for w in wins if isinstance(w.get('late'), int))
+    ph['snaps'] = sum(w.get('snaps', 0) for w in wins if isinstance(w.get('snaps'), int))
+    ph['resyncs'] = sum(w['resyncs'][1] for w in wins if isinstance(w.get('resyncs'), list))
+    ph['resync_requests'] = sum(w['resyncs'][0] for w in wins if isinstance(w.get('resyncs'), list))
+    ph['rebases'] = sum(w.get('rebases', 0) for w in wins if isinstance(w.get('rebases'), int))
+    ph['lead_adj'] = sum(w['lead_adj'] for w in wins if isinstance(w.get('lead_adj'), int)) \
+        if any('lead_adj' in w for w in wins) else None
+    ph['moved'] = sum(w['moved'] for w in wins if isinstance(w.get('moved'), int)) \
+        if any('moved' in w for w in wins) else None
+    return ph
+
+
+def client_phases(phases, base, end):
+    """A client's own phases: from its base (a late joiner's B is empty) to
+    its end."""
+    return {'B': (max(base, phases['B'][0]), phases['B'][1]), 'D': phases['D'],
+            'A': (phases['A'][0], max(phases['A'][0], end))}
+
+
+ARM_FAMILY = {'A0': 'control', 'A0J': 'control', 'A1': 'burst', 'A2': 'burst', 'A3X': 'burst', 'A4': 'burst',
+              'A7': 'burst', 'A9': 'burst', 'A3': 'a3', 'A3L': 'reported', 'A5': 'reported', 'A5U': 'lead',
+              'A5S': 'lead', 'A5D': 'a5d', 'A6': 'hold', 'A6M': 'hold', 'A6B': 'hold', 'A8': 'join', 'A9C': 'stall'}
+
+
+def infer_arm(args, source):
+    """--arm, or the arm the episode's kind says (5.2's table)."""
+    if getattr(args, 'arm', ''):
+        return args.arm.upper()
+    if source in ('hold', 'join', 'stall'):
+        return {'hold': 'A6', 'join': 'A8', 'stall': 'A9C'}[source]
+    kinds = {ev.kind for ev in args.events}
+    if kinds <= {'none'}:
+        return 'A0'
+    if 'stall' in kinds:
+        return 'A9C'
+    if 'step' in kinds:
+        ev = next(e for e in args.events if e.kind == 'step')
+        return 'A5D' if ev.until else ('A5U' if ev.direction == 'up' else 'A5')
+    if 'spike' in kinds:
+        return 'A9'
+    if any(ev.kind == 'blackout' and ev.direction == 'both' for ev in args.events):
+        return 'A3'
+    return 'A1'
+
+
+def event_report(args, case, case_dir):
+    """H6.  None when the run had no episode to report on."""
+    import first_divergence as fd
+    import journal_trace as jt
+    logs = {i: read_client_log(case_dir / f'client{i}.log') for i in range(args.players)}
+    ep = episode(args, logs)
+    if ep is None or not case.get('journal'):
+        return None
+    t_on, t_off, event_clients = ep['t_on'], ep['t_off'], ep['clients']
+    server = jt.read_journal(case['journal'][-1])
+    ticks = [g.tick for g in server.ticks if g.has_tick]
+    first, last = (ticks[0], ticks[-1]) if ticks else (0, 0)
+    phases = {'B': (first, t_on), 'D': (t_on, t_off + REACH), 'A': (t_off + REACH, last + 1)}
+    id_of = {i: logs[i]['own_id'] for i in logs}
+    index_of = {pid: i for i, pid in id_of.items() if pid}
+    arm = infer_arm(args, ep['source'])
+    family = ARM_FAMILY.get(arm, 'burst')
+    # A control has no late player: every client is one of "the others".
+    late_ids = set() if family == 'control' else {id_of[i] for i in event_clients if id_of.get(i)}
+    report = {'episode': ep['describe'], 'source': ep['source'], 'arm': arm, 'family': family,
+              'drop': ep.get('drop', False), 't_on': t_on, 't_off': t_off, 'phases': phases,
+              'event_clients': event_clients, 'server_journal': case['journal'][-1], 'clients': [],
+              'window_origin': getattr(args, 'window_origin', 0), 'input_delay': args.input_delay}
+    if getattr(args, 'join_late', None):
+        links = client_links(args)
+        report['join'] = [{'client': i, 'asked': asked, 'base': (logs[i]['bases'] or [None])[0],
+                           'latency_ms': links.get(i, {}).get('latency_ms', 0.0)}
+                          for i, asked in sorted(args.join_late.items())]
+
+    # The server: substituted ticks per player, TICK gaps, late events.
+    substituted = collections.defaultdict(list)
+    for g in server.ticks:
+        for rec in g.inputs:
+            if not rec['flags'] & 1:
+                substituted[rec['id']].append(g.tick)
+    gaps = {p: [] for p in PHASES}
+    gaps30 = {}
+    previous = None
+    for g in server.ticks:
+        if not g.has_tick:
+            continue
+        if previous is not None and g.tick == previous[0] + 1:
+            gap = g.record['ms'] - previous[1]
+            phase = phase_of(g.tick, phases)
+            if phase:
+                gaps[phase].append((gap, g.tick))
+            start = g.tick - g.tick % 30
+            gaps30[start] = max(gaps30.get(start, 0), gap)
+        previous = (g.tick, g.record['ms'])
+    tick_gaps = {}
+    for phase, values in gaps.items():
+        if values:
+            ordered = sorted(v for v, _ in values)
+            worst = max(values)
+            tick_gaps[phase] = {'max_ms': worst[0], 'at': worst[1], 'p99_ms': ordered[min(len(ordered) - 1, int(0.99 * len(ordered)))]}
+    late_events = [{'tick': e['tick'], 'stamp': e['event_tick'], 'type': e['type'], 'player': e['id'],
+                    'client': index_of.get(e['id'])}
+                   for e in server.events() if e['tick'] != e['event_tick']]
+    server_log = case_dir / 'server.log'
+    late_by_lines, barrier_lines = [], []
+    if server_log.exists():
+        for line in server_log.read_text(errors='replace').splitlines():
+            m = RE_LATE_BY.search(line)
+            if m:
+                late_by_lines.append({'type': int(m.group(1)), 'player': int(m.group(2)), 'stamp': int(m.group(3)),
+                                      'tick': int(m.group(4)), 'late_by': int(m.group(5))})
+            m = RE_BARRIER.search(line)
+            if m:
+                barrier_lines.append({'player': int(m.group(1)), 'tick': int(m.group(2))})
+    report['server'] = {'ticks': [first, last], 'tick_gaps': tick_gaps, 'late_events': late_events,
+                        'late_by_lines': late_by_lines, 'barrier_lines': barrier_lines,
+                        # the whole run in 30-tick buckets, so a later arm can
+                        # re-cut this run's gaps on its own phases
+                        'gaps30': sorted([s, v] for s, v in gaps30.items())}
+
+    server_world = fd.worlds(server, want_local=False)
+    for i in range(args.players):
+        log = logs[i]
+        pid = id_of.get(i, 0)
+        path = case_dir / f'client{i}.bmjr'
+        row = {'index': i, 'id': pid, 'base': log['bases'][0] if log['bases'] else None,
+               'resync_bases': log['bases'][1:], 'subst_client': log['subst'], 'lead_adj': log['lead_adj'],
+               'holds': log['holds'], 'stalls': log['stalls'], 'input_delays': log['input_delays'],
+               'status_lead': log['status_lead'], 'never_started': not log['exists'], 'phases': {}}
+        report['clients'].append(row)
+        base = row['base'] if row['base'] is not None else first
+        # The client's own phases: from its base (a late joiner's B is empty),
+        # to a second before its last line, past its exit's own effects.
+        end = min(last, log['last_tick']) - 60 if log['last_tick'] else last
+        cphases = client_phases(phases, base, end)
+        row['span'] = [base, end]
+        # Substitutions inside the client's span (the ticks before its base
+        # are applied held by construction and precede its numbering).
+        mine = [t for t in substituted.get(pid, []) if base <= t <= end]
+        row['subst_server'] = {p: sum(1 for t in mine if cphases[p][0] <= t < cphases[p][1]) for p in PHASES}
+        row['subst_total'] = len(mine)
+        row['subst_outside_event'] = sum(1 for t in mine if not t_on <= t <= t_off + 2)
+        runs = []
+        for t in mine:
+            if runs and t == runs[-1][1] + 1:
+                runs[-1][1] = t
+            else:
+                runs.append([t, t])
+        row['subst_runs'] = [r for r in runs if r[1] >= t_on - 60 and r[0] <= t_off + 120][:20]
+
+        # Errors against the server's checkpoints, per tick.
+        per_tick = {}
+        presence = {}   # tick -> (server has the own ball, client has it)
+        received = []
+        if path.exists():
+            journal = jt.read_journal(str(path))
+            local = fd.worlds(journal, want_local=True)
+            received = [cp['tick'] for cp in journal.checkpoints() if cp['flags'] & 4]
+            for tick in sorted(set(server_world) & set(local)):
+                a, b = server_world[tick], local[tick]
+                presence[tick] = (('ball', pid) in a, ('ball', pid) in b)
+                own = oth = late = mech = 0.0
+                have_own = False
+                for key in set(a) & set(b):
+                    err = distance(a[key], b[key])
+                    if key[0] == 'ball':
+                        if key[1] == pid:
+                            own, have_own = err, True
+                        else:
+                            oth = max(oth, err)
+                            if key[1] in late_ids:
+                                late = max(late, err)
+                    else:
+                        mech = max(mech, err)
+                per_tick[tick] = (own if have_own else None, oth, late, mech)
+        window_lo, window_hi = t_on - 60, t_off + REACH + 180
+        windows30 = []
+        for start in range(window_lo - window_lo % 30, window_hi, 30):
+            vals = [per_tick[t] for t in range(start, start + 30) if t in per_tick]
+            if vals:
+                windows30.append([start, max((v[0] or 0.0) for v in vals), max(v[1] for v in vals),
+                                  max(v[2] for v in vals), max(v[3] for v in vals)])
+        row['windows30'] = windows30
+        # The whole run in 30-tick buckets (own, other balls, mechanisms), so
+        # a later arm can re-cut this run's errors on its own phases.
+        err30 = {}
+        for t, v in per_tick.items():
+            s = t - t % 30
+            e = err30.setdefault(s, [s, None, 0.0, 0.0])
+            if v[0] is not None:
+                e[1] = max(e[1] or 0.0, v[0])
+            e[2], e[3] = max(e[2], v[1]), max(e[3], v[3])
+        row['err30'] = [err30[s] for s in sorted(err30)]
+        own_bad = [t for t, v in per_tick.items() if t >= t_on and t <= end and v[0] is not None and v[0] >= ZERO_M]
+        row['own_zero_from'] = (max(own_bad) + 2) if own_bad else t_on
+        row['own_after'] = max([v[0] for t, v in per_tick.items() if t_off + REACH <= t <= end and v[0] is not None] or [0.0])
+        row['late_mirror_after'] = max([v[2] for t, v in per_tick.items() if t_off + 60 <= t <= end] or [0.0])
+        # The same over the 300 ticks after those points only: the whole rest
+        # of a run also holds respawn piles that have nothing to do with the
+        # episode (the 30-tick windows say which is which).
+        row['own_after_300'] = max([v[0] for t, v in per_tick.items()
+                                    if t_off + REACH <= t < t_off + REACH + 300 and t <= end and v[0] is not None] or [0.0])
+        row['late_mirror_after_300'] = max([v[2] for t, v in per_tick.items()
+                                            if t_off + 60 <= t < t_off + 360 and t <= end] or [0.0])
+        # A3: the own ball 48 ticks after the client's last resync (or T_off).
+        settle = max([t_off] + [b for b in row['resync_bases'] if b >= t_on]) + REACH
+        row['own_after_resync'] = [settle, max([v[0] for t, v in per_tick.items()
+                                                if settle <= t <= end and v[0] is not None] or [0.0])]
+        # A6 drop: the checkpoints from T_on+48 on where the client has its own
+        # ball and the server has not, or the other way round.
+        row['own_presence_mismatch'] = sum(1 for t, (srv, loc) in presence.items()
+                                           if t_on + REACH <= t <= end and srv != loc)
+        row['received_in_event'] = sum(1 for t in received if t_on <= t <= t_off + REACH)
+        row['received_total'] = len(received)
+
+        # The window: lines, kept raw too: a control's are re-cut on the
+        # phases of the arm it is compared with (recut_phases).
+        row['raw_windows'] = log['windows']
+        for p in PHASES:
+            lo, hi = cphases[p]
+            vals = [v for t, v in per_tick.items() if lo <= t < hi]
+            ph = {'ticks': [lo, hi], 'compared': len(vals),
+                  'own_max': max([v[0] for v in vals if v[0] is not None] or [0.0]),
+                  'oth_max': max([v[1] for v in vals] or [0.0]),
+                  'late_mirror_max': max([v[2] for v in vals] or [0.0]),
+                  'mech_max': max([v[3] for v in vals] or [0.0])}
+            ph.update(aggregate([w for w in log['windows'] if window_phase(w, cphases) == p], late_ids, index_of))
+            row['phases'][p] = ph
+        # A snapshot rollback inside the episode's reach repairs the late
+        # client by a path the criteria do not test: the run is masked.
+        row['snap_rb_in_event'] = sum(
+            w['snaprb'][0] for w in log['windows']
+            if isinstance(w.get('snaprb'), list) and w['tick'] >= t_on and w.get('lo', w['tick'] - 59) <= t_off + REACH)
+    return report
+
+
+def load_controls(paths, sector):
+    """The event reports of the control runs given with --control."""
+    out = []
+    for p in paths:
+        path = pathlib.Path(p)
+        if path.is_dir():
+            path = path / 'summary.json'
+        try:
+            cases = json.loads(path.read_text(encoding='utf8'))
+        except (OSError, ValueError):
+            print('  note: control %s unreadable' % p, flush=True)
+            continue
+        for case in cases:
+            if case.get('sector') == sector and case.get('event_report'):
+                out.append(case['event_report'])
+    return out
+
+
+def normalize_window(w):
+    """A window read back from JSON: its source-player keys are strings there."""
+    w = dict(w)
+    w['lag'] = {int(src): {int(lag): n for lag, n in hist.items()} for src, hist in (w.get('lag') or {}).items()}
+    w['inrew_src'] = {int(src): n for src, n in (w.get('inrew_src') or {}).items()}
+    return w
+
+
+def recut_phases(rep, row, phases, late_indices):
+    """A control row's phase figures cut on another run's phases: the same
+    D length, the same windows-overlap rule, and "the late ball" being the
+    ball of the same client index.  An older control without raw windows
+    keeps its own phases (marked, so the criterion says so)."""
+    if 'raw_windows' not in row:
+        out = {p: dict(row['phases'][p]) for p in PHASES}
+        out['recut'] = False
+        return out
+    ids = {r['index']: r['id'] for r in rep['clients']}
+    index_of = {pid: i for i, pid in ids.items() if pid}
+    late_ids = {ids[i] for i in late_indices if ids.get(i)}
+    windows = [normalize_window(w) for w in row['raw_windows']]
+    base, end = row['span']
+    cph = client_phases(phases, base, end)
+    out = {'recut': True}
+    for p in PHASES:
+        lo, hi = cph[p]
+        ph = aggregate([w for w in windows if window_phase(w, cph) == p], late_ids, index_of)
+        errs = [e for e in row.get('err30', []) if e[0] < hi and e[0] + 30 > lo]
+        ph['mech_max'] = max([e[3] for e in errs] or [0.0])
+        ph['oth_max'] = max([e[2] for e in errs] or [0.0])
+        ph['own_max'] = max([e[1] for e in errs if e[1] is not None] or [0.0])
+        out[p] = ph
+    return out
+
+
+def band_upper(controls, index, getter, phases, late_indices):
+    """The control band's upper edge for client `index`, every control re-cut
+    on `phases`: the most any control run had (the criteria are one-sided).
+    (edge or None, whether every control could be re-cut)."""
+    values, recut = [], True
+    for rep in controls:
+        for row in rep['clients']:
+            if row['index'] == index:
+                cut = recut_phases(rep, row, phases, late_indices)
+                recut = recut and cut['recut']
+                try:
+                    v = getter(cut)
+                except (KeyError, TypeError):
+                    v = None
+                if v is not None:
+                    values.append(v)
+    return (max(values) if values else None), recut
+
+
+def control_gap_upper(controls, lo, hi):
+    """The most any control's server waited between two ticks in [lo, hi)."""
+    values = []
+    for rep in controls:
+        g = [v for s, v in rep['server'].get('gaps30', []) if s < hi and s + 30 > lo]
+        if g:
+            values.append(max(g))
+    return max(values) if values else None
+
+
+def criteria(report, case, controls):
+    """H8: each criterion of design 5.2 that this run can decide, as
+    (who, criterion, status, detail); status is pass, fail, masked or n/a.
+    The others' criteria apply to every arm; the late client's are the arm's
+    own (report['arm'], report['family'])."""
+    out = []
+    t_on, t_off = report['t_on'], report['t_off']
+    family, arm = report.get('family', 'burst'), report.get('arm', 'A1')
+    late = set() if family == 'control' else set(report['event_clients'])
+    late_indices = sorted(report['event_clients'])
+    phases = report['phases']
+
+    def add(who, name, ok, detail, masked=False):
+        status = 'n/a' if ok is None else ('masked' if masked and not ok else ('pass' if ok else 'fail'))
+        out.append({'who': who, 'criterion': name, 'status': status, 'detail': detail})
+
+    def band(index, getter):
+        edge, recut = band_upper(controls, index, getter, phases, late_indices)
+        return edge, '' if recut else ' (a control without raw windows: its own phases)'
+
+    def subst_parts(row):
+        return [int(v) for v in row['subst_client'].split('/')] if row['subst_client'] else None
+
+    no_subst = 'no subst= counter at this revision'
+    no_lead = 'no lead_adj counter at this revision'
+    replays = case.get('replays', [])
+    add('server', 'journal replays exactly',
+        all(r['exit_code'] == 0 and 'first_divergence=-1' in r['summary'] for r in replays) if replays else None,
+        '; '.join(r['summary'] for r in replays) or 'no replay')
+    add('all', 'arm', None, '%s (%s criteria)' % (arm, family))
+    for row in report['clients']:
+        who = 'client%d' % row['index']
+        D = row['phases']['D']
+        if row.get('never_started'):
+            add(who, 'client ran', False, 'never started')
+            continue
+        lead = [row['phases'][p]['lead_adj'] for p in PHASES]
+        lead_none = all(v is None for v in lead)
+        if row['index'] not in late:
+            for p in PHASES:
+                add(who, 'own ball 0.0000 in %s' % p, row['phases'][p]['own_max'] < ZERO_M,
+                    '%.4f m' % row['phases'][p]['own_max'])
+            add(who, 'relay_late 0', sum(row['phases'][p]['relay_late'] for p in PHASES) == 0,
+                'B/D/A %s' % '/'.join(str(row['phases'][p]['relay_late']) for p in PHASES))
+            add(who, 'resyncs 0', sum(row['phases'][p]['resyncs'] for p in PHASES) == 0 and not row['resync_bases'],
+                '%d' % sum(row['phases'][p]['resyncs'] for p in PHASES))
+            add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0, no_lead if lead_none else str(lead))
+            if late:
+                add(who, 'late ball mirror <= 0.001 m from T_off+60', row['late_mirror_after'] <= 0.001,
+                    '%.4f m (%.4f m in the 300 ticks after)' % (row['late_mirror_after'], row['late_mirror_after_300']))
+            if controls:
+                for p in PHASES:
+                    edge, note = band(row['index'], lambda c: c[p]['mech_max'])
+                    add(who, 'mechanism error in %s within control' % p,
+                        None if edge is None else row['phases'][p]['mech_max'] <= edge + 0.0005,
+                        '%.4f vs <= %s%s' % (row['phases'][p]['mech_max'], 'n/a' if edge is None else '%.4f' % edge, note))
+                for cls in ('input', 'life', 'snap', 'forced'):
+                    edge, note = band(row['index'], lambda c: c['D']['rb'][cls][0])
+                    add(who, '%s rollbacks in D within control' % cls,
+                        None if edge is None else D['rb'][cls][0] <= edge,
+                        '%d vs <= %s%s' % (D['rb'][cls][0], edge, note))
+                if late:
+                    edge, note = band(row['index'], lambda c: c['D']['inrew_late'])
+                    add(who, 'input rewinds naming the late ball in D within control',
+                        None if edge is None else D['inrew_late'] <= edge, '%d vs <= %s%s' % (D['inrew_late'], edge, note))
+                lag_phases = ('D', 'A') if family == 'lead' else ('D',)
+                for p in lag_phases:
+                    st_all = row['phases'][p]['lag']
+                    edge, note = band(row['index'], lambda c: c[p]['lag']['p99'])
+                    add(who, 'relay lag p99 in %s within control' % p, None if edge is None else st_all['p99'] <= edge,
+                        '%d vs <= %s%s' % (st_all['p99'], edge, note))
+                    for src, st in sorted(row['phases'][p]['lag_src'].items()):
+                        edge, note = band(row['index'], lambda c: c[p]['lag_src'][src]['p99'])
+                        add(who, 'relay lag p99 in %s from %s within control' % (p, src),
+                            None if edge is None else st['p99'] <= edge, '%d vs <= %s%s' % (st['p99'], edge, note))
+            else:
+                add(who, 'mechanism error / rollbacks / relay lag within control', None, 'no --control given')
+            add(who, 'relay lag above the band only in the first two ticks of the episode', None,
+                'not decidable here: the window: line gives lag per 60-tick window, not per tick')
+            if family == 'control':
+                # A0/A0j: substituted ticks per player <= HEAD + 0.5 % of the
+                # ticks (the controls given are the HEAD runs), moved births 0.
+                span = max(1, row['span'][1] - row['span'][0])
+                head =[r['subst_total'] for rep in controls for r in rep['clients'] if r['index'] == row['index']]
+                add(who, 'substituted ticks <= HEAD + 0.5 %',
+                    None if not head else row['subst_total'] <= max(head) + 0.005 * span,
+                    '%d of %d ticks vs HEAD %s' % (row['subst_total'], span, max(head) if head else 'n/a (no --control)'))
+                moved = [row['phases'][p]['moved'] for p in PHASES]
+                add(who, 'moved births 0', None if all(v is None for v in moved) else sum(v or 0 for v in moved) == 0,
+                    'no moved counter at this revision' if all(v is None for v in moved) else str(moved))
+            continue
+
+        # The late client: the arm's own criteria.
+        masked = row['snap_rb_in_event'] > 0 or row['received_in_event'] > 0
+        mask_note = ' (masked: %d snapshot rollbacks, %d RECEIVED checkpoints in [T_on, T_off+48])' % (
+            row['snap_rb_in_event'], row['received_in_event']) if masked else ''
+        parts = subst_parts(row)
+        resyncs = len(row['resync_bases'])
+        if family == 'burst':
+            add(who, 'substituted ticks only in [T_on, T_off+2]',
+                None if arm == 'A4' else row['subst_outside_event'] == 0,
+                ('a whole-run loss has no burst window; ' if arm == 'A4' else '')
+                + '%d of %d outside [%d, %d]; runs %s' % (row['subst_outside_event'], row['subst_total'], t_on, t_off + 2,
+                                                          row['subst_runs']))
+            add(who, 'subst recv == server count, subst late 0',
+                None if not parts or len(parts) < 6 else (parts[0] == row['subst_total'] and parts[5] == 0),
+                no_subst if row['subst_client'] is None else 'subst=%s vs server %d' % (row['subst_client'], row['subst_total']))
+            add(who, 'own ball 0.0000 from T_off+48', row['own_after'] < ZERO_M,
+                '%.4f m (%.4f m in the 300 ticks after); own error last >= 0.00005 m before tick %d (T_off+%d)%s' % (
+                    row['own_after'], row['own_after_300'], row['own_zero_from'], row['own_zero_from'] - t_off,
+                    mask_note), masked)
+            add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0, no_lead if lead_none else str(lead))
+        elif family == 'a3':
+            add(who, 'subst recv + subst late == server count',
+                None if not parts or len(parts) < 6 else parts[0] + parts[5] == row['subst_total'],
+                no_subst if row['subst_client'] is None else 'subst=%s vs server %d' % (row['subst_client'], row['subst_total']))
+            add(who, 'exactly one resync if subst late > 0',
+                None if not parts or len(parts) < 6 else (resyncs == 1 if parts[5] > 0 else True),
+                (no_subst + '; ' if not parts else '') + '%d resyncs (bases %s)' % (resyncs, row['resync_bases']))
+            settle, err = row['own_after_resync']
+            add(who, 'own ball 0.0000 48 ticks after the resync (or T_off)', err < ZERO_M,
+                '%.4f m from tick %d%s' % (err, settle, mask_note), masked)
+        elif family == 'reported':
+            add(who, 'reported only (%s)' % arm, None,
+                'own after T_off+48 %.4f m; relay_late B/D/A %s; resyncs %d; subst %d (outside the window %d)' % (
+                    row['own_after'], '/'.join(str(row['phases'][p]['relay_late']) for p in PHASES), resyncs,
+                    row['subst_total'], row['subst_outside_event']))
+        elif family == 'lead':
+            add(who, 'exactly one lead_adj, K in [ceil(up_ms/15), +4]', None if lead_none else sum(v or 0 for v in lead) == 1,
+                no_lead + ' (K needs the S1/S3 lines of plan steps 7 and 10)' if lead_none else str(lead))
+            add(who, 'exactly one buffer reset, E >= the first on-time frame after the slew', None,
+                'no S3 reset note at this revision')
+            add(who, 'substitutions only in [T_on, E]; own ball 0.0000 from E+48', None,
+                'no E at this revision; substituted %d (B/D/A %s), own after T_off+48 %.4f m' % (
+                    row['subst_total'], '/'.join(str(row['subst_server'][p]) for p in PHASES), row['own_after']))
+            add(who, 'resyncs 0', resyncs == 0 and sum(row['phases'][p]['resyncs'] for p in PHASES) == 0,
+                '%d (bases %s)' % (resyncs, row['resync_bases']))
+            add(who, "the session's input delay printed once", len(row['input_delays']) == 1,
+                'printed %s' % row['input_delays'])
+        elif family == 'a5d':
+            add(who, 'one raise and one lower', None if lead_none else sum(v or 0 for v in lead) == 2,
+                no_lead if lead_none else str(lead))
+        elif family == 'hold':
+            gap = report['server']['tick_gaps'].get('D', {})
+            lo, hi = phases['D']
+            edge = control_gap_upper(controls, lo, hi) if controls else None
+            add(who, 'largest server TICK gap near the hold <= control + 15 ms',
+                None if edge is None or not gap else gap['max_ms'] <= edge + 15,
+                '%s ms at tick %s vs control %s' % (gap.get('max_ms'), gap.get('at'), 'n/a' if edge is None else edge))
+            near = [b for b in report['server']['barrier_lines'] if lo <= b['tick'] < hi]
+            add(who, 'no barrier line', not near, '%d in D (%d in the run)' % (len(near), len(report['server']['barrier_lines'])))
+            if report.get('drop'):
+                add(who, 'drop: the owner matches the server within 48 ticks', row['own_presence_mismatch'] == 0
+                    and row['own_after'] < ZERO_M,
+                    '%d checkpoints from T_on+48 where the own ball exists on one side only; own error %.4f m' % (
+                        row['own_presence_mismatch'], row['own_after']))
+            else:
+                add(who, 'owner exactly one resync (past its reach at 150 ms)', resyncs == 1,
+                    '%d (bases %s)' % (resyncs, row['resync_bases']))
+                add(who, 'own ball 0.0000 48 ticks after the resync (or the release)', row['own_after_resync'][1] < ZERO_M,
+                    '%.4f m from tick %d' % (row['own_after_resync'][1], row['own_after_resync'][0]))
+        elif family == 'join':
+            info = next((j for j in report.get('join', []) if j['client'] == row['index']), None)
+            if info and row['input_delays']:
+                rtt = int(math.ceil(2.0 * info['latency_ms'] / 1000.0 / TICK_S))
+                want = report.get('input_delay', 0) + rtt + 2
+                add(who, 'joiner lead == D + ceil(rtt) + 2', row['input_delays'][0] == want,
+                    'printed input delay %d vs %d + %d + 2 = %d (status lead %s; asked tick %d, base %s)' % (
+                        row['input_delays'][0], report.get('input_delay', 0), rtt, want, row['status_lead'],
+                        info['asked'], info['base']))
+            else:
+                add(who, 'joiner lead == D + ceil(rtt) + 2', None, 'no session line or no --join-late for it')
+            add(who, 'subst late 0 after the first four windows', None if not parts or len(parts) < 6 else parts[5] == 0,
+                no_subst if row['subst_client'] is None else 'subst=%s' % row['subst_client'])
+        elif family == 'stall':
+            add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0, no_lead if lead_none else str(lead))
+            ok = (row['subst_server']['D'] > 0 and row['own_after'] < ZERO_M) or resyncs > 0
+            add(who, "the stall's ticks substituted and corrected, or a rebase and resync", ok,
+                'substituted in D %d, own after T_off+48 %.4f m, resyncs %d, rebases in D %d' % (
+                    row['subst_server']['D'], row['own_after'], resyncs, row['phases']['D']['rebases']))
+    return out
+
+
+def format_report(report, crit):
+    """The report as text: one line per client and phase, then the server and
+    the criteria."""
+    lines = ['event report: %s; arm %s; T_on %d, T_off %d; B < %d, D %d..%d, A >= %d%s' % (
+        '; '.join(report['episode']), report.get('arm', '?'), report['t_on'], report['t_off'], report['phases']['B'][1],
+        report['phases']['D'][0], report['phases']['D'][1] - 1, report['phases']['A'][0],
+        ('; window grid from tick %d' % report['window_origin']) if report.get('window_origin') else '')]
+    for j in report.get('join', []):
+        lines.append('join: client%d asked at host tick %d, tick base %s, link %g ms' % (
+            j['client'], j['asked'], j['base'], j['latency_ms']))
+    for row in report['clients']:
+        if row.get('never_started'):
+            lines.append('client%d never started' % row['index'])
+            continue
+        lines.append('client%d (id %d, base %s%s): server substituted B/D/A %s (runs near the event %s); client subst=%s; '
+                     'own 0.0000 from tick %d; own after T_off+48 %.4f (next 300 ticks %.4f), '
+                     'late mirror after T_off+60 %.4f (next 300 ticks %.4f); '
+                     'RECEIVED in the episode %d; input delay %s' % (
+                         row['index'], row['id'], row['base'],
+                         (', resynced to ' + ','.join(map(str, row['resync_bases']))) if row['resync_bases'] else '',
+                         '/'.join(str(row['subst_server'][p]) for p in PHASES), row['subst_runs'] or '-',
+                         row['subst_client'] or 'n/a', row['own_zero_from'], row['own_after'], row['own_after_300'],
+                         row['late_mirror_after'], row['late_mirror_after_300'], row['received_in_event'],
+                         '/'.join(map(str, row.get('input_delays', []))) or '?'))
+        for p in PHASES:
+            ph = row['phases'][p]
+            rb = ph['rb']
+            fmt_rb = lambda v: 'n/a' if v is None else ('%d/%.1f' % (v[0], v[1] / v[0]) if v[0] else '0')
+            lines.append('  %s %5d-%-5d own %.4f oth %.4f late %.4f mech %.4f | windows %d rb input %s life %s snap %s '
+                         'forced %s subst %s, naming late %d | lag %d/%d (n %d) %s | relay_late %d snaps %d resyncs %d '
+                         'rebases %d lead_adj %s moved %s' % (
+                             p, ph['ticks'][0], ph['ticks'][1] - 1, ph['own_max'], ph['oth_max'], ph['late_mirror_max'],
+                             ph['mech_max'], ph['windows'], fmt_rb(rb['input']), fmt_rb(rb['life']), fmt_rb(rb['snap']),
+                             fmt_rb(rb['forced']), fmt_rb(rb['subst']), ph['inrew_late'], ph['lag']['max'],
+                             ph['lag']['p99'], ph['lag']['n'],
+                             ' '.join('%s:%d/%d' % (src, st['max'], st['p99']) for src, st in ph['lag_src'].items()),
+                             ph['relay_late'], ph['snaps'], ph['resyncs'], ph['rebases'],
+                             'n/a' if ph['lead_adj'] is None else ph['lead_adj'],
+                             'n/a' if ph['moved'] is None else ph['moved']))
+        if row['holds'] or row['stalls']:
+            lines.append('  holds %s stalls %s' % (row['holds'], row['stalls']))
+    s = report['server']
+    lines.append('server: ticks %d..%d; TICK gap max/p99 ms %s; late events %d %s; "late by" lines %d; barrier give-ups %d' % (
+        s['ticks'][0], s['ticks'][1],
+        ' '.join('%s %d@%d/%d' % (p, g['max_ms'], g['at'], g['p99_ms']) for p, g in sorted(s['tick_gaps'].items(),
+                                                                                         key=lambda kv: PHASES.index(kv[0]))),
+        len(s['late_events']), [(e['client'], e['type'], e['stamp'], e['tick']) for e in s['late_events'][:8]],
+        len(s['late_by_lines']), len(s['barrier_lines'])))
+    counts = collections.Counter(c['status'] for c in crit)
+    for c in crit:
+        lines.append('criterion %-8s %s: %s - %s' % (c['who'], c['criterion'], c['status'].upper(), c['detail']))
+    lines.append('criteria: pass=%d fail=%d masked=%d n/a=%d' % (counts['pass'], counts['fail'], counts['masked'],
+                                                                 counts['n/a']))
+    return lines
 
 
 def replay(args, journal, out_dir):
@@ -454,6 +1583,9 @@ def verdict(case):
     """Pass only when the run was both clean and actually interactive."""
     problems, warnings = [], []
     for i, c in enumerate(case['clients']):
+        if c.get('never_started'):
+            problems.append(f'client{i} never started')
+            continue
         m = c['metrics'] or {}
         if c['exit_code'] != 0:
             problems.append(f'client{i} exit {c["exit_code"]}')
@@ -502,7 +1634,8 @@ def verdict(case):
         # snapshot-free measurements, a few dozen lifecycle-forced ones in
         # 60 s) has none to show even when every mechanism is tracked and in
         # step, so there it is a note, not a failure.
-        snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100 for c in case['clients'])
+        snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100 for c in case['clients']
+                            if not c.get('never_started'))
         (warnings if snapshot_free else problems).append(
             'no mechanism interaction observed' + (' (snapshot-free run: the corrections cannot show it)' if snapshot_free else ''))
     if len(case['clients']) > 1 and not inter['peer_balls_corrected']:
@@ -510,10 +1643,207 @@ def verdict(case):
     return problems, warnings
 
 
+def selftest():
+    """The harness's own logic without a game: the specs, the window line, the
+    percentile, the phases, and a proxy that blacks out and delays real
+    datagrams on loopback.  Prints one line per check; 0 when all pass."""
+    failures = []
+
+    def check(what, ok, detail=''):
+        print('%s %s%s' % ('ok  ' if ok else 'FAIL', what, (' - ' + detail) if detail else ''))
+        if not ok:
+            failures.append(what)
+
+    i, link = parse_link('2:lat=250,loss=10,burst=8,jitter=45')
+    check('parse_link', i == 2 and link == {'latency_ms': 250.0, 'loss_pct': 10.0, 'loss_burst': 8, 'jitter_ms': 45.0}, str(link))
+    ev = parse_event('2:1500:blackout=300:dir=up')
+    check('parse_event blackout', (ev.client, ev.tick, ev.kind, ev.ms, ev.dirs, ev.t_off) == (2, 1500, 'blackout', 300.0, ('up',), 1520),
+          '%s t_off %d' % (ev.describe(), ev.t_off))
+    ev = parse_event('2:1500:spike=300')
+    check('parse_event spike defaults', ev.dur_ms == 1000.0 and ev.dirs == ('up', 'down') and ev.t_off == 1500 + 86,
+          'dur %g t_off %d' % (ev.dur_ms, ev.t_off))
+    ev = parse_event('2:1500:step=300:dir=up:until=2700')
+    check('parse_event step until', ev.t_off == 2700 and ev.until == 2700)
+    w = parse_window('window: tick=1559 inrew=3/41 life=0/0 forced=0/0 snaprb=1/12 snaps=1 resyncs=0/0 rebases=0 '
+                     'relay=180 late=2 lag[11]=23*4,24*50,49*2 lag[12]=30*60 inrew[11]=3 subst=5/4/1/0/1/0 lead_adj=1')
+    check('parse_window', w and w['tick'] == 1559 and w['inrew'] == [3, 41] and w['late'] == 2
+          and w['lag'] == {11: {23: 4, 24: 50, 49: 2}, 12: {30: 60}} and w['inrew_src'] == {11: 3}
+          and w['subst'] == [5, 4, 1, 0, 1, 0] and w['lead_adj'] == 1, str(w))
+    st = hist_stats({23: 4, 24: 50, 49: 2})
+    check('hist_stats p99', st == {'n': 56, 'max': 49, 'p99': 49}, str(st))
+    st = hist_stats({i: 1 for i in range(1, 201)})
+    check('hist_stats p99 of 1..200', st['p99'] == 198 and st['max'] == 200, str(st))
+    check('parse_window ignores others', parse_window('status: tick=5') is None)
+    phases = {'B': (10, 100), 'D': (100, 168), 'A': (168, 400)}
+    check('phase_of', (phase_of(99, phases), phase_of(100, phases), phase_of(167, phases), phase_of(168, phases),
+                       phase_of(400, phases)) == ('B', 'D', 'D', 'A', None))
+    log = [b'logged in (own id 77, 2 online)\n', b'tick base 27 assigned (0 frames since anchor)\n',
+           b'hold-event: own physicalize #2 stamped tick 900 held at tick 893 for 300 ms\n',
+           b'hold-event: own physicalize stamped tick 900 (held at tick 893) released at tick 913\n',
+           b'stall: 500 ms at tick 1500 (--stall-ms)\n', b'resynced: tick base 1600\n',
+           b'window: tick=1619 inrew=0/0 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=1/1 rebases=1 relay=0 late=0\n']
+
+    # The window grid and the phases: a window that overlaps D at all is D's.
+    ph = {'B': (27, 1500), 'D': (1500, 1568), 'A': (1568, 3600)}
+    got = [window_phase({'tick': t, 'lo': t - 59}, ph) for t in (1439, 1499, 1500, 1559, 1619, 1627, 1680)]
+    check('window_phase overlap', got == ['B', 'B', 'D', 'D', 'D', 'A', 'A'], str(got))
+    # A control re-cut on a longer D: its windows, not its stored phases.
+    def win(t, inrew, lag):
+        return {'tick': t, 'lo': t - 59, 'inrew': [inrew, inrew * 10], 'life': [0, 0], 'forced': [0, 0],
+                'snaprb': [0, 0], 'snaps': 0, 'resyncs': [0, 0], 'rebases': 0, 'relay': 0, 'late': 0,
+                'lag': {'11': {str(lag): 60}}, 'inrew_src': {'11': inrew}}
+    ctrl_row = {'index': 1, 'id': 12, 'span': [27, 3000], 'phases': {},
+                'raw_windows': [win(t, 1 if t < 1560 else 4, 42 if t < 1560 else 45) for t in range(1499, 3000, 60)],
+                'err30': [[s, 0.0, 0.0, 0.001 if s < 1560 else 0.004] for s in range(30, 3000, 30)]}
+    ctrl = {'clients': [ctrl_row, {'index': 2, 'id': 11}]}
+    short = recut_phases(ctrl, ctrl_row, {'B': (27, 1500), 'D': (1500, 1548), 'A': (1548, 3600)}, [2])
+    long_ = recut_phases(ctrl, ctrl_row, {'B': (27, 1500), 'D': (1500, 1615), 'A': (1615, 3600)}, [2])
+    check('recut_phases follows the arm\'s D',
+          short['D']['windows'] == 1 and long_['D']['windows'] == 2 and short['D']['rb']['input'][0] == 1
+          and long_['D']['rb']['input'][0] == 5 and long_['D']['inrew_late'] == 5 and long_['D']['lag_src']['c2']['p99'] == 45
+          and short['D']['mech_max'] == 0.001 and long_['D']['mech_max'] == 0.004,
+          'short %s / long %s' % ((short['D']['windows'], short['D']['rb']['input'], short['D']['mech_max']),
+                                  (long_['D']['windows'], long_['D']['rb']['input'], long_['D']['mech_max'])))
+
+    class FakeArgs(object):
+        events, join_late, arm = [], {3: 1500}, ''
+    jl = episode(FakeArgs(), {0: {'holds': [], 'stalls': [], 'bases': [27]},
+                              3: {'holds': [], 'stalls': [], 'bases': [1713]}})
+    check('a join-late run is an episode at the joiner\'s base',
+          jl and jl['t_on'] == 1713 and jl['source'] == 'join' and jl['t_off'] + REACH - jl['t_on'] == 240
+          and infer_arm(FakeArgs(), 'join') == 'A8', str(jl))
+    FakeArgs.events = [parse_event('2:1500:step=300:dir=up')]
+    check('infer_arm', (infer_arm(FakeArgs(), 'event'),
+                        infer_arm(type('X', (), {'events': [parse_event('2:1500:blackout=200')], 'arm': ''})(), 'event'),
+                        infer_arm(type('X', (), {'events': [parse_event('2:1500:none=0')], 'arm': ''})(), 'event'))
+          == ('A5U', 'A3', 'A0'))
+
+    # A proxy in front of a loopback "server": a client sends one datagram
+    # every 5 ms for 1.2 s, an up blackout covers 0.3-0.6 s, a spike of 200 ms
+    # the down datagrams sent in 0.8-1.0 s.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / 'client.log'
+        path.write_bytes(b''.join(log))
+        parsed = read_client_log(path)
+        check('read_client_log', parsed['own_id'] == 77 and parsed['bases'] == [27, 1600]
+              and parsed['holds'] == [{'type': 'physicalize', 'stamp': 900, 'held_at': 893, 'released_at': 913}]
+              and parsed['stalls'] == [{'ms': 500, 'tick': 1500}] and len(parsed['windows']) == 1, str(parsed))
+        # The arming: a log that names tick base 100 arms tick 166 one second on.
+        armed = LinkEvent(0, 166, 'blackout', 100)
+        watch_log = pathlib.Path(tmp) / 'watch.log'
+        watch_log.write_bytes(b'')
+        watch = LogWatch(watch_log, arm_events([armed]))
+        with open(watch_log, 'ab') as f:
+            f.write(b'tick base 100 assigned (0 frames since anchor)\n')
+        t0 = time.monotonic()
+        while armed.start is None and time.monotonic() - t0 < 2:
+            time.sleep(0.01)
+        watch.close()
+        check('LogWatch arms from the tick base', armed.start is not None and abs(armed.start - t0 - 1.0) < 0.1,
+              'starts %.3f s after the line' % ((armed.start or t0) - t0))
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(('127.0.0.1', 0))
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(('127.0.0.1', 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    proxy = DelayProxy(port, server.getsockname(), 20.0)
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.bind(('127.0.0.1', 0))
+    start = time.monotonic()
+    black = LinkEvent(0, 0, 'blackout', 300, direction='up')
+    black.start = start + 0.3
+    spike = LinkEvent(0, 0, 'spike', 200, 200, 'down')
+    spike.start = start + 0.8
+    proxy.events = [black, spike]
+    got_up, got_down = [], []
+    server.settimeout(0.002)
+    client.settimeout(0.002)
+    n = sent_in_blackout = 0
+    while time.monotonic() - start < 1.6:
+        now = time.monotonic() - start
+        if now < 1.2 and n * 0.005 <= now:
+            client.sendto(struct.pack('<id', n, now), ('127.0.0.1', port))
+            sent_in_blackout += 0.3 <= now < 0.6
+            n += 1
+        try:
+            data, addr = server.recvfrom(64)
+            seq, sent = struct.unpack('<id', data)
+            got_up.append((seq, sent))
+            server.sendto(struct.pack('<id', seq, time.monotonic() - start), addr)
+        except (socket.timeout, ConnectionResetError):
+            pass
+        try:
+            data, _ = client.recvfrom(64)
+            seq, echoed = struct.unpack('<id', data)
+            got_down.append((seq, echoed, time.monotonic() - start))
+        except (socket.timeout, ConnectionResetError):
+            pass
+    proxy.close()
+    server.close()
+    client.close()
+    lost = [sent for seq, sent in got_up]
+    in_blackout = [s for s in lost if 0.3 <= s < 0.6]
+    check('blackout drops the up datagrams of its window, and only those',
+          not in_blackout and proxy.blacked['up'] > 10 and abs(proxy.blacked['up'] - sent_in_blackout) <= 2
+          and len(got_up) + proxy.blacked['up'] == n,
+          'sent %d, passed %d, blacked %d of the %d sent in the window, %d passed inside it'
+          % (n, len(got_up), proxy.blacked['up'], sent_in_blackout, len(in_blackout)))
+    late_down = [arrived - echoed for seq, echoed, arrived in got_down if 0.82 <= echoed < 0.98]
+    early_down = [arrived - echoed for seq, echoed, arrived in got_down if echoed < 0.25]
+    check('spike delays the down datagrams of its window',
+          late_down and min(late_down) > 0.2 and early_down and max(early_down) < 0.1 and proxy.delayed['down'] > 0,
+          'spiked trip %.3f..%.3f s, normal %.3f s' % (min(late_down or [0]), max(late_down or [0]), max(early_down or [0])))
+    order = [seq for seq, echoed, arrived in got_down]
+    after = [seq for seq, echoed, arrived in got_down if echoed >= 1.0]
+    check('nothing overtakes the spiked datagrams',
+          order == sorted(order) and after,
+          '%d down datagrams, %d sent after the spike, %d out of order'
+          % (len(order), len(after), sum(1 for a, b in zip(order, order[1:]) if b < a)))
+    print('selftest: %s' % ('PASS' if not failures else 'FAIL - ' + ', '.join(failures)))
+    return 1 if failures else 0
+
+
+def emit_report(args, case, case_dir):
+    """H6/H8 for one case: into the case, its directory and stdout."""
+    try:
+        report = event_report(args, case, case_dir)
+    except Exception as exc:   # a report bug must not cost the run's summary
+        import traceback
+        traceback.print_exc()
+        print(f'  event report failed: {exc}', flush=True)
+        return
+    if report is None:
+        return
+    crit = criteria(report, case, load_controls(args.control, case['sector']))
+    case['event_report'], case['criteria'] = report, crit
+    lines = format_report(report, crit)
+    (case_dir / 'event_report.txt').write_text('\n'.join(lines) + '\n', encoding='utf8')
+    (case_dir / 'event_report.json').write_text(json.dumps({'report': report, 'criteria': crit}, indent=1),
+                                                encoding='utf8')
+    for line in lines:
+        print('  ' + line, flush=True)
+
+
+def report_only(args):
+    """--report-only: the report of a finished run, again (a newer harness,
+    or a control given afterwards)."""
+    base = pathlib.Path(args.report_only)
+    cases = json.loads((base / 'summary.json').read_text(encoding='utf8'))
+    for case in cases:
+        if (base / 'server.bmjr').exists():
+            case['journal'] = [str(base / 'server.bmjr')]
+        emit_report(args, case, base / f'sector{case["sector"]}')
+    (base / 'summary.json').write_text(json.dumps(cases, indent=2), encoding='utf8')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--bin', default=str(REPO / 'build-agent/BallanceMMOServer'))
-    ap.add_argument('--root', required=True, help='Ballance data directory')
+    ap.add_argument('--root', default='', help='Ballance data directory (required for a run)')
     ap.add_argument('--level', type=int, default=13)
     ap.add_argument('--sectors', default='1,2,3,4')
     ap.add_argument('--players', type=int, default=4)
@@ -575,7 +1905,69 @@ def main():
     ap.add_argument('--gap', type=float, default=6.0,
                     help='seconds to wait between cases so the last session fully exits')
     ap.add_argument('--label', default=time.strftime('%Y%m%d%H%M%S'))
+    # The late-player harness (docs/late-player-design.md 5.1).
+    ap.add_argument('--link', action='append', default=[], metavar='N:lat=,loss=,burst=,jitter=',
+                    help='H1: client N\'s own link, over the shared one; repeatable')
+    ap.add_argument('--event', action='append', default=[], metavar='N:T:KIND=MS[:dur=MS][:dir=D][:until=T2]',
+                    help='H2: an episode on client N at its tick T; KIND blackout, spike, step, stall or none; repeatable')
+    ap.add_argument('--event-client', type=int, default=-1,
+                    help='H2, one event: the client (default 2, the design\'s: not the host)')
+    ap.add_argument('--event-tick', type=int, default=0, help='H2, one event: the tick (alone: a control\'s phases)')
+    ap.add_argument('--blackout-ms', type=float, default=0.0, help='H2: drop the link for this long')
+    ap.add_argument('--spike-ms', type=float, default=0.0, help='H2: add this much delay for --event-ms')
+    ap.add_argument('--step-ms', type=float, default=0.0, help='H2: add this much delay from the tick on')
+    ap.add_argument('--event-ms', type=float, default=0.0,
+                    help='H2: how long a spike lasts (default 1000); for a control, the episode length its phases assume')
+    ap.add_argument('--event-until', type=int, default=0, help='H2: the tick a step ends at (default: never)')
+    ap.add_argument('--event-dir', default='both', choices=('up', 'down', 'both'),
+                    help='H2: up = client to server')
+    ap.add_argument('--client-arg-for', action='append', default=[], metavar='N:"ARGS"', dest='client_arg_for_specs',
+                    help='H3: extra arguments for client N alone; repeatable')
+    ap.add_argument('--join-late', action='append', default=[], metavar='N:T',
+                    help='H4: client N starts when the host reaches tick T')
+    ap.add_argument('--server-log', default='', help='H5: an external server\'s log, copied into the case')
+    ap.add_argument('--control', action='append', default=[],
+                    help='H8: a control run (its directory or summary.json) whose event report is the band; repeatable')
+    ap.add_argument('--arm', default='', help='H8: the arm of design 5.2 (A0, A0j, A1 .. A9c) whose own criteria '
+                                              'apply; inferred from the episode when absent')
+    ap.add_argument('--window-origin', type=int, default=-1,
+                    help='the tick the clients\' window: grid starts at (default: T_on of the --event ticks, else the '
+                         '--join-late tick; 0 = the plain grid)')
+    ap.add_argument('--selftest', action='store_true', help='check the harness\'s own logic offline and exit')
+    ap.add_argument('--report-only', default='',
+                    help='redo the event report and criteria of an earlier run directory (give the run\'s own '
+                         '--players and event flags, and --control); its server.bmjr, when the batch copied one '
+                         'there, is the journal')
     args = ap.parse_args()
+    if args.selftest:
+        return selftest()
+    if not args.root and not args.report_only:
+        ap.error('--root is required')
+    args.links = dict(parse_link(s) for s in args.link)
+    args.events = [parse_event(s) for s in args.event]
+    if args.event_client >= 0 or args.event_tick:
+        kinds = [(k, ms) for k, ms in (('blackout', args.blackout_ms), ('spike', args.spike_ms), ('step', args.step_ms)) if ms > 0]
+        if len(kinds) > 1:
+            ap.error('one of --blackout-ms, --spike-ms, --step-ms per --event-client')
+        kind, ms = kinds[0] if kinds else ('none', 0.0)
+        # Client 2 unless named: the design's event client, and the same
+        # client in a control and its arms, so the band compares like with like.
+        client = args.event_client if args.event_client >= 0 else min(2, args.players - 1)
+        args.events.append(LinkEvent(client, args.event_tick, kind, ms, args.event_ms,
+                                     args.event_dir, args.event_until))
+    for ev in args.events:
+        if ev.kind == 'stall' and args.stall_client == ev.client and args.stall_ms > 0:
+            ap.error('client %d has both --stall-client and a stall --event: one stall knob per client' % ev.client)
+    if args.window_origin < 0:
+        ticks = [ev.tick for ev in args.events] or [int(b) for _, _, b in (s.partition(':') for s in args.join_late)]
+        args.window_origin = min(ticks) if ticks else 0
+    args.client_arg_for = {}
+    for spec in args.client_arg_for_specs:
+        index, _, rest = spec.partition(':')
+        args.client_arg_for.setdefault(int(index), []).extend(shlex.split(rest))
+    args.join_late = dict((int(a), int(b)) for a, _, b in (s.partition(':') for s in args.join_late))
+    if args.report_only:
+        return report_only(args)
 
     base = pathlib.Path(args.out) / args.label
     if base.exists():
@@ -614,6 +2006,9 @@ def main():
             print(f'  note: {"; ".join(warnings)}', flush=True)
         print(f'  VERDICT: {"PASS" if not problems else "FAIL - " + "; ".join(problems)}',
               flush=True)
+        # H6 and H8: the event report and the criteria, beside the verdict
+        # (which keeps its meaning: the run's own health).
+        emit_report(args, case, base / f'sector{sector}')
         (base / 'summary.json').write_text(json.dumps(results, indent=2), encoding='utf8')
         # Let the previous session's processes actually go before the next
         # server binds.  One server plus N headless clients is N+1 full
