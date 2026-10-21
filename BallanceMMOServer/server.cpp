@@ -706,6 +706,7 @@ public:
         rc.snapshot_interval = std::max<uint32_t>(1, config_.physics_snapshot_interval);
         rc.full_snapshot_interval = std::max<uint32_t>(1, config_.physics_full_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
+        rc.patience = config_.physics_patience;
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
         // server was started from before the first world boots.
@@ -727,9 +728,9 @@ public:
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, full every %u, journal %s).", config_.physics_game_root,
+               "snapshot interval %u, full every %u, journal %s, patience %s).", config_.physics_game_root,
                config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
-               rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string());
+               rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off");
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {

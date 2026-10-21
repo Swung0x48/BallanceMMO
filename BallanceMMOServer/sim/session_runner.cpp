@@ -56,6 +56,12 @@ namespace bmmo::sim {
             out.recipe = e.recipe;
             return out;
         }
+
+        std::string fixed2(double value) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%.2f", value);
+            return text;
+        }
     }
 
     session_runner::session_runner(runner_config config, session_callbacks callbacks)
@@ -261,6 +267,8 @@ namespace bmmo::sim {
         post([this, session, reason] {
             if (auto it = sessions_.find(session); it != sessions_.end()) {
                 auto& s = *it->second;
+                if (config_.patience && s.running && s.world)
+                    report_patience(s, s.world->tick_index(), "session end");
                 s.journal.note(s.world ? s.world->tick_index() : 0,
                                "end: " + (reason.empty() ? std::string("session destroyed") : reason));
                 s.journal.close();
@@ -295,6 +303,9 @@ namespace bmmo::sim {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
+            // Its last patience counts, before the entry goes.
+            if (config_.patience && s.running && s.world && s.inputs.count(player))
+                report_patience(s, s.world->tick_index(), "player left", &player);
             // Join order is the world's business at add time only; a removal
             // needs the player id alone.
             s.journal.player(s.world ? s.world->tick_index() : 0, player, 0, false, {});
@@ -304,6 +315,7 @@ namespace bmmo::sim {
             s.ready.erase(player);
             s.inputs.erase(player);
             s.lateness.erase(player);
+            s.patience.erase(player);
             s.acked.erase(player);
             s.lifecycle_missing.erase(player);
             s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
@@ -326,6 +338,7 @@ namespace bmmo::sim {
                     v.first_tick = s.world->tick_index();
                 }
                 publish_state(s);
+                log_patience_on(s);
             }
         });
     }
@@ -362,6 +375,13 @@ namespace bmmo::sim {
             }
             lateness.meter.reset(first_tick);
             lateness.reported = false;
+            // Measured anew, waived anew (design 2.8): an episode of the old
+            // assignment ends, and its cut ticks lie below the new base where
+            // nothing will come for them.  The counters stay.
+            if (auto p = s.patience.find(player); p != s.patience.end()) {
+                p->second.waiver.reassigned();
+                p->second.cut.clear();
+            }
             if (s.running) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
                 // Design 9.26: the first step (tick start_base) is due start_base
@@ -380,6 +400,7 @@ namespace bmmo::sim {
                 publish_state(s);
                 log("[session " + std::to_string(session) + "] all " + std::to_string(s.players.size())
                     + " players ready, ticking from " + std::to_string(s.world->tick_index()));
+                log_patience_on(s);
             }
             wake_.notify_all();
         });
@@ -405,19 +426,41 @@ namespace bmmo::sim {
             const uint32_t newest = first_tick + static_cast<uint32_t>(frames.size()) - 1;
             if (newest < s.scheduler.first_tick()
                     || newest >= cursor + bmmo::session::input_buffer::kMaxLookahead) return;
+            if (config_.patience) {
+                // Patience's cost (design 2.6), for the S1 patience line: a
+                // frame of a tick the session stepped early without it, that
+                // still beat that tick's deadline, is one the deadline would
+                // have taken.  A cut tick whose deadline this arrival is past
+                // can no longer be taken by anything later.
+                if (auto p = s.patience.find(player); p != s.patience.end()) {
+                    auto& cut = p->second.cut;
+                    while (!cut.empty() && s.scheduler.deadline(cut.front().first) <= arrival) cut.pop_front();
+                    for (auto c = cut.begin(); c != cut.end();) {
+                        if (c->first < first_tick || c->first > newest) { ++c; continue; }
+                        ++(c->second ? p->second.taken_waiver : p->second.taken_patience);
+                        c = cut.erase(c);
+                    }
+                }
+            }
             auto meter = s.lateness.find(player);
             if (meter == s.lateness.end()) return;
-            meter->second.meter.sample(newest,
-                    bmmo::session::lateness_slack_ticks(s.scheduler.deadline(newest), arrival));
+            const double slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(newest), arrival);
+            if (!meter->second.meter.sample(newest, slack) || !config_.patience) return;
+            // The streak waiver ends with the first sample inside the
+            // player's patience; the next tick the runner decides waits for
+            // it again.
+            if (auto p = s.patience.find(player); p != s.patience.end() && p->second.waiver.waived())
+                p->second.waiver.sample(slack, patience_lead(s, player));
         });
     }
 
     void session_runner::submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event) {
-        post([this, session, player, tick, event = std::move(event)] {
+        const auto arrival = clock::now();
+        post([this, session, player, tick, arrival, event = std::move(event)] {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& events = it->second->events;
-            pending_event pe{player, tick, std::move(event)};
+            pending_event pe{player, tick, std::move(event), arrival};
             auto pos = std::upper_bound(events.begin(), events.end(), tick,
                 [](uint32_t t, const pending_event& e) { return t < e.tick; });
             events.insert(pos, std::move(pe));
@@ -520,8 +563,15 @@ namespace bmmo::sim {
         for (auto& [player, buffer]: s.inputs) {
             bool fresh = false;
             uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
+            // Before take() moves the cursor past it.
+            const bool settled = buffer.settled(tick);
             const auto& frame = buffer.take(tick, fresh, source);
             if (fresh) s.acked[player] = tick;
+            // The streak waiver (design 2.6) starts at a substitution of a
+            // frame the step had to do without.  A tick below a re-anchored
+            // cursor was never going to get a frame, so its substitute is not
+            // lateness and waives nothing.
+            if (config_.patience && !fresh && !settled) s.patience[player].waiver.substituted();
             s.world->set_input(player, frame);
             applied.push_back(bmmo::session::applied_input{player, frame, !fresh, source});
             // What the world consumed, not what arrived on the wire: the wire
@@ -582,10 +632,29 @@ namespace bmmo::sim {
             // every mechanism of the sector by that much).  Said once per
             // event, capped, so a journal reader can tell a late event from a
             // fault in the simulation.
+            //
+            // With patience on, one whose stamp tick was stepped early with a
+            // member unsettled, but which arrived before that tick's deadline,
+            // is one patience made late (the deadline schedule would have
+            // waited longer for that tick): counted for the S1 patience line
+            // and noted in the box, uncapped there, until the re-stamp (plan
+            // step 16) makes a late event harmless.
+            bool by_patience = false;
+            if (config_.patience && e.tick < tick
+                    && std::find(s.early_ticks.begin(), s.early_ticks.end(), e.tick) != s.early_ticks.end()
+                    && e.arrival < s.scheduler.deadline(e.tick)) {
+                by_patience = true;
+                ++s.patience[e.player].late_events;
+                if (recording)
+                    s.journal.note(tick, "patience: event type " + std::to_string(static_cast<int>(e.event.type))
+                                   + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.tick)
+                                   + " arrived before its deadline but after its early step");
+            }
             if (e.tick < tick && ++s.late_events <= 50)
                 log("[session " + std::to_string(s.id) + "] event type " + std::to_string(static_cast<int>(e.event.type))
                     + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.tick) + " applied at tick "
-                    + std::to_string(tick) + " (late by " + std::to_string(tick - e.tick) + ")");
+                    + std::to_string(tick) + " (late by " + std::to_string(tick - e.tick) + ")"
+                    + (by_patience ? ", stepped early by patience" : ""));
             e.event.tick = e.tick;
             // After the tick is stamped: the spawn impulse direction is derived
             // from that field, so the record has to carry it - but the world
@@ -632,14 +701,6 @@ namespace bmmo::sim {
             std::vector<bmmo::session::body_state> bodies;
             s.world->snapshot_for_journal(bodies);
             s.journal.checkpoint(tick, bmmo::session::JOURNAL_CHECKPOINT_FULL, bodies);
-        }
-    }
-
-    namespace {
-        std::string fixed2(double value) {
-            char text[32];
-            std::snprintf(text, sizeof(text), "%.2f", value);
-            return text;
         }
     }
 
@@ -724,6 +785,81 @@ namespace bmmo::sim {
         }
     }
 
+    std::vector<bmmo::session::patience_member> session_runner::patience_members(const session_state& s,
+                                                                               uint32_t tick) const {
+        std::vector<bmmo::session::patience_member> members;
+        members.reserve(s.inputs.size());
+        for (const auto& [player, buffer]: s.inputs) {
+            if (!config_.patience) {
+                bmmo::session::patience_member m;
+                m.has = buffer.has(tick);
+                members.push_back(m);
+                continue;
+            }
+            const auto p = s.patience.find(player);
+            const auto l = s.lateness.find(player);
+            members.push_back(bmmo::session::patience_member_of(buffer.has(tick), buffer.settled(tick),
+                    p != s.patience.end() && p->second.waiver.waived(),
+                    l == s.lateness.end() ? nullptr : &l->second.meter, s.start_base));
+        }
+        if (config_.patience) bmmo::session::patience_assign_leads(members);
+        return members;
+    }
+
+    double session_runner::patience_lead(const session_state& s, uint32_t player) const {
+        const auto members = patience_members(s, s.world ? s.world->tick_index() : 0);
+        size_t i = 0;
+        for (const auto& entry: s.inputs) {
+            if (entry.first == player) return members[i].lead;
+            ++i;
+        }
+        return 0.0;
+    }
+
+    // Every 660 ticks with patience on, one line per player: its lead and
+    // where it came from, whether it is waived, and what patience cost it -
+    // the ticks it was substituted because the session stepped early without
+    // it, how many of those frames then beat the deadline, i.e. would have
+    // been taken fresh without patience (split by patience proper and the
+    // waiver), and how many of its events patience made late.  The A0j arm
+    // reads deadline-would-take to judge the margin.  The counters are
+    // cumulative; a `final=` line closes them when the player leaves or the
+    // session ends, so nothing after the last 660-tick line is lost.
+    void session_runner::report_patience(session_state& s, uint32_t tick, const char* final_reason,
+                                         const uint32_t* only) {
+        if (final_reason == nullptr && tick % kLatenessSummaryTicks != 0) return;
+        const auto members = patience_members(s, tick);
+        const session_state::patience_entry none{};
+        size_t i = 0;
+        for (const auto& [player, buffer]: s.inputs) {
+            const auto& m = members[i++];
+            if (only != nullptr && *only != player) continue;
+            const auto it = s.patience.find(player);
+            const auto& e = it == s.patience.end() ? none : it->second;
+            log("[session " + std::to_string(s.id) + "] S1 patience player=" + std::to_string(player)
+                + " tick=" + std::to_string(tick) + " lead=" + fixed2(m.lead)
+                + " source=" + (m.has_statistics ? "own" : (m.capped ? "cap" : "deadline"))
+                + " waived=" + (e.waiver.waived() ? "1" : "0")
+                + " waivers=" + std::to_string(e.waiver.episodes())
+                + " cut=" + std::to_string(e.cut_patience + e.cut_waiver)
+                + " (patience " + std::to_string(e.cut_patience) + ", waiver " + std::to_string(e.cut_waiver) + ")"
+                + " deadline-would-take=" + std::to_string(e.taken_patience + e.taken_waiver)
+                + " (patience " + std::to_string(e.taken_patience) + ", waiver " + std::to_string(e.taken_waiver) + ")"
+                + " late-events=" + std::to_string(e.late_events)
+                + " early-steps=" + std::to_string(s.early_steps)
+                + (final_reason != nullptr ? std::string(" final=") + final_reason : std::string()));
+        }
+    }
+
+    // Once per session when it starts ticking, on either start path (the last
+    // member ready, or the last unready member gone).
+    void session_runner::log_patience_on(const session_state& s) {
+        if (!config_.patience) return;
+        log("[session " + std::to_string(s.id) + "] S1 patience on: a player is waited for until "
+            "deadline - (r01 - " + fixed2(bmmo::session::kPatienceMarginTicks)
+            + ") ticks, with the streak waiver and the pacing floor (late-player design 2.6)");
+    }
+
     void session_runner::run() {
         std::unique_lock lk(mutex_);
         while (!stopping_) {
@@ -742,21 +878,60 @@ namespace bmmo::sim {
                 auto& s = *sp;
                 if (!s.running || s.failed || !s.world) continue;
                 uint32_t simulated = 0;
+                // When the tick waits for a player's patience (design 2.6),
+                // how long until it ends: a blacked-out player posts nothing,
+                // so nothing else would wake the runner there.
+                bool patience_wait = false;
+                std::chrono::milliseconds patience_sleep{0};
                 while (simulated < config_.max_catch_up_ticks) {
                     const uint32_t tick = s.world->tick_index();
-                    bool all_inputs = true;
-                    for (const auto& [player, buffer]: s.inputs)
-                        if (!buffer.has(tick)) { all_inputs = false; break; }
-                    if (!all_inputs && !s.scheduler.due(clock::now())) break;
+                    // With patience off this is the rule the runner always had:
+                    // every buffer has its frame, or the deadline passed.
+                    const auto members = patience_members(s, tick);
+                    const auto at = clock::now();
+                    const auto verdict = bmmo::session::patience_step_test(members, s.scheduler.due(at),
+                            config_.patience ? bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at) : 0.0,
+                            config_.patience);
+                    if (!verdict.step) {
+                        if (verdict.wait) {
+                            patience_wait = true;
+                            patience_sleep = std::chrono::ceil<std::chrono::milliseconds>(
+                                    std::chrono::duration<double, std::micro>(
+                                            verdict.wait_ticks * bmmo::session::kLatenessTickMicros));
+                        }
+                        break;
+                    }
                     if (waiting_for_lifecycle(s, tick)) break;
+                    if (verdict.early) {
+                        // Stepped before the deadline without some frames:
+                        // remember which, so a frame that still beats the
+                        // deadline is counted as one patience cut off.
+                        ++s.early_steps;
+                        s.early_ticks.push_back(tick);
+                        if (s.early_ticks.size() > 256) s.early_ticks.pop_front();
+                        size_t i = 0;
+                        for (const auto& [player, buffer]: s.inputs) {
+                            const auto& m = members[i++];
+                            // Not ready yet: nothing was ever coming for it.
+                            if (m.settled || !s.ready.count(player)) continue;
+                            auto& entry = s.patience[player];
+                            ++(m.waived ? entry.cut_waiver : entry.cut_patience);
+                            entry.cut.emplace_back(tick, m.waived);
+                            if (entry.cut.size() > 256) entry.cut.pop_front();
+                        }
+                    }
                     step(s);
-                    if (s.running) observe_lateness(s, tick);
+                    if (s.running) {
+                        observe_lateness(s, tick);
+                        if (config_.patience) report_patience(s, tick);
+                    }
                     ++simulated;
                     if (!s.running) break;
                 }
                 publish_state(s);
                 if (s.running) {
-                    const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(s.scheduler.until_due(clock::now()));
+                    auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(s.scheduler.until_due(clock::now()));
+                    if (patience_wait) wait = std::min(wait, patience_sleep);
                     sleep_for = std::min(sleep_for, std::max(std::chrono::milliseconds(1), wait));
                 }
             }
@@ -769,8 +944,12 @@ namespace bmmo::sim {
         lk.unlock();
         // A session still running when the server goes down says so in its box
         // rather than just stopping mid-file.
-        for (auto& [id, sp]: sessions_)
-            if (sp) sp->journal.note(sp->world ? sp->world->tick_index() : 0, "end: server stopped");
+        for (auto& [id, sp]: sessions_) {
+            if (!sp) continue;
+            if (config_.patience && sp->running && sp->world)
+                report_patience(*sp, sp->world->tick_index(), "server stopped");
+            sp->journal.note(sp->world ? sp->world->tick_index() : 0, "end: server stopped");
+        }
         sessions_.clear();
     }
 }

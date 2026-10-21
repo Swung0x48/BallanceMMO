@@ -79,6 +79,7 @@ bool config_manager::load() {
         // reach (rollback_thresholds::max_resim_ticks, 48): a frame the window
         // delivers deeper than that cannot be replayed.
         physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
+        physics_patience = yaml_load_value(physics, "patience", physics_patience);
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
         physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
         physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",
@@ -228,6 +229,9 @@ void config_manager::save(bool reload_values) {
                    "#     each other; 0 = every ball at the resetpoint, the design 9.10 layout),\n"
                    "#   relay_window (ticks of applied input each unreliable relayed datagram repeats per\n"
                    "#     member, default 8: a loss costs a gap only when that many in a row are lost),\n"
+                   "#   patience (late-player design 2.6, default false: the session waits for a missing frame\n"
+                   "#     only until that player's patience, deadline - (r01 - 1) ticks of its own measured\n"
+                   "#     arrivals, instead of the deadline; keep it off until the per-player lead exists),\n"
                    "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
                    "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
                    "#     relative to the server's own directory, empty = record nothing),\n"

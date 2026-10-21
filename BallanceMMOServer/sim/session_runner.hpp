@@ -50,6 +50,12 @@ namespace bmmo::sim {
         std::filesystem::path journal_dir;
         uint64_t journal_max_bytes = 256ull << 20;   // per session file; 0 = no limit
         uint32_t journal_checkpoint_ticks = 660;     // full body checkpoint cadence; 0 = none
+        // Late-player design 2.6: the session stops waiting for one player at
+        // that player's patience instead of the deadline, with the streak
+        // waiver.  Off, the step test and the sleep are exactly what they were
+        // before patience existed.  Stays off in deployments until the lead
+        // adjustment (plan step 11) can lift a player patience cuts off.
+        bool patience = false;
     };
 
     struct session_snapshot {
@@ -180,6 +186,10 @@ namespace bmmo::sim {
             uint32_t player;
             uint32_t tick;
             lifecycle_event event;
+            // When submit_event was called: only to tell, for the S1
+            // patience line, an event patience made late from one that was
+            // late anyway.
+            std::chrono::steady_clock::time_point arrival{};
         };
         struct session_state {
             uint32_t id = 0;
@@ -203,6 +213,35 @@ namespace bmmo::sim {
                 bool reported = false;
             };
             std::map<uint32_t, lateness_entry> lateness;
+            // Late-player design 2.6, behind runner_config::patience: each
+            // player's streak waiver and what patience cost it.  Keyed like
+            // `inputs` (not `lateness`), so a member added but not ready yet
+            // can be waived too.  `cut` holds the ticks stepped early without
+            // the player's frame (true = it was waived, false = past its
+            // patience) until their deadline passes; a frame that arrives for
+            // one of them before its deadline is one the deadline would have
+            // taken, which is what the S1 patience line reports.  Members not
+            // ready yet are left out of the cut counts: their ticks were never
+            // going to get a frame, so they are not lateness.
+            //
+            // `late_events` counts this player's lifecycle and Sector events
+            // that patience made late at the server: applied after their
+            // stamp tick, which was stepped early with a member unsettled,
+            // although they arrived before that tick's deadline.  The server
+            // applies a late event at the current tick and the clients at the
+            // stamp - the silent divergence of design 0 that only the re-stamp
+            // (plan step 16) removes - so the flag-on arms must read it.
+            struct patience_entry {
+                bmmo::session::patience_waiver waiver;
+                std::deque<std::pair<uint32_t, bool>> cut;
+                uint64_t cut_patience = 0, cut_waiver = 0;       // ticks substituted by an early step
+                uint64_t taken_patience = 0, taken_waiver = 0;   // of those, frames that beat the deadline
+                uint64_t late_events = 0;
+            };
+            std::map<uint32_t, patience_entry> patience;
+            uint64_t early_steps = 0;   // ticks stepped before the deadline with a member unsettled
+            // The last such ticks, for the late-event attribution above.
+            std::deque<uint32_t> early_ticks;
             std::map<uint32_t, uint32_t> acked;
             // The stamp of each player's last applied Physicalize: an
             // Unphysicalize stamped at or before it is a copy that lost its
@@ -242,6 +281,17 @@ namespace bmmo::sim {
         };
         bool waiting_for_lifecycle(session_state& s, uint32_t tick);
         void observe_lateness(session_state& s, uint32_t tick);
+        // Every member's view for patience_step_test at `tick`, in `inputs`
+        // order, leads assigned (design 2.6).
+        std::vector<bmmo::session::patience_member> patience_members(const session_state& s, uint32_t tick) const;
+        double patience_lead(const session_state& s, uint32_t player) const;
+        // The S1 patience lines: every 660 ticks from the run loop, and once
+        // more (`final_reason` set) for a player that leaves and for every
+        // player when its session ends, so no count after the last 660-tick
+        // line is lost.  `only` limits it to one player.
+        void report_patience(session_state& s, uint32_t tick, const char* final_reason = nullptr,
+                             const uint32_t* only = nullptr);
+        void log_patience_on(const session_state& s);
         void open_journal(session_state& s, float spawn_impulse, uint64_t anchor_hash,
                           uint64_t anchor_surfaces, uint32_t first_tick);
 

@@ -64,6 +64,13 @@ public:
     float physics_spawn_impulse = 3.0f;            // spawn kick speed, m/s (design 9.10); 0 disables
     float physics_spawn_spacing = 4.2f;            // spawn cell spacing, map units (a ball is 4 across); 0 = every ball at the resetpoint
     uint32_t physics_relay_window = 8;             // ticks of applied input every relayed datagram repeats per member (1..MAX_RELAY_FRAMES)
+    // Late-player design 2.6: stop waiting for one player at its patience
+    // (deadline - (r01 - 1) ticks of its frozen reference) instead of the
+    // deadline, with the streak waiver.  Off by default and in deployments
+    // until the per-player lead (plan step 11) lands: without it, a player
+    // whose frames still beat the deadline but not its patience is
+    // substituted for as long as its lateness lasts.
+    bool physics_patience = false;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

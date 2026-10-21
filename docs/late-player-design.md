@@ -584,6 +584,16 @@ patience. Patience then applies again from the next tick.
   just after the step, so it would never be fresh again, and it would be
   substituted for good.
 
+**The pacing floor** (added in step 9's review). The waiver, and `settled()`
+below the cursor, exempt a member only while some member's real frame for T
+is there (`has(T)`). With none, every member lacking its frame is waited for
+until its own patience, waived or not, so the tick steps at the latest of
+those patiences and never after the deadline. Before patience, a tick stepped
+early only once every frame was in, so the session never got ahead of its
+latest client. Without the floor, a solo session, members waived together (a
+shared outage), or a waived member beside a re-anchored one would step every
+tick at once and run hundreds of ticks ahead of the deadline schedule.
+
 **The reference is frozen** (§2.1). Re-measured after every adjustment, a
 raise that was capped, or a client that never applied one, would leave the
 arrivals late. The reference would then move down, and patience would move
@@ -614,6 +624,15 @@ deadline to the player's own tail. A player whose +300 ms frames still beat
 the deadline today (slack about 34) would be substituted for as long as the
 lateness lasts, until part two raises its lead. So `physics_patience` stays
 off in deployments until plan step 11 lands (§6).
+
+Patience also makes the late player's lifecycle and Sector events late at the
+server where the deadline would have taken them: a tick stepped early, or
+under the waiver, is gone before an event stamped for it arrives. The server
+applies such an event at the current tick and the clients at the stamp, which
+is the divergence of §0 that only the re-stamp (plan step 16) removes. Until
+then the S1 patience line counts them (`late-events=`) and the journal notes
+each one. The flag-on closing runs of A1, A2, A4 and A7 must report that count
+next to the others' criteria.
 
 ### 2.7 Lowering the lead again
 

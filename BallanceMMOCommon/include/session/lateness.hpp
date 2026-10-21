@@ -93,6 +93,22 @@ namespace bmmo::session {
         return n % 2 ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
     }
 
+    // The patience margin (design 2.6): a player's patience ends this many
+    // ticks AFTER the q01 of its frozen reference, `r01 - 1`, so the margin
+    // above its usual tail is `r10 - r01 + 1` ticks, sized from its own spread.
+    // A miss (design 2.1) is a sample after that patience, so the meter's miss
+    // rule uses the same number: change one and the raise rule and the
+    // session's cut-off move together.
+    //
+    // A named knob because the plan step 7 measurement found the newest-frame
+    // sampling under-samples the late tail under +-3 ticks of jitter (r10 about
+    // 5.6 against a per-datagram q10 of about 3.7): a reference taken from
+    // those samples sits early, and a patience anchored at r01 - 1 may cut off
+    // more frames than 2.6 expects.  The runner's S1 patience line counts the
+    // frames patience cut off that the deadline would still have taken, so the
+    // A0j arm shows whether 1 is enough.
+    inline constexpr double kPatienceMarginTicks = 1.0;
+
     enum class lateness_action : uint8_t {
         none,
         raise,     // run further ahead by k
@@ -139,7 +155,7 @@ namespace bmmo::session {
         static constexpr int kReferenceWindows = 4;         // qualifying windows that set the reference
         static constexpr int kReferenceMaxWindows = 8;      // windows after which a reference is set anyway
         static constexpr int kQualifyingMaxLate = kWindow / 10;   // at most 10 % after the deadline: 6 of 66
-        static constexpr double kMissMargin = 1.0;          // a miss is below r01 - 1
+        static constexpr double kMissMargin = kPatienceMarginTicks;   // a miss is below r01 - 1: after patience
         static constexpr uint32_t kRaiseTicks = 132;        // consecutive ticks of a majority of misses
         static constexpr uint32_t kFreshTicks = 8;          // a tick counts toward a streak only with a sample this recent
         static constexpr int kMinRaise = 2;
@@ -422,5 +438,206 @@ namespace bmmo::session {
         bool given_up_ = false;
         int offset_ = 0;
         int decisions_ = 0;
+    };
+
+    // ---- Patience (late-player design 2.6) ----------------------------------
+    //
+    // Without it the session waits until deadline(T) for every missing frame,
+    // so one late player puts everybody's step on deadlines.  With it, player
+    // p is waited for only until
+    //
+    //     patience_p(T) = min(deadline(T), deadline(T) - (r01_p - 1) ticks),
+    //
+    // anchored on its FROZEN reference (a reference that followed late
+    // arrivals down would move patience later for everybody, for good).  All
+    // of it is in ticks before the deadline, the unit samples are in: a frame
+    // whose slack is at least the lead arrived inside patience.
+
+    // How many ticks before deadline(T) a member with reference q01 `r01`
+    // stops being waited for; 0 means at the deadline (the min() above).
+    inline double patience_lead_ticks(double r01) {
+        const double lead = r01 - kPatienceMarginTicks;
+        return lead > 0.0 ? lead : 0.0;
+    }
+
+    // One member's view at the tick being decided.
+    struct patience_member {
+        bool has = false;              // its frame for T arrived (the rule without patience)
+        bool settled = false;          // input_buffer::settled(T): arrived, or below its cursor
+        bool waived = false;           // the streak waiver holds
+        bool has_statistics = false;   // a frozen reference, measured or adopted
+        double r01 = 0.0;              // that reference's q01, when has_statistics
+        double lead = 0.0;             // set by patience_assign_leads
+        bool capped = false;           // lead is the statistics-less cap, not its own
+        // Assigned after the session's start (a late joiner, a resync): the
+        // statistics-less cap applies to it.  A member measuring since the
+        // start waits for the deadline until its own reference is set.
+        bool late_assignment = false;
+    };
+
+    // The runner's view of one member (lead still unassigned): `has` and
+    // `settled` from its input buffer at T, `waived` from its waiver, and
+    // its lateness meter, or null when it has none yet (a member added but
+    // not ready).  A member without a meter, or whose meter was reset to a
+    // base past the session's start base (a late join or a resync: the
+    // server assigns start members the start base and everybody else a
+    // later one), is a late assignment.
+    inline patience_member patience_member_of(bool has, bool settled, bool waived,
+                                              const lateness_meter* meter, uint32_t start_base) {
+        patience_member m;
+        m.has = has;
+        m.settled = settled;
+        m.waived = waived;
+        m.late_assignment = meter == nullptr || meter->base() > start_base;
+        // The frozen reference, measured or adopted from the others' median
+        // (design 2.1); a member still measuring has none.
+        if (meter != nullptr && meter->has_reference()) {
+            m.has_statistics = true;
+            m.r01 = meter->r01();
+        }
+        return m;
+    }
+
+    // Every member's lead.  A member with statistics has its own.  One
+    // without that was assigned after the start (a late joiner in its first
+    // windows, or a member re-measuring after a resync) gets the latest
+    // patience among the members that have statistics, i.e. the smallest
+    // lead: the others' schedule, so it costs them nothing.  When nobody has
+    // statistics that is the deadline, today's behaviour.
+    //
+    // A member measuring since the session's start gets the deadline until
+    // its own reference is set, even when others already have theirs.  The
+    // members of the start measure together, but not in step: the newest-frame
+    // sampling gives a member whose datagrams overtake each other fewer
+    // samples, so the structurally latest member (the one with the most
+    // jitter, typically) is the last to fill its windows.  Capped at the
+    // others' schedule meanwhile, it would be substituted for those ticks at
+    // every session start - the patience_test steady-link run showed 21.
+    //
+    // The cap is deliberately NOT applied to members with statistics: the
+    // structurally latest member would then be cut off on every tick, its
+    // reference comes from that same distribution, the meter would never see
+    // a shift, and it would stay substituted for good.
+    inline void patience_assign_leads(std::vector<patience_member>& members) {
+        bool any = false;
+        double latest = 0.0;
+        for (auto& m: members) {
+            if (!m.has_statistics) continue;
+            m.lead = patience_lead_ticks(m.r01);
+            m.capped = false;
+            if (!any || m.lead < latest) latest = m.lead;
+            any = true;
+        }
+        for (auto& m: members) {
+            if (m.has_statistics) continue;
+            m.capped = any && m.late_assignment;
+            m.lead = m.capped ? latest : 0.0;
+        }
+    }
+
+    struct patience_verdict {
+        bool step = false;        // the tick may be stepped now
+        bool early = false;       // stepped before the deadline with a member unsettled
+        bool wait = false;        // !step and a member's patience falls before the deadline
+        double wait_ticks = 0.0;  // when wait: ticks from now to the earliest such patience
+    };
+
+    // The runner's early-step test for tick T.  `due` is now >= deadline(T)
+    // and `to_deadline` is deadline(T) - now in ticks (positive before it).
+    //
+    // Patience off: every member has its frame, or the deadline passed -
+    // exactly the rule the runner had before patience existed.
+    //
+    // Patience on: every member is settled, or past its patience
+    // (to_deadline <= lead), or waived; the deadline still steps regardless.
+    // When the tick cannot step yet, `wait` names the earliest patience among
+    // the members still waited for, so the runner wakes there: a
+    // blacked-out member posts nothing that would wake it otherwise.
+    //
+    // The pacing floor.  Settled-by-cursor and waived members are exempt
+    // only while some member's real frame for T is here (`has`): the waiver
+    // means "wait only for the others", and the cursor rule means "do not
+    // wait for a frame that will never come", but either needs somebody
+    // whose real-time clock produced T.  Before patience that bound was
+    // implicit (a tick stepped early only once every frame was in, so the
+    // session never got ahead of its latest client).  Without it a solo
+    // session, or members waived together (a shared outage), or a waived
+    // member beside a freshly re-anchored one, would step every tick at once
+    // - max_catch_up_ticks per pass, every post() waking another pass - and
+    // run hundreds of ticks ahead of the deadline schedule, after which every
+    // frame its players send is stale.  With nobody's frame here, every
+    // member that lacks one is waited for until its own patience, as if
+    // unwaived: the tick steps at the latest of those patiences, never later
+    // than the deadline.
+    inline patience_verdict patience_step_test(const std::vector<patience_member>& members, bool due,
+                                               double to_deadline, bool patience) {
+        patience_verdict v;
+        if (!patience) {
+            bool all = true;
+            for (const auto& m: members) if (!m.has) { all = false; break; }
+            v.step = all || due;
+            return v;
+        }
+        bool paced = false;
+        for (const auto& m: members) if (m.has) { paced = true; break; }
+        bool blocked = false, unsettled = false;
+        for (const auto& m: members) {
+            if (m.has) continue;
+            if (m.settled) {
+                if (paced) continue;
+            } else {
+                unsettled = true;
+                if (m.waived && paced) continue;
+            }
+            if (to_deadline <= m.lead) continue;
+            const double until = to_deadline - m.lead;
+            if (!blocked || until < v.wait_ticks) v.wait_ticks = until;
+            blocked = true;
+        }
+        v.step = due || !blocked;
+        v.early = v.step && !due && unsettled;
+        v.wait = !v.step && blocked;
+        return v;
+    }
+
+    // The streak waiver (design 2.6).  Once p was substituted at T because
+    // the session stepped without its frame, its patience is waived from the
+    // next tick on: the session waits only for the others (and takes p's
+    // frames that happen to be there).  The waiver ends with the first sample
+    // of p that arrived inside its patience, not with p's first FRESH frame:
+    // the member whose arrivals are structurally the session's last would,
+    // without patience, always arrive just after the step, never be fresh
+    // again, and stay substituted for good.  During a blackout or persistent
+    // lateness only the first tick of the episode waits for p - as long as
+    // some other member's real frame paces the tick (the pacing floor in
+    // patience_step_test); with nobody's frame there, p's patience applies.
+    class patience_waiver {
+    public:
+        // p was substituted at a tick it had not settled; returns true when
+        // this starts an episode.
+        bool substituted() {
+            const bool starts = !waived_;
+            waived_ = true;
+            if (starts) ++episodes_;
+            return starts;
+        }
+        // A lateness sample of p (slack in ticks before its frame's deadline)
+        // and p's lead: an arrival inside patience ends the waiver.  Returns
+        // true when it did.
+        bool sample(double slack, double lead) {
+            if (!waived_ || slack < lead) return false;
+            waived_ = false;
+            return true;
+        }
+        // A new assignment (a late join made ready, a resync): the player is
+        // measured anew (design 2.8), so an episode of its old assignment
+        // ends here.  The episode count is kept for the S1 patience line.
+        void reassigned() { waived_ = false; }
+        bool waived() const { return waived_; }
+        uint64_t episodes() const { return episodes_; }
+
+    private:
+        bool waived_ = false;
+        uint64_t episodes_ = 0;
     };
 }

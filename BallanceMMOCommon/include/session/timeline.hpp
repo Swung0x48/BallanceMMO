@@ -127,6 +127,12 @@ namespace bmmo::session {
         uint64_t stale() const { return stale_; }
 
         bool has(uint32_t tick) const { return frames_.count(tick) != 0; }
+        // Nothing more will come for `tick` that the step could use: its frame
+        // is here, or the buffer was re-anchored past it (a late joiner's or a
+        // resync's base, later a lead reset's range), so waiting for it would
+        // only put the session on deadlines (late-player design 2.3).  The
+        // patience step test reads this instead of has().
+        bool settled(uint32_t tick) const { return has(tick) || tick < next_tick_; }
         const input_frame* peek(uint32_t tick) const {
             auto it = frames_.find(tick);
             return it == frames_.end() ? nullptr : &it->second;
