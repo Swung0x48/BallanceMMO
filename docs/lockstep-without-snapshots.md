@@ -2370,6 +2370,57 @@ tick 702, 540 m off until the next snapshot) and 0.003 m off at +1 on the
 fourth, growing to 1-2 m; this is the 600-1199 window's own-ball error in
 that arm and the next thing to fix.
 
+### The own beam is rebuilt at its stamp, inside every replay that crosses it (2026-10-21)
+
+The swing bay's own-ball numbers were the harness beam's, not the game's. The
+beam moved the own ball in place after the step of tick T, bumped its
+lifetime after record T had been taken under the old one, and reported the
+Unphysicalize + Physicalize pair stamped T+1, which the server applies as a
+fresh core before stepping T+1. A relayed-input correction anchored before T
+that ran in frame T+1 then counted the anchor as the same life, re-stepped to
+T on the old path and overwrote record T; nothing applied the beam again, so
+on three of four clients the own ball stayed on the pre-beam path, 540 m from
+the server's, until a snapshot that the reach refused. On the fourth client
+the beam held but the moved core kept its stale floor friction contact, which
+step T+1 turned into an angular impulse the server's fresh core never had:
+0.002 m at +1, metres after landing.
+
+The client now does with the pair what the server does, at its stamp: record
+T stays the server's checkpoint of T, and in frame T+1, after that frame's
+rewinds and before the step, the own ball is unphysicalized, posed and
+physicalized again with the event log muted and the navigation replica shut
+down first, so the rebuild is neither a new lifetime nor a respawn. Every
+replay that crosses T+1 does the same from `before_replayed_tick`, so a
+rewind anchored at or before T replays to T and beams again; the beam retires
+once T leaves the history or the ball has had another life since. The same
+frame-order hole undid any remote lifecycle event that arrived on time (made
+before the frame's rewinds, which restored the old life onto the new core), so
+such events are now held until after the rewinds and applied in the server's
+order, join rank then event type, with the own beam at its owner's place.
+
+**Measured** (four headless clients, 150 ms each way, 10 % loss, snapshots
+off, spacing 4.2, host quiet; the owner's own ball against the server's after
+the beam at tick 701):
+
+| swing bay, 10 % loss | owner at +1 | owner at +20 / +60 | own ball, 600-1199 window mean | mirrors when the beam lands (+15..+25) |
+|---|---|---|---|---|
+| before (`bi_sw_loss10`, spread 3) | 540 m on three clients, 0.003 m on the fourth | 1.1 / 2.2 m (the fourth) | 3.5 / 259 / 234 / 246 m | 0.4-1.6 m |
+| after, spread 3 (`bm_sw_loss10`) | 0.001-0.002 m | 0.1-1.0 / 0.4-1.3 m | 0.17 / 0.83 / 1.04 / 1.67 m | 0.03-1.0 m |
+| after, spread 4.5 (`bm_sw_loss10_s45`) | 0.000 | 0.000-0.031 / 0.000-0.301 m | 0.0002 / 0.27 / 0.13 / 2.43 m | 0.0-1.3 m |
+| after, spread 4.5, forced rewinds every 7 ticks 10 deep (`bm_sw_fr_s45`) | 0.000 | 0.000-0.168 / 0.000-0.290 m | 0.0005 / 0.40 / 0.23 / 0.23 m | 0.0-1.4 m |
+
+The millimetres at spread 3 are the server's push-apart of the overlapping
+balls at step 701 (the ball is about 4 m across), which the owner cannot see
+until the remote beams arrive, and a remote born inside one replay is parked
+at its birth record by later rewinds rather than re-stepped with the
+neighbours of that replay; a spread wider than the ball removes it, as the
+spawn spacing does for the game's own spawns. The forced-rewind run put one
+rewind in the frame after the beam, the window that used to undo it, and the
+rest across it: the beam was rebuilt inside 6-14 replays per client and the
+owner stayed exact. What is left of the own-ball error in the swing bay is the
+pile from tick 850 on, the floor the prop probe measured. The lane at 10 % loss
+was unchanged and the server journal replayed bit-exact in all four runs.
+
 ## Checked on the real networked path, and two things found there
 
 The solo probe is where the fix was measured, so the 4-player 300 ms run was the

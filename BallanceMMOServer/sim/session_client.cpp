@@ -680,6 +680,11 @@ namespace {
                     // the retail mod does this in rebase_tick).  The registry
                     // goes with it: its rows are keyed by the old numbers.
                     rollback_.invalidate_history();
+                    // An own beam the new numbering has not reached yet is the
+                    // server's to apply at its stamp, and so ours: live once
+                    // more, rather than retired with the history.
+                    if (own_beam_.pending && static_cast<int32_t>(own_beam_.stamp - tick_base_) >= 0)
+                        own_beam_.applied_live = false;
                     own_inputs_.clear();
                     mechanism_tracking_.clear();
                     resync_pending_ = true;
@@ -996,6 +1001,8 @@ namespace {
             activations_replayed_ = 0;
             amend_failures_ = 0;
             beam_done_ = false;
+            own_beam_ = own_beam{};
+            held_lifecycle_.clear();
             remotes_.clear();
             relay_seen_.clear();
             pending_relay_.clear();
@@ -1219,6 +1226,18 @@ namespace {
         // it, because physicalize() of an entity that already has a body is a
         // no-op (physics_state.cpp:741), so the pair the retail death sends is
         // used instead.
+        //
+        // This client does what the server does with that pair, at the pair's
+        // stamp: the body is rebuilt at tick + 1, before that tick's step
+        // (apply_own_beam), not moved now.  Moving it here, after the record of
+        // `tick`, left the move outside every replay: a rewind anchored at or
+        // before `tick` re-stepped the old path and nothing put the beam back
+        // (measured: the own ball 540 m off on three of four clients), and
+        // the moved core kept its floor contact, which the server's fresh one
+        // does not have.  Applied at the stamp, live and in every replay that
+        // crosses it, the record of `tick` stays the pre-beam world the
+        // server's checkpoint of `tick` is, and the lifetime stays the same:
+        // the body has the same name, recipe and group on every side.
         void beam_own_ball(uint32_t tick) {
             CK3dEntity* ball = current_ball();
             const std::string name = ball && ball->GetName() ? ball->GetName() : "";
@@ -1226,30 +1245,132 @@ namespace {
                 logf("--beam at tick %u: no own body to beam", tick);
                 return;
             }
-            const double rotation[4] = {0.0, 0.0, 0.0, 1.0};
-            const float still[3] = {0.0f, 0.0f, 0.0f};
-            std::string error;
-            if (!bmmo::physics::set_body_state(engine_->physics(), name.c_str(), args_.beam_position, rotation,
-                                               still, still, true, error)) {
-                logf("--beam at tick %u: %s", tick, error.c_str());
-                return;
+            // Without the navigation replica (no --rollback) the ball is driven
+            // by the retail force controllers, which die with the core and are
+            // not re-made until the key is released: the body is moved in
+            // place, as before.  There is no rewind to undo it then.
+            if (!own_navigation_) {
+                const double rotation[4] = {0.0, 0.0, 0.0, 1.0};
+                const float still[3] = {0.0f, 0.0f, 0.0f};
+                std::string error;
+                if (!bmmo::physics::set_body_state(engine_->physics(), name.c_str(), args_.beam_position, rotation,
+                                                   still, still, true, error)) {
+                    logf("--beam at tick %u: %s", tick, error.c_str());
+                    return;
+                }
+                ++generations_[name];   // the server rebuilds its copy: a new lifetime
             }
-            ++generations_[name];   // the server rebuilds its copy: a new lifetime
+            if (own_beam_.pending)
+                logf("--beam at tick %u replaces the beam stamped %u", tick, own_beam_.stamp);
+            own_beam_ = own_beam{};
+            own_beam_.pending = own_navigation_;
+            own_beam_.stamp = tick + 1;
+            own_beam_.entity = name;
+            {
+                const auto generation = generations_.find(name);
+                own_beam_.generation = generation == generations_.end() ? 0u : generation->second;
+            }
+            for (int k = 0; k < 3; ++k) own_beam_.position[k] = static_cast<float>(args_.beam_position[k]);
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) own_beam_.rotation[r * 3 + k] = r == k ? 1.0f : 0.0f;
+            fill_retail_recipe(ball_type_of(name), own_beam_.recipe);
+            own_beam_.group = own_group_;
             bmmo::session_event_msg down;
-            down.tick = tick + 1;
+            down.tick = own_beam_.stamp;
             down.type = bmmo::session::event_type::Unphysicalize;
             send_event(down);
             bmmo::session_event_msg up;
-            up.tick = tick + 1;
+            up.tick = own_beam_.stamp;
             up.type = bmmo::session::event_type::Physicalize;
             up.ball_type = static_cast<uint8_t>(std::max(ball_type_of(name), 0));
-            for (int k = 0; k < 3; ++k) up.position[k] = static_cast<float>(args_.beam_position[k]);
-            for (int r = 0; r < 3; ++r)
-                for (int k = 0; k < 3; ++k) up.rotation[r * 3 + k] = r == k ? 1.0f : 0.0f;
-            fill_retail_recipe(ball_type_of(name), up.recipe);
+            std::copy(std::begin(own_beam_.position), std::end(own_beam_.position), up.position);
+            std::copy(std::begin(own_beam_.rotation), std::end(own_beam_.rotation), up.rotation);
+            up.recipe = own_beam_.recipe;
             send_event(up);
-            logf("--beam: %s put at (%.3f,%.3f,%.3f) at tick %u, re-reported to the server for tick %u", name.c_str(),
-                 args_.beam_position[0], args_.beam_position[1], args_.beam_position[2], tick, tick + 1);
+            logf("--beam: %s to (%.3f,%.3f,%.3f), reported to the server for tick %u and %s", name.c_str(),
+                 args_.beam_position[0], args_.beam_position[1], args_.beam_position[2], own_beam_.stamp,
+                 own_navigation_ ? "rebuilt here at that tick" : "moved here now (no navigation replica)");
+        }
+
+        // The own beam at its stamp, the server's Unphysicalize + Physicalize
+        // pair (physics_world::apply_event): the navigation shut down first -
+        // its controllers would otherwise point into the core that goes - then
+        // the body made again at the beam pose.  The stamp's own input
+        // re-creates the controllers on the new core in the step, with that
+        // tick's camera, as the server's PreSimulate pass does.
+        //
+        // The event log is muted: the drain after the step would take the
+        // "deleted" / "created" pair for a new lifetime (a generation bump,
+        // which no record before the stamp could restore across) and a respawn
+        // (a second Physicalize report and a spawn kick).  The body is the
+        // same life to every side, so nothing about it is reported.
+        //
+        // A body whose life ended after the beam (a death, a trafo: the drain
+        // bumped its generation) is not made again here: a replay that crosses
+        // the stamp would put back a body the live run no longer has, and
+        // nothing in the replay would take it out again.  The beam retires
+        // then, and such a rewind treats the ball as it did before the beam.
+        void apply_own_beam(uint32_t tick, const char* where) {
+            if (!own_beam_.pending || own_beam_.stamp != tick) return;
+            {
+                const auto generation = generations_.find(own_beam_.entity);
+                const uint32_t now = generation == generations_.end() ? 0u : generation->second;
+                if (now != own_beam_.generation) {
+                    logf("own beam stamped %u retired at tick %u (%s): %s has had another life since (generation %u -> %u)",
+                         own_beam_.stamp, tick, where, own_beam_.entity.c_str(), own_beam_.generation, now);
+                    own_beam_.pending = false;
+                    return;
+                }
+            }
+            CKIpionManager* physics = engine_->physics();
+            std::string error;
+            if (own_navigation_ && own_nav_entity_ == own_beam_.entity) {
+                const bmmo_physics_nav_state off{};
+                if (!bmmo::physics::navigation_set_state(physics, own_nav_entity_.c_str(), off, error))
+                    logf("own beam at tick %u: navigation shutdown: %s", tick, error.c_str());
+            }
+            auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
+                    const_cast<CKSTRING>(own_beam_.entity.c_str()), CKCID_3DENTITY, nullptr));
+            if (!entity) {
+                logf("own beam at tick %u: no 3D entity named %s", tick, own_beam_.entity.c_str());
+                return;
+            }
+            bool made = false;
+            {
+                const event_log_mute mute(*this);
+                if (!bmmo::physics::unphysicalize(physics, own_beam_.entity.c_str(), error))
+                    logf("own beam at tick %u (%s): unphysicalize %s: %s", tick, where, own_beam_.entity.c_str(), error.c_str());
+                entity->SetWorldMatrix(matrix_from_pose(own_beam_.position, own_beam_.rotation));
+                const auto recipe = to_bridge_recipe(own_beam_.recipe);
+                made = bmmo::physics::physicalize(physics, own_beam_.entity.c_str(), recipe, own_beam_.group.c_str(), error);
+            }
+            mechanism_tracking_.mark_dirty();
+            ++own_beams_applied_;
+            if (!made) logf("own beam at tick %u (%s): physicalize %s: %s", tick, where, own_beam_.entity.c_str(), error.c_str());
+            else if (own_beams_applied_ <= 16)
+                logf("own beam: %s rebuilt at (%.3f,%.3f,%.3f) before tick %u (%s)", own_beam_.entity.c_str(),
+                     static_cast<double>(own_beam_.position[0]), static_cast<double>(own_beam_.position[1]),
+                     static_cast<double>(own_beam_.position[2]), tick, where);
+        }
+
+        // The live half, in the frame of the stamp, after every rewind of that
+        // frame (they all end at the tick before the stamp, on the old path)
+        // and before the step, at our place among the body changes stamped
+        // for the same tick (apply_held_lifecycle).  The beam is kept for the
+        // replays while a rewind can still be anchored before the stamp.
+        void live_own_beam(uint32_t frame_tick) {
+            if (!own_beam_.pending) return;
+            if (!own_beam_.applied_live) {
+                if (frame_tick == own_beam_.stamp) {
+                    apply_own_beam(frame_tick, "live");
+                    own_beam_.applied_live = true;
+                } else if (static_cast<int32_t>(frame_tick - own_beam_.stamp) > 0) {
+                    logf("own beam stamped %u never met its live frame (now %u): dropped", own_beam_.stamp, frame_tick);
+                    own_beam_.pending = false;
+                    return;
+                }
+            }
+            if (own_beam_.applied_live && !rollback_.knows_tick(own_beam_.stamp - 1)) own_beam_.pending = false;
         }
 
         void read_ball_rows() {
@@ -1536,8 +1657,8 @@ namespace {
             // sector is up: this client has resolved a mechanism of its own).
             for (const auto& chain: reset_guard_.apply(engine_->context(), mechanism_tracking_.resolved() > 0))
                 logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
-            // After the events, so a birth and an input correction in the same
-            // frame leave the world replayed from the earlier of the two - and
+            // After the late events, so a birth and an input correction in the
+            // same frame leave the world replayed from the earlier of the two - and
             // BEFORE the union's pass below: the pass sets next-frame flags on
             // Gameplay_SectorManager, which the restore (the manager travels
             // with the records now) would write back to the anchor's and lose,
@@ -1545,6 +1666,11 @@ namespace {
             // client has this order already.
             replay_corrected_inputs();
             maybe_force_rollback();
+            // The body changes stamped for this very tick, the own beam among
+            // them: after the rewinds above, so none of them undoes one, and
+            // before the union's pass and the step, where the server applies
+            // them, in its order.
+            apply_held_lifecycle(frame_tick);
             // The sector union (session/sector_union.hpp), the rule the server's
             // update_sectors() runs: one count of the pacer per step, before
             // it, from the manager's state after the previous step, and one
@@ -2753,18 +2879,57 @@ namespace {
             }
             pending_events_.erase(keep, pending_events_.end());
             if (due.empty()) return;
-            const auto join_rank = [this](uint32_t player) {
-                for (const auto& p: players_) if (p.id == player) return static_cast<uint32_t>(p.join_order);
-                return 256u;
-            };
             std::stable_sort(due.begin(), due.end(),
-                             [&join_rank](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
+                             [this](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
                                  const uint32_t ja = join_rank(a.player), jb = join_rank(b.player);
                                  if (ja != jb) return ja < jb;
                                  if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
                                  return bmmo::session::lifecycle_event_rank(a.type) < bmmo::session::lifecycle_event_rank(b.type);
                              });
-            for (const auto& event: due) apply_event(event);
+            // A body change stamped for this very tick (on time) is held until
+            // this frame's rewinds have run (apply_held_lifecycle): made now,
+            // a rewind anchored before the stamp would restore the body's old
+            // life onto the new core - no record carries the new generation
+            // yet, so the anchor's record still counts as the same life - and
+            // replay it to the tick before the stamp, undoing the change for
+            // good, the way the own beam used to be undone.  Not late, it
+            // asks for no rewind of its own, so holding it moves nothing else.
+            for (auto& event: due) {
+                if (event.tick == tick && (event.type == bmmo::session::event_type::Physicalize
+                                           || event.type == bmmo::session::event_type::Unphysicalize)) {
+                    held_lifecycle_.push_back(std::move(event));   // the message is move-only
+                    continue;
+                }
+                apply_event(event);
+            }
+        }
+
+        // The body changes held by drain_due_events, after this frame's rewinds
+        // and before the union's pass and the step - where the server applies
+        // them - in the server's order (they were sorted by join order): the
+        // own beam stamped for this tick goes in at our place.
+        void apply_held_lifecycle(uint32_t frame_tick) {
+            std::vector<bmmo::session_event_msg> held;
+            held.swap(held_lifecycle_);
+            if (!held.empty()) {
+                const uint32_t own_rank = join_rank(own_id_);
+                bool beam_placed = false;
+                for (const auto& event: held) {
+                    if (!beam_placed && join_rank(event.player) > own_rank) {
+                        live_own_beam(frame_tick);
+                        beam_placed = true;
+                    }
+                    apply_event(event);
+                }
+            }
+            live_own_beam(frame_tick);   // applies once; afterwards only retires
+        }
+
+        // A member's place in the server's order of a tick's events: its join
+        // order, an unknown player after every known one.
+        uint32_t join_rank(uint32_t player) const {
+            for (const auto& p: players_) if (p.id == player) return static_cast<uint32_t>(p.join_order);
+            return 256u;
         }
 
         // A ball enters or leaves the world at its owner's tick and is relayed,
@@ -2902,16 +3067,36 @@ namespace {
         // frame would drain afterwards bumped it a second time, so the live
         // records after the replay named another lifetime than the replayed
         // ones and none of those could restore the body.
+        // In the server's order (session_runner::step): join order, and the
+        // own beam stamped for this tick at ours - two bodies made in one tick
+        // are made in that order and the order changes the world.  The own
+        // beam is applied here only once its live frame has run: before that
+        // no replay reaches its stamp.
         void drain_pending_births(uint32_t tick) {
+            if (pending_births_.empty() && !(own_beam_.pending && own_beam_.applied_live && own_beam_.stamp == tick)) return;
+            std::vector<pending_birth> due;
             for (auto it = pending_births_.begin(); it != pending_births_.end();)
                 if (it->tick == tick) {
-                    {
-                        const event_log_mute mute(*this);
-                        physicalize_remote(*it, tick);
-                    }
-                    mechanism_tracking_.mark_dirty();
+                    due.push_back(*it);
                     it = pending_births_.erase(it);
                 } else ++it;
+            std::stable_sort(due.begin(), due.end(), [this](const pending_birth& a, const pending_birth& b) {
+                return join_rank(a.player) < join_rank(b.player);
+            });
+            bool beam = own_beam_.pending && own_beam_.applied_live && own_beam_.stamp == tick;
+            const uint32_t own_rank = join_rank(own_id_);
+            for (const auto& birth: due) {
+                if (beam && join_rank(birth.player) > own_rank) {
+                    apply_own_beam(tick, "replay");
+                    beam = false;
+                }
+                {
+                    const event_log_mute mute(*this);
+                    physicalize_remote(birth, tick);
+                }
+                mechanism_tracking_.mark_dirty();
+            }
+            if (beam) apply_own_beam(tick, "replay");
         }
 
         // The event log muted for a scope, nesting: a trafo inside a birth made
@@ -3142,7 +3327,8 @@ namespace {
             o.log = [](const std::string& text) { logf("%s", text.c_str()); };
             // Before each replayed tick's scripts and step: the births deferred
             // into this replay (apply_event), made at their tick in the world
-            // as it stands then, and the traces.
+            // as it stands then, with the own beam stamped for it among them
+            // (drain_pending_births), and the traces.
             o.before_replayed_tick = [this](uint32_t tick) {
                 drain_pending_births(tick);
                 replay_manager_activation(tick);
@@ -4043,6 +4229,25 @@ namespace {
         std::map<std::string, uint32_t> generations_;
         uint64_t amend_failures_ = 0;
         bool beam_done_ = false;
+        // The --beam pair as the server applies it (beam_own_ball,
+        // apply_own_beam): kept while a rewind can be anchored before its
+        // stamp, so every replay that crosses the stamp beams again.
+        struct own_beam {
+            bool pending = false;
+            bool applied_live = false;
+            uint32_t stamp = 0;
+            uint32_t generation = 0;   // the ball's lifetime the beam belongs to (apply_own_beam)
+            std::string entity;
+            float position[3] = {};
+            float rotation[9] = {};
+            bmmo::session::ball_recipe recipe;
+            std::string group;
+        };
+        own_beam own_beam_;
+        // Body changes stamped for the frame's own tick, held past the frame's
+        // rewinds (drain_due_events -> apply_held_lifecycle, same frame).
+        std::vector<bmmo::session_event_msg> held_lifecycle_;
+        uint64_t own_beams_applied_ = 0;
         std::map<uint32_t, remote_ball> remotes_;
         bool have_snapshot_ = false;
         uint32_t last_snapshot_tick_ = 0;

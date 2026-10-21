@@ -2115,6 +2115,67 @@ TEST(RollbackEngine, PreStepHookFiresOnceBeforeEveryResimulatedStep) {
     EXPECT_EQ(world.calls.size(), calls_before);
 }
 
+// The own beam of the session client (apply_own_beam): the own ball rebuilt at
+// a new pose before the step of its stamp, live and by the pre_step hook in
+// every replay that crosses the stamp, with no lifetime change.  A rewind
+// anchored before the stamp must restore the pre-beam record, replay to the
+// stamp on the old path, beam again there and arrive where the live run did;
+// the records from the stamp on are re-captured on the beamed path, so a later
+// rewind anchored after the stamp restores that path.  Without the hook the
+// same rewind undoes the beam for good (the measured 540 m on three clients):
+// the control at the end pins that failure.  Both with and without the
+// savestate (the blob of an anchor before the stamp is applied over the
+// rebuilt body, as the IVP savestate maps a body by name).
+TEST(RollbackEngine, PreStepBeamOfTheOwnBallIsReappliedByEveryReplayThatCrossesIt) {
+    for (const bool savestates: {false, true}) {
+        SCOPED_TRACE(savestates ? "savestate" : "per-body");
+        constexpr uint32_t kStamp = 6, kNow = 10;
+        fake_world world;
+        world.savestates = savestates;
+        world.bodies["Own"].linear[0] = 1.0f;
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Own"] = {};
+        rollback_engine engine;
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.own_polls = true;
+        tracked.remote_entities = {"Remote"};
+        // A fresh body at the beam pose: nothing of the old one survives.
+        const auto beam = [&world](uint32_t tick) {
+            if (tick != kStamp) return;
+            fake_body fresh;
+            fresh.position[0] = 100.0;
+            fresh.linear[0] = 2.0f;
+            world.bodies["Own"] = fresh;
+        };
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= kNow; ++tick) {
+            beam(tick);   // the live frame of the stamp, before its step
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        const fake_body live = world.bodies["Own"];
+        ASSERT_NEAR(live.position[0], 100.0 + 5 * 2.0 * kDt, 1e-9);
+
+        w.pre_step = beam;
+        ASSERT_TRUE(engine.rewind_to(w, 3, kNow, no_input, "test"));
+        EXPECT_EQ(world.bodies["Own"].position[0], live.position[0]);
+        EXPECT_EQ(world.bodies["Own"].linear[0], live.linear[0]);
+        EXPECT_EQ(engine.stats().resim_ticks, kNow - 3);
+
+        // Anchored after the stamp: the re-captured records are on the beamed
+        // path, and nothing re-beams (the hook does nothing at other ticks).
+        ASSERT_TRUE(engine.rewind_to(w, 7, kNow, no_input, "test"));
+        EXPECT_EQ(world.bodies["Own"].position[0], live.position[0]);
+
+        // The control: the same rewind with no hook re-steps the old path from
+        // tick 3 and the beam is gone.
+        w.pre_step = nullptr;
+        ASSERT_TRUE(engine.rewind_to(w, 3, kNow, no_input, "test"));
+        EXPECT_LT(world.bodies["Own"].position[0], 1.0);
+    }
+}
+
 // A remote ball born late: its Physicalize (stamped tick 5) reaches the client
 // at tick 10, and the rewind to tick 4 makes the body inside the replay, at
 // its stamp (pre_step).  The records of 5..10 were captured while the player
