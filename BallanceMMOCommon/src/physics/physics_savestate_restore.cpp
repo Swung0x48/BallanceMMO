@@ -61,23 +61,7 @@ namespace bmmo::physics::savestate {
             void collision_is_going_to_be_deleted_event(IVP_Collision*) override {}
         };
 
-        // BallanceMMO's own PreSimulate callbacks (navigation_callback in
-        // ball_navigation.cpp, impulse_callback and clock_guard_callback in
-        // physics_state.cpp): queued and consumed by the bridge around every
-        // step (the rollback calls set_nav, which queues one, BEFORE
-        // set_savestate), so they are not part of the retail state the
-        // comparison guards.  They live in anonymous namespaces of other
-        // translation units, hence the RTTI name (MSVC: "class `anonymous
-        // namespace'::navigation_callback", Itanium: "N12_GLOBAL__N_119navigation_callbackE").
-        bool is_bmmo_callback(PhysicsCallback* callback) {
-            if (!callback) return false;
-            const char* name = typeid(*callback).name();
-            if (!name) return false;
-            static const char* const kNames[] = {"navigation_callback", "impulse_callback", "clock_guard_callback"};
-            for (const char* known : kNames)
-                if (std::strstr(name, known)) return true;
-            return false;
-        }
+        // is_bmmo_callback: physics_savestate_internal.hpp (shared with the capture).
 
         IVP_Controller* controller_identity(IVP_Controller* c) { return c; }
         IVP_Controller* controller_of_entry(IVP_Sim_Unit_Controller_Core_List* e) { return e ? e->l_controller : nullptr; }

@@ -19,6 +19,9 @@
 // copied, never re-derived.
 
 #include <physics/physics_savestate.hpp>
+#include "PhysicsCallback.h"
+#include <cstring>
+#include <typeinfo>
 
 #include "ivp_physics.hxx"
 #include "ivp_core.hxx"
@@ -446,6 +449,25 @@ namespace bmmo::physics::savestate {
     bool read_world(reader& r, world_record& world, std::string& error);
     std::string describe_world(const world_record& world);   // what describe_savestate prints
     std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov = false, int max_differences = 1);
+
+    // BallanceMMO's own PreSimulate callbacks (navigation_callback in
+    // ball_navigation.cpp, impulse_callback and clock_guard_callback in
+    // physics_state.cpp): queued and consumed by the bridge around every step
+    // (the rollback calls set_nav, which queues one, BEFORE set_savestate; the
+    // key-polling one is off for the whole of a replay), so they are not part
+    // of the retail state a blob carries or a restore guards.  They live in
+    // anonymous namespaces of other translation units, hence the RTTI name
+    // (MSVC: "class `anonymous namespace'::navigation_callback", Itanium:
+    // "N12_GLOBAL__N_119navigation_callbackE").
+    inline bool is_bmmo_callback(PhysicsCallback* callback) {
+        if (!callback) return false;
+        const char* name = typeid(*callback).name();
+        if (!name) return false;
+        static const char* const kNames[] = {"navigation_callback", "impulse_callback", "clock_guard_callback"};
+        for (const char* known : kNames)
+            if (std::strstr(name, known)) return true;
+        return false;
+    }
 
     // ------------------------------------------------------------------
     // The live world, indexed.  Built by both halves from the manager's

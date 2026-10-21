@@ -248,3 +248,35 @@ S1-S2 净新增约 250 行，S2 删零售端约 180 行绑定。
   blob 与 live 记录逐字节比较，不同则记字段）。
 - `--quick` 5/5 格如预期；x86 零售客户端 CLIENT-BUILD-OK；211 个单元测试通过。
 
+## 9. 下一阶段设计：窗口内出生的刚体在重放里重建（草案，2026-10-22）
+
+目标：跨出生的回滚也逐字节；§8 的残差（树布局 / unit 顺序 / cache 游标，以及由此在堆叠里
+放大的 ulp）全部来自"停放 + 出生 tick 步进后 recheck 回树"和 live 的 Physicalize 走的不是
+同一条插入路径。
+
+1. **出生记录**：引擎事件日志（`event_log_listener`）现在只记 `created <name>`；让 physics_RT 的
+   Physicalize 块在创建时把完整参数（`bmmo_physics_ball_recipe` 的全部字段：fixed / frozen /
+   collision / mass center / friction / elasticity / mass / damp / collision_surface / convex /
+   ball / concave 名）和实体当时的世界矩阵一并写进日志行（physics_RT 侧改动，不碰 IVP）。零售端
+   同一信息来自 BML 的 `OnPhysicalize`。客户端按 tick 存 `local_births_[tick] = {name, recipe,
+   matrix, group}`，随历史裁剪。
+2. **引擎**：`rollback_world` 新增两个可选 hook：`destroy_body(entity)` 与
+   `recreate_body(entity, birth_tick)`（后者由调用方用出生记录 `physicalize()`）。两者都装上时，
+   planning 的 birth 分支从"停放惰性 + 出生 tick 步进后 re-pose"改为：恢复时 `destroy_body`
+   （IVP 对象消失，CK 实体留着，脚本的力控制器由脚本恢复的 force hook 按锚点记录处理），
+   `pre_step(birth_tick)` 里、在 `drain_pending_births` 与 `execute_frame` 之前 `recreate_body`；
+   出生 tick 步进之后仍与出生记录比较——相同则不写（预期），不同则按旧路径 re-pose 并计数
+   （`birth_recreate_mismatches`）。没装 hook 的调用方（当前零售端）保持停放路径。
+3. **为什么能逐字节**：live 的 Physicalize 发生在该帧脚本遍历里、Simulate 之前；重放的
+   `recreate_body` 也在该 tick 的脚本帧之前、步进之前，走同一个 `CreatePhysicsObject` 路径——
+   同样的 OV tree 插入、同样的 sim unit 追加、同样的 cache 槽位、同样的 mindist 创建时刻。剩余的
+   帧内顺序差（同帧里别的脚本在 Physicalize 之前/之后移动了刚体）是二阶的，用 §8 的工具可量。
+4. **SimTool 场景（§5 第一格）**：`--savestate-check` 加 `--birth-at TICK ENTITY`（在直通段某 tick
+   `physicalize` 一个 prop），`physics_direct` 后端提供 destroy/recreate，判据回到逐字节。
+5. **顺序**：先用新加的在线"重放身份"检查（`savestate_replay_mismatches`）确认当前客户端的重放
+   在无出生窗口里是逐字节的，再做 1-4。**已确认（2026-10-22）**：20:12 臂 123 次回滚，
+   `sv=123/0/0`，"savestate replay:" 一行都没有——live 客户端里每次重放的最后一个 tick 的 blob 与
+   被它覆盖的 live 记录逐字节相同（blob 里不再记 bmmo 自己的 PreSimulate 回调：键盘轮询回调在
+   重放期间按设计是关着的，带着它的 blob 永远和自己的重放对不上）。所以堆叠的漂移不是重放失真，
+   只能是 §8 说的顺序字段。
+

@@ -798,7 +798,11 @@ namespace bmmo::physics::savestate {
             for (int slot = 0; slot < 3; ++slot) {
                 for (int i = 0; i < queue->m_Callbacks[slot].len(); ++i) {
                     PhysicsCallback* callback = queue->m_Callbacks[slot].element_at(i);
-                    if (!callback) continue;
+                    // The bridge's own callbacks are not retail state: the
+                    // key-polling one is queued live and absent for the whole
+                    // of a replay, and a blob that carried it never matched
+                    // its own replay (the restore ignores them already).
+                    if (!callback || is_bmmo_callback(callback)) continue;
                     callback_record rec;
                     rec.slot = slot;
                     rec.behavior = static_cast<uint32_t>(callback->m_BehaviorID);
