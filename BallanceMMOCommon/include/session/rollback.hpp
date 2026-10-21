@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <deque>
 #include <functional>
@@ -169,6 +170,50 @@ namespace bmmo::session {
         // record's blob byte for byte is logged with that field - the
         // in-session form of the SimTool's replay identity.
         std::function<std::string(const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed)> diff_savestate;
+        // Optional, as a pair: a body born inside the window is re-created
+        // inside the replay the way the live frame created it, instead of
+        // being parked at its birth pose and re-posed after its birth tick.
+        // destroy_body removes the body at the restore (before the savestate
+        // is applied, so the blob meets exactly the object set it recorded);
+        // false means the caller cannot re-create it (no recipe recorded) and
+        // it is parked as before.  recreate_body makes it again at the start
+        // of its birth tick, from the caller's own record of that birth (the
+        // Physicalize recipe, group and matrix), before the tick's scripts and
+        // step - the same insertion into IVP's tree, units and caches the live
+        // Physicalize made.  Without the pair, or when the savestate is not
+        // applied, the parking path runs.
+        std::function<bool(const std::string& entity)> destroy_body;
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> recreate_body;
+        // Optional, the default way for a body born inside the window when the
+        // caller has its Physicalize matrix: the parked body is put where and
+        // how its Physicalize made it at the START of its birth tick, before
+        // that tick's scripts and step, with the collision recheck - it
+        // enters the overlap tree at the moment the live creation did and is
+        // stepped with the others, as it was live.  After the step it is
+        // expected exactly on its birth record; a difference is counted and
+        // corrected as the parked path corrected it.  The body, its joints
+        // and its force controllers all stay what they are (unlike
+        // destroy_body / recreate_body, which sever what the live scripts
+        // attached to the body).
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> insert_birth;
+        // Optional: the entities born at `tick`, in the order the live frame
+        // created them.  IVP's overlap tree takes its layout from the order
+        // elements are inserted, so the births of one tick are inserted,
+        // re-created and re-posed in this order rather than the plan's
+        // alphabetical one (measured: three sector bodies inserted
+        // alphabetically gave the tree two extra nodes for good, and the
+        // plate row downstream drifted by ulps after every rewind through it).
+        // Names not listed come after, in the plan's order.
+        std::function<std::vector<std::string>(uint32_t tick)> birth_order;
+        // Optional: the tick the live frame created `entity` at, 0 when the
+        // caller does not know.  For a body the blob does not know and the
+        // records do not track (a fixed part of a module, born inside the
+        // window): instead of being rechecked back into the overlap tree at
+        // the restore - at the anchor, where the live world had no such body
+        // and the tree a different shape for good - it waits, out of collision
+        // detection, and is rechecked in at the start of its birth tick, in
+        // birth_order, where the live creation inserted it.
+        std::function<uint32_t(const std::string& entity)> birth_tick_of;
     };
 
     // What the caller tracks at a tick: the bodies (entity names) and, for
@@ -265,6 +310,14 @@ namespace bmmo::session {
         uint64_t script_restore_failures = 0;
         uint64_t script_mismatches = 0;        // logical: flags, IOs, controllers, counters
         uint64_t savestate_replay_mismatches = 0;   // the last replayed tick's blob != the live record's (diagnostic)
+        uint64_t unknown_rechecks_deferred = 0;     // untracked window-born bodies rechecked into the tree at their birth tick, not at the restore
+        uint64_t births_inserted = 0;               // window-born bodies put where their Physicalize made them before their birth tick's step
+        uint64_t births_inserted_exact = 0;         // ...and found at exactly their birth record after that step
+        uint64_t birth_insert_mismatches = 0;       // ...or not: re-posed from the record as a parked body would be
+        uint64_t births_recreated = 0;              // window-born bodies destroyed at a restore and made again at their birth tick
+        uint64_t births_recreated_exact = 0;        // ...and found at exactly their birth record after that tick's step
+        uint64_t birth_recreate_mismatches = 0;     // ...or not: re-posed from the record as a parked body would be
+        uint64_t birth_recreate_failures = 0;       // destroy or recreate refused: the body was parked / is missing
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
@@ -551,6 +604,9 @@ namespace bmmo::session {
             };
             std::map<std::string, restore> plan;
             std::vector<std::string> rechecks;   // bodies rechecked after every pose is in (v16)
+            // Untracked bodies the blob does not know, rechecked into the tree
+            // at their birth tick instead of now (rollback_world::birth_tick_of).
+            std::map<uint32_t, std::vector<std::string>> deferred_rechecks;
             for (const auto& entity: restore_candidates(anchor, rows)) {
                 const auto row = rows.find(entity);
                 const bmmo_physics_body_state* recorded = record_at(entity);
@@ -715,6 +771,20 @@ namespace bmmo::session {
             // and is dropped: it would only be refused again.
             bool savestate_applied = false;
             if (try_savestate) {
+                // Bodies born inside the window go first, when the caller can
+                // make them again at their birth tick: destroyed here, the
+                // blob meets the object set it recorded and nothing is parked.
+                if (world.destroy_body && world.recreate_body) {
+                    for (auto& [entity, item]: plan) {
+                        if (!item.repose_tick) continue;
+                        if (world.destroy_body(entity)) {
+                            item.recreate = true;
+                            ++stats_.births_recreated;
+                        } else {
+                            ++stats_.birth_recreate_failures;
+                        }
+                    }
+                }
                 for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
                 savestate_outcome outcome;
                 if (world.set_savestate(at->savestate, outcome)) {
@@ -739,8 +809,16 @@ namespace bmmo::session {
                     // run had no such body before that tick.  One with no
                     // record at all (physicalized in this very frame) would
                     // stay out for good: rechecked back in at once.
-                    for (const std::string& name: outcome.unknown_bodies)
-                        if (plan.find(name) == plan.end() && world.recheck_body) world.recheck_body(name);
+                    for (const std::string& name: outcome.unknown_bodies) {
+                        if (plan.find(name) != plan.end() || !world.recheck_body) continue;
+                        const uint32_t born = world.birth_tick_of ? world.birth_tick_of(name) : 0;
+                        if (born > anchor && born <= current_tick) {
+                            deferred_rechecks[born].push_back(name);   // in at its birth tick (below)
+                            ++stats_.unknown_rechecks_deferred;
+                        } else {
+                            world.recheck_body(name);
+                        }
+                    }
                 } else {
                     ++stats_.savestate_failures;
                     if (world.log && stats_.savestate_failures % 8 == 1)
@@ -942,6 +1020,53 @@ namespace bmmo::session {
                         trace += buf;
                     }
                 }
+                // The bodies born at this tick, made again before its scripts
+                // and step (the live Physicalize ran in this frame's script
+                // pass, before its step).
+                // This tick's births, in the live frame's creation order.
+                std::vector<std::string> born_now;
+                for (const auto& [entity, item]: plan)
+                    if (item.repose_tick == t) born_now.push_back(entity);
+                if (born_now.size() > 1 && world.birth_order) {
+                    const std::vector<std::string> order = world.birth_order(t);
+                    const auto rank = [&order](const std::string& name) {
+                        const auto it = std::find(order.begin(), order.end(), name);
+                        return it == order.end() ? order.size() : static_cast<size_t>(it - order.begin());
+                    };
+                    std::stable_sort(born_now.begin(), born_now.end(),
+                                     [&rank](const std::string& a, const std::string& b) { return rank(a) < rank(b); });
+                }
+                for (const std::string& entity: born_now) {
+                    restore& item = plan[entity];
+                    if (item.recreate || !world.insert_birth || !savestate_applied) continue;
+                    if (world.insert_birth(entity, t)) {
+                        item.inserted = true;
+                        ++stats_.births_inserted;
+                    }
+                }
+                if (const auto deferred = deferred_rechecks.find(t); deferred != deferred_rechecks.end()) {
+                    std::vector<std::string> names = deferred->second;
+                    if (names.size() > 1 && world.birth_order) {
+                        const std::vector<std::string> order = world.birth_order(t);
+                        const auto rank = [&order](const std::string& name) {
+                            const auto it = std::find(order.begin(), order.end(), name);
+                            return it == order.end() ? order.size() : static_cast<size_t>(it - order.begin());
+                        };
+                        std::stable_sort(names.begin(), names.end(),
+                                         [&rank](const std::string& a, const std::string& b) { return rank(a) < rank(b); });
+                    }
+                    for (const std::string& name: names) world.recheck_body(name);
+                }
+                for (const std::string& entity: born_now) {
+                    restore& item = plan[entity];
+                    if (!item.recreate) continue;
+                    if (!world.recreate_body(entity, t)) {
+                        ++stats_.birth_recreate_failures;
+                        item.recreate = false;   // nothing to compare after the step; the re-pose below finds no body
+                        if (world.log && recreate_logs_++ < 8)
+                            world.log("birth: " + entity + " could not be re-created at tick " + std::to_string(t));
+                    }
+                }
                 if (world.pre_step) world.pre_step(t);
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
@@ -952,10 +1077,35 @@ namespace bmmo::session {
                 // where its birth record has it - that record IS the state the
                 // live frame left at the end of the birth tick.  From the next
                 // tick on it is an ordinary replayed body.
-                for (const auto& [entity, item]: plan) {
-                    if (item.repose_tick != t) continue;
+                for (const std::string& entity: born_now) {
+                    restore& item = plan[entity];
                     bmmo_physics_body_state live{};
                     if (!world.get_body(entity, live)) continue;
+                    // A re-created body is expected exactly where its birth
+                    // record has it: the record is the state the live frame
+                    // left at the end of this tick, and this replay made the
+                    // body the same way.  Then there is nothing to write - a
+                    // beam would only zero what the step computed.  A
+                    // difference is measured and corrected as before.
+                    if (item.recreate || item.inserted) {
+                        if (same_body_state(live, item.state)) {
+                            ++(item.recreate ? stats_.births_recreated_exact : stats_.births_inserted_exact);
+                            continue;
+                        }
+                        ++(item.recreate ? stats_.birth_recreate_mismatches : stats_.birth_insert_mismatches);
+                        if (world.log && recreate_logs_++ < 8) {
+                            char buf[200];
+                            std::snprintf(buf, sizeof(buf), " dp=(%.3g,%.3g,%.3g) dv=(%.3g,%.3g,%.3g)%s",
+                                          live.position[0] - item.state.position[0], live.position[1] - item.state.position[1],
+                                          live.position[2] - item.state.position[2],
+                                          static_cast<double>(live.linear[0]) - item.state.linear[0],
+                                          static_cast<double>(live.linear[1]) - item.state.linear[1],
+                                          static_cast<double>(live.linear[2]) - item.state.linear[2],
+                                          live.simulated != item.state.simulated ? " sleep differs" : "");
+                            world.log("birth: " + entity + (item.recreate ? " re-created" : " inserted") + " at tick "
+                                      + std::to_string(t) + " is not at its birth record after the step:" + buf);
+                        }
+                    }
                     world.set_body(entity, item.state, item.mode, true);
                     write_extra(entity, item, false);
                     write_extra(entity, item, true);
@@ -989,8 +1139,11 @@ namespace bmmo::session {
                 // was told to differ from).
                 if (t == current_tick && have_live_savestate && state.have_savestate && state.savestate != live_savestate
                         && rows.empty()) {
+                    // A parked birth makes the live record describe a world
+                    // this replay was told to differ from; a re-created one
+                    // that landed on its record does not.
                     bool births = false;
-                    for (const auto& [entity, item]: plan) births = births || item.repose_tick != 0;
+                    for (const auto& [entity, item]: plan) births = births || (item.repose_tick != 0 && !item.recreate && !item.inserted);
                     if (!births) {
                         ++stats_.savestate_replay_mismatches;
                         if (world.log && savestate_replay_logs_++ < 8)
@@ -1168,6 +1321,8 @@ namespace bmmo::session {
             wake_mode mode = wake_mode::keep;
             bool from_row = false;
             bool force_recheck = false;
+            bool recreate = false;       // destroyed at this restore, re-created at repose_tick (rollback_world::recreate_body)
+            bool inserted = false;       // put at its Physicalize pose before repose_tick's step (rollback_world::insert_birth)
             // Put back by the anchor's savestate (rollback_world::set_savestate):
             // only an item from our own record, never a row or a birth.  Gets
             // no pose, extra or contact write of its own.
@@ -1200,6 +1355,16 @@ namespace bmmo::session {
             for (int k = 0; k < 4; ++k) state.rotation[k] = row.rotation[k];
             state.simulated = (row.flags & BODY_FLAG_SIMULATED) != 0;
             return state;
+        }
+
+        // Bit-identical pose, velocities and sleep state: what a re-created
+        // birth has to show after its birth tick's step.
+        static bool same_body_state(const bmmo_physics_body_state& a, const bmmo_physics_body_state& b) {
+            return std::memcmp(a.position, b.position, sizeof a.position) == 0
+                && std::memcmp(a.rotation, b.rotation, sizeof a.rotation) == 0
+                && std::memcmp(a.linear, b.linear, sizeof a.linear) == 0
+                && std::memcmp(a.angular, b.angular, sizeof a.angular) == 0
+                && a.simulated == b.simulated;
         }
 
         // Does writing `target` actually move the body?  A write that does not
@@ -1332,6 +1497,7 @@ namespace bmmo::session {
         bool exact_restore_ = true;
         uint32_t script_mismatch_logs_ = 0;
         uint32_t savestate_replay_logs_ = 0;
+        uint32_t recreate_logs_ = 0;
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;

@@ -448,7 +448,8 @@ namespace bmmo::physics::savestate {
     void write_world(writer& w, const world_record& world);
     bool read_world(reader& r, world_record& world, std::string& error);
     std::string describe_world(const world_record& world);   // what describe_savestate prints
-    std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov = false, int max_differences = 1);
+    std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov = false, int max_differences = 1,
+                           bool ignore_order = false);
 
     // BallanceMMO's own PreSimulate callbacks (navigation_callback in
     // ball_navigation.cpp, impulse_callback and clock_guard_callback in

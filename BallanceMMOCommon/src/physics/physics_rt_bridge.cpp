@@ -542,6 +542,20 @@ namespace {
         return made;
     }
 
+    int32_t api_set_body_matrix(void* manager, const char* entity, const float matrix[16], int32_t simulated, char* error,
+                                uint32_t error_size) {
+        if (!manager || !entity || !matrix) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::string text;
+        if (!bmmo::physics::set_body_matrix(static_cast<CKIpionManager*>(manager), entity, matrix, simulated != 0, text)) {
+            set_error(error, error_size, text);
+            return -1;
+        }
+        return 1;
+    }
+
     int32_t api_body_recheck(void* manager, const char* entity, char* error, uint32_t error_size) {
         if (!manager || !entity) {
             set_error(error, error_size, "null argument");
@@ -669,6 +683,7 @@ namespace {
         api_body_recheck,
         api_savestate_get,
         api_savestate_set,
+        api_set_body_matrix,
     };
 }
 

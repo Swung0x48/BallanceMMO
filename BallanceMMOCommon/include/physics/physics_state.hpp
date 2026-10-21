@@ -192,6 +192,17 @@ namespace bmmo::physics {
                         const double position[3], const double rotation[4],
                         const float linear[3], const float angular[3], wake_mode mode,
                         bool recheck, std::string& error);
+    // A body put where its Physicalize made it, the way the Physicalize did:
+    // the entity's world matrix is set to `matrix` (row-major, the last row
+    // the translation) and the body is beamed to the position and quaternion
+    // physics_RT derives from that matrix at creation (FillTemplateInfo, the
+    // one algorithm of engine change #8), at rest, awake or frozen as the
+    // Physicalize left it, with the collision recheck - into the overlap tree
+    // at this moment.  A rollback uses it at the start of a body's birth tick
+    // for a body born inside its window, so the body enters IVP's structures
+    // where and when the live creation did (plan doc 9).
+    bool set_body_matrix(CKIpionManager* physics, const char* entity_name, const float matrix[16], bool simulated,
+                         std::string& error);
     // The retail Physicalize block's recipe path, driven from a POD recipe
     // instead of a behavior graph.  Already-physicalized entities succeed
     // without doing anything (like the block).  `collision_group` is the IVP

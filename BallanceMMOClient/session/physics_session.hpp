@@ -188,6 +188,34 @@ namespace bmmo::session {
         // instead of throwing the whole history away (findings/A5 section 2b:
         // 6 % of the 9.24 session was uncorrectable for that reason).
         std::map<std::string, uint32_t> generations;
+        // Every body the retail Physicalize block made during the session, by
+        // the tick of the record that first carries it (BML's OnPhysicalize
+        // runs before the block creates the body, so this frame's record):
+        // the block's recipe, collision group and the entity's matrix at that
+        // moment.  A rewind anchored before that tick destroys the body at
+        // the restore and makes it again at that tick from this
+        // (rollback_world::destroy_body / recreate_body, plan doc 9), the way
+        // the live frame made it - parking it instead left IVP's overlap tree
+        // and unit order different for good.
+        struct local_birth {
+            std::string name, group;
+            bmmo_physics_ball_recipe recipe{};
+            float matrix[16] = {};
+        };
+        std::map<uint32_t, std::vector<local_birth>> local_births;
+        uint32_t birth_logs = 0;
+        bool insert_births = false;              // the insert_birth A/B (see physics_session_rollback_world)
+        const local_birth* find_local_birth(const std::string& entity, uint32_t tick) const {
+            if (tick) {
+                const auto it = local_births.find(tick);
+                if (it == local_births.end()) return nullptr;
+                for (const auto& b: it->second) if (b.name == entity) return &b;
+                return nullptr;
+            }
+            for (auto it = local_births.rbegin(); it != local_births.rend(); ++it)
+                for (const auto& b: it->second) if (b.name == entity) return &b;
+            return nullptr;
+        }
         uint64_t corrections_logged = 0;
         uint64_t amend_failures = 0;             // amend_record calls whose tick was no longer recorded
 
@@ -358,6 +386,8 @@ namespace bmmo::session {
             hard_sets = blends = 0;
             mechanism_tracking.clear();
             generations.clear();
+            local_births.clear();
+            birth_logs = 0;
             latest_ball_rows.clear();
             corrections_logged = 0;
             savestate_get_logs = savestate_set_logs = 0;

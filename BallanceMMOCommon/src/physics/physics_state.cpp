@@ -8,6 +8,7 @@
 #include "ivp_core.hxx"
 #include "ivp_controller.hxx"
 #include "ivp_real_object.hxx"
+#include "ivp_templates.hxx"
 #include "ivp_mindist.hxx"
 #include "ivp_friction.hxx"
 #include "ivp_clustering_longrange.hxx"
@@ -398,6 +399,7 @@ namespace bmmo::physics {
         public:
             std::string text;
             IVP_Environment* environment = nullptr;
+            CKIpionManager* manager = nullptr;   // for the creation parameters (engine change #19)
 
             // A replay re-executes mechanism scripts whose Physics WakeUp
             // and births would otherwise be logged as live events
@@ -455,12 +457,73 @@ namespace bmmo::physics {
                     static_cast<int>(core->movement_state), static_cast<unsigned long long>(surface), fp);
                 text += line;
             }
+            // The recipe the body was created with and the entity's matrix at
+            // that moment (engine change #19, CKIpionManager::m_CurrentCreate):
+            // "t=<s> recipe <name>|fixed=|frozen=|coll=|cmc=|fr=|el=|m=|ld=|rd=|mc=x,y,z
+            // |surf=<name>|convex=a/b|balls=x,y,z,r/..|concave=a/b|group=<g>|mtx=16 hex floats;"
+            // - what a rollback needs to re-create a body born inside its
+            // window the way the live frame did (docs/rollback-core-unification-plan.md, 9).
+            void record_recipe(IVP_Event_Object* event) {
+                if (muted || !manager || !manager->m_CurrentCreate || text.size() > 256 * 1024) return;
+                const CKIpionManager::PhysicsCreateParams& p = *manager->m_CurrentCreate;
+                if (!p.target || !event || !event->real_object) return;
+                char line[2600];
+                const int n = std::snprintf(line, sizeof(line),
+                    "t=%.6f recipe %s|fixed=%d|frozen=%d|coll=%d|cmc=%d|fr=%a|el=%a|m=%a|ld=%a|rd=%a|mc=%a,%a,%a|surf=%s|convex=",
+                    event->environment ? event->environment->get_current_time().get_seconds() : -1.0,
+                    p.target->GetName() ? p.target->GetName() : "?", p.fixed ? 1 : 0, p.startFrozen ? 1 : 0,
+                    p.enableCollision ? 1 : 0, p.autoCalcMassCenter ? 1 : 0,
+                    p.material ? static_cast<double>(p.material->get_friction_factor()) : 0.0,
+                    p.material ? static_cast<double>(p.material->get_elasticity()) : 0.0,
+                    static_cast<double>(p.mass), static_cast<double>(p.linearSpeedDampening),
+                    static_cast<double>(p.rotSpeedDampening),
+                    p.shiftMassCenter ? static_cast<double>(p.shiftMassCenter->x) : 0.0,
+                    p.shiftMassCenter ? static_cast<double>(p.shiftMassCenter->y) : 0.0,
+                    p.shiftMassCenter ? static_cast<double>(p.shiftMassCenter->z) : 0.0,
+                    p.collisionSurface ? p.collisionSurface : "");
+                if (n < 0 || n >= static_cast<int>(sizeof(line))) return;
+                std::string out(line);
+                for (int i = 0; i < p.convexCount; ++i) {
+                    if (i) out += '/';
+                    out += p.convexes && p.convexes[i] && p.convexes[i]->GetName() ? p.convexes[i]->GetName() : "";
+                }
+                out += "|balls=";
+                for (int i = 0; i < p.ballCount; ++i) {
+                    const VxVector c = p.ballPositions ? p.ballPositions[i] : VxVector(0.0f, 0.0f, 0.0f);
+                    const float r = p.ballRadii ? p.ballRadii[i] : p.ballRadius;
+                    std::snprintf(line, sizeof(line), "%s%a,%a,%a,%a", i ? "/" : "", static_cast<double>(c.x),
+                                  static_cast<double>(c.y), static_cast<double>(c.z), static_cast<double>(r));
+                    out += line;
+                }
+                if (p.ballCount == 0 && (!p.collisionSurface || !p.collisionSurface[0])) {
+                    // A plain ball of ballRadius: what CreatePhysicsObjectOnParameters makes then.
+                    std::snprintf(line, sizeof(line), "%a,%a,%a,%a", 0.0, 0.0, 0.0, static_cast<double>(p.ballRadius));
+                    out += line;
+                }
+                out += "|concave=";
+                for (int i = 0; i < p.concaveCount; ++i) {
+                    if (i) out += '/';
+                    out += p.concaves && p.concaves[i] && p.concaves[i]->GetName() ? p.concaves[i]->GetName() : "";
+                }
+                out += "|group=";
+                out += p.collisionGroup ? p.collisionGroup : "";
+                out += "|mtx=";
+                const VxMatrix& m = p.target->GetWorldMatrix();
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) {
+                        std::snprintf(line, sizeof(line), "%s%a", (r || k) ? "," : "", static_cast<double>(m[r][k]));
+                        out += line;
+                    }
+                out += ';';
+                text += out;
+            }
             void event_object_deleted(IVP_Event_Object* event) override {
                 record("deleted", event);
                 if (event && event->real_object) psi_watch_forget(event->real_object);
             }
             void event_object_created(IVP_Event_Object* event) override {
                 record("created", event);
+                record_recipe(event);
                 record_birth(event);
                 // BMMO_PSI_PROBE=<name prefix>: the first PSIs of every body
                 // born with that prefix go into the event log as "psi" entries.
@@ -577,6 +640,7 @@ namespace bmmo::physics {
             g_event_log.environment = environment;
             g_event_log.text += "listener installed;";
         }
+        if (environment) g_event_log.manager = physics;
         if (environment && g_psi_probe.environment != environment) {
             environment->add_listener_PSI(&g_psi_probe);
             g_psi_probe.environment = environment;
@@ -1521,6 +1585,43 @@ namespace bmmo::physics {
         error = "CreatePhysicsObjectOnParameters failed for '" + name + "' ("
               + std::to_string(result) + ")";
         return false;
+    }
+
+    bool set_body_matrix(CKIpionManager* physics, const char* entity_name, const float matrix[16], bool simulated,
+                         std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return false;
+        }
+        PhysicsObject* object = physics->GetPhysicsObject(entity);
+        if (!object || !object->m_RealObject) {
+            error = "'" + name + "' has no body";
+            return false;
+        }
+        VxMatrix world;
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k) world[r][k] = matrix[r * 4 + k];
+        entity->SetWorldMatrix(world);
+        // The creation's own derivation of the pose from the matrix, so the
+        // quaternion is the one a Physicalize would have given the body.
+        IVP_Template_Real_Object templ;
+        IVP_U_Point position;
+        IVP_U_Quat quaternion;
+        IVP_U_Matrix mass_center;
+        CKIpionManager::FillTemplateInfo(&templ, &position, &quaternion, const_cast<CKSTRING>(name.c_str()), 1.0f, nullptr,
+                                         0.0f, 0.0f, entity, FALSE, const_cast<CKSTRING>(""), &mass_center, nullptr);
+        const double pos[3] = {position.k[0], position.k[1], position.k[2]};
+        const double rot[4] = {quaternion.x, quaternion.y, quaternion.z, quaternion.w};
+        const float still[3] = {0.0f, 0.0f, 0.0f};
+        return set_body_state(physics, name.c_str(), pos, rot, still, still, simulated ? wake_mode::wake : wake_mode::freeze,
+                              true, error);
     }
 
     bool unphysicalize(CKIpionManager* physics, const char* entity_name, std::string& error) {

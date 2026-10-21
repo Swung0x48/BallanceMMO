@@ -280,3 +280,49 @@ S1-S2 净新增约 250 行，S2 删零售端约 180 行绑定。
    重放期间按设计是关着的，带着它的 blob 永远和自己的重放对不上）。所以堆叠的漂移不是重放失真，
    只能是 §8 说的顺序字段。
 
+## 10. §9 的实施结果（2026-10-22）与下一步
+
+**做了什么（提交在 collision-overhaul）：**
+- 引擎变更 #19（physics_RT，`CKIpionManager::m_CurrentCreate`）+ 桥接事件日志的 `recipe` 行：每次创建刚体
+  都记下 Physicalize 的全部参数、碰撞组和实体当时的世界矩阵；两个客户端按 tick 存成出生表
+  （无头 `local_births_`、零售 `physics_session_state::local_births`，零售侧来自 BML `OnPhysicalize`）。
+- 引擎 hook：`destroy_body` / `recreate_body`（恢复前销毁、出生 tick 重建）、`insert_birth`（出生 tick
+  步进前把停放刚体放到 Physicalize 的姿态并 recheck 入树，桥接 API v19 `set_body_matrix`）、
+  `birth_order`（一个 tick 的出生按 live 的创建顺序处理）、`birth_tick_of`（blob 不认识、记录也不跟踪
+  的刚体——模块的固定部件——不再在锚点 recheck 入树，而是等到它出生的 tick）。无头 `--recreate-births`
+  是销毁重建的 A/B。
+- 单测：重建路径、无 recipe 时回到停放、预插入路径各一例（215 个全过）。
+
+**量到的：**
+- 销毁重建：46 个窗口内出生里 45 个在出生 tick 步进后与出生记录逐字节相同（唯一不同的
+  P_Modul_41 是同帧脚本在 Physicalize 之后又动了它）。**但**模块脚本在窗口内被激活、按 v14 规则
+  "保持 live、不重放"，它们给刚体挂的球关节/铰链/力控制器随旧刚体一起没了，重建后的刚体没有关节：
+  Platte 一排从关节上掉下去自由落体 7.5 km。所以默认不走这条路。
+- 预插入 + 创建顺序 + 固定部件延后入树：**overlap tree 与 control 逐节点相同了**（之前多 2 个节点的
+  根源是 P_Modul_01 的 Rinne/Filler——没有记录、不被跟踪的固定部件——在锚点就被 recheck 进树）。
+  剩下与 control 不同的簿记只有 cache reuse index 和 unit 编号。
+- 预插入本身是**负收益**：46 次里 29 次逐字节，17 次不同（Platte 系列只差旋转，见下）→ 回退
+  re-pose 再 recheck 一次；7:5 臂在纯停放下 53 个里只有 Schaukel 不同，开了预插入变成 6 个不同
+  （P_Ball_Wood_MF 在 tick 66 就差 0.5 mm）。所以预插入改成 A/B（无头 `--insert-births`、零售
+  `insert_births` 开关），默认是停放 + 创建顺序 + 固定部件延后入树：7:5 回到 1/53，20:12 的
+  overlap tree 与 control 相同，11/53（与本阶段之前一样）。
+- 可是 Platte 堆的漂移一点没变（纸球 0.1797 m、Platte ≤ 2.5 cm，首次 >1e-6 m 仍在 924）。
+  `--savestate-diff --ignore-ov --ignore-order` 把第一个物理差异定位到 `A_Floor_009/010` 的 hull
+  条目（Platte 对地面 mindist 的 hull 值）——mindist 的创建时刻/路径。预插入 46 次里 29 次出生 tick
+  步进后与记录逐字节相同，17 次不同（Platte 系列只差旋转：beam 会归一化四元数，IVP 创建不归一化；
+  P_Box_MF 多落了一帧）→ 回退 re-pose 再 recheck 一次 → 这些刚体的 mindist 是在步进之后第二次
+  创建的，hull 值的时间基不同。7:5 臂（窄窗口，只有 Schaukel 不同）cache index 与 control 相同。
+
+**结论与下一步：** 窗口内出生要逐字节，刚体必须像 live 那样被 Physicalize 块**在重放里创建**，
+连同它的关节和力控制器。这意味着 v14 的"窗口内激活的脚本保持 live"要翻过来：
+1. 扇区激活是输入（stamped tick 已知）：`before_replayed_tick(t)` 在 live 发生过 pass 的 tick 重新
+   `start_sector(sector)`；Gameplay_SectorManager 进重放选择（satellite，状态随记录），`execute_frame`
+   每帧执行它。
+2. `script_replay::restore` 写**全部**选中脚本（含锚点时未激活的），`replayed` = 全部，去掉
+   `kept_live`；激活、Reset、Physicalize、Ball Joint、Hinge、SetPhysicsForce 都由重放里的脚本自己
+   再做一次。
+3. 恢复时 `destroy_body` 窗口内出生的机关刚体（否则 body guard #6 让重放的 Physicalize 保留旧刚体）；
+   球仍走停放。出生记录改为校验。
+4. 风险：选择之外的激活源（Gameplay_Ingame 的死亡/关卡事件）；用引擎自带的脚本一致性检查、
+   出生校验计数和三臂 journal 衡量。
+

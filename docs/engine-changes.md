@@ -686,6 +686,66 @@ the loaded level, which is all a blob needs (it never leaves its process). The
 member is appended to a class private to the translation unit; nothing in the
 retail layout moves, and IVP reads the name only to print it.
 
+## 19. The creation parameters, visible while a body is made (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.h` (a nested
+`PhysicsCreateParams` struct and the member `m_CurrentCreate`),
+`CKIpionManager.cpp` (the constructor nulls it; `CreatePhysicsObjectOnParameters`
+points it at its own arguments for the duration of the call, through a scope
+guard, and nulls it on every return).
+
+A rollback whose window spans a body's birth used to park that body at its
+birth pose and re-pose it after its birth tick's step, which puts it back into
+IVP's overlap tree, simulation units and object cache through a recheck, at a
+different moment and by a different path than the live Physicalize did. The
+state the blobs compare came back equal, the ORDER did not (two extra overlap
+nodes, shifted unit indices, another cache reuse index), and IVP's order is
+numerically significant in a pile: the 20:12 and 50:48 arena arms drifted on
+the plate row a few ticks after any rewind through it while the 7:5 arm, whose
+rewinds left the tree identical, stayed exact. The fix is to make the body
+again inside the replay the way the live frame made it, which needs what the
+live frame made it with.
+
+`CreatePhysicsObjectOnParameters` is the one path every creation takes - the
+retail Physicalize block and the bridge's own `physicalize` both end there - and
+IVP announces the creation through `IVP_Listener_Object::event_object_created`
+from inside it, before the entity is attached as `client_data`. The listener
+the bridge installs (physics_state.cpp, `event_log_listener`) reads
+`m_CurrentCreate` at that moment and writes one `recipe` line into the event log:
+every argument (the material's friction and elasticity, mass, dampings, mass
+centre, the collision surface and mesh names, the balls, the group, the flags)
+and the entity's world matrix. The clients keep those lines by tick and a
+rewind anchored before the tick destroys the body at the restore and
+re-creates it at the start of its birth tick (`rollback_world::destroy_body` /
+`recreate_body`), expecting it exactly on its birth record after the step.
+
+Nothing in the retail layout moves (the member is appended), no IVP file is
+touched, and a build without the bridge's listener only carries a pointer that
+is null between calls.
+
+---
+
+## Bridge notes: a body put where its Physicalize made it (bridge API v19, engine change #19 for the record only)
+
+`set_body_matrix(entity, matrix[16], simulated)` sets the entity's world matrix
+and beams the body to the position and quaternion `CKIpionManager::
+FillTemplateInfo` derives from that matrix - the creation's own derivation, the
+one algorithm of #8 - at rest, awake or frozen, with the collision recheck.
+The rollback uses it at the start of a body's birth tick for a body born inside
+the window it replays (`rollback_world::insert_birth`), so the body enters the
+overlap tree where and when the live creation did (IVP's creation path IS a
+recheck: `enable_collision_detection_for_object` makes the OV element and calls
+`recheck_ov_element`).  Two things keep it from being bit-identical to a
+creation and are measured rather than hidden: a beam normalizes the quaternion
+and the creation does not, so the rotation differs in the last bit and the
+engine's post-step check re-poses the body from its birth record (counted as
+`birth_insert_mismatches`); and the body's core keeps the age it had live.
+`--savestate-diff` grew `--ignore-ov`, `--ignore-order` and `--max-diff N` to
+look past the bookkeeping two runs order differently (overlap-tree layout, the
+cache ring, unit numbering) to the first physical field.
+
+---
+
 ## Bridge notes: restoring a body's leapfrog state (no engine change)
 
 Not a numbered engine change: nothing under `submodule/Ballanced` changed for

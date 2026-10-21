@@ -165,6 +165,15 @@ namespace {
         // and field - the way to find where two runs' SCRIPT states part,
         // which a journal (poses) and a blob diff (IVP) both miss.
         std::string compare_scripts_dir;
+        // --recreate-births: destroy a body born inside a rewind's window at
+        // the restore and make it again at its birth tick from its recorded
+        // Physicalize recipe, instead of putting the parked body where the
+        // Physicalize made it before that tick's step (the default).  An A/B
+        // that severs the joints and controllers scripts attached to the body.
+        bool recreate_births = false;
+        // --insert-births: put a parked window-born body where its Physicalize
+        // made it before its birth tick's step (see the hook).  An A/B.
+        bool insert_births = false;
         // --no-restore-recheck: do not ask IVP to recheck contacts for a
         // body the restore moved.  Isolates the recheck's own cost to
         // replay fidelity from everything else.
@@ -273,7 +282,7 @@ namespace {
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS]\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
-                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR]\n"
+                  "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--recreate-births] [--insert-births]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)");
     }
 
@@ -329,6 +338,8 @@ namespace {
                 if (!(v = next())) return false;
                 out.dump_savestate_dir = v;
             }
+            else if (arg == "--recreate-births") out.recreate_births = true;
+            else if (arg == "--insert-births") out.insert_births = true;
             else if (arg == "--compare-scripts") {
                 if (!(v = next())) return false;
                 out.compare_scripts_dir = v;
@@ -916,6 +927,7 @@ namespace {
             mechanism_correctors_.clear();
             mechanism_tracking_.clear();
             generations_.clear();
+            local_births_.clear();
             amend_failures_ = 0;
             beam_done_ = false;
             remotes_.clear();
@@ -1570,6 +1582,20 @@ namespace {
                 if (space2 == std::string::npos) continue;
                 const std::string kind = entry.substr(space1 + 1, space2 - space1 - 1);
                 const std::string name = entry.substr(space2 + 1);
+                if (kind == "recipe") {
+                    // What this frame's Physicalize made the body with (engine
+                    // change #19): kept by tick, so a rewind anchored before
+                    // this tick can make the body again at it (recreate_body).
+                    local_birth birth;
+                    if (parse_recipe_event(name, birth)) {
+                        local_births_[tick].push_back(std::move(birth));
+                        while (!local_births_.empty() && local_births_.begin()->first + 4096 < tick)
+                            local_births_.erase(local_births_.begin());
+                    } else if (recipe_parse_logs_++ < 4) {
+                        logf("birth recipe at tick %u could not be parsed: %.120s", tick, name.c_str());
+                    }
+                    continue;
+                }
                 if (kind == "created" || kind == "deleted") {
                     // The body behind a tracked name changed: a new lifetime for
                     // it, and the mechanism registry has to ask the world again.
@@ -2890,6 +2916,97 @@ namespace {
             world.diff_savestate = [](const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed) {
                 return bmmo::physics::diff_savestate(live.data(), live.size(), replayed.data(), replayed.size(), true, 3);
             };
+            // A body born inside the window is made again inside the replay,
+            // at its birth tick, with the recipe and matrix its Physicalize
+            // used (plan doc 9): the same insertion into IVP's tree, units and
+            // caches the live frame made, where parking and re-posing it gave
+            // the tree a different layout for good.  The event log is muted
+            // around both: the destroy and the re-creation are not lifetime
+            // changes of the body the records describe.
+            // --insert-births: the parked body is put where its Physicalize
+            // made it at the start of its birth tick (set_body_matrix), its
+            // joints and controllers untouched.  Not the default: a beam
+            // normalizes the quaternion where the creation does not, so most
+            // insertions miss their birth record in the last bit and fall back
+            // to the re-pose - a second recheck after the step - and the 7:5
+            // arm, exact on 52 of 53 bodies under plain parking, came out off
+            // on six (measured 2026-10-22).  The A/B stays.
+            if (args_.insert_births) world.insert_birth = [this](const std::string& entity, uint32_t birth_tick) {
+                // The balls stay on the parking path (exact there in every arm;
+                // the replica's controllers are on them).
+                if (entity.rfind("Ball_", 0) == 0 || entity == own_body_entity_) return false;
+                const local_birth* birth = find_local_birth(entity, birth_tick);
+                if (!birth) return false;
+                std::string error;
+                if (!bmmo::physics::set_body_matrix(engine_->physics(), entity.c_str(), birth->matrix,
+                                                    !(birth->recipe.start_frozen || birth->recipe.fixed), error)) {
+                    if (recreate_logs_++ < 8) logf("birth: inserting %s at tick %u failed: %s", entity.c_str(), birth_tick, error.c_str());
+                    return false;
+                }
+                return true;
+            };
+            // The tick a body was created at (its latest birth), for the
+            // untracked ones the blob does not know.
+            world.birth_tick_of = [this](const std::string& entity) -> uint32_t {
+                for (auto it = local_births_.rbegin(); it != local_births_.rend(); ++it)
+                    for (const auto& b: it->second) if (b.name == entity) return it->first;
+                return 0;
+            };
+            // The order the live frame created a tick's bodies in: the event
+            // log's order, which is the scripts' order.
+            world.birth_order = [this](uint32_t tick) {
+                std::vector<std::string> names;
+                const auto it = local_births_.find(tick);
+                if (it != local_births_.end())
+                    for (const auto& b: it->second) names.push_back(b.name);
+                return names;
+            };
+            // --recreate-births: the experiment that destroys the body at the
+            // restore and makes it again at its birth tick.  45 of 46 births
+            // came back bit-exact on the arena, but a body's joints and force
+            // controllers are made by scripts that were activated inside the
+            // window and are kept live, not re-run, so they are lost with the
+            // body: the plate row fell off its joints.  Kept as the A/B.
+            if (args_.recreate_births) {
+                world.destroy_body = [this](const std::string& entity) {
+                    // The balls keep the parking path: a navigated body has the
+                    // replica's controllers on it, and its lifecycle has its own
+                    // events (the ball is exact under parking in every arm).
+                    if (entity.rfind("Ball_", 0) == 0 || entity == own_body_entity_) return false;
+                    for (const auto& [id, remote]: remotes_) if (remote.entity == entity) return false;
+                    if (!find_local_birth(entity, 0)) return false;   // no recipe: parked as before
+                    std::string error;
+                    bmmo::physics::set_event_log_muted(true);
+                    const bool ok = bmmo::physics::unphysicalize(engine_->physics(), entity.c_str(), error);
+                    bmmo::physics::set_event_log_muted(false);
+                    if (!ok && recreate_logs_++ < 8) logf("birth: destroying %s at the restore failed: %s", entity.c_str(), error.c_str());
+                    return ok;
+                };
+                world.recreate_body = [this](const std::string& entity, uint32_t birth_tick) {
+                    const local_birth* birth = find_local_birth(entity, birth_tick);
+                    if (!birth) {
+                        if (recreate_logs_++ < 8) logf("birth: no recipe for %s at tick %u", entity.c_str(), birth_tick);
+                        return false;
+                    }
+                    CKContext* context = engine_->context();
+                    // ParentClass: the level's bodies are CK3dObjects.
+                    auto* ck = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(entity.c_str()), CKCID_3DENTITY, nullptr));
+                    if (!ck) {
+                        if (recreate_logs_++ < 8) logf("birth: no entity named %s to re-create", entity.c_str());
+                        return false;
+                    }
+                    VxMatrix matrix;
+                    for (int r = 0; r < 4; ++r)
+                        for (int k = 0; k < 4; ++k) matrix[r][k] = birth->matrix[r * 4 + k];
+                    std::string error;
+                    bmmo::physics::set_event_log_muted(true);
+                    ck->SetWorldMatrix(matrix);
+                    const bool ok = bmmo::physics::physicalize(engine_->physics(), entity.c_str(), birth->recipe, birth->group.c_str(), error);
+                    bmmo::physics::set_event_log_muted(false);
+                    if (!ok && recreate_logs_++ < 8) logf("birth: re-creating %s at tick %u failed: %s", entity.c_str(), birth_tick, error.c_str());
+                    return ok;
+                };
+            }
             if (args_.script_replay && !scripts_.empty()) {
                 bmmo::session::script_binding_options so;
                 so.context = engine_->context();
@@ -3226,7 +3343,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
+                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu deferred=%llu scr=%llu/%llu/%llu/%llu/%llu max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                  static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
@@ -3252,6 +3369,11 @@ namespace {
                  static_cast<unsigned long long>(rs.contacts_restored), static_cast<unsigned long long>(rs.contact_restore_failures),
                  static_cast<unsigned long long>(rs.savestates_restored), static_cast<unsigned long long>(rs.savestate_failures),
                  static_cast<unsigned long long>(rs.savestate_capture_failures),
+                 static_cast<unsigned long long>(rs.births_inserted), static_cast<unsigned long long>(rs.births_inserted_exact),
+                 static_cast<unsigned long long>(rs.birth_insert_mismatches),
+                 static_cast<unsigned long long>(rs.births_recreated), static_cast<unsigned long long>(rs.births_recreated_exact),
+                 static_cast<unsigned long long>(rs.birth_recreate_mismatches), static_cast<unsigned long long>(rs.birth_recreate_failures),
+                 static_cast<unsigned long long>(rs.unknown_rechecks_deferred),
                  static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
                  static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
                  static_cast<unsigned long long>(script_reset_skips_), rs.max_error,
@@ -3315,6 +3437,110 @@ namespace {
         std::string savestate_clock_before_;                 // describe_clock() just before the last savestate restore (--trace)
         uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)
         uint32_t compare_scripts_ticks_ = 0, compare_scripts_logs_ = 0;
+        uint32_t recipe_parse_logs_ = 0, recreate_logs_ = 0;
+        // Every body this world made, by the tick of the record that first
+        // carries it: the Physicalize recipe, collision group and the entity's
+        // matrix at that moment (the event log's "recipe" line, engine change
+        // #19).  A rewind anchored before that tick re-creates the body from
+        // it at that tick (rollback_world::recreate_body).
+        struct local_birth {
+            std::string name, group;
+            bmmo_physics_ball_recipe recipe{};
+            float matrix[16] = {};
+        };
+        std::map<uint32_t, std::vector<local_birth>> local_births_;
+        // The birth of `entity` recorded at `tick`, or - tick 0 - its latest.
+        const local_birth* find_local_birth(const std::string& entity, uint32_t tick) const {
+            if (tick) {
+                const auto it = local_births_.find(tick);
+                if (it == local_births_.end()) return nullptr;
+                for (const auto& b: it->second) if (b.name == entity) return &b;
+                return nullptr;
+            }
+            for (auto it = local_births_.rbegin(); it != local_births_.rend(); ++it)
+                for (const auto& b: it->second) if (b.name == entity) return &b;
+            return nullptr;
+        }
+        // "<name>|fixed=|frozen=|coll=|cmc=|fr=|el=|m=|ld=|rd=|mc=x,y,z|surf=|convex=a/b|balls=x,y,z,r/..|concave=a/b|group=|mtx=16 floats"
+        static bool parse_recipe_event(const std::string& text, local_birth& out) {
+            std::vector<std::string> fields;
+            size_t start = 0;
+            for (;;) {
+                const size_t bar = text.find('|', start);
+                fields.push_back(text.substr(start, bar == std::string::npos ? std::string::npos : bar - start));
+                if (bar == std::string::npos) break;
+                start = bar + 1;
+            }
+            if (fields.size() < 2 || fields[0].empty()) return false;
+            out.name = fields[0];
+            std::snprintf(out.recipe.collision_surface, sizeof(out.recipe.collision_surface), "%s", "");
+            const auto split = [](const std::string& v, char sep) {
+                std::vector<std::string> parts;
+                if (v.empty()) return parts;
+                size_t at = 0;
+                for (;;) {
+                    const size_t next = v.find(sep, at);
+                    parts.push_back(v.substr(at, next == std::string::npos ? std::string::npos : next - at));
+                    if (next == std::string::npos) break;
+                    at = next + 1;
+                }
+                return parts;
+            };
+            const auto number = [](const std::string& v) { return std::strtod(v.c_str(), nullptr); };
+            int matrix_values = 0;
+            for (size_t i = 1; i < fields.size(); ++i) {
+                const size_t eq = fields[i].find('=');
+                if (eq == std::string::npos) continue;
+                const std::string key = fields[i].substr(0, eq), value = fields[i].substr(eq + 1);
+                if (key == "fixed") out.recipe.fixed = value == "1";
+                else if (key == "frozen") out.recipe.start_frozen = value == "1";
+                else if (key == "coll") out.recipe.enable_collision = value == "1";
+                else if (key == "cmc") out.recipe.calc_mass_center = value == "1";
+                else if (key == "fr") out.recipe.friction = static_cast<float>(number(value));
+                else if (key == "el") out.recipe.elasticity = static_cast<float>(number(value));
+                else if (key == "m") out.recipe.mass = static_cast<float>(number(value));
+                else if (key == "ld") out.recipe.linear_damp = static_cast<float>(number(value));
+                else if (key == "rd") out.recipe.rot_damp = static_cast<float>(number(value));
+                else if (key == "mc") {
+                    const auto parts = split(value, ',');
+                    for (size_t k = 0; k < 3 && k < parts.size(); ++k) out.recipe.mass_center[k] = static_cast<float>(number(parts[k]));
+                } else if (key == "surf") {
+                    std::snprintf(out.recipe.collision_surface, sizeof(out.recipe.collision_surface), "%s", value.c_str());
+                } else if (key == "convex") {
+                    const auto parts = split(value, '/');
+                    out.recipe.convex_count = 0;
+                    for (const auto& part: parts) {
+                        if (out.recipe.convex_count >= BMMO_PHYSICS_MAX_CONVEX) return false;
+                        std::snprintf(out.recipe.convex[out.recipe.convex_count++], BMMO_PHYSICS_NAME_SIZE, "%s", part.c_str());
+                    }
+                } else if (key == "concave") {
+                    const auto parts = split(value, '/');
+                    out.recipe.concave_count = 0;
+                    for (const auto& part: parts) {
+                        if (out.recipe.concave_count >= BMMO_PHYSICS_MAX_CONCAVE) return false;
+                        std::snprintf(out.recipe.concave[out.recipe.concave_count++], BMMO_PHYSICS_NAME_SIZE, "%s", part.c_str());
+                    }
+                } else if (key == "balls") {
+                    const auto parts = split(value, '/');
+                    out.recipe.ball_count = 0;
+                    for (const auto& part: parts) {
+                        const auto xyzr = split(part, ',');
+                        if (xyzr.size() != 4 || out.recipe.ball_count >= BMMO_PHYSICS_MAX_BALLS) return false;
+                        for (int k = 0; k < 3; ++k) out.recipe.ball_center[out.recipe.ball_count][k] = static_cast<float>(number(xyzr[k]));
+                        out.recipe.ball_radius[out.recipe.ball_count] = static_cast<float>(number(xyzr[3]));
+                        ++out.recipe.ball_count;
+                    }
+                } else if (key == "group") {
+                    out.group = value;
+                } else if (key == "mtx") {
+                    const auto parts = split(value, ',');
+                    if (parts.size() != 16) return false;
+                    for (size_t k = 0; k < 16; ++k) out.matrix[k] = static_cast<float>(number(parts[k]));
+                    matrix_values = 16;
+                }
+            }
+            return matrix_values == 16;
+        }
         uint32_t queue_traces_ = 0;                          // --trace-restore PreSimulate queue lines (the first 24)
         std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds

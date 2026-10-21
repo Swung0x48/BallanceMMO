@@ -227,6 +227,7 @@ namespace {
         std::string savestate_describe;
         std::string describe_script;      // --describe-script NAME: print that root script's graph
         bool ignore_ov = false;           // --ignore-ov: --savestate-diff leaves the overlap tree out
+        bool ignore_order = false;        // --ignore-order: ...and the cache ring and unit numbering
         int max_diff = 1;                 // --max-diff N: --savestate-diff lists up to N differing fields
         int savestate_rounds = 50;
         int savestate_max_depth = 48;
@@ -363,6 +364,7 @@ namespace {
             else if (arg == "--savestate-describe") { if (!(v = next())) return false; out.savestate_describe = v; }
             else if (arg == "--describe-script") { if (!(v = next())) return false; out.describe_script = v; }
             else if (arg == "--ignore-ov") out.ignore_ov = true;
+            else if (arg == "--ignore-order") out.ignore_order = true;
             else if (arg == "--max-diff") { if (!(v = next())) return false; out.max_diff = std::atoi(v); }
             else if (arg == "--rounds") { if (!(v = next())) return false; out.savestate_rounds = std::atoi(v); }
             else if (arg == "--max-depth") { if (!(v = next())) return false; out.savestate_max_depth = std::atoi(v); }
@@ -1688,7 +1690,7 @@ namespace {
             }
         }
         const std::string difference = bmmo::physics::diff_savestate(blobs[0].data(), blobs[0].size(), blobs[1].data(),
-                                                                     blobs[1].size(), args.ignore_ov, args.max_diff);
+                                                                     blobs[1].size(), args.ignore_ov, args.max_diff, args.ignore_order);
         if (difference.empty()) {
             std::printf("identical (%zu bytes)\n", blobs[0].size());
             return 0;

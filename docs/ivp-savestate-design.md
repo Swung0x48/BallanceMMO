@@ -404,6 +404,65 @@ simulating, and the caller's per-body fallback writes into a consistent world.
 Measured before the salvage: a refused restore at step 6 was followed by an
 access violation in `~IVP_OO_Watcher` at the next rewind.
 
+**Bodies born inside the window, re-created (2026-10-22, plan doc 9).** Parking
+was exact in value and wrong in order: the 20:12 and 50:48 arena arms came out
+of every rewind with their blobs equal to the control's in every field but the
+overlap-tree layout (two extra nodes from the first rewind that spanned births),
+the unit indices and the cache reuse index, and the plate row then drifted by
+ulps in the floor's hull entries a few live ticks after any rewind through it,
+while the 7:5 arm, whose rewinds left the tree identical, stayed exact.  A
+recheck after the birth tick's step files the body in the tree, in a unit and
+in a cache slot at a different moment and by a different path than the live
+Physicalize did, and IVP's order is part of the arithmetic in a pile.  So,
+when the caller installs `rollback_world::destroy_body` and `recreate_body`
+(the headless client and the retail mod do; the SimTool scenes have no birth
+inside a window), a body born inside the window is destroyed BEFORE the blob
+is applied - the blob then meets exactly the object set it recorded and parks
+nothing - and made again at the start of its birth tick, before that tick's
+scripts and step, with the recipe, collision group and entity matrix its
+Physicalize used: engine change #19 keeps `CKIpionManager::m_CurrentCreate`
+pointing at the creation arguments while the body is made, the bridge's
+object listener writes them into the event log as a `recipe` line at every
+creation, the headless client keeps those by tick (`local_births_`), the retail
+mod keeps BML's `OnPhysicalize` parameters the same way.  After the birth
+tick's step the body is expected bit-identical to its birth record
+(`births_recreated_exact`); a difference is counted (`birth_recreate_mismatches`)
+and corrected as the parked path corrected it.  A body with no recipe (born
+before the session's log started) is parked as before
+(`birth_recreate_failures`).  The event log is muted around both operations:
+they are not lifetime changes of the body the records describe.
+Measured (20:12 arm, 46 births inside windows): 45 came back bit-identical
+after their birth tick's step - the one that did not had been moved by its own
+script in the same frame after the Physicalize.  But a body's joints and force
+controllers are made by module scripts that were activated inside the window
+and are kept live rather than re-run (bridge API v14), so they went with the
+destroyed body and the plate row fell off its joints.  Re-creation is therefore
+the `--recreate-births` A/B, not the default.
+
+The default keeps the body parked and fixes what it can of the ORDER:
+`birth_order` applies a tick's births in the live creation order (the tree
+takes its layout from insertion order), and `birth_tick_of` lets a body the
+blob does not know AND the records do not track - a fixed part of a module,
+born inside the window - wait out of the tree until its birth tick instead of
+being rechecked in at the anchor (that was the two extra overlap nodes, from
+the first rewind that spanned the pusher's rail and filler).  With these the
+overlap tree is identical to the control's at every compared tick, the 7:5
+arm stays at one body off (the swing), and the cache reuse index and the unit
+numbering still differ.  `insert_birth` - the parked body put where its
+Physicalize made it at the start of its birth tick, before that tick's scripts
+and step, with the recheck (bridge API v19 `set_body_matrix`: the entity's
+matrix set, the pose derived from it as the creation derives it, a beam at
+rest, awake or frozen as the Physicalize left it) - is an A/B
+(`--insert-births`): a beam normalizes the quaternion where the creation does
+not, so most insertions miss their birth record in the last bit and fall back
+to the re-pose, a second recheck after the step, and the 7:5 arm came out off
+on six bodies with it.  The plate row still drifts after a deep rewind through
+it: `--savestate-diff --ignore-ov --ignore-order` puts the first physical
+difference in the hull entries of the plates' mindists, the collision state a
+recheck creates at a different moment than the creation.  The end of this
+road is plan doc 10: re-run the module scripts inside the replay, so the
+Physicalize, the joints and the forces are made the live way.
+
 ## Pitfalls already found
 
 * `IVP_IF(x)` is `if(0==1)` in release: `remove_exact_mindist` and friends do

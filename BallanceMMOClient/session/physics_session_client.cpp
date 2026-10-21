@@ -2527,11 +2527,52 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
                                       float* ballRadius, int concaveCnt, CKMesh** concaveMesh) {
     auto& s = physics_session_;
     if (s.phase != phase_type::running || !target) return;
+    // Every birth, the own ball's included (recorded again below with its
+    // spawn offset applied): what a rewind across this tick re-creates the
+    // body from (bmmo::session::physics_session_state::local_births).
+    const auto record_birth = [&](uint32_t tick) {
+        bmmo::session::physics_session_state::local_birth birth;
+        birth.name = target->GetName() ? target->GetName() : "";
+        birth.group = collGroup ? collGroup : "";
+        bmmo::session::ball_recipe r;
+        r.fixed = fixed != 0;
+        r.friction = friction;
+        r.elasticity = elasticity;
+        r.mass = mass;
+        r.start_frozen = startFrozen != 0;
+        r.enable_collision = enableColl != 0;
+        r.calc_mass_center = calcMassCenter != 0;
+        r.linear_damp = linearDamp;
+        r.rot_damp = rotDamp;
+        r.mass_center[0] = massCenter.x; r.mass_center[1] = massCenter.y; r.mass_center[2] = massCenter.z;
+        r.collision_surface = collSurface ? collSurface : "";
+        for (int i = 0; i < convexCnt && convexMesh; ++i)
+            r.convex_meshes.push_back(convexMesh[i] && convexMesh[i]->GetName() ? convexMesh[i]->GetName() : "");
+        for (int i = 0; i < ballCnt; ++i) {
+            bmmo::session::ball_recipe::sphere sphere;
+            if (ballCenter) { sphere.center[0] = ballCenter[i].x; sphere.center[1] = ballCenter[i].y; sphere.center[2] = ballCenter[i].z; }
+            sphere.radius = ballRadius ? ballRadius[i] : 0.0f;
+            r.balls.push_back(sphere);
+        }
+        for (int i = 0; i < concaveCnt && concaveMesh; ++i)
+            r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
+        birth.recipe = to_bridge_recipe(r);
+        const VxMatrix& m = target->GetWorldMatrix();
+        for (int row = 0; row < 4; ++row)
+            for (int k = 0; k < 4; ++k) birth.matrix[row * 4 + k] = m[row][k];
+        auto& at = s.local_births[tick];
+        for (auto& existing: at)
+            if (existing.name == birth.name) { existing = birth; return; }
+        at.push_back(birth);
+        while (!s.local_births.empty() && s.local_births.begin()->first + 4096 < tick)
+            s.local_births.erase(s.local_births.begin());
+    };
     CK3dObject* ball = get_current_ball();
     if (!ball || target != static_cast<CK3dEntity*>(ball)) {
         // retail Physicalize of a level object during the session (the
         // sector reset after a death re-runs it; the body guard keeps the
         // existing body, engine change #6)
+        record_birth(s.current_tick() + 1);
         if (s.trace)
             logger_->Info("Physics session: retail physicalize of %s at tick %u (%d convex, %d balls, %d concave)",
                           target->GetName() ? target->GetName() : "?", s.current_tick() + 1, convexCnt, ballCnt, concaveCnt);
@@ -2610,7 +2651,7 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
     }
     for (int i = 0; i < concaveCnt && concaveMesh; ++i)
         r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
-    (void)collGroup;
+    record_birth(event.tick);   // after the spawn offset moved the entity: the matrix the body is made from
     physics_session_send_event(event);
     // Keep it: a server that never applied this event has to be told again
     // (physics_session_check_own_body), same flags, no second impulse.
@@ -2842,6 +2883,51 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         if (c.kind == 1) journal.request_checkpoint();   // a rollback re-simulated every body
     };
     bmmo::session::rollback_world world = bmmo::session::bind_rollback_world(physics_view_, o);
+    // A body born inside the window is made again inside the replay at its
+    // birth tick, with the recipe and matrix OnPhysicalize recorded (plan doc
+    // 9); the bridge's event log is muted around the destroy and the
+    // re-creation, which are not lifetime changes of the body the records
+    // describe.
+    // A body born inside the window is put where its Physicalize made it at
+    // the start of its birth tick, before that tick's scripts and step (plan
+    // doc 9): the way the live creation entered IVP's overlap tree, which
+    // parking and re-posing it after the step did not reproduce.  Its joints
+    // and controllers stay what they are.
+    // Not installed: measured on the headless arms, an insertion that misses
+    // its birth record in the last bit (a beam normalizes the quaternion, the
+    // creation does not) falls back to a second recheck and leaves more bodies
+    // off the control than plain parking.  Kept for the day the pose is
+    // written the way the creation writes it.
+    if (s.insert_births) world.insert_birth = [this](const std::string& entity, uint32_t birth_tick) {
+        auto& s = physics_session_;
+        // The balls stay on the parking path (the replica's controllers are on them).
+        if (entity.rfind("Ball_", 0) == 0) return false;
+        if (CK3dObject* ball = get_current_ball(); ball && ball->GetName() && entity == ball->GetName()) return false;
+        const bmmo::session::physics_session_state::local_birth* birth = s.find_local_birth(entity, birth_tick);
+        if (!birth) return false;
+        std::string error;
+        if (!physics_view_.set_body_matrix(entity.c_str(), birth->matrix, !(birth->recipe.start_frozen || birth->recipe.fixed), error)) {
+            if (s.birth_logs++ < 8) logger_->Warn("Physics session: birth: inserting %s at tick %u failed: %s", entity.c_str(), birth_tick, error.c_str());
+            return false;
+        }
+        return true;
+    };
+    // The tick a body was created at (its latest birth), for the untracked
+    // ones the blob does not know.
+    world.birth_tick_of = [this](const std::string& entity) -> uint32_t {
+        const auto& births = physics_session_.local_births;
+        for (auto it = births.rbegin(); it != births.rend(); ++it)
+            for (const auto& b: it->second) if (b.name == entity) return it->first;
+        return 0;
+    };
+    // The order OnPhysicalize reported a tick's bodies in: the scripts' order.
+    world.birth_order = [this](uint32_t tick) {
+        std::vector<std::string> names;
+        const auto it = physics_session_.local_births.find(tick);
+        if (it != physics_session_.local_births.end())
+            for (const auto& b: it->second) names.push_back(b.name);
+        return names;
+    };
     if (!s.script_ids.empty()) {
         bmmo::session::script_binding_options so;
         so.context = m_bml->GetCKContext();

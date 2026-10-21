@@ -1075,6 +1075,170 @@ TEST(RollbackEngine, TrafoBallIsHeldAtItsBirthPoseAndReposedAtItsBirthTick) {
     EXPECT_NEAR(world.bodies["OwnNew"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 }
 
+// Plan doc 9: with destroy_body / recreate_body installed and the savestate
+// applied, a body born inside the window is not parked and re-posed but
+// destroyed at the restore and made again at the start of its birth tick, the
+// way the live frame made it; after that tick's step it is expected exactly
+// where its birth record has it, and nothing is written.
+TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWorldCanMakeIt) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    // The caller's record of the birth: the state the body was created with,
+    // before its first step.
+    std::map<std::string, fake_body> births;
+    w.destroy_body = [&](const std::string& entity) {
+        world.calls.push_back("destroy " + entity);
+        if (!births.count(entity)) return false;
+        return world.bodies.erase(entity) > 0;
+    };
+    w.recreate_body = [&](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("recreate " + entity + "@" + std::to_string(tick));
+        world.bodies[entity] = births.at(entity);
+        return true;
+    };
+
+    rollback_tracked before;
+    before.remote_entities = {"Remote"};
+    rollback_tracked after = before;
+    after.mechanisms = {"Prop"};
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        if (tick == 4) {
+            fake_body born;
+            born.position[0] = 10.0;
+            born.linear[0] = 3.0f;
+            births["Prop"] = born;
+            world.bodies["Prop"] = born;
+        }
+        w.step();
+        engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
+    }
+    world.calls.clear();
+    const double born_at = 10.0 + 3.0 * kDt;
+    ASSERT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+
+    // A snapshot of tick 2 that disagrees about the remote ball: a rewind
+    // across the prop's birth at 4.
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+    auto entity_now = [](const body_state& body) -> std::string {
+        return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+    };
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+    EXPECT_EQ(engine.stats().resim_ticks, 4u);
+    EXPECT_EQ(engine.stats().savestates_restored, 1u);
+    // destroyed at the restore, made again at 4, found on its record: no write
+    EXPECT_EQ(world.count("destroy Prop"), 1);
+    EXPECT_EQ(world.count("recreate Prop@4"), 1);
+    EXPECT_EQ(world.count("set_body Prop"), 0);
+    EXPECT_EQ(engine.stats().births_recreated, 1u);
+    EXPECT_EQ(engine.stats().births_recreated_exact, 1u);
+    EXPECT_EQ(engine.stats().birth_recreate_mismatches, 0u);
+    EXPECT_EQ(engine.stats().birth_recreate_failures, 0u);
+    EXPECT_TRUE(world.bodies.contains("Prop"));
+    EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+}
+
+// The default path: insert_birth puts the parked body where its Physicalize
+// made it before its birth tick's step; after the step it is on its record and
+// nothing is written for it.
+TEST(RollbackEngine, ABodyBornInsideTheWindowIsInsertedBeforeItsBirthTicksStepWhenTheWorldKnowsItsPhysicalize) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    std::map<std::string, fake_body> births;
+    w.insert_birth = [&](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("insert " + entity + "@" + std::to_string(tick));
+        const auto it = births.find(entity);
+        if (it == births.end()) return false;
+        world.bodies[entity] = it->second;   // where and how the Physicalize made it, at rest
+        return true;
+    };
+
+    rollback_tracked before;
+    before.remote_entities = {"Remote"};
+    rollback_tracked after = before;
+    after.mechanisms = {"Prop"};
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        if (tick == 4) {
+            fake_body born;
+            born.position[0] = 10.0;
+            born.linear[0] = 3.0f;
+            births["Prop"] = born;
+            world.bodies["Prop"] = born;
+        }
+        w.step();
+        engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
+    }
+    world.calls.clear();
+    const double born_at = 10.0 + 3.0 * kDt;
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+    auto entity_now = [](const body_state& body) -> std::string {
+        return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+    };
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+    EXPECT_EQ(world.count("insert Prop@4"), 1);
+    // parked at the restore (one write), inserted before tick 4's step by the
+    // caller, found on its record after it: no re-pose
+    EXPECT_EQ(world.count("set_body Prop"), 1);
+    EXPECT_EQ(engine.stats().births_inserted, 1u);
+    EXPECT_EQ(engine.stats().births_inserted_exact, 1u);
+    EXPECT_EQ(engine.stats().birth_insert_mismatches, 0u);
+    EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
+}
+
+// The same rewind without a recipe for the body: destroy_body says no, and the
+// body is parked and re-posed as before.
+TEST(RollbackEngine, ABodyBornInsideTheWindowIsParkedWhenTheWorldCannotMakeItAgain) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    w.destroy_body = [&](const std::string& entity) {
+        world.calls.push_back("destroy " + entity);
+        return false;
+    };
+    w.recreate_body = [&](const std::string&, uint32_t) { return true; };
+
+    rollback_tracked before;
+    before.remote_entities = {"Remote"};
+    rollback_tracked after = before;
+    after.mechanisms = {"Prop"};
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        if (tick == 4) {
+            world.bodies["Prop"].position[0] = 10.0;
+            world.bodies["Prop"].linear[0] = 3.0f;
+        }
+        w.step();
+        engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
+    }
+    world.calls.clear();
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+    auto entity_now = [](const body_state& body) -> std::string {
+        return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+    };
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+    EXPECT_EQ(world.count("destroy Prop"), 1);
+    EXPECT_EQ(world.count("recreate Prop"), 0);
+    // parked at T, re-posed after tick 4's step: the pre-9 path
+    EXPECT_EQ(world.count("set_body Prop"), 2);
+    EXPECT_EQ(engine.stats().births_recreated, 0u);
+    EXPECT_EQ(engine.stats().birth_recreate_failures, 1u);
+}
+
 // 9.25 rule 1: a row for a body we have no record of at T is not a rejection.
 // The body exists now, so the row is the best pose anyone has for it at T and
 // the restore uses it; the snapshot corrects the rest of the world as usual.

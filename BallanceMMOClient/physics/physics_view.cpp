@@ -521,6 +521,19 @@ namespace bmmo::physics {
         return ok;
     }
 
+    bool physics_view::set_body_matrix(const char* entity, const float matrix[16], bool simulated, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_body_matrix) {
+            error = "the physics_RT bridge lacks set_body_matrix";
+            return false;
+        }
+        char text[256] = {};
+        const bool ok = api_->set_body_matrix(manager_, entity, matrix, simulated ? 1 : 0, text, sizeof(text)) > 0;
+        if (text[0]) error = text;
+        return ok;
+    }
+
     bool physics_view::savestate_get(std::vector<uint8_t>& out, std::string& error) const {
         error.clear();
         out.clear();

@@ -1113,18 +1113,27 @@ namespace bmmo::physics::savestate {
             return f.kind == "ovnode" || (f.kind == "world" && f.field == "ov_nodes") || (f.kind == "clock" && f.field == "ov_root")
                 || (f.kind == "ov" && f.field == "node");
         }
-        std::vector<field_entry> flatten_without_ov(const world_record& world) {
+        // The other bookkeeping whose order two runs may keep differently
+        // without any value differing: the object cache ring and its reuse
+        // index, the simulation units' numbering (a core's unit index, the
+        // unit records themselves).
+        bool is_order_field(const field_entry& f) {
+            return f.kind == "cache" || (f.kind == "clock" && f.field == "cache_reuse_index")
+                || (f.kind == "world" && (f.field == "cache_slots" || f.field == "units"))
+                || (f.kind == "core" && f.field == "unit") || f.kind == "unit";
+        }
+        std::vector<field_entry> flatten_without(const world_record& world, bool ov, bool order) {
             std::vector<field_entry> all = flatten(world), kept;
             kept.reserve(all.size());
             for (field_entry& f : all)
-                if (!is_ov_field(f)) kept.push_back(std::move(f));
+                if (!(ov && is_ov_field(f)) && !(order && is_order_field(f))) kept.push_back(std::move(f));
             return kept;
         }
     }
 
-    std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov, int max_differences) {
-        const std::vector<field_entry> ea = ignore_ov ? flatten_without_ov(a) : flatten(a);
-        const std::vector<field_entry> eb = ignore_ov ? flatten_without_ov(b) : flatten(b);
+    std::string diff_world(const world_record& a, const world_record& b, bool ignore_ov, int max_differences, bool ignore_order) {
+        const std::vector<field_entry> ea = flatten_without(a, ignore_ov, ignore_order);
+        const std::vector<field_entry> eb = flatten_without(b, ignore_ov, ignore_order);
         const size_t n = std::min(ea.size(), eb.size());
         std::string out;
         int listed = 0;
@@ -1193,7 +1202,7 @@ namespace bmmo::physics {
     }
 
     std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size, bool ignore_ov,
-                               int max_differences) {
+                               int max_differences, bool ignore_order) {
         static const uint8_t empty = 0;
         if (!a) a_size = 0;
         if (!b) b_size = 0;
@@ -1204,9 +1213,9 @@ namespace bmmo::physics {
         if (!savestate::read_world(ra, wa, error)) return "savestate a unreadable: " + error;
         savestate::reader rb(b ? b : &empty, b_size);
         if (!savestate::read_world(rb, wb, error)) return "savestate b unreadable: " + error;
-        std::string d = savestate::diff_world(wa, wb, ignore_ov, max_differences);
+        std::string d = savestate::diff_world(wa, wb, ignore_ov, max_differences, ignore_order);
         if (d.empty())
-            d = std::string(ignore_ov ? "no difference outside the overlap tree" : "bytes differ but every field renders the same")
+            d = std::string(ignore_ov || ignore_order ? "no difference outside the ignored bookkeeping" : "bytes differ but every field renders the same")
               + " (sizes " + std::to_string(a_size) + " and " + std::to_string(b_size) + ")";
         return d;
     }

@@ -84,6 +84,8 @@ namespace bmmo::physics {
         int contacts_set(const char* entity, const bmmo_physics_contact* in, int count, uint32_t flags, std::string& error) const;
         // v16: rebuild the body's collision pairs against the world as it stands now.
         bool body_recheck(const char* entity, std::string& error) const;
+        // v19: the body put where its Physicalize made it (bmmo::physics::set_body_matrix).
+        bool set_body_matrix(const char* entity, const float matrix[16], bool simulated, std::string& error) const;
         // ---- bridge API v17: the IVP savestate (docs/ivp-savestate-design.md) ----
         // The engine's whole dynamic state as a local byte blob; never on the
         // wire.  savestate_get replaces `out`; savestate_set takes the
