@@ -5,7 +5,10 @@ tells a late player which of its inputs it substituted, a player whose
 lateness persists gets a longer lead of its own, and the one-second
 Physicalize barrier goes. Written against `collision-overhaul` at 0dd381a.
 Line numbers are from that revision. Revision 2 answers two reviews; §8 lists
-what each finding changed.
+what each finding changed. Revision 3 replaces part two's measurement (the
+meter, patience and lowering: §2.1, §2.6, §2.7, and the Sector margin's
+samples in §2.9) after the lp11 runs; its own line numbers are from 177c337
+and are marked so. §8.2 records it.
 
 ## 0. Principles and the problem
 
@@ -351,43 +354,250 @@ and they get them through the relay like any other frames.
 
 ## 2. Part two: a per-player lead
 
+**Revision 3: what revision 2 measured, and why its rules were replaced.**
+Revision 2's meter and patience were built in plan steps 7, 9 and 10
+(0b5de5f, 53d8ecc, b134bcb) and measured in the lp11 runs: four headless
+clients, 150 ms each way, lane, snapshots off, the event on client 2
+(`maps/arena-test/lp11_*`). Revision 2 judged every member against a reference
+frozen from its own first four windows: r01 ≈ 20.2 and r10 ≈ 21.0 ticks of
+slack, measured over ticks 27-290. With both flags on:
+
+- The control A0 substituted 11.4-15.7 % of every client's ticks; with the
+  flags off (lp11_a0_off) it substituted 0-1 ticks. A0 also raised three
+  healthy clients by 9-11 ticks. A0j substituted 10.6-18.3 %, A1 11.7-16.2 %.
+- The cause is that the members' slack dips **together**. All four dip to
+  3-11 ticks around the deaths and respawns (ticks 2302-2615 in the lane).
+  Three of them dip at the key edges of client 0's recorded drive
+  (arena_map_test.py:428 brakes for 25 ticks every 500, around 1169, 1670 and
+  2169), where the other three replay about 20 ticks together. The dip around
+  tick 2640 is not a sector activation: there is no Sector event after 1807.
+- Patience at `deadline - (r01 - 1)` cut everyone in such a dip. The waiver,
+  which ended only on a sample with slack ≥ r01 - 1, then did about 90 % of
+  the cutting: `cut=888 (patience 33, waiver 855)` in the lp11_a0 server log.
+  The meter compared each member with its own frozen past, so it read the
+  shared dip as every member's own lateness.
+- In A9c the WSL server's clock ran about 7-8 % fast against the Windows
+  clients for about 8 s. Every member's frames fell past the deadline
+  together: slack -23.4 for all four at tick 660, substituted on every tick
+  from 245 to 760. The reference froze on that (r01 3.85 at 576), and all four
+  were raised by +30 at tick 707.
+- Under a persistent +300 ms uplink on client 2 (lp11_a5u), the meter decided
+  k = 20. The Sector margin capped it at 14 (§2.9). With both flags off
+  (lp11_a5u_off), the same arm resynced all four clients, because the relay
+  went past the reach.
+
+Revision 3 keeps the per-datagram sampling, the persistence rule, the gates and
+the whole SessionLead path. It changes three things:
+
+- A member's lateness is measured **against the other members at the same
+  tick**, so anything they share cancels. An early member counts as on time:
+  it is never a reference earlier than on time, and a raised member that is
+  still late counts with its lateness, not with its raise.
+- Each member keeps one frozen number, its **baseline**: where its frames
+  normally fall. Members on one start base differ structurally by their round
+  trips, and the baseline absorbs that.
+- An **absolute rule** is kept for frames at the deadline's edge. When every
+  member is late together, nothing relative can see it; when a majority shares
+  it, it waits ten seconds before it raises anyone, so a fault of the server's
+  own clock (lp11_a9c) raises nobody.
+
+The per-tick numbers quoted below come from replaying the lp11 runs: arrival
+times are reconstructed from the client journals (a client's TICK record for T
+plus a constant 160 ms per run, calibrated against the S1 lines to ±0.1 tick
+at q50). The replay is open loop, and proxy jitter and loss are not in it, so
+plan steps R1-R3 (§6.1) measure the rules in the runner.
+
 ### 2.1 Measurement on the server
 
-No arrival time exists today. `handle_session_input` (server.cpp:1309-1313)
-captures `steady_clock::now()` and passes it through
-`runner_->submit_input` (session_runner.cpp:366-375) into the posted lambda.
+**Arrivals.** `handle_session_input` passes the GNS receive time
+(177c337: server.cpp:1655-1664) to `submit_input` (session_runner.cpp:471-523).
+The runner keeps an arrival ring per member, 256 ticks deep: {tick, `at`,
+`seen`, `as_newest`}.
 
-**Samples are taken per datagram, from its newest frame.** Every uplink
-datagram of player p gives one sample, `s = (deadline(t_new) - arrival) /
-tick`, where `t_new` is the newest frame tick it carries. A datagram whose
-`t_new` is not newer than one already sampled is ignored (a duplicate or a
-reordered datagram). This measures the path and the client's send schedule.
-Loss gives no sample at all, and a frame recovered from the redundancy window
-is never a sample. So loss cannot look like latency, and no sample waits for
-a "lost" classification. The meter is `lateness_meter` (new,
-`BallanceMMOCommon/include/session/lateness.hpp`, pure and unit testable).
+- `at` is the first arrival, at GNS's receive time.
+- `seen` is the runner's clock when the command that carried the frame ran.
+  The main loop polls every 15 ms and the runner drains commands only between
+  passes (session_runner.cpp:1044-1121), so `seen` is up to about a tick
+  later, and after a main-loop stall up to the 10 s age clamp later.
+- `as_newest` marks a frame whose first arrival was in the datagram where it
+  was the newest frame.
+
+The ring is written in `submit_input` before `buffer.submit` (:481) for every
+frame of the datagram whose slot does not hold that tick yet, stale frames
+included, and never for the `kMaxLookahead` garbage (:489-490). It is created
+with the input buffer (:240, :295), cleared at `player_ready` (:386-398) and
+erased at `remove_player` (:316-319). For a tick T,
+`slack_p(T) = (deadline(T) - at) / tick`. The meter measures on `at`.
+Patience (§2.6) measures on `seen`, because the step test can only take a
+frame it has seen.
+
+**The baseline.** `A_p` is the median slack of p's first 264 newest-frame
+samples after its **first** assignment (four windows of 66), floored at 3
+ticks (`kBaselineFloorTicks`, revision 2's deadline reference r10). It is
+frozen:
+
+- An acknowledged lead delta does not move it. A raise restores the arrivals
+  to the baseline, so moving the baseline by the delta would read the
+  restored arrivals as late.
+- A resync keeps it, shifted only by a lead the re-anchor did not restore
+  (§2.8).
+
+A member without a baseline is judged by nobody and is nobody's reference.
+
+**The quantities**, at tick T, in ticks:
+
+| name | definition | meaning |
+|---|---|---|
+| `n_p(T)` | `A_p - slack_p(T)` | how much later than usual p's frame came, at p's current lead |
+| `r_q(T)` | `max(0, n_q(T))` | q as a reference: its lateness, with an early frame counted as on time |
+| `U_p(T)` | the upper median of `r_q(T)` over the other members q that have a baseline and are not exempt at T (in a lead reset's held range, or below their cursor): the j-th smallest of `n_o`, `j = floor(n_o/2) + 1` | the others' common lateness |
+| `V_p(T)` | the smallest `r_q(T)` over the same members | the least late of the others |
+| `L_p(T)` | `n_p(T) - U_p(T)` | **p's lateness relative to the others** |
+| `L'_p(T)` | `n_p(T) - V_p(T)` | p's lateness relative to the least late other |
+
+**When they are computed.** In tick order, from the ring, once T has been
+stepped and p's frame for T is in. That is at T's step when the frame was
+already there, and at its arrival when T was stepped without it. A member q
+whose frame is still missing then counts with the lower bound of its
+lateness, `A_q - (deadline(T) - now)/tick`, because its frame arrives no
+earlier than now. Nothing is final earlier: n normalises each arrival by its
+member's baseline, so the order in n is not the order of arrival. In A0h the
+250 ms member arrives last but, with a baseline about 13 ticks below the
+others', can have the smallest n. Two things are excluded:
+
+- A sample is taken only from p's `as_newest` frames. Revision 2's rule
+  stands: loss is not latency, and a frame recovered from the redundancy
+  window is never a sample.
+- A tick at which no other member has a baseline and is not exempt gives no
+  relative sample.
+
+In tick order, lateness.hpp:215-216's "newer than the last sampled tick" test
+drops nothing. Revision 3 computed L as soon as j frames were in, so the ticks
+whose reference completed late were dropped, and those are exactly the ticks
+where the others were late. A sample whose T lies below the meter's
+`discard_below_` is still dropped.
+
+**Why each piece.**
+
+- **What the others share cancels.** A dip all members share (the deaths and
+  respawns) moves U and V with p. So does one most of them share: in the
+  brake-edge dips the three replaying members are each other's reference.
+- **The clamp at 0.** An early member is never a reference earlier than on
+  time. Three kinds of member arrive early against their baselines:
+  - a raised member whose path recovered (`n = -k`);
+  - a member whose path improved after its baseline was measured;
+  - a late joiner, whose lead `D + ceil(rtt) + 2` gives slack `2D + 2` whatever
+    its round trip (its baseline absorbs that, so only an improvement after
+    it counts).
+
+  Without the clamp, in a two-member session such a member would make its
+  partner look late by the improvement, cut it, and raise it.
+- **No offset in the reference.** Revision 3 used `g_q = n_q + o_q`, q's
+  lateness with its acknowledged raises added back, as the reference. That
+  is wrong after a raise:
+  - A raised member's frames arrive at `n`, not at `g`. A5u's client 2 after
+    a capped raise of 14 is at `n ≈ 6` and `g ≈ 20`, and A5s's after its +7
+    is at `n ≈ 0` and `g ≈ 7`.
+  - Every healthy member's reference moved by the raise. Its patience fell
+    to the deadline, and with two or three members its own lateness went
+    unseen up to `20 + M` ticks.
+  - In the window between E and the acknowledgment, `o` was not counted yet
+    and a slewing member read `g = -k`.
+
+  With `r = max(0, n)`, a raised member counts with what its frames do.
+- **The upper median.** U is a majority's lateness: one late member never
+  moves it, and a late pair in a four-member session is still seen. With
+  `n_o` = 1 or 2 it is the later of the others, so in a three-member session
+  a late pair is its own reference in L. A late majority (two of three, three
+  of four) reads `L ≈ 0`.
+- **The least late other.** `L'` compares p with the least late other member,
+  which is on time at worst. It sees any lateness that not every member
+  shares, including a late majority's, but a dip shared by all but one member
+  reads the same way. So its rule has a persistence of 660 ticks, not 132. In
+  the lp11 replays (a0_off, and a0j, a1, a4, a9 to tick 2700), the longest
+  majority of `L'` misses that any member held was 93 ticks, around the
+  sector-3 crossings in a9; the brake-edge dips held 22-55.
+- **The baseline.** Without it, structural differences read as lateness. A
+  start member's slack is `base + D - raw rtt`, with one base for the whole
+  session (late_tick.hpp:124-126, 130-134). So a 30 ms member and a 200 ms
+  member differ by 11 ticks for good, and a late joiner sits 12-15 ticks
+  before the start members. With L on raw arrivals, the later member would be
+  cut from the session's first tick and raised after about 3 s. The lp11 arms
+  are symmetric and cannot show this; A0j's clock anchoring already offsets
+  two members by 2.1 ticks, and arm A0h (§5.2) covers it. The baseline does
+  not bring back revision 2's failure:
+  - It is a median, not a tail.
+  - Start members measure theirs over the same ticks, so a dip in the
+    measurement window biases all of them together and cancels in L.
+  - A joiner measures alone, and a median over 264 samples absorbs any dip
+    shorter than 132 ticks.
+
+**The rules.** They share the margin `M = 4` ticks (`kQuorumMarginTicks`) with
+patience (§2.6), where its sizing is given.
 
 | quantity | value |
 |---|---|
-| reference | `r10_p`, `r01_p` = q10 and q01 of the samples over the player's first four windows of 66 samples after an assignment, taken only from windows where at most 10 % of samples fall after the deadline. Afterwards it is **frozen**: it is never re-measured downward, it moves only by an acked delta (`r += applied`), and it is measured anew only after the next assignment. |
-| reference that cannot be set | after 8 windows without a qualifying one (a member structurally late from its start), `r10_p` and `r01_p` are set to the median of the other members' measured references, and the raise rule below applies against them. With no measured peer by window 12 (a solo session, or every peer on the fallback; added in step 10, behind `physics.lead_adjust`) it takes the deadline reference: `r01 = 1` (patience exactly the deadline, a miss is a substituted frame) and `r10 = 3` |
-| miss | a sample below `r01_p - 1`: that frame arrived after the player's patience (§2.6) |
-| raise | in the trailing 66 samples **more than half are misses**, at every stepped tick for **132 consecutive ticks**. Then `k = ceil(r10_p - q10)` over those 66, at least 2. |
-| lower | `q05 > r10_p + 6` over the trailing 66 samples, at every tick for 660 consecutive ticks; `k = -floor(q05 - r10_p - 1)`, and the player's total offset never goes below 0 |
-| cooldown | no decision until `E + |k|·2 + 132` ticks after an adjustment; samples before E are discarded |
+| relative miss | `L_p > M`: p came more than M ticks later than the others, against its baseline |
+| minority miss | `L'_p > M` |
+| absolute miss | a per-datagram newest-frame sample with slack below `θ = 3` ticks (`kAbsoluteMissTicks`). As built: `s = (deadline(t_new) - arrival) / tick`, one per datagram, newer ticks only. The threshold moves from 0 to 3. |
+| raise | One of three majorities over its trailing 66 samples holds at every fresh tick for its persistence: relative, 132 ticks; minority, 660 ticks (`kMinorityPersistTicks`); absolute, 132 ticks, or 660 (`kSharedPersistTicks`) while the absolute majority is **shared**, meaning at least two counted members, and more than half of them, hold one at that tick. k: relative `max(2, ceil(q90(L)))`; minority `max(2, ceil(q90(L')))`; absolute `ceil(q50(n))` over the trailing 132 samples (660 when shared). When several hold, the largest. |
+| lower | `lead_offset > 0`, the relative window full, `q95(L) < -4` (`kLowerMarginTicks`) at every fresh tick for 660 consecutive ticks, and no absolute majority. `k = -min(lead_offset, floor(-q95(L)) - 1, floor(q10(slack)) - 3)`; nothing when that is not negative. |
+| cooldown, gates | Unchanged: no decision until `E + |k|·2 + 132` after an acknowledgment; samples below E discarded; one decision outstanding; at most two raises that do not restore the arrivals; the total cap latches; the Sector bound defers (§2.2, §2.9). |
+| solo | no relative samples, so only the absolute rule applies, at 132 ticks |
 
-**What "persistent" means.** A window has a majority of misses only after 33
-late samples. So the raise needs at least 131 consecutive ticks of lateness,
-about two seconds. A one-second delay spike, a CPU stall with its ≤ 33-frame
-catch-up, or a blackout (which gives no samples) can never raise the lead,
-wherever it falls relative to a window boundary. Arms A9 and A9c (§5.2) check
-this.
+**The raise's size.**
 
-A raise of `r10_p - q10` puts the player's arrivals back where its reference
-had them, not at the deadline. The lower threshold is wider and slower than
-the raise, and together with the cooldown that hysteresis keeps the lead from
-oscillating.
+- **Relative.** `ceil(q90(L))` puts 90 % of p's frames back at or before the
+  others', against its baseline. Client 2 in lp11_a5u reads L p50 19.73 and
+  p90 19.80 after the +300 ms uplink, which gives k = 20.
+- **Absolute.** `ceil(q50(n))` brings p's median arrival back to its
+  baseline, which is where the session's sizing put it. The trigger and the
+  target are then on one quantity: q50 of slack goes back to `A_p ≥ 3`, so
+  the trigger cannot hold again. Revision 3 triggered on `q50 < 0` and aimed
+  at `q10 = 3`, so a member could stay substituted on up to half its ticks
+  without a raise. Its q10 target was also unstable:
+  - The test was the lp11_a0_off replay with 19.8 ticks added to every
+    uplink from tick 1500. There q10 over 66 samples read 1 to 12 depending
+    on whether the window held a shared dip.
+  - `q50(n)` over 132 or 660 samples read 19.8-20.0 for every member at any
+    decision tick.
+  - The same replay gives 16.7-22.5 % of every member's frames past the
+    deadline before the raise.
 
+  On lp11_a9c's fault the absolute rule gives about 45 (`22 + 23`), but the
+  shared persistence takes no decision for a fault under 10 s.
+- **Several rules.** A member that is both a single late member and past the
+  deadline's edge gets the larger k.
+
+**What "persistent" means.** A majority takes 34 late samples, so a raise
+needs at least 131 consecutive ticks of lateness, about two seconds. A
+one-second delay spike (66 samples at L ≈ 20, a majority for about 66 ticks),
+a CPU stall with its ≤ 33-frame catch-up, or a blackout (no samples) can never
+raise the lead. A shared dip raises nobody: L and L' stay near 0, and slack
+stays at or above 3. The lane's dips bottom out at 3.0-4.7 ticks of slack. In
+the replays of lp11_a0_off, a0j, a1, a4 and a9, no member's trailing-66
+median of slack went below 3 even once. Two things take 660 ticks:
+
+- **A shift shared by a majority.** lp11_a9c's fault held every member past
+  the deadline from tick 245 to 760, 515 ticks. Under the shared rule it
+  raises nobody. A fault longer than 10 s raises every member once, and the
+  lower takes it back after the fault (`n = -k`, `L = -k`).
+- **A late majority** (the minority rule). It is waited for until then
+  (§2.6).
+
+**Not adopted.**
+
+- **The others' latest arrival as the meter's reference**: two members late
+  together would mask each other for good.
+- **No baseline**, the proposal: it fails on structural round-trip
+  differences, as shown above.
+- **The pooled inter-member spread as M**: one persistently late member widens
+  it for everyone.
+- **Revision 3's `g = n + o` reference**: it moves every other member's
+  reference by one member's raise (above).
+- **The absolute rule without the shared persistence.** Revision 3 raised
+  every member by up to 14 for a host-clock fault. Before step 12, that puts
+  every member's relay lag at 46-58 against a reach of 48.
 ### 2.2 The message: `SessionLead` (new opcode)
 
 SessionAssign cannot carry this. A newer `first_tick` means a renumbering, a
@@ -416,12 +626,14 @@ reliable. The server keeps `lead_offset[player] += applied`.
   step 11.
 - No new decision is taken for a player while its previous `seq` is unacked.
 - A raise that is acked but does not bring the player's samples back inside
-  its patience within the cooldown allows one more raise, with k measured
-  again. If the arrivals are still not restored after that, the server stops
+  its patience (revision 3: below the miss threshold, §2.1) within the
+  cooldown allows one more raise, with k measured again. If the arrivals are still not restored after that, the server stops
   deciding for that player until its next assignment and logs it once.
 - A raise is capped by the total lead cap (80 ticks, §2.5) and, until step
-  14, by the Sector margin (§2.9). A capped raise is applied as far as the
-  cap allows. The server does not take another decision at the cap.
+  14, by the Sector bound (§2.9). Revision 3 applies that bound only while
+  some sector of the level is not yet in the union. A capped raise is
+  applied as far as the cap allows. The server takes no further decision at
+  the total cap.
 
 So a client that cannot or will not apply the raise costs the server nothing
 after one decision, and the others nothing at all.
@@ -457,7 +669,10 @@ new base (or the first untaken tick): the client on the new base dropped the
 SessionLead by its epoch, and its real frames for [base, E) must count.
 Without patience, only a `reset_hold` range counts as settled in the step
 test (a resync's re-anchored cursor does not), behind the same pacing floor
-as §2.6.
+as §2.6. (Revision 3, step R5: the Sector bound is kept per pair of members,
+from every datagram and every on-time event of each sender. It binds only
+senders that are on time, and only while the level has a sector nobody has
+entered yet (§2.9).)
 
 ### 2.3 The server's reset of that player's input buffer
 
@@ -590,8 +805,13 @@ its mirrors would diverge silently.
 ms each way the relay lag is already 32-44 ticks (C's runs). A raise of `k`
 adds `k` to everything the late client hears. A +300 ms uplink step therefore
 needs about 20 ticks of lead and puts that client's relay lag at 52-64. The
-lead is still raised by the full `k`: control of one's own ball comes first,
-and without the raise every input of the player is substituted. Two things
+lead is raised by the full `k` as far as the Sector bound allows: control of
+one's own ball comes first, and without the raise every input of the player
+is substituted. The Sector bound applies only until every sector of the level
+is in the union (§2.9). In the lane that is tick 1713, so A5u's 14 of 20 is
+followed by the remaining 6 at the next decision. Until step 12, the full 20
+puts client 2's relay lag past the 48-tick reach. Its relay_late and any
+resync of it are its own cost, reported and not failed in A5u. Two things
 then happen, both to the late client only:
 
 - its reach grows with its measured lag, up to 120;
@@ -607,75 +827,154 @@ Part one makes a late frame harmless to the server's state. It does not stop
 the session from waiting until `deadline(T)` for it. That is cost 2 in §3.6:
 up to 24 ticks of extra relay lag for everyone at 300 ms.
 
-**Patience.**
+**Patience, revision 3: a quorum timer.** For tick T, the **counted** members
+are those that are ready, have a baseline (§2.1), are not exempt at T (in a
+held range, or below their cursor) and are not waived. p is waited for while
+its lateness against the counted others stays within M. Patience runs on
+`seen` (§2.1): `ns_q(T) = A_q - (deadline(T) - seen_q)/tick`.
 
-`patience_p(T) = min(deadline(T), deadline(T) - (r01_p - 1)·tick)`.
+`patience_p(T) = min(deadline(T), deadline(T) - (A_p - R_p(T) - M)·tick)`
 
-It is anchored on the reference's q01 and not on q10. Anchored on q10, about
-10 % of a stationary, jittery player's arrivals would be cut off where the
-deadline would have taken them fresh. On q01 less one tick, the margin is
-sized per player from its own spread, `r10_p - r01_p + 1` ticks above its
-usual tail.
+`R_p(T)` comes from one of two timers:
 
-The early-step test becomes: every player is `settled(T)`, or `now >=
-patience_p(T)`, or its patience is waived (below).
+- **The last member.** `R_p(T) = max(0, max ns_q(T))` over the other counted
+  members. It exists once all of their frames for T are seen. With equal
+  baselines this is "M ticks after the latest of the others was seen". Only
+  the member still missing when everyone else is in can be cut by it.
+- **A minority late together** (four or more counted members).
+  `R'_p(T) = max(0, the m-th smallest ns)` among the counted members whose
+  frames are seen, `m = ceil(n/2)`. It exists once m of them are seen, and it
+  takes the margin `M2 = 10` (`kQuorumWideMarginTicks`) instead of M. Of the
+  two patiences, the earlier holds.
 
-**The streak waiver.** Once p has been substituted at T, its patience is
-waived from T+1 on. The step then waits only for the others, and for frames
-of p that happen to be settled already. The waiver ends with the first
-sample of p whose slack is at least `r01_p - 1`: an arrival inside its
-patience. Patience then applies again from the next tick.
+The clamp is §2.1's. A reference never lies before on time, and a raised
+member that is still late counts with its own lateness. Revision 3's `g`
+put the healthy members' patience at the deadline for as long as the raised
+member stayed late. That cost them up to M2 at the next burst of one of them
+(four members), or up to the deadline (two or three).
 
-- During a blackout or persistent lateness, only the first tick of the
-  episode waits for p. Without the waiver, every tick of the episode would
-  wait `patience_p`, which lies later than the others' own step time by up
-  to `(r10_p - r01_p) + 1` ticks plus p's structural lag behind them.
-- The waiver does not end at p's first *fresh* frame. Take the member whose
-  arrivals are structurally the session's last (the worst ping, which
-  `input_delay` was sized for). With no patience its frames always arrive
-  just after the step, so it would never be fresh again, and it would be
-  substituted for good.
+p has no patience before the deadline (it waits the deadline, today's rule) in
+three cases: p has no baseline, no counted member's frame for T is in, or
+neither timer exists yet (a majority is missing).
 
-**The pacing floor** (added in step 9's review). The waiver, and `settled()`
-below the cursor, exempt a member only while some member's real frame for T
-is there (`has(T)`). With none, every member lacking its frame is waited for
-until its own patience, waived or not, so the tick steps at the latest of
-those patiences and never after the deadline. Before patience, a tick stepped
-early only once every frame was in, so the session never got ahead of its
-latest client. Without the floor, a solo session, members waived together (a
-shared outage), or a waived member beside a re-anchored one would step every
-tick at once and run hundreds of ticks ahead of the deadline schedule.
+**Why `seen`.** On `at` the timer would start at the others' backdated
+arrivals, while p's frame counts only once it is seen. M would then act as M
+less p's poll delay: in the replay, M = 3 cuts 85 against 58 at M = 4. On
+`seen` the others' poll delays move the timer with p's. A main-loop stall
+delays everyone's `seen` together, so it cuts nobody. The runner's wake-up
+can be up to a Windows timer period (15.6 ms) late, which only makes patience
+later. The S1 quorum line prints p50/p99 of `seen - at` and of the wake-up
+against the patience it slept for.
 
-**The reference is frozen** (§2.1). Re-measured after every adjustment, a
-raise that was capped, or a client that never applied one, would leave the
-arrivals late. The reference would then move down, and patience would move
-later for everyone, for good. Frozen, a raise that did not help leaves only p
-missing.
+**The step test** (patience on). The tick steps when every member has its
+frame, or is exempt, or is waived, or is counted with `now ≥ patience_p(T)`;
+or when the tick is due. The pacing floor stays: an exempt or waived member
+is exempt only while some member's real frame for T is here (177c337:
+lateness.hpp:691-705). With none, the tick steps at the deadline. Members
+without a baseline wait for the deadline, so the first 264 samples of a
+session (about 4 s) run today's rule. A late joiner's uncapped lead puts its
+frames early anyway (A8). The runner sleeps until the earliest patience among
+the blocked members (session_runner.cpp:1074-1081, 1111-1114, as built). Only
+`wait_ticks`' meaning changes.
 
-**A member without statistics** (a late joiner in its first four windows) has
-as its patience the latest patience among the members that do have
-statistics, that is, the others' schedule. Only at session start, when nobody
-has statistics, is patience the deadline, which is today's behaviour.
+**What the others pay.**
 
-**Waking up.** The runner sleeps for `until_due` (the deadline) only
-(session_runner.cpp:625, 633), and is woken by `post()` (:83). A blacked-out
-player posts nothing, so the step would wait for the next arrival or the
-20 ms cap. `sleep_for` becomes the minimum over unsettled, unwaived players
-of `patience_p(T) - now`, besides `until_due`.
+- At most M (60 ms) on the first tick of one member's episode.
+- At most M2 (150 ms) when two or more of at least four members go late
+  together.
+- Nothing after that first tick, because of the waiver.
+- Nothing more because another member was raised: a raised member counts
+  with its own lateness (above).
+- A late majority (two of three, three of four, or more) is waited for on
+  every tick until the minority rule raises it. Its decision comes about 726
+  ticks (66 + 660) after the shift and its E about 60 ticks later, 12 s in
+  all, and then nothing. Until then the others pay
+  the majority's lateness, about 20 ticks of relay lag at +300 ms (arm
+  A3m). This cost is accepted: nothing stops the whole session for **one**
+  player, and a majority is not one player. A timer that cut the majority
+  instead would substitute three players' inputs for those 12 s to spare one
+  player 20 ticks of relay lag.
 
-**Not adopted: capping every member's patience at the others' schedule.** For
-a member with statistics, a hard cap `patience_p <= max_{q≠p} patience_q`
-would substitute the structurally latest member on every tick. Its reference
-comes from that same distribution, so the meter would never see a shift and
-would never raise it. That member would stay substituted for good. The frozen
-reference and the waiver bound the drift instead. The cap is kept only for
-members without statistics.
+A member structurally later than the others is not "late": its baseline holds
+it, and the others wait for it exactly as in the flags-off session. That is
+the session's own sizing (`input_delay` from the worst ping), and the
+principles freeze it.
 
-**Behind a flag until the lead works.** Patience moves the cut-off from the
-deadline to the player's own tail. A player whose +300 ms frames still beat
-the deadline today (slack about 34) would be substituted for as long as the
+**The streak waiver** starts as built, at a substitution of a frame the step
+had to do without (session_runner.cpp:654). It ends on the first frame of p
+the step test would have waited for. That is a frame seen before
+`patience_p(T)`, computed for T after the fact, with p counted, from both
+timers. When p has no counted reference at T (solo, a partner without a
+baseline, every other member exempt), patience is the deadline, so the
+waiver ends on a frame seen with slack ≥ 0. That is lateness.hpp:769-773's
+rule with lead 0. Without that case, a waived member beside a member that is
+still measuring its baseline would be cut on every tick for about 4 s while
+on time, because the pacing floor lets the session step on the other member's
+frames. The member whose arrivals are structurally the last is still never
+stuck: with its baseline it is within M of the others. Without the waiver,
+every tick of a blackout or of a persistent lateness would cost the others M.
+
+Revision 3 ended the waiver on `L_p ≤ M`, with U the upper median. That is
+not the patience the step test applies. On lp11_a0_off it cuts 81 (0.58 %)
+against 61 (0.44 %) for the end above (`rv4_w.py`). There is no hysteresis.
+Ending the waiver one or two ticks inside the patience instead saves the
+others nothing: ending it at M, M - 1 and M - 2 gives 13, 13 and 12 episodes
+on lp11_a0_off, and 22, 24 and 26 on a0j. It only adds the member's own cuts:
+61, 65 and 67 on lp11_a0_off, and 95, 108 and 117 on a0j.
+
+**Sizing M and the quorum.** The replay of lp11_a0_off covers ticks
+27-3496, 13 880 member-ticks, with the waiver. For comparison, revision 2's
+flags-on control actually substituted 1509 ticks (13.6 %) in lp11_a0, ticks
+27-2800.
+
+| rule | M = 3 | M = 4 | M = 5 |
+|---|---|---|---|
+| the last member's timer (latest of the others + M) | 85 (0.61 %) | 58 (0.42 %) | 46 (0.33 %) |
+| plus the minority timer (2nd arrival + 10) | | 61 (0.44 %) | |
+| lower median of all four + M (the code map's t_q) | 159 (1.15 %) | 106 (0.76 %) | |
+| timer from the first arrival, restarted on each (the proposal as written) | 1045 (7.5 %) | 861 (6.2 %) | |
+| revision 2's patience and waiver | 1506 (10.9 %) at its own r01 | | |
+
+Notes on the table:
+
+- **What the 58 cuts at M = 4 are.** 26 of them are one stall of client 2 alone
+  (ticks 3215-3240, up to 9.7 ticks behind the others, slack down to -0.4).
+  That stall is its own: the flags-off session made the others pay for it.
+- **The clamp.** It changes nothing in these runs, because nobody is early
+  against its baseline: with and without it, `rv4_check.py` cuts the same
+  ticks.
+- **Jitter.** A0j's proxy jitter was modelled: uniform 0-45 ms per datagram,
+  first arrival over the 8-frame redundancy, and A0j's anchoring offsets of
+  0/2.1/1.1/2.1 ticks on raw arrivals, without baselines. That gives 54
+  (0.39 %) at M = 4. The redundancy compresses the jitter to about one tick.
+- **Spread out of the dips.** With nobody dipped, the gap between the latest
+  arrival and the second-latest has p95 0.13-0.33 and p99 1.7 ticks, max 3.9.
+  Inside the shared dips the gap reaches 5-11 ticks.
+- **Why M is a constant.** A spread measured over recent windows sits at its
+  floor and cannot foresee those gaps. The S1 quorum line (step R1) reports
+  the spread so that the constant can be revisited.
+- **Visibility.** The table is on backdated arrivals. Step R1 measures the
+  would-cut live, on `seen`, and that is what closes it.
+
+**Not adopted.**
+
+- **The timer from the first arrival** (the proposal as written). It cut all
+  three replaying members at every brake edge, because client 0 alone
+  arrives 10 or more ticks earlier (above).
+- **The lower median as the only reference** (the code map). It doubles the
+  steady-state cuts, which is the price of seeing a late pair. The minority
+  timer sees the pair at M2 for 3 more cuts in lp11_a0_off (61 against 58).
+- **A latest-arrival timer that restarts on every arrival.** It is the last
+  member's timer with the pair masking each other, and the minority timer
+  bounds that case.
+- **Revision 2's frozen absolute patience and its statistics-less cap.** It is
+  replaced by the baseline and the others' lateness.
+- **Waiver hysteresis** (above).
+
+**Behind a flag until the lead works.** A player whose +300 ms frames still
+beat the deadline today (slack about 2.4) is cut on every tick while the
 lateness lasts, until part two raises its lead. So `physics_patience` stays
-off in deployments until plan step 11 lands (§6).
+off in deployments until step R5 closes (§6.1).
 
 Patience also makes the late player's lifecycle and Sector events late at the
 server where the deadline would have taken them: a tick stepped early, or
@@ -689,21 +988,59 @@ next to the others' criteria.
 ### 2.7 Lowering the lead again
 
 Lowering exists because the extra lead costs the player: deeper rollbacks,
-more CPU, remote balls shown later. The lower policy is in §2.1. It moves no
-tick range (`held_from = 0`, `E = N`), the client slews at 0.9x, and the
-reference moves by the acked delta. A lowered player's arrivals still beat
-its patience, because the threshold leaves `r10_p + 1` of slack.
+more CPU, remote balls shown later. A raised member whose path recovered
+arrives early against its baseline, `L_p ≈ -k`. The rule (§2.1) lowers it once
+q95 of L has stayed below -4 for 660 ticks, by `floor(-q95(L)) - 1`, never
+below offset 0. The lower moves no tick range (`held_from = 0`, `E = N`), and
+the client slews at 0.9x.
+
+**No oscillation.**
+
+- After a raise, q90 of L sits near 0, so q95 is far above -4: no lower.
+- After a lower, q95 of L is near -1, so its frames still precede the others'
+  and no relative miss follows.
+- A lower never takes p's slack below the absolute threshold: its size is
+  bounded by `floor(q10(slack)) - 3`, and no lower is taken while an absolute
+  majority holds. A sustained shift of the server's clock, or a shared shift
+  after an absolute raise, can therefore not alternate a relative lower with an
+  absolute raise.
+- After an absolute raise for a shift every member shares (A10, A9h), every
+  member is at `n ≈ 0`, `U ≈ 0` and `L ≈ 0`: no lower while the shift lasts.
+  When it ends, `n = -k` for all, `U = 0` (the clamp), `L = -k`, and each is
+  lowered once.
+- A member that is early from its start, a late joiner or a LAN host, has no
+  offset and is never lowered.
+
+In A5d (the uplink back at 2700) the raised client 2 reads L ≈ -20 and is
+lowered by 19 at the earliest 660 ticks later; with the Sector bound of
+revision 3 it had only 14 to give back.
 
 ### 2.8 Resync, rebase and late join
 
 - A resync re-anchors at `L_eff_p` (§2.5). It resets that player's meter
-  samples, `held_total` and epoch, and keeps `lead_offset[p]`. The reference
-  is measured anew.
+  samples, `held_total` and epoch, and keeps `lead_offset[p]` **and the
+  baseline**: re-anchoring at `L_eff` restores the lead the baseline was
+  measured against plus the offset, so p's frames fall where they fell. Only
+  when the re-anchor's lead differs from `assigned_lead + lead_offset` (L_eff
+  clamped at `44 - D` or 80, or a client without CAP_LEAD that gets the
+  capped late-tick lead) does `A_p` move, by the difference. Re-measuring
+  would have absorbed whatever lateness p had at the resync:
+  - lp11_a5u resynced client 2 at 2820 with the uplink still on, and its
+    residual of 6 would have become everyone's wait for the rest of the run;
+  - lp11_a5d resynced it at 2817, after the uplink came back at 2700, and a
+    baseline measured at the raised lead would have left the +14 for good.
+
+  The baseline is measured only at a member's first assignment. A resync's
+  anchoring error (A0j: up to 2.1 ticks) stays inside M.
+- The lower's gate is `lead_offset > 0`, which a resync keeps.
 - A SessionLead whose `epoch` is older than the client's base is dropped.
 - A client rebase (more than `33 + |slew|` behind) still asks for a resync.
   The CPU stall that causes it is the client's own.
-- A late joiner starts at `late_join_lead_ticks` with offset 0, and is
-  measured like anyone else once it has statistics.
+- A late joiner starts at `late_join_lead_ticks` with offset 0. Its frames
+  arrive early, and it is judged like anyone else once its baseline is set
+  (264 samples). Until then it is waited for until the deadline and is nobody's
+  reference, and a waived member beside it ends its waiver on the absolute
+  rule (§2.6).
 
 ### 2.9 Why the others are unaffected
 
@@ -712,19 +1049,139 @@ The changes touch nothing the others see:
 - `input_delay`, `sector_lead`, the scheduler, the start base and every other
   buffer are untouched;
 - the reset is per buffer, and `settled()` keeps it out of the step timing;
-- patience costs the others at most the first tick of an episode, and only a
-  frozen reference can move it;
+- the quorum (§2.6) costs the others at most M on the first tick of one
+  member's episode (M2 when a minority of two or more of at least four is late
+  together), and nothing a single member does moves it. The reference is the
+  others' lateness clamped at on time, and each member's own frozen baseline,
+  and neither moves when a member is raised;
 - the relay of the late player's frames to the others is what it was: the
   applied frames;
 - the late player's own Sector stamps land `k` ticks *further* ahead for
-  everyone else, which only adds margin.
+  everyone else once it is raised, which only adds margin.
 
-The others' Sector events, in turn, reach the late client `k` ticks later on
-its clock, so they are late *there*. Today the headless client does not
-rewind for a late remote Sector (session_client.cpp:3015-3017). It starts the
-sector a frame late, which leaves that client's mechanisms out of phase.
-Plan step 14 builds the rewind for it. Until then, `k` is capped at the late
-client's measured Sector margin.
+**The Sector margin, re-derived (revision 3).** Another member q stamps a
+Sector event `S` ticks ahead of its clock (`S = D + 1 +
+input_delay_for_ping(worst rtt)`, timeline.hpp:79-81; 35 in lp11_a5u). The
+event takes q's uplink to the server, which relays it at intake
+(177c337: server.cpp:1816), and p's downlink. It reaches p when p's clock reads
+`c_q + up_q + down_p + (c_p - c_q)`. So p's margin against q is
+
+`margin_pq = S - up_q - down_p + (c_q - c_p)`
+
+in ticks. A raise of p by k takes k off every `margin_pq`. The headless client
+does not rewind for a late remote Sector (session_client.cpp:3015-3017): it
+starts the sector a frame late, and that client's mechanisms stay out of phase
+for the rest of the session. So until plan step 14, `k ≤ margin_pq - 1` for
+the senders q that bind (below).
+
+- **What the margin protects: the first crossing of a sector.** The union only
+  grows. A Sector event for a sector the union already holds is a no-op on
+  every side (sector_union.hpp:68-70: `request` inserts nothing, and `tick`
+  starts nothing). Only an event that adds a sector can be late in a way that
+  matters. The arena has four sectors, and in lp11_a5u the union is complete
+  at tick 1713 (server.log:126). The deferrals at 1918 and 2579
+  (server.log:141, 204) protected nothing, and neither did revision 3's "L ≈
+  6 for as long as the uplink lasts". So the bound applies only while some
+  sector of the level has not been requested at a stamp at or below the
+  session's next tick N. Once every one has, every event still in flight is
+  a no-op. The world counts the level's sectors at boot
+  (`level_sector_count()`, from the level's `Sector_NN` groups, one per
+  sector, as bbp_ng writes them: build_arena_map.py:535). When it cannot
+  tell (0), the bound always applies.
+- **The 14 in lp11_a5u is the true limit before the union completes.** Before
+  the shift, `margin = 35 - 10 - 10 + 0 = 15`. A delay on p's uplink does not
+  enter the formula: p's clock does not move, and the others' events never
+  travel p's uplink. So `k ≤ 14` against the 20 that client 2 needs, while
+  the union lacks sector 4 (stamped 1713; the decision was at 1685). The
+  full 20 would deliver another member's first crossing 5-6 ticks after
+  client 2 simulated its stamp. After 1713 the remaining 6 go out at the
+  next decision (about 1918).
+- **The estimate is right.** The server estimates p's clock as `c_est = t_newest
+  + (N - n_arr) + ceil(rtt_p)` (lead.hpp:56-60). An uplink delay cancels in it:
+  the newest frame is older by `up`, and the round trip is longer by `up`.
+  This is exact while GNS's rtt is `up_p + down_p` (601-605 ms for client 2,
+  which fits). Its biases are all small, and two of them make the margin
+  smaller than it is (conservative):
+  - the ceil, under a tick, conservative;
+  - the time between the relay at intake and the runner reading its tick,
+    conservative;
+  - the session-tick term `(N - n_arr)`, exact while the session steps on its
+    schedule.
+- **The samples were wrong.** Revision 2 sampled p's margin from every other
+  member's Sector events, pooled, the worst of the last 8 (lead.hpp:71-95,
+  153-159, 211-212). That makes p's bound a function of whichever sender was
+  worst:
+  - In lp11_a5u, client 2's own sector-4 event was stamped for 1713 before its
+    raise was acknowledged. It reached the others late (`client0.log:1086`:
+    "LATE: the server started it already"), but it was on time at the server,
+    so it was sampled. The healthy members read margins of -8 and -9 from
+    then on (server.log:143-145), and their (reference-bug) would-raises at
+    2784-2807 were deferred by it.
+  - Before any shift, event samples sit below the path model's 15 for some
+    receivers. At tick 1320 (the sector-2 and sector-3 crossings), one
+    member reads 9 in lp11_a9, two read 12 in a5s, 13 and 12 in a5d, and 13
+    in a4. Others read 15-16, and a9c reads 17-20. Revision 3 attributed a
+    "margin 1 at tick 1320" to lp11_a5u; there is none: a5u reads 15 for all
+    four at 1320 (server.log:105-108). The 1 at 1980 (server.log:146) is client
+    2's own margin after its acknowledged 14 (`15 - 14`). The 1, 3 and 5 at
+    3300 in lp11_a0, a0j, a4 and a9 are healthy members' margins after their
+    own (reference-bug) raises.
+
+  Revision 3 (step R5) keeps the bound **per pair** (p receiving, q sending):
+  - **Path samples.** On every datagram of q, for every other member p:
+    `t_newest_q + S - c_est_p`, the margin of a crossing of q at that
+    datagram's tick, relayed now. There is no on-time filter. A sender in its
+    own catch-up sends older newest ticks, and a crossing it stamps then is
+    exactly that late, so the path sample shows what its event would.
+    Revision 3's filter (`L_q ≤ M`) dropped a raised sender that is still
+    late as a sender, although its events reach the others at about
+    `35 - 30 + 14 - 10 = 9`.
+  - **Event samples.** Each on-time Sector event of q (as built,
+    lead.hpp:153-159) is also a sample of `margin_pq`, kept until R5's
+    per-pair lines explain the 9-13 lows above (open question 9).
+  - The window per pair is the minimum over the trailing 660 ticks, kept as
+    ten 66-tick buckets.
+  - **Binding.** p's bound is `min over q of (min_pq - 1)` over the senders
+    whose `min_pq ≥ 1`. A sender at or below 0 is late for p whatever p
+    does: its first crossings reach p late today, the raise changes how late
+    and not whether, and only that sender's own raise (or step 14) fixes it.
+    It is reported (S1: `sector-late=q`) and binds nothing. Otherwise one
+    late sender would cap everyone else's raises at nothing.
+  - **No samples at all** with two or more members defers the raise.
+    lead.hpp:211's "unknown means uncapped" goes.
+  - **On an acknowledgment of p**, every pair with p on either side is
+    cleared; the cooldown (`E + 2k + 132`) refills it with at least 132
+    datagrams per sender. Path samples are re-measured continuously, so
+    revision 2's shift of the stored samples (lead.hpp:85-87, 291) would
+    count a sample taken after E twice.
+  - The runner needs S: `create_session` takes `s.sector_lead`
+    (server.cpp:835).
+
+  In the scenario the per-pair bound exists for, client 2 has been raised by
+  14 and its events reach the others at 9. If client 0 then takes a +200 ms
+  uplink and needs 13, it gets 8: the pooled path samples of revision 3 would
+  have allowed 13, and client 2's next first crossing would reach client 0 at
+  -4.
+- **What lifts the bound for good: step 14.** On a late remote Sector, step 14
+  rewinds the client to the stamp minus 1 and re-stamps the union. The bound
+  then becomes p's own reach, `k - (margin_pq - 1) ≤` p's rewind depth (step
+  12: `max_resim` up to 120, history 128), and it stays at lead.hpp:211-212
+  as a reach bound that costs p only. Raising S instead would move every
+  member's activation, so the principles rule it out.
+- **What the bound costs until then.** Only while a sector is still unentered,
+  and only p. A member raised as far as the bound allows stays at `L ≈ k -
+  bound`, is cut on most ticks, and is corrected by part one: its inputs take
+  effect late, with constant own replays. The meter asks again after its
+  cooldown, or 660 ticks after a raise the bound left nothing of, and the
+  rest goes out once the union is complete. Neither the others nor the
+  server's state pay for it.
+- **The other direction.** Before p is raised (at least 66 + 132 ticks after the
+  shift), p's own first crossings reach the others late:
+  `margin_qp = S - up_p - down_q = 35 - 30 - 10 = -5` in lp11_a5u. That is a
+  cost to the others that only step 14 on the receivers removes. Step 16's
+  re-stamp does not: the events are on time at the server. A late first
+  crossing of p is also the one case in which p's own lateness reaches the
+  others; it ends with the union.
 
 ## 3. Part three: the barrier goes; late events are re-stamped
 
@@ -948,10 +1405,10 @@ What (b) removes is B's case A (the event lost while the frame arrived, about
 the frames are late too.
 
 **Patience makes that rarer, not more common.** A birth rides with its frame,
-so a substituted birth frame is a re-stamped birth. Patience anchored on
-`r01 - 1` cuts off about 1 % of a player's arrivals at most, and births are a
-few per minute. Arms A0 and A0j require 0 moved births and substitutions
-within HEAD + 0.5 % of ticks (§5.2).
+so a substituted birth frame is a re-stamped birth. The revision 3 quorum
+(§2.6) cuts off about 0.4 % of a player's arrivals in the lp11 replay, and
+births are a few per minute. Arms A0, A0j and A0h require 0 moved births and
+substitutions within the flags-off twin + 0.5 % of ticks (§5.2).
 
 **A birth stamp lead was considered and is not adopted.** A birth would be
 stamped a few ticks ahead, as with `sector_lead`. That delays the owner's own
@@ -1020,8 +1477,9 @@ server's world (plan step 19).
 | 1 | no body at T (death, move) | the frame is stored in `own_inputs_` anyway; a replay that re-makes the body uses it |
 | 1 | determinism | the replay drives the own ball through `nav_input` from the record, the path every existing input rewind already proves exact; the server drives its clone with the same bytes |
 | 2 | SessionLead lost | reliable plus 3 copies; until it lands, frames ≥ E are simply late and part one covers them; no new decision while unacked |
-| 2 | client cannot apply it, or the raise is capped | no SessionLead without `CAP_LEAD`; at most two raises without restored arrivals, then none; frozen reference, so the others' patience never moves |
-| 2 | oscillation | hysteresis (raise 2 s, lower 10 s, different thresholds), cooldown, frozen reference |
+| 2 | client cannot apply it, or the raise is capped | no SessionLead without `CAP_LEAD`; at most two raises without restored arrivals, then none; the frozen baseline and the quorum on the others' lateness clamped at on time (revision 3), so neither one member's lateness nor its raise moves the others' patience |
+| 2 | oscillation | hysteresis (raise 2 s, lower 10 s, different thresholds: L > 4 against q95(L) < -4); a lower never taken under an absolute majority and never below slack 3 (§2.7); the absolute raise aimed at q50, the quantity its trigger reads; cooldown; frozen baseline |
+| 2 | a shift every member shares (dips at deaths and respawns, the host clock) | relative lateness cancels it; the absolute rule (median slack below 3) raises for it only after 660 ticks when a majority shares it, so a host-clock fault under 10 s raises nobody (revision 3, §2.1; arm A9h) |
 | 2 | loss, a delay spike or a CPU stall mistaken for persistence | per-datagram samples (loss gives none), and a majority of misses over 132 consecutive ticks (a spike under about 2 s cannot qualify) |
 | 2 | CPU stall during a slew | rebase threshold `33 + |slew|`; a real stall still resyncs |
 | 2 | resync during an adjustment | `epoch` drops stale messages; resync re-anchors at `L_eff_p` |
@@ -1062,12 +1520,27 @@ Today one link setting is shared by every client and by both directions
 - **H7 Journal replay.** `sim_tool` replays the server journal in **every**
   arm, not only in the lifecycle steps.
 - **H8 Verdict.** Per criterion: pass, fail, or masked.
+- **H9 Host clock** (revision 3). A run in which every member's server-side
+  slack falls below 0 together while the client journals keep 15.15 ms per
+  tick is labelled `host clock`, with the fault's span (lp11_a9c: ticks
+  245-760). It is not rerun. The span is judged by A9h's criteria, and the
+  arm's own criteria are judged outside it and reported inside it.
+- **H10 Twins** (revision 3). Every arm runs flags-off and flags-on, and the
+  report compares them.
+- **H11 Server clock skew** (revision 3). A test-only server option
+  `physics.test_clock_skew = T:MS:PCT`, off by default, offsets the runner's
+  scheduler clock: from tick T it runs PCT % fast for MS, then returns to the
+  true clock at the same rate. It moves the deadlines only, not the
+  client-to-client paths, as lp11_a9c's fault did.
+- **H12 Session size** (revision 3). `--clients N` per arm (1 to 4).
 
 Client flags (session_client.cpp):
 
 - C6 `--hold-event TYPE:N:MS|drop`, which gates `send_event` and both repeat
   paths;
-- C7 `--stall-ms T:MS`, a CPU stall at tick T.
+- C7 `--stall-ms T:MS`, a CPU stall at tick T;
+- C8 `--resync-at T`, a resync request at tick T (revision 3: the baseline
+  kept through a resync).
 
 Counters to add in code:
 
@@ -1080,77 +1553,203 @@ Counters to add in code:
 
 ### 5.2 Arms and pass criteria
 
-Every arm has 4 clients, 150 ms each way on all, snapshots effectively off
-(`run L 100000 100000 4.2`), 60 s, `--drive`, checkpoints every 2 ticks,
-the event on client 2 (not the host) at T = 1500. Lane and swing variants are
-used as in C. A0 (the control) is run twice, and its spread is the noise
-band. Every arm is run at HEAD first.
+**Setup, every arm.**
+
+- 4 clients unless the arm names another count (H12), 150 ms each way on all,
+  snapshots effectively off (`run L 100000 100000 4.2`), 60 s, `--drive`,
+  checkpoints every 2 ticks.
+- The event is on client 2 (not the host) at T = 1500.
+- Lane and swing variants are used as in C.
+
+**Twins and validity (revision 3).**
+
+- Every arm is run as a twin: both flags off (its **control**) and the flags
+  under test. A0 off is run twice, and its spread is the noise band.
+- A run H9 labels `host clock` is judged over the fault's span by A9h's
+  criteria, and by its own arm's criteria outside it.
+- The control twin does not always bound anything. lp11_a5u_off resynced all
+  four clients, because its relay went past the reach. So wherever a
+  criterion says "no higher than the control twin and the A0-off band's upper
+  edge", both bounds are checked separately, and the band edge is the one
+  that binds.
 
 | arm | event |
 |---|---|
 | A0 / A0j | control; ±3 ticks of jitter on every link, whole run |
+| A0h | heterogeneous links, whole run: clients 0-3 at 50 / 150 / 150 / 250 ms each way (revision 3: structural round-trip differences) |
 | A1 / A2 | uplink blackout 300 / 600 ms |
 | A3 / A3L | both-way blackout 200 / 1000 ms (A3L past the reach: the late client is reported only) |
 | A3x | A3 at 50 ms each way, where the notices stay inside the reach |
+| A3m | clients 1, 2 and 3 +300 ms uplink at 1500, persistent (revision 3: a late majority) |
 | A4 | client 2 at 10 % loss, bursts of 8, whole run |
 | A5 / A5u / A5s | +300 ms both ways / uplink only / +100 ms both ways, persistent |
-| A5d | +300 ms uplink at 1500, back at 2700 |
+| A5u2 / A5u3 / A5s2 | A5u with 2 and with 3 clients; A5s with 2 clients (revision 3: session size, the window between E and the acknowledgment) |
+| A5uB | A5u, plus A9's spike on client 0 at tick 2100, after client 2's raise (revision 3: a burst after a raise) |
+| A5d | +300 ms uplink at 1500, back at 2700; once more with C8 `--resync-at 2900` on client 2 |
+| A5p | clients 2 and 3 together, +300 ms uplink, persistent (revision 3: a late pair) |
 | A6 | `--hold-event physicalize:2:{300,1500,drop}` |
 | A6m | hold 300 ms at 50 ms each way, barrier off: the move inside the reach |
 | A6b | barrier off, 300 ms: hold a Physicalize and the following Unphysicalize together; and two same-type trafos (wood → stone → wood) in one hold |
 | A7 | clients 2 and 3, uplink blackouts of 300 ms, overlapping by 100 ms |
 | A8 | client 4 joins late at T = 1500 on a 250 ms each way link |
 | A9 / A9c | a +300 ms uplink delay spike of 1 s (late, not lost) / a 500 ms CPU stall on client 2 |
+| A9h8 / A9h20 | H11: the server's clock 7.5 % fast from tick 300 for 8 s / 20 s, then back (revision 3: lp11_a9c's fault, injected) |
+| A10 / A10x | every client +300 ms / +450 ms uplink at 1500, persistent (revision 3: a shift shared by all) |
+| A11 / A11u | one client alone: A1's blackout / A5u's uplink (revision 3: the absolute rule alone) |
 
-**The other clients, every arm:**
+**The other clients, every arm** (the unaffected members; in A3m, A5p, A7,
+A9h, A10 and A10x there are fewer or none):
 
 - own-ball error 0.0000 m in B, D and A;
 - mechanism error within the control band in B, D and A;
 - in D, rollbacks per class within the control band, and input rewinds that
   name the late ball no more often than in the control;
 - relay lag, overall and per source player: p99 in D no higher than the
-  control band's upper edge (one-sided), and above it only in the first two
-  ticks of the episode;
+  arm's own control twin and the A0-off band's upper edge (one-sided, both
+  checked), and above it only in the first two ticks of an episode (the
+  quorum's M, or M2 in A5p);
+- substituted ticks within the A0-off band + 0.5 % of their ticks (one-sided):
+  the late member's episode never cuts them;
 - relay_late Δ 0, lead_adj 0, resyncs 0;
 - their mirror of the late ball from T_off+60 on ≤ 0.001 m;
 - the server journal replays exactly.
 
-**A0 and A0j:** substituted ticks per player ≤ HEAD + 0.5 % of the ticks,
-moved births 0, lead_adj 0.
+**A0, A0j, A0h (flags on against their off twins):**
+
+- substituted ticks in total ≤ the twin + 0.5 % of member-ticks. The replay
+  gives 0.42-0.44 % at M = 4, with one 26-tick stall of client 2 in it;
+- per member ≤ the twin + 1 %; every cut episode listed with its L and slack,
+  so a stall of one client alone shows as that client's;
+- would-raise 0 on all three rules, lead_adj 0 (nobody raised), moved births 0;
+- S1: no common-dip episode in which three or four members are cut at once;
+- A0h in addition: each member's baseline equals its control slack q50
+  within one tick, so the 250 ms member's baseline sits about 13 ticks below
+  the 50 ms member's, and nobody is cut more than in A0.
 
 **Late client, bursts (A1, A2, A3x, A4, A7, A9):**
 
-- the server's substituted ticks lie only inside [T_on, T_off + 2];
+- the server's substituted ticks lie only inside [T_on, T_off + 2] (in A4,
+  inside the loss bursts' own spans + 2);
 - `subst recv` equals the server's count, and `subst late` is 0;
 - own ball 0.0000 from T_off+48 on;
 - no snap-class rollback and no RECEIVED checkpoint in [T_on, T_off+48]
   (otherwise the run is marked "masked" and rerun);
-- lead_adj 0.
+- would-raise 0, lead_adj 0.
 
 **A3** (150 ms): the earliest notices arrive at relay lag + 13 = 45-57 ticks,
 past the reach. So `subst recv + subst late` equals the server's count,
 there is exactly one resync if `subst late > 0`, and the own ball is 0.0000
 48 ticks after it.
 
-**A9c:** lead_adj 0. The stall's ticks are substituted and corrected, or the
-client rebases and resyncs itself. Either way, the others pass.
+**A9c:** nobody raised (would-raise 0, lead_adj 0). The stall's ticks are
+substituted and corrected, or the client rebases and resyncs itself. Either
+way, the others pass. A host-clock span H9 finds in the run is judged as A9h.
 
-**A5u and A5s:**
+**A9h8:** nobody raised. The shared absolute majority lasts under 660 ticks,
+as lp11_a9c's 515 did. Every member is substituted only inside the fault's
+span + 2, and the late-client burst criteria hold for every member with that
+span as [T_on, T_off].
 
-- exactly one lead_adj, with K in [ceil(up_ms/15), +4];
-- exactly one buffer reset, whose E (S3 note) satisfies E ≥ the first
-  on-time frame after the slew;
-- substitutions only in [T_on, E];
-- own ball 0.0000 from E+48;
-- resyncs 0;
+**A9h20:**
+
+- every member is raised exactly once, by the shared absolute rule, about 726
+  ticks after the fault's start, with the k it prints (`ceil(q50(n))`, capped
+  only by the total cap and the Sector bound);
+- each is lowered exactly once after the fault, within cooldown + 660 + 66
+  ticks of its end;
+- no second raise, and no raise after a lower;
+- until step 12, relay_late and resyncs are reported, not failed: the raise
+  puts every member's relay lag past the reach.
+
+**A11:** no raise; the client's substitutions lie only inside the blackout.
+**A11u:** one raise by the absolute rule, about 132 + 66 ticks after 1500,
+with k in [20, 24]. A member alone has no Sector bound.
+
+**A5u and A5s, and A5u2, A5u3, A5s2:**
+
+- The meter's decided k lies in [ceil(up_ms/15), +4] = [20, 24] for A5u and
+  [7, 11] for A5s.
+- The raises sent to client 2 sum to a k in that range, in at most two
+  SessionLeads:
+  - A raise decided while some sector of the level has not been entered is
+    sent as far as the Sector bound allows. In the lane at 150 ms each way
+    that is 14 of A5u's 20, decided at about 1686, before sector 4's stamp
+    at 1713.
+  - The rest goes at the next decision, after the cooldown.
+  - In A5s the bound is about 7 (15 less client 2's +7 downlink), so A5s's
+    7 goes at once.
+- give-up is not reached;
+- one buffer reset per raise, whose E (S3 note) satisfies E ≥ the first
+  on-time frame after its slew;
+- client 2's substitutions only in [T_on, E of the last raise];
+- own ball 0.0000 from that E + 48 on, outside a resync's own 48 ticks;
+- the others: resyncs 0. Client 2's relay_late and resyncs are reported, not
+  failed, until step 12: at +20 its relay lag is 52-64 against a reach of 48;
+- the S1 Sector lines of the three others:
+  - their bound from each other stays at 14 (15 - 1) for the whole run;
+  - client 2 as a sender reads about -5 until its first raise. It is
+    reported as `sector-late` and binds nothing.
+  - After the raises it reads `-5 + k`;
+  - after the union is complete the line says `union=4/4` and no bound
+    applies;
 - the session's input delay printed once;
-- the others: lead_adj 0, relay lag in A within the control band.
+- the others: lead_adj 0, relay lag and substitutions as in "every arm".
+- A5u2 and A5u3 in addition: after client 2's raise, the healthy members'
+  S1 quorum reference is 0 ± 1. Their patience is their baseline + M, not
+  the deadline.
+- A5s2 in addition: nobody but client 2 is cut between E and the
+  acknowledgment.
+
+**A5uB:** client 0's 1 s spike at 2100 costs clients 1 and 3 at most M, at its
+first tick only (relay lag above the band only there). Client 0 is cut only
+inside the spike and is not raised, and client 2's criteria are A5u's.
 
 **A5 (both ways)** is reported. At this base the late client's relay lag
 exceeds even its deeper reach (§2.5), and its relay_late is the measured cost
 to that player.
 
-**A5d:** one raise and one lower, and the others are unaffected throughout.
+**A5d:**
+
+- The raises are as in A5u.
+- There is one lower, at least 660 ticks after 2700, by 19 ± 1 when the full
+  20 was sent.
+- The others are unaffected throughout.
+- The variant with `--resync-at 2900` lowers the same, because the resync
+  keeps the baseline and the offset (§2.8).
+
+**A5p:**
+
+- clients 2 and 3 are each raised once, by the relative rule: against the
+  upper median of the others, each reads L ≈ 20;
+- the two healthy members are delayed only at the episode's first tick, by at
+  most M2;
+- the healthy members' substitutions and relay lag are as in "every arm".
+
+**A3m:**
+
+- Clients 1, 2 and 3 are each raised once, by the minority rule, about 726
+  ticks after 1500, with k in [20, 24]. By then the union is complete in the
+  lane, so there is no bound.
+- No member is raised twice.
+- Client 0 is never raised and never cut.
+- Client 0's relay lag carries about 20 extra ticks from 1500 until the raises'
+  E. That is §2.6's accepted cost. It is back in the A0-off band after that
+  E, and its resyncs are 0.
+
+**A10:**
+
+- Every member is raised exactly once, by the shared absolute rule, about 726
+  ticks after 1500, with k in [20, 22]. The replay gives `q50(n)` = 19.8-20.0.
+- Before the raise, 16-23 % of every member's frames are past the deadline in
+  the replay. They are substituted and corrected, and this is reported.
+- Nobody is cut by the quorum beyond the A0 criterion.
+- Every pair's Sector margin is about -5 before the raises (reported as
+  `sector-late`) and about 15 after.
+- Until step 12, relay_late is reported.
+
+**A10x:** as A10, with k in [30, 32]. Every frame is past the deadline until
+the raise. After it, every relay lag is past the reach until step 12, so A10x
+is reported, not passed, until then.
 
 **A6:**
 
@@ -1169,16 +1768,21 @@ to that player.
 **A6b:** every mirror and the owner are ≤ 0.001 m from the server journal's
 bodies, with the same body set.
 
-**A8:** the joiner's lead is `D + ceil(rtt) + 2`, as printed. Its
-`subst late` is 0 after its first four windows. The others' relay lag stays
-within the band during those windows (the patience cap for members without
-statistics).
+**A8:** the joiner's lead is `D + ceil(rtt) + 2`, as printed, and its frames
+arrive before the start members' (its baseline is above theirs). Its `subst
+late` is 0. Nobody is raised, the joiner included: it is early, and it has no
+offset to lower. The others' relay lag stays within the band while the
+joiner's baseline is measured (it is waited for until the deadline meanwhile,
+and arrives early).
 
 ## 6. Implementation plan
 
 Each step is one implement-and-review workflow, and is closed by its
 measurement. Flags `physics_patience` and `physics_lead_adjust` exist from
-steps 9 and 10 and stay off in deployments until step 11 closes.
+steps 9 and 10 and stay off in deployments until step R5 closes (§6.1).
+Steps 7-11 are built; the rules their rows name for the meter and patience
+(reference, `r01 - 1`, the statistics-less cap) are revision 2's and are
+replaced by §6.1, which runs before step 12.
 
 | # | step | files | tests | close |
 |---|---|---|---|---|
@@ -1207,6 +1811,288 @@ steps 9 and 10 and stay off in deployments until step 11 closes.
 | 23 | Own Sector move (headless) | session_client.cpp (on step 13's facility) | SimTool forced own Sector move | an A6m variant holding a Sector event: the owner's mechanism error ≤ control |
 | 24 | Retail part three | physics_session_client.cpp (origin echoes; moved/rejected/superseded → self-resync with snapshots off; REJECTED fast path) | none | A6 drop with a retail late client: no stall, the retail client converges |
 
+### 6.1 Revision 3: the follow-up to steps 7-11, in order
+
+Steps 7-11 are built (0b5de5f, 53d8ecc, b134bcb, 177c337). Their meter,
+patience and Sector samples are replaced by the steps below. Each step is one
+implement-and-review pass, closed by its measurement. All of them come before
+step 12, and each builds and runs on its own. Line numbers are 177c337's.
+Both flags stay off in deployments until R5 closes.
+
+**R0. Harness: twins, new arms, host clock, clock skew.**
+
+- Files:
+  - scripts/arena_map_test.py:
+    - H9 labels the host clock with its span;
+    - H10 runs every arm as a flags-off/flags-on twin;
+    - H12 sets the client count per arm;
+    - the arms A0h, A3m, A5u2, A5u3, A5s2, A5uB, A5p, A9h8, A9h20, A10, A10x,
+      A11 and A11u are added (§5.2);
+    - the S1 quorum, lateness and Sector lines of R1-R5 are parsed into the
+      report.
+  - server.cpp and session_runner.{hpp,cpp}: H11 `physics.test_clock_skew`,
+    off by default, applied to the scheduler's clock only.
+  - sim/session_client.cpp: C8 `--resync-at`.
+- Tests:
+  - the harness self-check: H9 labels lp11_a9c's span 245-760 and nothing in
+    lp11_a0_off;
+  - session_logic_test: the skewed clock moves deadlines only inside its
+    span, and is the identity when off.
+- Close: dry runs of A0h, A5p and A9h8 at HEAD produce full reports, and H9
+  labels A9h8's span.
+
+**R1. The arrival ring and the baseline, observe only.**
+
+- lateness.hpp:
+  - `arrival_ring`: 256 slots of {tick, at, seen, as_newest}, first arrival
+    only;
+  - `lateness_baseline`: the median of the first 264 newest-frame samples
+    after the first assignment, floored at 3 and frozen, with
+    `rebase(delta)` for a re-anchor's lead difference.
+- session_runner.{hpp,cpp}: a ring and a baseline per member in
+  `session_state` (session_runner.hpp:232-279).
+  - The ring is written in `submit_input` before `buffer.submit` (:481), with
+    `seen` taken in the posted command, and not for the lookahead garbage
+    (:489-490).
+  - It is created at :240 and :295 and erased at `remove_player` (:316-319).
+    `player_ready` (:386-398) clears the ring, but clears the baseline only
+    at the first assignment.
+- Online, at each evaluation of the run loop's step test (:1069-1073), the
+  runner computes what the quorum would decide on `seen`, with both timers
+  and the clamp, and after each step what the waiver would have done. It acts
+  on none of it.
+- A new S1 quorum line every 660 ticks:
+  - counted members;
+  - the gap between the latest and the second-latest normalized arrival
+    (p50/p95/p99/max);
+  - would-cut counts per timer (M = 4, M2 = 10);
+  - p50/p99 of `seen - at`, and of the wake-up against the patience it slept
+    for;
+  - per member, its baseline and the q50/q90 of n.
+- An optional `physics.arrival_trace` prints one line per tick with every
+  member's slack. It is off by default.
+- Tests, lateness_test:
+  - the ring: first arrival kept, `seen ≥ at`, stale frames recorded, wrap at
+    256, `as_newest`;
+  - the baseline: median, floor, frozen through an acked raise, kept through
+    a resync and moved by `rebase`, measured only at the first assignment.
+- Close: A0 off, A0h off and A0j off.
+  - The live would-cut is ≤ 0.5 % of member-ticks in A0; the replay gives
+    58-61 on `at`.
+  - The gap's p99 is ≤ 2 ticks outside the deaths and respawns.
+  - A0h's baselines equal the members' control slack q50 within one tick,
+    and its would-cut is within A0's + 0.2 %.
+  - `seen - at` is recorded.
+
+**R2. The new meter beside revision 2's, observe only.**
+
+- lateness.hpp: a `relative_meter` with three trailing windows (relative,
+  minority, absolute at θ = 3).
+  - The runner passes the shared flag per tick.
+  - Persistence is 132 or 660 ticks, k is per §2.1, and the lower follows
+    §2.1 with its slack bound.
+  - Revision 2's meter stays and still drives every decision. Its reference
+    code, and `patience_member_of` (lateness.hpp:621-633) that reads it, are
+    untouched, so the tree builds and both flags behave as at 177c337.
+- session_runner.cpp:
+  - L and L' are computed per member in tick order, from the ring, after
+    each step and at a cut frame's arrival (§2.1). They feed the new meter.
+  - "Shared" is computed each tick from the members' absolute majorities.
+  - The S1 lateness line gains the new meter's state: the baseline; q50/q90
+    of L and L'; q10/q50 of slack; the three miss counts; and
+    `would-raise2` with its rule and k.
+- Tests, lateness_test, on a multi-member `run()` that feeds arrivals on a
+  shared clock:
+  - (a) a dip shared by four members (-15 ticks for 400 ticks, spread ≤ 2):
+    no raise;
+  - (b) the brake-edge pattern (three members 15 ticks late for 25 ticks
+    every 500): no raise;
+  - (c) one member +20 for good: one relative raise, k = 20;
+  - (d) two of four +20 together: both raised by the relative rule;
+  - (e) three of four +20: no relative raise; all three raised by the
+    minority rule after 660 ticks;
+  - (f) solo +20: one absolute raise after 132 ticks, k = 20;
+  - (g) members on 50/150/250 ms from the start: no miss, no raise;
+  - (h) two members, one a late joiner 12 ticks early: no raise for either;
+  - (i) a raised member whose path recovers: its partner in a two-member
+    session reads L ≈ 0, and it is lowered after 660 ticks, never below
+    offset 0;
+  - (j) three members, one raised and still late by 6: a healthy member late
+    by M + 1 against its baseline is a relative miss;
+  - (k) two members, one slewing between E and its acknowledgment: its
+    partner's L stays at 0;
+  - (l) a shared shift into the absolute band (all +20): nothing before 660
+    ticks, then every member raised once, k = 20. The same shift for 515
+    ticks raises nobody;
+  - (m) after (l), the shift ends: each member lowered once. With the shift
+    sustained, no lower;
+  - (n) a resync keeps the baseline and the offset, and the lower still
+    follows the return;
+  - (o) a member whose path improved by 7 after its baseline: its partner
+    reads L = 0.
+- Close, flags off:
+  - would-raise2 exactly once in A5u (k in [20, 24]) and in A11u;
+  - once each for clients 2 and 3 in A5p, and for clients 1-3 in A3m
+    (minority);
+  - once each for every member in A10, A10x and A9h20 (shared);
+  - zero in A0, A0h, A0j, A1, A2, A4, A9, A9c, A9h8 and A11.
+
+**R3. Patience as the quorum, and the waiver (`physics.patience`).**
+
+- lateness.hpp:
+  - `patience_member` becomes {has, settled, held, waived, counted, baseline,
+    ns when seen}. `patience_lead_ticks`, `patience_assign_leads`,
+    `patience_member_of` and the statistics fields go (:587-633), so
+    patience no longer reads revision 2's reference.
+  - `patience_step_test(members, due, to_deadline, M, M2)` replaces
+    :706-743. The patience-off branch (:709-722) stays exactly as it is.
+  - Per member, the lead in ticks before the deadline is `A_p - R - M` (or
+    `- M2`), clamped at 0, with R clamped at 0. The `to_deadline <= lead`
+    structure and the pacing floor carry over.
+  - `patience_waiver::sample` (:769-773) ends the waiver on a frame seen
+    before `patience_p(T)` (both timers, p counted). Without a reference, it
+    ends on a frame with slack ≥ 0.
+- session_runner.cpp:
+  - `patience_members` (:964-986) fills `ns` and `counted` from the ring and
+    the baselines, on `seen`;
+  - `patience_lead` (:988-996) goes;
+  - the waiver call (:516-521) moves to R1's after-the-fact evaluation;
+  - the run loop passes M and M2 (:1069-1073). The wake-up (:1074-1081,
+    1111-1114) is unchanged, and so is the cut bookkeeping (:491-506,
+    1084-1101);
+  - `report_patience` and `log_patience_on` (:1007-1040) print M, M2,
+    counted, the timer that cut, and the cut counts by timer.
+- Tests, patience_test:
+  - deleted: LeadIsR01LessTheMarginAndNeverPastTheDeadline,
+    StatisticsLessMemberGetsTheLatestPatienceAmongTheOthers,
+    MemberOfMapsTheMeterLikeTheRunner,
+    WithoutStatisticsTheFirstMissWaitsForTheDeadline and
+    LateAssignedMemberIsCappedAtTheOthersScheduleUntilItsReference;
+  - rewritten for the quorum: StepTestWaitsUntilTheEarliestPatience,
+    WaiverStartsAtASubstitutionAndEndsInsidePatience,
+    StructurallyLastMemberIsNeverStuckSubstituted,
+    BlackoutWaitsOnceAtPatienceWithTheWaiverAndEveryTickWithout,
+    SoloBlackoutNeverStepsBeforePatience and
+    SharedOutageStepsAtTheLatestPatience (both now step at the deadline);
+  - kept: SettledIsArrivedOrBelowTheCursor,
+    StepTestWithPatienceOffIsTheDeadlineRule,
+    StepTestNeedsARealFrameToSkipAWaivedOrReanchoredMember and
+    SteadyLinksAreNeverCutOff;
+  - `run_sim` (~49-150) records arrivals in the ring, with a `seen` delay.
+- New patience tests:
+  - a shared dip cuts nobody and starts no waiver;
+  - the brake-edge trio within 4 ticks of each other is never cut;
+  - one member +20: cut from the first tick, and the others' step times
+    unchanged to 1e-6 after the first tick;
+  - a pair +12 of four: cut at the minority timer once, then waived;
+  - a member with no baseline waits for the deadline;
+  - a member structurally 11 ticks late (its baseline) is never cut;
+  - the waiver ends on the first frame inside patience while its slack is
+    low;
+  - a waived member beside a member without a baseline ends its waiver at
+    slack ≥ 0;
+  - a member raised by 20 and still on its slow path (n ≈ 0): a burst at a
+    healthy member costs the others at most M;
+  - a uniform `seen` delay of one tick cuts nothing that `at` would not.
+- Close, patience on and lead off:
+  - A0, A0h and A0j: substitutions within the twin + 0.5 % in total and
+    + 1 % per member.
+  - A1, A2, A4, A7, A9 and A5uB's spike: the others' criteria, with the late
+    client's cuts only inside its episode.
+  - A3m: client 0 is never cut.
+  - The S1 cut counts by timer and `seen - at` are recorded.
+
+**R4. Lead decisions on the new meter (`physics.lead_adjust`).**
+
+- lateness.hpp: the new meter takes over `on_tick` and the decisions.
+  - Revision 2's reference goes: the `kReference*` constants,
+    `kQualifyingMaxLate` and the deadline reference constants (:164-166,
+    182, 191-192).
+  - So do `window_`, `reference_samples_`, `close_window`, `set_reference`,
+    `adopt_reference`, `adopt_deadline_reference`, `wants_fallback`,
+    `wants_deadline_reference` and `reference_source` (:229-232, 380-401,
+    406, 459-474, 486-494), and `lateness_median` and
+    `lateness_settle_reference` (:89-94, 560-570).
+  - The `measuring` and `wants_fallback` states become `baseline`.
+- session_runner.cpp:
+  - in `observe_lateness` (:798-), the fallback block (:810-820) and the
+    reference line (:821-828) go;
+  - `player_ready` (:386) keeps the baseline and the offset at a resync, and
+    rebases the baseline by the lead difference;
+  - server.cpp passes the assigned lead with the assignment.
+- `apply_lead_decision` and `lead_decide` are unchanged. The Sector bound is
+  still revision 2's until R5.
+- Tests:
+  - lateness_test: rewrite or delete the reference tests (`measured_meter`,
+    ReferenceFromFourQualifyingWindows,
+    ReferenceIsFrozenUntilTheNextAssignment,
+    StructurallyLateMemberTakesTheOthersMedian,
+    PersistentShiftRaisesExactlyOnce, TwoAndAHalfSecondShiftRaisesExactlyOnce,
+    AcknowledgedRaiseRestoresAndALowerFollowsTheReturn,
+    LowerNeverTakesTheOffsetBelowZero, NoLowerWithoutAnOffset,
+    ResetKeepsOnlyTheOffset). The spike, burst, 33-frame stall, A4 loss,
+    blackout and streak tests keep their meaning.
+  - lead_test: `meter_rig` (~425-455) feeds arrivals instead of slack, which
+    touches 493-614 and 837-911. The three `LatenessReference` tests (648,
+    679, 692) go, and the solo test is rewritten as the absolute rule.
+- Close, both flags on:
+  - lead_adj 0 in A0, A0h, A0j, A1, A2, A4, A9, A9c, A9h8 and A11;
+  - A5u and A5s raise client 2 once, sent `min(decided, revision 2's
+    bound)`;
+  - A11u raises once, by k in [20, 24];
+  - A5d lowers once, in both variants.
+
+**R5. The Sector bound per pair, lifted with the union (`physics.lead_adjust`).**
+
+- lead.hpp:
+  - `lead_sector_margin` keeps, per sender q, ten 66-tick bucket minima
+    (660 ticks).
+  - `lead_sector_path_sample(p, q, t_newest_q, S, now_tick)` is new, with
+    `c_est` unchanged (:56-60, 120-124).
+  - `lead_sector_sample` (:153-159) feeds the same per-pair window, from
+    on-time events only, as built.
+  - `shift` (:85-87) and its call (:291) go. An acknowledgment of p clears
+    every pair with p on either side.
+  - `lead_decide` (:210-212): the bound is the minimum of `min_pq - 1` over
+    the senders with `min_pq ≥ 1`. With two or more members and no samples
+    at all, the raise is deferred. Once the union is complete there is no
+    bound.
+- physics_world.{hpp,cpp}: `level_sector_count()`, from the level's
+  `Sector_NN` groups at boot.
+- session_runner:
+  - the union is complete when every level sector is requested at a stamp
+    ≤ N;
+  - `create_session` takes S (`s.sector_lead`, server.cpp:835);
+  - `submit_input` takes a path sample for every other member from each
+    datagram (no filter);
+  - `submit_event`'s sampling (:532-542) feeds the pair;
+  - the S1 lead line prints the per-sender minima, `sector-late=` and
+    `union=n/N`.
+- session_client.cpp: the `window:` line prints each remote Sector event's
+  actual margin at receipt (its stamp less the own tick), per sender (open
+  question 9).
+- Tests, lead_test:
+  - `margin = S - up_q - down_p` on a synthetic two-path rig, independent of
+    p's uplink;
+  - a sender in catch-up lowers its pairs' samples;
+  - a sender at or below 0 binds nothing and is reported;
+  - a raised sender at 9 bounds another member's later raise at 8;
+  - an acknowledgment clears the pairs;
+  - with no samples the raise is deferred;
+  - with the union complete there is no bound;
+  - `LeadSector.AnEventLateAtTheServerIsNoSample` (960) is kept.
+- Close, both flags on: the §5.2 matrix against the twins. The arms are A0,
+  A0h, A0j, A1, A2, A3m, A4, A5u, A5u2, A5u3, A5uB, A5s, A5s2, A5d, A5p,
+  A7, A9, A9c, A9h8, A9h20, A10, A10x, A11 and A11u.
+  - A5u: 14 and then the rest, and the others' bound at 14 from each other.
+  - Relay_late of a raised member is reported until step 12.
+
+Then both flags may go on in deployments (open question 8).
+
+After R5, step 12 gives the raised members the reach their lead needs (A5u,
+A10, A9h20), and step 14 removes the bound on raises decided before a level's
+last sector is entered.
+
 ## 7. Open questions
 
 1. **The deeper per-client reach.** Can a late client afford a reach of up to
@@ -1218,16 +2104,50 @@ steps 9 and 10 and stay off in deployments until step 11 closes.
    from a robust statistic rather than the worst ping, now that part two can
    lift one slow member on its own? The principles freeze them during a
    session, not how they are chosen.
-3. **The patience tail under loss.** Under 10 % loss a frame's first arrival
-   can be the second datagram carrying it (+1 tick). Is `r01 - 1` enough
-   then? A4 decides; the birth stamp lead (§3.4) is the fallback.
+3. **The quorum under loss.** Under loss, a frame's first arrival can be a
+   later datagram's redundancy copy: one tick late per datagram lost before
+   it. With M = 4, a burst of five or more lost datagrams cuts the frames it
+   delays. That cut is the lossy member's alone, and the meter never sees it
+   (no `as_newest` sample). A4 measures how many; the birth stamp lead (§3.4)
+   is the fallback for its events.
 4. **BodyRevived.** Does it still do anything under the sector union, or can
    it be retired?
 5. **Retail input rewind.** Parts one and three on retail are only partial
    until the input-rewind card lands. Whether the retail scripts tolerate a
    multi-tick own absence is measured in step 21.
+6. **A shift every member shares.** Revision 3 raises every member for it,
+   after 660 ticks of a shared absolute majority (A10, A10x, A9h20), and
+   nobody for a shorter one (lp11_a9c, A9h8). Re-anchoring the server's
+   deadline schedule by the shared shift would restore every member's frames
+   at once. It would send no SessionLead and force no range, and it would
+   change neither `input_delay` nor any member's relative lead. Is that within
+   the principles? A shared shift is not one player. Decide after A9h20 and
+   A10.
+7. **M as a constant.** M = 4 and M2 = 10 come from the lp11 replay, at 150 ms
+   with uniform jitter compressed by the redundancy, on backdated arrivals.
+   R1's live would-cut on `seen` re-measures them; revisit with deployment
+   logs.
+8. **The reach before step 12.** With the Sector bound lifted once the union
+   is complete, A5u's full raise puts client 2's relay lag at 52-64, past the
+   48 reach. A10, A10x and A9h20 do the same for every member. Their
+   relay_late is reported, not failed, until step 12. Should the deployment
+   gate after R5 wait for step 12, or should a raise be bounded by p's reach
+   until then? A bound would leave p partly substituted instead of partly
+   relay_late; both costs are p's alone. Step 14 now matters only for raises
+   decided before a level's last sector is entered, so it stays after 12.
+9. **Sector event lows.** Before any shift, some receivers' event samples sit
+   2-6 ticks below the path model's 15: lp11_a9 reads 9, a5s 12 and 12, a5d
+   13 and 12, and a4 13, at tick 1320. They are per receiver, not per sender:
+   in lp11_a9 the other three receivers of the same crossings read 14, 14 and
+   16. Two causes fit: the server's `c_est` overestimating that receiver (a
+   ping spike, which is conservative), or a real late arrival. R5 keeps the
+   event samples as a bound, and prints per pair the path minimum, the event
+   minimum and the client's actual margin at receipt. If the actual margins
+   sit at the model's, the event samples can go.
 
-## 8. Review record (revision 2)
+## 8. Review record
+
+### 8.1 Revision 2
 
 | finding | disposition |
 |---|---|
@@ -1249,3 +2169,43 @@ steps 9 and 10 and stay off in deployments until step 11 closes.
 | R1 N1 | changed: S5 line; step 17 gated on it |
 | plan (both) | changed: step 3 covers both clients' parse; patience and SessionLead behind flags; step 1 split from the baselines; the re-stamp in three steps (16-18); reach its own step (12); the Sector facility proven before use (13-14); journal ordering in step 19; arms A0j, A6b, A6m, A7, A8, A9, A9c |
 | R2 nits | changed: `recorded_input` reused; a lifecycle budget instead of an exemption; 0.9x lowering; SessionLead ticks counted as learned |
+
+### 8.2 Revision 3
+
+| proposal or finding | disposition |
+|---|---|
+| (1) patience relative to the others, a quorum timer restarted on every arrival, M 2-3 | changed: the timer starts only for the last missing member (latest of the others + M), plus a minority timer (m-th arrival + M2) for four or more members. Started on any first arrival, the timer cut 7.5 % of lp11_a0_off at M = 3, because the brake-edge trio arrives 10+ ticks after client 0. M = 4 (0.42 % against 0.61 % at M = 3); M2 = 10. A measured spread is not adopted (it sits at its floor out of the dips). |
+| (2) the meter on relative lateness, no statistics | changed: relative lateness against the upper median of the others, plus one frozen median baseline per member. Without it, structural round-trip differences (one start base: slack = base + D - rtt) and early late joiners read as lateness. The baseline is a median and cancels in L, so the shared-dip failure does not return. The absolute rule (slack < 0) is kept for a shift every member shares (lp11_a9c). |
+| (3) the waiver ends within M of the others | adopted: it ends on `L_p ≤ M` |
+| (4) the Sector-margin cap | the 14 of A5u re-derived as the true limit (`S - up_q - down_p = 15`; an uplink delay cancels in `c_est`). The samples are replaced: other members' events bound p by the sender's timing (the -8/-9 from client 2's late event, the margin 1 at tick 1320). They become path samples from on-time members' datagrams (R4). Step 14 lifts the cap, and the residual until then is p's alone. |
+| A: no dip is a sector activation; the three-of-four dips are the brake edges | adopted in the text (part two's opening) |
+| A: lp11_a9c's shared lateness is a host clock fault | adopted: H9 marks such a run masked; open question 6 for the remedy |
+| B: `t_q` = lower median, M from each member's own jitter | not adopted: the lower median doubles the steady-state cuts (0.76 % against 0.42 % at M = 4); the baseline makes a member's own spread a matter of M alone |
+| B: skip a Sector sample from a late sender | adopted in a stronger form: path samples only from on-time senders, no event samples |
+
+### 8.3 Revision 3, review
+
+| finding | disposition |
+|---|---|
+| R1 B1, R2 1: the reference `g = n + o` moves every member's reference by one member's raise; after A5u's raise the healthy members' patience is the deadline and their own lateness goes unseen | changed: the reference is `r = max(0, n)` (§2.1), with U, R and R' over it; arms A5u2, A5u3, A5uB and tests (j), (k) in R2, and the burst-after-raise test in R3 |
+| R1 S1: absolute raises and relative lowers oscillate (A10x, a server-clock skew) | changed: with `r` the shared shift reads `L ≈ 0`, and a lower is bounded by `floor(q10(slack)) - 3` and never taken under an absolute majority (§2.7) |
+| R1 S2: a member whose path improved makes its partner late | changed: the clamp (test (o)) |
+| R1 S3, R2 7: "the j-th smallest is final once j are in" is false with differing baselines, and the "newer than the last sample" test then drops late-reference ticks | changed: L and L' are computed in tick order once T is stepped and p's frame is in, with missing members at their lower bound (§2.1) |
+| R1 S4, R2 8: the waiver never ends without a reference | changed: without a counted reference it ends on slack ≥ 0 (§2.6) |
+| R1 S5: the Sector cap protects only a sector's first crossing | changed: no bound once every level sector is requested at a stamp ≤ N (§2.9). A5u gets its remaining 6 at the next decision, and open question 8 is reworded |
+| R1 S6: there is no "margin 1 at tick 1320"; event lows of 9-13 exist; the on-time filter drops a capped sender | changed: the claim is corrected. The 1 at 1980 is client 2's own margin after its 14, and the 1/3/5 at 3300 in lp11_a0, a0j, a4 and a9 are margins after raises. Event samples stay as a bound per pair; the filter goes; a sender binds while its margin is ≥ 1 (§2.9, open question 9) |
+| R1 S7: a late majority is held every tick, not once | changed: the minority rule (`L'` against the least late other, clamped, 660 ticks) raises it, and the wait until then is stated as an accepted cost (§2.6); arm A3m. In the replays the longest `L'` majority is 93 ticks against 660 |
+| R1 S8: A10's "slack about 2" is false; the trigger `q50 < 0` and the target `q10 = 3` disagree | changed: the absolute miss is slack < 3, and the raise is `ceil(q50(n))`, so the trigger and the target are one quantity. In the replay it gives 19.8-20.0 where the q10 target read 1-12. A10's criteria are rewritten |
+| R1 S9, R2 5: masking hides the host-clock case; no solo or 2- or 3-member arms | changed: H9 labels and judges instead of masking; H11 injects the skew (A9h8, A9h20); shared absolute majorities wait 660 ticks, so lp11_a9c's 515-tick fault raises nobody; arms A11, A11u, A5u2, A5u3 and A5s2 |
+| R1 N1: waiver hysteresis | refuted: in the replay, ending at M - 1 or M - 2 does not reduce the episodes (13/13/12 on lp11_a0_off, 22/24/26 on a0j) and adds the member's own cuts (61 → 65 → 67, 95 → 108 → 117) |
+| R2 2: a resync re-measures the baseline and resets `o` | changed: a resync keeps the baseline and the offset, and the baseline moves only by a lead the re-anchor did not restore (§2.8); the lower is gated on `lead_offset`; the A5d variant with C8 `--resync-at` |
+| R2 3: arrivals are backdated, and the step test sees frames later | changed: the ring keeps `seen`; patience runs on `seen`; R1 measures the would-cut live; the S1 line prints `seen - at` and the wake-up's lateness |
+| R2 4: path samples with an on-time filter, pooled, shifted on the ack, absent at the start | changed: per pair, from every datagram, a minimum over 660 ticks, cleared on an ack, deferring with no samples (§2.9, R5) |
+| R2 6: R2 deleted the reference while step 9's patience still read it | changed: R2 is observe-only beside revision 2's meter; R3 removes patience's use of the reference; R4 deletes it. Each step builds on its own |
+| R2 control-twin gap | changed: both bounds checked separately; the A0-off band edge binds (§5.2) |
+| (own) revision 3's waiver end on `L ≤ M` was not the patience the replay used | changed: the waiver ends on a frame inside the step test's patience. On lp11_a0_off the `L ≤ M` end cuts 81 (0.58 %, past the 0.5 % criterion) against 61 |
+| (own) the full raise after the union completes puts A5u's client 2 past the 48 reach before step 12 | stated: reported, not failed, until step 12; open question 8 |
+
+Scripts for this record: `rv4_check.py`, `rv4_hyst.py`, `rv4_ep.py`,
+`rv4_w.py`, `rv4_a10.py`, `rv4_a10b.py` and `rv4_a10c.py`, in the session's
+scratchpad.
