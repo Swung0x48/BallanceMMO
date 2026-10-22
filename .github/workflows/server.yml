@@ -42,7 +42,9 @@ jobs:
       run: git submodule update --init --recursive
 
     - name: Install dependencies (OpenSSL, Protobuf)
-      run: sudo apt install libssl-dev libprotobuf-dev protobuf-compiler ninja-build
+      # The runner image's package index can be stale (a 404 on a superseded
+      # protobuf build), so refresh it first.
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev libprotobuf-dev protobuf-compiler ninja-build
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
