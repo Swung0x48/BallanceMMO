@@ -4,10 +4,13 @@
 // headless client, the platform with send / now / log, the capabilities and
 // the empty legacy_calls - so these pin what E1 has: the moved state's
 // initializers, the platform check at construction, and that the core hands
-// the host's operations back unchanged.  The flow tests of design 5.1 (frame
+// the host's operations back unchanged (step E3 gives legacy_calls seven
+// entries, all empty in a fresh core).  The flow tests of design 5.1 (frame
 // order, numbering, the hold, events, echoes, beam, sectors, status text,
 // SessionLead) arrive with the steps that move that flow (E3-E10).  Step E2
-// adds the journal's (core::client_journal over a temporary file).
+// adds the journal's (core::client_journal over a temporary file); step E3
+// numbering and the hold (design 5.1), begin, SessionReady, the resync
+// limiter, the event sends and end.
 
 #include <gtest/gtest.h>
 
@@ -23,6 +26,9 @@
 #include <vector>
 
 #include <session/client_core.hpp>
+// After client_core.hpp: the message headers are not self-contained.
+#include <message/session_ready_msg.hpp>
+#include <message/session_resync_msg.hpp>
 
 namespace {
     using bmmo::session::clock_site;
@@ -100,10 +106,19 @@ namespace {
         EXPECT_EQ(other.capabilities().own_lifecycle, bmmo::session::own_lifecycle_source::host_hooks);
     }
 
-    // E1 moves no function, so no back-call is needed yet (design 6.1).
+    // The back-calls (design 6.1) are the host's to fill: a core starts with
+    // none.  E3 adds the seven its moved code calls.
     TEST(SessionClientCore, LegacyCallsStartEmpty) {
-        static_assert(std::is_empty_v<bmmo::session::legacy_calls>, "E1 adds no legacy call");
-        SUCCEED();
+        fake_platform fake;
+        session_client_core core(fake.make(), session_capabilities{});
+        const auto& l = core.legacy;
+        EXPECT_FALSE(l.rebase_own_lives);
+        EXPECT_FALSE(l.set_aside_unanswered);
+        EXPECT_FALSE(l.reset_held_epoch);
+        EXPECT_FALSE(l.drop_pending_rewind);
+        EXPECT_FALSE(l.finish_lead_slew);
+        EXPECT_FALSE(l.end_session_world);
+        EXPECT_FALSE(l.report);
     }
 
     // The state moved with its initializers unchanged (design 6.1, E1): the
@@ -432,5 +447,500 @@ namespace {
         core.config.journal_checkpoint_ticks = 0;
         EXPECT_TRUE(core.journal().checkpoint_due(bmmo::session::core::kJournalCheckpointTicks * 3));
         core.journal().close("done");
+    }
+
+
+    // ------------------------------------------------- numbering and the hold
+    // Step E3: begin, anchor's SessionReady half, poll_hold, SessionAssign,
+    // the resync request and its limiter, the event sends and end, over a
+    // fake platform whose clock the test moves, with the host hooks and the
+    // legacy back-calls recorded in the same call list.
+
+    struct flow_fake : journal_fake {
+        std::vector<std::pair<std::string, send_mode>> sent;   // every send, in order, with its bytes
+
+        session_platform make_flow(bool journalling = false) {
+            session_platform p = journalling ? make_journal() : make();
+            p.send = [this](const std::string& bytes, send_mode mode) {
+                calls.push_back("send:" + std::to_string(static_cast<int>(mode)));
+                sent.emplace_back(bytes, mode);
+            };
+            p.hooks.numbering_restarted = [this](clock_site site) {
+                calls.push_back(std::string("hook:numbering_restarted:") + bmmo::session::clock_site_name(site));
+            };
+            p.hooks.ending = [this]() { calls.push_back("hook:ending"); };
+            return p;
+        }
+
+        void fill_legacy(session_client_core& core) {
+            auto& l = core.legacy;
+            l.rebase_own_lives = [this]() { calls.push_back("legacy:rebase_own_lives"); };
+            l.set_aside_unanswered = [this](client_core_state::own_life::aside why) {
+                calls.push_back("legacy:set_aside_unanswered:" + std::to_string(static_cast<int>(why)));
+            };
+            l.reset_held_epoch = [this](const char* why) { calls.push_back(std::string("legacy:reset_held_epoch:") + why); };
+            l.drop_pending_rewind = [this]() { calls.push_back("legacy:drop_pending_rewind"); };
+            l.finish_lead_slew = [this](const std::string& why, bool reanchored) {
+                calls.push_back("legacy:finish_lead_slew:" + why + (reanchored ? ":reanchored" : ""));
+            };
+            l.end_session_world = [this]() { calls.push_back("legacy:end_session_world"); };
+            l.report = [this]() { calls.push_back("legacy:report"); };
+        }
+
+        void advance(std::chrono::milliseconds ms) { clock += ms; }
+    };
+
+    bmmo::session_start_msg start_message(uint32_t session, uint32_t own_id) {
+        bmmo::session_start_msg msg;
+        msg.session = session;
+        msg.input_delay = 4;
+        msg.sector_lead = 7;
+        msg.seed = 11;
+        msg.spawn_impulse = 3.0f;
+        msg.spawn_spacing = 4.2f;
+        msg.map.level = 13;
+        bmmo::session::player_entry own, other;
+        own.id = own_id; own.join_order = 2;
+        other.id = own_id + 1; other.join_order = 0;
+        msg.players = {other, own};
+        return msg;
+    }
+
+    // begin, level_requested and anchor with a session of id 9 for own id 3.
+    void run_to_anchor(session_client_core& core, flow_fake& fake) {
+        core.s.own_id_ = 3;
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        core.level_requested();
+        bmmo::session::anchor_report report;
+        report.hash.pose = 0x51;
+        report.hash.surfaces = 0x52;
+        report.physics_sha256 = "headless-64";
+        report.build_id = "build-x";
+        report.own_name = "Me";
+        report.load_ticks = 12;
+        core.anchor(report);
+    }
+
+    bmmo::session_assign_msg assign_message(uint32_t session, uint32_t first_tick) {
+        bmmo::session_assign_msg msg;
+        msg.session = session;
+        msg.first_tick = first_tick;
+        return msg;
+    }
+
+    template <class Msg>
+    Msg decode(const std::string& bytes) {
+        Msg msg;
+        msg.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        EXPECT_TRUE(msg.deserialize());
+        return msg;
+    }
+
+    std::vector<std::string> since(const std::vector<std::string>& calls, size_t from) {
+        return std::vector<std::string>(calls.begin() + static_cast<std::ptrdiff_t>(from), calls.end());
+    }
+
+    TEST(SessionClientCoreFlow, BeginRefusesAnotherProtocol) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        auto msg = start_message(9, 3);
+        msg.protocol = bmmo::session::PHYSICS_PROTOCOL_VERSION + 1;
+        EXPECT_TRUE(core.begin(msg, bmmo::session::core_config{}).refused);
+        ASSERT_EQ(fake.calls.size(), 1u);
+        EXPECT_EQ(fake.calls[0].rfind("log:0:session 9 refused: the server runs physics protocol", 0), 0u) << fake.calls[0];
+        EXPECT_EQ(core.s.session_, 0u);
+        EXPECT_EQ(core.s.phase_, client_core_state::phase::idle);
+    }
+
+    TEST(SessionClientCoreFlow, BeginTakesTheSessionAndConfig) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        core.s.own_id_ = 3;
+        core.s.assigned_ = true;
+        core.s.tick_base_ = 77;
+        core.s.held_ = true;
+        core.s.hold_polls_ = 5;
+        core.s.remotes_[4].entity = "x";
+        bmmo::session::core_config config;
+        config.journal_checkpoint_ticks = 2;
+        config.level = 5;
+        auto msg = start_message(9, 3);
+        EXPECT_FALSE(core.begin(msg, config).refused);
+        EXPECT_EQ(core.config.journal_checkpoint_ticks, 2u);
+        EXPECT_EQ(core.s.session_, 9u);
+        EXPECT_EQ(core.s.level_, 13) << "the session's level, not the fallback";
+        EXPECT_EQ(core.s.input_delay_, 4u);
+        EXPECT_EQ(core.s.sector_lead_, 7u);
+        EXPECT_EQ(core.s.seed_, 11);
+        EXPECT_EQ(core.s.own_join_order_, 2);
+        EXPECT_EQ(core.s.own_group_, "P#2");
+        EXPECT_FALSE(core.s.assigned_);
+        EXPECT_FALSE(core.s.held_);
+        EXPECT_EQ(core.s.hold_polls_, 0);
+        EXPECT_EQ(core.s.tick_base_, 0u);
+        EXPECT_EQ(core.s.frames_since_anchor_, -1);
+        EXPECT_TRUE(core.s.remotes_.empty());
+        EXPECT_EQ(core.s.phase_, client_core_state::phase::idle) << "loading only once the host requested the level";
+        const std::vector<std::string> expected = {
+            "log:0:session 9 starting: level 13, 2 players, join order 2, seed 11, input delay 4, sector lead 7",
+            "legacy:reset_held_epoch:a new session"};
+        EXPECT_EQ(fake.calls, expected);
+        core.level_requested();
+        EXPECT_EQ(core.s.phase_, client_core_state::phase::loading);
+
+        // A SessionStart without a level loads the host's; without our id the
+        // join order is unknown and the group is the fallback's.
+        msg.map.level = 0;
+        msg.players.clear();
+        core.begin(msg, config);
+        EXPECT_EQ(core.s.level_, 5);
+        EXPECT_EQ(core.s.own_join_order_, -1);
+        EXPECT_EQ(core.s.own_group_, "P#63");
+    }
+
+    // SessionReady carries the anchor hash, the host's strings and CAP_LEAD
+    // iff the host can slew (design 2.3); the hold is armed 10 s ahead.
+    TEST(SessionClientCoreFlow, AnchorSendsReadyAndArmsTheHold) {
+        for (bool slew: {false, true}) {
+            flow_fake fake;
+            session_capabilities caps;
+            caps.slew = slew;
+            session_client_core core(fake.make_flow(), caps);
+            fake.fill_legacy(core);
+            core.s.resync_in_flight_ = true;
+            core.s.resync_owed_ = true;
+            core.s.window_index_ = 3;
+            run_to_anchor(core, fake);
+            const std::vector<std::string> expected = {
+                "log:0:session 9 starting: level 13, 2 players, join order 2, seed 11, input delay 4, sector lead 7",
+                "legacy:reset_held_epoch:a new session",
+                "hook:numbering_restarted:anchor_origin",
+                "legacy:drop_pending_rewind",
+                "now:anchor_hold",
+                "send:0",
+                "log:0:anchored after 12 load ticks: pose 0000000000000051 surfaces 0000000000000052 cores=0 factor=0.000000"};
+            EXPECT_EQ(fake.calls, expected);
+            EXPECT_EQ(core.s.phase_, client_core_state::phase::running);
+            EXPECT_EQ(core.s.frames_since_anchor_, 0);
+            EXPECT_TRUE(core.holding());
+            EXPECT_EQ(core.s.hold_deadline_, fake.clock + bmmo::session::kAnchorHoldTimeout);
+            EXPECT_FALSE(core.s.resync_in_flight_);
+            EXPECT_FALSE(core.s.resync_owed_);
+            EXPECT_EQ(core.s.window_index_, 0xFFFFFFFFu);
+            ASSERT_EQ(fake.sent.size(), 1u);
+            const auto ready = decode<bmmo::session_ready_msg>(fake.sent[0].first);
+            EXPECT_EQ(ready.session, 9u);
+            EXPECT_EQ(ready.first_tick, 0u);
+            EXPECT_EQ(ready.anchor_hash, 0x51u);
+            EXPECT_EQ(ready.anchor_surfaces, 0x52u);
+            EXPECT_EQ(ready.physics_sha256, "headless-64");
+            EXPECT_EQ(ready.build_id, "build-x");
+            EXPECT_EQ(ready.caps, slew ? bmmo::session::CAP_LEAD : 0u);
+        }
+    }
+
+    // Design 5.1 "The hold": released on assign; held while the deadline is
+    // ahead, polls counted.
+    TEST(SessionClientCoreFlow, HoldReleasesOnAssign) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        for (int i = 0; i < 3; ++i) {
+            fake.advance(std::chrono::milliseconds(1000));
+            const auto state = core.poll_hold();
+            EXPECT_TRUE(state.held);
+            EXPECT_FALSE(state.timed_out);
+        }
+        EXPECT_EQ(core.s.hold_polls_, 3);
+        const size_t from = fake.calls.size();
+        core.on_session_assign(assign_message(9, 120));
+        EXPECT_TRUE(core.assigned());
+        EXPECT_FALSE(core.holding());
+        EXPECT_EQ(core.s.tick_base_, 120u);
+        EXPECT_EQ(core.s.held_floor_, 120u);
+        EXPECT_EQ(core.s.frames_since_anchor_, 0);
+        EXPECT_EQ(core.current_tick(), 120u);
+        const std::vector<std::string> expected = {
+            "legacy:set_aside_unanswered:2",
+            "hook:numbering_restarted:assign_renumber",
+            "legacy:reset_held_epoch:the new base",
+            "hook:numbering_restarted:assign_release",
+            "log:0:anchor hold released after 3 polls: the first frame is tick 120",
+            "log:0:tick base 120 assigned (0 frames since anchor)"};
+        EXPECT_EQ(since(fake.calls, from), expected);
+        const auto after = core.poll_hold();
+        EXPECT_FALSE(after.held);
+        EXPECT_FALSE(after.timed_out);
+        EXPECT_EQ(core.s.hold_polls_, 3) << "no poll counted once released";
+    }
+
+    // Design 5.1 "The hold": the timeout at 10 s on the fake clock, with the
+    // journal note.
+    TEST(SessionClientCoreFlow, HoldTimesOutAfterTenSeconds) {
+        journal_dir dir("hold");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_client_core core(fake.make_flow(true), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        fake.advance(std::chrono::milliseconds(9999));
+        EXPECT_TRUE(core.poll_hold().held);
+        fake.advance(std::chrono::milliseconds(1));
+        const size_t from = fake.calls.size();
+        const auto state = core.poll_hold();
+        EXPECT_FALSE(state.held);
+        EXPECT_TRUE(state.timed_out);
+        EXPECT_FALSE(core.holding());
+        EXPECT_EQ(core.s.hold_polls_, 2);
+        const std::vector<std::string> expected = {
+            "now:hold_poll", "hook:numbering_restarted:hold_timeout",
+            "log:0:anchor hold: no tick base after 10.0 s; running anyway (the world will be out of phase with the server's)"};
+        EXPECT_EQ(since(fake.calls, from), expected);
+        EXPECT_FALSE(core.poll_hold().held);
+        core.journal().close("done");
+        bmmo::session::journal j;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, j, error)) << error;
+        bool noted = false;
+        for (const auto& n: j.notes) noted = noted || n.text == "anchor hold timed out; running without a tick base";
+        EXPECT_TRUE(noted);
+    }
+
+    // Design 5.1 "Numbering": a first assignment renumbers; a duplicate or an
+    // older one changes nothing; base 0 leaves the numbering alone.
+    TEST(SessionClientCoreFlow, DuplicateOrOlderAssignmentChangesNothing) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(8, 120));   // another session
+        core.s.phase_ = client_core_state::phase::loading;
+        core.on_session_assign(assign_message(9, 120));   // not running yet
+        core.s.phase_ = client_core_state::phase::running;
+        EXPECT_FALSE(core.assigned());
+        core.on_session_assign(assign_message(9, 120));
+        core.s.frames_since_anchor_ = 40;
+        core.s.input_history_.push_back({159, bmmo::session::input_frame{}});
+        const size_t from = fake.calls.size();
+        core.on_session_assign(assign_message(9, 120));
+        core.on_session_assign(assign_message(9, 100));
+        EXPECT_EQ(core.s.duplicate_assigns_, 2u);
+        EXPECT_EQ(core.s.tick_base_, 120u);
+        EXPECT_EQ(core.s.frames_since_anchor_, 40);
+        EXPECT_EQ(core.s.input_history_.size(), 1u);
+        EXPECT_TRUE(since(fake.calls, from).empty());
+
+        // Base 0: the numbering stays the anchor's, frames and inputs kept.
+        flow_fake zero;
+        session_client_core other(zero.make_flow(), session_capabilities{});
+        zero.fill_legacy(other);
+        run_to_anchor(other, zero);
+        other.s.frames_since_anchor_ = 2;
+        const size_t zfrom = zero.calls.size();
+        other.on_session_assign(assign_message(9, 0));
+        EXPECT_TRUE(other.assigned());
+        EXPECT_EQ(other.s.frames_since_anchor_, 2);
+        const std::vector<std::string> expected = {
+            "legacy:reset_held_epoch:the new base", "hook:numbering_restarted:assign_release",
+            "log:0:anchor hold released after 0 polls: the first frame is tick 0",
+            "log:0:tick base 0 assigned (2 frames since anchor)"};
+        EXPECT_EQ(since(zero.calls, zfrom), expected);
+    }
+
+    // Design 5.1 "Numbering": a re-assignment resyncs - the history goes,
+    // rebase_own_lives, held_floor_ at the new base, a snapshot awaited.
+    TEST(SessionClientCoreFlow, ReassignmentResyncs) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        core.s.frames_since_anchor_ = 300;
+        core.s.input_history_.push_back({419, bmmo::session::input_frame{}});
+        core.s.own_inputs_[419] = bmmo::session::input_frame{};
+        core.s.have_snapshot_ = true;
+        core.s.resync_in_flight_ = true;
+        core.s.resync_owed_ = true;
+        const size_t from = fake.calls.size();
+        core.on_session_assign(assign_message(9, 2000));
+        EXPECT_EQ(core.s.tick_base_, 2000u);
+        EXPECT_EQ(core.s.held_floor_, 2000u);
+        EXPECT_EQ(core.s.last_assign_first_tick_, 2000u);
+        EXPECT_EQ(core.s.frames_since_anchor_, 0);
+        EXPECT_TRUE(core.s.input_history_.empty());
+        EXPECT_TRUE(core.s.own_inputs_.empty());
+        EXPECT_TRUE(core.resync_pending());
+        EXPECT_FALSE(core.s.have_snapshot_);
+        EXPECT_FALSE(core.s.resync_in_flight_);
+        EXPECT_FALSE(core.s.resync_owed_);
+        const std::vector<std::string> expected = {
+            "legacy:reset_held_epoch:the new base", "legacy:rebase_own_lives",
+            "hook:numbering_restarted:assign_resync", "log:0:resynced: tick base 2000"};
+        EXPECT_EQ(since(fake.calls, from), expected);
+        EXPECT_TRUE(fake.sent.size() == 1u) << "a resync sends nothing (the SessionReady only)";
+    }
+
+    // The limiter: nothing before the assignment; one request in flight for
+    // up to 10 s; 2 s between requests, an owed one asked again by
+    // retry_owed_resync; a slew in flight ended, acknowledged in full.
+    TEST(SessionClientCoreFlow, ResyncLimiter) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.request_resync("before the base");
+        EXPECT_EQ(core.s.resyncs_sent_, 0u);
+        core.on_session_assign(assign_message(9, 120));
+        core.s.last_snapshot_tick_ = 115;
+        size_t from = fake.calls.size();
+        core.request_resync("first");
+        EXPECT_EQ(core.s.resyncs_sent_, 1u);
+        EXPECT_TRUE(core.s.resync_in_flight_);
+        {
+            const std::vector<std::string> expected = {"now:resync_limiter", "send:0",
+                                                       "log:0:resync requested (first) at tick 120"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+            const auto msg = decode<bmmo::session_resync_msg>(fake.sent.back().first);
+            EXPECT_EQ(msg.session, 9u);
+            EXPECT_EQ(msg.last_full_tick, 115u);
+        }
+        // In flight: nothing for 10 s, not even an owed note.
+        fake.advance(std::chrono::milliseconds(5000));
+        from = fake.calls.size();
+        core.request_resync("in flight", true);
+        EXPECT_FALSE(core.s.resync_owed_);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"now:resync_limiter"});
+        // Answered (a newer base), then asked again within 2 s: owed.
+        core.on_session_assign(assign_message(9, 900));
+        core.s.resync_pending_ = false;
+        fake.advance(std::chrono::milliseconds(-4000));   // 1 s after the first request
+        from = fake.calls.size();
+        core.request_resync("not owed");
+        EXPECT_FALSE(core.s.resync_owed_);
+        core.request_resync("owed", true);
+        EXPECT_TRUE(core.s.resync_owed_);
+        EXPECT_EQ(core.s.resync_owed_reason_, "owed");
+        {
+            const std::vector<std::string> expected = {"now:resync_limiter", "now:resync_limiter",
+                                                       "log:0:resync owed (owed) at tick 900: the limiter holds it back"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        core.retry_owed_resync();   // still within 2 s: kept
+        EXPECT_TRUE(core.s.resync_owed_);
+        EXPECT_EQ(core.s.resyncs_sent_, 1u);
+        fake.advance(std::chrono::milliseconds(1000));
+        core.s.lead_slew_.start(1, 3);
+        from = fake.calls.size();
+        core.retry_owed_resync();
+        EXPECT_FALSE(core.s.resync_owed_);
+        EXPECT_EQ(core.s.resyncs_sent_, 2u);
+        {
+            const std::vector<std::string> expected = {
+                "now:resync_limiter", "legacy:finish_lead_slew:ended by a resync request (owed (owed)):reanchored",
+                "send:0", "log:0:resync requested (owed (owed)) at tick 900"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        // A resync waiting for its snapshot is the answer to an owed one.
+        core.s.resync_owed_ = true;
+        core.s.resync_pending_ = true;
+        from = fake.calls.size();
+        core.retry_owed_resync();
+        EXPECT_FALSE(core.s.resync_owed_);
+        EXPECT_TRUE(since(fake.calls, from).empty());
+    }
+
+    // send_event: stamped with the session, origin = stamp, counted; the
+    // host's filter may keep it; on the wire it goes reliable no-Nagle and is
+    // repeated unreliably by flush_inputs once assigned, beside the inputs
+    // (one datagram per MAX_INPUT_FRAMES), each remembered in the sent ring.
+    TEST(SessionClientCoreFlow, EventsAndInputsGoOut) {
+        flow_fake fake;
+        session_platform p = fake.make_flow();
+        bool hold = true;
+        p.hooks.filter_event = [&](const bmmo::session_event_msg&) {
+            fake.calls.push_back("hook:filter_event");
+            return hold ? bmmo::session::event_send_verdict::hold : bmmo::session::event_send_verdict::send;
+        };
+        session_client_core core(std::move(p), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        bmmo::session_event_msg event;
+        event.tick = 130;
+        event.type = bmmo::session::event_type::Physicalize;
+        size_t from = fake.calls.size();
+        const size_t sent_before = fake.sent.size();
+        core.send_event(event);
+        EXPECT_EQ(event.session, 9u);
+        EXPECT_EQ(event.origin_tick, 130u);
+        EXPECT_EQ(core.s.events_sent_, 1u);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"hook:filter_event"});
+        EXPECT_EQ(fake.sent.size(), sent_before);
+        core.flush_inputs();   // not assigned: nothing
+        EXPECT_EQ(fake.sent.size(), sent_before);
+        const std::string held_bytes = event.raw.str();
+        core.release_event(held_bytes);
+        hold = false;
+        core.send_event(event);
+        ASSERT_EQ(fake.sent.size(), sent_before + 2);
+        EXPECT_EQ(fake.sent[sent_before].second, send_mode::reliable_no_nagle);
+        EXPECT_EQ(fake.sent[sent_before].first, held_bytes);
+        EXPECT_EQ(fake.sent[sent_before + 1].second, send_mode::reliable_no_nagle);
+
+        core.on_session_assign(assign_message(9, 120));   // flushes: two repeats each, no input yet
+        const size_t after_assign = fake.sent.size();
+        EXPECT_EQ(after_assign, sent_before + 4);
+        for (size_t i = sent_before + 2; i < after_assign; ++i)
+            EXPECT_EQ(fake.sent[i].second, send_mode::unreliable_no_delay);
+        for (uint32_t t = 120; t < 120 + bmmo::session::MAX_INPUT_FRAMES + 3; ++t) {
+            bmmo::session::input_frame frame;
+            frame.keys = static_cast<uint8_t>(t);
+            core.s.input_history_.push_back({t, frame});
+        }
+        const uint64_t inputs_before = core.s.inputs_sent_;
+        core.flush_inputs();
+        EXPECT_EQ(core.s.inputs_sent_, inputs_before + 2);
+        const auto first = decode<bmmo::session_input_msg>(fake.sent[fake.sent.size() - 2].first);
+        const auto second = decode<bmmo::session_input_msg>(fake.sent.back().first);
+        EXPECT_EQ(first.first_tick, 120u);
+        EXPECT_EQ(first.frames.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES));
+        EXPECT_EQ(second.first_tick, 120u + bmmo::session::MAX_INPUT_FRAMES);
+        EXPECT_EQ(second.frames.size(), 3u);
+        EXPECT_EQ(core.s.sent_inputs_.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES) + 3);
+        EXPECT_EQ(core.s.sent_inputs_.at(121).keys, 121);
+    }
+
+    // SessionEnd: another session's is only logged; ours goes idle, in
+    // order: the host's discards, the journal closed, the host's world, the
+    // state, the held epoch, the status line, then idle.
+    TEST(SessionClientCoreFlow, EndGoesIdle) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        core.s.remotes_[4].entity = "Ball_Wood_BMMO_4";
+        bmmo::session_end_msg other;
+        other.session = 8;
+        other.reason = "elsewhere";
+        size_t from = fake.calls.size();
+        core.on_session_end(other);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"log:0:session 8 ended: elsewhere"});
+        EXPECT_EQ(core.s.phase_, client_core_state::phase::running);
+        bmmo::session_end_msg ours;
+        ours.session = 9;
+        from = fake.calls.size();
+        core.on_session_end(ours);
+        const std::vector<std::string> expected = {
+            "log:0:session 9 ended: ", "hook:ending", "legacy:end_session_world",
+            "legacy:reset_held_epoch:the session's end", "legacy:report"};
+        EXPECT_EQ(since(fake.calls, from), expected);
+        EXPECT_EQ(core.s.phase_, client_core_state::phase::idle);
+        EXPECT_EQ(core.s.session_, 0u);
+        EXPECT_FALSE(core.assigned());
+        EXPECT_TRUE(core.s.remotes_.empty());
+        EXPECT_EQ(core.s.sessions_ended_, 1u);
     }
 }

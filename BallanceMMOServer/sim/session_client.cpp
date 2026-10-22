@@ -84,12 +84,6 @@
 namespace {
     using clock_type = std::chrono::steady_clock;
 
-    // How long the world waits at the anchor for SessionAssign before it starts
-    // stepping anyway (design 9.25 phase alignment).  The assignment is one
-    // reliable round trip behind SessionReady, so this is a fault timeout, not
-    // a schedule: a server that never answers must not freeze the client.
-    constexpr std::chrono::seconds kAnchorHoldTimeout{10};
-
     struct arguments {
         std::string root;
         std::string server = "127.0.0.1:26676";
@@ -544,7 +538,7 @@ namespace {
         // rest of the frame-loop internals.
         friend class own_physicalize_callback;
     public:
-        explicit session_client(arguments args) : args_(std::move(args)) {}
+        explicit session_client(arguments args) : args_(std::move(args)) { core_.legacy = make_legacy_calls(); }
         // make_platform() hands core_ lambdas that hold `this`: a moved (or
         // copied) client would leave them calling into the old object.
         session_client(session_client&&) = delete;
@@ -813,92 +807,7 @@ namespace {
             case bmmo::SessionAssign: {
                 bmmo::session_assign_msg msg;
                 if (!fill(msg)) return;
-                if (msg.session != core_.s.session_ || core_.s.phase_ != phase::running) return;
-                // The server sends an assignment several times, unreliably,
-                // beside the reliable one (a lost reliable copy used to arrive
-                // ~400 ms late and start this client that far behind for good):
-                // a copy of the one already applied changes nothing.
-                // ...and a copy of an older one (a resync's base is always
-                // newer than the start's) must not be taken for a re-assignment.
-                if (core_.s.assigned_ && static_cast<int32_t>(msg.first_tick - core_.s.last_assign_first_tick_) <= 0) {
-                    ++core_.s.duplicate_assigns_;
-                    return;
-                }
-                core_.s.last_assign_first_tick_ = msg.first_tick;
-                // A newer base answers every resync asked for so far, and any
-                // the limiter still owes: its full snapshot replaces the world.
-                core_.s.resync_in_flight_ = false;
-                core_.s.resync_owed_ = false;
-                if (core_.s.assigned_) {
-                    // Resync (design 9.2): numbering restarts from the server's
-                    // current tick; the next full snapshot rebuilds every body.
-                    core_.s.tick_base_ = msg.first_tick;
-                    core_.s.held_floor_ = core_.s.tick_base_;
-                    reset_held_epoch();
-                    core_.s.frames_since_anchor_ = 0;
-                    core_.s.input_history_.clear();
-                    core_.s.corrector_.clear();
-                    for (auto& [name, corrector]: core_.s.mechanism_correctors_) corrector.clear();
-                    for (auto& [id, remote]: core_.s.remotes_) remote.corrector.clear();
-                    // A renumbering makes every record unreachable: no incoming
-                    // snapshot can match a tick of the old base (design 9.25 -
-                    // the retail mod does this in rebase_tick).  The registry
-                    // goes with it: its rows are keyed by the old numbers.
-                    core_.s.rollback_.invalidate_history();
-                    // An own beam the new numbering has not reached yet is the
-                    // server's to apply at its stamp, and so ours: live once
-                    // more, rather than retired with the history.  The births
-                    // go: the full snapshot puts the server's own ball in.
-                    rebase_own_lives();
-                    core_.s.own_inputs_.clear();
-                    core_.s.mechanism_tracking_.clear();
-                    core_.s.resync_pending_ = true;
-                    core_.s.have_snapshot_ = false;
-                    origin_ = wall_now(bmmo::sim::wall_site::assign_resync);
-                    logf("resynced: tick base %u", core_.s.tick_base_);
-                    core_.journal().note("resync: tick base " + std::to_string(core_.s.tick_base_));
-                    break;
-                }
-                core_.s.assigned_ = true;
-                // A numbered base is the ordinary case: the server anchors the
-                // members present at the start at its start lead and a late
-                // joiner (or a resync) at its current tick plus the same lead,
-                // so the numbering is not the one this client has been running
-                // since its own anchor.  Renumber onto it, exactly as the retail
-                // client does (physics_session_client.cpp).  Base 0 is the one
-                // case left over: a server that still numbers a start member
-                // from its own anchor leaves the numbering alone.
-                if (msg.first_tick != 0) {
-                    core_.s.frames_since_anchor_ = 0;
-                    core_.s.input_history_.clear();
-                    // Same as the resync above: the frames recorded under the
-                    // anchor-relative numbering name ticks the server never
-                    // asked us for, and nothing can match them again.
-                    core_.s.rollback_.invalidate_history();
-                    core_.s.own_inputs_.clear();
-                    // ...and our own body changes, numbered the same way
-                    // (an unanswered birth is set aside for its echo).
-                    set_aside_unanswered(own_life::aside::resync);
-                    core_.s.own_life_.clear();
-                    core_.s.mechanism_tracking_.clear();
-                    origin_ = wall_now(bmmo::sim::wall_site::assign_renumber);
-                }
-                core_.s.tick_base_ = msg.first_tick;
-                core_.s.held_floor_ = core_.s.tick_base_;
-                reset_held_epoch();
-                // The anchor hold ends here: the next frame is the world's
-                // first step and it is numbered `tick_base_`, exactly like the
-                // server's own first step (design 9.25 phase alignment).
-                if (core_.s.held_) {
-                    core_.s.held_ = false;
-                    origin_ = wall_now(bmmo::sim::wall_site::assign_release);
-                    logf("anchor hold released after %d polls: the first frame is tick %u", core_.s.hold_polls_, core_.s.tick_base_);
-                    core_.journal().note("anchor hold released at tick base " + std::to_string(core_.s.tick_base_));
-                }
-                logf("tick base %u assigned (%lld frames since anchor)", core_.s.tick_base_, static_cast<long long>(core_.s.frames_since_anchor_));
-                core_.journal().note("assigned: tick base " + std::to_string(core_.s.tick_base_) + " ("
-                             + std::to_string(core_.s.frames_since_anchor_) + " frames since the anchor)");
-                flush_inputs();
+                core_.on_session_assign(msg);
                 break;
             }
             case bmmo::SessionSnapshot: {
@@ -1012,8 +921,7 @@ namespace {
             case bmmo::SessionEnd: {
                 bmmo::session_end_msg msg;
                 if (!fill(msg)) return;
-                logf("session %u ended: %s", msg.session, msg.reason.c_str());
-                if (msg.session == core_.s.session_) end_session(msg.reason.empty() ? "session ended" : msg.reason);
+                core_.on_session_end(msg);
                 break;
             }
             case bmmo::PlainText: {
@@ -1059,11 +967,61 @@ namespace {
             };
             p.list_bodies = [this]() { return bmmo::physics::physics_direct(engine_->physics()).list_bodies(); };
             p.journal_path = [this](const bmmo::session::journal_header&) { return std::filesystem::path(args_.journal); };
+            // The host hooks (E3): the pacer's origin restarts with the
+            // numbering, --hold-event, and its discards at the session's end.
+            p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) { origin_ = wall_now(site); };
+            p.hooks.filter_event = [this](const bmmo::session_event_msg& event) {
+                if (!hold_event(event)) return bmmo::session::event_send_verdict::send;
+                return args_.hold_event_drop ? bmmo::session::event_send_verdict::drop
+                                             : bmmo::session::event_send_verdict::hold;
+            };
+            p.hooks.ending = [this]() { discard_held_events(); };
             return p;
         }
-        // Declared as each capability's operations arrive (design 2.3): none
-        // is read before E3.
-        static bmmo::session::session_capabilities make_capabilities() { return {}; }
+        // Declared as each capability's operations arrive (design 2.3).  E3:
+        // slew (SessionReady's caps = CAP_LEAD, as this client always sent)
+        // and nonblocking_hold (the hold returns to the loop).
+        static bmmo::session::session_capabilities make_capabilities() {
+            bmmo::session::session_capabilities caps;
+            caps.slew = true;
+            caps.nonblocking_hold = true;
+            return caps;
+        }
+        // The transitional back-calls (shared-core design 6.1): the functions
+        // of this client that code moved into the core still calls.
+        bmmo::session::legacy_calls make_legacy_calls() {
+            bmmo::session::legacy_calls l;
+            l.rebase_own_lives = [this]() { rebase_own_lives(); };
+            l.set_aside_unanswered = [this](own_life::aside why) { set_aside_unanswered(why); };
+            l.reset_held_epoch = [this](const char* why) { reset_held_epoch(why); };
+            l.drop_pending_rewind = [this]() { drop_pending_rewind(); };
+            l.finish_lead_slew = [this](const std::string& why, bool reanchored) { finish_lead_slew(why, reanchored); };
+            l.end_session_world = [this]() { end_session_world(); };
+            l.report = [this]() { report(); };
+            return l;
+        }
+        // The core's configuration from the arguments (design 1.2).
+        bmmo::session::core_config make_core_config() const {
+            bmmo::session::core_config c;
+            c.journal_checkpoint_ticks = args_.checkpoint_ticks;
+            c.level = args_.level;
+            c.verbose = args_.trace;
+            c.restore_recheck = args_.restore_recheck;
+            c.two_pass_recheck = args_.two_pass_recheck;
+            c.restore_impulses = args_.restore_impulses;
+            c.restore_quaternions = args_.restore_quaternions;
+            c.restore_clock = args_.restore_clock;
+            c.restore_calm = args_.restore_calm;
+            c.restore_unit = args_.restore_unit;
+            c.restore_contacts = args_.restore_contacts;
+            c.contact_flags = args_.contact_flags;
+            c.sleep_as_recorded = args_.sleep_as_recorded;
+            c.script_replay = args_.script_replay;
+            c.savestate = args_.savestate;
+            c.script_diff_logs = args_.script_diff_logs;
+            c.trace_plan = args_.trace_plan;
+            return c;
+        }
 
         // ------------------------------------------------- inbound capture
         // The wall clock as the session flow reads it: the live clock, written
@@ -1267,104 +1225,27 @@ namespace {
 
         // ---------------------------------------------------------- session
         void begin_session(const bmmo::session_start_msg& msg) {
-            // A server of another protocol (entity/session.hpp) computes and
-            // compares other things: refuse, loudly, rather than play a session
-            // that cannot agree.
-            if (msg.protocol != bmmo::session::PHYSICS_PROTOCOL_VERSION) {
-                logf("session %u refused: the server runs physics protocol %u, this client runs %u", msg.session,
-                     msg.protocol, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+            // The session's parameters and the core's fresh state (shared-core
+            // design E3: session_client_core::begin).
+            if (core_.begin(msg, make_core_config()).refused) {
                 ended_ = true;
                 return;
             }
-            // A box of the previous session is closed with its own numbering,
-            // before begin_session resets the tick base under it.
-            core_.journal().close("a new session started");
-            core_.config.journal_checkpoint_ticks = args_.checkpoint_ticks;
-            core_.s.rollback_.set_verbose(args_.trace);
-            core_.s.rollback_.set_recheck_on_restore(args_.restore_recheck);
-            core_.s.rollback_.set_two_pass_recheck(args_.two_pass_recheck);
-            core_.s.rollback_.set_restore_impulses(args_.restore_impulses);
-            core_.s.rollback_.set_restore_quaternions(args_.restore_quaternions);
-            core_.s.rollback_.set_restore_clock(args_.restore_clock);
-            core_.s.rollback_.set_restore_calm(args_.restore_calm);
-            core_.s.rollback_.set_restore_unit(args_.restore_unit);
-            core_.s.rollback_.set_restore_contacts(args_.restore_contacts);
-            core_.s.rollback_.set_contact_flags(args_.contact_flags);
-            core_.s.rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
-            core_.s.rollback_.set_replay_scripts(args_.script_replay);
-            core_.s.rollback_.set_exact_restore(args_.savestate);
-            core_.s.rollback_.set_script_log_cap(args_.script_diff_logs);
-            core_.s.rollback_.set_trace_plan(args_.trace_plan);
-            core_.s.session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
-            core_.s.input_delay_ = msg.input_delay;
-            core_.s.sector_lead_ = msg.sector_lead;
-            core_.s.seed_ = msg.seed;
-            core_.s.spawn_impulse_ = msg.spawn_impulse;
-            core_.s.spawn_spacing_ = msg.spawn_spacing;
-            core_.s.level_ = msg.map.level > 0 ? msg.map.level : args_.level;
-            core_.s.players_ = msg.players;
-            core_.s.own_join_order_ = -1;
             spawn_known_ = false;
             for (const auto& p: core_.s.players_) {
                 if (p.id != core_.s.own_id_) continue;
-                core_.s.own_join_order_ = p.join_order;
                 for (int k = 0; k < 3; ++k) spawn_position_[k] = p.spawn_position[k];
                 spawn_known_ = true;
             }
-            core_.s.own_group_ = "P#" + std::to_string(core_.s.own_join_order_ < 0 ? 63 : core_.s.own_join_order_);
-            logf("session %u starting: level %d, %zu players, join order %d, seed %d, input delay %u, sector lead %u",
-                 core_.s.session_, core_.s.level_, core_.s.players_.size(), core_.s.own_join_order_, core_.s.seed_, static_cast<unsigned>(core_.s.input_delay_),
-                 static_cast<unsigned>(core_.s.sector_lead_));
-            // Fresh runtime state.
-            core_.s.assigned_ = false;
-            core_.s.held_ = false;
-            core_.s.hold_polls_ = 0;
-            core_.s.tick_base_ = 0;
-            core_.s.frames_since_anchor_ = -1;
-            core_.s.input_history_.clear();
-            core_.s.previous_cam_valid_ = false;
+            // This client's fresh runtime state.
             navigation_known_ = false;
-            core_.s.corrector_.clear();
-            core_.s.mechanism_correctors_.clear();
-            core_.s.mechanism_tracking_.clear();
-            core_.s.generations_.clear();
             local_births_.clear();
             manager_activations_.clear();
             activations_replayed_ = 0;
-            core_.s.amend_failures_ = 0;
             beam_done_ = false;
-            core_.s.own_life_.clear();
-            core_.s.own_echoes_.clear();
-            core_.s.own_echoes_stale_.clear();
-            core_.s.own_unanswered_.clear();
-            core_.s.own_moved_unphysicalize_.clear();
-            core_.s.held_lifecycle_.clear();
-            core_.s.remotes_.clear();
-            core_.s.relay_seen_.clear();
-            core_.s.held_seen_.clear();
-            core_.s.held_stale_seen_.clear();
-            core_.s.held_header_known_ = false;
-            core_.s.acked_header_known_ = false;
-            core_.s.held_floor_ = 0;
-            reset_held_epoch("a new session");
-            // Decision ids are unique per player for a session's life; the
-            // offset is this session's.
-            core_.s.lead_seen_.clear();
-            core_.s.lead_offset_ = 0;
-            core_.s.pending_relay_.clear();
-            core_.s.event_seen_.clear();
-            core_.s.own_event_repeats_.clear();
-            core_.s.remote_last_physicalize_.clear();
-            core_.s.remote_last_unphysicalize_.clear();
             own_group_set_ = false;
-            core_.s.own_physicalized_ = false;
-            core_.s.own_body_entity_.clear();
             own_capture_.valid = false;
-            core_.s.start_sector_pending_ = false;
-            core_.s.sectors_.reset();
-            core_.s.sectors_requested_.clear();
-            core_.s.sector_cell_ = 0;
             scripts_.clear();
             script_reset_ticks_.clear();
             reset_guard_.restore(engine_->context());
@@ -1392,7 +1273,7 @@ namespace {
             engine_->request_level(core_.s.level_);
             load_waited_ = 0;
             level_sequencers_.clear();
-            core_.s.phase_ = phase::loading;
+            core_.level_requested();
         }
 
         void load_step() {
@@ -1503,49 +1384,18 @@ namespace {
                 logf("--start-sector %d will be stamped %u ticks ahead of the first assigned frame", args_.start_sector,
                      static_cast<unsigned>(core_.s.sector_lead_));
             }
-            core_.s.frames_since_anchor_ = 0;
-            core_.s.phase_ = phase::running;
-            origin_ = wall_now(bmmo::sim::wall_site::anchor_origin);
             rebases_ = 0;
-            // The window: line starts over with the session (its first call
-            // takes the base, prints nothing), and --hold-event counts the
-            // N-th own event of this session.
-            core_.s.window_index_ = 0xFFFFFFFFu;
-            core_.s.window_lag_.clear();
-            core_.s.window_inrew_src_.clear();
-            drop_pending_rewind();
-            core_.s.resync_in_flight_ = false;
-            core_.s.resync_owed_ = false;
             hold_event_seen_ = 0;
-            // Hold the world here until the tick base arrives (design 9.25
-            // phase alignment): the first frame this client steps must be the
-            // first frame the server's world steps, the one both of them number
-            // with the start base.  The network keeps being polled while we
-            // wait; nothing else in the frame runs, so no input, no journal
-            // TICK record and no rollback record is made for a tick that does
-            // not exist.
-            core_.s.held_ = true;
-            core_.s.hold_polls_ = 0;
-            core_.s.hold_deadline_ = wall_now(bmmo::sim::wall_site::anchor_hold) + kAnchorHoldTimeout;
-            bmmo::session_ready_msg ready;
-            ready.session = core_.s.session_;
-            ready.first_tick = 0;
-            ready.anchor_hash = hash.pose;
-            ready.anchor_surfaces = hash.surfaces;
-            ready.physics_sha256 = sizeof(void*) == 8 ? "headless-64" : "headless-32";
-            ready.build_id = bmmo::physics::build_id();
-            // This client applies a SessionLead (late-player design 2.4:
-            // amend, force, slew, acknowledge), so the server may send it one
-            // and anchor its late join and resyncs at its own lead.
-            ready.caps = bmmo::session::CAP_LEAD;
-            ready.serialize();
-            send_bytes(ready.raw.str(), k_nSteamNetworkingSend_Reliable);
-            logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", load_waited_,
-                 static_cast<unsigned long long>(hash.pose), static_cast<unsigned long long>(hash.surfaces), hash.cores,
-                 hash.time_factor);
-            // The box starts where the session does: at the anchor the server
-            // has to agree with, before the tick base is known.
-            core_.journal().open(hash, bmmo::physics::build_id(), args_.name);
+            // The phase, the pacer's origin (hooks.numbering_restarted), the
+            // hold, SessionReady and the journal (shared-core design E3:
+            // session_client_core::anchor).
+            bmmo::session::anchor_report report;
+            report.hash = hash;
+            report.physics_sha256 = sizeof(void*) == 8 ? "headless-64" : "headless-32";
+            report.build_id = bmmo::physics::build_id();
+            report.own_name = args_.name;
+            report.load_ticks = load_waited_;
+            core_.anchor(report);
         }
 
         // The lead the server sized for this session (SessionStart).
@@ -2120,23 +1970,15 @@ namespace {
             // and bought nothing but the offset.)  A bounded wait: if the
             // assignment never comes the client runs on rather than sitting
             // here for ever, and says so.
-            if (core_.s.held_) {
-                ++core_.s.hold_polls_;
-                if (wall_now(bmmo::sim::wall_site::hold_poll) < core_.s.hold_deadline_) {
-                    wall_sleep(std::chrono::milliseconds(1));
-                    return;   // poll the network, step nothing
-                }
-                core_.s.held_ = false;
-                origin_ = wall_now(bmmo::sim::wall_site::hold_timeout);
-                logf("anchor hold: no tick base after %.1f s; running anyway (the world will be out of phase with "
-                     "the server's)", std::chrono::duration<double>(kAnchorHoldTimeout).count());
-                core_.journal().note("anchor hold timed out; running without a tick base");
+            if (core_.poll_hold().held) {
+                wall_sleep(std::chrono::milliseconds(1));
+                return;   // poll the network, step nothing
             }
             // Frames run from the assignment, and the server's world starts at
             // the same tick: a client that stepped between its anchor and the
             // assignment would be that many steps ahead of the world for good.
-            // Inputs before the assignment queue up and flush_inputs() sends
-            // them when the tick base lands.
+            // Inputs before the assignment queue up and core_.flush_inputs()
+            // sends them when the tick base lands.
             const uint64_t next_frame = static_cast<uint64_t>(core_.s.frames_since_anchor_ + 1);
             if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
                 paused_once_ = true;
@@ -2276,7 +2118,7 @@ namespace {
             // and the replay ends one tick short of re-issuing it.  The retail
             // client has this order already.
             replay_corrected_inputs();
-            retry_owed_resync();
+            core_.retry_owed_resync();
             maybe_force_rollback();
             // The body changes stamped for this very tick, the own beam among
             // them: after the rewinds above, so none of them undoes one, and
@@ -2622,7 +2464,7 @@ namespace {
                 msg.session = core_.s.session_;
                 msg.first_tick = core_.s.input_history_.front().first;
                 for (const auto& [t, fr]: core_.s.input_history_) msg.frames.push_back(fr);
-                remember_sent(msg);
+                core_.remember_sent(msg);
                 msg.serialize();
                 send_bytes(msg.raw.str(), k_nSteamNetworkingSend_UnreliableNoDelay);
                 ++core_.s.inputs_sent_;
@@ -2823,33 +2665,8 @@ namespace {
                  static_cast<double>(event.position[2]));
         }
 
-        void send_event(bmmo::session_event_msg& event) {
-            event.session = core_.s.session_;
-            // Protocol 9: a client's event goes out with its origin equal to
-            // its stamp; only the server re-stamps.
-            event.origin_tick = event.tick;
-            event.state = 0;
-            event.serialize();
-            ++core_.s.events_sent_;
-            // Own events go on the wire with player 0; the box names the
-            // player the server will fill in.
-            core_.journal().lifecycle_event(core_.s.own_id_, event);
-            if (hold_event(event)) return;
-            put_event_on_wire(event.raw.str());
-        }
-
-        void put_event_on_wire(const std::string& bytes) {
-            // ReliableNoNagle, not Reliable: a reliable message waits up to the
-            // Nagle delay to be batched, and this frame's input goes out
-            // unreliable with no delay a moment later - so an event stamped
-            // for this tick could arrive after the input that lets the server
-            // step it, and be applied a tick late (the server logs it: "late
-            // by 1", seen on BodyRevived and Physicalize).
-            send_bytes(bytes, k_nSteamNetworkingSend_ReliableNoNagle);
-            // ...and again, unreliably, on each of the next ticks
-            // (flush_inputs): the server takes the first copy to arrive.
-            core_.s.own_event_repeats_.push(bytes, {0u});
-        }
+        // Own events go out through the core (shared-core design E3).
+        void send_event(bmmo::session_event_msg& event) { core_.send_event(event); }
 
         // --hold-event: true when this event is the one to hold back.  Held
         // here, before the reliable copy and before the repeat queue, so the
@@ -2882,7 +2699,7 @@ namespace {
             for (auto it = held_events_.begin(); it != held_events_.end();) {
                 if (now < it->release) { ++it; continue; }
                 if (core_.s.phase_ != phase::running) {
-                    // end_session clears the list, so this is a safety net;
+                    // the session's end clears the list (discard_held_events), so this is a safety net;
                     // said aloud either way, so a hold never ends silently.
                     logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: no session running",
                          event_type_name(args_.hold_event_type), it->stamp, it->held_at);
@@ -2890,47 +2707,12 @@ namespace {
                     continue;
                 }
                 if (!core_.s.assigned_) { ++it; continue; }   // a session but no tick base yet: wait for it
-                put_event_on_wire(it->bytes);
+                core_.release_event(it->bytes);
                 logf("hold-event: own %s stamped tick %u (held at tick %u) released at tick %u",
                      event_type_name(args_.hold_event_type), it->stamp, it->held_at, current_tick());
                 core_.journal().note("hold-event: released stamped " + std::to_string(it->stamp));
                 it = held_events_.erase(it);
             }
-        }
-
-        void flush_inputs() {
-            if (!core_.s.assigned_) return;
-            core_.s.own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
-                send_bytes(bytes, k_nSteamNetworkingSend_UnreliableNoDelay);
-            });
-            if (core_.s.input_history_.empty()) return;
-            size_t index = 0;
-            while (index < core_.s.input_history_.size()) {
-                bmmo::session_input_msg msg;
-                msg.session = core_.s.session_;
-                msg.first_tick = core_.s.input_history_[index].first;
-                while (index < core_.s.input_history_.size() && msg.frames.size() < bmmo::session::MAX_INPUT_FRAMES) {
-                    msg.frames.push_back(core_.s.input_history_[index].second);
-                    ++index;
-                }
-                remember_sent(msg);
-                msg.serialize();
-                send_bytes(msg.raw.str(), k_nSteamNetworkingSend_UnreliableNoDelay);
-                ++core_.s.inputs_sent_;
-            }
-        }
-
-        // The sent ring (late-player design 1.3): the bytes each uplink
-        // datagram carried, by tick, which a held record's `source` names.
-        // Never amended - a source tick can itself have been substituted,
-        // and the server applied the frame as we SENT it, not what our own
-        // input history says after a correction.  Cleared with the numbering
-        // (reset_held_epoch); kSentInputRing ticks reach every reference a
-        // record inside the deepest reach can make (input_relay.hpp).
-        void remember_sent(const bmmo::session_input_msg& msg) {
-            for (size_t i = 0; i < msg.frames.size(); ++i)
-                core_.s.sent_inputs_.emplace(msg.first_tick + static_cast<uint32_t>(i), msg.frames[i]);
-            while (core_.s.sent_inputs_.size() > bmmo::session::kSentInputRing) core_.s.sent_inputs_.erase(core_.s.sent_inputs_.begin());
         }
 
         void apply_blend(const std::string& name, bmmo::session::body_corrector& corrector) {
@@ -5254,70 +5036,23 @@ namespace {
             return world;
         }
 
-        // `owed`: the own correction needs this resync (late-player design
-        // 1.3's late gate) - one the 2 s limiter holds back is asked again
-        // from frame() (retry_owed_resync) rather than lost, since the tick
-        // that asked is deduplicated and nothing would ask a second time.
-        // While a request is unanswered no other goes out: its assignment
-        // renumbers and its full snapshot replaces the world, which covers
-        // every reason found meanwhile (a blackout can hold the answer past
-        // the limiter's 2 s; 10 s is the give-up for an answer never coming).
-        void request_resync(const char* reason, bool owed = false) {
-            if (core_.s.phase_ != phase::running || !core_.s.assigned_) return;
-            const auto now = wall_now(bmmo::sim::wall_site::resync_limiter);
-            if (core_.s.resync_in_flight_ && now - core_.s.last_resync_request_ < std::chrono::seconds(10)) return;
-            if (core_.s.resyncs_sent_ > 0 && now - core_.s.last_resync_request_ < std::chrono::seconds(2)) {
-                if (owed && !core_.s.resync_owed_) {
-                    core_.s.resync_owed_ = true;
-                    core_.s.resync_owed_reason_ = reason;
-                    logf("resync owed (%s) at tick %u: the limiter holds it back", reason, current_tick());
-                }
-                return;
-            }
-            core_.s.resync_owed_ = false;
-            core_.s.resync_in_flight_ = true;
-            core_.s.last_resync_request_ = now;
-            core_.s.consecutive_hard_ = 0;
-            // A SessionLead's slew in flight ends here, acknowledged in full
-            // (late-player design 2.8, lead_slew::finish_reanchored): the
-            // server re-anchors this client at L_eff, the first lead plus the
-            // acknowledged offset, and the ack sent first on the same
-            // reliable channel is counted in it - so the new clock has the
-            // whole delta the server decided, not the part the slew had
-            // moved.  Only here, past the limiter: a request held back
-            // re-anchors nothing, and the slew carries on.
-            if (core_.s.lead_slew_.active())
-                finish_lead_slew(std::string("ended by a resync request (") + reason + ")", true);
-            bmmo::session_resync_msg msg;
-            msg.session = core_.s.session_;
-            msg.last_full_tick = core_.s.last_snapshot_tick_;
-            msg.serialize();
-            send_bytes(msg.raw.str(), k_nSteamNetworkingSend_Reliable);
-            ++core_.s.resyncs_sent_;
-            logf("resync requested (%s) at tick %u", reason, current_tick());
-            // Why this client gave up on its own world belongs in the box: the
-            // reason ("tick schedule rebased") leaves no other trace in the
-            // file, and the assignment that answers it looks unprompted.
-            core_.journal().note(std::string("resync: requested (") + reason + ")");
-        }
+        // The resync request and its limiter are the core's (shared-core
+        // design E3).
+        void request_resync(const char* reason, bool owed = false) { core_.request_resync(reason, owed); }
 
-        // A resync request_resync held back for the own correction: asked
-        // now if the limiter allows (it keeps the debt otherwise).  A resync
-        // waiting for its snapshot already is the answer.
-        void retry_owed_resync() {
-            if (!core_.s.resync_owed_) return;
-            if (core_.s.resync_pending_) { core_.s.resync_owed_ = false; return; }
-            const std::string reason = core_.s.resync_owed_reason_ + " (owed)";
-            request_resync(reason.c_str(), true);
-        }
-
-        // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
-        // same room reloads the level (host restart) through begin_session().
-        void end_session(const std::string& reason = "session ended") {
+        // SessionEnd (session_client_core::end): what --hold-event still
+        // holds is discarded, said aloud (hooks.ending)...
+        void discard_held_events() {
             for (const auto& held: held_events_)
                 logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: the session ended first",
                      event_type_name(args_.hold_event_type), held.stamp, held.held_at);
-            core_.journal().close(reason);
+            held_events_.clear();
+        }
+
+        // ...and, after the journal closed, the own body guard is lifted and
+        // every mirror's navigation and body taken out (legacy_calls::
+        // end_session_world).
+        void end_session_world() {
             std::string error;
             if (body_guard_) {
                 bmmo::physics::set_body_guard(engine_->physics(), false, nullptr, error);
@@ -5328,22 +5063,6 @@ namespace {
                 if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 if (remote.physicalized) bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
             }
-            core_.s.remotes_.clear();
-            core_.s.relay_seen_.clear();
-            core_.s.held_seen_.clear();
-            core_.s.held_stale_seen_.clear();
-            reset_held_epoch("the session's end");
-            core_.s.pending_relay_.clear();
-            core_.s.event_seen_.clear();
-            core_.s.own_event_repeats_.clear();
-            held_events_.clear();
-            core_.s.remote_last_physicalize_.clear();
-            core_.s.remote_last_unphysicalize_.clear();
-            report();
-            core_.s.phase_ = phase::idle;
-            core_.s.session_ = 0;
-            core_.s.assigned_ = false;
-            ++core_.s.sessions_ended_;
         }
 
         // One line per kWindowTicks ticks (late-player design 5.1 C1): what

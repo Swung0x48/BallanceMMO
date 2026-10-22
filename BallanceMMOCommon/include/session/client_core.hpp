@@ -17,6 +17,11 @@
 // (session/client_journal.hpp), the headless client's helpers, reached as
 // journal().
 //
+// Step E3 moves numbering, the hold and the resync request (design 6.1 row
+// E3): begin, anchor's SessionReady half, poll_hold, SessionAssign,
+// request_resync / retry_owed_resync, flush_inputs, remember_sent,
+// send_event, put_event_on_wire and SessionEnd, in client_core.cpp.
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -32,13 +37,19 @@
 #include "rollback.hpp"
 #include "sector_union.hpp"
 #include "../entity/session.hpp"
+#include "../message/session_assign_msg.hpp"
+#include "../message/session_end_msg.hpp"
 #include "../message/session_event_msg.hpp"
+#include "../message/session_input_msg.hpp"
+#include "../message/session_start_msg.hpp"
+#include "../physics/world_hash.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -47,6 +58,12 @@
 #include <vector>
 
 namespace bmmo::session {
+
+    // How long the world waits at the anchor for SessionAssign before it starts
+    // stepping anyway (design 9.25 phase alignment).  The assignment is one
+    // reliable round trip behind SessionReady, so this is a fault timeout, not
+    // a schedule: a server that never answers must not freeze the client.
+    constexpr std::chrono::seconds kAnchorHoldTimeout{10};
 
     // Design 1.2: everything the session flow decides from, as the headless
     // client declared it (session_client.cpp at 9d9cb08), in the same order
@@ -385,6 +402,70 @@ namespace bmmo::session {
         // The LOCAL checkpoint cadence in ticks (headless --checkpoint-ticks,
         // retail BMMO_JOURNAL_CHECKPOINT_TICKS); 0 = core::kJournalCheckpointTicks.
         uint32_t journal_checkpoint_ticks = 0;
+        // The level to load when SessionStart names none (headless --level).
+        int level = 1;
+        // The rollback engine's switches, applied by begin (E3).  The defaults
+        // are the headless client's argument defaults.
+        bool verbose = false;               // set_verbose (headless --trace)
+        bool restore_recheck = true;        // set_recheck_on_restore
+        bool two_pass_recheck = false;      // set_two_pass_recheck
+        bool restore_impulses = true;       // set_restore_impulses
+        bool restore_quaternions = true;    // set_restore_quaternions
+        bool restore_clock = false;         // set_restore_clock
+        bool restore_calm = true;           // set_restore_calm
+        bool restore_unit = true;           // set_restore_unit
+        bool restore_contacts = true;       // set_restore_contacts
+        uint32_t contact_flags = BMMO_PHYSICS_CONTACT_DEFAULT;   // set_contact_flags
+        bool sleep_as_recorded = true;      // set_sleep_as_recorded
+        bool script_replay = true;          // set_replay_scripts
+        bool savestate = true;              // set_exact_restore
+        uint32_t script_diff_logs = 8;      // set_script_log_cap
+        bool trace_plan = false;            // set_trace_plan
+    };
+
+    // Transitional (design 6.1, "Linking while the core is incomplete"): one
+    // std::function per host function that code already moved into the core
+    // still calls.  Each E step adds the entries its moved code needs and
+    // deletes those whose target it moves; E11 deletes the struct.  The
+    // headless client fills every entry; the core calls them unguarded.
+    struct legacy_calls {
+        // E3: SessionAssign (they move with the own lives, E7).
+        std::function<void()> rebase_own_lives;
+        std::function<void(client_core_state::own_life::aside why)> set_aside_unanswered;
+        // E3: SessionAssign, begin and end (section J, E5).
+        std::function<void(const char* why)> reset_held_epoch;
+        // E3: anchor (moves with note_input_correction, E5).
+        std::function<void()> drop_pending_rewind;
+        // E3: request_resync ends a slew in flight (SessionLead, E5).
+        std::function<void(const std::string& why, bool reanchored)> finish_lead_slew;
+        // E3: end - the own body guard off, and every mirror's navigation and
+        // body taken out (E6: unmake_mirror; the guard is host state).
+        std::function<void()> end_session_world;
+        // E3: end prints the status line (E10: status_text and hooks.status).
+        std::function<void()> report;
+    };
+
+    // anchor (design 1.3): what the host's anchor work found.
+    struct anchor_report {
+        bmmo::physics::world_hash hash;   // the anchor's world hash (SessionReady, the journal header)
+        std::string physics_sha256;       // SessionReady::physics_sha256 (headless: "headless-64" / "headless-32")
+        std::string build_id;             // SessionReady::build_id and the journal header's
+        std::string own_name;             // the journal's own player name
+        int load_ticks = 0;               // the ticks the level took to load (the anchored log line)
+    };
+
+    // begin: refused when the server runs another physics protocol.
+    struct begin_result {
+        bool refused = false;
+    };
+
+    // poll_hold: still holding (the host steps nothing and polls again), or
+    // timed out on this poll (the hold is over; the core logged and journaled
+    // it).  Neither: not holding.  The headless host reads only `held`;
+    // `timed_out` is kept for the retail host's blocking loop (R1).
+    struct hold_state {
+        bool held = false;
+        bool timed_out = false;
     };
 
     class session_client_core {
@@ -407,7 +488,7 @@ namespace bmmo::session {
         // headless client, by the fake-platform test with recorders, and left
         // empty by the retail mod, which does not run the core before R1.
         legacy_calls legacy;
-        // Filled by the host (design 1.2); public until begin takes it (E3).
+        // The host's configuration (design 1.2), taken by begin.
         core_config config;
 
         const session_platform& platform() const { return platform_; }
@@ -422,6 +503,50 @@ namespace bmmo::session {
         // The session's journal (design 1.2).
         core::client_journal& journal() { return journal_; }
         const core::client_journal& journal() const { return journal_; }
+
+        // ---- session lifecycle (design 1.3; E3) ----
+        // SessionStart: the session's parameters and fresh runtime state, the
+        // rollback switches from `config`.  Refused on a protocol mismatch.
+        // The host then does its own resets, requests the level and calls
+        // level_requested().
+        begin_result begin(const bmmo::session_start_msg& msg, const core_config& config);
+        // The level is requested: the host loads it until its anchor.
+        void level_requested();
+        // The level is up and the host's anchor work done: SessionReady, the
+        // journal opened, the hold armed until the tick base arrives.
+        void anchor(const anchor_report& report);
+        // The anchor hold, once per host loop pass while it holds.
+        hold_state poll_hold();
+        // SessionEnd: drop the mirrors and go idle.
+        void end(const std::string& reason);
+
+        // ---- messages (E3: decoded by the host until on_message exists) ----
+        void on_session_assign(const bmmo::session_assign_msg& msg);
+        void on_session_end(const bmmo::session_end_msg& msg);
+
+        // ---- numbering and resync ----
+        // `owed`: the own correction needs this resync; one the limiter
+        // holds back is asked again by retry_owed_resync.
+        void request_resync(const char* reason, bool owed = false);
+        void retry_owed_resync();
+
+        // ---- sending ----
+        // The input history and the event repeats due, once assigned.
+        void flush_inputs();
+        // The sent ring: the frames an uplink datagram carried, by tick.
+        void remember_sent(const bmmo::session_input_msg& msg);
+        // An own lifecycle event: stamped, counted, journaled, then on the
+        // wire unless hooks.filter_event keeps it.
+        void send_event(bmmo::session_event_msg& event);
+        // The reliable copy, and the unreliable repeats queued.
+        void put_event_on_wire(const std::string& bytes);
+        // A held send (hooks.filter_event) goes out now.
+        void release_event(const std::string& wire_bytes) { put_event_on_wire(wire_bytes); }
+
+        // ---- reading ----
+        bool assigned() const { return s.assigned_; }
+        bool holding() const { return s.held_; }
+        bool resync_pending() const { return s.resync_pending_; }
 
         // The core's log line: printf-formatted into a growing buffer and
         // handed to platform().log as one line (design 6.1).  GCC and Clang

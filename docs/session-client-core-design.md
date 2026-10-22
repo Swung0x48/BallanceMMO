@@ -1,8 +1,9 @@
 # Session-client core: one implementation of the client flow, two hosts
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
-what became of it). Steps E0 (§5.2, "As built (step E0)"), E1 and E2 (§6.1,
-"As built (step E1)", "As built (step E2)") are built; nothing else is yet.
+what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2 and E3
+(§6.1, "As built (step E1)", "As built (step E2)", "As built (step E3)") are
+built; nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -491,7 +492,8 @@ value, as the free functions do today.
 | **host hooks** (all optional, H) | | | |
 | hooks.after_rewinds / after_record / after_amend / after_journal | `void(uint32_t tick)` | `maybe_force_rollback`, `dump_savestate`, traces, `report_queued_impulses` | a forced-rollback verb (R0/R2), nothing else |
 | hooks.filter_event | `event_send_verdict(const session_event_msg&)`: send / hold / drop | `--hold-event` (SC:2662-2703); the host later calls `core.release_event` | empty |
-| hooks.numbering_restarted | `void(clock_site)`: `assign_resync`, `assign_renumber` or `assign_release` | `origin_ = wall_now(site)` | empty |
+| hooks.numbering_restarted | `void(clock_site)`: `anchor_origin`, `hold_timeout`, `assign_resync`, `assign_renumber` or `assign_release` (the five sites that reset the pacer's origin, E3) | `origin_ = wall_now(site)` | empty |
+| hooks.ending (added at E3) | `void()`: the first thing `end` does | discards the `--hold-event` sends still held, logging each, before the journal closes | empty |
 | hooks.window / hooks.status | `void(const std::string&)` | `logf` | the log, plus the F3 overlay reads `status_text` |
 
 **What the host feeds the core, and when.**
@@ -679,6 +681,11 @@ headless host.
   / `own_unphysicalized`.
 - **Pacing:** `fixed_tick_` (no slew until R5). A rebase calls
   `core.schedule_rebased("tick driver rebased")`, as PSC:1709-1712 does.
+- **`core_config`.** The retail host fills every field before `begin`.
+  The defaults are the headless argument defaults (`savestate` and
+  `script_replay` on, ...), so a default-constructed config would quietly
+  turn the exact restore on; retail sets `savestate` 0 and `restore_clock`
+  false (§4.1).
 - **Automation verbs:**
   - `session [trace|rollback on|off|core on|off|force-rollback E:D]`;
   - `journal on|off|mark` (`core.journal()` with `core on`, the legacy
@@ -1315,6 +1322,202 @@ the row above:
     syntax-only with the Arch flags, and both core sources with
     `-Wall -Wextra`, with no error or warning.
 
+**As built (step E3).** Where the code made E3 differ from §1.3, §2.2 and
+the row above:
+
+- **What moved** (`src/session/client_core.cpp`, verbatim but for the
+  platform calls and the back-calls): `begin` (SC's `begin_session` up to
+  the host's own resets), `level_requested`, `anchor` (from the phase change
+  on: the window reset, the hold, SessionReady, the anchored line, the
+  journal open), `poll_hold`, `end`, `on_session_assign`, `on_session_end`,
+  `request_resync`, `retry_owed_resync`, `flush_inputs`, `remember_sent`,
+  `send_event`, `put_event_on_wire` and `release_event`.
+  `kAnchorHoldTimeout` moved to `client_core.hpp`. SC keeps one-line
+  forwarders for `send_event` and `request_resync`, which its unmoved code
+  calls in many places.
+- **Entry points the design does not name.**
+  - `on_session_assign` / `on_session_end` instead of `on_message`: the host
+    decodes those two opcodes and hands the message over until every
+    Session* area has moved; `on_message` replaces them then.
+  - `level_requested()`: `begin` returns before the engine reboot (host
+    work), and the phase becomes `loading` only after it, at the end of SC's
+    `begin_session`, as before.
+  - `anchor_report` carries `own_name` (the journal header, as E2's `open`)
+    and `load_ticks` (the anchored line) besides the hash, sha and build id.
+  - `hold_state` is `{held, timed_out}`. A release happens in SessionAssign,
+    not in a poll, so `released_now` could never be set; `assigned()` and
+    `holding()` say it. `timed_out` has no headless reader (SC reads
+    `held`); it is kept for the retail blocking loop's log (R1).
+    `release_hold(why)` (retail: connection lost) is not built: no
+    headless path calls it; it comes with the retail host (the R1 row says
+    so).
+  - The send helpers are wider than §1.3: `flush_inputs`, `remember_sent`
+    and `put_event_on_wire` are public. SC's per-frame send still calls
+    `remember_sent` (SC:2467) and the unit tests drive the other two. They
+    become private once `on_message`, `pre_step` and `post_step` exist
+    (E9), so that a host cannot pass `filter_event` by.
+  - `session_ready_msg.hpp` and `session_resync_msg.hpp` do not compile on
+    their own (pre-existing); `client_core.cpp` and the test include them
+    after `client_core.hpp`.
+- **`core_config`** gained `level` (the `--level` fallback) and the rollback
+  engine's switches (`verbose` ... `trace_plan`, the headless argument
+  defaults). `begin` takes it whole (`config = cfg`) and sets the engine's
+  switches, in SC's order; SC builds it in `make_core_config()`.
+- **Host hooks** (`session_platform::hooks`, `session_hooks` in
+  `client_platform.hpp`), all optional, arrived here instead of at E9:
+  - `numbering_restarted(site)` at the five sites that reset the pacer's
+    origin: `anchor_origin`, `hold_timeout`, `assign_resync`,
+    `assign_renumber`, `assign_release` (headless `origin_ = wall_now(site)`;
+    each read keeps its site and its place);
+  - `filter_event` (`event_send_verdict` send / hold / drop): `--hold-event`,
+    after the count and the journal record, as `hold_event` was;
+  - `ending`, new: `end` calls it first, so the headless `--hold-event`
+    discards are logged before the journal closes, as in SC's `end_session`.
+- **Capabilities.** The headless client now declares `slew` and
+  `nonblocking_hold`. `anchor` reads `slew` for SessionReady's caps
+  (`CAP_LEAD` iff slew; headless sent `CAP_LEAD` unconditionally, so its
+  bytes are unchanged). `nonblocking_hold` changes nothing in the core: there
+  is one state machine, and the flag only says how the host waits. No
+  operation is required for either yet (the pacer's arrive at E5/E9).
+- **`legacy_calls` moved** to `client_core.hpp` (an entry names
+  `own_life::aside`). Entries added, seven: the row's `rebase_own_lives` and
+  `set_aside_unanswered`, and five the row did not list: `reset_held_epoch`
+  (SessionAssign, `begin`, `end`; section J, E5), `drop_pending_rewind`
+  (`anchor`; E5), `finish_lead_slew` (`request_resync`; E5),
+  `end_session_world` (`end`: the own body guard off and every mirror's
+  navigation and body out, after the journal closes; E6) and `report` (`end`
+  prints the status line; E10). None removed. The row's "resync rebuild's
+  own-life half" is not needed yet: the resync rebuild is `apply_snapshot`'s,
+  which stays in SC until E4.
+- **§5.1**: 10 new tests (`SessionClientCoreFlow.*`): the protocol refusal;
+  `begin` (parameters, join order and group, the fresh state, the level
+  fallback); `anchor` (the call order, SessionReady decoded, `caps` with and
+  without `slew`, the 10 s deadline); the hold released on assign (polls
+  counted, the hook order); the hold timeout at 10 s on the fake clock with
+  its journal note; duplicate, older and other-session assignments changing
+  nothing, and base 0; a re-assignment resyncing (`invalidate_history`'s
+  state, `rebase_own_lives`, `held_floor_`, a snapshot awaited); the resync
+  limiter (before the base, in flight, 2 s, owed and retried, a slew ended
+  with `reanchored`, an owed one answered by a pending resync); event sends
+  (`filter_event` hold, release, reliable no-Nagle, the unreliable repeats,
+  inputs split at `MAX_INPUT_FRAMES`, the sent ring); `end` (another
+  session's only logged; ours in SC's order). `LegacyCallsStartEmpty` checks
+  the seven entries are empty in a fresh core. 372 tests pass.
+- **Results.** Old is HEAD f8b07e5's binary (`build-agent-e2final/`, build
+  id `bmmo-f8b07e5fe2b8`), new the E3 binary (`build-agent-e3/`,
+  `bmmo-f8b07e5fe2b8-dirty`).
+  - §5.2 (5): all 16 reference captures replayed with the E3 binary; each
+    reached its end marker and compared IDENTICAL with `e0_compare.py`.
+    Strict byte check: every journal has its live reference's length
+    (7178667 to 10753920 bytes); 10 bytes differ per file, all inside the
+    header's build id. What the captures exercise of the moved code: `begin`,
+    `anchor` and the hold released on assign (all 16); a pacer rebase,
+    `request_resync` taken at once and the re-assignment's resync
+    (`resync_snapoff`, all four clients, and `a5u_lead` client 2 twice); a
+    `--hold-event` send held and released (`a6m_snapoff` client 2); the
+    input flush and the event sends and repeats (all 16). **Covered by no
+    capture, only by the unit tests** (checked by hand against HEAD, and
+    the unit tests check the new code, not old against new): the limiter's
+    held-back branches (a request in flight, within 2 s, owed, and
+    `retry_owed_resync`: no "resync owed" line in any log), a resync
+    ending a slew (`finish_lead_slew(..., true)`), the hold timeout, the
+    protocol refusal, a base-0 assignment, `on_session_end` / `end` and
+    `hooks.ending` (every run stops by `--seconds`), the `filter_event`
+    drop verdict and the discard at session end, and `begin` closing a
+    previous session's journal (one session per run).
+  - §5.2 (4): 187 literals against HEAD's 187, equal.
+  - §5.2 (3): the old SimTool on each live reference against the new one on
+    its E3 replay (`--continue-after-jump`): all 16 have the same rc and
+    summary line. The new SimTool replays the four reference server journals
+    exactly (rc 0, 3986 to 4257 ticks, 0 checkpoint mismatches).
+  - §5.2 (2): solo snapshots off (`solo/e3_new1`, starved=0) against `old1`:
+    TICK hash and pose identical at all 2425 common ticks (8-2432), LOCAL
+    checkpoints 1213/1213, the 8 RECEIVED snapshots equal in content, other
+    records 6099/6099: IDENTICAL. The server's journal of that run has the
+    same TICK hash and pose as `old1`'s server at all 2897 common ticks, so
+    the sends the core now makes (SessionReady, inputs at the assignment,
+    events and their repeats) reached the server's world unchanged; the
+    replays above cannot see sends.
+  - §5.3, lane control and forced resync, three batches (`e3ab1_*`,
+    `e3ab2_*`; `e3ab3_*` forced resync only), O1 N1 O2 N2 each. Host load at
+    most 23.6 % total with no other process above 5.6 % in the first two
+    batches; in the third, O2 is void (`backgrounddownload` 12.6 %). **The
+    band rule fails, and fails as much between old runs.** On this host at
+    150 ms every client falls 33 ticks behind while rolling back for
+    corrected inputs and rebases once (`resyncs=1`, starvation 113 to 1813
+    ticks per client), at a tick that moves from run to run: the old binary
+    rebased its non-paused clients at 1250, 2200 or 2650-2700 in the lane
+    control and at 1620-1925 in the forced resync arm; the new one at
+    2640-2700 or not at all (lane), and at 1200-1430, 1822, 2710-2900 or
+    3362-3429 (forced resync). Which regime a run lands in decides most metrics.
+    Applying the rule to old runs of two batches as if one pair were new
+    puts 34 to 88 metrics outside the band; old against new puts 33 to 125
+    (design metrics). Pooled over the batches, the new runs lie on both
+    sides of the old ones. What the arms do show the same on both binaries:
+    paused client 2's forced resync (requested at 1500, re-based at
+    1572-1574 from the full snapshot of 1548-1557) whenever no earlier
+    rebase preceded it, `far` 0, `overtaken` 0, `lead_adj` 0, the late
+    mirror 0.0000 m, and every server journal replaying exactly (rc 0, 0
+    checkpoint mismatches). The CPU cost is equal: an unpaced replay of a
+    reference capture takes 29.55 / 29.56 / 29.56 s old and 29.14 / 29.53 /
+    29.72 s new, and the four `resync_snapoff` captures at once 20.93 /
+    21.10 s old and 21.23 / 20.68 s new. Since the logic is exact under the
+    captured clocks and costs the same, the A/B differences are the rebase
+    regime's run-to-run variance; this host cannot close these two arms by
+    the band rule (§5.3 needs a host with headroom at 150 ms, or a latency
+    at which no client rebases).
+  - Builds: x64 BUILD-OK; x86 mod CLIENT-BUILD-OK with its target's objects
+    deleted first (it compiles `client_core.cpp`, whose header changed);
+    `linux_test_syntax.sh` passes on every line (20 sources); GCC compiles
+    the headless client syntax-only with the Arch flags, and both core
+    sources with `-Wall -Wextra`, with no error or warning. The Arch server
+    build was not rerun: no server source changed, and the server target
+    compiles neither `BMMO_SESSION_CORE_SRC` nor a file that includes
+    `client_core.hpp` (only the headless client and the tests do).
+  - **After review**, on the final tree (comments, this note, the §2.2
+    hooks rows, §3.2 and the R1 row; no code change), rebuilt and checked
+    again: 372 tests pass; x64 BUILD-OK; x86 CLIENT-BUILD-OK with the
+    target's 21 objects deleted first; `linux_test_syntax.sh` every line
+    ok; the GCC compile of the headless client and both core sources rc 0
+    with no warning. (5) all 16 replays (`e3f`) IDENTICAL and
+    byte-identical outside the build id; (4) 187 = 187; (3) all 16 the
+    same rc and summary line, the four server journals rc 0 with 0
+    checkpoint mismatches; (2) `solo/e3_new4` (starved=0) IDENTICAL to
+    `old1` at all 2452 common ticks (8-2459), LOCAL checkpoints
+    1226/1226, other records 6166/6166.
+  - **The wire bytes, old against new.** A replay sends nothing, so (5)
+    cannot see what the core now puts on the wire. Both binaries were
+    built once more with the same temporary trace in `send_bytes` (with
+    `BMMO_SEND_TRACE` set: tick, Steam flags, size and FNV-1a 64 of every
+    payload, written before the replay's early return; not committed)
+    and the 16 captures replayed with each: 62898 sends (61970
+    unreliable no-delay inputs, 838 reliable no-Nagle events, 90
+    reliable), the same tick, flags, size and hash in the same order on
+    every client, except each client's first: the 36-byte login, whose
+    uuid is drawn from the system clock (not captured, §5.2 E0 note).
+    SessionReady, the resyncs, the inputs flushed at the assignment and
+    the event repeats are therefore byte-equal on everything the
+    captures exercise.
+  - §5.3, a fourth batch (`e3ab4_*`, both arms, host at most 22.6 %, no
+    other process above 4.4 %, no void run): the band rule fails again,
+    lane control 25 metrics, forced resync 80 metrics and 6 harness
+    criteria. The same regime decides it: in the lane arm O1 rebased
+    clients 2 and 3, O2 client 1, N1 none, N2 clients 2 and 3; in the
+    forced-resync arm O1, N1 and O2 rebased every client (O1 at
+    1822-1842) and N2 only the paused client 2 at 1500, so N2 passes
+    criteria (`resyncs 0`, `relay_late 0`) the old runs fail. Pooled over
+    every batch (old range widened by its spread, per-run client mean):
+    lane control 0 metrics outside (6 old, 6 new runs); forced resync 12
+    outside (7 old, 8 new), all from two new runs of batch 1, whose
+    clients rebased before the pause (1197-1432) so that client 2 rebased
+    a second time at 1500 (`resyncs` 1.25, phase B error), and from N2
+    of batch 4, which did not rebase at all. Paused client 2 requests its
+    resync at 1500 in every run of both binaries; `far`, `overtaken`,
+    `lead_adj` and the late mirror are 0 everywhere, and every server
+    journal replays exactly. **The two arms stay open**: the step is not
+    committed until they are closed on a host or latency where the
+    rebase regime does not vary, or the band waiver is decided.
+
 ### 6.2 R steps: the retail mod hosts the core
 
 **Testing tools used throughout:**
@@ -1360,7 +1563,7 @@ snapshots off is `… 100000 100000 4.2`.
 | step | what | checks that close it |
 |---|---|---|
 | **R0** plumbing | Build the core and host support into the mod. `core_host.cpp` with the file-scope statics, `retail_platform` (every §2.2 operation), the mailbox, the `session core on\|off` and `session force-rollback E:D` verbs, the `replay session <file>` mode (§3.2). A `net lag <ms>\|blackout <ms> [up\|down]` verb setting GNS fake lag / loss (the retail counterpart of `BMMO_FAKE_LAG_MS`, SC:587-592), so R2-R6 can be measured. Core off by default: nothing else changes. | Clean x86 build; **three launches without a hang** (the BML constraint); the legacy two-client test reproduces its last numbers (the same checks as R1's legacy arm); **the baseline**: two legacy solo runs with `replay session`, snapshots off, have identical journal TICK hashes (if not, the cause is found before R1) |
-| **R1** the frame and the snapshot path | `core on` hosts the facade with `rollback`, `correct` as today. The switches `input_rewind`, `lifecycle_rewind`, `own_echoes`, `own_corrections` and `own_birth_move` are off. `mirror_start_from_row` and `own_body_backstop` are on. `caps` = 0; capabilities: no own body control, no slew, blocking hold, no whole frame, `host_hooks`. The snapshot rollback, resync and its limiter, numbering, record and amend, relay store (no rewind), the events drained at their tick, sectors, the beam (`request_beam`, §2.3) and the core's journal all run through the core. `too_far` → resync is deleted; `frozen` → resync is the core's rule. The §4.2 rows marked R1 change. | (a) **Solo, snapshots off, `replay session`: the TICK hashes of `core off` and `core on` are identical at every tick**, given R0's legacy-legacy baseline (no snapshot, no peer: the R1 order changes cannot show). The journal formats differ (§1.2), so the hashes are compared, not the files. (b) Two clients, snapshots on, 3 runs each of off/on interleaved: per client `snaps/ok/mism/rb`, `max_err`, mirror error, events applied within the off-off band (§5.3 rule); resyncs 0; the server journal replays exact; both client journals replay in SimTool and `worst_bodies.py` reads them. (c) Two clients, snapshots on, `net lag 150`, one death and respawn and one `beam` per client, and one forced resync (a `fixed_tick` stall over 33 ticks on client 2): late events drained at their tick (`events=` as the server's S-lines), the limiter's owed and in-flight path taken once with the resync applied, `own_body_backstop` counted, the own ball's error after the beam reported, everything within the off band. |
+| **R1** the frame and the snapshot path | `core on` hosts the facade with `rollback`, `correct` as today. The switches `input_rewind`, `lifecycle_rewind`, `own_echoes`, `own_corrections` and `own_birth_move` are off. `mirror_start_from_row` and `own_body_backstop` are on. `caps` = 0; capabilities: no own body control, no slew, blocking hold, no whole frame, `host_hooks`. `core.release_hold(why)` is built here (E3 left it out: no headless path calls it): the blocking hold's release when the connection is lost. The snapshot rollback, resync and its limiter, numbering, record and amend, relay store (no rewind), the events drained at their tick, sectors, the beam (`request_beam`, §2.3) and the core's journal all run through the core. `too_far` → resync is deleted; `frozen` → resync is the core's rule. The §4.2 rows marked R1 change. | (a) **Solo, snapshots off, `replay session`: the TICK hashes of `core off` and `core on` are identical at every tick**, given R0's legacy-legacy baseline (no snapshot, no peer: the R1 order changes cannot show). The journal formats differ (§1.2), so the hashes are compared, not the files. (b) Two clients, snapshots on, 3 runs each of off/on interleaved: per client `snaps/ok/mism/rb`, `max_err`, mirror error, events applied within the off-off band (§5.3 rule); resyncs 0; the server journal replays exact; both client journals replay in SimTool and `worst_bodies.py` reads them. (c) Two clients, snapshots on, `net lag 150`, one death and respawn and one `beam` per client, and one forced resync (a `fixed_tick` stall over 33 ticks on client 2): late events drained at their tick (`events=` as the server's S-lines), the limiter's owed and in-flight path taken once with the resync applied, `own_body_backstop` counted, the own ball's error after the beam reported, everything within the off band. |
 | **R2** relay rewind | `input_rewind` on: remote corrections rewind (`replay_corrected_inputs`, `replay_remotes` in the binding). `observe_input` records what the replica stepped (NAV_ACTIVE from the leaves, the mute in force; §2.2); `unforce_own` restores the mute. | (a) **Solo forced rollback**: `session force-rollback 50:12`, `97:24`, `131:47`, plus windows across the first spawn, a respawn, a trafo and an ESC pause held over a nav-activity edge, against a control with the same record. The three original windows may cross no nav-activity edge and would pass with the NAV_ACTIVE bug in place. `worst_bodies.py` 0.0 m on every body (the retail counterpart of §5.2 (1)). It measures what the non-selected retail scripts do inside a replay: a non-zero result names the script, and the step stays open. (b) Two clients, snapshots off, `net lag 150`: `inrew` > 0, `far` 0, resyncs 0. Each client's mirror of the other against the owner's own journal checkpoints (2 ticks): p99 ≤ the headless lane control's at 150 ms (E11's O runs). |
 | **R3** lifecycle | `lifecycle_rewind` and `own_echoes` on, `mirror_start_from_row` deleted. Own echoes processed by the core with the `own_body_control` fallback (moved → snapshot or resync; rejected/missing → re-report while current; superseded → nothing). | Two clients, snapshots off, `net lag 150`, with deaths in the arena's death zone, a respawn and a trafo per client (scripted by key record and `beam`). Mirror birth pose at its stamp 0.0000 m against the owner's checkpoint; life rewinds > 0; `overtaken` and `superseded` as the server's S-lines; resyncs only from the capability fallback, each one logged with its reason; the server journal exact. |
 | **R4** part one | `own_corrections` on: held notices amend the own records and rewind. The starvation detector is deleted. LPD §1.4 is corrected. | Two clients, snapshots off, `net lag 150`, client 2 `net blackout 300 up` at tick 1500 (the A1 analogue): `subst recv` equals the server's S2 count for that client; `subst rew` > 0; no resync; client 2's own ball 0.0000 m from the server's journal after the episode settles (A1's criterion); client 1 unaffected (its numbers within the R3 band). |

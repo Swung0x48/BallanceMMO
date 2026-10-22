@@ -11,7 +11,9 @@
 // Step E1 (design 6.1) starts it with the three operations every host has
 // and the headless platform fills: send, now and log.  Each later step adds
 // the operations its moved code calls (design 2.2), and the capability checks
-// with them: E2 the journal's (journal_path, utc_ms, body_state, list_bodies).
+// with them: E2 the journal's (journal_path, utc_ms, body_state, list_bodies);
+// E3 the first host hooks (session_hooks: numbering_restarted, filter_event,
+// ending).
 //
 // CK-free and header-only.
 
@@ -24,6 +26,10 @@
 #include <functional>
 #include <string>
 #include <vector>
+
+namespace bmmo {
+    struct session_event_msg;   // message/session_event_msg.hpp
+}
 
 namespace bmmo::session {
 
@@ -38,6 +44,28 @@ namespace bmmo::session {
     // 2.3): the event log at post_step (headless), or the host's hooks,
     // queued and committed at post_step (retail).
     enum class own_lifecycle_source : uint8_t { event_log, host_hooks };
+
+    // What the host does with an own lifecycle event the core is about to put
+    // on the wire (design 2.2 hooks.filter_event): send it, or keep it - held
+    // for a later session_client_core::release_event, or dropped.
+    enum class event_send_verdict : uint8_t { send, hold, drop };
+
+    // Design 2.2 "host hooks": optional, H.  An empty hook is a host with
+    // nothing to do there.
+    struct session_hooks {
+        // The tick numbering (re)started at `site`, the pacer's origin with it:
+        // the anchor (anchor_origin), the hold's timeout (hold_timeout) and a
+        // SessionAssign (assign_resync, assign_renumber, assign_release).
+        // Headless: origin_ = wall_now(site); retail: nothing (its fixed tick
+        // counts on its own).
+        std::function<void(clock_site site)> numbering_restarted;
+        // An own event, counted and journaled, before it goes on the wire
+        // (headless --hold-event).
+        std::function<event_send_verdict(const bmmo::session_event_msg& event)> filter_event;
+        // The session is ending (session_client_core::end), before anything
+        // else: headless discards what --hold-event still holds.
+        std::function<void()> ending;
+    };
 
     struct session_platform {
         // ---- transport and time (design 2.2) ----
@@ -66,12 +94,18 @@ namespace bmmo::session {
         // journals.  Headless: --journal verbatim; retail (R1): its journal
         // directory and file name, after pruning old files.
         std::function<std::filesystem::path(const journal_header& header)> journal_path;
+
+        // ---- host hooks (design 2.2), all optional ----
+        session_hooks hooks;
     };
 
     // Design 2.3.  Every flag defaults to "cannot"; a host declares what it
-    // can.  At E1 no flag is read yet: each comes with the operations it
-    // needs (own_body_control: make_own / unmake_own at E7; slew at E5;
-    // nonblocking_hold at E3; whole_frame with bind_world at E9).
+    // can.  Each comes with the operations it needs (own_body_control:
+    // make_own / unmake_own at E7; whole_frame with bind_world at E9).  From
+    // E3 the core reads `slew` (SessionReady's caps: CAP_LEAD iff slew); the
+    // pacer operations it will need arrive at E5/E9.  `nonblocking_hold`
+    // changes nothing in the core (one hold state machine, poll_hold); it
+    // says how the host waits.
     struct session_capabilities {
         bool own_body_control = false;   // make_own / unmake_own filled
         bool slew = false;               // the host's pacer applies slew_step (2x raise, 0.9x lower)
@@ -80,13 +114,9 @@ namespace bmmo::session {
         own_lifecycle_source own_lifecycle = own_lifecycle_source::event_log;   // or host_hooks
     };
 
-    // Transitional (design 6.1, "Linking while the core is incomplete"): one
-    // std::function per host function that code already moved into the core
-    // still calls.  Each E step adds the entries its moved code needs and
-    // deletes those whose target it moves; E11 deletes the struct.  E1 moves
-    // no function, so it is empty.
-    struct legacy_calls {
-    };
+    // legacy_calls (design 6.1, "Linking while the core is incomplete") is in
+    // session/client_core.hpp from E3 on: its entries name the core state's
+    // types (own_life::aside).
 
     // The first operation `platform` lacks that every host must fill, or that
     // a capability `caps` declares needs; nullptr when nothing is missing.
