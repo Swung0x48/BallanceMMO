@@ -7,9 +7,12 @@
 #include <message/message_all.hpp>
 
 #include <algorithm>
+#include <map>
 #include <string>
+#include <vector>
 
 #include <session/correction.hpp>
+#include <session/lead_slew.hpp>
 #include <session/own_correction.hpp>
 #include <session/timeline.hpp>
 
@@ -535,4 +538,270 @@ TEST(OwnCorrection, AnEarlierRewindCarriesTheWaitingReplay) {
     // across the wrap of the tick counter
     EXPECT_TRUE(replay_subsumes(0xFFFFFFF0u, 5u));
     EXPECT_FALSE(replay_subsumes(5u, 0xFFFFFFF0u));
+}
+
+// ---------------------------------------------------------------------------
+// SessionLead on the client (late-player design 2.4, session/lead_slew.hpp).
+
+namespace {
+    // The headless client's pacer in tick units: frame f is due once the
+    // wall clock, measured from the origin, reaches f; a slew moves the
+    // origin.  Each step is a quarter of a tick period, as the pacer polls
+    // the network several times per slot.
+    struct pacer_model {
+        double wall = 0.0;
+        double origin = 0.0;          // in ticks; one tick earlier = the clock one tick ahead
+        uint64_t next_frame = 1;
+        uint32_t tick_base = 1000;    // frame 1 is tick 1000
+        std::vector<uint32_t> ticks;  // the ticks stepped, in order
+
+        double expected() const { return wall - origin; }
+        uint32_t current_tick() const { return tick_base + static_cast<uint32_t>(next_frame - 2); }
+        // One poll: the slew advances, then every frame due runs.
+        void poll(lead_slew& slew, double dt) {
+            wall += dt;
+            origin -= slew.advance(dt, expected() - static_cast<double>(next_frame));
+            while (static_cast<double>(next_frame) <= expected()) {
+                ticks.push_back(tick_base + static_cast<uint32_t>(next_frame - 1));
+                ++next_frame;
+            }
+        }
+        void run(lead_slew& slew, double periods) {
+            for (int i = 0; i < static_cast<int>(periods * 4.0 + 0.5); ++i) poll(slew, 0.25);
+        }
+    };
+}
+
+// [N, E) split at the client's current tick c: the simulated part is amended,
+// the rest forced, and the first tick played on the client's own input again
+// is E - where the server's buffer, re-anchored at E, takes its frames from.
+TEST(LeadSlew, TheHeldRangeSplitsAtTheClientsTick) {
+    // c = 1020: amend [1000, 1021), force [1021, 1050)
+    auto r = lead_split_range(1000, 1050, 1021);
+    EXPECT_TRUE(r.amend());
+    EXPECT_EQ(r.amend_from, 1000u);
+    EXPECT_EQ(r.amend_to, 1021u);
+    EXPECT_TRUE(r.force());
+    EXPECT_EQ(r.force_from, 1021u);
+    EXPECT_EQ(r.force_to, 1050u);
+    // c >= E (the round trip was over-estimated): everything amended, nothing forced
+    r = lead_split_range(1000, 1050, 1060);
+    EXPECT_EQ(r.amend_from, 1000u);
+    EXPECT_EQ(r.amend_to, 1050u);
+    EXPECT_FALSE(r.force());
+    r = lead_split_range(1000, 1050, 1050);
+    EXPECT_EQ(r.amend_to, 1050u);
+    EXPECT_FALSE(r.force());
+    // c < N (the client runs behind the session's next tick): the whole range
+    // is forced, and the ticks before N are not the range's
+    r = lead_split_range(1000, 1050, 990);
+    EXPECT_FALSE(r.amend());
+    EXPECT_EQ(r.force_from, 1000u);
+    EXPECT_EQ(r.force_to, 1050u);
+    // no range (a lower, or a reset that held nothing): the client only slews
+    r = lead_split_range(0, 1050, 1021);
+    EXPECT_FALSE(r.amend());
+    EXPECT_FALSE(r.force());
+    // across the wrap of the tick counter
+    r = lead_split_range(0xFFFFFFF0u, 0x10u, 0u);
+    EXPECT_EQ(r.amend_from, 0xFFFFFFF0u);
+    EXPECT_EQ(r.amend_to, 0u);
+    EXPECT_EQ(r.force_from, 0u);
+    EXPECT_EQ(r.force_to, 0x10u);
+}
+
+// A raise of k moves the origin by exactly k, one tick per tick period: the
+// pacer runs two frames per slot for k slots and then one again.  Every tick
+// is stepped once, in order - nothing skipped or renumbered.
+TEST(LeadSlew, ARaiseRunsTwoFramesPerSlotUntilItHasGainedK) {
+    pacer_model pacer;
+    lead_slew slew;
+    pacer.run(slew, 40.0);
+    const size_t before = pacer.ticks.size();
+    const double origin_before = pacer.origin;
+    constexpr int k = 12;
+    slew.start(7, k);
+    EXPECT_EQ(slew.outstanding(), k);
+    EXPECT_DOUBLE_EQ(lead_rebase_threshold(slew.outstanding()), 33.0 + k);
+    pacer.run(slew, k);
+    EXPECT_TRUE(slew.done());
+    EXPECT_EQ(slew.outstanding(), 0);
+    EXPECT_DOUBLE_EQ(origin_before - pacer.origin, static_cast<double>(k));
+    const size_t during = pacer.ticks.size() - before;
+    EXPECT_GE(during, static_cast<size_t>(2 * k - 1));
+    EXPECT_LE(during, static_cast<size_t>(2 * k + 1));
+    EXPECT_EQ(slew.finish(), k);   // the ack's applied
+    EXPECT_FALSE(slew.active());
+    EXPECT_DOUBLE_EQ(lead_rebase_threshold(slew.outstanding()), 33.0);
+    // afterwards one frame per slot again, the origin k ticks earlier for good
+    const size_t settled = pacer.ticks.size();
+    pacer.run(slew, 20.0);
+    EXPECT_EQ(pacer.ticks.size() - settled, 20u);
+    EXPECT_DOUBLE_EQ(origin_before - pacer.origin, static_cast<double>(k));
+    for (size_t i = 1; i < pacer.ticks.size(); ++i) ASSERT_EQ(pacer.ticks[i], pacer.ticks[i - 1] + 1);
+}
+
+// A lower moves the origin one tick later every tenth period: 0.9x, never a
+// stop, and exactly |k| in the end.
+TEST(LeadSlew, ALowerRunsAtNineTenths) {
+    pacer_model pacer;
+    lead_slew slew;
+    pacer.run(slew, 40.0);
+    const size_t before = pacer.ticks.size();
+    const double origin_before = pacer.origin;
+    slew.start(9, -5);
+    EXPECT_EQ(slew.outstanding(), -5);
+    EXPECT_DOUBLE_EQ(lead_rebase_threshold(slew.outstanding()), 38.0);
+    pacer.run(slew, 52.0);
+    EXPECT_TRUE(slew.done());
+    EXPECT_DOUBLE_EQ(pacer.origin - origin_before, 5.0);
+    const size_t during = pacer.ticks.size() - before;
+    EXPECT_GE(during, 46u);   // 52 periods less 5
+    EXPECT_LE(during, 48u);
+    EXPECT_EQ(slew.finish(), -5);
+}
+
+// A raise gains nothing while the pacer is behind (a slow CPU, a stall): the
+// slew never makes a backlog of its own, so 33 + the outstanding slew still
+// tells a stall from a slew.  A burst of wall time moves one tick, not many.
+TEST(LeadSlew, ARaiseWaitsWhileThePacerIsBehind) {
+    lead_slew slew;
+    slew.start(3, 4);
+    EXPECT_EQ(slew.advance(1.0, 1.5), 0);
+    EXPECT_EQ(slew.advance(1.0, 5.0), 0);
+    EXPECT_EQ(slew.applied(), 0);
+    EXPECT_EQ(slew.advance(10.0, -0.5), 1);   // ten periods at once: one tick
+    EXPECT_EQ(slew.advance(0.5, -0.5), 0);    // the credit was capped at one period
+    EXPECT_EQ(slew.advance(0.5, -0.5), 1);
+    EXPECT_EQ(slew.applied(), 2);
+    // a lower is never held back: being behind is what it reduces
+    lead_slew lower;
+    lower.start(4, -1);
+    EXPECT_EQ(lower.advance(10.0, 8.0), -1);
+    EXPECT_TRUE(lower.done());
+}
+
+// A rebase does not end a slew: the ticks it moved are stepped already (it
+// gains only while the pacer is less than a frame behind), so the restarted
+// schedule loses none of them, and the rest is moved on the new schedule.
+// The client's resync request that follows a rebase is what ends it - and
+// then the ack says the whole delta (finish_reanchored), since the server
+// re-anchors the client at L_eff with whatever was acknowledged: an ack of
+// the part moved would leave the new clock short of the lead decided.
+TEST(LeadSlew, ARebaseKeepsTheSlewAndAResyncAcknowledgesTheWholeDelta) {
+    pacer_model pacer;
+    lead_slew slew;
+    pacer.run(slew, 10.0);
+    slew.start(11, 10);
+    pacer.run(slew, 4.0);
+    EXPECT_EQ(slew.applied(), 4);
+    EXPECT_EQ(slew.outstanding(), 6);
+    EXPECT_DOUBLE_EQ(lead_rebase_threshold(slew.outstanding()), 39.0);
+    // a 50-period stall, then the schedule restarts at the next frame: the
+    // slew waits while behind, and carries on from 4 once the pacer is not
+    const size_t stepped = pacer.ticks.size();
+    pacer.wall += 50.0;
+    EXPECT_EQ(slew.advance(50.0, pacer.expected() - static_cast<double>(pacer.next_frame)), 0);
+    EXPECT_GT(pacer.expected() - static_cast<double>(pacer.next_frame), lead_rebase_threshold(slew.outstanding()));
+    pacer.origin = pacer.wall - static_cast<double>(pacer.next_frame);   // the rebase
+    EXPECT_TRUE(slew.active());
+    EXPECT_EQ(slew.applied(), 4);
+    const double origin = pacer.origin;
+    pacer.run(slew, 6.0);
+    EXPECT_TRUE(slew.done());
+    EXPECT_DOUBLE_EQ(origin - pacer.origin, 6.0);
+    EXPECT_EQ(slew.finish(), 10);
+    for (size_t i = stepped + 1; i < pacer.ticks.size(); ++i) ASSERT_EQ(pacer.ticks[i], pacer.ticks[i - 1] + 1);
+    // a resync request part-way: the whole delta is acknowledged, and the
+    // slew moves nothing more (the assignment sets the clock)
+    slew.start(12, 10);
+    pacer.run(slew, 3.0);
+    EXPECT_EQ(slew.applied(), 3);
+    EXPECT_EQ(slew.finish_reanchored(), 10);
+    EXPECT_FALSE(slew.active());
+    EXPECT_EQ(slew.outstanding(), 0);
+    const double after = pacer.origin;
+    pacer.run(slew, 10.0);
+    EXPECT_DOUBLE_EQ(pacer.origin, after);
+    // a lower the same way, on its own side; idle, it acknowledges nothing
+    slew.start(13, -3);
+    EXPECT_EQ(slew.advance(10.0, 0.0), -1);
+    EXPECT_EQ(slew.finish_reanchored(), -3);
+    EXPECT_EQ(slew.finish_reanchored(), 0);
+    // superseded by a newer decision: what was moved, never the rest
+    slew.start(14, 5);
+    EXPECT_EQ(slew.advance(1.0, 0.0), 1);
+    EXPECT_EQ(slew.finish(), 1);
+    // a zero delta is no slew
+    slew.start(15, 0);
+    EXPECT_FALSE(slew.active());
+}
+
+// The forced range is capped at the client's ring of own frames: the ticks
+// past it are neither forced nor learned, so their notices settle them.
+TEST(LeadSlew, TheForcedRangeIsCappedAtTheRing) {
+    auto r = lead_cap_forced(lead_split_range(1000, 1500, 1021), 256);
+    EXPECT_EQ(r.amend_to, 1021u);
+    EXPECT_EQ(r.force_from, 1021u);
+    EXPECT_EQ(r.force_to, 1021u + 256u);
+    r = lead_cap_forced(lead_split_range(1000, 1050, 1021), 256);   // under the cap: unchanged
+    EXPECT_EQ(r.force_to, 1050u);
+    r = lead_cap_forced(lead_split_range(1000, 1050, 1060), 256);   // nothing forced: unchanged
+    EXPECT_FALSE(r.force());
+    EXPECT_EQ(r.amend_to, 1050u);
+    r = lead_cap_forced(lead_split_range(0xFFFFFF00u, 0x200u, 0xFFFFFF10u), 256);   // across the wrap
+    EXPECT_EQ(r.force_from, 0xFFFFFF10u);
+    EXPECT_EQ(r.force_to, 0x10u);
+}
+
+// The whole client side of a raise, as the server sized it (lead.hpp: E =
+// c_est + 2k + 2): the client at c receives it, amends [N, c], forces (c, E)
+// and slews.  The frames it sends are stamped with their own ticks: below E
+// the held frame (stale to the server, whose buffer holds that frame anyway),
+// from E on its own input, which the server's buffer takes.  The slew is
+// over before the client reaches E, so E's frame is the first of the new
+// schedule.
+TEST(LeadSlew, FramesFromEOnAreTheClientsOwnAndTheSlewIsOverByThen) {
+    constexpr uint32_t N = 2000;
+    constexpr int k = 15;
+    pacer_model pacer;
+    pacer.tick_base = 1980;
+    lead_slew slew;
+    pacer.run(slew, 40.0);            // the client is at c = 2019
+    const uint32_t c = pacer.current_tick();
+    ASSERT_EQ(c, 2019u);
+    const uint32_t E = c + 2 * k + 2;   // the server's estimate of c was exact
+    const auto r = lead_split_range(N, E, c + 1);
+    EXPECT_EQ(r.amend_from, N);
+    EXPECT_EQ(r.amend_to, c + 1);
+    EXPECT_EQ(r.force_from, c + 1);
+    EXPECT_EQ(r.force_to, E);
+    slew.start(21, k);
+    std::map<uint32_t, char> sent;      // tick -> 'h' held, 'o' own
+    size_t seen = pacer.ticks.size();
+    const size_t stop = seen + 200;
+    uint32_t tick_at_done = 0;
+    while (pacer.ticks.size() < stop) {
+        pacer.poll(slew, 0.25);
+        if (slew.active() && slew.done()) {
+            tick_at_done = pacer.current_tick();
+            EXPECT_EQ(slew.finish(), k);
+        }
+        for (; seen < pacer.ticks.size(); ++seen) {
+            const uint32_t t = pacer.ticks[seen];
+            const bool forced = static_cast<int32_t>(t - r.force_from) >= 0 && static_cast<int32_t>(t - r.force_to) < 0;
+            ASSERT_TRUE(sent.emplace(t, forced ? 'h' : 'o').second) << "tick " << t << " stepped twice";
+        }
+    }
+    ASSERT_NE(tick_at_done, 0u);
+    EXPECT_LT(tick_at_done, E);
+    // every tick after c stepped once, held up to E - 1, own from E on
+    uint32_t expect = c + 1;
+    for (const auto& [t, what]: sent) {
+        ASSERT_EQ(t, expect++);
+        EXPECT_EQ(what, static_cast<int32_t>(t - E) < 0 ? 'h' : 'o') << "tick " << t;
+    }
+    EXPECT_EQ(sent.begin()->first, c + 1);
+    EXPECT_EQ(sent.at(E), 'o');
+    EXPECT_EQ(sent.at(E - 1), 'h');
 }

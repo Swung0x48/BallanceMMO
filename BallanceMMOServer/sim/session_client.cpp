@@ -53,6 +53,7 @@
 #include <session/input_relay.hpp>
 #include <session/lifecycle.hpp>
 #include <session/journal.hpp>
+#include <session/lead_slew.hpp>
 #include <session/mechanism_tracking.hpp>
 #include <session/own_correction.hpp>
 #include <session/rollback.hpp>
@@ -899,6 +900,13 @@ namespace {
                 }
                 break;
             }
+            case bmmo::SessionLead: {
+                bmmo::session_lead_msg msg;
+                if (!fill(msg)) return;
+                if (msg.session != session_ || phase_ != phase::running) break;
+                on_session_lead(msg);
+                break;
+            }
             case bmmo::SessionEnd: {
                 bmmo::session_end_msg msg;
                 if (!fill(msg)) return;
@@ -1091,7 +1099,11 @@ namespace {
             held_header_known_ = false;
             acked_header_known_ = false;
             held_floor_ = 0;
-            reset_held_epoch();
+            reset_held_epoch("a new session");
+            // Decision ids are unique per player for a session's life; the
+            // offset is this session's.
+            lead_seen_.clear();
+            lead_offset_ = 0;
             pending_relay_.clear();
             event_seen_.clear();
             own_event_repeats_.clear();
@@ -1272,6 +1284,10 @@ namespace {
             ready.anchor_surfaces = hash.surfaces;
             ready.physics_sha256 = sizeof(void*) == 8 ? "headless-64" : "headless-32";
             ready.build_id = bmmo::physics::build_id();
+            // This client applies a SessionLead (late-player design 2.4:
+            // amend, force, slew, acknowledge), so the server may send it one
+            // and anchor its late join and resyncs at its own lead.
+            ready.caps = bmmo::session::CAP_LEAD;
             ready.serialize();
             send_bytes(ready.raw.str(), k_nSteamNetworkingSend_Reliable);
             logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", load_waited_,
@@ -1669,12 +1685,26 @@ namespace {
                 if (args_.stall_named) logf("stall: %d ms at tick %u (--stall-ms)", args_.pause_ms, current_tick());
                 std::this_thread::sleep_for(std::chrono::milliseconds(args_.pause_ms));
             }
+            // A SessionLead's slew (late-player design 2.4) moves the origin
+            // before the schedule is read: one tick earlier per tick period
+            // for a raise (two frames per slot), one later per ten for a
+            // lower.
+            if (lead_slew_.active()) advance_lead_slew(next_frame);
             const double expected = std::chrono::duration<double>(clock_type::now() - origin_).count() * bmmo::sim::kTickRate;
-            if (static_cast<double>(next_frame) + 33.0 < expected) {
+            // 33 frames behind is a stall, plus whatever a slew still has to
+            // gain: the slew never runs the pacer more than a frame behind
+            // (lead_slew::kRaiseMaxBehind), so a real stall still rebases.
+            if (static_cast<double>(next_frame) + bmmo::session::lead_rebase_threshold(lead_slew_.outstanding()) < expected) {
                 // far behind (a long pause): restart the schedule instead of fast-forwarding
                 origin_ = clock_type::now() - std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
                 ++rebases_;
+                // A slew in flight is not ended here: the ticks it moved are
+                // stepped already, and it goes on moving the new schedule.
+                // If the request below goes out, request_resync ends it and
+                // acknowledges the whole delta first (the re-anchor at L_eff
+                // applies all of it); if the limiter holds the request back,
+                // the slew is all that still moves this client's lead.
                 request_resync("tick schedule rebased");
             } else if (static_cast<double>(next_frame) > expected) {
                 const auto due = origin_ + std::chrono::duration_cast<clock_type::duration>(
@@ -1686,6 +1716,23 @@ namespace {
                 }
             }
             frame();
+        }
+
+        // One step of the slew: the tick periods since the previous step and
+        // how far the pacer is behind go to lead_slew::advance, and the origin
+        // moves by what it returns (+1: a tick earlier, the clock runs ahead).
+        // The whole delta moved: acknowledged.
+        void advance_lead_slew(uint64_t next_frame) {
+            const auto now = clock_type::now();
+            const double wall = std::chrono::duration<double>(now - lead_slew_clock_).count() * bmmo::sim::kTickRate;
+            lead_slew_clock_ = now;
+            const double behind = std::chrono::duration<double>(now - origin_).count() * bmmo::sim::kTickRate
+                                - static_cast<double>(next_frame);
+            const int moved = lead_slew_.advance(wall, behind);
+            if (moved != 0)
+                origin_ -= std::chrono::duration_cast<clock_type::duration>(
+                    std::chrono::duration<double>(static_cast<double>(moved) / bmmo::sim::kTickRate));
+            if (lead_slew_.done()) finish_lead_slew("slew complete");
         }
 
         // --keep-lane: the record's keys of this frame with LEFT or RIGHT added
@@ -1812,10 +1859,46 @@ namespace {
             // Simulate(), before the PSIs (capture_own_physicalize).  Armed
             // here, after the rewinds above: a replayed step runs the
             // PreSimulate pass too, and only the live tick may capture.
+            // A tick a SessionLead forced (late-player design 2.4): the server
+            // applies `held` here and drops our frame as stale, so the own
+            // ball is driven with it the way a replay drives it - polling off,
+            // the frame through nav_input - and our keys wait until E.  After
+            // the rewinds above, whose replays switch the polling back on.
+            forced_own forced_frame;
+            const bool forced = [&] {
+                while (!forced_own_.empty() && static_cast<int32_t>(forced_own_.begin()->first - frame_tick) < 0)
+                    forced_own_.erase(forced_own_.begin());
+                const auto it = forced_own_.find(frame_tick);
+                if (it == forced_own_.end()) return false;
+                forced_frame = it->second;
+                forced_own_.erase(it);
+                return true;
+            }();
+            std::string forced_entity;
+            if (forced && own_navigation_) {
+                const auto& held = forced_frame.frame;
+                forced_entity = own_nav_entity_;
+                std::string force_error;
+                if (!bmmo::physics::navigation_poll(engine_->physics(), forced_entity.c_str(), false, own_key_codes_,
+                                                    own_key_blocks_, own_key_count_, force_error)
+                        || !bmmo::physics::navigation_input(engine_->physics(), forced_entity.c_str(), held.keys,
+                                                            held.cam_right, held.cam_up, held.cam_dir,
+                                                            (held.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0,
+                                                            force_error))
+                    if (lead_force_logs_++ < 8)   // the ball may be unphysicalized for the whole range
+                        logf("lead: forced own input at tick %u: %s", frame_tick, force_error.c_str());
+            }
             live_tick_serial_ = ++live_ticks_;
             arm_own_physicalize_capture(live_tick_serial_, frame_tick);
             const bool ticked = engine_->tick(error);
             live_tick_serial_ = 0;
+            if (!forced_entity.empty()) {
+                std::string force_error;
+                if (!bmmo::physics::navigation_poll(engine_->physics(), forced_entity.c_str(), true, own_key_codes_,
+                                                    own_key_blocks_, own_key_count_, force_error))
+                    if (lead_force_logs_++ < 8)
+                        logf("lead: own polling after the forced tick %u: %s", frame_tick, force_error.c_str());
+            }
             if (!ticked) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             frames_since_anchor_ = f;
             // An activation of Gameplay_SectorManager this frame's scripts asked
@@ -1990,6 +2073,18 @@ namespace {
             const bool nav_active = navigation_known_ && navigation_active();
             input.flags = static_cast<uint8_t>((physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
                         | (nav_active ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));
+            // A forced tick plays the server's frame (design 2.4): recorded,
+            // journaled SUBSTITUTED and sent as such - the server drops it as
+            // stale, and the record holds what the server applied, so its
+            // notice, when it comes, changes nothing.
+            if (forced) {
+                input = forced_frame.frame;
+                ++lead_forced_played_;
+                if (forced_frame.count) {
+                    if (held_tick_is_base(tick)) ++subst_base_;
+                    else { ++subst_recv_; ++subst_same_; }
+                }
+            }
             if (args_.trace && (input.keys != last_keys_ || nav_active != last_nav_active_))
                 logf("input edge at tick %u keys=%u flags=%u", tick, input.keys, input.flags);
             last_keys_ = input.keys;
@@ -2002,7 +2097,9 @@ namespace {
             input_history_.emplace_back(tick, input);
             // The frame is finished: journal it before it goes on the wire, so
             // the box holds what this client played even when the send is lost.
-            if (journalling()) journal_.input(tick, own_id_, input, bmmo::session::JOURNAL_INPUT_FRESH);
+            if (journalling())
+                journal_.input(tick, own_id_, input,
+                               forced ? bmmo::session::JOURNAL_INPUT_SUBSTITUTED : bmmo::session::JOURNAL_INPUT_FRESH);
             if (args_.rollback) {
                 own_inputs_[tick] = input;
                 while (own_inputs_.size() > 128) own_inputs_.erase(own_inputs_.begin());
@@ -2716,18 +2813,8 @@ namespace {
                 if (!held_seen_.first(own_id_, tick)) { ++subst_dup_; continue; }
                 learn_held_tick(tick);
                 bmmo::session::input_frame frame{};
-                const bool resolved = resolve_held_frame(record, frame);
-                if (!args_.rollback || resync_pending_ || static_cast<int32_t>(tick - held_floor_) <= 0) {
-                    ++subst_base_;
-                    // Kept all the same (design 1.3: stored with or without a
-                    // way to replay it) - a tick not simulated yet when its
-                    // live frame is.
-                    if (!resolved) continue;
-                    if (static_cast<int32_t>(tick - current_tick()) > 0) hold_ahead(tick, frame, false);
-                    else store_held_frame(tick, frame);
-                    continue;
-                }
-                if (!resolved) {
+                if (!resolve_held_frame(record, frame)) {
+                    if (held_tick_is_base(tick)) { ++subst_base_; continue; }
                     ++subst_late_;
                     if (subst_unresolved_logs_++ < 8)
                         logf("held notice for own tick %u names source %u, which the sent ring no longer holds", tick,
@@ -2735,29 +2822,197 @@ namespace {
                     request_resync("a substituted own frame could not be resolved", true);
                     continue;
                 }
-                if (static_cast<int32_t>(tick - current_tick()) > 0) {   // not simulated yet
-                    ++subst_recv_;
-                    hold_ahead(tick, frame, true);
-                    continue;
-                }
-                store_held_frame(tick, frame);
-                // The gate note_input_correction applies: the anchor of the
-                // rewind, tick - 1, still re-simulable and in the history.
-                const uint32_t anchor = tick - 1;
-                const bool reachable = current_tick() - anchor <= rollback_.thresholds().max_resim_ticks
-                                    && rollback_.knows_tick(anchor);
-                if (!reachable) {
-                    ++subst_late_;
-                    if (subst_late_logs_++ < 8)
-                        logf("held notice for own tick %u arrived at tick %u, past the reach of %u ticks", tick,
-                             current_tick(), rollback_.thresholds().max_resim_ticks);
-                    request_resync("a substituted own frame arrived past the reach", true);
-                    continue;
-                }
-                ++subst_recv_;
-                correct_own_tick(tick, frame);
+                settle_held_tick(tick, frame);
             }
             check_held_complete(msg);
+        }
+
+        // A held tick no rewind could ever reach (the base rule of
+        // note_held_section): without --rollback, while a resync waits for
+        // its full snapshot, or at or below held_floor_.
+        bool held_tick_is_base(uint32_t tick) const {
+            return !args_.rollback || resync_pending_ || static_cast<int32_t>(tick - held_floor_) <= 0;
+        }
+
+        // One own tick the server applied `frame` at, resolved: base, held
+        // for its live frame, late, or recv (note_held_section's rules; a
+        // SessionLead's simulated range takes the same path).
+        void settle_held_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
+            if (held_tick_is_base(tick)) {
+                ++subst_base_;
+                // Kept all the same (design 1.3: stored with or without a
+                // way to replay it) - a tick not simulated yet when its live
+                // frame is.
+                if (static_cast<int32_t>(tick - current_tick()) > 0) hold_ahead(tick, frame, false);
+                else store_held_frame(tick, frame);
+                return;
+            }
+            if (static_cast<int32_t>(tick - current_tick()) > 0) {   // not simulated yet
+                ++subst_recv_;
+                hold_ahead(tick, frame, true);
+                return;
+            }
+            store_held_frame(tick, frame);
+            // The gate note_input_correction applies: the anchor of the
+            // rewind, tick - 1, still re-simulable and in the history.
+            const uint32_t anchor = tick - 1;
+            const bool reachable = current_tick() - anchor <= rollback_.thresholds().max_resim_ticks
+                                && rollback_.knows_tick(anchor);
+            if (!reachable) {
+                ++subst_late_;
+                if (subst_late_logs_++ < 8)
+                    logf("held notice for own tick %u arrived at tick %u, past the reach of %u ticks", tick,
+                         current_tick(), rollback_.thresholds().max_resim_ticks);
+                request_resync("a substituted own frame arrived past the reach", true);
+                return;
+            }
+            ++subst_recv_;
+            correct_own_tick(tick, frame);
+        }
+
+        // SessionLead (late-player design 2.4): the server moves this
+        // client's lead by msg.delta and, for a raise, applied `held` at
+        // every tick of [held_from, effective) - its buffer for us was reset
+        // there, and our frames below E are stale to it.  At our current
+        // tick c (bmmo::session::lead_split_range):
+        //  1. the range's ticks at or before c ran on our own input: each is
+        //     a substituted tick like a held notice's (settle_held_tick -
+        //     stored, journaled SUBSTITUTED, the record amended and one
+        //     replay from the earliest), counted once with the notices;
+        //  2. the ticks of (c, E) are forced: their live frames drive the
+        //     own ball with `held` (frame()), so we play what the server
+        //     applies and their notices, when they come, change nothing;
+        //  3. every tick of the range counts as learned for the completeness
+        //     check: the server's held_total counts them, and a notice that
+        //     comes later is a re-delivery;
+        //  4. the clock slews by delta (pace_and_frame), and the ack goes out
+        //     when the slew ends, with what it moved - or, when a resync
+        //     request ends it first, with the whole delta, which the
+        //     re-anchor at L_eff applies (request_resync).
+        // Nothing is renumbered: the first tick played on our own input
+        // again is E, stamped E, exactly where the server's buffer takes our
+        // frames from.  Copies are dropped by seq; a decision of another
+        // base by epoch (a resync crossed it: the server dropped it too).
+        void on_session_lead(const bmmo::session_lead_msg& msg) {
+            if (!assigned_ || msg.player != own_id_) return;
+            if (lead_seen_.count(msg.seq)) { ++lead_dups_; return; }
+            if (msg.epoch != tick_base_) {
+                // An older base: void.  A newer one: an unreliable copy that
+                // overtook its assignment; the reliable one follows it.
+                ++lead_stale_;
+                logf("lead: SessionLead %u of base %u dropped (our base %u)", msg.seq, msg.epoch, tick_base_);
+                return;
+            }
+            lead_seen_.insert(msg.seq);
+            // A slew still running (the server never overlaps two, so this is
+            // defensive): it ends here with what it moved, acknowledged.
+            if (lead_slew_.active()) finish_lead_slew("superseded by SessionLead " + std::to_string(msg.seq));
+            // A resync of ours in flight: the server answers it with an
+            // assignment at L_eff that voids this decision (send_session_assign
+            // clears the outstanding one, and our ack would come after the
+            // request on the same channel and be ignored).  The range is
+            // still applied - the server plays `held` there until it
+            // re-anchors us - but the clock is not slewed for an assignment
+            // that replaces it, and nothing is acknowledged or counted.
+            const bool voided = resync_in_flight_;
+            // The slew starts before the range is settled: an amended tick
+            // past the reach asks for a resync (settle_held_tick), and
+            // request_resync then acknowledges this decision in full ahead of
+            // the request, so the re-anchor at L_eff carries it.
+            const uint64_t resyncs_before = resyncs_sent_;
+            if (!voided) {
+                lead_slew_.start(msg.seq, msg.delta);
+                lead_slew_clock_ = clock_type::now();
+            }
+            const uint32_t next_unsimulated = frames_since_anchor_ >= 1 ? current_tick() + 1 : tick_base_;
+            const auto ranges = bmmo::session::lead_cap_forced(
+                bmmo::session::lead_split_range(msg.held_from, msg.effective, next_unsimulated),
+                static_cast<uint32_t>(bmmo::session::kSentInputRing));
+            uint32_t amended = 0, forced = 0, known = 0;
+            if (msg.held_from != 0) {
+                // Up to the forced range's end, capped: the ticks past the cap
+                // are not ours to force or learn (lead_cap_forced), their
+                // notices settle them.
+                for (uint32_t t = msg.held_from; static_cast<int32_t>(t - ranges.force_to) < 0; ++t) {
+                    const bool first = held_seen_.first(own_id_, t);
+                    if (first) learn_held_tick(t);
+                    else ++known;
+                    if (static_cast<int32_t>(t - ranges.force_from) < 0) {
+                        // Simulated: a notice that came first settled it already.
+                        if (first) { settle_held_tick(t, msg.held); ++amended; }
+                        continue;
+                    }
+                    // Ahead: the live frame plays `held`.  A notice that named
+                    // the tick first waits in held_ahead_ to compare the record
+                    // with what we play, which is now the same frame (the
+                    // server froze it for the range): dropped, and a recv one
+                    // counted as the same frame here, since the forced tick
+                    // does not count it again.
+                    if (const auto ahead = held_ahead_.find(t); ahead != held_ahead_.end()) {
+                        if (ahead->second.second) ++subst_same_;
+                        held_ahead_.erase(ahead);
+                    }
+                    forced_own_[t] = forced_own{msg.held, first};
+                    ++forced;
+                }
+            }
+            const bool reanchored = resyncs_sent_ != resyncs_before;
+            if (!voided) ++lead_adjustments_;
+            else ++lead_void_;
+            logf("lead: SessionLead %u %s: k=%+d N=%u E=%u at tick %u (base %u): amended %u [%u,%u) forced %u [%u,%u) "
+                 "already noticed %u, held-source=%s; %s",
+                 msg.seq, voided ? "void (a resync of ours is in flight), range applied" : "applied",
+                 static_cast<int>(msg.delta), msg.held_from, msg.effective,
+                 frames_since_anchor_ >= 1 ? current_tick() : tick_base_, tick_base_, amended, ranges.amend_from,
+                 ranges.amend_to, forced, ranges.force_from, ranges.force_to, known,
+                 msg.held_source == bmmo::session::INPUT_SOURCE_DEFAULT ? "default" : std::to_string(msg.held_source).c_str(),
+                 voided ? "no slew" : reanchored ? "acknowledged in full ahead of the resync it asked for"
+                                    : msg.delta > 0 ? "slewing at 2x" : "slewing at 0.9x");
+            journal_note("lead: SessionLead " + std::to_string(msg.seq) + " " + (msg.delta > 0 ? "+" : "")
+                         + std::to_string(msg.delta) + " held [" + std::to_string(msg.held_from) + ", "
+                         + std::to_string(msg.effective) + "), forced from " + std::to_string(ranges.force_from)
+                         + (voided ? " (void: resync in flight)" : ""));
+            // A zero delta: nothing to slew, acknowledged at once (unless a
+            // resync request did it, or the decision is void).
+            if (!voided && !reanchored && !lead_slew_.active()) finish_lead_slew("nothing to slew");
+        }
+
+        // The slew ends - moved in full, superseded, or ended by a resync
+        // request (`reanchored`: acknowledged in full, the re-anchor at
+        // L_eff applies all of it, lead_slew::finish_reanchored) - and the
+        // server is told what it applied (its lead_offset and a resync's
+        // L_eff follow that, bounded by the delta it sent).  Reliable: it is
+        // ordered before the resync request request_resync sends right after
+        // it, so the re-anchor already counts it.
+        void finish_lead_slew(const std::string& why, bool reanchored = false) {
+            const uint32_t seq = lead_slew_.seq();
+            const int delta = lead_slew_.delta();
+            const int moved = lead_slew_.applied();
+            const int applied = reanchored ? lead_slew_.finish_reanchored() : lead_slew_.finish();
+            lead_offset_ += applied;
+            bmmo::session_lead_ack_msg ack;
+            ack.session = session_;
+            ack.seq = seq;
+            ack.applied = static_cast<int16_t>(std::clamp(applied, -32768, 32767));
+            ack.serialize();
+            send_bytes(ack.raw.str(), k_nSteamNetworkingSend_Reliable);
+            logf("lead: SessionLead %u acknowledged at tick %u: applied %+d of %+d, the slew moved %+d (%s); lead offset %+d",
+                 seq, current_tick(), applied, delta, moved, why.c_str(), lead_offset_);
+            journal_note("lead: SessionLead " + std::to_string(seq) + " applied " + std::to_string(applied) + " of "
+                         + std::to_string(delta) + " (" + why + ")");
+        }
+
+        // A new assignment voids the adjustment in flight and the forced
+        // ticks (numbered from the old base): the server dropped the decision
+        // with its base and ignores an ack of it.  `why`: a new base, or the
+        // session's end.
+        void drop_lead_state(const char* why) {
+            if (lead_slew_.active()) {
+                logf("lead: SessionLead %u voided by %s after %+d of %+d ticks", lead_slew_.seq(), why,
+                     lead_slew_.applied(), lead_slew_.delta());
+                lead_slew_.finish();
+            }
+            forced_own_.clear();
         }
 
         // The frame a held record says the server applied.  False when it
@@ -2913,8 +3168,9 @@ namespace {
         // A replay asked for by a correction under the previous numbering
         // has no anchor in the new one (the history went with it): dropped,
         // not run into a refusal - a refused own replay asks for a resync.
-        void reset_held_epoch() {
+        void reset_held_epoch(const char* why = "the new base") {
             drop_pending_rewind();
+            drop_lead_state(why);
             own_replay_pacer_.reset();
             held_seen_.clear();
             held_ahead_.clear();
@@ -4157,6 +4413,16 @@ namespace {
             resync_in_flight_ = true;
             last_resync_request_ = now;
             consecutive_hard_ = 0;
+            // A SessionLead's slew in flight ends here, acknowledged in full
+            // (late-player design 2.8, lead_slew::finish_reanchored): the
+            // server re-anchors this client at L_eff, the first lead plus the
+            // acknowledged offset, and the ack sent first on the same
+            // reliable channel is counted in it - so the new clock has the
+            // whole delta the server decided, not the part the slew had
+            // moved.  Only here, past the limiter: a request held back
+            // re-anchors nothing, and the slew carries on.
+            if (lead_slew_.active())
+                finish_lead_slew(std::string("ended by a resync request (") + reason + ")", true);
             bmmo::session_resync_msg msg;
             msg.session = session_;
             msg.last_full_tick = last_snapshot_tick_;
@@ -4440,7 +4706,7 @@ namespace {
             relay_seen_.clear();
             held_seen_.clear();
             held_stale_seen_.clear();
-            reset_held_epoch();
+            reset_held_epoch("the session's end");
             pending_relay_.clear();
             event_seen_.clear();
             own_event_repeats_.clear();
@@ -4479,6 +4745,7 @@ namespace {
             now.substrew = subst_rewinds_; now.substrew_depth = subst_rewind_depth_;
             now.subst_deferred = subst_deferred_; now.subst_unseen = subst_unseen_;
             now.subst_subsumed = subst_subsumed_; now.subst_saved = subst_saved_;
+            now.lead_adj = lead_adjustments_;
             const window_base& was = window_base_;
             if (!first) {
                 auto d = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
@@ -4509,6 +4776,14 @@ namespace {
                               d(now.subst_deferred, was.subst_deferred), d(now.subst_unseen, was.subst_unseen),
                               d(now.subst_subsumed, was.subst_subsumed), d(now.subst_saved, was.subst_saved));
                 text += subst;
+                // SessionLead (late-player design 2.4): the adjustments
+                // applied in this window (lead_adj, the harness's count), the
+                // acknowledged offset so far (lead) and the ticks the slew in
+                // flight still has to move (slew, signed).
+                char lead[96];
+                std::snprintf(lead, sizeof(lead), " lead_adj=%llu lead=%d slew=%d", d(now.lead_adj, was.lead_adj),
+                              lead_offset_, lead_slew_.outstanding());
+                text += lead;
                 for (const auto& [player, hist]: window_lag_) {
                     text += " lag[" + std::to_string(player) + "]=";
                     bool comma = false;
@@ -4539,6 +4814,7 @@ namespace {
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                 "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
@@ -4595,6 +4871,16 @@ namespace {
                  static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max,
                  static_cast<unsigned long long>(amend_failures_), rebases_,
                  static_cast<unsigned long long>(resyncs_sent_), static_cast<unsigned long long>(resyncs_done_),
+                 // lead_adj: SessionLeads applied; lead_offset: what their
+                 // acks applied in total; slew: ticks the one in flight still
+                 // moves; lead_forced: live frames that played the held
+                 // frame; lead_skip=dup/stale/void: copies, decisions of
+                 // another base, and decisions a resync of ours in flight
+                 // voids (late-player design 2.4, 2.8).  `lead=` further
+                 // on is the measured lead over the server, not this.
+                 static_cast<unsigned long long>(lead_adjustments_), lead_offset_, lead_slew_.outstanding(),
+                 static_cast<unsigned long long>(lead_forced_played_), static_cast<unsigned long long>(lead_dups_),
+                 static_cast<unsigned long long>(lead_stale_), static_cast<unsigned long long>(lead_void_),
                  static_cast<unsigned long long>(rs.snapshots), static_cast<unsigned long long>(rs.matched),
                  static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
                  static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
@@ -5008,6 +5294,7 @@ namespace {
             uint64_t subst_recv = 0, subst_diff = 0, subst_same = 0, subst_bodiless = 0, subst_late = 0;
             uint64_t substrew = 0, substrew_depth = 0;
             uint64_t subst_deferred = 0, subst_unseen = 0, subst_subsumed = 0, subst_saved = 0;
+            uint64_t lead_adj = 0;
             int rebases = 0;
         } window_base_;
         uint64_t input_rewind_depth_ = 0, life_rewind_depth_ = 0, forced_rollback_depth_ = 0;
@@ -5045,6 +5332,24 @@ namespace {
         // (take_held_ahead); both numbered from our base.
         std::map<uint32_t, bmmo::session::input_frame> sent_inputs_;
         std::map<uint32_t, std::pair<bmmo::session::input_frame, bool>> held_ahead_;
+        // SessionLead (late-player design 2.4, on_session_lead): the ticks
+        // whose live frame plays the server's held frame, with whether it
+        // still counts as a received notice (no notice named it first); the
+        // decision ids taken this session; the slew in flight and the clock
+        // its steps are measured on; the total acknowledged offset.  Counted
+        // for the status and window lines: adjustments applied (lead_adj),
+        // forced frames played, copies dropped, and decisions of another base.
+        struct forced_own {
+            bmmo::session::input_frame frame{};
+            bool count = false;
+        };
+        std::map<uint32_t, forced_own> forced_own_;
+        std::set<uint32_t> lead_seen_;
+        bmmo::session::lead_slew lead_slew_;
+        clock_type::time_point lead_slew_clock_{};
+        int lead_offset_ = 0;
+        uint64_t lead_adjustments_ = 0, lead_forced_played_ = 0, lead_dups_ = 0, lead_stale_ = 0, lead_void_ = 0;
+        uint64_t lead_force_logs_ = 0;
         // The completeness check (check_held_complete): the ticks learned
         // since the epoch, the recent ones by tick, the shortfall already
         // counted, and the datagrams whose held_total was ahead (tick ->

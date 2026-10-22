@@ -550,6 +550,25 @@ reliable copy stands behind them.
   while an adjustment is outstanding, so the server's raise, which needs 132
   ticks, always lands first.
 
+**As built (step 11, headless).** The arithmetic is in
+`session/lead_slew.hpp`. The ack goes out when the slew ends, not on
+receipt, so `applied` is what moved; the server's gates only count on the ack.
+A raise gains a tick only while the pacer is less than one frame behind, so a
+slow CPU slews more slowly instead of reading as a stall. A rebase does not end
+the slew: the ticks it moved are already stepped, and it goes on moving the
+new schedule. A resync request ends it and acks the whole delta first, on the
+same reliable channel. The re-anchor at `L_eff` then applies all of it,
+because the assignment's clock replaces the slewed one. An ack of only the
+part moved would leave the client short of the lead the server decided. The
+slew starts before [N, c] is amended, so a resync that an amended tick past the
+reach asks for carries the decision. A SessionLead that arrives while the
+client's own resync is in flight is void, because the assignment that answers
+the resync clears it at the server. Its range is still applied, but there is no
+slew and no ack. The forced range is capped at the 256-tick ring. The ticks past
+the cap are neither forced nor learned, so their notices settle them. The
+status line prints the offset as `lead_offset=`, because its `lead=` is the
+measured lead. The window line prints `lead_adj= lead= slew=`.
+
 ### 2.5 Leads, caps and reach
 
 | item | today | change |

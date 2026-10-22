@@ -825,6 +825,15 @@ RE_BARRIER = re.compile(r'no Physicalize for player (\d+) at tick (\d+)')
 # (server.cpp handle_session_resync): the ticks between are applied held under
 # no numbering the client has, so no notice of them ever reaches it.
 RE_RESYNCED = re.compile(r'resynced at tick (\d+) \(last full snapshot it had: \d+; held counted through tick (\d+)\)')
+# Plan step 10's S1 lead line (session_runner.cpp apply_lead_decision): a
+# SessionLead sent, its k - with the meter's decided k and the binding cap
+# when a cap (the total, the Sector margin) cut it - the reset range
+# [held-from, E) (held-from 0 for a lower) and the frames the buffer reset
+# dropped; and the server's line for the client's acknowledgement
+# (session_runner.cpp acknowledge_lead).
+RE_LEAD_SENT = re.compile(r'\bS1 .*\blead player=(\d+) id=(\d+) k=(-?\d+)(?: decided=(-?\d+))?'
+                          r'(?: cap=(\S+) binding=(\S+))? N=(\d+) held-from=(\d+) E=(\d+).*?\bdropped=(\d+)')
+RE_LEAD_ACK = re.compile(r'\bS1 lead-ack player=(\d+) id=(\d+) applied=(-?\d+) tick=(\d+)')
 PHASES = ('B', 'D', 'A')
 
 
@@ -1057,7 +1066,8 @@ def infer_arm(args, source):
         return 'A9C'
     if 'step' in kinds:
         ev = next(e for e in args.events if e.kind == 'step')
-        return 'A5D' if ev.until else ('A5U' if ev.direction == 'up' else 'A5')
+        # A5 is +300 ms both ways, A5s +100 ms both ways (5.2's table)
+        return 'A5D' if ev.until else ('A5U' if ev.direction == 'up' else ('A5S' if ev.ms <= 150 else 'A5'))
     if 'spike' in kinds:
         return 'A9'
     if any(ev.kind == 'blackout' and ev.direction == 'both' for ev in args.events):
@@ -1087,7 +1097,9 @@ def event_report(args, case, case_dir):
     report = {'episode': ep['describe'], 'source': ep['source'], 'arm': arm, 'family': family,
               'drop': ep.get('drop', False), 't_on': t_on, 't_off': t_off, 'phases': phases,
               'event_clients': event_clients, 'server_journal': case['journal'][-1], 'clients': [],
-              'window_origin': getattr(args, 'window_origin', 0), 'input_delay': args.input_delay}
+              'window_origin': getattr(args, 'window_origin', 0), 'input_delay': args.input_delay,
+              # A5u/A5s: the uplink step K is judged against
+              'step_ms': max([ev.ms for ev in (getattr(args, 'events', None) or []) if ev.kind == 'step'] or [0.0])}
     if getattr(args, 'join_late', None):
         links = client_links(args)
         report['join'] = [{'client': i, 'asked': asked, 'base': (logs[i]['bases'] or [None])[0],
@@ -1126,11 +1138,27 @@ def event_report(args, case, case_dir):
     server_log = case_dir / 'server.log'
     late_by_lines, barrier_lines = [], []
     counted_through = {}   # resync base -> the old epoch's last counted tick
+    # SessionLeads sent to this run's players and their acks (an external
+    # server's log holds other runs too: kept to this run's ids and ticks).
+    leads = []
     if server_log.exists():
         for line in server_log.read_text(errors='replace').splitlines():
             m = RE_RESYNCED.search(line)
             if m:
                 counted_through[int(m.group(1))] = int(m.group(2))
+            m = RE_LEAD_SENT.search(line)
+            if m and int(m.group(1)) in index_of and first <= int(m.group(7)) <= last:
+                leads.append({'player': int(m.group(1)), 'client': index_of[int(m.group(1))], 'id': int(m.group(2)),
+                              'k': int(m.group(3)),
+                              # the meter's k before a cap cut it (= k when uncapped)
+                              'decided': int(m.group(4)) if m.group(4) is not None else int(m.group(3)),
+                              'binding': m.group(6), 'n': int(m.group(7)), 'held_from': int(m.group(8)),
+                              'e': int(m.group(9)), 'dropped': int(m.group(10)), 'applied': None})
+            m = RE_LEAD_ACK.search(line)
+            if m:
+                for lead in leads:
+                    if lead['player'] == int(m.group(1)) and lead['id'] == int(m.group(2)):
+                        lead['applied'] = int(m.group(3))
             m = RE_LATE_BY.search(line)
             if m:
                 late_by_lines.append({'type': int(m.group(1)), 'player': int(m.group(2)), 'stamp': int(m.group(3)),
@@ -1139,7 +1167,7 @@ def event_report(args, case, case_dir):
             if m:
                 barrier_lines.append({'player': int(m.group(1)), 'tick': int(m.group(2))})
     report['server'] = {'ticks': [first, last], 'tick_gaps': tick_gaps, 'late_events': late_events,
-                        'late_by_lines': late_by_lines, 'barrier_lines': barrier_lines,
+                        'late_by_lines': late_by_lines, 'barrier_lines': barrier_lines, 'leads': leads,
                         # the whole run in 30-tick buckets, so a later arm can
                         # re-cut this run's gaps on its own phases
                         'gaps30': sorted([s, v] for s, v in gaps30.items())}
@@ -1237,6 +1265,19 @@ def event_report(args, case, case_dir):
         row['late_mirror_after_300'] = max([v[2] for t, v in per_tick.items()
                                             if t_off + 60 <= t < t_off + 360 and t <= end] or [0.0])
         # A3: the own ball 48 ticks after the client's last resync (or T_off).
+        # A5u/A5s: this client's SessionLeads (the S1 lead lines), and from the
+        # first raise's E: the substitutions outside [T_on, E], the first tick
+        # at or after E the server applied fresh, and the own ball from E+48.
+        row['leads'] = [lead for lead in leads if lead['client'] == i]
+        raises = [lead for lead in row['leads'] if lead['k'] > 0 and lead['held_from']]
+        if raises:
+            e = raises[0]['e']
+            held = set(mine)
+            fresh_from_e = next((t for t in range(e, end + 1) if t not in held), None)
+            row['lead_e'] = {'e': e, 'n': raises[0]['n'], 'subst_outside': sum(1 for t in mine if not t_on <= t <= e),
+                             'first_fresh': fresh_from_e,
+                             'own_after': max([v[0] for t, v in per_tick.items()
+                                               if e + REACH <= t <= end and v[0] is not None] or [0.0])}
         settle = max([t_off] + [b for b in row['resync_bases'] if b >= t_on]) + REACH
         row['own_after_resync'] = [settle, max([v[0] for t, v in per_tick.items()
                                                 if settle <= t <= end and v[0] is not None] or [0.0])]
@@ -1478,13 +1519,39 @@ def criteria(report, case, controls):
                     row['own_after'], '/'.join(str(row['phases'][p]['relay_late']) for p in PHASES), resyncs,
                     row['subst_total'], row['subst_outside_event']))
         elif family == 'lead':
-            add(who, 'exactly one lead_adj, K in [ceil(up_ms/15), +4]', None if lead_none else sum(v or 0 for v in lead) == 1,
-                no_lead + ' (K needs the S1/S3 lines of plan steps 7 and 10)' if lead_none else str(lead))
-            add(who, 'exactly one buffer reset, E >= the first on-time frame after the slew', None,
-                'no S3 reset note at this revision')
-            add(who, 'substitutions only in [T_on, E]; own ball 0.0000 from E+48', None,
-                'no E at this revision; substituted %d (B/D/A %s), own after T_off+48 %.4f m' % (
-                    row['subst_total'], '/'.join(str(row['subst_server'][p]) for p in PHASES), row['own_after']))
+            # K from the server's S1 lead line (plan step 10), judged against
+            # the uplink step; the client's lead_adj counts what it applied.
+            sent = row.get('leads', [])
+            k_lo = int(math.ceil(report.get('step_ms', 0.0) / 1000.0 / TICK_S))
+            # K is the meter's decision: a cap (the total, the Sector margin)
+            # cuts what is sent below it, and is shown, not misread as a
+            # wrong K
+            ks = [lead.get('decided', lead['k']) for lead in sent]
+            capped = ['%d->%d (%s)' % (lead['decided'], lead['k'], lead['binding'] or '?')
+                      for lead in sent if lead.get('decided', lead['k']) != lead['k']]
+            one = (not lead_none and sum(v or 0 for v in lead) == 1)
+            add(who, 'exactly one lead_adj, K in [ceil(up_ms/15), +4]',
+                None if lead_none and not sent else (one and len(ks) == 1 and k_lo <= ks[0] <= k_lo + 4),
+                '%s; lead_adj B/D/A %s; K %s vs [%d, %d]%s; acked %s' % (
+                    'S1 lead lines: none (no --server-log, or a server before step 10)' if not sent else '%d sent' % len(sent),
+                    no_lead if lead_none else '/'.join(str(v) for v in lead), ks, k_lo, k_lo + 4,
+                    '; capped %s' % ', '.join(capped) if capped else '',
+                    [lead['applied'] for lead in sent]))
+            le = row.get('lead_e')
+            resets = [lead for lead in sent if lead['held_from']]
+            add(who, 'exactly one buffer reset, E >= the first on-time frame after the slew',
+                None if not sent else (len(resets) == 1 and le is not None and le['first_fresh'] == le['e']),
+                'no S1 lead line' if not sent else '%d resets; %s' % (
+                    len(resets), 'no raise' if le is None else 'N %d E %d, first tick applied fresh from E: %s (dropped %d)' % (
+                        le['n'], le['e'], le['first_fresh'], resets[0]['dropped'] if resets else 0)))
+            add(who, 'substitutions only in [T_on, E]', None if le is None else le['subst_outside'] == 0,
+                'no E (no raise in the S1 lines); substituted %d (B/D/A %s)' % (
+                    row['subst_total'], '/'.join(str(row['subst_server'][p]) for p in PHASES)) if le is None else
+                '%d of %d outside [%d, %d]; runs %s' % (le['subst_outside'], row['subst_total'], t_on, le['e'],
+                                                        row['subst_runs']))
+            add(who, 'own ball 0.0000 from E+48', None if le is None else le['own_after'] < ZERO_M,
+                ('no E; own after T_off+48 %.4f m' % row['own_after']) if le is None else
+                '%.4f m from tick %d%s' % (le['own_after'], le['e'] + REACH, mask_note), masked)
             add(who, 'resyncs 0', resyncs == 0 and sum(row['phases'][p]['resyncs'] for p in PHASES) == 0,
                 '%d (bases %s)' % (resyncs, row['resync_bases']))
             add(who, "the session's input delay printed once", len(row['input_delays']) == 1,
@@ -1693,12 +1760,29 @@ def selftest():
           'dur %g t_off %d' % (ev.dur_ms, ev.t_off))
     ev = parse_event('2:1500:step=300:dir=up:until=2700')
     check('parse_event step until', ev.t_off == 2700 and ev.until == 2700)
+    arms = [infer_arm(argparse.Namespace(arm='', events=[parse_event(spec)]), 'link')
+            for spec in ('1:1500:step=300:dir=up', '1:1500:step=100', '1:1500:step=300', '1:1500:step=300:dir=up:until=2700')]
+    check('infer_arm A5u/A5s/A5/A5d', arms == ['A5U', 'A5S', 'A5', 'A5D'], str(arms))
     w = parse_window('window: tick=1559 inrew=3/41 life=0/0 forced=0/0 snaprb=1/12 snaps=1 resyncs=0/0 rebases=0 '
                      'relay=180 late=2 lag[11]=23*4,24*50,49*2 lag[12]=30*60 inrew[11]=3 subst=5/4/1/0/1/0 '
-                     'substco=7/1/1/9 lead_adj=1')
+                     'substco=7/1/1/9 lead_adj=1 lead=21 slew=-3')
     check('parse_window', w and w['tick'] == 1559 and w['inrew'] == [3, 41] and w['late'] == 2
           and w['lag'] == {11: {23: 4, 24: 50, 49: 2}, 12: {30: 60}} and w['inrew_src'] == {11: 3}
-          and w['subst'] == [5, 4, 1, 0, 1, 0] and w['substco'] == [7, 1, 1, 9] and w['lead_adj'] == 1, str(w))
+          and w['subst'] == [5, 4, 1, 0, 1, 0] and w['substco'] == [7, 1, 1, 9] and w['lead_adj'] == 1
+          and w['lead'] == 21 and w['slew'] == -3, str(w))
+    # the server's S1 lead and lead-ack lines (session_runner.cpp)
+    m = RE_LEAD_SENT.search('[session 3] S1 would-raise player=11 tick=1700 k=21 q10=-18.40 r10=2.10 r01=0.40 '
+                            'misses=60/66 streak=132 offset=0; lead player=11 id=2 k=19 decided=21 cap=total '
+                            'binding=total N=1700 held-from=1700 E=1745 c-est=1722 rtt=301 held-source=1690 '
+                            'dropped=9 epoch=1200')
+    check('RE_LEAD_SENT', m is not None and m.groups() == ('11', '2', '19', '21', 'total', 'total', '1700', '1700',
+                                                          '1745', '9'), str(m.groups() if m else None))
+    m = RE_LEAD_SENT.search('[session 3] S1 would-raise player=11 tick=1700 k=21 offset=0; lead player=11 id=3 k=7 '
+                            'N=1700 held-from=1700 E=1718 c-est=? rtt=? held-source=default dropped=0 epoch=1200')
+    check('RE_LEAD_SENT uncapped', m is not None and m.groups() == ('11', '3', '7', None, None, None, '1700', '1700',
+                                                                   '1718', '0'), str(m.groups() if m else None))
+    m = RE_LEAD_ACK.search('[session 3] S1 lead-ack player=11 id=2 applied=19 tick=1721 effective=1745 offset=19')
+    check('RE_LEAD_ACK', m is not None and m.groups() == ('11', '2', '19', '1721'), str(m.groups() if m else None))
     st = hist_stats({23: 4, 24: 50, 49: 2})
     check('hist_stats p99', st == {'n': 56, 'max': 49, 'p99': 49}, str(st))
     st = hist_stats({i: 1 for i in range(1, 201)})

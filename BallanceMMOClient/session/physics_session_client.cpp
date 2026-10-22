@@ -1455,6 +1455,11 @@ void BallanceMMOClient::physics_session_anchor() {
     ready.anchor_surfaces = s.anchor_surfaces;
     ready.physics_sha256 = physics_view_.dll_sha256();
     ready.build_id = physics_view_.build_id();
+    // No capabilities: this client cannot apply a SessionLead yet (its
+    // fixed-tick driver has no slew, late-player design plan step 15), so the
+    // server never sends it one and keeps it on the capped leads the 48-tick
+    // reach was sized for.
+    ready.caps = 0;
     ready.serialize();
     send(ready.raw.str().data(), ready.size(), k_nSteamNetworkingSend_Reliable);
     logger_->Info("Physics session %u: anchored (hash %016llx surfaces %016llx), waiting for the tick assignment",
