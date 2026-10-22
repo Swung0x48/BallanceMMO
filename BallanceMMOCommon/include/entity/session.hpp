@@ -42,7 +42,13 @@ namespace bmmo::session {
     //      CAP_* below), and the server may send SessionLead to a client that
     //      declared CAP_LEAD, which answers with SessionLeadAck (late-player
     //      design 2.2).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 8;   // 4: SessionStart carries spawn_spacing
+    //   9  a lifecycle event is re-stamped where the server accepts it
+    //      (late-player design 3.1): SessionEvent carries origin_tick (the
+    //      sender's stamp) beside tick (the tick the server applies it at,
+    //      never earlier than the stamp) and state bits (EVENT_STATE_*); it
+    //      is relayed to every member, the owner included, and every
+    //      receiver keys, orders and guards a player's events on the origin.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 9;   // 4: SessionStart carries spawn_spacing
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
@@ -110,6 +116,18 @@ namespace bmmo::session {
     // (CurrentLevel[0,3]) - a spawn or a respawn, not a trafo - so the
     // session's spawn impulse applies (design 9.10, session/spawn_impulse.hpp).
     constexpr uint8_t PHYSICALIZE_FLAG_SPAWN = 1u << 0;
+
+    // session_event_msg `state` bits (protocol 9, late-player design 3.1-3.2),
+    // set by the server only; a client sends 0.  MOVED: the server applies the
+    // event later than its origin (tick > origin_tick), because it arrived
+    // after the session had passed its stamp.  SUPERSEDED: a birth overtaken
+    // by a newer accepted Physicalize or Unphysicalize of the same player; it
+    // is never applied and goes to its owner only.  REJECTED: the server
+    // refused the event (a malformed recipe, plan step 18); owner only.
+    constexpr uint8_t EVENT_STATE_MOVED      = 1u << 0;
+    constexpr uint8_t EVENT_STATE_SUPERSEDED = 1u << 1;
+    constexpr uint8_t EVENT_STATE_REJECTED   = 1u << 2;
+    constexpr uint8_t EVENT_STATE_KNOWN = EVENT_STATE_MOVED | EVENT_STATE_SUPERSEDED | EVENT_STATE_REJECTED;
 
     // session_start_msg::players entry: one member's spawn assignment.
     struct player_entry {

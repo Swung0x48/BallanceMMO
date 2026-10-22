@@ -877,36 +877,46 @@ TEST(SessionJournal, EventKeepsTheAppliedAndTheStampedTickApart) {
     EXPECT_EQ(0u, out.ticks[2].events[0].event_tick);
 }
 
+namespace {
+    // The synthetic journal with every EVENT payload cut short by `strip`
+    // bytes and the file's version field set to `version`: what an older
+    // writer produced.  Returns the number of events shortened.
+    size_t write_shortened_events(const std::filesystem::path& from, const std::filesystem::path& to,
+                                  size_t strip, uint32_t version) {
+        const std::string bytes = read_file(from);
+        std::string trimmed = bytes.substr(0, 8);    // magic
+        journal_detail::write_u32(trimmed, version);
+        size_t at = 12;
+        size_t stripped = 0;
+        while (at + 5 <= bytes.size()) {
+            const uint8_t tag = static_cast<uint8_t>(bytes[at]);
+            const uint32_t size = journal_detail::load_u32(bytes.data() + at + 1);
+            if (at + 5 + size > bytes.size()) break;
+            std::string payload = bytes.substr(at + 5, size);
+            if (tag == static_cast<uint8_t>(journal_tag::event) && payload.size() >= strip) {
+                payload.resize(payload.size() - strip);
+                ++stripped;
+            }
+            trimmed.push_back(static_cast<char>(tag));
+            journal_detail::write_u32(trimmed, static_cast<uint32_t>(payload.size()));
+            trimmed += payload;
+            at += 5 + size;
+        }
+        write_file(to, trimmed);
+        return stripped;
+    }
+}
+
 // A file from a writer that predates the stamped tick: the EVENT payload ends
 // after the recipe, and the record must still parse - with the stamp equal to
-// the applied tick, and with every record after it intact.
+// the applied tick, and with every record after it intact.  (Version 2 had the
+// stamp but not the origin and state of version 3: 4 + 4 + 1 bytes less.)
 TEST(SessionJournal, EventWithoutTheStampedTickReadsItAsTheAppliedTick) {
     const temp_dir dir("event_tick_old");
     const auto path = dir.file("session.bmjr");
     write_synthetic(path);
-    const std::string bytes = read_file(path);
-
-    std::string trimmed = bytes.substr(0, 12);   // magic + version
-    size_t at = 12;
-    size_t stripped = 0;
-    while (at + 5 <= bytes.size()) {
-        const uint8_t tag = static_cast<uint8_t>(bytes[at]);
-        const uint32_t size = journal_detail::load_u32(bytes.data() + at + 1);
-        ASSERT_LE(at + 5 + size, bytes.size());
-        std::string payload = bytes.substr(at + 5, size);
-        if (tag == static_cast<uint8_t>(journal_tag::event)) {
-            ASSERT_GE(payload.size(), 4u);
-            payload.resize(payload.size() - 4);
-            ++stripped;
-        }
-        trimmed.push_back(static_cast<char>(tag));
-        journal_detail::write_u32(trimmed, static_cast<uint32_t>(payload.size()));
-        trimmed += payload;
-        at += 5 + size;
-    }
-    ASSERT_EQ(2u, stripped);
     const auto old_style = dir.file("old.bmjr");
-    write_file(old_style, trimmed);
+    ASSERT_EQ(2u, write_shortened_events(path, old_style, 9, 2));
 
     journal out;
     std::string error;
@@ -923,4 +933,83 @@ TEST(SessionJournal, EventWithoutTheStampedTickReadsItAsTheAppliedTick) {
     EXPECT_EQ("Trafo_Piece_3", out.ticks[2].events[0].name);
     ASSERT_EQ(2u, out.notes.size());   // the records after the shortened ones
     EXPECT_EQ("end: session over", out.notes[1].text);
+    // and the origin falls back to the stamp, the only one such a file has
+    EXPECT_EQ(101u, out.ticks[1].events[0].origin_tick);
+    EXPECT_EQ(0u, out.ticks[1].events[0].state);
+}
+
+// Version 3 (protocol 9, late-player design 4): the EVENT record carries the
+// origin - the tick the sender stamped it for - and the state beside the
+// applied tick.  The server re-stamps a late event, so `tick` and
+// `event_tick` are the applied tick there and the origin is older; a client
+// journal records a relayed event's state bits too.
+TEST(SessionJournal, V3EventRecordRoundTripsTheOriginAndTheState) {
+    const temp_dir dir("event_origin");
+    const auto path = dir.file("session.bmjr");
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        journal_event restamped;   // stamped 113, accepted when the session was at 130
+        restamped.tick = 130;
+        restamped.event_tick = 130;
+        restamped.origin_tick = 113;
+        restamped.state = EVENT_STATE_MOVED;
+        restamped.id = 42;
+        restamped.type = event_type::Physicalize;
+        restamped.ball_type = 1;
+        restamped.flags = PHYSICALIZE_FLAG_SPAWN;
+        restamped.recipe = make_recipe();
+        writer.event(restamped);
+        journal_event death = restamped;   // the same outage: stamped 120, applied at 130 after the birth
+        death.origin_tick = 120;
+        death.type = event_type::Unphysicalize;
+        death.recipe = {};
+        writer.event(death);
+        journal_event on_time;
+        on_time.tick = 131;
+        on_time.event_tick = 131;
+        on_time.origin_tick = 131;
+        on_time.id = 43;
+        on_time.type = event_type::Sector;
+        on_time.sector = 4;
+        writer.event(on_time);
+        writer.tick(131, make_hash(131), 8);
+        writer.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_TRUE(out.warning.empty()) << out.warning;
+    ASSERT_EQ(2u, out.ticks.size());
+    ASSERT_EQ(2u, out.ticks[0].events.size());
+    const auto& birth = out.ticks[0].events[0];
+    EXPECT_EQ(130u, birth.tick);
+    EXPECT_EQ(130u, birth.event_tick);
+    EXPECT_EQ(113u, birth.origin_tick);
+    EXPECT_EQ(EVENT_STATE_MOVED, birth.state);
+    expect_same_recipe(make_recipe(), birth.recipe);
+    EXPECT_EQ(120u, out.ticks[0].events[1].origin_tick);
+    EXPECT_EQ(event_type::Unphysicalize, out.ticks[0].events[1].type);
+    ASSERT_EQ(1u, out.ticks[1].events.size());
+    EXPECT_EQ(131u, out.ticks[1].events[0].origin_tick);
+    EXPECT_EQ(0u, out.ticks[1].events[0].state);
+    EXPECT_EQ(4, out.ticks[1].events[0].sector);
+
+    // A version 2 file (no origin, no state) still reads, the stamp as the
+    // origin; a version 1 file does not (its hashes mean something else).
+    const auto v2 = dir.file("v2.bmjr");
+    ASSERT_EQ(3u, write_shortened_events(path, v2, 5, 2));
+    journal old;
+    ASSERT_TRUE(read_journal(v2, old, error)) << error;
+    ASSERT_EQ(2u, old.ticks.size());
+    ASSERT_EQ(2u, old.ticks[0].events.size());
+    EXPECT_EQ(130u, old.ticks[0].events[0].origin_tick);
+    EXPECT_EQ(0u, old.ticks[0].events[0].state);
+    EXPECT_EQ(130u, old.ticks[0].events[0].event_tick);
+    const auto v1 = dir.file("v1.bmjr");
+    write_shortened_events(path, v1, 5, 1);
+    journal refused;
+    EXPECT_FALSE(read_journal(v1, refused, error));
+    EXPECT_NE(std::string::npos, error.find("version")) << error;
 }

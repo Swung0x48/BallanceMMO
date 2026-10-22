@@ -616,6 +616,17 @@ public:
         bmmo::session::event_repeats event_repeats;
         bmmo::session::event_seen events_seen;
         uint64_t duplicate_events = 0;
+        // Protocol 9 (late-player design 3.1): an event is relayed once the
+        // runner has accepted it on the simulation thread and fixed the tick
+        // it is applied at, not on arrival.  Its message waits here under the
+        // token submit_event was given, until on_event_accepted takes it.
+        struct awaiting_event {
+            HSteamNetConnection from = k_HSteamNetConnection_Invalid;
+            bmmo::session_event_msg msg;
+        };
+        std::map<uint64_t, awaiting_event> awaiting_events;
+        uint64_t next_event_token = 1;
+        uint64_t restamped_events = 0, superseded_births = 0;
         // Assignments still to be repeated unreliably, one copy every
         // kAssignRepeatSpacing from the main loop (send_session_assign,
         // send_assign_repeats).
@@ -675,13 +686,19 @@ public:
         // per-player slot use this number, so the server and every side agree
         // on the spawn direction without exchanging it separately.
         std::map<HSteamNetConnection, uint8_t> join_orders;
-        // last Physicalize event of each member (serialized, player set) so a
-        // late joiner can build the bodies that already exist
-        // Each member's last Physicalize as relayed (for a late joiner) with
-        // its stamp: an Unphysicalize erases it only when stamped later, and
-        // the Unphysicalize sent on a leaver's behalf is stamped after it.
+        // Each member's last Physicalize as relayed (serialized, player, applied
+        // tick and origin set), so a late joiner can build the bodies that
+        // already exist, with its ORIGIN (late-player design 3.1): an
+        // Unphysicalize erases it only when its origin is later, the guard
+        // every receiver runs.  Updated when the runner accepts an event
+        // (on_event_accepted), on the simulation thread.
         struct last_physicalize_entry { uint32_t tick = 0; std::string bytes; };
         std::map<HSteamNetConnection, last_physicalize_entry> last_physicalize;
+        // The origin of each member's newest accepted Unphysicalize: a birth
+        // older by origin that is accepted after it (still applied, before
+        // it) is no ball a late joiner may be given - the death already
+        // erased the entry, and the birth must not put it back.
+        std::map<HSteamNetConnection, uint32_t> last_unphysicalize;
         // Every Sector event relayed in this session (serialized, player set),
         // in order: a late joiner's union has to grow by the same sectors the
         // running members' did (session/sector_union.hpp), and a resynced
@@ -734,6 +751,7 @@ public:
         rc.trace = config_.physics_debug_trace;
         rc.patience = config_.physics_patience;
         rc.lead_adjust = config_.physics_lead_adjust;
+        rc.lifecycle_barrier = config_.physics_lifecycle_barrier;
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
         // server was started from before the first world boots.
@@ -750,16 +768,18 @@ public:
             on_session_inputs(session, tick, applied);
         };
         callbacks.on_lead = [this](const bmmo::sim::lead_notice& notice) { on_session_lead(notice); };
+        callbacks.on_event_accepted = [this](const bmmo::sim::accepted_event& a) { on_event_accepted(a); };
         callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
             std::lock_guard lk(state_mutex_);
             end_physics_session(session, "simulation failed: " + reason);
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).", config_.physics_game_root,
+               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s, lifecycle barrier %s).",
+               config_.physics_game_root,
                config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
                rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off",
-               rc.lead_adjust ? "on" : "off");
+               rc.lead_adjust ? "on" : "off", rc.lifecycle_barrier ? "on" : "off");
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -1233,26 +1253,16 @@ public:
         }
         s.late.erase(c);
         s.join_orders.erase(c);
-        const auto last_physicalize = s.last_physicalize.find(c);
-        const uint32_t last_physicalize_tick = last_physicalize == s.last_physicalize.end() ? 0 : last_physicalize->second.tick;
-        if (last_physicalize != s.last_physicalize.end()) s.last_physicalize.erase(last_physicalize);
-        if (last_physicalize_tick && runner_) {
-            // The others still mirror this ball: relay an Unphysicalize on the
-            // leaver's behalf (design 9.3).  Stamped after the ball's own
-            // Physicalize (the members stamp theirs ahead of the server's tick
-            // by the start lead): every receiver orders a player's lifecycle
-            // events by stamp, and one stamped before the birth would be the
-            // death of an earlier ball.
-            bmmo::session_event_msg gone;
-            gone.session = session;
-            gone.player = c;
-            gone.tick = std::max(runner_->current_tick(session), last_physicalize_tick + 1);
-            gone.type = bmmo::session::event_type::Unphysicalize;
-            gone.serialize();
-            for (const auto m: s.members)
-                send(m, gone.raw.str().data(), gone.size(), k_nSteamNetworkingSend_Reliable);
-            s.event_repeats.push(gone.raw.str(), std::vector<uint32_t>(s.members.begin(), s.members.end()));
-        }
+        s.last_physicalize.erase(c);
+        s.last_unphysicalize.erase(c);
+        // Its events still waiting for the runner stay: their acceptance was
+        // posted before the removal, so they are relayed to the others first,
+        // and the leaver's Unphysicalize after them.
+        // The others still mirror this ball: the runner relays an
+        // Unphysicalize on the leaver's behalf (design 9.3) through
+        // on_event_accepted, at its own next tick and after the ball's newest
+        // accepted Physicalize (late-player design 3.2) - no longer stamped
+        // here from the network thread's view of the runner's tick.
         if (runner_) runner_->remove_player(session, c);
         if (s.members.empty()) end_physics_session(session, "everyone left");
         else assign_start_members(s);   // the leaver may have been the one everybody waited for
@@ -1673,6 +1683,11 @@ public:
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
+        // On the uplink the stamp is the origin and nothing is re-stamped yet
+        // (protocol 9): whatever the client put in the two fields, the server
+        // goes by `tick`.
+        msg.origin_tick = msg.tick;
+        msg.state = 0;
         // The member sends every event several times (protocol 6): the first
         // arrival is the event, the rest are nothing - not a rate-limit hit,
         // not a second submit, not a second relay.
@@ -1813,36 +1828,133 @@ public:
             p.concave_count = static_cast<int32_t>(std::min<size_t>(r.concave_meshes.size(), BMMO_PHYSICS_MAX_CONCAVE));
             for (int i = 0; i < p.concave_count; ++i) copy_name(p.concave[i], sizeof(p.concave[i]), r.concave_meshes[i]);
         }
-        runner_->submit_event(msg.session, c, msg.tick, std::move(event));
-        // relay to the other members with the origin filled in
-        msg.player = c;
+        // Relayed from the runner's acceptance (late-player design 3.1,
+        // on_event_accepted), where the tick it is applied at is fixed on the
+        // simulation thread: the message waits here until then.
+        const uint64_t token = s.next_event_token++;
+        const uint32_t stamp = msg.tick;
+        auto& waiting = s.awaiting_events[token];
+        waiting.from = c;
+        waiting.msg = std::move(msg);
+        runner_->submit_event(waiting.msg.session, c, stamp, std::move(event), token);
+    }
+
+    // Simulation thread: the runner accepted a lifecycle event and fixed the
+    // tick it is applied at (late-player design 3.1).  Relayed from here to
+    // EVERY member, the owner included - the owner's copy is its echo, a
+    // plain ack when the event was on time - reliable without Nagle, then the
+    // unreliable repeats two ticks apart (protocol 6).  Without Nagle, like
+    // the sender did: a Sector event's relay has to reach the other members
+    // before they simulate its tick, and the lead was sized for the trip, not
+    // for a batching delay on top.  The late joiner's catch-up state
+    // (last_physicalize, sector_history) is updated here too, on the origin.
+    // A superseded birth goes to its owner only, flagged.
+    //
+    // The S5 line (plan step 8, the gate of step 17): how long the event took
+    // from the intake (submit_event) to this send, which the posted command
+    // can spend behind a catch-up pass of every session, and which eats into
+    // the Sector lead.
+    void on_event_accepted(const bmmo::sim::accepted_event& a) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(a.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        const auto owner = static_cast<HSteamNetConnection>(a.player);
+        bmmo::session_event_msg msg;
+        if (a.dropped) {   // the runner did not take it: only the parked message goes
+            if (a.token != 0) s.awaiting_events.erase(a.token);
+            return;
+        }
+        if (a.token != 0) {
+            auto waiting = s.awaiting_events.find(a.token);
+            if (waiting == s.awaiting_events.end()) return;   // its sender left meanwhile
+            msg = std::move(waiting->second.msg);
+            s.awaiting_events.erase(waiting);
+        } else {
+            msg.session = a.session;   // produced by the runner: the leaver's Unphysicalize
+            msg.type = a.type;
+            // Every event of the leaver the runner was going to accept has
+            // been (the commands run in order); one still waiting here was
+            // dropped by it and never will be.
+            for (auto e = s.awaiting_events.begin(); e != s.awaiting_events.end();)
+                if (e->second.from == owner) e = s.awaiting_events.erase(e);
+                else ++e;
+        }
+        msg.player = a.player;
+        msg.tick = a.applied;
+        msg.origin_tick = a.origin;
+        msg.state = static_cast<uint8_t>((a.applied != a.origin ? bmmo::session::EVENT_STATE_MOVED : 0)
+                                         | (a.superseded ? bmmo::session::EVENT_STATE_SUPERSEDED : 0));
         msg.clear();
         msg.serialize();
         const std::string bytes = msg.raw.str();
-        if (msg.type == bmmo::session::event_type::Physicalize) {
-            auto& last = s.last_physicalize[c];
-            if (last.bytes.empty() || static_cast<int32_t>(msg.tick - last.tick) >= 0) last = {msg.tick, bytes};
-        } else if (msg.type == bmmo::session::event_type::Unphysicalize) {
-            // Only a death stamped after the last birth ends it (protocol 6:
-            // the copies of a beam's pair can arrive in either order).
-            const auto last = s.last_physicalize.find(c);
-            if (last != s.last_physicalize.end() && static_cast<int32_t>(msg.tick - last->second.tick) > 0)
-                s.last_physicalize.erase(last);
+        const auto is_member = [&s](HSteamNetConnection m) {
+            return std::find(s.members.begin(), s.members.end(), m) != s.members.end();
+        };
+        std::vector<uint32_t> to;
+        if (a.superseded) {
+            ++s.superseded_births;
+            if (is_member(owner)) to.push_back(owner);
+        } else {
+            // Re-stamped and applied (one definition with the runner's
+            // describe: a superseded birth's applied tick is never used).
+            if (a.applied != a.origin) ++s.restamped_events;
+            if (msg.type == bmmo::session::event_type::Physicalize) {
+                // Not when a death newer by origin was accepted first: the
+                // birth is applied before it, and the death ends the ball.
+                const auto death = s.last_unphysicalize.find(owner);
+                const bool dead = death != s.last_unphysicalize.end()
+                               && static_cast<int32_t>(death->second - a.origin) > 0;
+                if (!dead) {
+                    auto& last = s.last_physicalize[owner];
+                    if (last.bytes.empty() || static_cast<int32_t>(a.origin - last.tick) >= 0) last = {a.origin, bytes};
+                }
+            } else if (msg.type == bmmo::session::event_type::Unphysicalize) {
+                if (is_member(owner)) {   // not the leaver's own, after its entries went
+                    auto [death, fresh] = s.last_unphysicalize.try_emplace(owner, a.origin);
+                    if (!fresh && static_cast<int32_t>(a.origin - death->second) > 0) death->second = a.origin;
+                }
+                // Only a death newer by origin than the last birth ends it
+                // (protocol 6: the copies of a beam's pair can arrive in
+                // either order; design 3.1: re-stamped, both land at one tick).
+                const auto last = s.last_physicalize.find(owner);
+                if (last != s.last_physicalize.end() && static_cast<int32_t>(a.origin - last->second.tick) > 0)
+                    s.last_physicalize.erase(last);
+            } else if (msg.type == bmmo::session::event_type::Sector) {
+                s.sector_history.push_back(bytes);
+            }
+            // BodyRevived is the server's own business (design 3.3: a wake of
+            // a body the server's scripts also run), relayed to the others
+            // and never echoed.
+            for (const auto m: s.members)
+                if (m != owner || msg.type != bmmo::session::event_type::BodyRevived) to.push_back(m);
         }
-        else if (msg.type == bmmo::session::event_type::Sector) s.sector_history.push_back(bytes);
-        // Without Nagle, like the sender did: a Sector event's relay has to
-        // reach the other members before they simulate its tick, and the
-        // lead was sized for the trip, not for a batching delay on top.
-        for (const auto m: s.members)
-            if (m != c) send(m, bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
-        // ...and again, unreliably, on each of the next ticks (on_session_inputs):
-        // a lost reliable copy is otherwise ~400 ms late by retransmit, past
-        // the rollback's reach, and a mirror whose respawn or beam is applied
-        // that late sits metres off until the next forced snapshot.
-        std::vector<uint32_t> others;
-        for (const auto m: s.members)
-            if (m != c) others.push_back(m);
-        s.event_repeats.push(bytes, std::move(others));
+        for (const auto m: to)
+            send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        // ...and again, unreliably, on each of the next ticks: a lost
+        // reliable copy is otherwise ~400 ms late by retransmit, past the
+        // rollback's reach, and a mirror whose respawn or beam is applied that
+        // late sits metres off until the next forced snapshot.
+        const size_t recipients = to.size();
+        s.event_repeats.push(bytes, std::move(to));
+        const auto delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - a.intake).count();
+        Printf("Physics session %u: S5 event player=%u type=%s origin=%u applied=%u late=%d delay_us=%lld delay_ticks=%.2f "
+               "to=%zu%s", s.id, a.player, session_event_type_name(msg.type), a.origin, a.applied,
+               static_cast<int>(static_cast<int32_t>(a.applied - a.origin)), static_cast<long long>(delay_us),
+               static_cast<double>(delay_us) / 15000.0, recipients,
+               a.superseded ? " superseded" : (a.token == 0 ? " leaver" : ""));
+    }
+
+    static const char* session_event_type_name(bmmo::session::event_type type) {
+        switch (type) {
+            case bmmo::session::event_type::Physicalize: return "Physicalize";
+            case bmmo::session::event_type::Unphysicalize: return "Unphysicalize";
+            case bmmo::session::event_type::Sector: return "Sector";
+            case bmmo::session::event_type::Finish: return "Finish";
+            case bmmo::session::event_type::BodyRevived: return "BodyRevived";
+        }
+        return "?";
     }
 
     void print_physics_sessions() {
@@ -1852,10 +1964,11 @@ public:
         for (const auto& [id, s]: physics_sessions_) {
             const std::string journal = runner_->journal_path(id);
             Printf("Session %u: room %u, level %d, %zu members, %zu ready, world %s, ticking %s, tick %u, "
-                   "events flagged %llu / rejected %llu, journal %s.",
+                   "events flagged %llu / rejected %llu / re-stamped %llu / superseded %llu, journal %s.",
                     id, s.room, s.map.level, s.members.size(), s.ready.size(), s.world_ready ? "ready" : "booting",
                     s.ticking ? "yes" : "no", runner_->current_tick(id),
                     static_cast<unsigned long long>(s.flagged_events), static_cast<unsigned long long>(s.rejected_events),
+                    static_cast<unsigned long long>(s.restamped_events), static_cast<unsigned long long>(s.superseded_births),
                     journal.empty() ? "off" : journal.c_str());
             runner_->describe(id);
         }

@@ -53,6 +53,7 @@
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_state.hpp>
 #include <session/journal.hpp>
+#include <session/lifecycle.hpp>
 #include <physics/physics_direct.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
@@ -2355,11 +2356,13 @@ namespace {
         out.recipe = e.recipe;
         out.sector = e.sector;
         out.name = e.name;
-        // The stamp, not the tick the record is filed under: the spawn impulse
-        // direction is derived from this field, and the two differ whenever the
-        // event reached the server after the tick it was asked for.  The reader
-        // already resolved a file written before the split (no trailing u32) to
-        // the applied tick, so 0 here means an event stamped for tick 0.
+        // The tick the world was handed in the event, not necessarily the one
+        // the record is filed under: the spawn impulse direction is derived
+        // from this field.  A server journal of protocol 9 (journal v3) has the
+        // applied tick here, the one every side kicked the ball with; an older
+        // one has the stamp, which is what that server used.  The reader
+        // already resolved a file written before the split (no trailing u32)
+        // to the applied tick, so 0 here means an event stamped for tick 0.
         out.tick = e.event_tick;
         return out;
     }
@@ -2454,14 +2457,24 @@ namespace {
                     e.name = in.str();
                     if (!in.ok || !bmmo::session::journal_detail::read_recipe(in, e.recipe)) break;
                     e.event_tick = in.size - in.pos >= 4 ? in.u32() : e.tick;
+                    e.origin_tick = in.size - in.pos >= 4 ? in.u32() : e.event_tick;
+                    e.state = in.size - in.pos >= 1 ? in.u8() : 0;
                     if (!in.ok) break;
                     seen_tick(e.tick);
                     // "stamped S applied T" only when they differ: that gap is
                     // an event that reached the server after its own tick, and
-                    // is itself worth seeing.
-                    char stamp[48] = {};
-                    if (e.event_tick != e.tick)
-                        std::snprintf(stamp, sizeof(stamp), " stamped %u applied %u", e.event_tick, e.tick);
+                    // is itself worth seeing.  Since journal v3 the stamp is
+                    // the origin (the server re-stamps a late event, protocol
+                    // 9); an older file has it in event_tick.
+                    char stamp[64] = {};
+                    const uint32_t stamped = e.origin_tick != e.tick ? e.origin_tick : e.event_tick;
+                    if (stamped != e.tick)
+                        std::snprintf(stamp, sizeof(stamp), " stamped %u applied %u", stamped, e.tick);
+                    if (e.state != 0) {
+                        char state[24] = {};
+                        std::snprintf(state, sizeof(state), " state=%02x", static_cast<unsigned>(e.state));
+                        std::strncat(stamp, state, sizeof(stamp) - std::strlen(stamp) - 1);
+                    }
                     std::printf("tick %-8u event p%u %s ball=%u flags=%02x sector=%d pos=(%.3f,%.3f,%.3f) name=%s%s\n",
                         e.tick, e.id, event_type_name(e.type), static_cast<unsigned>(e.ball_type),
                         static_cast<unsigned>(e.flags), e.sector, static_cast<double>(e.position[0]),
@@ -2916,13 +2929,15 @@ namespace {
                 world->set_input(in.id, in.frame);
                 if (out.is_open()) out.input(in.tick, in.id, in.frame, in.flags);
             }
-            // The server applies a tick's events in the members' join order
-            // (session_runner::step), and that order is what a server journal's
-            // file order already IS.  A client wrote them in the order they
-            // reached it - its own first, the relayed ones after - so a client
-            // journal has to be sorted back into the server's rule here, or the
-            // replay creates two balls of the same tick the other way round and
-            // diverges from the session for good.
+            // The server applies a tick's events in the members' join order,
+            // and one player's by origin and then type rank (session_runner::
+            // step, late-player design 3.1), and that order is what a server
+            // journal's file order already IS.  A client wrote them in the
+            // order they reached it - its own first, the relayed ones after -
+            // so a client journal has to be sorted back into the server's rule
+            // here, from the v3 record's origin, or the replay creates two
+            // balls of the same tick the other way round, or a re-stamped
+            // birth after its death, and diverges from the session for good.
             std::vector<const bmmo::session::journal_event*> ordered;
             ordered.reserve(group.events.size());
             for (const auto& e: group.events) ordered.push_back(&e);
@@ -2933,7 +2948,8 @@ namespace {
                 };
                 std::stable_sort(ordered.begin(), ordered.end(),
                     [&join_rank](const bmmo::session::journal_event* a, const bmmo::session::journal_event* b) {
-                        return join_rank(a->id) < join_rank(b->id);
+                        return bmmo::session::lifecycle_apply_before(join_rank(a->id), a->origin_tick, a->type,
+                                                                     join_rank(b->id), b->origin_tick, b->type);
                     });
             }
             for (const auto* entry: ordered) {
@@ -2950,10 +2966,15 @@ namespace {
                 const bmmo::sim::lifecycle_event event = to_lifecycle_event(e);
                 // The gap between the two ticks is the event arriving after the
                 // tick it asked for: worth seeing, because a divergence here is
-                // about the recording, not about the physics.
+                // about the recording, not about the physics.  Since journal v3
+                // the stamp is the origin and the world is handed the applied
+                // tick (the server re-stamps, protocol 9).
                 if (event.tick != e.tick)
                     std::printf("tick %u: %s event from p%u was stamped for tick %u\n", e.tick,
                         event_type_name(e.type), e.id, event.tick);
+                else if (e.origin_tick != e.tick)
+                    std::printf("tick %u: %s event from p%u stamped for tick %u, re-stamped to its applied tick\n",
+                        e.tick, event_type_name(e.type), e.id, e.origin_tick);
                 if (!world->apply_event(e.id, event, error)) {
                     std::printf("tick %u: %s event from p%u failed: %s\n", e.tick, event_type_name(e.type), e.id,
                         error.c_str());

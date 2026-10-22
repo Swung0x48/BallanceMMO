@@ -117,10 +117,13 @@ namespace {
     // session read alike in the black box.
     bmmo::session::journal_event to_journal_event(const bmmo::session_event_msg& msg, uint32_t id) {
         bmmo::session::journal_event e;
-        // Both ticks are the stamped one: only the server sees the tick its
-        // world finally dequeued the event at, and a client never learns it.
+        // Protocol 9: a relayed event's tick is the one the server applies it
+        // at (and hands its world, the spawn impulse index), with the origin
+        // beside it (journal v3); our own carry their stamp in both.
         e.tick = msg.tick;
         e.event_tick = msg.tick;
+        e.origin_tick = msg.origin_tick;
+        e.state = msg.state;
         e.id = id;
         e.type = msg.type;
         e.ball_type = msg.ball_type;
@@ -2136,6 +2139,9 @@ void BallanceMMOClient::physics_session_frame() {
 void BallanceMMOClient::physics_session_send_event(bmmo::session_event_msg& event) {
     auto& s = physics_session_;
     event.session = s.session;
+    // Protocol 9: the origin is the stamp; only the server re-stamps.
+    event.origin_tick = event.tick;
+    event.state = 0;
     event.serialize();
     // ReliableNoNagle, not Reliable: a reliable message waits up to the Nagle
     // delay to be batched, and this frame's input goes out unreliable with no
@@ -2173,19 +2179,35 @@ void BallanceMMOClient::physics_session_apply_queues() {
                 physics_session_cache_ball_row(snapshot.tick, body);
     // Protocol 6: an event may arrive several times (the server repeats it
     // unreliably beside the reliable copy) and out of order.  The first
-    // arrival counts; the batch is applied in stamp order and join order, as
-    // the server applies them.
+    // arrival counts; the batch is applied in applied-tick order and join
+    // order, as the server applies them, and one player's events of one tick
+    // by origin (protocol 9, late-player design 3.1).
+    //
+    // Protocol 9 also echoes our own events back.  On time it is a plain ack;
+    // moved, superseded or rejected, this client cannot move its own ball
+    // (no rewind: plan step 24), so it is counted and logged only.
+    const uint32_t own = db_.get_client_id();
     std::vector<bmmo::session_event_msg> fresh;
     for (auto& event: events) {
         if (event.session != s.session) continue;
         if (!s.events_seen.first(bmmo::session::lifecycle_key_of(event, event.player))) { ++s.event_dups; continue; }
+        if (event.player == own && own != 0) {
+            const char* verdict = nullptr;
+            if (event.state & bmmo::session::EVENT_STATE_REJECTED) { ++s.own_echo_rejected; verdict = "rejected"; }
+            else if (event.state & bmmo::session::EVENT_STATE_SUPERSEDED) { ++s.own_echo_superseded; verdict = "superseded"; }
+            else if (event.tick != event.origin_tick) { ++s.own_echo_moved; verdict = "moved"; }
+            else ++s.own_echo_acked;
+            if (verdict != nullptr && s.own_echo_moved + s.own_echo_superseded + s.own_echo_rejected <= 50)
+                logger_->Warn("Physics session %u: own event type %u stamped %u %s by the server (applied %u)",
+                              s.session, static_cast<unsigned>(event.type), event.origin_tick, verdict, event.tick);
+            continue;
+        }
         fresh.push_back(std::move(event));
     }
     std::stable_sort(fresh.begin(), fresh.end(), [&s](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
         if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
         const uint8_t ja = mirror_join_order(s, a.player), jb = mirror_join_order(s, b.player);
-        if (ja != jb) return ja < jb;
-        return bmmo::session::lifecycle_event_rank(a.type) < bmmo::session::lifecycle_event_rank(b.type);
+        return bmmo::session::lifecycle_apply_before(ja, a.origin_tick, a.type, jb, b.origin_tick, b.type);
     });
     for (auto& event: fresh) physics_session_apply_event(event);
     auto& journal = bmmo::session::client_journal::instance();
@@ -2280,19 +2302,22 @@ void BallanceMMOClient::physics_session_apply_event(const bmmo::session_event_ms
     // a newer one for the same player (its reliable copy retransmitted, the
     // unreliable ones lost) describes a body the newer event already replaced
     // - an Unphysicalize of a ball that has since respawned would take the
-    // new mirror down.  The newer state stands.
+    // new mirror down.  The newer state stands.  Newer by ORIGIN (protocol 9,
+    // late-player design 3.1): two events re-stamped into one tick keep the
+    // order their owner made them in, as at the server.
     if (event.type == bmmo::session::event_type::Physicalize || event.type == bmmo::session::event_type::Unphysicalize) {
         const uint32_t last = s.last_lifecycle_tick.count(event.player) ? s.last_lifecycle_tick[event.player] : 0;
-        const uint32_t last_birth = s.last_physicalize_tick.count(event.player) ? s.last_physicalize_tick[event.player] : 0;
-        const bool older = last != 0 && static_cast<int32_t>(event.tick - last) < 0;
+        const bool have_birth = s.last_physicalize_tick.count(event.player) != 0;
+        const uint32_t last_birth = have_birth ? s.last_physicalize_tick[event.player] : 0;
+        const bool older = last != 0 && static_cast<int32_t>(event.origin_tick - last) < 0;
         const bool unphysicalize_of_a_replaced_body = event.type == bmmo::session::event_type::Unphysicalize
-            && last_birth != 0 && static_cast<int32_t>(event.tick - last_birth) <= 0;
+            && bmmo::session::lifecycle_unphysicalize_superseded(event.origin_tick, have_birth && last_birth != 0, last_birth);
         if (older || unphysicalize_of_a_replaced_body) {
             ++s.events_superseded;
             return;
         }
-        s.last_lifecycle_tick[event.player] = event.tick;
-        if (event.type == bmmo::session::event_type::Physicalize) s.last_physicalize_tick[event.player] = event.tick;
+        s.last_lifecycle_tick[event.player] = event.origin_tick;
+        if (event.type == bmmo::session::event_type::Physicalize) s.last_physicalize_tick[event.player] = event.origin_tick;
     }
     std::string error;
     switch (event.type) {
@@ -3549,7 +3574,7 @@ std::string BallanceMMOClient::physics_session_status_text() {
     return std::format(
         "session={} phase={} impulse={:.3f} tick={} base={} assigned={} held={}/{}{} frames={} inputs_sent={} keys_known={} own_phys={} group_set={} "
         "snapshots={}/{}/{} last_snapshot={} remotes={} remote_inputs={} subst={}/{}/{} acked={} held_total={} remote_corr={}/{}/{}/{} mechanisms={}/{} writes={}/{} generations={} amend_failures={} "
-        "events={}/{} phys_resends={} sectors={} held={} late={} lead={} "
+        "events={}/{}/{}/{} echo={}/{}/{}/{} phys_resends={} sectors={} held={} late={} lead={} "
         "resyncs={}/{} rollback: {} snaps={} ok={} mism={} rb={} resim={} unmatched={} far={} frozen={} ct={}/{} scr={}/{}/{}/{}/{} max_err={:.4f} last={} "
         "corrections: compared={} ignored={} blended={} hard={} unmatched={} last_err={:.4f} max_err={:.4f} last_error='{}'",
         // held=<holding now>/<1 ms polls the hold took>[+timeout]: the anchor
@@ -3570,7 +3595,10 @@ std::string BallanceMMOClient::physics_session_status_text() {
         s.mechanism_tracking.known(), s.mechanism_tracking.resolved(), s.body_writes, s.body_write_errors,
         s.generations.size(),
         s.amend_failures,
-        s.events_sent, s.events_received, s.physicalize_resends, s.sector_union.active().size(), s.sectors_deferred,
+        s.events_sent, s.events_received, s.event_dups, s.events_superseded,
+        // echo=acked/moved/superseded/rejected: our own events as the server
+        // echoed them back (protocol 9), as on the headless status line.
+        s.own_echo_acked, s.own_echo_moved, s.own_echo_superseded, s.own_echo_rejected, s.physicalize_resends, s.sector_union.active().size(), s.sectors_deferred,
         s.sector_union.late(), s.sector_lead(),
         s.resyncs_sent, s.resyncs_done,
         s.rollback_enabled ? "on" : "off", rs.snapshots, rs.matched, rs.mismatched, rs.rollbacks, rs.resim_ticks, rs.unmatched,

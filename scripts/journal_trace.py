@@ -48,7 +48,8 @@ import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 2   # 2: order-independent world hash (world_hash.hpp)
+VERSION = 3   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9)
+OLDEST_READABLE = 2   # a version 2 file has no event origin: its stamp is the origin
 
 TAG_HEADER = 0
 TAG_PLAYER = 1
@@ -320,7 +321,13 @@ class JournalWriter(object):
         # The stamped tick, trailing so a reader that predates it still parses
         # the record; journal.hpp substitutes `tick` for a zero the same way.
         stamp = record.get("event_tick") or 0
-        buf += _U32.pack(stamp if stamp else record["tick"])
+        stamp = stamp if stamp else record["tick"]
+        buf += _U32.pack(stamp)
+        # Version 3: the origin (the sender's stamp; the server re-stamps a
+        # late event to the tick it applies it at) and the state bits.
+        origin = record.get("origin_tick")
+        buf += _U32.pack(stamp if origin is None else origin)
+        buf += _U8.pack(record.get("state", 0))
         return bytes(buf)
 
     @staticmethod
@@ -599,8 +606,8 @@ class JournalReader(object):
         if len(data) < len(MAGIC) + 4 or data[:len(MAGIC)] != MAGIC:
             raise JournalError("not a BMMO journal (bad magic)")
         version = _U32.unpack_from(data, len(MAGIC))[0]
-        if version != VERSION:
-            raise JournalError("journal version %d, this reader knows %d" % (version, VERSION))
+        if version < OLDEST_READABLE or version > VERSION:
+            raise JournalError("journal version %d, this reader knows %d..%d" % (version, OLDEST_READABLE, VERSION))
         off = len(MAGIC) + 4
         record = self._next(off)
         if record is None or record[0] != TAG_HEADER:
@@ -781,6 +788,10 @@ class JournalReader(object):
         # late).  A file written before the field existed has neither the four
         # bytes nor the distinction.
         record["event_tick"] = cursor.u32() if cursor.remaining() >= 4 else record["tick"]
+        # Version 3: the origin and the state.  A version 2 record has
+        # neither, and its stamp is the only origin it knows.
+        record["origin_tick"] = cursor.u32() if cursor.remaining() >= 4 else record["event_tick"]
+        record["state"] = cursor.u8() if cursor.remaining() >= 1 else 0
         return record
 
     @staticmethod
@@ -1086,9 +1097,16 @@ def _fmt_recipe(recipe):
 def _fmt_event(record):
     # "@N": the event was stamped for tick N and applied here instead, which is
     # a symptom in itself (the event arrived after the world had passed N).
+    # Since version 3 the stamp is the origin: the server re-stamps a late event
+    # and hands its world the applied tick.  "!xx" are the state bits.
     stamp = ""
-    if record.get("event_tick", record["tick"]) != record["tick"]:
+    origin = record.get("origin_tick", record["tick"])
+    if origin != record["tick"]:
+        stamp = "@%d" % origin
+    elif record.get("event_tick", record["tick"]) != record["tick"]:
         stamp = "@%d" % record["event_tick"]
+    if record.get("state", 0):
+        stamp += "!%02x" % record["state"]
     text = "event%s p%d %s ball=%d flags=%02x sector=%d pos=%s" % (
         stamp, record["id"], EVENT_TYPES.get(record["type"], "type%d" % record["type"]),
         record["ball_type"], record["flags"], record["sector"], _fmt_vec(record["position"], "%.3f"))
@@ -1483,7 +1501,8 @@ def _synthetic_server():
                            "frame": _frame(0x0B, 0.5, 3, 5)}))
     plan.append(("input", {"tick": 101, "id": 2, "flags": 0, "repeat": False,
                            "frame": _frame(0x00, 0.25)}))
-    plan.append(("event", {"tick": 101, "event_tick": 101, "id": 1, "type": 0, "ball_type": 3, "flags": 1,
+    plan.append(("event", {"tick": 101, "event_tick": 101, "origin_tick": 101, "state": 0,
+                           "id": 1, "type": 0, "ball_type": 3, "flags": 1,
                            "position": tuple(f32(v) for v in (1.5, -2.25, 3.0)),
                            "rotation": tuple(f32(v) for v in (1, 0, 0, 0, 1, 0, 0, 0, 1)),
                            "sector": 2, "name": "Ball_Wood", "recipe": recipe}))
@@ -1503,7 +1522,8 @@ def _synthetic_server():
                                 "bodies": [_body(0, 1, "Ball_Wood_BMMO_2", 10.0),
                                            _body(1, 7, "Trafo_Piece_01", -3.5)]}))
     # stamped for 101, applied at 103: the late event the two tick fields exist for
-    plan.append(("event", {"tick": 103, "event_tick": 101, "id": 2, "type": 2, "ball_type": 0, "flags": 0,
+    plan.append(("event", {"tick": 103, "event_tick": 103, "origin_tick": 101, "state": 1,
+                           "id": 2, "type": 2, "ball_type": 0, "flags": 0,
                            "position": (f32(0.0), f32(0.0), f32(0.0)),
                            "rotation": tuple(f32(0.0) for _ in range(9)),
                            "sector": 3, "name": "", "recipe": empty_recipe()}))
@@ -1663,28 +1683,39 @@ def _event_tick_checks(directory):
     """Both halves of the trailing event_tick: a new file and an old one."""
     path = os.path.join(directory, "selftest_event_tick.bmjr")
     header, _ = _synthetic_server()
-    late = {"tick": 16, "event_tick": 6, "id": 7, "type": 4, "ball_type": 2, "flags": 0,
-            "position": (f32(1.0), f32(2.0), f32(3.0)), "rotation": tuple(f32(0.0) for _ in range(9)),
+    late = {"tick": 16, "event_tick": 6, "origin_tick": 6, "state": 0, "id": 7, "type": 4, "ball_type": 2,
+            "flags": 0, "position": (f32(1.0), f32(2.0), f32(3.0)), "rotation": tuple(f32(0.0) for _ in range(9)),
             "sector": 1, "name": "P_Box_MF002", "recipe": empty_recipe()}
+    # protocol 9: re-stamped by the server, the stamp kept as the origin
+    restamped = dict(late, tick=18, event_tick=18, origin_tick=9, state=1)
     writer = JournalWriter(path, header)
     writer.event(late)
-    # the same event as a pre-event_tick writer wrote it: no trailing u32
-    old = dict(late, tick=20, event_tick=20)
-    writer.raw(TAG_EVENT, JournalWriter._event_payload(old)[:-4])
+    writer.event(restamped)
+    # the same event as a pre-event_tick writer wrote it: no trailing stamp,
+    # origin nor state (4 + 4 + 1 bytes)
+    old = dict(late, tick=20, event_tick=20, origin_tick=20)
+    writer.raw(TAG_EVENT, JournalWriter._event_payload(old)[:-9])
+    # and as a version 2 writer did: the stamp, no origin nor state
+    v2 = dict(late, tick=22, event_tick=21, origin_tick=21)
+    writer.raw(TAG_EVENT, JournalWriter._event_payload(v2)[:-5])
     writer.close()
     journal = read_journal(path)
     _check("event_tick: warning", "", journal.warning)
     _check("event_tick: dropped bytes", 0, journal.bytes_dropped)
     events = journal.events()
-    _check("event_tick: records", 2, len(events))
+    _check("event_tick: records", 4, len(events))
     _check("event_tick: the late event", late, events[0])
+    _check("event_tick: the re-stamped event", restamped, events[1])
     # an old payload has no stamp of its own, so it reads back as its own tick
-    _check("event_tick: the old-style event", old, events[1])
+    _check("event_tick: the old-style event", old, events[2])
+    _check("event_tick: the version 2 event", v2, events[3])
+    if "@9!01" not in _fmt_event(events[1]):
+        raise AssertionError("a re-stamped event must show its origin and state: %s" % _fmt_event(events[1]))
     if "@6" not in _fmt_event(events[0]):
         raise AssertionError("a late event must show its stamped tick: %s" % _fmt_event(events[0]))
-    if "@" in _fmt_event(events[1]):
+    if "@" in _fmt_event(events[2]):
         raise AssertionError("an event applied at its own tick must not show a stamp: %s"
-                             % _fmt_event(events[1]))
+                             % _fmt_event(events[2]))
     os.remove(path)
 
 

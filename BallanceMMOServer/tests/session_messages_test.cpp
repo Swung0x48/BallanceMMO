@@ -422,11 +422,16 @@ TEST(SessionInputMsg, DeserializeRejectsFrameCountLargerThanRemaining) {
 
 namespace {
 
+// The trailer every session_event_msg ends with since protocol 9:
+// origin_tick u32 and state u8.
+constexpr size_t kEventTrailer = sizeof(uint32_t) + sizeof(uint8_t);
+
 bmmo::session_event_msg make_physicalize_event() {
     bmmo::session_event_msg msg{};
     msg.session = 5;
     msg.player = 20;
     msg.tick = 300;
+    msg.origin_tick = 300;
     msg.type = bmmo::session::event_type::Physicalize;
     msg.ball_type = 1;
     msg.position[0] = 1.f; msg.position[1] = 2.f; msg.position[2] = 3.f;
@@ -541,6 +546,68 @@ TEST(SessionEventMsg, DeserializeRejectsEveryTruncationForBodyRevived) {
     expect_rejects_every_truncation(msg);
 }
 
+// Protocol 9: the applied tick, the origin and the state bits.
+TEST(SessionEventMsg, CarriesTheOriginAndTheStateFromProtocol9) {
+    auto msg = make_physicalize_event();
+    msg.tick = 330;            // applied: the server re-stamped it
+    msg.origin_tick = 300;     // stamped by its sender
+    msg.state = bmmo::session::EVENT_STATE_MOVED;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(330u, parsed.tick);
+    EXPECT_EQ(300u, parsed.origin_tick);
+    EXPECT_EQ(bmmo::session::EVENT_STATE_MOVED, parsed.state);
+    EXPECT_EQ("Ball_Stone_Mesh", parsed.recipe.collision_surface);
+
+    bmmo::session_event_msg superseded{};
+    superseded.session = 5; superseded.player = 20;
+    superseded.tick = 128; superseded.origin_tick = 100;
+    superseded.type = bmmo::session::event_type::Unphysicalize;
+    superseded.state = bmmo::session::EVENT_STATE_MOVED | bmmo::session::EVENT_STATE_SUPERSEDED;
+    auto parsed_superseded = round_trip(superseded);
+    EXPECT_EQ(100u, parsed_superseded.origin_tick);
+    EXPECT_EQ(bmmo::session::EVENT_STATE_MOVED | bmmo::session::EVENT_STATE_SUPERSEDED, parsed_superseded.state);
+
+    bmmo::session_event_msg sector{};
+    sector.tick = 77; sector.origin_tick = 77; sector.type = bmmo::session::event_type::Sector; sector.sector = 3;
+    auto parsed_sector = round_trip(sector);
+    EXPECT_EQ(77u, parsed_sector.origin_tick);
+    EXPECT_EQ(3, parsed_sector.sector);
+    EXPECT_EQ(0u, parsed_sector.state);
+}
+
+// A protocol 8 message is a protocol 9 one without the trailer: refused for
+// every type, as is an origin after the applied tick (the re-stamp only ever
+// moves an event later) and a state bit nobody defined.
+TEST(SessionEventMsg, RejectsAProtocol8MessageAnOriginAfterTheTickAndUnknownState) {
+    auto parses = [](const std::string& bytes) {
+        bmmo::session_event_msg parsed{};
+        parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        return parsed.deserialize();
+    };
+    for (const auto type: {bmmo::session::event_type::Physicalize, bmmo::session::event_type::Unphysicalize,
+                           bmmo::session::event_type::Sector, bmmo::session::event_type::Finish,
+                           bmmo::session::event_type::BodyRevived}) {
+        auto msg = make_physicalize_event();   // serialize() writes what the type needs only
+        msg.type = type;
+        msg.tick = 300;
+        msg.origin_tick = 300;
+        msg.name = "P_Modul_01_Rinne";
+        ASSERT_TRUE(msg.serialize());
+        const std::string payload = stream_payload(msg.raw);
+        ASSERT_TRUE(parses(payload)) << static_cast<int>(type);
+        EXPECT_FALSE(parses(payload.substr(0, payload.size() - kEventTrailer))) << "v8 shape of type " << static_cast<int>(type);
+    }
+    auto later = make_physicalize_event();
+    later.tick = 300;
+    later.origin_tick = 301;
+    ASSERT_TRUE(later.serialize());
+    EXPECT_FALSE(parses(stream_payload(later.raw)));
+    auto unknown = make_physicalize_event();
+    unknown.state = 0x08;
+    ASSERT_TRUE(unknown.serialize());
+    EXPECT_FALSE(parses(stream_payload(unknown.raw)));
+}
+
 TEST(SessionEventMsg, DeserializeRejectsInvalidType) {
     bmmo::session_event_msg msg{};
     msg.type = bmmo::session::event_type::Finish;
@@ -562,13 +629,16 @@ TEST(SessionEventMsg, DeserializeRejectsConvexCountAboveCap) {
     msg.recipe.concave_meshes.clear();
     ASSERT_TRUE(msg.serialize());
     std::string payload = stream_payload(msg.raw);
-    // trailing bytes are convex_count(0), ball_count(0), concave_count(0)
-    payload.resize(payload.size() - 3 * sizeof(uint8_t));
+    // the payload ends with origin_tick u32 and state u8 (protocol 9); before
+    // them: convex_count(0), ball_count(0), concave_count(0)
+    const std::string trailer = payload.substr(payload.size() - kEventTrailer);
+    payload.resize(payload.size() - kEventTrailer - 3 * sizeof(uint8_t));
     const uint8_t forged_convex_count = static_cast<uint8_t>(bmmo::session::MAX_CONVEX + 1);
     const uint8_t zero = 0;
     payload.append(reinterpret_cast<const char*>(&forged_convex_count), sizeof(forged_convex_count));
     payload.append(reinterpret_cast<const char*>(&zero), sizeof(zero));
     payload.append(reinterpret_cast<const char*>(&zero), sizeof(zero));
+    payload += trailer;
 
     bmmo::session_event_msg parsed{};
     parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));
@@ -584,7 +654,7 @@ TEST(SessionEventMsg, DeserializeRejectsConvexCountLargerThanRemaining) {
     msg.recipe.concave_meshes.clear();
     ASSERT_TRUE(msg.serialize());
     std::string payload = stream_payload(msg.raw);
-    payload.resize(payload.size() - 3 * sizeof(uint8_t));
+    payload.resize(payload.size() - kEventTrailer - 3 * sizeof(uint8_t));
     const uint8_t forged_convex_count = 3; // within the cap, but no mesh names follow
     payload.append(reinterpret_cast<const char*>(&forged_convex_count), sizeof(forged_convex_count));
 
@@ -601,13 +671,15 @@ TEST(SessionEventMsg, DeserializeRejectsBallCountAboveCap) {
     msg.recipe.concave_meshes.clear();
     ASSERT_TRUE(msg.serialize());
     std::string payload = stream_payload(msg.raw);
-    // trailing bytes: convex_count(0), ball_count(0), concave_count(0); keep
-    // convex_count(0), forge ball_count
-    payload.resize(payload.size() - 2 * sizeof(uint8_t));
+    // before the origin/state trailer: convex_count(0), ball_count(0),
+    // concave_count(0); keep convex_count(0), forge ball_count
+    const std::string trailer = payload.substr(payload.size() - kEventTrailer);
+    payload.resize(payload.size() - kEventTrailer - 2 * sizeof(uint8_t));
     const uint8_t forged_ball_count = static_cast<uint8_t>(bmmo::session::MAX_CONVEX + 1);
     const uint8_t zero = 0;
     payload.append(reinterpret_cast<const char*>(&forged_ball_count), sizeof(forged_ball_count));
     payload.append(reinterpret_cast<const char*>(&zero), sizeof(zero));
+    payload += trailer;
 
     bmmo::session_event_msg parsed{};
     parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));

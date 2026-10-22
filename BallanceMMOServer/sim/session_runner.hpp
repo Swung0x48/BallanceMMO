@@ -31,6 +31,7 @@
 #include <session/journal.hpp>
 #include <session/lateness.hpp>
 #include <session/lead.hpp>
+#include <session/lifecycle.hpp>
 #include <session/timeline.hpp>
 
 #include "physics_world.hpp"
@@ -64,6 +65,36 @@ namespace bmmo::sim {
         // is logged and nothing is sent.  Off, the runner does exactly what it
         // did before: the decisions are observed and logged, nothing else.
         bool lead_adjust = false;
+        // The lifecycle barrier (late-player design 3.2): a tick whose input
+        // shows a physicalized ball the world does not have waits up to a
+        // second for the Physicalize.  On by default, as it always was; plan
+        // step 20 deletes it once the arms without it pass.  Off, the tick is
+        // stepped with the ball missing, which the world tolerates (it never
+        // reads INPUT_FLAG_PHYSICALIZED).
+        bool lifecycle_barrier = true;
+    };
+
+    // One lifecycle event the runner accepted (late-player design 3.1), for
+    // the server to relay.  `applied` = max(origin, the session's next tick
+    // at acceptance): the tick the world applies it at and every receiver
+    // must too.  A superseded birth is never applied; it is handed over for
+    // its owner's SUPERSEDED echo only.  `token` is the server's handle on
+    // the message it submitted (0 = produced by the runner itself: the
+    // leaver's Unphysicalize), and `intake` when submit_event was called, for
+    // the S5 intake-to-send line.
+    struct accepted_event {
+        uint32_t session = 0;
+        uint32_t player = 0;
+        uint32_t origin = 0;
+        uint32_t applied = 0;
+        bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
+        bool superseded = false;
+        // Not accepted at all: the session or the player was gone when the
+        // event reached the runner.  Nothing is sent; the server only lets go
+        // of the message it parked under `token`.
+        bool dropped = false;
+        uint64_t token = 0;
+        std::chrono::steady_clock::time_point intake{};
     };
 
     // One SessionLead for the server to send (late-player design 2.2).
@@ -126,6 +157,10 @@ namespace bmmo::sim {
         // a client that declared CAP_LEAD).  The server sends it reliably with
         // repeats until the client acknowledges it (acknowledge_lead).
         std::function<void(const lead_notice&)> on_lead;
+        // Simulation thread, from the command that accepted the event: every
+        // accepted lifecycle event, re-stamped (late-player design 3.1).  The
+        // server relays it from here to every member, the owner included.
+        std::function<void(const accepted_event&)> on_event_accepted;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
         std::function<void(const std::string&)> log;
@@ -166,6 +201,11 @@ namespace bmmo::sim {
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.
         void add_player(uint32_t session, uint32_t player, uint8_t join_order, const std::string& name = {});
+        // A player that leaves with a ball gets its Unphysicalize from here
+        // (late-player design 3.2), at the runner's own tick, through
+        // on_event_accepted (token 0).  One with events accepted and relayed
+        // but not applied yet stays in the world until they and that
+        // Unphysicalize are applied (session_state::leaving).
         void remove_player(uint32_t session, uint32_t player);
         // The player anchored at first_tick; ticking starts when every player
         // of a not-yet-running session is ready.  A late join or a resync calls
@@ -204,7 +244,12 @@ namespace bmmo::sim {
         // contract (design 9.15), because it is the only one a client can
         // reproduce offline - its own journal cannot know which of two players
         // reached the server first, but every member knows every join order.
-        void submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event);
+        // Within one player, by ORIGIN (`tick`, the stamp), then type rank.
+        // The event is accepted on the simulation thread and re-stamped there
+        // (late-player design 3.1): it is applied at max(tick, the session's
+        // next tick), and on_event_accepted hands it back with `token`.
+        void submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event,
+                          uint64_t token = 0);
         void request_full_snapshot(uint32_t session);
         // Diagnostics through the log callback.
         void describe(uint32_t session);
@@ -222,7 +267,12 @@ namespace bmmo::sim {
     private:
         struct pending_event {
             uint32_t player;
-            uint32_t tick;
+            // The tick the sender stamped it for, which every side orders
+            // and guards a player's events by (late-player design 3.1).
+            uint32_t origin;
+            // max(origin, the session's next tick at acceptance): the tick
+            // the world applies it at.  Never behind the session.
+            uint32_t applied;
             lifecycle_event event;
             // When submit_event was called: only to tell, for the S1
             // patience line, an event patience made late from one that was
@@ -286,12 +336,36 @@ namespace bmmo::sim {
             // The last such ticks, for the late-event attribution above.
             std::deque<uint32_t> early_ticks;
             std::map<uint32_t, uint32_t> acked;
-            // The stamp of each player's last applied Physicalize: an
+            // The ORIGIN of each player's last applied Physicalize: an
             // Unphysicalize stamped at or before it is a copy that lost its
-            // place (protocol 6) and would take the newer ball out.
+            // place (protocol 6) and would take the newer ball out.  Origins,
+            // not applied ticks (late-player design 3.1): a death stamped
+            // after a re-stamped birth must still be applied.
             std::map<uint32_t, uint32_t> last_physicalize_tick;
             uint64_t superseded_events = 0;
-            std::vector<pending_event> events;   // sorted by tick on insertion
+            // The frame the world applied for each player at the last step:
+            // what the members' mirrors of a leaver go on with (the relay's
+            // last frame of it), so what the server drives a leaver with
+            // until it takes it out.
+            std::map<uint32_t, bmmo::session::input_frame> last_frames;
+            // Late-player design 3.2 (review of step 16): a player who left
+            // with events accepted and relayed but not applied yet stays in
+            // the world - out of every member structure, so nothing waits for
+            // it - until `remove_at`, before whose step it is taken out
+            // (lifecycle_leaver_removal_tick): its queued events, its
+            // Unphysicalize among them, are applied here at the ticks every
+            // receiver applies them at, and it is driven with `frame` until
+            // then.
+            struct leaving_player {
+                uint32_t remove_at = 0;
+                bmmo::session::input_frame frame{};
+            };
+            std::map<uint32_t, leaving_player> leaving;
+            // The re-stamp and the superseded-birth rule (design 3.1), per
+            // player, decided when an event is accepted.
+            bmmo::session::lifecycle_acceptance acceptance;
+            uint64_t superseded_births = 0, restamped_events = 0;
+            std::vector<pending_event> events;   // sorted by applied tick on insertion
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs
             uint32_t late_events = 0;   // applied after the tick they were stamped for (logged, capped)
             // Design 9.26: the start base B the members are numbered from.  The
@@ -323,6 +397,9 @@ namespace bmmo::sim {
             std::chrono::steady_clock::time_point journal_start{};
         };
         bool waiting_for_lifecycle(session_state& s, uint32_t tick);
+        // Takes a leaver out of the world before the step of `tick`, with
+        // the journal's PLAYER record at that tick.
+        void finish_leave(session_state& s, uint32_t player, uint32_t tick);
         void observe_lateness(session_state& s, uint32_t tick);
         // What a decision does with lead_adjust on (design 2.3): the plan,
         // the buffer reset, the S1 lead line, the journal note and on_lead.

@@ -7,11 +7,22 @@ namespace bmmo {
     // Bidirectional, reliable. A single session lifecycle event reported by a
     // client (player == 0 when sent) and relayed by the server (player set to
     // the origin). docs/rooms-and-sessions-protocol.md 2.2.
+    //
+    // Protocol 9 (late-player design 3.1): `tick` is the tick the event is
+    // applied at and `origin_tick` the tick its sender stamped it for.  A
+    // client sends both equal; the server re-stamps an event that arrived
+    // after the session passed its stamp (tick = max(stamp, the session's next
+    // tick)) and relays it to every member, the owner included, with the
+    // origin kept, because every receiver keys, orders and guards a player's
+    // events on the origin.  Both trail the type's payload, so a protocol 8
+    // message, which lacks them, is a truncated one and never parses.
     struct session_event_msg : public serializable_message {
         uint32_t session = 0;
         uint32_t player = 0;   // origin when forwarded by the server, 0 when sent by a client
-        uint32_t tick = 0;
+        uint32_t tick = 0;     // applied (protocol 9); the stamp when sent by a client
         session::event_type type = session::event_type::Physicalize;
+        uint32_t origin_tick = 0;   // the sender's stamp; equal to `tick` when sent by a client
+        uint8_t state = 0;          // session::EVENT_STATE_*; server only, 0 when sent by a client
 
         // Union of optional payloads; serialize()/deserialize() only put the
         // fields the current `type` needs on the wire.
@@ -145,6 +156,8 @@ namespace bmmo {
                     message_utils::write_string<uint16_t>(name.substr(0, session::MAX_NAME), raw);
                     break;
             }
+            raw.write(reinterpret_cast<const char*>(&origin_tick), sizeof(origin_tick));
+            raw.write(reinterpret_cast<const char*>(&state), sizeof(state));
             return raw.good();
         }
 
@@ -178,6 +191,12 @@ namespace bmmo {
                     if (name.size() > session::MAX_NAME) return false;
                     break;
             }
+            if (!message_utils::read_variable(raw, &origin_tick)) return false;
+            if (!message_utils::read_variable(raw, &state)) return false;
+            // An origin after the applied tick is not something the server
+            // ever writes: the re-stamp only moves an event later.
+            if (static_cast<int32_t>(tick - origin_tick) < 0) return false;
+            if ((state & ~session::EVENT_STATE_KNOWN) != 0) return false;
             return true;
         }
     };

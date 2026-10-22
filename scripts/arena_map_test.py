@@ -821,6 +821,10 @@ RE_HOLD = re.compile(r'^hold-event: own (\w+) (?:#\d+ )?stamped tick (\d+) (held
 RE_STALL = re.compile(r'^stall: (\d+) ms at tick (\d+)')
 RE_LATE_BY = re.compile(r'event type (\d+) from (\d+) stamped (\d+) applied at tick (\d+) \(late by (\d+)\)')
 RE_BARRIER = re.compile(r'no Physicalize for player (\d+) at tick (\d+)')
+# Protocol 9 (late-player plan step 8, the gate of step 17): the server's
+# intake-to-send delay of every accepted lifecycle event.
+RE_S5 = re.compile(r'\bS5 event player=(\d+) type=(\w+) origin=(\d+) applied=(\d+) late=(-?\d+) delay_us=(\d+)'
+                   r' delay_ticks=([0-9.]+) to=(\d+)(?: (superseded|leaver))?')
 # A resync's base and the newest tick the old epoch's held_total counted
 # (server.cpp handle_session_resync): the ticks between are applied held under
 # no numbering the client has, so no notice of them ever reaches it.
@@ -1075,6 +1079,24 @@ def infer_arm(args, source):
     return 'A1'
 
 
+def s5_summary(lines):
+    """p50/p99/max of the S5 intake-to-send delay in ticks, per type and split
+    on-time / re-stamped, plus 'all' (the step-17 gate: p99 <= 2 ticks in A0
+    and A4)."""
+    groups = collections.defaultdict(list)
+    for e in lines:
+        kind = 'restamped' if e['late'] > 0 else 'on-time'
+        for key in ('all', 'all/' + kind, e['type'], e['type'] + '/' + kind):
+            groups[key].append(e['delay_ticks'])
+    out = {}
+    for key, values in groups.items():
+        ordered = sorted(values)
+        n = len(ordered)
+        out[key] = {'n': n, 'p50': ordered[min(n - 1, int(0.50 * n))], 'p99': ordered[min(n - 1, int(0.99 * n))],
+                    'max': ordered[-1]}
+    return out
+
+
 def event_report(args, case, case_dir):
     """H6.  None when the run had no episode to report on."""
     import first_divergence as fd
@@ -1132,11 +1154,14 @@ def event_report(args, case, case_dir):
             ordered = sorted(v for v, _ in values)
             worst = max(values)
             tick_gaps[phase] = {'max_ms': worst[0], 'at': worst[1], 'p99_ms': ordered[min(len(ordered) - 1, int(0.99 * len(ordered)))]}
-    late_events = [{'tick': e['tick'], 'stamp': e['event_tick'], 'type': e['type'], 'player': e['id'],
-                    'client': index_of.get(e['id'])}
-                   for e in server.events() if e['tick'] != e['event_tick']]
+    # The stamp is the origin since journal v3 (protocol 9: a late event is
+    # re-stamped to the tick the server applies it at, event_tick included);
+    # a version 2 journal has it in event_tick.
+    late_events = [{'tick': e['tick'], 'stamp': e.get('origin_tick', e['event_tick']), 'type': e['type'],
+                    'player': e['id'], 'client': index_of.get(e['id']), 'state': e.get('state', 0)}
+                   for e in server.events() if e['tick'] != e.get('origin_tick', e['event_tick'])]
     server_log = case_dir / 'server.log'
-    late_by_lines, barrier_lines = [], []
+    late_by_lines, barrier_lines, s5_lines = [], [], []
     counted_through = {}   # resync base -> the old epoch's last counted tick
     # SessionLeads sent to this run's players and their acks (an external
     # server's log holds other runs too: kept to this run's ids and ticks).
@@ -1166,8 +1191,16 @@ def event_report(args, case, case_dir):
             m = RE_BARRIER.search(line)
             if m:
                 barrier_lines.append({'player': int(m.group(1)), 'tick': int(m.group(2))})
+            # This run's players and ticks only (an external server's log
+            # holds other runs too).
+            m = RE_S5.search(line)
+            if m and int(m.group(1)) in index_of and first <= int(m.group(4)) <= last:
+                s5_lines.append({'player': int(m.group(1)), 'type': m.group(2), 'origin': int(m.group(3)),
+                                 'applied': int(m.group(4)), 'late': int(m.group(5)), 'delay_us': int(m.group(6)),
+                                 'delay_ticks': float(m.group(7)), 'to': int(m.group(8)), 'flag': m.group(9) or ''})
     report['server'] = {'ticks': [first, last], 'tick_gaps': tick_gaps, 'late_events': late_events,
                         'late_by_lines': late_by_lines, 'barrier_lines': barrier_lines, 'leads': leads,
+                        's5': s5_summary(s5_lines), 's5_superseded': sum(1 for e in s5_lines if e['flag'] == 'superseded'),
                         # the whole run in 30-tick buckets, so a later arm can
                         # re-cut this run's gaps on its own phases
                         'gaps30': sorted([s, v] for s, v in gaps30.items())}
@@ -1650,6 +1683,12 @@ def format_report(report, crit):
                                                                                          key=lambda kv: PHASES.index(kv[0]))),
         len(s['late_events']), [(e['client'], e['type'], e['stamp'], e['tick']) for e in s['late_events'][:8]],
         len(s['late_by_lines']), len(s['barrier_lines'])))
+    s5 = s.get('s5') or {}
+    if s5:
+        lines.append('server S5 intake-to-send ticks (n p50/p99/max; step 17: all p99 <= 2): %s; superseded %d' % (
+            '; '.join('%s %d %.2f/%.2f/%.2f' % (k, v['n'], v['p50'], v['p99'], v['max'])
+                      for k, v in sorted(s5.items(), key=lambda kv: (kv[0].split('/')[0] != 'all', kv[0]))),
+            s.get('s5_superseded', 0)))
     counts = collections.Counter(c['status'] for c in crit)
     for c in crit:
         lines.append('criterion %-8s %s: %s - %s' % (c['who'], c['criterion'], c['status'].upper(), c['detail']))
@@ -1750,6 +1789,14 @@ def selftest():
         if not ok:
             failures.append(what)
 
+    m = RE_S5.search('[Sim] Physics session 3: S5 event player=17 type=Physicalize origin=100 applied=130 late=30 '
+                     'delay_us=21000 delay_ticks=1.40 to=1 superseded')
+    check('RE_S5', m is not None and m.group(2) == 'Physicalize' and int(m.group(5)) == 30 and m.group(9) == 'superseded',
+          str(m.groups() if m else None))
+    s5 = s5_summary([{'type': 'Sector', 'late': 0, 'delay_ticks': d} for d in (0.1, 0.2, 3.0)]
+                    + [{'type': 'Physicalize', 'late': 4, 'delay_ticks': 1.0}])
+    check('s5_summary', s5['all']['n'] == 4 and s5['Sector/on-time']['max'] == 3.0 and s5['all/restamped']['n'] == 1
+          and s5['Sector']['p50'] == 0.2, str(s5))
     i, link = parse_link('2:lat=250,loss=10,burst=8,jitter=45')
     check('parse_link', i == 2 and link == {'latency_ms': 250.0, 'loss_pct': 10.0, 'loss_burst': 8, 'jitter_ms': 45.0}, str(link))
     ev = parse_event('2:1500:blackout=300:dir=up')

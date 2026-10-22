@@ -354,7 +354,11 @@ namespace bmmo::session {
         event_seen events_seen;
         event_repeats own_event_repeats;
         uint64_t event_dups = 0, events_superseded = 0;
-        std::map<uint32_t, uint32_t> last_lifecycle_tick;     // Physicalize or Unphysicalize applied, per player
+        // Protocol 9: echoes of our own events, by what the server did.
+        uint64_t own_echo_acked = 0, own_echo_moved = 0, own_echo_superseded = 0, own_echo_rejected = 0;
+        // ORIGINS (protocol 9): of the Physicalize or Unphysicalize applied
+        // last, and of the Physicalize applied last, per player.
+        std::map<uint32_t, uint32_t> last_lifecycle_tick;
         std::map<uint32_t, uint32_t> last_physicalize_tick;
         relay_seen relay_seen_frames;
         pending_relay pending_relay_frames;
@@ -469,6 +473,7 @@ namespace bmmo::session {
             events_seen.clear();
             own_event_repeats.clear();
             event_dups = events_superseded = 0;
+            own_echo_acked = own_echo_moved = own_echo_superseded = own_echo_rejected = 0;
             last_lifecycle_tick.clear();
             last_physicalize_tick.clear();
             relay_seen_frames.clear();

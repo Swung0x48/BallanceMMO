@@ -39,12 +39,16 @@ namespace bmmo::sim {
         // copy plus the player it belongs to (journal.hpp cannot include the
         // server's headers, so the conversion lives here).  `applied` is the
         // tick the world consumed it at, which is the one a replay has to feed
-        // it back at; `e.tick` is the tick the client stamped it for and can be
-        // older when the event arrived late.
-        bmmo::session::journal_event to_journal_event(uint32_t player, const lifecycle_event& e, uint32_t applied) {
+        // it back at; `e.tick` is the tick the world was handed in the event
+        // (the applied tick too since protocol 9: the spawn impulse index
+        // comes from it), and `origin` the tick the client stamped it for,
+        // older when the event arrived late (journal v3).
+        bmmo::session::journal_event to_journal_event(uint32_t player, const lifecycle_event& e, uint32_t applied,
+                                                      uint32_t origin) {
             bmmo::session::journal_event out;
             out.tick = applied;
             out.event_tick = e.tick;
+            out.origin_tick = origin;
             out.id = player;
             out.type = e.type;
             out.ball_type = e.ball_type;
@@ -285,6 +289,8 @@ namespace bmmo::sim {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
+            // Back before its old self was taken out: the old one goes now.
+            if (s.leaving.count(player)) finish_leave(s, player, s.world->tick_index());
             std::string error;
             if (!s.world->add_player(player, join_order, error)) {
                 log("[session " + std::to_string(session) + "] add_player failed: " + error);
@@ -298,6 +304,20 @@ namespace bmmo::sim {
         });
     }
 
+    void session_runner::finish_leave(session_state& s, uint32_t player, uint32_t tick) {
+        // Join order is the world's business at add time only; a removal
+        // needs the player id alone.
+        s.journal.player(tick, player, 0, false, {});
+        if (s.world) s.world->remove_player(player);
+        s.join_orders.erase(player);
+        s.last_physicalize_tick.erase(player);
+        s.last_frames.erase(player);
+        s.leaving.erase(player);
+        s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
+                [player](const pending_event& e) { return e.player == player; }), s.events.end());
+        s.cadence.force_full();
+    }
+
     void session_runner::remove_player(uint32_t session, uint32_t player) {
         post([this, session, player] {
             auto it = sessions_.find(session);
@@ -306,12 +326,68 @@ namespace bmmo::sim {
             // Its last patience counts, before the entry goes.
             if (config_.patience && s.running && s.world && s.inputs.count(player))
                 report_patience(s, s.world->tick_index(), "player left", &player);
-            // Join order is the world's business at add time only; a removal
-            // needs the player id alone.
-            s.journal.player(s.world ? s.world->tick_index() : 0, player, 0, false, {});
-            if (s.world) s.world->remove_player(player);
+            // Late-player design 3.2: the others still mirror the leaver's
+            // ball, so an Unphysicalize goes to them on its behalf - from
+            // here, at the runner's own next tick, where the tick is exact,
+            // instead of stamped from the network thread's view of it.
+            //
+            // Its events accepted and relayed but not applied yet (a birth or
+            // a Sector stamped ahead) are applied by every receiver at their
+            // applied ticks, and the Unphysicalize after them, so the server
+            // keeps the player in its world until the tick after the last of
+            // them and applies them too (review of step 16): dropped here, the
+            // others would make a ball the server never has, or start a
+            // sector the server never runs, and the sector union would break.
+            // The Unphysicalize then goes through the queue like any event and
+            // is an EVENT record; out at once (nothing queued, the usual case)
+            // the world drops the ball with the player, and the journal's
+            // PLAYER record is what a replay removes it by, so it is a note.
+            if (s.world) {
+                bmmo::session::lifecycle_acceptance::leaver_event gone;
+                const uint32_t next = s.world->tick_index();
+                const bool has_ball = s.acceptance.leaver_unphysicalize(player, next, gone);
+                const bool queued = std::any_of(s.events.begin(), s.events.end(),
+                        [player](const pending_event& e) { return e.player == player; });
+                if (has_ball && queued) {
+                    lifecycle_event death;
+                    death.type = bmmo::session::event_type::Unphysicalize;
+                    death.tick = gone.applied;
+                    pending_event pe{player, gone.origin, gone.applied, std::move(death), clock::now()};
+                    auto pos = std::upper_bound(s.events.begin(), s.events.end(), gone.applied,
+                        [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
+                    s.events.insert(pos, std::move(pe));
+                }
+                if (has_ball) {
+                    log("[session " + std::to_string(s.id) + "] player " + std::to_string(player)
+                        + " left with a ball: Unphysicalize relayed for tick " + std::to_string(gone.applied)
+                        + " (next tick " + std::to_string(next) + ")");
+                    s.journal.note(next, "leaver: p" + std::to_string(player) + " Unphysicalize relayed for tick "
+                                   + std::to_string(gone.applied));
+                    if (callbacks_.on_event_accepted) {
+                        accepted_event a;
+                        a.session = s.id;
+                        a.player = player;
+                        a.origin = gone.origin;
+                        a.applied = gone.applied;
+                        a.type = bmmo::session::event_type::Unphysicalize;
+                        a.intake = clock::now();
+                        callbacks_.on_event_accepted(a);
+                    }
+                }
+                if (queued) {
+                    auto& leaving = s.leaving[player];
+                    leaving.remove_at = bmmo::session::lifecycle_leaver_removal_tick(s.events, player, next);
+                    if (const auto f = s.last_frames.find(player); f != s.last_frames.end()) leaving.frame = f->second;
+                    log("[session " + std::to_string(s.id) + "] player " + std::to_string(player)
+                        + " left with events queued: it stays in the world until tick "
+                        + std::to_string(leaving.remove_at) + " (next tick " + std::to_string(next) + ")");
+                    s.journal.note(next, "leaver: p" + std::to_string(player) + " stays in the world until tick "
+                                   + std::to_string(leaving.remove_at) + " for its queued events");
+                }
+            }
+            s.acceptance.forget(player);
+            if (!s.leaving.count(player)) finish_leave(s, player, s.world ? s.world->tick_index() : 0);
             s.players.erase(player);
-            s.join_orders.erase(player);
             s.ready.erase(player);
             s.inputs.erase(player);
             s.lateness.erase(player);
@@ -319,9 +395,6 @@ namespace bmmo::sim {
             s.leads.erase(player);
             s.acked.erase(player);
             s.lifecycle_missing.erase(player);
-            s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
-                    [player](const pending_event& e) { return e.player == player; }), s.events.end());
-            s.cadence.force_full();
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
@@ -522,12 +595,70 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event) {
+    void session_runner::submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event,
+                                      uint64_t token) {
         const auto arrival = clock::now();
-        post([this, session, player, tick, arrival, event = std::move(event)] {
+        post([this, session, player, tick, arrival, token, event = std::move(event)]() mutable {
+            // Not taken: the server still lets go of the message it parked.
+            const auto dropped = [&] {
+                if (!callbacks_.on_event_accepted) return;
+                accepted_event a;
+                a.session = session;
+                a.player = player;
+                a.origin = tick;
+                a.applied = tick;
+                a.type = event.type;
+                a.dropped = true;
+                a.token = token;
+                a.intake = arrival;
+                callbacks_.on_event_accepted(a);
+            };
             auto it = sessions_.find(session);
-            if (it == sessions_.end()) return;
-            auto& events = it->second->events;
+            if (it == sessions_.end() || !it->second->world) { dropped(); return; }
+            auto& s = *it->second;
+            // A player removed before its event got here: the world has no
+            // slot for it, and its leaver's Unphysicalize is already out.
+            if (!s.players.count(player)) { dropped(); return; }
+            auto& events = s.events;
+            // Late-player design 3.1: accepted here, where the session's next
+            // tick N is exact, at applied = max(stamp, N) - never before its
+            // stamp, and never behind the session, so every side applies it at
+            // the same tick.  A birth overtaken by a newer accepted event of
+            // its player is superseded: not queued, not relayed to the others.
+            const uint32_t next = s.world->tick_index();
+            const auto type = event.type;
+            const auto verdict = s.acceptance.accept(player, type, tick, next);
+            const auto accepted = [&](bool superseded) {
+                if (!callbacks_.on_event_accepted) return;
+                accepted_event a;
+                a.session = s.id;
+                a.player = player;
+                a.origin = tick;
+                a.applied = verdict.applied;
+                a.type = type;
+                a.superseded = superseded;
+                a.token = token;
+                a.intake = arrival;
+                callbacks_.on_event_accepted(a);
+            };
+            if (verdict.superseded) {
+                ++s.superseded_births;
+                if (s.superseded_births <= 50)
+                    log("[session " + std::to_string(s.id) + "] Physicalize from " + std::to_string(player)
+                        + " stamped " + std::to_string(tick) + " would apply at " + std::to_string(verdict.applied)
+                        + " after its newer " + (verdict.by_type == bmmo::session::event_type::Physicalize
+                                                 ? "Physicalize" : "Unphysicalize")
+                        + " stamped " + std::to_string(verdict.by_origin) + " (applied "
+                        + std::to_string(verdict.by_applied) + "): superseded, never applied");
+                // Design 4: a superseded birth is never applied, so the box
+                // has it as a note only.
+                if (s.journal.is_open() && !s.journal.capped())
+                    s.journal.note(next, "superseded: p" + std::to_string(player) + " Physicalize stamped "
+                                   + std::to_string(tick) + " (by origin " + std::to_string(verdict.by_origin) + ")");
+                accepted(true);
+                return;
+            }
+            if (verdict.applied != tick) ++s.restamped_events;
             // Every other member's Sector margin (design 2.9): the server
             // relays the event the moment it takes it, so it reaches member
             // q at about q's c_est, and the stamp less that is how far ahead
@@ -535,15 +666,16 @@ namespace bmmo::sim {
             // until a late remote Sector is rewound for (plan step 14).  An
             // event already late at the server is the sender's lateness, not
             // q's path, and is no sample (lead_sector_sample).
-            if (config_.lead_adjust && event.type == bmmo::session::event_type::Sector && it->second->world) {
-                const uint32_t now_tick = it->second->world->tick_index();
-                for (auto& [other, lead]: it->second->leads)
-                    if (other != player) bmmo::session::lead_sector_sample(lead, tick, now_tick);
+            if (config_.lead_adjust && type == bmmo::session::event_type::Sector) {
+                for (auto& [other, lead]: s.leads)
+                    if (other != player) bmmo::session::lead_sector_sample(lead, tick, next);
             }
-            pending_event pe{player, tick, std::move(event), arrival};
-            auto pos = std::upper_bound(events.begin(), events.end(), tick,
-                [](uint32_t t, const pending_event& e) { return t < e.tick; });
+            const uint32_t applied = verdict.applied;
+            pending_event pe{player, tick, applied, std::move(event), arrival};
+            auto pos = std::upper_bound(events.begin(), events.end(), applied,
+                [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
             events.insert(pos, std::move(pe));
+            accepted(false);
         });
     }
 
@@ -564,7 +696,10 @@ namespace bmmo::sim {
             auto& s = *it->second;
             std::string text = s.world->describe() + " running=" + (s.running ? "1" : "0")
                 + " ready=" + std::to_string(s.ready.size()) + "/" + std::to_string(s.players.size())
-                + " pending_events=" + std::to_string(s.events.size());
+                + " pending_events=" + std::to_string(s.events.size())
+                + " restamped=" + std::to_string(s.restamped_events)
+                + " superseded=" + std::to_string(s.superseded_births) + "/" + std::to_string(s.superseded_events)
+                + " barrier=" + (config_.lifecycle_barrier ? "on" : "off");
             for (auto& [player, buffer]: s.inputs)
                 text += " in[" + std::to_string(player) + "]=" + std::to_string(buffer.pending())
                       + "@" + std::to_string(buffer.last_fresh_tick())
@@ -638,6 +773,14 @@ namespace bmmo::sim {
         // Everything the journal costs hangs off this: a capped or absent box
         // does not even capture a hash.
         const bool recording = s.journal.is_open() && !s.journal.capped();
+        // Leavers whose queued events are all applied go before this step,
+        // which is where the PLAYER record at this tick puts them in a replay.
+        for (auto l = s.leaving.begin(); l != s.leaving.end();) {
+            const uint32_t player = l->first;
+            const bool due = static_cast<int32_t>(l->second.remove_at - tick) <= 0;
+            ++l;
+            if (due) finish_leave(s, player, tick);
+        }
         std::vector<bmmo::session::applied_input> applied;
         applied.reserve(s.inputs.size());
         for (auto& [player, buffer]: s.inputs) {
@@ -653,6 +796,7 @@ namespace bmmo::sim {
             // lateness and waives nothing.
             if (config_.patience && !fresh && !settled) s.patience[player].waiver.substituted();
             s.world->set_input(player, frame);
+            s.last_frames[player] = frame;
             applied.push_back(bmmo::session::applied_input{player, frame, !fresh, source});
             // What the world consumed, not what arrived on the wire: the wire
             // can lose, duplicate and reorder, the world cannot.  The source
@@ -660,6 +804,13 @@ namespace bmmo::sim {
             // replay needs, and the server's S2 log lines carry the source.
             if (recording)
                 s.journal.input(tick, player, frame, fresh ? bmmo::session::JOURNAL_INPUT_FRESH : 0);
+        }
+        // A leaver still in the world is driven with the last frame applied
+        // for it, which is the last one relayed - what every member's mirror
+        // of it goes on with - and is not relayed (it is no member).
+        for (const auto& [player, leaving]: s.leaving) {
+            s.world->set_input(player, leaving.frame);
+            if (recording) s.journal.input(tick, player, leaving.frame, 0);
         }
         // Every step, one player or several: the relay's header and held
         // section are the owner's, and a solo player needs them as much as
@@ -674,8 +825,13 @@ namespace bmmo::sim {
         // knows who got there first, but every member knows every join order.
         // An unknown player (its removal raced the event) sorts after all known
         // ones; stable_sort keeps arrival order within one rank.
+        //
+        // Within one player, by ORIGIN and then type rank (late-player design
+        // 3.1): events re-stamped into one tick by an outage keep the order
+        // their owner made them in - a birth and the death stamped after it
+        // leave no ball, the other way round they would leave one.
         size_t due_count = 0;
-        while (due_count < s.events.size() && s.events[due_count].tick <= tick) ++due_count;
+        while (due_count < s.events.size() && static_cast<int32_t>(s.events[due_count].applied - tick) <= 0) ++due_count;
         std::vector<pending_event> due(std::make_move_iterator(s.events.begin()),
                                        std::make_move_iterator(s.events.begin() + due_count));
         s.events.erase(s.events.begin(), s.events.begin() + due_count);
@@ -684,68 +840,67 @@ namespace bmmo::sim {
             return it == s.join_orders.end() ? 256u : static_cast<uint32_t>(it->second);
         };
         std::stable_sort(due.begin(), due.end(), [&join_rank](const pending_event& a, const pending_event& b) {
-            const uint32_t ja = join_rank(a.player), jb = join_rank(b.player);
-            if (ja != jb) return ja < jb;
-            if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
-            return bmmo::session::lifecycle_event_rank(a.event.type) < bmmo::session::lifecycle_event_rank(b.event.type);
+            return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin, a.event.type,
+                                                         join_rank(b.player), b.origin, b.event.type);
         });
         for (pending_event& e: due) {
             // Protocol 6: the copies of a stamp's events can overtake each
             // other, so an Unphysicalize stamped at or before the player's
             // last applied Physicalize is one that lost its place; applied, it
-            // would take the newer ball out.
+            // would take the newer ball out.  Compared on origins (design
+            // 3.1), as every receiver does.
             if (e.event.type == bmmo::session::event_type::Unphysicalize) {
                 const auto last = s.last_physicalize_tick.find(e.player);
-                if (last != s.last_physicalize_tick.end() && static_cast<int32_t>(e.tick - last->second) <= 0) {
+                if (bmmo::session::lifecycle_unphysicalize_superseded(e.origin, last != s.last_physicalize_tick.end(),
+                                                                      last == s.last_physicalize_tick.end() ? 0 : last->second)) {
                     if (++s.superseded_events <= 20)
                         log("[session " + std::to_string(s.id) + "] Unphysicalize from " + std::to_string(e.player)
-                            + " stamped " + std::to_string(e.tick) + " is older than its Physicalize at "
+                            + " stamped " + std::to_string(e.origin) + " is older than its Physicalize stamped "
                             + std::to_string(last->second) + ": superseded");
                     continue;
                 }
             } else if (e.event.type == bmmo::session::event_type::Physicalize) {
-                s.last_physicalize_tick[e.player] = e.tick;
+                s.last_physicalize_tick[e.player] = e.origin;
             }
-            // An event that arrives after its tick was simulated is applied
-            // now, which the client that stamped it did not do: the two sides
-            // apply it at different ticks from here on (a Sector event moves
-            // every mechanism of the sector by that much).  Said once per
-            // event, capped, so a journal reader can tell a late event from a
-            // fault in the simulation.
+            // An event that arrived after its stamp tick was simulated was
+            // re-stamped at acceptance (design 3.1): applied now, and relayed
+            // with this tick, so every receiver applies it here too and the
+            // late arrival is no divergence any more.  Still said once per
+            // event, capped, as a diagnostic: a journal reader sees the stamp
+            // beside the applied tick in the EVENT record as well.
             //
             // With patience on, one whose stamp tick was stepped early with a
             // member unsettled, but which arrived before that tick's deadline,
             // is one patience made late (the deadline schedule would have
             // waited longer for that tick): counted for the S1 patience line
-            // and noted in the box, uncapped there, until the re-stamp (plan
-            // step 16) makes a late event harmless.
+            // and noted in the box.
             bool by_patience = false;
-            if (config_.patience && e.tick < tick
-                    && std::find(s.early_ticks.begin(), s.early_ticks.end(), e.tick) != s.early_ticks.end()
-                    && e.arrival < s.scheduler.deadline(e.tick)) {
+            if (config_.patience && static_cast<int32_t>(e.origin - tick) < 0
+                    && std::find(s.early_ticks.begin(), s.early_ticks.end(), e.origin) != s.early_ticks.end()
+                    && e.arrival < s.scheduler.deadline(e.origin)) {
                 by_patience = true;
                 ++s.patience[e.player].late_events;
                 if (recording)
                     s.journal.note(tick, "patience: event type " + std::to_string(static_cast<int>(e.event.type))
-                                   + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.tick)
+                                   + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.origin)
                                    + " arrived before its deadline but after its early step");
             }
-            if (e.tick < tick && ++s.late_events <= 50)
+            if (static_cast<int32_t>(e.origin - tick) < 0 && ++s.late_events <= 50)
                 log("[session " + std::to_string(s.id) + "] event type " + std::to_string(static_cast<int>(e.event.type))
-                    + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.tick) + " applied at tick "
-                    + std::to_string(tick) + " (late by " + std::to_string(tick - e.tick) + ")"
+                    + " from " + std::to_string(e.player) + " stamped " + std::to_string(e.origin) + " applied at tick "
+                    + std::to_string(tick) + " (late by " + std::to_string(tick - e.origin) + "), re-stamped"
                     + (by_patience ? ", stepped early by patience" : ""));
-            e.event.tick = e.tick;
-            // After the tick is stamped: the spawn impulse direction is derived
-            // from that field, so the record has to carry it - but the world
-            // consumes the event now, at `tick`, which is what the record is
-            // filed under.  An event that arrived after its own tick was
-            // simulated would otherwise be replayed too early.
-            if (recording) s.journal.event(to_journal_event(e.player, e.event, tick));
+            // The applied tick, not the stamp (design 3.1): the spawn impulse
+            // direction is derived from this field, and every receiver makes
+            // the ball at the applied tick with the index of that tick.  The
+            // record is filed under the tick the world consumes it at, with
+            // the origin beside it.
+            e.event.tick = e.applied;
+            if (recording) s.journal.event(to_journal_event(e.player, e.event, tick, e.origin));
             std::string error;
             if (!s.world->apply_event(e.player, e.event, error)) {
                 log("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)
-                    + " at tick " + std::to_string(e.tick) + " failed: " + error);
+                    + " stamped " + std::to_string(e.origin) + " at tick " + std::to_string(tick) + " failed: " + error);
                 if (recording) s.journal.note(tick, "event failed: " + error);
             }
         }
@@ -1080,7 +1235,7 @@ namespace bmmo::sim {
                         }
                         break;
                     }
-                    if (waiting_for_lifecycle(s, tick)) break;
+                    if (config_.lifecycle_barrier && waiting_for_lifecycle(s, tick)) break;
                     if (verdict.early) {
                         // Stepped before the deadline without some frames:
                         // remember which, so a frame that still beats the

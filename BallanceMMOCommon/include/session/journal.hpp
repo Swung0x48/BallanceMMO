@@ -9,11 +9,16 @@
 // readers parse it (the SimTool's --replay-session, scripts/journal_trace.py,
 // the round-trip unit tests).
 //
-// File format, version 2.  Everything little-endian and written field by
+// File format, version 3.  Everything little-endian and written field by
 // field, never a struct dump: the writer may be a Linux x64 server and the
 // reader a Windows x86 client.  Version 2 differs from 1 only in what a TICK
 // record's hashes mean (world_hash.hpp: the order-independent fold); a version
 // 1 file is refused rather than read with hashes nothing can compare.
+// Version 3 (protocol 9, late-player design 4) appends the event's origin
+// tick and its state to the EVENT record: the server re-stamps a late event
+// to the tick it applies it at, and a client journal's replay orders a
+// tick's events by the origin.  A version 2 file is still read; its events
+// have no origin of their own and read back with the stamp as the origin.
 //
 //   file   = magic "BMMOJRNL" (8 bytes) , u32 version , record*
 //   record = u8 tag , u32 payload_size , payload[payload_size]
@@ -65,7 +70,9 @@ namespace bmmo::session {
     };
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
-    constexpr uint32_t kJournalVersion = 2;
+    constexpr uint32_t kJournalVersion = 3;
+    // The oldest version this reader still takes (see the format note above).
+    constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
     constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::correction);
     // A str never exceeds this; a longer one makes the record invalid.
@@ -137,6 +144,16 @@ namespace bmmo::session {
         // frame really does stamp tick 0, and only an old file (no trailing
         // u32 at all) means "the applied tick".
         uint32_t event_tick = 0;
+        // Version 3: the tick the event's sender stamped it for (protocol 9,
+        // late-player design 3.1).  The server applies a late event at the
+        // tick it has reached and hands the world that tick (event_tick), so
+        // the stamp survives only here; a client journal's replay orders a
+        // tick's events by it, as the server did.  A version 2 record reads
+        // back with event_tick here.
+        uint32_t origin_tick = 0;
+        // Version 3: session::EVENT_STATE_* as the event arrived (0 in a
+        // server journal and for a client's own events).
+        uint8_t state = 0;
         uint32_t id = 0;
         event_type type = event_type::Physicalize;
         uint8_t ball_type = 0;
@@ -572,6 +589,9 @@ namespace bmmo::session {
             // Verbatim: a stamp of 0 is a real stamp (a client's anchor frame),
             // and guessing here would kick that ball the wrong way on replay.
             journal_detail::write_u32(payload, e.event_tick);
+            // Version 3, appended for the same reason.
+            journal_detail::write_u32(payload, e.origin_tick);
+            journal_detail::write_u8(payload, e.state);
             record(journal_tag::event, payload);
         }
 
@@ -757,9 +777,10 @@ namespace bmmo::session {
             return false;
         }
         const uint32_t file_version = journal_detail::load_u32(version_bytes);
-        if (file_version != kJournalVersion) {
+        if (file_version < kJournalOldestReadable || file_version > kJournalVersion) {
             error = "journal version " + std::to_string(file_version) + " (expected "
-                  + std::to_string(kJournalVersion) + "): " + path.string();
+                  + std::to_string(kJournalOldestReadable) + ".." + std::to_string(kJournalVersion) + "): "
+                  + path.string();
             return false;
         }
         uint64_t consumed = sizeof(kJournalMagic) + 4;
@@ -887,6 +908,10 @@ namespace bmmo::session {
                     // tick has the two the same way round for everything but a
                     // late event, which it cannot express.
                     e.event_tick = in.size - in.pos >= 4 ? in.u32() : e.tick;
+                    // Version 3's origin and state; a version 2 record has
+                    // neither, and its stamp is the only origin it knows.
+                    e.origin_tick = in.size - in.pos >= 4 ? in.u32() : e.event_tick;
+                    e.state = in.size - in.pos >= 1 ? in.u8() : 0;
                     if (!in.ok) break;
                     auto& group = groups[e.tick];
                     group.tick = e.tick;

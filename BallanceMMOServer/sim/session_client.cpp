@@ -831,6 +831,17 @@ namespace {
                     ++event_dups_;
                     break;
                 }
+                // Protocol 9: the server relays every event to every member,
+                // its owner included.  Our own is an echo: applied at its
+                // origin it is a plain ack; MOVED, SUPERSEDED or REJECTED it
+                // says the server applied it elsewhere or not at all.  Moving
+                // our own birth to the server's tick inside the history is
+                // plan step 19; until then the echo is only counted and our
+                // events stay applied where we stamped them.
+                if (msg.player == own_id_ && own_id_ != 0) {
+                    note_own_echo(msg);
+                    break;
+                }
                 // Queued, not applied here: an event applied on arrival lands
                 // at an arbitrary point relative to this client's physics step
                 // and in network arrival order, while the server applies every
@@ -1108,6 +1119,7 @@ namespace {
             event_seen_.clear();
             own_event_repeats_.clear();
             remote_last_physicalize_.clear();
+            remote_last_unphysicalize_.clear();
             own_group_set_ = false;
             own_physicalized_ = false;
             own_body_entity_.clear();
@@ -1136,6 +1148,7 @@ namespace {
                 event_seen_.clear();
                 own_event_repeats_.clear();
                 remote_last_physicalize_.clear();
+                remote_last_unphysicalize_.clear();
                 if (!boot_engine()) { ended_ = true; return; }
             }
             engine_->clear_keys();
@@ -2355,6 +2368,10 @@ namespace {
 
         void send_event(bmmo::session_event_msg& event) {
             event.session = session_;
+            // Protocol 9: a client's event goes out with its origin equal to
+            // its stamp; only the server re-stamps.
+            event.origin_tick = event.tick;
+            event.state = 0;
             event.serialize();
             ++events_sent_;
             // Own events go on the wire with player 0; the box names the
@@ -3705,12 +3722,16 @@ namespace {
             }
             pending_events_.erase(keep, pending_events_.end());
             if (due.empty()) return;
+            // (join, applied, origin, rank): the server applies each event at
+            // its applied tick, and one player's events of one tick by origin
+            // (protocol 9, late-player design 3.1).
             std::stable_sort(due.begin(), due.end(),
                              [this](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
                                  const uint32_t ja = join_rank(a.player), jb = join_rank(b.player);
                                  if (ja != jb) return ja < jb;
                                  if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
-                                 return bmmo::session::lifecycle_event_rank(a.type) < bmmo::session::lifecycle_event_rank(b.type);
+                                 return bmmo::session::lifecycle_apply_before(ja, a.origin_tick, a.type,
+                                                                              jb, b.origin_tick, b.type);
                              });
             // A body change stamped for this very tick (on time) is held until
             // this frame's rewinds have run (apply_held_lifecycle): made now,
@@ -3751,6 +3772,26 @@ namespace {
             live_own_beam(frame_tick);   // applies once; afterwards only retires
         }
 
+        // An echo of one of our own events (protocol 9), counted by what the
+        // server did with it: echo=acked/moved/superseded/rejected on the
+        // status line.  Not journalled: the event went into the box when it
+        // was sent, and a second record of it would be replayed twice (the
+        // box records the server's verdict once the owner acts on it, plan
+        // step 19).
+        void note_own_echo(const bmmo::session_event_msg& msg) {
+            const char* verdict = "acked";
+            if (msg.state & bmmo::session::EVENT_STATE_REJECTED) { ++own_echo_rejected_; verdict = "rejected"; }
+            else if (msg.state & bmmo::session::EVENT_STATE_SUPERSEDED) { ++own_echo_superseded_; verdict = "superseded"; }
+            else if (msg.tick != msg.origin_tick) { ++own_echo_moved_; verdict = "moved"; }
+            else { ++own_echo_acked_; return; }
+            logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u; "
+                 "kept where we stamped it (the owner's move is plan step 19)",
+                 event_type_name(static_cast<int>(msg.type)), msg.origin_tick, verdict, msg.tick,
+                 static_cast<unsigned>(msg.state), current_tick());
+            journal_note(std::string("own echo: ") + event_type_name(static_cast<int>(msg.type)) + " stamped "
+                         + std::to_string(msg.origin_tick) + " " + verdict + " (applied " + std::to_string(msg.tick) + ")");
+        }
+
         // A member's place in the server's order of a tick's events: its join
         // order, an unknown player after every known one.
         uint32_t join_rank(uint32_t player) const {
@@ -3777,24 +3818,74 @@ namespace {
         // A stamp older than the rollback history has nothing to rewind to, and
         // then the snapshot path takes over - which is what it is there for.
         void rewind_for_lifecycle(const bmmo::session_event_msg& event) {
-            if (!args_.rollback || event.tick == 0) return;
+            rewind_for_lifecycle(event.player, event.tick);
+        }
+        void rewind_for_lifecycle(uint32_t player, uint32_t event_tick) {
+            if (!args_.rollback || event_tick == 0) return;
             const uint32_t now = current_tick();
-            if (static_cast<int32_t>(event.tick - now) > 0) return;   // not late: nothing to replay
+            if (static_cast<int32_t>(event_tick - now) > 0) return;   // not late: nothing to replay
             auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
                 return recorded_input_at(entity, tick, out);
             };
-            const std::string reason = "ball of " + std::to_string(event.player) + " born at tick "
-                                     + std::to_string(event.tick);
+            const std::string reason = "ball of " + std::to_string(player) + " born at tick "
+                                     + std::to_string(event_tick);
             const live_cells_guard keep_cells(*this);
-            if (rollback_.rewind_to(rollback_world(), event.tick - 1, now, input_at, reason)) {
+            if (rollback_.rewind_to(rollback_world(), event_tick - 1, now, input_at, reason)) {
                 ++life_rewinds_;
-                life_rewind_depth_ += now - (event.tick - 1);
-                drop_carried_own_replay(event.tick - 1, false);
+                life_rewind_depth_ += now - (event_tick - 1);
+                drop_carried_own_replay(event_tick - 1, false);
                 return;
             }
             ++life_rewinds_missed_;
             logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
-                 "the body set disagrees until a snapshot re-anchors it", event.player, event.tick, now);
+                 "the body set disagrees until a snapshot re-anchors it", player, event_tick, now);
+        }
+
+        // The remote's mirror goes (an Unphysicalize applied); false when
+        // there is no such remote.
+        bool unphysicalize_remote(uint32_t player, uint32_t tick) {
+            auto it = remotes_.find(player);
+            if (it == remotes_.end()) return false;
+            std::string error;
+            if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
+            it->second.navigation = false;
+            if (it->second.physicalized) {
+                ++generations_[it->second.entity];   // the body goes: a new lifetime
+                unphysicalize_mirror(it->second.entity);
+            }
+            it->second.physicalized = false;
+            logf("remote player %u unphysicalized at tick %u", player, tick);
+            return true;
+        }
+
+        // A remote's birth.  One stamped in the past, with its tick still in
+        // the rollback history, is not made here: the world is rewound to the
+        // tick before it and the body is made inside the replay, at its tick,
+        // in the world as it stood then (pre_step below).  Made here, at the
+        // live tick, its collision bookkeeping is built against the live
+        // world - a ball 1.9 m from the spawn it is then put back onto -
+        // where the server built it coincident with the balls born the same
+        // tick (a zero contact normal, no event; measured: the host's own
+        // ball knocked 0.8 m back at the first replay and 11-17 m from the
+        // server's through the start pile).
+        void make_remote_birth(const bmmo::session_event_msg& event) {
+            const uint32_t now = current_tick();
+            if (args_.rollback && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
+                    && rollback_.knows_tick(event.tick - 1)) {
+                pending_births_.push_back(pending_birth::of(event));
+                rewind_for_lifecycle(event);
+                // The replay made it at its tick; if it did not get that
+                // far, make it now.
+                for (auto it = pending_births_.begin(); it != pending_births_.end();)
+                    if (it->player == event.player) {
+                        logf("remote physicalize of %u: the replay did not reach tick %u, made live", event.player, event.tick);
+                        physicalize_remote(*it, live_first_tick(event.tick));
+                        it = pending_births_.erase(it);
+                    } else ++it;
+                return;
+            }
+            physicalize_remote(pending_birth::of(event), live_first_tick(event.tick));
+            rewind_for_lifecycle(event);
         }
 
         void apply_event(const bmmo::session_event_msg& event) {
@@ -3803,35 +3894,43 @@ namespace {
             std::string error;
             switch (event.type) {
             case bmmo::session::event_type::Physicalize: {
-                remote_last_physicalize_[event.player] = event.tick;
-                // A birth stamped in the past, with its tick still in the
-                // rollback history, is not made here: the world is rewound to
-                // the tick before it and the body is made inside the replay,
-                // at its tick, in the world as it stood then (pre_step below).
-                // Made here, at the live tick, its collision bookkeeping is
-                // built against the live world - a ball 1.9 m from the spawn
-                // it is then put back onto - where the server built it
-                // coincident with the balls born the same tick (a zero
-                // contact normal, no event; measured: the host's own ball
-                // knocked 0.8 m back at the first replay and 11-17 m from the
-                // server's through the start pile).
-                const uint32_t now = current_tick();
-                if (args_.rollback && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
-                        && rollback_.knows_tick(event.tick - 1)) {
-                    pending_births_.push_back(pending_birth::of(event));
-                    rewind_for_lifecycle(event);
-                    // The replay made it at its tick; if it did not get that
-                    // far, make it now.
-                    for (auto it = pending_births_.begin(); it != pending_births_.end();)
-                        if (it->player == event.player) {
-                            logf("remote physicalize of %u: the replay did not reach tick %u, made live", event.player, event.tick);
-                            physicalize_remote(*it, live_first_tick(event.tick));
-                            it = pending_births_.erase(it);
-                        } else ++it;
+                // A birth older by origin than a death of the same player this
+                // client applied already (the death's relay overtook it): the
+                // server applies the birth first and the death after it.  In
+                // the death's own tick (both re-stamped into one, or the
+                // birth's applied tick after it, which the server supersedes
+                // and never relays) the two leave no ball: dropped.  Earlier,
+                // the ball lived from the birth to the death: made as below,
+                // inside a replay, and then the death applied again and
+                // rewound for, so nothing is left of it after the death's
+                // tick (review of step 16: applied alone, the mirror lived on
+                // where the server and every other side had none).
+                const auto death = remote_last_unphysicalize_.find(event.player);
+                const bool overtaken = death != remote_last_unphysicalize_.end()
+                                    && static_cast<int32_t>(death->second.origin - event.origin_tick) > 0;
+                if (overtaken && static_cast<int32_t>(event.tick - death->second.applied) >= 0) {
+                    ++births_overtaken_;
+                    logf("remote physicalize of %u stamped %u (applied %u) is older than its death stamped %u, applied"
+                         " at %u already: no ball", event.player, event.origin_tick, event.tick,
+                         death->second.origin, death->second.applied);
                     break;
                 }
-                physicalize_remote(pending_birth::of(event), live_first_tick(event.tick));
-                rewind_for_lifecycle(event);
+                // The origin, which the guard below compares (design 3.1);
+                // never backwards (an older birth relayed late).
+                if (auto [last, fresh] = remote_last_physicalize_.try_emplace(event.player, event.origin_tick);
+                        !fresh && static_cast<int32_t>(event.origin_tick - last->second) > 0)
+                    last->second = event.origin_tick;
+                if (overtaken) {
+                    ++births_overtaken_;
+                    const applied_death later = death->second;
+                    logf("remote physicalize of %u stamped %u (applied %u) is older than its death stamped %u, applied"
+                         " at %u already: made, and the death applied again", event.player, event.origin_tick,
+                         event.tick, later.origin, later.applied);
+                    make_remote_birth(event);
+                    if (unphysicalize_remote(event.player, later.applied)) rewind_for_lifecycle(event.player, later.applied);
+                    break;
+                }
+                make_remote_birth(event);
                 break;
             }
             case bmmo::session::event_type::Sector:
@@ -3847,22 +3946,22 @@ namespace {
             case bmmo::session::event_type::Unphysicalize: {
                 // A death stamped at or before the player's last applied birth
                 // is a copy that lost its place (protocol 6); applied, it would
-                // take the newer mirror out.
+                // take the newer mirror out.  Stamped: compared on origins, as
+                // the server does (design 3.1).
                 if (const auto last = remote_last_physicalize_.find(event.player);
-                        last != remote_last_physicalize_.end() && static_cast<int32_t>(event.tick - last->second) <= 0) {
+                        bmmo::session::lifecycle_unphysicalize_superseded(
+                                event.origin_tick, last != remote_last_physicalize_.end(),
+                                last == remote_last_physicalize_.end() ? 0 : last->second)) {
                     ++events_superseded_;
                     return;
                 }
-                auto it = remotes_.find(event.player);
-                if (it == remotes_.end()) return;
-                if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
-                it->second.navigation = false;
-                if (it->second.physicalized) {
-                    ++generations_[it->second.entity];   // the body goes: a new lifetime
-                    unphysicalize_mirror(it->second.entity);
-                }
-                it->second.physicalized = false;
-                logf("remote player %u unphysicalized at tick %u", event.player, event.tick);
+                // Newest by origin, with its applied tick: an older birth
+                // relayed after it is put back in front of it (above).
+                if (auto [death, fresh] = remote_last_unphysicalize_.try_emplace(
+                            event.player, applied_death{event.origin_tick, event.tick});
+                        !fresh && static_cast<int32_t>(event.origin_tick - death->second.origin) > 0)
+                    death->second = applied_death{event.origin_tick, event.tick};
+                if (!unphysicalize_remote(event.player, event.tick)) return;
                 rewind_for_lifecycle(event);
                 break;
             }
@@ -3872,14 +3971,15 @@ namespace {
         }
 
         struct pending_birth {
-            uint32_t player = 0, tick = 0;
+            uint32_t player = 0, tick = 0, origin = 0;   // tick: applied (protocol 9)
             uint8_t ball_type = 0, flags = 0;
             float position[3] = {};
             float rotation[9] = {};
             bmmo::session::ball_recipe recipe;
             static pending_birth of(const bmmo::session_event_msg& event) {
                 pending_birth b;
-                b.player = event.player; b.tick = event.tick; b.ball_type = event.ball_type; b.flags = event.flags;
+                b.player = event.player; b.tick = event.tick; b.origin = event.origin_tick;
+                b.ball_type = event.ball_type; b.flags = event.flags;
                 std::copy(std::begin(event.position), std::end(event.position), b.position);
                 std::copy(std::begin(event.rotation), std::end(event.rotation), b.rotation);
                 b.recipe = event.recipe;
@@ -3909,7 +4009,10 @@ namespace {
                     it = pending_births_.erase(it);
                 } else ++it;
             std::stable_sort(due.begin(), due.end(), [this](const pending_birth& a, const pending_birth& b) {
-                return join_rank(a.player) < join_rank(b.player);
+                return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin,
+                                                             bmmo::session::event_type::Physicalize,
+                                                             join_rank(b.player), b.origin,
+                                                             bmmo::session::event_type::Physicalize);
             });
             bool beam = own_beam_.pending && own_beam_.applied_live && own_beam_.stamp == tick;
             const uint32_t own_rank = join_rank(own_id_);
@@ -4558,11 +4661,14 @@ namespace {
             journal_announce_player(player, e.tick);
             bmmo::session::journal_event out;
             out.tick = e.tick;
-            // The tick the server applied it at is the server's own business
-            // and never reaches a client; the stamp is all this side knows, so
-            // both fields carry it and a replay of a client journal is the best
-            // effort the SimTool already says it is.
+            // Protocol 9: a relayed event's tick is the one the server applied
+            // it at, and the world is handed that tick (the spawn impulse
+            // index); the origin goes beside it (journal v3), and a replay of
+            // a client journal orders a tick's events by it.  Our own events
+            // carry their stamp in both.
             out.event_tick = e.tick;
+            out.origin_tick = e.origin_tick;
+            out.state = e.state;
             out.id = player;
             out.type = e.type;
             out.ball_type = e.ball_type;
@@ -4712,6 +4818,7 @@ namespace {
             own_event_repeats_.clear();
             held_events_.clear();
             remote_last_physicalize_.clear();
+            remote_last_unphysicalize_.clear();
             report();
             phase_ = phase::idle;
             session_ = 0;
@@ -4812,7 +4919,7 @@ namespace {
             }
             double mech_max = 0.0;
             for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
-            logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu snapshots=%llu/%llu/%llu "
+            logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu overtaken=%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
@@ -4822,6 +4929,13 @@ namespace {
                  static_cast<long long>(frames_since_anchor_),
                  static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
                  static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(event_dups_),
+                 // echo=acked/moved/superseded/rejected: our own events as the
+                 // server echoed them back (protocol 9).
+                 static_cast<unsigned long long>(own_echo_acked_), static_cast<unsigned long long>(own_echo_moved_),
+                 static_cast<unsigned long long>(own_echo_superseded_), static_cast<unsigned long long>(own_echo_rejected_),
+                 // overtaken: older remote births relayed after their death
+                 // and put back in front of it (dropped or re-ordered).
+                 static_cast<unsigned long long>(births_overtaken_),
                  static_cast<unsigned long long>(snapshots_received_),
                  static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
                  static_cast<unsigned long long>(life_rewinds_), static_cast<unsigned long long>(life_rewinds_missed_),
@@ -5377,7 +5491,15 @@ namespace {
         uint32_t hold_event_seen_ = 0;
         std::vector<held_event> held_events_;
         uint64_t event_dups_ = 0, events_superseded_ = 0;
-        std::map<uint32_t, uint32_t> remote_last_physicalize_;   // stamp of each remote's last applied Physicalize
+        // Protocol 9: echoes of our own events (note_own_echo).
+        uint64_t own_echo_acked_ = 0, own_echo_moved_ = 0, own_echo_superseded_ = 0, own_echo_rejected_ = 0;
+        std::map<uint32_t, uint32_t> remote_last_physicalize_;   // origin of each remote's last applied Physicalize
+        // Each remote's newest applied Unphysicalize, by origin, with the tick
+        // it was applied at: an older birth relayed after it is put back in
+        // front of it (apply_event).
+        struct applied_death { uint32_t origin = 0, applied = 0; };
+        std::map<uint32_t, applied_death> remote_last_unphysicalize_;
+        uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
         bool resync_pending_ = false;
         // A resync request sent and not answered yet (no assignment with a
         // newer base): its full snapshot covers every reason found meanwhile.
