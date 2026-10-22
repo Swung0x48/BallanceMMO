@@ -136,6 +136,7 @@ namespace bmmo::session {
         s.own_physicalized_ = false;
         s.own_body_entity_.clear();
         s.start_sector_pending_ = false;
+        s.start_sectors_.clear();
         s.sectors_.reset();
         s.sectors_requested_.clear();
         s.sector_cell_ = 0;
@@ -149,6 +150,13 @@ namespace bmmo::session {
     // The anchor's SessionReady half (session_client.cpp anchor(), from the
     // phase change on); the host's anchor work comes before it.
     void session_client_core::anchor(const anchor_report& report) {
+        // Sectors are inputs to the whole session (session/sector_union.hpp):
+        // sector 1 is the level's own on every side, and the cell is what
+        // the level wrote by the anchor, so the own sector poll takes only
+        // a later write for a crossing (E8: the headless anchor set both
+        // before its anchor work; nothing in that work reads them).
+        s.sectors_requested_ = {1};
+        s.sector_cell_ = report.sector_cell;
         s.frames_since_anchor_ = 0;
         s.phase_ = client_core_state::phase::running;
         if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::anchor_origin);

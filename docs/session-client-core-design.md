@@ -2,7 +2,7 @@
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
-E5, E6 and E7 (§6.1, "As built (step E1)" ... "As built (step E7)") are built.
+E5, E6, E7 and E8 (§6.1, "As built (step E1)" ... "As built (step E8)") are built.
 Nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
@@ -337,7 +337,7 @@ order:
 | 23 | the rollback record: `own_inputs_`, tracked set (own, remotes, `platform.movable_mechanisms()`, `generations_`), `platform.note_script_resets(T)`, `rollback_.record(world(), T, …)`, `hooks.after_record(T)` | SC:2374-2421 | C + P (+H: dump_savestate) |
 | 24 | `take_held_ahead(T)` | SC:2425 | C |
 | 25 | send the input history (unreliable, no delay) and the event repeats due | SC:2426-2443 | C over `platform.send` |
-| 26 | own sector detection: `platform.poll_sector()` → `{cell, resetpoint_moved, checkpoint_held}`; the core decides between `hold_sector(s, T + 1 + lead)` and a Sector event after the fact | SC:2459-2486 | P + C |
+| 26 | own sector detection: `platform.poll_sector()` → `{cell, resetpoint_moved, checkpoint_held}` (as built, E8: `poll_sector(T)` → `{cell_read, cell, resetpoint_moved, checkpoint_held}`); the core decides between `hold_sector(s, T + 1 + lead)` and a Sector event after the fact | SC:2459-2486 | P + C |
 | 27 | legacy blends (`correct`) | SC:2489-2494 | C over P |
 | 28 | next tick's mirror drive: `remote.applied = live_drive(remote, T + 1)`, `platform.drive` | SC:2498-2505 | C + P |
 | 29 | a requested beam (`request_beam`, from `--beam` or the retail verb): `beam_own_ball(T)`, stamped T+1 | SC:2507-2510 | C (+ `write_body` without `own_body_control`, §2.3) |
@@ -459,14 +459,14 @@ value, as the free functions do today.
 | drain_body_events | `std::vector<body_event>()`: `{created, deleted, wakeup}` + name; recipe entries are kept by the host (the local birth log); an own `deleted` clears the host's `own_group_set_` (SC:2309) | `drain_event_log` + the shared parser (§2.4) | `physics_view_.drain_event_log` + the same parser |
 | reportable_wakeup | `bool(const std::string& name, const std::string& own_ball)` | not `Ball_*`, not `*_BMMO_*` (SC:2311-2312) | not `Ball_*`, not the own ball, not `*_Peer_*` (PSC:1846-1847) |
 | observe_input | `input_observation()`: `{keys, cam[3][3], cam_valid, nav_active, paused, ball_type, physicalized}`: **what the own replica used for step T** (every replay drives the own ball from this record) | the record's keys through `keys_from_state`, `Cam_OrientRef`, `navigation_active()` (the leaves' Key Event `IsActive`, SC:1912-1918) | `frame_keys_` through `keys_from_state`; `Cam_OrientRef`; **nav_active from the leaves' Key Event `IsActive`**, the source the replica polls (ball_navigation.cpp:469-481), not `ball_nav_active_` (the BML hook); **paused = the mute in force during step T** (the previous frame's decision), not the one decided now (PSC:1874-1883 applies a new mute from T+1 on, so today the edge tick is recorded keys 0 + PAUSED while the replica polled live keys). Changed at R2 (§4.2) |
-| poll_sector | `sector_poll()`: `{cell, resetpoint_moved, checkpoint_held}` | `IngameParameter[0][1]`, `level_resetpoint` (SC:2459-2470) | `IngameParameter[0][1]`; `checkpoint_held = sector_activate_.block && !failed`; the resetpoint is not used (the `OnPostCheckpointReached` hook reports through `request_sector`) |
-| sector_manager_active | `bool()` | `Gameplay_SectorManager->IsActive()` (SC:2100-2104) | `physics_session_sector_manager_active` |
+| poll_sector | `sector_poll()`: `{cell, resetpoint_moved, checkpoint_held}`; as built (E8): `sector_poll(uint32_t tick)` → `{cell_read, cell, resetpoint_moved, checkpoint_held}`, `cell_read` false (the cell could not be read) counting for nothing, as SC's failed `GetElementValue` did; `tick` is the T the core decides for, so a host line about the poll names it (the headless `resetpoint now ...` line) | `IngameParameter[0][1]`, `level_resetpoint` (SC:2459-2470) | `IngameParameter[0][1]` **only while the hold is in force** (`sector_activate_.block && !sector_activate_failed_`, as the cell poll of PSC:1692-1701 reads it today), so `checkpoint_held` is true whenever `cell_read` is; with the hold not in force `cell_read = false`: the hook (`physics_session_on_sector`, PSC:2912-2924) has already reported that crossing after the fact, and a cell read would make the core report it a second time (review of E8); the resetpoint is not used (the `OnPostCheckpointReached` hook reports through `request_sector`) |
+| sector_manager_active | `bool()` | `Gameplay_SectorManager->IsActive()` (SC:2100-2104), the manager found once by name (`sector_manager_id_`, host state: the activation record and its replay use it) | `physics_session_sector_manager_active` |
 | **writing the world** | | | |
 | write_body | `bool(const std::string&, const session::body_state& row, bool wake)`; as built (E4): `bool(entity, const double position[3], const double rotation[4], const float linear[3], const float angular[3], bool wake, std::string& error)`, the bool overload of `set_body_state` | `set_body_state` (resync rebuild SC:2803-2822; legacy ladder) | `physics_view_.set_body_state` (PSC:3290-3351) |
 | mute_event_log | `void(bool)` (the core keeps the nesting counter, SC:4607-4620); as built (E6): the core's `session_client_core::event_log_mute` scope keeps the flag in force (`event_log_muted_`, core state) and restores it | `set_event_log_muted` | `physics_view_.set_event_log_muted` |
 | keep_live_cells | `scope_guard(const session_client_core&)`, RAII around every `rewind_to` / `on_snapshot` (SC:2874, 3709, 3807, 4342, 4401); the guard reads `core.rollback_stats()` and `core.current_tick()` (SC:5728-5738) | `live_cells_guard` (SC:5719-5739) | the same write-back of `CurrentLevel[0][4]`, `IngameParameter[0][1..2]` + `replay_manager_activation` (PSC:2037-2046) |
 | run_sector | `void(int sector)` | SC:1346-1357 | PSC:2962-2986 |
-| record_activation / record_pending_activation | `void(uint32_t tick, bool reset)` / `void(uint32_t tick)` | `record_manager_activation` (SC:5695-5711, 2180-2184) | `record_manager_activation` (PSC:64-88, 2032-2036) |
+| record_activation / record_pending_activation | `void(uint32_t tick, bool reset)` / `void(uint32_t tick)`; as built (E8): `record_activation` only (the union pass); `record_pending_activation` (step 15) comes with the frame (E9) | `record_manager_activation` (SC:5695-5711, 2180-2184) | `record_manager_activation` (PSC:64-88, 2032-2036) |
 | script_guards | `void(uint32_t tick, bool resolved)` | `reset_guard_.apply` | `death_reset_apply`, `sector_deactivate_apply`, `sector_activate_apply` (the clock guard, pause pin and `pause_scripts_apply` are host code before `post_step`, §1.3) |
 | note_script_resets | `void(uint32_t tick)` | `script_replay::resets_pending` → `script_reset_ticks_` | the same (PSC:1964-1965) |
 | **driving** | | | |
@@ -515,7 +515,18 @@ value, as the free functions do today.
   `OnPostCheckpointReached` / the `sector N` verb. Once assigned it is the same
   `hold_sector(s, current + 1 + lead)` both use today
   (SC:1330-1341, PSC:2927-2955); before the assignment it only marks the
-  sector pending (step 1).
+  sector pending (step 1). As built (E8): `void`, and it always holds;
+  every request made before the assignment waits, in request order, and is
+  stamped at the first assigned frame. Retail's `physics_session_hold_sector`
+  returns false when the session is not assigned or the hold failed, and
+  its hook then reports the crossing after the fact at once
+  (PSC:2912-2933). The retail host keeps that decision (R1): its hook and
+  the `sector N` verb call `core.request_sector` only when the session is
+  assigned and the hold is in force, and otherwise send today's
+  after-the-fact Sector event (`core.send_event`), so a crossing between
+  the anchor and the assignment is reported at once, as today, not stamped
+  at the first assigned frame. Making it wait instead would be a retail
+  behaviour change, to be listed in §4.2 if R1 wants it.
 - `request_beam`: headless `--beam` (from the loop once `tick >= beam_tick`)
   and the retail `beam` verb; consumed at step 29.
 
@@ -2663,6 +2674,235 @@ and the row above:
 
   Not run: §5.2 (1). No forced-rollback path moved; the own beam inside the
   replays is covered by the swing captures and the unit tests.
+
+**As built (step E8).** Where the code made E8 differ from §1.2, §1.3, §2.2
+and the row above:
+
+- **What moved** (`src/session/client_core_frame.cpp`, after E5's rewinds:
+  §1.1 names no file for the sectors, and steps 1, 9 and 26 are the frame's,
+  so no new source and no `SessionCore.cmake` change), verbatim but for the
+  platform calls: `hold_sector`, the pending start sector's stamp (step 1),
+  the union pass (step 9) and the own sector poll's decision (step 26), and
+  the anchor's two sector lines (`sectors_requested_ = {1}`, `sector_cell_`)
+  into `session_client_core::anchor`. The four moved `logf` literals
+  (`sector %d stamped ...`, `sector +%d ...`, `sector %d at tick %u`, and
+  the union pass's `running:` list, whose lambda's local had to be renamed
+  from `s`, the core's state member) are unchanged; SC's `sector_lead_ticks()`
+  moved with them (public on the core). The headless client keeps a one-line
+  call at each old site.
+- **Entry points** (the E3 pattern, until E9's `pre_step` / `post_step`):
+  - `request_sector(sector, why)`, as §1.3: before the assignment it only
+    records the request (`start_sector_pending_` and the new core state
+    `start_sectors_`, every request with its reason in request order, the E1
+    note's "becomes core state at E8"; `begin` clears them); after it,
+    `hold_sector(s, current + 1 + lead, why)`. `hold_pending_sector` stamps
+    each waiting request at T + lead, in order, a repeat dropped by
+    `hold_sector` (the first round kept one slot, so a second request before
+    the assignment overwrote the first: review of E8; the headless client
+    makes one). It returns nothing and always holds: the retail host decides
+    before calling whether a crossing is held or reported after the fact
+    (§2.2 `request_sector`, review of E8). The headless anchor calls it for `--start-sector` where it
+    set the flag, always before the assignment (`on_session_assign` needs
+    the running phase, which `core.anchor` starts after the call), and keeps
+    its own `--start-sector %d will be stamped ...` line after it: that text
+    names the headless option, so it stays a host literal.
+  - `hold_pending_sector(T)` (step 1), `sector_union_pass(T)` (step 9) and
+    `poll_own_sector(T)` (step 26), public until E9. `hold_sector` is
+    private.
+  - `anchor_report` gained `sector_cell`: the host reads
+    `IngameParameter[0][1]` where SC did (before its script selection, reset
+    guard and checkpoint hold, none of which writes the cell or reads the
+    two members) and the core sets `sectors_requested_ = {1}` and
+    `sector_cell_` first thing in `anchor`. An unread cell leaves 0, which is
+    what `begin` left in SC's member.
+- **Platform operations** (§2.2 rows amended): `sector_manager_active`
+  (headless: the manager found once by name, `sector_manager_id_`, which
+  stays host state because the activation record and its replay use it; the
+  lookup runs at the same place, inside step 9, as before), `run_sector`
+  (SC's `start_sector`, its `--start-sector %d: IngameParameter or
+  Gameplay_SectorManager is missing` line host text), `record_activation`
+  (SC's `record_manager_activation`; `record_pending_activation`, step 15,
+  comes with the frame at E9) and `poll_sector(T) -> sector_poll {cell_read,
+  cell, resetpoint_moved, checkpoint_held}`. The tick is the T the core
+  decides for: the headless `resetpoint now ... at tick %u` line prints it
+  (the first round printed `current_tick()`, equal to SC's post-step `tick`
+  today, but only while nothing between SC's `tick = current_tick()` and
+  step 26 moves the numbering, which E9 could change: review of E8). The
+  retail row now says the retail host reads the cell only while its hold is
+  in force and returns `cell_read` false otherwise, so a crossing its hook
+  already reported after the fact is not reported twice (review of E8). `cell_read` is not in §2.2's
+  struct: SC's crossing test ran only when the cell was read, and a host
+  must be able to say it was not. The headless poll keeps the resetpoint
+  read, its `resetpoint now ...` line (with the own ball's position, CK) and
+  `resetpoint_seen_` / `checkpoint_held_` (host state since E1), in SC's
+  order: resetpoint, its line, then the cell. All four are required by
+  `missing_platform_operation`: every host runs the union and reports its
+  own sectors.
+- **`legacy_calls`**: none added or removed (the sectors call no SC
+  function; `send_event` is the core's since E3). Left: `own_body_guard_off`,
+  `report`, `recorded_input_at`, `own_ball`, `describe_movable_objects`.
+- **§5.1**: 2 new tests (`SessionClientCoreSectors.*`): a request before
+  the assignment only waits (nothing sent or stamped, also on an unassigned
+  frame), the anchor's sector 1 and cell, the first assigned frame's stamp
+  T + lead with the request's reason (the event decoded: Sector, tick =
+  origin = 127), once per sector, a request after the assignment at current
+  + 1 + lead, `begin` forgetting a request; and the union pass (the manager
+  counted every tick, the pass after three idle ticks with `run_sector`,
+  `record_activation(T, reset)` and the line, a peer's stamp held by the
+  pacer), the poll raising no event for the pass's own cell write nor for a
+  peer's, a moved resetpoint into a peer's sector stamped as ours, a
+  crossing stamped tick + 1 + lead with the chain held and reported after
+  the fact without it (stamped with the tick, not handed to the union), an
+  unread cell ignored, each poll called with its tick; and (review round) a
+  second request and a repeat before the assignment, both stamped at the
+  first assigned frame in order, the repeat dropped. The fake platform fills
+  the four operations and the construction test checks each is required.
+  `StateKeepsTheHeadlessInitializers` checks the new member. 402 tests
+  pass on Windows and on Arch (GCC 16.2.1).
+- **Review round** (two reviews, no blocker). What became of the findings:
+  - the host's `resetpoint now ... at tick %u` line printed `current_tick()`,
+    equal to SC's post-step `tick` only while nothing moves the numbering
+    between them (both reviews): `poll_sector` now takes the tick (above);
+  - one waiting slot before the assignment (both reviews): every request
+    waits, in order (above);
+  - the retail column of `poll_sector` would have the core report a crossing
+    the retail hook had already reported after the fact (review 2): the row
+    now has the retail host return `cell_read` false while its hold is not in
+    force (§2.2);
+  - `request_sector` against retail's `physics_session_hold_sector`, which
+    returns false and reports at once when unassigned or unheld (review 2):
+    the retail host keeps that decision and calls the core only when it
+    holds (§2.2 `request_sector`, for R1);
+  - the first batch's out-of-band metrics were not all traced (review 2):
+    traced below, for it and for the two batches of this round;
+  - the `anchor_report.sector_cell` default of 0 with IngameParameter
+    missing (review 1, "no finding"): unchanged, as the note says.
+- **Results.** Old is 924092a's binary (`build-agent-E7/`, build id
+  `bmmo-f2227b078f12-dirty`), new the E8 binary rebuilt after the review
+  round (`build-agent-E8/`, `bmmo-924092a86b88-dirty`). Every check below was
+  rerun on it.
+  - §5.2 (5) and (6), `wire_check.sh E7 E8 e8r`: WIRE-CHECK: ALL SAME, 62914
+    sends on the 16 clients equal but each login; every replay reached its
+    end marker (rc 0); all 16 journals IDENTICAL with `e0_compare.py` and
+    BYTE-IDENTICAL-EXCEPT-BUILD-ID (`e1_bytecheck.py`: equal sizes, 11
+    bytes differing, all inside the build id). The sector and `resetpoint
+    now` lines of the old and new replay logs are identical (15 to 22 per
+    client, 1 to 3 `resetpoint now` lines on 13 of the 16). What the
+    captures exercise of the moved code: the pending `--start-sector 4` and
+    its stamp on the first assigned frame (`swing_snapon`, all four clients:
+    "sector 4 stamped for tick 62 (--start-sector, lead 35, ...)"), three
+    union passes per client on all 16 (one held by the pacer on `a5u_lead`
+    clients 0, 1 and 3), the own crossings stamped ahead with the checkpoint
+    chain held (1 to 3 per client, each after its `resetpoint now` line),
+    and the anchor's cell. **Covered by no capture, only by the unit
+    tests**: the after-the-fact branch (no run without the checkpoint hold),
+    a request after the assignment and a second one before it (no headless
+    caller), an unread cell; `sector_manager_active` with no manager has
+    neither.
+  - §5.2 (4): 188 literals against 924092a's 188 (SC + `src/session/*.cpp`),
+    EQUAL.
+  - §5.2 (3): the old SimTool on its replay of each capture against the new
+    one on the E8 replay (`--continue-after-jump`): all 16 the same rc and
+    summary line; the four reference server journals rc 0 with 0 checkpoint
+    mismatches on both (3986 to 4257 ticks).
+  - §5.2 (2): solo snapshots off (`solo/e8_new2`, starved=0) against `old1`:
+    TICK hash and pose identical at all 2245 common ticks (8-2252), LOCAL
+    checkpoints 1123/1123, the 8 RECEIVED snapshots equal in content, other
+    records 5647/5647: IDENTICAL. Host load at most 12.9 %. (The first
+    round's `e8_new1`: 2454 ticks, IDENTICAL.)
+  - CPU parity (`cpu_parity.sh E7 E8`, three rounds): PASS, old 20.50 /
+    20.50 / 20.46 s, new 20.64 / 20.56 / 20.46 s, limit 21.56 s. (First
+    round: old 20.49 / 20.45 / 20.45, new 20.24 / 20.48 / 20.30.)
+  - Builds: x64 BUILD-OK; x86 mod CLIENT-BUILD-OK with the target's 25
+    objects deleted first (`client_platform.hpp` and `client_core.hpp`
+    changed layout); `linux_test_syntax.sh` every line ok (24 sources); GCC
+    16.2.1 compiles the headless client syntax-only with the Arch flags, and
+    the six core sources with `-Wall -Wextra`, with no error or warning; the
+    Arch tree builds and links the headless client and the tests, and 402
+    tests pass there as on Windows. No server source changed (the server
+    compiles neither the core nor its headers), so the Arch server was not
+    rebuilt.
+  - §5.3, the row's arm, swing bay (snapshots off), O1 N1 O2 N2, every
+    client capturing its inbound. Three batches: `e8ab1_swing` with the
+    first round's binary, `e8ab2_swing` and `e8ab3_swing` with this round's.
+    Host peak 14.3 / 18.0 / 17.0 % total, no other process above 3.4 %: no
+    void run. No pacer rebase in any run. Every server journal replays rc 0
+    with 0 checkpoint mismatches. **The cross-replay:** each N run's four
+    captures replayed with E7 give client journals IDENTICAL to the N run's
+    live ones, and each O run's replayed with E8 give its own (12 runs, 48
+    journals, all IDENTICAL), and every counter of each replay's last status
+    line (inputs, events, echo, ownlife, life, inrew, rb, unmatched, far,
+    relay, lag) equals the live run's: every number below is the run's
+    inbound stream's, not the code's. In each batch both N runs' criteria
+    equal both O runs' (and every pooled swing O run's from E4 on).
+    - **`e8ab3_swing`: PASS, nothing to trace but the band.** No crash
+      (every client rc 0), no resync, no zero broken (`far` 3 on N1 clients
+      0 and 1 where an O run of the client is non-zero: snapshots 3155-3157
+      delivered 49 to 77 deep, past the reach). Band 15 of 138 out
+      (reported). 14 are N2's: its client 0 reached its time limit at tick
+      3358 against 3441 to 3472 in the other three, so its teardown came
+      first and the four clients' `inputs`, `rb`, `inrew`, client 0's `life`
+      and client 3's `events` received / dups fall below the band; and its
+      client 2's `relay_lag_p99` 34 (band 35-37), the lag its relayed frames
+      arrived with (the same in the E7 replay). The 15th is N1 client 1's
+      `far` 3 (the snapshots above). N1 client 0's `rb` 181, out on the same
+      metric as N2's, is inside the pooled O range (153-218 over 26 O runs).
+    - **`e8ab2_swing`: one crash, of the old code as well.** N1 client 3
+      exited 0xc0000005 after its time limit (status line written, journal
+      complete, its capture's end marker reached), in the teardown:
+      `~session_client` -> `~headless_engine` -> `CKContext::Reset` ->
+      `DestroyObjects` -> `SetPhysicsSpringCallBack`
+      (`SetPhysicsSpring.cpp:224`, `delete spring` on a stale pointer in the
+      block's local 0). **The E7 binary replaying that capture crashes the
+      same way** (the same stack, by the frames' offsets), as does E8, and
+      both replays' journals are IDENTICAL to the live one: a spring handle
+      left in a SetPhysicsSpring block after IVP freed it, met only when the
+      engine tears the scene down. It is not E8's (no spring, joint or
+      teardown code moved) and is left open below. Traced besides: N1 client
+      2's resync (the server applied its beam's pair, Unphysicalize and
+      Physicalize stamped 701, at 703; the own pair moved, plan step 22:
+      `resyncs` 1/1, `relay_late` 150, `ownlife` resynced 1 and other 1,
+      `echo` moved 2) and its `unmatched` 2 (snapshots 703 and 728 at 789
+      after the rebuild from 701); N2 client 0 `unmatched` 3 (snapshots
+      3145-3149 at 3245, 96 to 100 deep, past the 96-tick history); N2
+      client 1 `echo` moved 1, `ownlife` moved 1 / remade 1 (its Physicalize
+      3343 applied at 3347). The rest of the band's 35 of 138: N1 was the
+      longest run (client 0 at 3461 against 3359 to 3405, the teardown last)
+      with client 2's resync in it - `inputs`, `rb`, `inrew`, `relay_lag_p99`
+      and `events` of N1's clients - and N2 clients 2 and 3 `events`
+      received / dups (1205 / 1021 and 1193 / 1008, inside the pooled O
+      range 1075-1228 / 907-1041 and 1114-1222 / 944-1035).
+    - **`e8ab1_swing` (first round) traced.** One zero broken: N2 client 1
+      `unmatched` 1 = the full snapshot of 3283 delivered at its local tick
+      3381, 98 deep, past the 96-tick history. N2 client 3 (player
+      1433115652) `echo` moved 2, `ownlife` moved 2 and remade 3: the server
+      applied its Physicalize stamped 701 at 702 and stamped 1210 at 1211
+      (server.log, "late by 1"); the client moved both births inside the
+      history ("own physicalize stamped 701 moved to 702 ... at local tick
+      723", "1210 moved to 1211 ... at 1238") and re-made the body at the
+      applied tick, live and in the replays after (3). The other 7:
+      client 0 `events` received / dups N1 1179 / 996 (the run longer than
+      O1's by 80 ticks, inside the pooled O range 1075-1230 / 894-1043);
+      client 1 `events` N1 1192 / 1009 and N2 1199 / 1016 (the two runs
+      with peers' lifecycle events applied late, 4 and 5 against 1 and 0 in
+      the O runs; 2 to 9 above the pooled maximum of 1190 / 1006); client 2
+      `rb` 330 / `inrew` 307 in N1 (its own Physicalize 3347 moved to 3348
+      and a BodyRevived 3331 applied at 3332, inside the pooled range
+      276-341 / 258-320). `far` differs only where an O run of the client is
+      non-zero.
+- **Open (not E8's):** the teardown crash above. A SetPhysicsSpring block
+  keeps its spring in local 0 (`script_replay.hpp`, `is_joint_block`); when
+  the spring's body goes while the block keeps the pointer, the block's
+  reset callback deletes freed memory at `CKContext::Reset`. Seen once in 12
+  swing runs of this step, reproducible from `e8ab2_swing_n1/capture3.bmic`
+  on both binaries; it happens after the session's end, so no journal or
+  criterion is affected but the exit code.
+- **The step's status.** Every exact check (§5.2 (2) to (6)) and CPU parity
+  pass on the review round's binary; the row's arm passes in `e8ab3_swing`
+  and, but for a teardown crash the old binary reproduces from the same
+  capture, in `e8ab2_swing`, every difference traced to a run event above;
+  every run is reproduced exactly by the other binary from its captures.
+  §5.2 (1) not run: no forced-rollback path moved.
 
 ### 6.2 R steps: the retail mod hosts the core
 

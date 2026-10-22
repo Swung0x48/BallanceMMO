@@ -873,7 +873,8 @@ namespace {
         // with send, now and log; the steps that move code add the rest (E2:
         // utc_ms, body_state, list_bodies, journal_path; E3: the hooks; E4:
         // write_body, own_driven_entity, bind_world, keep_live_cells; E6: the
-        // mirrors' operations and mute_event_log; E7: the own ball's).
+        // mirrors' operations and mute_event_log; E7: the own ball's; E8: the
+        // sectors').
         bmmo::session::session_platform make_platform() {
             bmmo::session::session_platform p;
             p.send = [this](const std::string& bytes, bmmo::session::send_mode mode) {
@@ -965,6 +966,19 @@ namespace {
             p.make_own = [this](const bmmo::session::own_body_spec& spec) { return remake_own_body(spec); };
             p.unmake_own = [this](const std::string& entity, const float position[3], const float rotation[9], uint32_t tick,
                                   std::string& error) { return unmake_own_body(entity, position, rotation, tick, error); };
+            // The sectors' (E8): Gameplay_SectorManager's state (found once,
+            // as the union pass found it), one union pass, its activation
+            // record for the replay, and the own sector poll.
+            p.sector_manager_active = [this]() {
+                if (!sector_manager_id_)
+                    if (CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager"))
+                        sector_manager_id_ = manager->GetID();
+                auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
+                return manager && manager->IsActive();
+            };
+            p.run_sector = [this](int sector) { start_sector(sector); };
+            p.record_activation = [this](uint32_t tick, bool reset) { record_manager_activation(tick, reset); };
+            p.poll_sector = [this](uint32_t tick) { return poll_sector(tick); };
             // The host hooks (E3): the pacer's origin restarts with the
             // numbering, --hold-event, and its discards at the session's end.
             p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) { origin_ = wall_now(site); };
@@ -1362,10 +1376,12 @@ namespace {
             // the union runs the passes - ours and the other members' - before
             // the step of the tick each is due at.  Sector 1 is the level's own
             // on every side, and the anchor hash is unaffected: nothing is
-            // activated before the server's world has.
-            core_.s.sectors_requested_ = {1};
+            // activated before the server's world has.  The core sets both
+            // (shared-core design E8: session_client_core::anchor, from the
+            // report); the cell is read here, where it always was.
+            int sector_cell = 0;
             if (CKDataArray* parameters = engine_->data_array("IngameParameter"))
-                parameters->GetElementValue(0, 1, &core_.s.sector_cell_);
+                parameters->GetElementValue(0, 1, &sector_cell);
             // The script replay (game/script_replay.hpp): the mechanism scripts
             // whose state travels with the rollback records, and the hooks
             // that carry the force blocks' controllers through the bridge.
@@ -1417,7 +1433,9 @@ namespace {
                          hold_error.c_str());
             }
             if (args_.start_sector > 0) {
-                core_.s.start_sector_pending_ = true;
+                // Before the assignment: pending until the first assigned
+                // frame (session_client_core::request_sector, E8).
+                core_.request_sector(args_.start_sector, "--start-sector");
                 logf("--start-sector %d will be stamped %u ticks ahead of the first assigned frame", args_.start_sector,
                      static_cast<unsigned>(core_.s.sector_lead_));
             }
@@ -1432,33 +1450,18 @@ namespace {
             report.build_id = bmmo::physics::build_id();
             report.own_name = args_.name;
             report.load_ticks = load_waited_;
+            report.sector_cell = sector_cell;
             core_.anchor(report);
         }
 
-        // The lead the server sized for this session (SessionStart).
-        uint32_t sector_lead_ticks() const { return core_.s.sector_lead_; }
-
-        // A sector this client enters, as an input: stamped for `due`, sent at
-        // once, and handed to the union, which starts it before the step of
-        // that tick (or the first one after it the pacer allows) - as the
-        // server does with the event, and every other member with its relay.
-        // Once per sector per session.
-        void hold_sector(int sector, uint32_t due, const char* why) {
-            if (core_.s.sectors_requested_.count(sector)) return;
-            core_.s.sectors_requested_.insert(sector);
-            bmmo::session_event_msg event;
-            event.tick = due;
-            event.type = bmmo::session::event_type::Sector;
-            event.sector = sector;
-            send_event(event);
-            core_.s.sectors_.stamp(core_.s.own_id_, sector, due);
-            logf("sector %d stamped for tick %u (%s, lead %u, input_delay %u), event sent ahead", sector, due, why,
-                 sector_lead_ticks(), static_cast<unsigned>(core_.s.input_delay_));
-        }
+        // hold_sector, request_sector and the sector lead moved into the
+        // shared core at E8 (client_core_frame.cpp).  What stays is their
+        // platform half (make_platform: sector_manager_active, run_sector,
+        // record_activation, poll_sector).
 
         // One pass of the sector union: deactivate nothing, activate `sector`,
         // run Gameplay_SectorManager from its start - the writes the server's
-        // update_sectors() makes.
+        // update_sectors() makes (platform run_sector).
         void start_sector(int sector) {
             CKDataArray* parameters = engine_->data_array("IngameParameter");
             CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager");
@@ -1470,6 +1473,32 @@ namespace {
             parameters->SetElementValue(0, 2, &none, sizeof(none));
             parameters->SetElementValue(0, 1, &sector, sizeof(sector));
             if (CKScene* scene = engine_->context()->GetCurrentScene()) scene->Activate(manager, TRUE);
+        }
+
+        // The own sector poll's platform half (platform poll_sector, E8): a
+        // moved resetpoint (the own ball's crossing; logged with where the
+        // ball is), the sector cell the level's scripts last wrote, and
+        // whether the checkpoint chain's manager run is held.  The core
+        // decides what the crossing is (session_client_core::poll_own_sector).
+        bmmo::session::sector_poll poll_sector(uint32_t tick) {
+            bmmo::session::sector_poll poll;
+            const VxVector reset = level_resetpoint();
+            const bool resetpoint_moved = reset != resetpoint_seen_;
+            if (resetpoint_moved) {
+                resetpoint_seen_ = reset;
+                VxVector at(0.0f, 0.0f, 0.0f);
+                if (CK3dEntity* ball = current_ball()) ball->GetPosition(&at);
+                logf("resetpoint now (%.2f,%.2f,%.2f) at tick %u, own ball at (%.2f,%.2f,%.2f)",
+                     reset.x, reset.y, reset.z, tick, at.x, at.y, at.z);
+            }
+            poll.resetpoint_moved = resetpoint_moved;
+            if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
+                int sector = 0;
+                poll.cell_read = parameters->GetElementValue(0, 1, &sector) != 0;
+                poll.cell = sector;
+            }
+            poll.checkpoint_held = checkpoint_held_;
+            return poll;
         }
 
         // struct own_life and the own lives - the beam, the own births'
@@ -1828,11 +1857,8 @@ namespace {
             const uint32_t frame_tick = core_.s.tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
             // A held --start-sector: on the first frame the session is assigned
             // (tick base and lead known), stamp it `lead` ticks ahead like any
-            // other sector this client enters.
-            if (core_.s.start_sector_pending_ && core_.s.assigned_) {
-                core_.s.start_sector_pending_ = false;
-                hold_sector(args_.start_sector, frame_tick + sector_lead_ticks(), "--start-sector");
-            }
+            // other sector this client enters (the core's, E8).
+            core_.hold_pending_sector(frame_tick);
             // This tick's events first - a relayed Sector event stamped for it
             // among them - then the union's pass, then the step: the order the
             // server's session_runner::step keeps.
@@ -1865,22 +1891,10 @@ namespace {
             // it, from the manager's state after the previous step, and one
             // pass per idle manager for the lowest sector owed.  The two worlds
             // run the same scripts from the same anchor on the same stamps, so
-            // the tick a pass starts at is the same on every side.
-            {
-                if (!sector_manager_id_)
-                    if (CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager"))
-                        sector_manager_id_ = manager->GetID();
-                auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
-                const auto pass = core_.s.sectors_.tick(frame_tick, manager && manager->IsActive());
-                if (pass) {
-                    core_.s.sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
-                    start_sector(pass.sector);
-                    record_manager_activation(frame_tick, true);
-                    logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s", pass.sector, frame_tick,
-                         pass.player, pass.stamped_tick, frame_tick > pass.stamped_tick ? ", held by the pacer" : "",
-                         [this] { std::string s; for (int x: core_.s.sectors_.active()) s += std::to_string(x) + " "; return s; }().c_str());
-                }
-            }
+            // the tick a pass starts at is the same on every side.  (The
+            // core's, E8: the manager's state, the pass and the activation
+            // record are make_platform's.)
+            core_.sector_union_pass(frame_tick);
             // A rewind above replayed up to the previous tick and left every
             // mirror's navigation input at the frame it last fed there; this
             // tick's step is driven by the frame recorded as applied for it
@@ -2196,48 +2210,10 @@ namespace {
                 core_.s.input_history_.pop_front();
             }
 
-            // Sector: the sector the level's scripts last wrote.  With the
-            // checkpoint chain held this is a crossing whose manager run did
-            // not happen: it becomes an input, stamped ahead like the retail
-            // client's cell poll (physics_session_frame).  This frame's step was
-            // `tick`, so the earliest the manager can run is before tick + 1.
-            // Without the hold (a graph the hold did not understand) the chain
-            // already activated it: report it after the fact, out of lockstep.
-            //
-            // A moved resetpoint is a crossing too, the own ball's alone (only
-            // the checkpoint chain moves it, in the frame it writes the cell).
-            // It is what catches a trailing ball: a peer's crossing has the
-            // union pass write the same sector into the cell first, so the
-            // chain's own write changes nothing there - the retail client
-            // reports that crossing from OnPostCheckpointReached.
-            const VxVector reset = level_resetpoint();
-            const bool resetpoint_moved = reset != resetpoint_seen_;
-            if (resetpoint_moved) {
-                resetpoint_seen_ = reset;
-                VxVector at(0.0f, 0.0f, 0.0f);
-                if (CK3dEntity* ball = current_ball()) ball->GetPosition(&at);
-                logf("resetpoint now (%.2f,%.2f,%.2f) at tick %u, own ball at (%.2f,%.2f,%.2f)",
-                     reset.x, reset.y, reset.z, tick, at.x, at.y, at.z);
-            }
-            if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
-                int sector = 0;
-                if (parameters->GetElementValue(0, 1, &sector) && (sector != core_.s.sector_cell_ || resetpoint_moved)) {
-                    core_.s.sector_cell_ = sector;
-                    if (sector > 0 && !core_.s.sectors_requested_.count(sector)) {
-                        if (checkpoint_held_) {
-                            hold_sector(sector, tick + 1 + sector_lead_ticks(), "checkpoint");
-                        } else {
-                            core_.s.sectors_requested_.insert(sector);
-                            bmmo::session_event_msg event;
-                            event.tick = tick;
-                            event.type = bmmo::session::event_type::Sector;
-                            event.sector = sector;
-                            send_event(event);
-                            logf("sector %d at tick %u", sector, tick);
-                        }
-                    }
-                }
-            }
+            // Sector: the own sector poll (the core's, E8: a crossing stamped
+            // ahead with the checkpoint chain held, else reported after the
+            // fact; the host's poll_sector is its platform half).
+            core_.poll_own_sector(tick);
 
             // Continue running blends.
             if (args_.correct) {

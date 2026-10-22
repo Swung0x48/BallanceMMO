@@ -5,6 +5,11 @@
 // replay_corrected_inputs (pre_step step 5) and force_rewind, the core half
 // of the headless --force-rollback (step 7's hook; the cadence and the
 // traces around it stay the host's).  pre_step and post_step follow at E9.
+// Step E8 adds the sectors (session_client.cpp at 924092a), verbatim but for
+// the platform calls (sector_manager_active, run_sector, record_activation,
+// poll_sector): request_sector with the start sector pending until the
+// assignment (pre_step step 1), hold_sector, the sector union's pass
+// (step 9) and the own sector poll (post_step step 26).
 
 #include "session/client_core.hpp"
 
@@ -117,6 +122,105 @@ namespace bmmo::session {
             ++s.forced_rollbacks_missed_;
         }
         return result;
+    }
+
+    // ---------------------------------------------------------- sectors
+    // A sector this client enters, as an input: stamped for `due`, sent at
+    // once, and handed to the union, which starts it before the step of
+    // that tick (or the first one after it the pacer allows) - as the
+    // server does with the event, and every other member with its relay.
+    // Once per sector per session.
+    void session_client_core::hold_sector(int sector, uint32_t due, const char* why) {
+        if (s.sectors_requested_.count(sector)) return;
+        s.sectors_requested_.insert(sector);
+        bmmo::session_event_msg event;
+        event.tick = due;
+        event.type = bmmo::session::event_type::Sector;
+        event.sector = sector;
+        send_event(event);
+        s.sectors_.stamp(s.own_id_, sector, due);
+        logf("sector %d stamped for tick %u (%s, lead %u, input_delay %u), event sent ahead", sector, due, why,
+             sector_lead_ticks(), static_cast<unsigned>(s.input_delay_));
+    }
+
+    // Before the assignment the request waits for the first assigned frame:
+    // the anchor precedes the renumbering, so a stamp now would be
+    // anchor-relative.  After it, the next tick to step plus the lead, the
+    // stamp hold_pending_sector gives on that frame.  Every request made
+    // before the assignment waits, in order (a repeat is dropped by
+    // hold_sector, as after the assignment).
+    void session_client_core::request_sector(int sector, const char* why) {
+        if (!s.assigned_) {
+            s.start_sector_pending_ = true;
+            s.start_sectors_.emplace_back(sector, why ? why : "");
+            return;
+        }
+        hold_sector(sector, current_tick() + 1 + sector_lead_ticks(), why);
+    }
+
+    // A held --start-sector: on the first frame the session is assigned
+    // (tick base and lead known), stamp it `lead` ticks ahead like any
+    // other sector this client enters (each request that waited, in order).
+    void session_client_core::hold_pending_sector(uint32_t tick) {
+        if (s.start_sector_pending_ && s.assigned_) {
+            s.start_sector_pending_ = false;
+            const auto waiting = std::move(s.start_sectors_);
+            s.start_sectors_.clear();
+            for (const auto& [sector, why]: waiting) hold_sector(sector, tick + sector_lead_ticks(), why.c_str());
+        }
+    }
+
+    // The sector union (session/sector_union.hpp), the rule the server's
+    // update_sectors() runs: one count of the pacer per step, before it,
+    // from the manager's state after the previous step, and one pass per
+    // idle manager for the lowest sector owed.  The two worlds run the same
+    // scripts from the same anchor on the same stamps, so the tick a pass
+    // starts at is the same on every side.
+    void session_client_core::sector_union_pass(uint32_t tick) {
+        const auto pass = s.sectors_.tick(tick, platform_.sector_manager_active());
+        if (pass) {
+            s.sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
+            platform_.run_sector(pass.sector);
+            platform_.record_activation(tick, true);
+            logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s", pass.sector, tick,
+                 pass.player, pass.stamped_tick, tick > pass.stamped_tick ? ", held by the pacer" : "",
+                 [this] { std::string text; for (int x: s.sectors_.active()) text += std::to_string(x) + " "; return text; }().c_str());
+        }
+    }
+
+    // Sector: the sector the level's scripts last wrote.  With the
+    // checkpoint chain held this is a crossing whose manager run did not
+    // happen: it becomes an input, stamped ahead like the retail client's
+    // cell poll (physics_session_frame).  This frame's step was `tick`, so
+    // the earliest the manager can run is before tick + 1.  Without the hold
+    // (a graph the hold did not understand) the chain already activated it:
+    // report it after the fact, out of lockstep.
+    //
+    // A moved resetpoint is a crossing too, the own ball's alone (only the
+    // checkpoint chain moves it, in the frame it writes the cell).  It is
+    // what catches a trailing ball: a peer's crossing has the union pass
+    // write the same sector into the cell first, so the chain's own write
+    // changes nothing there - the retail client reports that crossing from
+    // OnPostCheckpointReached.
+    void session_client_core::poll_own_sector(uint32_t tick) {
+        const sector_poll poll = platform_.poll_sector(tick);
+        if (poll.cell_read && (poll.cell != s.sector_cell_ || poll.resetpoint_moved)) {
+            const int sector = poll.cell;
+            s.sector_cell_ = sector;
+            if (sector > 0 && !s.sectors_requested_.count(sector)) {
+                if (poll.checkpoint_held) {
+                    hold_sector(sector, tick + 1 + sector_lead_ticks(), "checkpoint");
+                } else {
+                    s.sectors_requested_.insert(sector);
+                    bmmo::session_event_msg event;
+                    event.tick = tick;
+                    event.type = bmmo::session::event_type::Sector;
+                    event.sector = sector;
+                    send_event(event);
+                    logf("sector %d at tick %u", sector, tick);
+                }
+            }
+        }
     }
 
 }

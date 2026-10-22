@@ -50,6 +50,12 @@
 // own_birth_capture, make_own and unmake_own, with the own_body_control
 // fallback of design 2.3 and the own_echoes switch.
 //
+// Step E8 moves the sectors (design 6.1 row E8): request_sector with the
+// start sector pending until the assignment, hold_sector, the union's pass
+// before the step and the own sector poll after it, and the anchor's
+// sector_cell_, in client_core_frame.cpp, over the platform's
+// sector_manager_active, run_sector, record_activation and poll_sector.
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -218,6 +224,12 @@ namespace bmmo::session {
         uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
         std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
+        // The sectors start_sector_pending_ stands for, each with why it was
+        // asked for, in the order requested (request_sector before the
+        // assignment; E8: the headless --start-sector, which was
+        // args_.start_sector until then, is the only one there; a retail
+        // host may ask for more than one before its assignment).
+        std::vector<std::pair<int, std::string>> start_sectors_;
         bool input_rewind_pending_ = false;
         uint32_t input_rewind_tick_ = 0;
         std::string input_rewind_entity_;
@@ -557,6 +569,7 @@ namespace bmmo::session {
         std::string build_id;             // SessionReady::build_id and the journal header's
         std::string own_name;             // the journal's own player name
         int load_ticks = 0;               // the ticks the level took to load (the anchored log line)
+        int sector_cell = 0;              // IngameParameter[0][1] at the anchor (E8: the core's sector_cell_)
     };
 
     // begin: refused when the server runs another physics protocol.
@@ -696,6 +709,31 @@ namespace bmmo::session {
         // always without own_body_control (design 2.3: the branch is inert).
         bool destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed);
 
+        // ---- sectors (E8, client_core_frame.cpp; design 1.3 steps 1, 9, 26) ----
+        // A sector this client enters (the headless --start-sector, the
+        // retail checkpoint hook and verb): before the assignment it waits
+        // for the first assigned frame (hold_pending_sector), since the
+        // anchor precedes the renumbering; after it, stamped for the tick
+        // after the current one plus the sector lead.  Once per sector;
+        // every request made before the assignment waits, in order.  It
+        // always holds: a host that reports a crossing after the fact
+        // instead (the retail hook without the checkpoint hold, or before
+        // its assignment) decides that before it calls (design 6.2).
+        void request_sector(int sector, const char* why);
+        // pre_step step 1: the requests waiting for the assignment, stamped
+        // for `tick` (the tick about to be stepped) plus the lead, once
+        // assigned.
+        void hold_pending_sector(uint32_t tick);
+        // pre_step step 9: one pass of the sector union before the step of
+        // `tick` (session/sector_union.hpp), its cell write the core's.
+        void sector_union_pass(uint32_t tick);
+        // post_step step 26: the own sector poll after the step of `tick` -
+        // a crossing stamped ahead (the checkpoint chain held) or reported
+        // after the fact.
+        void poll_own_sector(uint32_t tick);
+        // The lead the server sized for this session (SessionStart).
+        uint32_t sector_lead_ticks() const { return s.sector_lead_; }
+
         // ---- the frame's rewinds (E5; pre_step steps 5 and 7, design 1.3) ----
         // One replay for every input correction the frame collected (the
         // relay's and our own substituted frames').
@@ -771,6 +809,10 @@ namespace bmmo::session {
         void logf(const char* format, ...);
 
     private:
+        // A sector this client enters, as an input: stamped for `due`, sent,
+        // and handed to the union (E8).  Once per sector per session.
+        void hold_sector(int sector, uint32_t due, const char* why);
+
         // The snapshot path (E4, client_core_messages.cpp): the resync
         // rebuild, the snapshot rollback, or the legacy ladder.
         void apply_snapshot(const bmmo::session_snapshot_msg& snapshot);

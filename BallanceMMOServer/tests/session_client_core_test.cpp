@@ -25,7 +25,11 @@
 // "Beam": each echo verdict with and without own_body_control and with the
 // own_echoes switch off; the reports queued and committed after the drain's
 // bump; the beam stamped T+1, live and in a replay) and takes the five
-// back-calls whose targets moved out of the call lists.
+// back-calls whose targets moved out of the call lists.  Step E8 adds the
+// sectors (design 5.1 "Sector request before the assignment": pending until
+// the first assigned frame, then stamped T + lead; the union pass's cell
+// write raising no Sector event in the own poll; the own crossings stamped
+// ahead or reported after the fact).
 
 #include <gtest/gtest.h>
 
@@ -35,6 +39,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -71,6 +76,8 @@ namespace {
         int ball_type = 1;                               // what ball_recipe_of answers
         bmmo::session::own_birth_pose capture;           // what own_birth_capture answers
         std::vector<bmmo::session::own_body_spec> own_specs;   // every make_own's spec, in order
+        bool manager_active = false;                     // what sector_manager_active answers (E8)
+        bmmo::session::sector_poll poll;                 // what poll_sector answers (E8)
 
         session_platform make() {
             session_platform p;
@@ -165,6 +172,19 @@ namespace {
                 calls.push_back("unmake_own:" + entity + ":" + std::to_string(tick));
                 return true;
             };
+            // The sectors' (E8).
+            p.sector_manager_active = [this]() {
+                calls.push_back(manager_active ? "sector_manager_active:on" : "sector_manager_active:off");
+                return manager_active;
+            };
+            p.run_sector = [this](int sector) { calls.push_back("run_sector:" + std::to_string(sector)); };
+            p.record_activation = [this](uint32_t tick, bool reset) {
+                calls.push_back("record_activation:" + std::to_string(tick) + (reset ? ":reset" : ""));
+            };
+            p.poll_sector = [this](uint32_t tick) {
+                calls.push_back("poll_sector:" + std::to_string(tick));
+                return poll;
+            };
             return p;
         }
     };
@@ -176,7 +196,7 @@ namespace {
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 16; ++missing) {
+        for (int missing = 0; missing < 20; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
@@ -195,6 +215,10 @@ namespace {
             if (missing == 13) p.mute_event_log = nullptr;
             if (missing == 14) p.ball_recipe_of = nullptr;
             if (missing == 15) p.own_birth_capture = nullptr;
+            if (missing == 16) p.sector_manager_active = nullptr;
+            if (missing == 17) p.run_sector = nullptr;
+            if (missing == 18) p.record_activation = nullptr;
+            if (missing == 19) p.poll_sector = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         // E7: the capture only with the event log's own births; make_own and
@@ -281,6 +305,7 @@ namespace {
         EXPECT_EQ(s.sector_lead_, 0u);
         EXPECT_EQ(s.sector_cell_, 0);
         EXPECT_FALSE(s.start_sector_pending_);
+        EXPECT_TRUE(s.start_sectors_.empty());
         EXPECT_FALSE(s.assigned_);
         EXPECT_FALSE(s.held_);
         EXPECT_EQ(s.hold_polls_, 0);
@@ -2875,5 +2900,219 @@ namespace {
     TEST(SessionClientCoreOwnLives, OwnEchoesOffCountsOnly) {
         own_echoes_off_counts_only(true);
         own_echoes_off_counts_only(false);
+    }
+
+    // ------------------------------------------------------------- sectors (E8)
+    bmmo::session::sector_poll cell_poll(int cell, bool held, bool moved = false, bool read = true) {
+        bmmo::session::sector_poll poll;
+        poll.cell_read = read;
+        poll.cell = cell;
+        poll.checkpoint_held = held;
+        poll.resetpoint_moved = moved;
+        return poll;
+    }
+
+    // Design 5.1 "Sector request before the assignment": the anchor makes
+    // sector 1 ours and takes the report's cell; a request before the
+    // assignment only waits (nothing sent, nothing stamped), and the first
+    // assigned frame stamps it T + lead with the request's reason.  A
+    // request after the assignment is stamped current + 1 + lead at once;
+    // each sector once.
+    TEST(SessionClientCoreSectors, RequestBeforeTheAssignmentWaitsForTheFirstAssignedFrame) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        core.s.own_id_ = 3;
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        core.s.sector_cell_ = 9;   // begin's reset is the anchor's to overwrite
+        core.level_requested();
+        // A request at the anchor (the headless --start-sector) comes before
+        // the anchor's SessionReady: not assigned, so pending.
+        size_t from = fake.calls.size();
+        core.request_sector(3, "--start-sector");
+        EXPECT_TRUE(since(fake.calls, from).empty());
+        EXPECT_TRUE(core.s.start_sector_pending_);
+        {
+            const std::vector<std::pair<int, std::string>> expected = {{3, "--start-sector"}};
+            EXPECT_EQ(core.s.start_sectors_, expected);
+        }
+        // A second request before the assignment (a retail checkpoint, say)
+        // waits too, after the first; a repeat is dropped when it is stamped.
+        core.request_sector(2, "checkpoint");
+        core.request_sector(3, "sector verb");
+        EXPECT_TRUE(since(fake.calls, from).empty());
+        ASSERT_EQ(core.s.start_sectors_.size(), 3u);
+        EXPECT_EQ(core.s.start_sectors_[1], std::make_pair(2, std::string("checkpoint")));
+        bmmo::session::anchor_report report;
+        report.build_id = "build-x";
+        report.sector_cell = 1;
+        core.anchor(report);
+        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1}));
+        EXPECT_EQ(core.s.sector_cell_, 1);
+        EXPECT_TRUE(core.s.start_sector_pending_) << "the anchor keeps the request";
+        // Not assigned: the frame (a hold that timed out) stamps nothing.
+        from = fake.calls.size();
+        core.hold_pending_sector(5);
+        EXPECT_TRUE(since(fake.calls, from).empty());
+        EXPECT_TRUE(core.s.start_sector_pending_);
+        EXPECT_EQ(core.s.sectors_.stamps_pending(), 0u);
+
+        core.on_session_assign(assign_message(9, 120));
+        from = fake.calls.size();
+        const size_t sent_before = fake.sent.size();
+        core.hold_pending_sector(120);   // the first assigned frame steps 120
+        {
+            const std::vector<std::string> expected = {
+                "send:1", "log:0:sector 3 stamped for tick 127 (--start-sector, lead 7, input_delay 4), event sent ahead",
+                "send:1", "log:0:sector 2 stamped for tick 127 (checkpoint, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        ASSERT_EQ(fake.sent.size(), sent_before + 2);
+        {
+            const auto event = decode<bmmo::session_event_msg>(fake.sent[sent_before].first);
+            EXPECT_EQ(event.session, 9u);
+            EXPECT_EQ(event.type, bmmo::session::event_type::Sector);
+            EXPECT_EQ(event.sector, 3);
+            EXPECT_EQ(event.tick, 127u);
+            EXPECT_EQ(event.origin_tick, 127u);
+            EXPECT_EQ(decode<bmmo::session_event_msg>(fake.sent.back().first).sector, 2);
+        }
+        EXPECT_FALSE(core.s.start_sector_pending_);
+        EXPECT_TRUE(core.s.start_sectors_.empty());
+        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 2, 3}));
+        EXPECT_EQ(core.s.sectors_.stamps_pending(), 2u);
+        EXPECT_EQ(core.s.events_sent_, 2u);
+        // Once: the next frame and a repeated request do nothing.
+        from = fake.calls.size();
+        core.hold_pending_sector(121);
+        core.request_sector(3, "sector verb");
+        EXPECT_TRUE(since(fake.calls, from).empty());
+        // After the assignment: current (120, nothing stepped yet) + 1 + lead.
+        ASSERT_EQ(core.current_tick(), 120u);
+        core.request_sector(4, "sector verb");
+        {
+            const std::vector<std::string> expected = {
+                "send:1", "log:0:sector 4 stamped for tick 128 (sector verb, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(decode<bmmo::session_event_msg>(fake.sent.back().first).tick, 128u);
+        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 2, 3, 4}));
+        // A new session forgets the request.
+        core.end("over");
+        core.request_sector(5, "x");
+        EXPECT_TRUE(core.s.start_sector_pending_);
+        ASSERT_FALSE(core.begin(start_message(10, 3), bmmo::session::core_config{}).refused);
+        EXPECT_FALSE(core.s.start_sector_pending_);
+        EXPECT_TRUE(core.s.start_sectors_.empty());
+        EXPECT_TRUE(core.s.sectors_requested_.empty());
+    }
+
+    // The union's pass before the step (design 1.3 step 9): the manager's
+    // state counted every tick, a pass started for the lowest sector owed
+    // once the manager has been idle three ticks, with the cell written,
+    // the manager run, the activation recorded and the line logged.  The
+    // own poll after the step (step 26) then raises no Sector event for the
+    // pass's own write; a crossing is stamped ahead with the chain held,
+    // reported after the fact without it, and a moved resetpoint is our own
+    // crossing of a sector a peer started.
+    TEST(SessionClientCoreSectors, UnionPassAndTheOwnPoll) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        EXPECT_EQ(core.s.sector_cell_, 0);
+        core.request_sector(3, "sector verb");   // stamped 128
+        size_t from = fake.calls.size();
+        for (uint32_t tick = 120; tick <= 127; ++tick) core.sector_union_pass(tick);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>(8, "sector_manager_active:off"));
+        from = fake.calls.size();
+        core.sector_union_pass(128);
+        {
+            const std::vector<std::string> expected = {
+                "sector_manager_active:off", "run_sector:3", "record_activation:128:reset",
+                "log:0:sector +3 at tick 128 (player 3, stamped 128), running: 1 3 "};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.sector_cell_, 3);
+        // The pass's own write: no crossing.
+        fake.poll = cell_poll(3, true);
+        from = fake.calls.size();
+        core.poll_own_sector(128);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:128"});
+
+        // A peer's sector, relayed for 129: the pacer holds it while the
+        // manager runs and for the idle ticks after.
+        core.on_session_event(sector_message(4, 5, 129, 129));
+        core.drain_due_events(129);
+        fake.manager_active = true;
+        core.sector_union_pass(129);
+        fake.manager_active = false;
+        for (uint32_t tick = 130; tick <= 131; ++tick) core.sector_union_pass(tick);
+        from = fake.calls.size();
+        core.sector_union_pass(132);
+        {
+            const std::vector<std::string> expected = {
+                "sector_manager_active:off", "run_sector:5", "record_activation:132:reset",
+                "log:0:sector +5 at tick 132 (player 4, stamped 129, held by the pacer), running: 1 3 5 "};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.sector_cell_, 5);
+        fake.poll = cell_poll(5, true);
+        from = fake.calls.size();
+        core.poll_own_sector(132);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:132"}) << "a peer's pass is no crossing of ours";
+        // ...but our own ball crossing into it moves the resetpoint: ours too.
+        fake.poll = cell_poll(5, true, true);
+        from = fake.calls.size();
+        core.poll_own_sector(134);
+        {
+            const std::vector<std::string> expected = {
+                "poll_sector:134", "send:1",
+                "log:0:sector 5 stamped for tick 142 (checkpoint, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 3, 5}));
+        // Moved again into a sector already ours: nothing.
+        from = fake.calls.size();
+        core.poll_own_sector(135);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:135"});
+        // A crossing with the chain held: stamped tick + 1 + lead.
+        fake.poll = cell_poll(6, true);
+        from = fake.calls.size();
+        core.poll_own_sector(136);
+        {
+            const std::vector<std::string> expected = {
+                "poll_sector:136", "send:1",
+                "log:0:sector 6 stamped for tick 144 (checkpoint, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.sector_cell_, 6);
+        // Without the hold the chain ran already: reported after the fact,
+        // stamped with the tick that ran it, and not handed to the union.
+        const size_t stamps = core.s.sectors_.stamps_pending();
+        fake.poll = cell_poll(8, false);
+        from = fake.calls.size();
+        core.poll_own_sector(140);
+        {
+            const std::vector<std::string> expected = {"poll_sector:140", "send:1", "log:0:sector 8 at tick 140"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        {
+            const auto event = decode<bmmo::session_event_msg>(fake.sent.back().first);
+            EXPECT_EQ(event.type, bmmo::session::event_type::Sector);
+            EXPECT_EQ(event.sector, 8);
+            EXPECT_EQ(event.tick, 140u);
+        }
+        EXPECT_EQ(core.s.sectors_.stamps_pending(), stamps);
+        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 3, 5, 6, 8}));
+        // An unread cell counts for nothing; a cell of 0 is taken, unreported.
+        fake.poll = cell_poll(11, true, true, false);
+        from = fake.calls.size();
+        core.poll_own_sector(141);
+        fake.poll = cell_poll(0, true);
+        core.poll_own_sector(142);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>({"poll_sector:141", "poll_sector:142"}));
+        EXPECT_EQ(core.s.sector_cell_, 0);
     }
 }

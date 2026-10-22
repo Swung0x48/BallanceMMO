@@ -17,7 +17,9 @@
 // keep_live_cells); E6 the mirrors' (mirror_entity, make_mirror,
 // unmake_mirror, detach_mirror_navigation, attach_mirror_navigation,
 // mute_event_log); E7 the own ball's (make_own, unmake_own,
-// own_birth_capture, ball_recipe_of) and the own_body_control check.
+// own_birth_capture, ball_recipe_of) and the own_body_control check; E8 the
+// sectors' (sector_manager_active, run_sector, record_activation,
+// poll_sector).
 //
 // CK-free and header-only.
 
@@ -147,6 +149,23 @@ namespace bmmo::session {
         bool spawn = false;
     };
 
+    // What the host's own sector poll found after a step (design 2.2
+    // poll_sector; E8): the sector cell the level's scripts last wrote
+    // (IngameParameter[0][1]; `cell_read` false when the host could not read
+    // it, and nothing else counts), whether the own ball's resetpoint moved
+    // (a crossing of the own ball alone; a host that does not watch it says
+    // false), and whether the level's checkpoint sector activation is held
+    // (a crossing is then stamped ahead; otherwise it already ran and is
+    // reported after the fact).  A host that reports its crossings itself
+    // while the hold is not in force (the retail checkpoint hook) says
+    // `cell_read` false then, or the core would report them a second time.
+    struct sector_poll {
+        bool cell_read = false;
+        int cell = 0;
+        bool resetpoint_moved = false;
+        bool checkpoint_held = false;
+    };
+
     // The host's work around a scope of the core (keep_live_cells): what it
     // did on entry is the host's; `on_exit` runs when the scope ends, once.
     class scope_guard {
@@ -185,6 +204,15 @@ namespace bmmo::session {
         // Every physicalized entity, in physics-table order.
         std::function<std::vector<bmmo_physics_body_state>()> list_bodies;
 
+        // Gameplay_SectorManager is running (design 2.2
+        // sector_manager_active; E8): the sector union's pacer counts it once
+        // per tick, before that tick's step.
+        std::function<bool()> sector_manager_active;
+        // The own sector poll after the step of `tick` (sector_poll; E8):
+        // `tick` is the tick the core decides for, so a line the host writes
+        // about the poll names the same tick.
+        std::function<sector_poll(uint32_t tick)> poll_sector;
+
         // ---- writing the world (design 2.2; E4) ----
         // Beam a body to the pose and overwrite its speeds; `wake` wakes it, a
         // simulated body is frozen otherwise (physics_state.hpp set_body_state,
@@ -193,6 +221,16 @@ namespace bmmo::session {
         // across its writes and logs it only after a failed one.
         std::function<bool(const std::string& entity, const double position[3], const double rotation[4],
                            const float linear[3], const float angular[3], bool wake, std::string& error)> write_body;
+
+        // One pass of the sector union (design 2.2 run_sector; E8):
+        // deactivate nothing, write `sector` into the sector cell and start
+        // Gameplay_SectorManager from its beginning, as the server's
+        // update_sectors() does.
+        std::function<void(int sector)> run_sector;
+        // A manager activation this frame consumed, by the tick of that
+        // frame, for the replay to re-issue (design 2.2 record_activation;
+        // E8: the union's passes, `reset` true).
+        std::function<void(uint32_t tick, bool reset)> record_activation;
 
         // ---- mirrors (design 2.2; E6) ----
         // The entity that mirrors `player` with a ball of `ball_type`, made
@@ -313,6 +351,12 @@ namespace bmmo::session {
         // the event log's births need the capture, the own body control the
         // two body operations.
         if (!platform.ball_recipe_of) return "ball_recipe_of";
+        // The sectors (E8): every host runs the sector union and reports the
+        // sectors its own ball enters.
+        if (!platform.sector_manager_active) return "sector_manager_active";
+        if (!platform.run_sector) return "run_sector";
+        if (!platform.record_activation) return "record_activation";
+        if (!platform.poll_sector) return "poll_sector";
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
         if (caps.own_body_control) {
