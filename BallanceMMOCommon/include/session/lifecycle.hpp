@@ -35,6 +35,20 @@
 #include "../entity/session.hpp"
 
 namespace bmmo::session {
+    // An event type's name as the headless client's log lines and journal
+    // notes print it (and its --hold-event takes it): moved from the headless
+    // client at shared-core step E7, whose own-echo lines it names.
+    inline const char* event_type_name(int type) {
+        switch (type) {
+        case 0: return "physicalize";
+        case 1: return "unphysicalize";
+        case 2: return "sector";
+        case 3: return "finish";
+        case 4: return "bodyrevived";
+        default: return "?";
+        }
+    }
+
     // S4 (late-player design 3.2, plan step 20): the lifecycle barrier is
     // gone.  It held every member up to a second when a present frame was
     // flagged INPUT_FLAG_PHYSICALIZED and the world had no ball for that

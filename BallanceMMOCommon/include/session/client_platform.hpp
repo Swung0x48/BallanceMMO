@@ -16,12 +16,14 @@
 // ending); E4 the snapshot path's (write_body, own_driven_entity, bind_world,
 // keep_live_cells); E6 the mirrors' (mirror_entity, make_mirror,
 // unmake_mirror, detach_mirror_navigation, attach_mirror_navigation,
-// mute_event_log).
+// mute_event_log); E7 the own ball's (make_own, unmake_own,
+// own_birth_capture, ball_recipe_of) and the own_body_control check.
 //
 // CK-free and header-only.
 
 #include "clock_site.hpp"
 #include "rollback.hpp"
+#include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
 
 #include <chrono>
@@ -104,6 +106,47 @@ namespace bmmo::session {
     // attach failed (`error` says why).
     enum class mirror_navigation : uint8_t { unavailable, attached, failed };
 
+    // The own ball's body made again the way the server makes it (design 2.2
+    // make_own; E7): at the pose its Physicalize carried, with that recipe in
+    // the own collision group, kicked with the spawn impulse of `kick_index`
+    // when `kick`.  `tick` names the change in the host's own log lines.
+    struct own_body_spec {
+        std::string entity;
+        float position[3] = {};
+        float rotation[9] = {};
+        bmmo_physics_ball_recipe recipe{};
+        std::string group;
+        bool kick = false;
+        uint32_t kick_index = 0;
+        float kick_strength = 0.0f;
+        uint32_t tick = 0;
+    };
+    // What make_own did: `found` (false: the host has no such entity, and
+    // did nothing); a body still there taken out first, or that failing
+    // (`took_out_failed`, `took_out_error`); the body made (`made`, `error`
+    // otherwise, and nothing kicked); the kick taken (`kick_error`
+    // otherwise).  The core logs them, in this order.
+    struct own_body_made {
+        bool found = false;
+        bool took_out_failed = false;
+        std::string took_out_error;
+        bool made = false;
+        std::string error;
+        bool kicked = false;
+        std::string kick_error;
+    };
+    // The own ball's Physicalize as the host saw it (design 2.2
+    // own_birth_capture; E7): `captured` before the step moved it (headless:
+    // the PreSimulate capture of the live tick), else the entity's pose after
+    // the step, which is never a spawn; `spawn` when it was at the level's
+    // resetpoint (kicked here, so on every side).
+    struct own_birth_pose {
+        bool captured = false;
+        float position[3] = {};
+        float rotation[9] = {};
+        bool spawn = false;
+    };
+
     // The host's work around a scope of the core (keep_live_cells): what it
     // did on entry is the host's; `on_exit` runs when the scope ends, once.
     class scope_guard {
@@ -181,6 +224,27 @@ namespace bmmo::session {
         // The entity the own navigation replica drives, "" when there is none.
         std::function<std::string()> own_driven_entity;
 
+        // ---- own ball (design 2.2; E7) ----
+        // The level's ball table row of `entity` (Physicalize_GameBall): its
+        // type, -1 when the table names no such ball, and the retail
+        // Physicalize recipe of that type (cleared, and empty for -1).  The
+        // beam's and the own birth's recipe.
+        std::function<int(const std::string& entity, bmmo::session::ball_recipe& recipe)> ball_recipe_of;
+        // The own birth of `entity` the event log reported for `tick`
+        // (own_lifecycle_source::event_log): the pose and spawn flag the host
+        // captured before the step, consumed by this call.  Required with
+        // event_log.
+        std::function<own_birth_pose(const std::string& entity, uint32_t tick)> own_birth_capture;
+        // With own_body_control only (design 2.3), and called inside the
+        // core's mute of the event log (mute_event_log): the own body made
+        // again (own_body_spec), a body still there taken out first; and the
+        // own body taken out, the entity put at the pose its Physicalize
+        // carried (false and `error`: not taken out).  The host shuts down
+        // what drives the body first (headless: the navigation replica).
+        std::function<own_body_made(const own_body_spec& spec)> make_own;
+        std::function<bool(const std::string& entity, const float position[3], const float rotation[9], uint32_t tick,
+                           std::string& error)> unmake_own;
+
         // ---- rollback (design 2.2; E4) ----
         // The rollback engine's view of the host's world, bound anew on every
         // use, never cached (the options take the own key count by value).
@@ -208,7 +272,8 @@ namespace bmmo::session {
 
     // Design 2.3.  Every flag defaults to "cannot"; a host declares what it
     // can.  Each comes with the operations it needs (own_body_control:
-    // make_own / unmake_own at E7; whole_frame with bind_world at E9).  From
+    // make_own / unmake_own, checked from E7; whole_frame with bind_world at
+    // E9).  From
     // E3 the core reads `slew` (SessionReady's caps: CAP_LEAD iff slew); the
     // pacer operations it will need arrive at E5/E9.  `nonblocking_hold`
     // changes nothing in the core (one hold state machine, poll_hold); it
@@ -228,7 +293,6 @@ namespace bmmo::session {
     // The first operation `platform` lacks that every host must fill, or that
     // a capability `caps` declares needs; nullptr when nothing is missing.
     inline const char* missing_platform_operation(const session_platform& platform, const session_capabilities& caps) {
-        (void)caps;
         if (!platform.send) return "send";
         if (!platform.now) return "now";
         if (!platform.log) return "log";
@@ -245,6 +309,16 @@ namespace bmmo::session {
         if (!platform.detach_mirror_navigation) return "detach_mirror_navigation";
         if (!platform.attach_mirror_navigation) return "attach_mirror_navigation";
         if (!platform.mute_event_log) return "mute_event_log";
+        // The own lives (E7): every host beams and reports its own births;
+        // the event log's births need the capture, the own body control the
+        // two body operations.
+        if (!platform.ball_recipe_of) return "ball_recipe_of";
+        if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
+            return "own_birth_capture";
+        if (caps.own_body_control) {
+            if (!platform.make_own) return "make_own";
+            if (!platform.unmake_own) return "unmake_own";
+        }
         // A host that journals (session/client_journal.hpp) stamps the header,
         // and writes bodies into LOCAL checkpoints (body_state, which body
         // corrections read too, is required above).

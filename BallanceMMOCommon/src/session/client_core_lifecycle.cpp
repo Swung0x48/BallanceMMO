@@ -145,13 +145,13 @@ namespace bmmo::session {
             bool own_placed = false;
             for (const auto& event: held) {
                 if (!own_placed && join_rank(event.player) > own_rank) {
-                    legacy.live_own_lives(frame_tick);
+                    live_own_lives(frame_tick);
                     own_placed = true;
                 }
                 apply_event(event);
             }
         }
-        legacy.live_own_lives(frame_tick);   // applies once; afterwards only retires
+        live_own_lives(frame_tick);   // applies once; afterwards only retires
     }
 
     // A member's place in the server's order of a tick's events: its join
@@ -349,7 +349,7 @@ namespace bmmo::session {
     // stamp is applied here only once its live frame has run: before that
     // no replay reaches it.
     void session_client_core::drain_pending_births(uint32_t tick) {
-        if (s.pending_births_.empty() && !legacy.own_lives_due(tick)) return;
+        if (s.pending_births_.empty() && !own_lives_due(tick)) return;
         std::vector<pending_birth> due;
         for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();)
             if (it->tick == tick) {
@@ -362,11 +362,11 @@ namespace bmmo::session {
                                                          join_rank(b.player), b.origin,
                                                          bmmo::session::event_type::Physicalize);
         });
-        bool own = legacy.own_lives_due(tick);
+        bool own = own_lives_due(tick);
         const uint32_t own_rank = join_rank(s.own_id_);
         for (const auto& birth: due) {
             if (own && join_rank(birth.player) > own_rank) {
-                legacy.apply_own_lives(tick, "replay", false);
+                apply_own_lives(tick, "replay", false);
                 own = false;
             }
             {
@@ -375,7 +375,7 @@ namespace bmmo::session {
             }
             s.mechanism_tracking_.mark_dirty();
         }
-        if (own) legacy.apply_own_lives(tick, "replay", false);
+        if (own) apply_own_lives(tick, "replay", false);
     }
 
     // ----------------------------------------------------------- mirrors
@@ -512,6 +512,871 @@ namespace bmmo::session {
         } else {
             logf("remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
         }
+    }
+
+
+    // ======================================================= own lives (E7)
+    // Moved from the headless client (session_client.cpp at f2227b0): the
+    // own ball's body changes the history keeps (struct own_life), the beam,
+    // the own births reported and the echoes of our own events, verbatim but
+    // for the platform calls (own_birth_capture, ball_recipe_of, make_own,
+    // unmake_own, body_state, write_body, own_driven_entity, bind_world,
+    // keep_live_cells), the configuration (rollback, own_echoes) and the
+    // back-calls (own_ball, recorded_input_at).  Without own_body_control
+    // (design 2.3) the own body is never made or taken out: the beam's stamp
+    // is an in-place write, and an echo the history cannot carry is a
+    // re-report or a resync.
+
+    // ------------------------------------------------- own reports (step 19)
+    // The own ball's Physicalize as the event log reported it for `tick`:
+    // the pose the retail script physicalized at and the spawn flag (design
+    // 9.10), both taken before the step moved the body (the host's capture).
+    // Without a capture of this birth - no Ball Navigation yet to anchor the
+    // callback to - the entity after the tick is all there is, and it is
+    // never flagged: no kick was applied here, so none may be applied
+    // anywhere else.
+    void session_client_core::report_physicalize(const std::string& entity, uint32_t tick) {
+        own_birth_report report;
+        report.entity = entity;
+        report.tick = tick;
+        report.pose = platform_.own_birth_capture(entity, tick);
+        report.ball_type = platform_.ball_recipe_of(entity, report.recipe);
+        commit_own_birth(report);
+    }
+
+    void session_client_core::commit_own_birth(const own_birth_report& report) {
+        bmmo::session_event_msg event;
+        event.tick = report.tick;
+        event.type = bmmo::session::event_type::Physicalize;
+        event.ball_type = static_cast<uint8_t>(report.ball_type < 0 ? 0 : report.ball_type);
+        if (!report.pose.captured) logf("warning: physicalize pose taken from the entity after the tick (no capture before the step)");
+        std::copy(std::begin(report.pose.position), std::end(report.pose.position), event.position);
+        std::copy(std::begin(report.pose.rotation), std::end(report.pose.rotation), event.rotation);
+        const bool spawn = report.pose.captured && report.pose.spawn;
+        if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        event.recipe = report.recipe;
+        send_event(event);
+        // The birth as the history keeps it: what the server makes when
+        // its echo says it applied the event later (record_own_birth).
+        record_own_birth(event, report.entity);
+        logf("own ball %s physicalized at tick %u (type %d%s) pos=%a,%a,%a", report.entity.c_str(), report.tick,
+             report.ball_type, spawn ? ", spawn" : "", static_cast<double>(event.position[0]),
+             static_cast<double>(event.position[1]), static_cast<double>(event.position[2]));
+    }
+
+    void session_client_core::report_unphysicalize(uint32_t tick) {
+        bmmo::session_event_msg event;
+        event.tick = tick;
+        event.type = bmmo::session::event_type::Unphysicalize;
+        send_event(event);
+        logf("own ball unphysicalized at tick %u", tick);
+    }
+
+    void session_client_core::own_physicalized(const own_birth_report& report) {
+        client_core_state::own_report queued;
+        queued.report = report;
+        s.own_reports_.push_back(std::move(queued));
+    }
+
+    void session_client_core::own_unphysicalized(uint32_t tick) {
+        client_core_state::own_report queued;
+        queued.birth = false;
+        queued.report.tick = tick;
+        s.own_reports_.push_back(std::move(queued));
+    }
+
+    // Committed where the event log's reports are (design 1.3): after the
+    // drain bumped the generation of a body made this frame, so the life's
+    // generation is the body's.
+    void session_client_core::commit_own_reports() {
+        std::vector<client_core_state::own_report> queued;
+        queued.swap(s.own_reports_);
+        for (const auto& r: queued) {
+            if (r.birth) commit_own_birth(r.report);
+            else report_unphysicalize(r.report.tick);
+        }
+    }
+
+    // ------------------------------------------------------------- beam
+    void session_client_core::request_beam(const double position[3]) {
+        s.beam_requested_ = true;
+        for (int k = 0; k < 3; ++k) s.beam_position_[k] = position[k];
+    }
+
+    void session_client_core::apply_requested_beam(uint32_t tick) {
+        if (!s.beam_requested_) return;
+        s.beam_requested_ = false;
+        beam_own_ball(tick);
+    }
+
+    // The own ball beamed in place, upright and at rest (no rebuild: a
+    // ball without the navigation replica, or a host without own body
+    // control).
+    bool session_client_core::write_beam(const std::string& name, const double position[3], uint32_t tick) {
+        const double rotation[4] = {0.0, 0.0, 0.0, 1.0};
+        const float still[3] = {0.0f, 0.0f, 0.0f};
+        std::string error;
+        if (!platform_.write_body(name, position, rotation, still, still, true, error)) {
+            logf("--beam at tick %u: %s", tick, error.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    // The automation `beam` verb, headless: the own ball at `position`,
+    // upright and at rest.  The server's copy is moved by re-reporting the
+    // ball's life at that pose - a plain repeat Physicalize would not move
+    // it, because physicalize() of an entity that already has a body is a
+    // no-op (physics_state.cpp:741), so the pair the retail death sends is
+    // used instead.
+    //
+    // This client does what the server does with that pair, at the pair's
+    // stamp: the body is rebuilt at tick + 1, before that tick's step
+    // (apply_own_lives), not moved now.  Moving it here, after the record of
+    // `tick`, left the move outside every replay: a rewind anchored at or
+    // before `tick` re-stepped the old path and nothing put the beam back
+    // (measured: the own ball 540 m off on three of four clients), and
+    // the moved core kept its floor contact, which the server's fresh one
+    // does not have.  Applied at the stamp, live and in every replay that
+    // crosses it, the record of `tick` stays the pre-beam world the
+    // server's checkpoint of `tick` is, and the lifetime stays the same:
+    // the body has the same name, recipe and group on every side.
+    //
+    // Without own body control (design 2.3) the record is kept the same
+    // way, but its stamp is an in-place write (write_beam), live and in
+    // every replay that crosses it, and the generation is bumped here, at
+    // the request, as the in-place branch below does.
+    void session_client_core::beam_own_ball(uint32_t tick) {
+        const std::string name = legacy.own_ball();
+        if (name.empty() || !s.own_physicalized_) {
+            logf("--beam at tick %u: no own body to beam", tick);
+            return;
+        }
+        // Without the navigation replica (no --rollback) the ball is driven
+        // by the retail force controllers, which die with the core and are
+        // not re-made until the key is released: the body is moved in
+        // place, as before.  There is no rewind to undo it then.
+        const bool navigated = !platform_.own_driven_entity().empty();
+        if (!navigated) {
+            if (!write_beam(name, s.beam_position_, tick)) return;
+            ++s.generations_[name];   // the server rebuilds its copy: a new lifetime
+        } else if (!caps_.own_body_control) {
+            ++s.generations_[name];   // design 2.3: the server's new lifetime, bumped at the request
+        }
+        own_life beam;
+        beam.what = own_life::kind::beam;
+        beam.origin = beam.applied = tick + 1;
+        beam.entity = name;
+        {
+            const auto generation = s.generations_.find(name);
+            beam.generation = generation == s.generations_.end() ? 0u : generation->second;
+        }
+        bmmo::session::ball_recipe recipe;
+        const int ball_type = platform_.ball_recipe_of(name, recipe);
+        beam.ball_type = static_cast<uint8_t>(std::max(ball_type, 0));
+        for (int k = 0; k < 3; ++k) beam.position[k] = static_cast<float>(s.beam_position_[k]);
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k) beam.rotation[r * 3 + k] = r == k ? 1.0f : 0.0f;
+        beam.recipe = recipe;
+        beam.group = s.own_group_;
+        bmmo::session_event_msg down;
+        down.tick = beam.origin;
+        down.type = bmmo::session::event_type::Unphysicalize;
+        send_event(down);
+        bmmo::session_event_msg up;
+        up.tick = beam.origin;
+        up.type = bmmo::session::event_type::Physicalize;
+        up.ball_type = beam.ball_type;
+        std::copy(std::begin(beam.position), std::end(beam.position), up.position);
+        std::copy(std::begin(beam.rotation), std::end(beam.rotation), up.rotation);
+        up.recipe = beam.recipe;
+        send_event(up);
+        logf("--beam: %s to (%.3f,%.3f,%.3f), reported to the server for tick %u and %s", name.c_str(),
+             s.beam_position_[0], s.beam_position_[1], s.beam_position_[2], beam.origin,
+             !navigated ? "moved here now (no navigation replica)"
+             : caps_.own_body_control ? "rebuilt here at that tick" : "moved here at that tick (no own body control)");
+        if (navigated) s.own_life_.push_back(std::move(beam));
+    }
+
+    // ------------------------------------------------------ own lives
+    // A birth the retail scripts made this frame and report_physicalize
+    // sent, as an own_life: the body the scripts made stays (a replay
+    // across it parks it as before), and the record is what moves it when
+    // the server's echo says it applied the Physicalize later, or removes
+    // it when the server never did (late-player design 3.3).
+    void session_client_core::record_own_birth(const bmmo::session_event_msg& event, const std::string& entity) {
+        if (!config.rollback) return;   // no history to move it in
+        own_life birth;
+        birth.what = own_life::kind::birth;
+        birth.origin = birth.applied = event.tick;
+        birth.entity = entity;
+        {
+            const auto generation = s.generations_.find(entity);
+            birth.generation = generation == s.generations_.end() ? 0u : generation->second;
+        }
+        birth.ball_type = event.ball_type;
+        std::copy(std::begin(event.position), std::end(event.position), birth.position);
+        std::copy(std::begin(event.rotation), std::end(event.rotation), birth.rotation);
+        birth.recipe = event.recipe;
+        birth.group = s.own_group_;
+        birth.spawn = (event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) != 0;
+        birth.origin_live = birth.applied_live = true;
+        s.own_life_.push_back(std::move(birth));
+    }
+
+    // Whether the ball's lifetime `life` belongs to is still the one the
+    // world has: a death or a trafo since (the drain bumped the
+    // generation) ended it, and a replay that made its body again would
+    // put back a body the live run no longer has, with nothing in the
+    // replay to take it out again.
+    bool session_client_core::own_life_current(const own_life& life) const {
+        const auto generation = s.generations_.find(life.entity);
+        return (generation == s.generations_.end() ? 0u : generation->second) == life.generation;
+    }
+
+    // The own body of `life` taken out, with the event log muted: not a
+    // lifetime change of the body the records describe (a beam's
+    // Unphysicalize half, a moved birth before its applied tick).  The
+    // entity is put at the pose its Physicalize carried, where the body
+    // is made again.  (The host shuts down the navigation replica first:
+    // its controllers would otherwise point into the core that goes.)
+    bool session_client_core::unmake_own_body(const own_life& life, uint32_t tick, const char* where) {
+        std::string error;
+        bool ok = false;
+        {
+            const event_log_mute mute(*this);
+            ok = platform_.unmake_own(life.entity, life.position, life.rotation, tick, error);
+        }
+        s.mechanism_tracking_.mark_dirty();
+        if (!ok && s.own_lives_applied_ < 16)
+            logf("own body at tick %u (%s): unphysicalize %s: %s", tick, where, life.entity.c_str(), error.c_str());
+        return ok;
+    }
+
+    // The own body of `life` made at `tick` the way the server makes it
+    // (physics_world::apply_event): the pose, recipe and group its
+    // Physicalize carried, and a spawn's kick with the impulse index of
+    // `tick` - the applied tick, which the server and every remote kick
+    // with too.  A body still there is taken out first (a beam's pair in
+    // one tick, or a body a restore parked instead of destroying).  The
+    // event log is muted: the body is the same life to every side, so
+    // nothing about it is reported, and its generation stays.
+    bool session_client_core::remake_own_body(const own_life& life, uint32_t tick, const char* where) {
+        own_body_spec spec;
+        spec.entity = life.entity;
+        std::copy(std::begin(life.position), std::end(life.position), spec.position);
+        std::copy(std::begin(life.rotation), std::end(life.rotation), spec.rotation);
+        spec.recipe = to_bridge_recipe(life.recipe);
+        spec.group = life.group;
+        spec.tick = tick;
+        if (life.spawn && s.spawn_impulse_ > 0.0f) {
+            const uint8_t join_order = static_cast<uint8_t>(s.own_join_order_ < 0 ? 63 : s.own_join_order_);
+            spec.kick = true;
+            spec.kick_index = bmmo::session::spawn_direction_index(s.seed_, join_order, tick);
+            spec.kick_strength = s.spawn_impulse_;
+        }
+        own_body_made made;
+        {
+            const event_log_mute mute(*this);
+            made = platform_.make_own(spec);
+        }
+        if (!made.found) {
+            logf("own body at tick %u: no 3D entity named %s", tick, life.entity.c_str());
+            return false;
+        }
+        if (made.took_out_failed)
+            logf("own body at tick %u (%s): unphysicalize %s: %s", tick, where, life.entity.c_str(), made.took_out_error.c_str());
+        s.mechanism_tracking_.mark_dirty();
+        ++s.own_lives_applied_;
+        if (!made.made) {
+            logf("own body at tick %u (%s): physicalize %s: %s", tick, where, life.entity.c_str(), made.error.c_str());
+            return false;
+        }
+        if (spec.kick && !made.kicked)
+            logf("own body at tick %u: spawn impulse: %s", tick, made.kick_error.c_str());
+        if (s.own_lives_applied_ <= 16)
+            logf("own body: %s made at (%.3f,%.3f,%.3f) before tick %u (%s, %s%s)", life.entity.c_str(),
+                 static_cast<double>(life.position[0]), static_cast<double>(life.position[1]),
+                 static_cast<double>(life.position[2]), tick, where,
+                 life.what == own_life::kind::beam ? "beam" : "moved birth", life.spawn ? ", spawn kick" : "");
+        return true;
+    }
+
+    // The own body changes due before the step of `tick`, as the server
+    // applies the pair or the Physicalize (physics_world::apply_event):
+    //
+    //   * a beam at its stamp: the body goes, and is made again at the
+    //     beam pose when the server applied its Physicalize there too;
+    //   * a moved birth or beam Physicalize at its applied tick: the body
+    //     made again (remake_own_body).  A birth's own origin needs
+    //     nothing: the scripts made the body live, a replay parks it, and
+    //     a moved one was taken out at the restore (the destroy_body hook,
+    //     or process_own_echoes before the first rewind).
+    //
+    // `live`: the frame of `tick` itself (live_own_lives), each change
+    // once; otherwise a replay (drain_pending_births), where a beam's
+    // stamp is redone only once its live frame has run - before that no
+    // replay reaches it.  A lifetime that ended since is never made again
+    // (own_life_current) and retires.
+    //
+    // Without own body control (design 2.3) a beam's stamp is the in-place
+    // write instead, and nothing is ever moved (no remake is due).
+    void session_client_core::apply_own_lives(uint32_t tick, const char* where, bool live) {
+        for (auto& life: s.own_life_) {
+            if (life.retired) continue;
+            const bool beam_stamp = life.what == own_life::kind::beam && life.origin == tick
+                                 && (live ? !life.origin_live : life.origin_live);
+            const bool remake_due = life.moved() && life.applied == tick && (!live || !life.applied_live);
+            if (!beam_stamp && !remake_due) continue;
+            if (!own_life_current(life)) {
+                const auto generation = s.generations_.find(life.entity);
+                logf("own %s stamped %u retired at tick %u (%s): %s has had another life since (generation %u -> %u)",
+                     life.what == own_life::kind::beam ? "beam" : "birth", life.origin, tick, where,
+                     life.entity.c_str(), life.generation, generation == s.generations_.end() ? 0u : generation->second);
+                life.retired = true;
+                continue;
+            }
+            if (beam_stamp) {
+                if (!caps_.own_body_control) {
+                    if (life.made) {
+                        const double position[3] = {life.position[0], life.position[1], life.position[2]};
+                        write_beam(life.entity, position, tick);
+                    }
+                    ++s.own_lives_applied_;
+                } else if (life.made && life.applied == life.origin) {
+                    remake_own_body(life, tick, where);
+                } else {
+                    unmake_own_body(life, tick, where);
+                    ++s.own_lives_applied_;
+                }
+                if (live) life.origin_live = true;
+                if (live && life.applied == life.origin) life.applied_live = true;
+            }
+            if (remake_due) {
+                if (remake_own_body(life, tick, where)) ++s.own_remakes_;
+                if (live) life.applied_live = true;
+            }
+            if (live) {
+                // The body this frame's step starts from: the capture
+                // callback of this frame must not take it for a birth of
+                // the scripts (capture_own_physicalize).
+                bmmo_physics_body_state state{};
+                if (platform_.body_state(life.entity, state)) s.own_body_entity_ = life.entity;
+            }
+        }
+    }
+
+    // Whether apply_own_lives has anything for a replayed `tick`.
+    bool session_client_core::own_lives_due(uint32_t tick) const {
+        for (const auto& life: s.own_life_) {
+            if (life.retired) continue;
+            if (life.what == own_life::kind::beam && life.origin == tick && life.origin_live) return true;
+            if (life.moved() && life.applied == tick) return true;
+        }
+        return false;
+    }
+
+    // The live half, in the frame of the change, after every rewind of
+    // that frame (they all end at the tick before it, on the old path)
+    // and before the step, at our place among the body changes stamped
+    // for the same tick (apply_held_lifecycle).  A change whose live frame
+    // was skipped (a resync renumbered past it) is dropped.  The records
+    // retire once no rewind can be anchored before them.
+    void session_client_core::live_own_lives(uint32_t frame_tick) {
+        for (auto& life: s.own_life_) {
+            if (life.retired) continue;
+            const bool beam_late = life.what == own_life::kind::beam && !life.origin_live
+                                && static_cast<int32_t>(frame_tick - life.origin) > 0;
+            const bool remake_late = life.moved() && !life.applied_live
+                                  && static_cast<int32_t>(frame_tick - life.applied) > 0;
+            if (beam_late || remake_late) {
+                logf("own %s stamped %u (applied %u) never met its live frame (now %u): dropped",
+                     life.what == own_life::kind::beam ? "beam" : "birth", life.origin, life.applied, frame_tick);
+                life.retired = true;
+            }
+        }
+        apply_own_lives(frame_tick, "live", true);
+        retire_own_lives();
+    }
+
+    // A record retires once the live run has made all of it and the
+    // history no longer holds the tick before its last change - the
+    // origin, or the applied tick of a moved one: no rewind can cross it
+    // any more.  (A moved birth has to outlive its origin's anchor: a
+    // rewind anchored inside the gap still crosses the applied tick, and
+    // the record is what makes the body there.)
+    //
+    // A birth the server has not answered yet stays, past its history
+    // too, until its echo or the deadline (expire_own_echoes) says where
+    // the server made it: the answer past the history is a resync, and
+    // without the record it could not take a never-made body out.  It
+    // makes nothing in a replay (it is not moved), so keeping it is free.
+    void session_client_core::retire_own_lives() {
+        const uint32_t now = current_tick();
+        s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this, now](const own_life& life) {
+            if (life.retired) return true;
+            if (life.what == own_life::kind::birth && life.state == own_life::verdict::sent
+                    && static_cast<int32_t>(now - life.origin) < static_cast<int32_t>(client_core_state::kOwnRecordKeepTicks))
+                return false;
+            const bool done = life.origin_live && (life.applied_live || !life.made);
+            const uint32_t last = life.moved() ? life.applied : life.origin;
+            return done && !s.rollback_.knows_tick(last - 1);
+        }), s.own_life_.end());
+    }
+
+    // A resync renumbers onto the server's tick and its full snapshot
+    // puts the server's own ball in: the births go.  A beam the new
+    // numbering has not reached yet is the server's to apply at its stamp,
+    // and so ours: live once more.
+    // A birth still unanswered is set aside (own_unanswered_): its echo,
+    // when it comes, is not one a record of the new numbering can take.
+    void session_client_core::rebase_own_lives() {
+        set_aside_unanswered(own_life::aside::resync);
+        s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this](own_life& life) {
+            if (life.what != own_life::kind::beam || static_cast<int32_t>(life.origin - s.tick_base_) < 0) return true;
+            life.origin_live = false;
+            life.applied_live = false;
+            return false;
+        }), s.own_life_.end());
+    }
+
+    // The births still waiting for their echo, kept aside (with the echoes
+    // already queued: they answer the old numbering) when a SessionAssign
+    // renumbers the history.  Bounded: the echo of each comes within a
+    // round trip or two, and an old entry answers nothing any more.
+    void session_client_core::set_aside_unanswered(own_life::aside why) {
+        const uint32_t now = current_tick();
+        for (const auto& life: s.own_life_) {
+            if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
+            own_life aside = life;
+            aside.why = why;
+            aside.aside_at = now;
+            s.own_unanswered_.push_back(std::move(aside));
+        }
+        for (auto& msg: s.own_echoes_) s.own_echoes_stale_.push_back(std::move(msg));
+        s.own_echoes_.clear();
+        while (s.own_unanswered_.size() > 16) s.own_unanswered_.erase(s.own_unanswered_.begin());
+    }
+
+    // The set-aside birth an echo answers, or null.
+    client_core_state::own_life* session_client_core::find_unanswered(uint32_t origin, uint8_t ball_type) {
+        for (auto& life: s.own_unanswered_)
+            if (life.origin == origin && life.ball_type == ball_type) return &life;
+        return nullptr;
+    }
+
+    // A moved own birth's body, asked for by a restore (rollback_world::
+    // destroy_body) when the replay will cross its applied tick: the
+    // birth record of that lifetime is the applied tick's, and the body
+    // is made again there (apply_own_lives).
+    const client_core_state::own_life* session_client_core::moved_own_life(const std::string& entity,
+                                                                           uint32_t birth_tick) const {
+        for (const auto& life: s.own_life_)
+            if (!life.retired && life.moved() && life.entity == entity && life.applied == birth_tick
+                    && own_life_current(life))
+                return &life;
+        return nullptr;
+    }
+
+    bool session_client_core::destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed) {
+        if (!caps_.own_body_control) return false;
+        const own_life* life = moved_own_life(entity, birth_tick);
+        if (!life) return false;
+        destroyed = unmake_own_body(*life, current_tick(), "restore");
+        return true;
+    }
+
+    // --------------------------------------------------------- echoes
+    // The echoes of our own events that arrived since the last frame,
+    // before this frame's other rewinds (process_own_echo): first those
+    // queued before the last SessionAssign, which can only answer the
+    // births it set aside, then the rest; then the births whose echo is
+    // overdue (expire_own_echoes).
+    void session_client_core::process_own_echoes() {
+        if (!s.own_echoes_stale_.empty()) {
+            std::vector<bmmo::session_event_msg> stale;
+            stale.swap(s.own_echoes_stale_);
+            for (const auto& msg: stale) process_own_echo(msg, true);
+        }
+        if (!s.own_echoes_.empty()) {
+            std::vector<bmmo::session_event_msg> echoes;
+            echoes.swap(s.own_echoes_);
+            for (const auto& msg: echoes) process_own_echo(msg, false);
+        }
+        expire_own_echoes();
+    }
+
+    // An echo of one of our own events (protocol 9), counted by what the
+    // server did with it: echo=acked/moved/superseded/rejected/missing on
+    // the status line.  An ack changes nothing.  Any other verdict goes
+    // into the box beside the event as it was sent: the same (player,
+    // origin, type) with the server's applied tick and state, which a
+    // replay of this file takes over the earlier record (sim_tool keeps
+    // the last), so the box replays to the server's world.
+    //
+    // A Physicalize the server applied later, or never, is moved inside
+    // our history (late-player design 3.3, move_own_birth).  A MOVED echo
+    // of another type is counted and kept where we stamped it: the own
+    // death and the own Sector move are plan steps 22 and 23.  One
+    // exception: an own Unphysicalize moved together with the birth of
+    // its origin (a beam, a trafo, a respawn's pair) is a pair the server
+    // applied late as a whole; the old body lived on at the server until
+    // T', which moving the birth alone cannot give, so this client
+    // resyncs instead (resync_own_life), whichever echo comes first.
+    //
+    // `stale`: queued before the last SessionAssign.  It answers a birth
+    // that assign set aside (answer_set_aside) and never a record of the
+    // new numbering, and asks for no resync of its own: the assign was one.
+    //
+    // With the own_echoes switch off (design 1.2) nothing is acted on: no
+    // record or set-aside birth is looked up, the moved-Unphysicalize list
+    // is not kept, and the echo is counted, journaled and logged as kept
+    // where we stamped it.
+    void session_client_core::process_own_echo(const bmmo::session_event_msg& msg, bool stale) {
+        const bool acting = acting_on_echoes();
+        const bool rejected = (msg.state & bmmo::session::EVENT_STATE_REJECTED) != 0;
+        const bool superseded = !rejected && (msg.state & bmmo::session::EVENT_STATE_SUPERSEDED) != 0;
+        const bool made = !rejected && !superseded;
+        const bool moved = made && msg.tick != msg.origin_tick;
+        const bool birth = msg.type == bmmo::session::event_type::Physicalize;
+        own_life* life = nullptr;
+        if (birth && !stale && acting)
+            for (auto& candidate: s.own_life_)
+                if (!candidate.retired && candidate.origin == msg.origin_tick && candidate.ball_type == msg.ball_type
+                        && candidate.state == own_life::verdict::sent) {
+                    life = &candidate;
+                    break;
+                }
+        own_life* aside = birth && !life && acting ? find_unanswered(msg.origin_tick, msg.ball_type) : nullptr;
+        if (made && !moved) {
+            ++s.own_echo_acked_;
+            if (life) life->state = own_life::verdict::acked;
+            if (aside) answer_set_aside(*aside, true, false, msg.tick, "acked");
+            return;
+        }
+        const char* verdict = rejected ? "rejected" : superseded ? "superseded" : "moved";
+        if (rejected) ++s.own_echo_rejected_;
+        else if (superseded) ++s.own_echo_superseded_;
+        else ++s.own_echo_moved_;
+        if (birth && moved) ++s.own_birth_echo_moved_;
+        journal_.lifecycle_event(s.own_id_, msg);
+        journal_.note(std::string("own echo: ") + event_type_name(static_cast<int>(msg.type)) + " stamped "
+                      + std::to_string(msg.origin_tick) + " " + verdict + " (applied " + std::to_string(msg.tick) + ")");
+        if (!birth) {
+            if (moved) ++s.own_moves_other_;
+            logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u; "
+                 "kept where we stamped it (only an own Physicalize is moved here)",
+                 event_type_name(static_cast<int>(msg.type)), msg.origin_tick, verdict, msg.tick,
+                 static_cast<unsigned>(msg.state), current_tick());
+            if (msg.type == bmmo::session::event_type::Unphysicalize && moved && acting && !stale) {
+                s.own_moved_unphysicalize_.push_back(msg.origin_tick);
+                while (s.own_moved_unphysicalize_.size() > 32) s.own_moved_unphysicalize_.erase(s.own_moved_unphysicalize_.begin());
+                // The birth of the pair already moved inside the history:
+                // the old body's late end is what it missed.
+                for (auto& candidate: s.own_life_)
+                    if (!candidate.retired && candidate.origin == msg.origin_tick
+                            && candidate.state == own_life::verdict::moved) {
+                        resync_own_life(candidate, candidate.made, candidate.applied,
+                                        "its Unphysicalize was moved too (an own pair, plan step 22)");
+                        break;
+                    }
+            }
+            return;
+        }
+        if (life) {
+            life->state = rejected ? own_life::verdict::rejected
+                        : superseded ? own_life::verdict::superseded : own_life::verdict::moved;
+            // Design 2.3: without own body control a superseded birth needs
+            // nothing, its pair's moved Unphysicalize included (with the
+            // control the pair resyncs as it always did).
+            if (superseded && !caps_.own_body_control) {
+                move_own_birth(*life, msg.tick, made);
+                return;
+            }
+            if (std::find(s.own_moved_unphysicalize_.begin(), s.own_moved_unphysicalize_.end(), msg.origin_tick)
+                    != s.own_moved_unphysicalize_.end()) {
+                resync_own_life(*life, made, msg.tick, "its Unphysicalize was moved too (an own pair, plan step 22)");
+                return;
+            }
+            move_own_birth(*life, msg.tick, made);
+            return;
+        }
+        if (aside) {
+            answer_set_aside(*aside, made, superseded, msg.tick, verdict);
+            return;
+        }
+        // No record: never recorded (no rollback), sent before the last
+        // resync and answered by it, or retired after kOwnRecordKeepTicks
+        // with no echo.
+        const bool before_base = static_cast<int32_t>(msg.origin_tick - s.tick_base_) < 0;
+        if (!acting || stale || before_base) {
+            logf("own physicalize stamped %u echoed %s by the server (applied %u) at local tick %u: no record of it, %s",
+                 msg.origin_tick, verdict, msg.tick, current_tick(),
+                 !config.rollback ? "no rollback: kept where we stamped it"
+                 : !acting ? "own echoes off: kept where we stamped it"
+                           : "sent before the last resync: nothing to do");
+            return;
+        }
+        const std::string head = "own birth moved " + std::to_string(msg.origin_tick) + " -> "
+                               + (made ? std::to_string(msg.tick) : std::string("never"));
+        logf("%s at local tick %u: no record of it (past the history), resync", head.c_str(), current_tick());
+        journal_.note(head + ": no record of it (past the history), resync");
+        ++s.own_moves_resynced_;
+        request_resync("own birth moved past the history", true);
+    }
+
+    // The answer to a birth set aside (own_unanswered_), which leaves the
+    // list.  Given up as missing but made after all: this client took
+    // its body out, so it is made again and the client resyncs.  Sent
+    // before a resync and never made: the body the scripts made goes and
+    // the client resyncs.  The other two need nothing: the body is where
+    // the server has it, and the poses are the snapshots'.  (`superseded`
+    // tells a never-made one's verdict to resync_own_life, which without
+    // own body control re-reports a rejected birth and never a superseded
+    // one.)
+    void session_client_core::answer_set_aside(own_life& entry, bool made, bool superseded, uint32_t applied,
+                                               const char* verdict) {
+        own_life life = entry;
+        s.own_unanswered_.erase(s.own_unanswered_.begin() + (&entry - s.own_unanswered_.data()));
+        const bool missing = life.why == own_life::aside::missing;
+        if (missing == made) {
+            if (!made) life.state = superseded ? own_life::verdict::superseded : own_life::verdict::rejected;
+            resync_own_life(life, made, applied, missing ? "made after its echo was given up as missing"
+                                                         : "sent before the last resync and never made");
+            return;
+        }
+        logf("own physicalize stamped %u echoed %s by the server (applied %u) at local tick %u: %s, nothing to do",
+             life.origin, verdict, applied, current_tick(),
+             missing ? "taken out already as missing" : "sent before the last resync");
+    }
+
+    // An own birth with no echo while the server's tick is
+    // kOwnEchoDeadlineTicks past its stamp: the Physicalize never reached
+    // the server (the A6 drop variant), or it will be applied so late
+    // that the move is past the reach anyway.  Either way the answer is a
+    // resync of this client alone, and since the server has no body for
+    // it now, the body goes first (resync_own_life with `made` false).
+    // The birth is set aside, so an echo that comes after all is still
+    // answered (answer_set_aside), and the box gets the event as never
+    // made (state REJECTED: sim_tool drops it), so the client journal
+    // replays to the server's world; a later echo is journaled after it
+    // and wins.
+    //
+    // The server's tick comes from the relay header, which every relayed
+    // datagram carries every tick (plan step 20), and from the snapshots
+    // when they run: the server is authoritative with snapshots off too,
+    // and a birth it never made must not live on here for good.  The
+    // server echoes an event when it accepts it, before it steps that
+    // event's applied tick and so before it relays that tick, so an echo
+    // that exists is sent ahead of the datagram that passes the deadline;
+    // one that loses the race is answered as set aside.
+    //
+    // The deadline is gated on our uplink (bmmo::session::
+    // own_echo_deadline): it counts only once the header's acked shows
+    // the server applied a frame of ours at or past the origin, and only
+    // kOwnEchoUplinkSettleTicks after that was first seen.  The server's
+    // tick moves with the downlink; with the uplink out for longer than
+    // the deadline the reliable copy is still queued here, and giving the
+    // birth up would resync this client twice (the give-up, then the
+    // late copy echoed as made).
+    void session_client_core::expire_own_echoes() {
+        if (!acting_on_echoes() || s.resync_pending_) return;
+        uint32_t server_tick = 0;
+        if (!bmmo::session::newest_server_tick(s.acked_header_known_, s.acked_header_tick_, s.have_snapshot_,
+                                               s.last_snapshot_tick_, server_tick))
+            return;
+        for (auto& life: s.own_life_) {
+            if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
+            if (!life.echo_deadline.missing(server_tick, s.acked_header_known_, s.header_acked_, life.origin,
+                                            client_core_state::kOwnEchoDeadlineTicks,
+                                            client_core_state::kOwnEchoUplinkSettleTicks))
+                continue;
+            ++s.own_echo_missing_;
+            life.state = own_life::verdict::missing;
+            own_life aside = life;
+            aside.why = own_life::aside::missing;
+            aside.aside_at = current_tick();
+            s.own_unanswered_.push_back(aside);
+            while (s.own_unanswered_.size() > 16) s.own_unanswered_.erase(s.own_unanswered_.begin());
+            bmmo::session_event_msg never;
+            never.tick = never.origin_tick = life.origin;
+            never.type = bmmo::session::event_type::Physicalize;
+            never.state = static_cast<uint8_t>(bmmo::session::EVENT_STATE_REJECTED);
+            never.ball_type = life.ball_type;
+            never.flags = static_cast<uint8_t>(life.spawn ? bmmo::session::PHYSICALIZE_FLAG_SPAWN : 0);
+            std::copy(std::begin(life.position), std::end(life.position), never.position);
+            std::copy(std::begin(life.rotation), std::end(life.rotation), never.rotation);
+            never.recipe = life.recipe;
+            journal_.lifecycle_event(s.own_id_, never);
+            journal_.note("own echo: Physicalize stamped " + std::to_string(life.origin) + " missing at the server's tick "
+                          + std::to_string(server_tick));
+            resync_own_life(life, false, life.origin, "no echo by the server's tick " + std::to_string(server_tick));
+        }
+    }
+
+    // The owner's answer when its history cannot carry what the server
+    // did with an own birth (late-player design 3.3 step 1): a resync of
+    // this client alone.  The full snapshot only sets the poses of the
+    // bodies both sides have, so the own body set is put right first: a
+    // birth the server never made goes, from the records too (no rewind
+    // before the assign brings it back); one the server made but this
+    // client has taken out is made again.  A lifetime that ended since is
+    // left alone: the server's has ended too (its death came after T').
+    //
+    // Without own body control (design 2.3) the own body is never touched:
+    // a birth the server never made, while its life is current, is
+    // re-reported at the next tick without the spawn flag (LPD 3.5: the
+    // REJECTED echo makes it immediate) - not a superseded one, which a
+    // newer accepted event of ours overtook - and then the resync.
+    void session_client_core::resync_own_life(own_life& life, bool made, uint32_t applied, const std::string& why) {
+        const uint32_t now = current_tick();
+        const char* what = life.what == own_life::kind::beam ? "beam" : "birth";
+        const std::string head = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
+                               + (made ? std::to_string(applied) : std::string("never"));
+        if (life.what == own_life::kind::birth && own_life_current(life)) {
+            if (!caps_.own_body_control) {
+                if (!made && life.state != own_life::verdict::superseded) re_report_own_birth(life, now);
+            } else {
+                bmmo_physics_body_state state{};
+                const bool there = platform_.body_state(life.entity, state);
+                if (!made) {
+                    s.rollback_.move_birth(life.entity, life.generation, life.origin, life.origin, false);
+                    if (there) unmake_own_body(life, now, "never made");
+                    s.own_physicalized_ = false;
+                    s.own_body_entity_.clear();
+                } else if (!there && remake_own_body(life, now, "resync")) {
+                    ++s.own_remakes_;
+                    s.own_body_entity_ = life.entity;
+                }
+            }
+        }
+        life.retired = true;
+        ++s.own_moves_resynced_;
+        logf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str());
+        journal_.note(head + ": " + why + ", resync");
+        request_resync("own birth: resync", true);
+    }
+
+    // Design 2.3, without own body control: the birth's Physicalize sent
+    // again for the next tick, as it was but for the spawn flag (no kick:
+    // the body is long made here).  Its echo answers nothing (no record):
+    // the resync that follows renumbers past it.
+    void session_client_core::re_report_own_birth(const own_life& life, uint32_t now) {
+        bmmo::session_event_msg again;
+        again.tick = now + 1;
+        again.type = bmmo::session::event_type::Physicalize;
+        again.ball_type = life.ball_type;
+        std::copy(std::begin(life.position), std::end(life.position), again.position);
+        std::copy(std::begin(life.rotation), std::end(life.rotation), again.rotation);
+        again.recipe = life.recipe;
+        journal_.note("own birth stamped " + std::to_string(life.origin) + " never made: re-reported for tick "
+                      + std::to_string(now + 1) + " (no own body control)");
+        send_event(again);
+    }
+
+    // The server made our own birth stamped T at T' > T (`made`), or never
+    // (late-player design 3.3).  The history is put where the server's
+    // world is: no own body from T to T'-1, the body made again at T' with
+    // the impulse index of T', in this replay and in every later one that
+    // crosses T' (apply_own_lives).  Steps:
+    //
+    //   1. a rewind to T-1 must still be possible (inside the reach, T-1
+    //      recorded); otherwise this client resyncs itself, alone
+    //      (resync_own_life);
+    //   2. the live body of a birth goes now (a beam's body is the
+    //      anchor's, and the replay takes it out at its stamp), with the
+    //      navigation replica shut down first and the entity put at the
+    //      captured pose;
+    //   3. the records lose the body (rollback_engine::move_birth): from T
+    //      to T'-1 there was none, from T' on the replay re-captures it;
+    //   4. the rewind to T-1 replays with that body set, and the body is
+    //      made at T' by drain_pending_births, at our join rank - or by
+    //      the live frame of T' when the client has not reached it yet.
+    //
+    // A lifetime that ended since (a death or a trafo after the birth)
+    // and that the server made: the server's ball lived T'..D, and
+    // nothing in a replay could end a re-made one at D (the own death's
+    // move is plan step 22), so the client resyncs.  One the server
+    // never made is removed from the history from T on: the server had
+    // no ball, and neither has the replay.
+    //
+    // Without own body control (design 2.3) nothing moves: a moved birth
+    // is the snapshot rollback's to reconcile when snapshots run (the
+    // server's ball exists from T'), a resync otherwise; a superseded one
+    // needs nothing; a rejected one is re-reported while current, and the
+    // client resyncs (resync_own_life).
+    void session_client_core::move_own_birth(own_life& life, uint32_t applied, bool made) {
+        if (!caps_.own_body_control) {
+            const std::string head = std::string("own ") + (life.what == own_life::kind::beam ? "beam" : "birth")
+                                   + " moved " + std::to_string(life.origin) + " -> "
+                                   + (made ? std::to_string(applied) : std::string("never"));
+            if (made && snapshots_run()) {
+                journal_.note(head + ": no own body control, left to the snapshots");
+                return;
+            }
+            if (!made && life.state == own_life::verdict::superseded) {
+                journal_.note(head + ": superseded, no own body control: nothing to do");
+                return;
+            }
+            resync_own_life(life, made, applied, made ? "no own body control, no snapshots" : "no own body control");
+            return;
+        }
+        const uint32_t now = current_tick();
+        const uint32_t anchor = life.origin - 1;
+        const char* what = life.what == own_life::kind::beam ? "beam" : "birth";
+        const std::string reason = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
+                                 + (made ? std::to_string(applied) : std::string("never"));
+        if (!config.rollback || static_cast<int32_t>(now - anchor) < 0
+                || now - anchor > s.rollback_.thresholds().max_resim_ticks || !s.rollback_.knows_tick(anchor)) {
+            resync_own_life(life, made, applied, "past the reach (depth " + std::to_string(static_cast<int>(now - anchor)) + ")");
+            return;
+        }
+        const bool alive = own_life_current(life);
+        if (made && !alive) {
+            resync_own_life(life, made, applied, "its life has ended since (plan step 22)");
+            return;
+        }
+        life.made = made;
+        life.applied = made ? applied : life.origin;
+        if (life.what == own_life::kind::birth && alive) {
+            bmmo_physics_body_state state{};
+            if (platform_.body_state(life.entity, state)) unmake_own_body(life, now, "moved");
+        }
+        const size_t changed = s.rollback_.move_birth(life.entity, life.generation, life.origin, life.applied, made);
+        if (!made) {
+            ++s.own_births_removed_;
+            if (life.what == own_life::kind::birth) life.retired = true;   // a beam's stamp still takes the old body out
+        }
+        // The replay below makes it when it reaches T'; past the live
+        // tick the live frame of T' does.
+        life.applied_live = !made || static_cast<int32_t>(life.applied - now) <= 0;
+        if (life.what == own_life::kind::birth && alive && !life.applied_live) {
+            s.own_physicalized_ = false;
+            s.own_body_entity_.clear();
+        }
+        auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+            return legacy.recorded_input_at(entity, tick, out);
+        };
+        const scope_guard keep_cells = platform_.keep_live_cells(*this);
+        if (!s.rollback_.rewind_to(platform_.bind_world(), anchor, now, input_at, reason)) {
+            // The body set put back the way the server has it, then the
+            // resync (a refusal leaves the world at the live tick).
+            resync_own_life(life, made, applied, "the rewind to " + std::to_string(anchor) + " was refused");
+            return;
+        }
+        ++s.life_rewinds_;
+        s.life_rewind_depth_ += now - anchor;
+        if (made) ++s.own_births_moved_;
+        drop_carried_own_replay(anchor, false);
+        if (life.what == own_life::kind::birth && !made) {
+            s.own_physicalized_ = false;
+            s.own_body_entity_.clear();
+        }
+        logf("own physicalize stamped %u %s by the server at local tick %u: rewound to %u (%zu records changed%s)",
+             life.origin, made ? ("moved to " + std::to_string(applied)).c_str() : "never made", now, anchor, changed,
+             made ? (life.applied_live ? ", made again in the replay" : ", made again live at that tick")
+                  : alive ? ", removed from the history" : ", its life has ended since: removed from the history");
+        journal_.note(reason + ": rewound to " + std::to_string(anchor));
     }
 
 }

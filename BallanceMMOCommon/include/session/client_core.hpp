@@ -41,6 +41,15 @@
 // mirror_entity, make_mirror, unmake_mirror, detach_mirror_navigation,
 // attach_mirror_navigation and mute_event_log.
 //
+// Step E7 moves the own lives and echoes (design 6.1 row E7): the own births
+// reported (report_physicalize, or a host's own_physicalized committed at
+// step 19), the beam (request_beam), the own_life records made again or
+// taken out at the history's changes, and the echoes of our own events
+// (process_own_echoes, move_own_birth, resync_own_life, expire_own_echoes),
+// in client_core_lifecycle.cpp, over the platform's ball_recipe_of,
+// own_birth_capture, make_own and unmake_own, with the own_body_control
+// fallback of design 2.3 and the own_echoes switch.
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -85,6 +94,18 @@ namespace bmmo::session {
     // reliable round trip behind SessionReady, so this is a fault timeout, not
     // a schedule: a server that never answers must not freeze the client.
     constexpr std::chrono::seconds kAnchorHoldTimeout{10};
+
+    // An own birth as the host reports it (design 1.3 own_physicalized; E7):
+    // the ball's entity and its row in the level's ball table (-1: none, sent
+    // as type 0), the tick whose step it was made before, the pose and spawn
+    // flag of its Physicalize, and its recipe.
+    struct own_birth_report {
+        std::string entity;
+        int ball_type = -1;
+        uint32_t tick = 0;
+        own_birth_pose pose;
+        bmmo::session::ball_recipe recipe;
+    };
 
     // Design 1.2: everything the session flow decides from, as the headless
     // client declared it (session_client.cpp at 9d9cb08), in the same order
@@ -181,6 +202,10 @@ namespace bmmo::session {
         uint32_t own_id_ = 0;
         phase phase_ = phase::idle;
         uint32_t session_ = 0;
+        // SessionStart::snapshot_interval (the server clamps a longer one to
+        // 255: "snapshots off").  Dead state in the headless client until E7,
+        // whose own-echo fallback without own body control reads it.
+        uint8_t snapshot_interval_ = 2;
         uint8_t input_delay_ = 6;
         uint64_t life_rewinds_ = 0, life_rewinds_missed_ = 0;
         // Births stamped in the past, waiting to be made inside a replay at
@@ -269,6 +294,32 @@ namespace bmmo::session {
         uint64_t own_birth_echo_moved_ = 0;
         uint64_t own_births_moved_ = 0, own_births_removed_ = 0, own_moves_resynced_ = 0, own_remakes_ = 0;
         uint64_t own_moves_other_ = 0;
+        // How long an own birth waits for its echo: the server's tick (the
+        // relay header's, or the snapshots') this far past its stamp with no
+        // echo, and the Physicalize either never reached the server or will
+        // be applied past the reach - a resync either way, and a never-made
+        // body has to go first.  Twice the history (2.9 s): far past every
+        // hold arm, so a merely late event's echo always comes first.
+        // (Moved from the headless client at E7.)
+        static constexpr uint32_t kOwnEchoDeadlineTicks = 192;
+        // ...counted only once the server has applied a frame of ours at or
+        // past the birth's origin, and this long after that was first seen
+        // (one second for the reliable copy's retransmission).
+        static constexpr uint32_t kOwnEchoUplinkSettleTicks = 66;
+        // A birth unanswered this long retires anyway (retire_own_lives).
+        static constexpr uint32_t kOwnRecordKeepTicks = 512;
+        // A beam asked for (session_client_core::request_beam: the headless
+        // --beam, the retail verb) and not made yet, with its pose (E7).
+        bool beam_requested_ = false;
+        double beam_position_[3] = {};
+        // The own body changes a host_hooks host reported in the behaviour
+        // pass (own_physicalized / own_unphysicalized), committed in order
+        // at the frame's step 19 (commit_own_reports; E7).
+        struct own_report {
+            bool birth = true;            // a Physicalize; false: an Unphysicalize of report.tick
+            own_birth_report report;
+        };
+        std::vector<own_report> own_reports_;
         std::map<uint32_t, remote_ball> remotes_;
         bool have_snapshot_ = false;
         uint32_t last_snapshot_tick_ = 0;
@@ -456,6 +507,12 @@ namespace bmmo::session {
         bool rollback = true;               // the snapshot rollback; off: the legacy blend ladder (--no-rollback)
         bool correct = true;                // the ladder writes its hard corrections (--no-correct: logged only)
         bool trace = false;                 // the core's diagnostic lines (headless --trace)
+        // Design 1.2 feature switch (E7): act on the echoes of our own events
+        // (move_own_birth, resync_own_life, expire_own_echoes and the
+        // moved-Unphysicalize list).  Off, they are counted and journaled
+        // only.  Acting needs `rollback` too, as before; headless sets it
+        // from --no-rollback, so the pair is today's `rollback` alone.
+        bool own_echoes = true;
     };
 
     // Transitional (design 6.1, "Linking while the core is incomplete"): one
@@ -464,9 +521,9 @@ namespace bmmo::session {
     // deletes those whose target it moves; E11 deletes the struct.  The
     // headless client fills every entry; the core calls them unguarded.
     struct legacy_calls {
-        // E3: SessionAssign (they move with the own lives, E7).
-        std::function<void()> rebase_own_lives;
-        std::function<void(client_core_state::own_life::aside why)> set_aside_unanswered;
+        // (E3's rebase_own_lives and set_aside_unanswered, and E6's
+        // live_own_lives, own_lives_due and apply_own_lives, were removed at
+        // E7: the own lives moved into the core.)
         // (E3's reset_held_epoch, drop_pending_rewind and finish_lead_slew,
         // and E4's drop_carried_own_replay, were removed at E5: section J and
         // SessionLead moved into the core.)
@@ -486,18 +543,11 @@ namespace bmmo::session {
         // does not say (E9: the own ball's platform half).
         std::function<bool(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out)> recorded_input_at;
         // E4: the own ball's entity name, "" when the level has none (E9: the
-        // platform's own_ball).
+        // platform's own_ball).  E7's beam reads it too.
         std::function<std::string()> own_ball;
         // E4: the movable objects' description, the --trace line after a
         // snapshot rollback (a headless diagnostic, design 2.4).
         std::function<std::string()> describe_movable_objects;
-        // E6: the own lives' part of the lifecycle (E7 moves them).  The
-        // own body changes due at the frame's tick, made live at our place
-        // among the held events (apply_held_lifecycle); whether a replayed
-        // tick has any, and making them there (drain_pending_births).
-        std::function<void(uint32_t frame_tick)> live_own_lives;
-        std::function<bool(uint32_t tick)> own_lives_due;
-        std::function<void(uint32_t tick, const char* where, bool live)> apply_own_lives;
     };
 
     // anchor (design 1.3): what the host's anchor work found.
@@ -616,20 +666,35 @@ namespace bmmo::session {
         // (post_step step 28).
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick);
 
-        // The event log muted for a scope, nesting (platform mute_event_log;
-        // the flag in force is client_core_state::event_log_muted_).  Public
-        // while the own body's re-make and removal are the host's (E7).
-        class event_log_mute {
-        public:
-            explicit event_log_mute(session_client_core& core);
-            ~event_log_mute();
-            event_log_mute(const event_log_mute&) = delete;
-            event_log_mute& operator=(const event_log_mute&) = delete;
-
-        private:
-            session_client_core& owner;
-            const bool was;
-        };
+        // ---- own lives and echoes (E7, client_core_lifecycle.cpp) ----
+        // The echoes of our own events that arrived since the last frame
+        // (pre_step step 3): the stale ones, the rest, then the births whose
+        // echo is overdue.
+        void process_own_echoes();
+        // The own ball's Physicalize the event log reported for `tick`
+        // (own_lifecycle_source::event_log; post_step step 19): the host's
+        // capture (own_birth_capture) and recipe (ball_recipe_of), sent and
+        // recorded.  And its Unphysicalize, sent.
+        void report_physicalize(const std::string& entity, uint32_t tick);
+        void report_unphysicalize(uint32_t tick);
+        // The same facts from a host_hooks host's hooks (design 1.3), fired in
+        // the behaviour pass and stamped current_tick() + 1: queued, and
+        // committed in order by commit_own_reports at step 19 (after the
+        // drain's generation bump), where report_physicalize runs.
+        void own_physicalized(const own_birth_report& report);
+        void own_unphysicalized(uint32_t tick);
+        void commit_own_reports();
+        // A beam of the own ball to `position`, upright and at rest (the
+        // headless --beam, the retail verb): made by apply_requested_beam at
+        // post_step step 29 of the frame that stepped T, stamped T + 1.
+        void request_beam(const double position[3]);
+        void apply_requested_beam(uint32_t tick);
+        // A restore's destroy_body (the host's binding until E9): a moved own
+        // birth whose body the replay makes again at its applied tick is
+        // taken out here.  True when `entity` at `birth_tick` is one
+        // (`destroyed`: taken out); false, and nothing done, otherwise and
+        // always without own_body_control (design 2.3: the branch is inert).
+        bool destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed);
 
         // ---- the frame's rewinds (E5; pre_step steps 5 and 7, design 1.3) ----
         // One replay for every input correction the frame collected (the
@@ -743,6 +808,52 @@ namespace bmmo::session {
         uint32_t live_first_tick(uint32_t stamp) const;
         void unphysicalize_mirror(const std::string& entity);
         void physicalize_remote(const client_core_state::pending_birth& event, uint32_t first_tick);
+
+        // The event log muted for a scope, nesting (platform mute_event_log;
+        // the flag in force is client_core_state::event_log_muted_).  Private
+        // since E7: the own body's re-make and removal moved into the core.
+        class event_log_mute {
+        public:
+            explicit event_log_mute(session_client_core& core);
+            ~event_log_mute();
+            event_log_mute(const event_log_mute&) = delete;
+            event_log_mute& operator=(const event_log_mute&) = delete;
+
+        private:
+            session_client_core& owner;
+            const bool was;
+        };
+
+        // Own lives and echoes (E7, client_core_lifecycle.cpp).
+        using own_life = client_core_state::own_life;
+        bool acting_on_echoes() const { return config.rollback && config.own_echoes; }
+        // SessionStart's interval byte: the server clamps every interval of
+        // 255 or more to 255 (server.cpp:942), and 255 is treated as off -
+        // a snapshot at most every 255 ticks reconciles nothing in time, so
+        // a moved birth without own body control resyncs instead (the safe
+        // side: one extra resync).
+        bool snapshots_run() const { return s.snapshot_interval_ < 255; }
+        void commit_own_birth(const own_birth_report& report);
+        void beam_own_ball(uint32_t tick);
+        bool write_beam(const std::string& name, const double position[3], uint32_t tick);
+        void record_own_birth(const bmmo::session_event_msg& event, const std::string& entity);
+        bool own_life_current(const own_life& life) const;
+        bool unmake_own_body(const own_life& life, uint32_t tick, const char* where);
+        bool remake_own_body(const own_life& life, uint32_t tick, const char* where);
+        void apply_own_lives(uint32_t tick, const char* where, bool live);
+        bool own_lives_due(uint32_t tick) const;
+        void live_own_lives(uint32_t frame_tick);
+        void retire_own_lives();
+        void rebase_own_lives();
+        void set_aside_unanswered(own_life::aside why);
+        own_life* find_unanswered(uint32_t origin, uint8_t ball_type);
+        const own_life* moved_own_life(const std::string& entity, uint32_t birth_tick) const;
+        void process_own_echo(const bmmo::session_event_msg& msg, bool stale);
+        void answer_set_aside(own_life& entry, bool made, bool superseded, uint32_t applied, const char* verdict);
+        void expire_own_echoes();
+        void resync_own_life(own_life& life, bool made, uint32_t applied, const std::string& why);
+        void re_report_own_birth(const own_life& life, uint32_t now);
+        void move_own_birth(own_life& life, uint32_t applied, bool made);
 
         session_platform platform_;
         session_capabilities caps_;

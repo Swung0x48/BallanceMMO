@@ -78,6 +78,7 @@ namespace bmmo::session {
         s.rollback_.set_script_log_cap(config.script_diff_logs);
         s.rollback_.set_trace_plan(config.trace_plan);
         s.session_ = msg.session;
+        s.snapshot_interval_ = msg.snapshot_interval;
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;
         s.seed_ = msg.seed;
@@ -112,6 +113,8 @@ namespace bmmo::session {
         s.own_echoes_stale_.clear();
         s.own_unanswered_.clear();
         s.own_moved_unphysicalize_.clear();
+        s.beam_requested_ = false;
+        s.own_reports_.clear();
         s.held_lifecycle_.clear();
         s.remotes_.clear();
         s.relay_seen_.clear();
@@ -285,7 +288,7 @@ namespace bmmo::session {
             // server's to apply at its stamp, and so ours: live once
             // more, rather than retired with the history.  The births
             // go: the full snapshot puts the server's own ball in.
-            legacy.rebase_own_lives();
+            rebase_own_lives();
             s.own_inputs_.clear();
             s.mechanism_tracking_.clear();
             s.resync_pending_ = true;
@@ -314,7 +317,7 @@ namespace bmmo::session {
             s.own_inputs_.clear();
             // ...and our own body changes, numbered the same way
             // (an unanswered birth is set aside for its echo).
-            legacy.set_aside_unanswered(own_life::aside::resync);
+            set_aside_unanswered(own_life::aside::resync);
             s.own_life_.clear();
             s.mechanism_tracking_.clear();
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_renumber);
