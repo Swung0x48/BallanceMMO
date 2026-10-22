@@ -22,6 +22,11 @@
 // request_resync / retry_owed_resync, flush_inputs, remember_sent,
 // send_event, put_event_on_wire and SessionEnd, in client_core.cpp.
 //
+// Step E4 moves the snapshot path (design 6.1 row E4): SessionSnapshot's
+// apply_snapshot - the rollback path, the resync rebuild and the legacy
+// ladder - in client_core_messages.cpp, over the platform's write_body,
+// own_driven_entity, bind_world and keep_live_cells.
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -296,6 +301,9 @@ namespace bmmo::session {
         } window_base_;
         uint64_t input_rewind_depth_ = 0, life_rewind_depth_ = 0, forced_rollback_depth_ = 0;
         uint64_t snapshot_rollbacks_ = 0, snapshot_rollback_depth_ = 0;
+        // The --trace lines after a snapshot rollback (apply_snapshot): the
+        // first 16 (moved from the headless client's state at E4).
+        int rollback_diag_ = 0;
         bmmo::session::relay_seen relay_seen_;
         bmmo::session::pending_relay pending_relay_;
         // Protocol 7 (late-player design 1.3): the server's notices of our own
@@ -421,6 +429,10 @@ namespace bmmo::session {
         bool savestate = true;              // set_exact_restore
         uint32_t script_diff_logs = 8;      // set_script_log_cap
         bool trace_plan = false;            // set_trace_plan
+        // The flow's switches (E4), the headless argument defaults.
+        bool rollback = true;               // the snapshot rollback; off: the legacy blend ladder (--no-rollback)
+        bool correct = true;                // the ladder writes its hard corrections (--no-correct: logged only)
+        bool trace = false;                 // the core's diagnostic lines (headless --trace)
     };
 
     // Transitional (design 6.1, "Linking while the core is incomplete"): one
@@ -443,6 +455,19 @@ namespace bmmo::session {
         std::function<void()> end_session_world;
         // E3: end prints the status line (E10: status_text and hooks.status).
         std::function<void()> report;
+        // E4: apply_snapshot.  The input a navigated ball had at `tick`, for a
+        // re-simulation: the own ball's exact record, a remote's relayed frame
+        // (moves with the relay, E5).
+        std::function<bool(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out)> recorded_input_at;
+        // E4: the own ball's entity name, "" when the level has none (E9: the
+        // platform's own_ball).
+        std::function<std::string()> own_ball;
+        // E4: the movable objects' description, the --trace line after a
+        // snapshot rollback (a headless diagnostic, design 2.4).
+        std::function<std::string()> describe_movable_objects;
+        // E4: a waiting own replay the snapshot rollback carried is dropped
+        // (section J, E5).
+        std::function<void(uint32_t anchor, bool server_rows)> drop_carried_own_replay;
     };
 
     // anchor (design 1.3): what the host's anchor work found.
@@ -499,6 +524,9 @@ namespace bmmo::session {
         uint32_t current_tick() const {
             return s.frames_since_anchor_ >= 1 ? s.tick_base_ + static_cast<uint32_t>(s.frames_since_anchor_ - 1) : s.tick_base_;
         }
+        // The rollback engine's statistics (design 1.1; E4): what a host's
+        // keep_live_cells guard compares before and after a rollback.
+        const bmmo::session::rollback_stats& rollback_stats() const { return s.rollback_.stats(); }
 
         // The session's journal (design 1.2).
         core::client_journal& journal() { return journal_; }
@@ -523,6 +551,9 @@ namespace bmmo::session {
         // ---- messages (E3: decoded by the host until on_message exists) ----
         void on_session_assign(const bmmo::session_assign_msg& msg);
         void on_session_end(const bmmo::session_end_msg& msg);
+        // SessionSnapshot (E4): counted, then applied when it is this
+        // running session's.
+        void on_session_snapshot(const bmmo::session_snapshot_msg& msg);
 
         // ---- numbering and resync ----
         // `owed`: the own correction needs this resync; one the limiter
@@ -557,6 +588,10 @@ namespace bmmo::session {
         void logf(const char* format, ...);
 
     private:
+        // The snapshot path (E4, client_core_messages.cpp): the resync
+        // rebuild, the snapshot rollback, or the legacy ladder.
+        void apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
+
         session_platform platform_;
         session_capabilities caps_;
         // Last, so it is destroyed first (the file closes before the state

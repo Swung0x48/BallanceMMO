@@ -10,7 +10,9 @@
 // SessionLead) arrive with the steps that move that flow (E3-E10).  Step E2
 // adds the journal's (core::client_journal over a temporary file); step E3
 // numbering and the hold (design 5.1), begin, SessionReady, the resync
-// limiter, the event sends and end.
+// limiter, the event sends and end; step E4 the snapshot path (the count,
+// the stale rule, the resync rebuild, the rollback path's guard order, the
+// legacy ladder).
 
 #include <gtest/gtest.h>
 
@@ -43,6 +45,8 @@ namespace {
     struct fake_platform {
         std::vector<std::string> calls;
         std::chrono::steady_clock::time_point clock{std::chrono::milliseconds(1000)};
+        std::string driven;              // what own_driven_entity answers
+        bool write_ok = true;            // what write_body answers (false: "no body")
 
         session_platform make() {
             session_platform p;
@@ -56,23 +60,56 @@ namespace {
             p.log = [this](log_level level, const std::string& text) {
                 calls.push_back("log:" + std::to_string(static_cast<int>(level)) + ":" + text);
             };
+            // The snapshot path's (E4).
+            p.body_state = [this](const std::string& entity, bmmo_physics_body_state&) {
+                calls.push_back("body_state:" + entity);
+                return false;
+            };
+            p.write_body = [this](const std::string& entity, const double position[3], const double*, const float*,
+                                  const float*, bool wake, std::string& error) {
+                calls.push_back("write_body:" + entity + ":" + std::to_string(position[0]) + (wake ? ":wake" : ":freeze"));
+                error.clear();
+                if (!write_ok) error = "no body";
+                return write_ok;
+            };
+            p.own_driven_entity = [this]() {
+                calls.push_back("own_driven_entity");
+                return driven;
+            };
+            p.bind_world = [this]() {
+                calls.push_back("bind_world");
+                return bmmo::session::rollback_world{};
+            };
+            p.keep_live_cells = [this](const session_client_core& core) {
+                calls.push_back("keep_live_cells:enter:" + std::to_string(core.current_tick()));
+                const uint64_t rollbacks_before = core.rollback_stats().rollbacks;
+                return bmmo::session::scope_guard([this, &core, rollbacks_before]() {
+                    calls.push_back(core.rollback_stats().rollbacks != rollbacks_before ? "keep_live_cells:exit:rolled back"
+                                                                                      : "keep_live_cells:exit");
+                });
+            };
             return p;
         }
     };
 
-    TEST(SessionClientCore, ConstructsWithTheThreeOperations) {
+    TEST(SessionClientCore, ConstructsWithTheRequiredOperations) {
         fake_platform fake;
         session_client_core core(fake.make(), session_capabilities{});
         EXPECT_TRUE(fake.calls.empty()) << "construction calls nothing on the platform";
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 3; ++missing) {
+        for (int missing = 0; missing < 8; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
             if (missing == 1) p.now = nullptr;
             if (missing == 2) p.log = nullptr;
+            if (missing == 3) p.body_state = nullptr;
+            if (missing == 4) p.write_body = nullptr;
+            if (missing == 5) p.own_driven_entity = nullptr;
+            if (missing == 6) p.bind_world = nullptr;
+            if (missing == 7) p.keep_live_cells = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         EXPECT_STREQ(bmmo::session::missing_platform_operation(session_platform{}, session_capabilities{}), "send");
@@ -107,7 +144,7 @@ namespace {
     }
 
     // The back-calls (design 6.1) are the host's to fill: a core starts with
-    // none.  E3 adds the seven its moved code calls.
+    // none.  E3 adds the seven its moved code calls, E4 four more.
     TEST(SessionClientCore, LegacyCallsStartEmpty) {
         fake_platform fake;
         session_client_core core(fake.make(), session_capabilities{});
@@ -119,6 +156,10 @@ namespace {
         EXPECT_FALSE(l.finish_lead_slew);
         EXPECT_FALSE(l.end_session_world);
         EXPECT_FALSE(l.report);
+        EXPECT_FALSE(l.recorded_input_at);
+        EXPECT_FALSE(l.own_ball);
+        EXPECT_FALSE(l.describe_movable_objects);
+        EXPECT_FALSE(l.drop_carried_own_replay);
     }
 
     // The state moved with its initializers unchanged (design 6.1, E1): the
@@ -164,6 +205,10 @@ namespace {
         EXPECT_TRUE(s.pending_events_.empty());
         EXPECT_FALSE(core.journal().journalling());
         EXPECT_EQ(core.config.journal_checkpoint_ticks, 0u);
+        EXPECT_TRUE(core.config.rollback);
+        EXPECT_TRUE(core.config.correct);
+        EXPECT_FALSE(core.config.trace);
+        EXPECT_EQ(s.rollback_diag_, 0);
         EXPECT_EQ(s.rollback_.stats().rollbacks, 0u);
     }
 
@@ -283,7 +328,8 @@ namespace {
             if (missing == 2) p.list_bodies = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
-        // Without journal_path the host never journals, and needs none of them.
+        // Without journal_path the host never journals, and needs neither
+        // utc_ms nor list_bodies (body_state every host needs: E4).
         fake_platform plain;
         EXPECT_NO_THROW(session_client_core(plain.make(), session_capabilities{}));
     }
@@ -485,7 +531,23 @@ namespace {
             };
             l.end_session_world = [this]() { calls.push_back("legacy:end_session_world"); };
             l.report = [this]() { calls.push_back("legacy:report"); };
+            l.recorded_input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame&) {
+                calls.push_back("legacy:recorded_input_at:" + entity + ":" + std::to_string(tick));
+                return false;
+            };
+            l.own_ball = [this]() {
+                calls.push_back("legacy:own_ball");
+                return own_ball_name;
+            };
+            l.describe_movable_objects = [this]() {
+                calls.push_back("legacy:describe_movable_objects");
+                return std::string("-");
+            };
+            l.drop_carried_own_replay = [this](uint32_t anchor, bool server_rows) {
+                calls.push_back("legacy:drop_carried_own_replay:" + std::to_string(anchor) + (server_rows ? ":rows" : ""));
+            };
         }
+        std::string own_ball_name = "Ball_Wood";
 
         void advance(std::chrono::milliseconds ms) { clock += ms; }
     };
@@ -942,5 +1004,180 @@ namespace {
         EXPECT_FALSE(core.assigned());
         EXPECT_TRUE(core.s.remotes_.empty());
         EXPECT_EQ(core.s.sessions_ended_, 1u);
+    }
+
+    // ---------------------------------------------------- the snapshot path
+    // Step E4: SessionSnapshot's count and apply_snapshot - the resync
+    // rebuild, the snapshot rollback and the legacy ladder - over the
+    // platform's write_body, own_driven_entity, bind_world and
+    // keep_live_cells, with the legacy back-calls recorded.
+
+    bmmo::session::body_state ball_row(uint32_t owner, double x, bool simulated) {
+        bmmo::session::body_state b;
+        b.kind = bmmo::session::body_kind::Ball;
+        b.owner = owner;
+        b.position[0] = x;
+        b.rotation[3] = 1.0;
+        b.flags = simulated ? bmmo::session::BODY_FLAG_SIMULATED : 0;
+        return b;
+    }
+
+    bmmo::session_snapshot_msg snapshot_message(uint32_t session, uint32_t tick, bool full,
+                                                std::vector<bmmo::session::body_state> bodies) {
+        bmmo::session_snapshot_msg msg;
+        msg.session = session;
+        msg.tick = tick;
+        msg.full = full;
+        msg.bodies = std::move(bodies);
+        return msg;
+    }
+
+    // Counted always; applied only when it is this running session's; a
+    // delta at or before the last applied tick is stale (a full one is not).
+    // The rollback path: the live cells kept around the bound world, an
+    // unmatched tick rolls nothing back.
+    TEST(SessionClientCoreSnapshot, CountedAppliedAndStale) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        core.on_session_snapshot(snapshot_message(9, 100, true, {}));
+        EXPECT_EQ(core.s.snapshots_received_, 1u);
+        EXPECT_TRUE(fake.calls.empty()) << "idle: counted only";
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        size_t from = fake.calls.size();
+        core.on_session_snapshot(snapshot_message(8, 125, true, {ball_row(3, 1.0, true)}));
+        EXPECT_EQ(core.s.snapshots_received_, 2u);
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "another session's: counted only";
+        EXPECT_FALSE(core.s.have_snapshot_);
+
+        core.on_session_snapshot(snapshot_message(9, 125, false, {ball_row(3, 1.0, true)}));
+        EXPECT_EQ(core.s.snapshots_received_, 3u);
+        EXPECT_EQ(core.s.snapshots_applied_, 1u);
+        EXPECT_TRUE(core.s.have_snapshot_);
+        EXPECT_EQ(core.s.last_snapshot_tick_, 125u);
+        EXPECT_EQ(core.rollback_stats().unmatched, 1u) << "no record of tick 125";
+        EXPECT_EQ(core.s.snapshot_rollbacks_, 0u);
+        {
+            // The own row names no entity while the own ball has no body.
+            const std::vector<std::string> expected = {"legacy:own_ball", "keep_live_cells:enter:120", "bind_world",
+                                                       "keep_live_cells:exit"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        from = fake.calls.size();
+        core.on_session_snapshot(snapshot_message(9, 125, false, {}));
+        core.on_session_snapshot(snapshot_message(9, 110, false, {}));
+        EXPECT_EQ(core.s.snapshots_stale_, 2u);
+        EXPECT_EQ(core.s.snapshots_applied_, 1u);
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "stale: nothing read";
+        core.on_session_snapshot(snapshot_message(9, 110, true, {ball_row(3, 1.0, true)}));
+        EXPECT_EQ(core.s.snapshots_applied_, 2u) << "a full one is never stale";
+        EXPECT_EQ(core.rollback_stats().unmatched, 2u);
+        {
+            const std::vector<std::string> expected = {"legacy:own_ball", "keep_live_cells:enter:120", "bind_world",
+                                                       "keep_live_cells:exit"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+    }
+
+    // The resync rebuild: only a full snapshot answers it; the history and a
+    // pending replay go, every ball with a body here is written (the own one
+    // awake, the others as the row says), the held floor moves past the
+    // current tick.
+    TEST(SessionClientCoreSnapshot, ResyncRebuildsFromTheFullSnapshot) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        core.on_session_assign(assign_message(9, 2000));
+        ASSERT_TRUE(core.resync_pending());
+        core.s.frames_since_anchor_ = 10;   // current tick 2009
+        core.s.own_physicalized_ = true;
+        core.s.remotes_[4].entity = "Ball_Wood_BMMO_4";
+        core.s.remotes_[4].physicalized = true;
+        core.s.remotes_[5].entity = "Ball_Wood_BMMO_5";
+        const std::vector<bmmo::session::body_state> rows = {ball_row(3, 1.0, false), ball_row(4, 2.0, false),
+                                                             ball_row(5, 3.0, true), ball_row(6, 4.0, true)};
+        size_t from = fake.calls.size();
+        core.on_session_snapshot(snapshot_message(9, 1995, false, rows));
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"legacy:own_ball"});
+        EXPECT_TRUE(core.resync_pending());
+        EXPECT_EQ(core.s.snapshots_applied_, 0u);
+        from = fake.calls.size();
+        core.on_session_snapshot(snapshot_message(9, 1995, true, rows));
+        const std::vector<std::string> expected = {
+            "legacy:own_ball", "legacy:drop_pending_rewind", "write_body:Ball_Wood:1.000000:wake",
+            "write_body:Ball_Wood_BMMO_4:2.000000:freeze",
+            "log:0:resync applied from the full snapshot of tick 1995 (4 bodies)"};
+        EXPECT_EQ(since(fake.calls, from), expected);
+        EXPECT_FALSE(core.resync_pending());
+        EXPECT_TRUE(core.s.have_snapshot_);
+        EXPECT_EQ(core.s.last_snapshot_tick_, 1995u);
+        EXPECT_EQ(core.s.snapshots_applied_, 1u);
+        EXPECT_EQ(core.s.resyncs_done_, 1u);
+        EXPECT_EQ(core.s.held_floor_, 2010u);
+    }
+
+    // The legacy ladder (rollback off): the own ball compared with its
+    // recorded pose - a hard correction written only with `correct`, the
+    // third in a row asks for a resync; a remote without navigation written
+    // as the row says, a failed write logged.
+    TEST(SessionClientCoreSnapshot, LegacyLadder) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        core.config.rollback = false;
+        core.s.own_physicalized_ = true;
+        auto hard_at = [&](uint32_t tick) {
+            bmmo::session::ball_pose local;
+            local.tick = tick;
+            core.s.corrector_.record(local);
+            core.on_session_snapshot(snapshot_message(9, tick, false, {ball_row(3, 5.0, true)}));
+        };
+        size_t from = fake.calls.size();
+        hard_at(125);
+        {
+            const std::vector<std::string> expected = {
+                "legacy:own_ball", "log:0:hard correction of own ball for tick 125 (error 5.0000 m, local tick 120)",
+                "write_body:Ball_Wood:5.000000:wake"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.consecutive_hard_, 1);
+        core.config.correct = false;
+        from = fake.calls.size();
+        hard_at(126);
+        {
+            const std::vector<std::string> expected = {
+                "legacy:own_ball", "log:0:hard correction of own ball for tick 126 (error 5.0000 m, local tick 120)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        from = fake.calls.size();
+        hard_at(127);
+        {
+            const std::vector<std::string> expected = {
+                "legacy:own_ball", "now:resync_limiter", "send:0",
+                "log:0:resync requested (3 hard corrections in a row) at tick 120",
+                "log:0:hard correction of own ball for tick 127 (error 5.0000 m, local tick 120)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.resyncs_sent_, 1u);
+        EXPECT_EQ(core.s.consecutive_hard_, 0) << "reset by the request";
+
+        core.s.remotes_[4].entity = "Ball_Wood_BMMO_4";
+        core.s.remotes_[4].physicalized = true;
+        from = fake.calls.size();
+        core.on_session_snapshot(snapshot_message(9, 128, false, {ball_row(4, 2.0, false)}));
+        fake.write_ok = false;
+        core.on_session_snapshot(snapshot_message(9, 129, false, {ball_row(4, 3.0, true)}));
+        {
+            const std::vector<std::string> expected = {
+                "legacy:own_ball", "write_body:Ball_Wood_BMMO_4:2.000000:freeze",
+                "legacy:own_ball", "write_body:Ball_Wood_BMMO_4:3.000000:wake", "log:0:remote 4: no body"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.remote_writes_, 1u);
     }
 }

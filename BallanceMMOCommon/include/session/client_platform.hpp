@@ -13,11 +13,13 @@
 // the operations its moved code calls (design 2.2), and the capability checks
 // with them: E2 the journal's (journal_path, utc_ms, body_state, list_bodies);
 // E3 the first host hooks (session_hooks: numbering_restarted, filter_event,
-// ending).
+// ending); E4 the snapshot path's (write_body, own_driven_entity, bind_world,
+// keep_live_cells).
 //
 // CK-free and header-only.
 
 #include "clock_site.hpp"
+#include "rollback.hpp"
 #include "../physics/physics_rt_api.h"
 
 #include <chrono>
@@ -25,6 +27,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bmmo {
@@ -34,6 +37,7 @@ namespace bmmo {
 namespace bmmo::session {
 
     struct journal_header;   // session/journal.hpp
+    class session_client_core;   // session/client_core.hpp
 
     // How a message goes out; the host maps it to k_nSteamNetworkingSend_*.
     enum class send_mode : uint8_t { reliable, reliable_no_nagle, unreliable_no_delay };
@@ -67,6 +71,24 @@ namespace bmmo::session {
         std::function<void()> ending;
     };
 
+    // The host's work around a scope of the core (keep_live_cells): what it
+    // did on entry is the host's; `on_exit` runs when the scope ends, once.
+    class scope_guard {
+    public:
+        scope_guard() = default;
+        explicit scope_guard(std::function<void()> on_exit) : on_exit_(std::move(on_exit)) {}
+        scope_guard(scope_guard&& other) noexcept : on_exit_(std::move(other.on_exit_)) { other.on_exit_ = nullptr; }
+        scope_guard(const scope_guard&) = delete;
+        scope_guard& operator=(const scope_guard&) = delete;
+        scope_guard& operator=(scope_guard&&) = delete;
+        ~scope_guard() {
+            if (on_exit_) on_exit_();
+        }
+
+    private:
+        std::function<void()> on_exit_;
+    };
+
     struct session_platform {
         // ---- transport and time (design 2.2) ----
         std::function<void(const std::string& bytes, send_mode mode)> send;
@@ -86,6 +108,32 @@ namespace bmmo::session {
         std::function<bool(const std::string& entity, bmmo_physics_body_state& out)> body_state;
         // Every physicalized entity, in physics-table order.
         std::function<std::vector<bmmo_physics_body_state>()> list_bodies;
+
+        // ---- writing the world (design 2.2; E4) ----
+        // Beam a body to the pose and overwrite its speeds; `wake` wakes it, a
+        // simulated body is frozen otherwise (physics_state.hpp set_body_state,
+        // the bool overload).  `error` is the failure's text: the host clears
+        // it first, as write_body_state does - the core keeps one string
+        // across its writes and logs it only after a failed one.
+        std::function<bool(const std::string& entity, const double position[3], const double rotation[4],
+                           const float linear[3], const float angular[3], bool wake, std::string& error)> write_body;
+
+        // ---- driving (design 2.2; E4) ----
+        // The entity the own navigation replica drives, "" when there is none.
+        std::function<std::string()> own_driven_entity;
+
+        // ---- rollback (design 2.2; E4) ----
+        // The rollback engine's view of the host's world, bound anew on every
+        // use, never cached (the options take the own key count by value).
+        // E4: the host's own binding (headless rollback_world()); the core's
+        // hooks and bind_session_world arrive with the frame (E9).
+        std::function<rollback_world()> bind_world;
+        // Around every rewind_to / on_snapshot: the host keeps the live cells
+        // the replay rewinds (headless live_cells_guard) and re-issues what a
+        // rollback lost when the returned guard goes out of scope.  The guard
+        // reads the core's rollback_stats() and current_tick() (headless
+        // reads the same state through core_.s until E11).
+        std::function<scope_guard(const session_client_core& core)> keep_live_cells;
 
         // ---- journal (design 1.2) ----
         // The whole path of the session's journal for this header (the
@@ -125,11 +173,17 @@ namespace bmmo::session {
         if (!platform.send) return "send";
         if (!platform.now) return "now";
         if (!platform.log) return "log";
+        // The snapshot path (E4): every host applies snapshots.
+        if (!platform.body_state) return "body_state";
+        if (!platform.write_body) return "write_body";
+        if (!platform.own_driven_entity) return "own_driven_entity";
+        if (!platform.bind_world) return "bind_world";
+        if (!platform.keep_live_cells) return "keep_live_cells";
         // A host that journals (session/client_journal.hpp) stamps the header,
-        // and writes bodies into body corrections and LOCAL checkpoints.
+        // and writes bodies into LOCAL checkpoints (body_state, which body
+        // corrections read too, is required above).
         if (platform.journal_path) {
             if (!platform.utc_ms) return "utc_ms";
-            if (!platform.body_state) return "body_state";
             if (!platform.list_bodies) return "list_bodies";
         }
         return nullptr;
