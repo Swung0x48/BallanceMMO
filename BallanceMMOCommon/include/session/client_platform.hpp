@@ -14,7 +14,9 @@
 // with them: E2 the journal's (journal_path, utc_ms, body_state, list_bodies);
 // E3 the first host hooks (session_hooks: numbering_restarted, filter_event,
 // ending); E4 the snapshot path's (write_body, own_driven_entity, bind_world,
-// keep_live_cells).
+// keep_live_cells); E6 the mirrors' (mirror_entity, make_mirror,
+// unmake_mirror, detach_mirror_navigation, attach_mirror_navigation,
+// mute_event_log).
 //
 // CK-free and header-only.
 
@@ -71,6 +73,37 @@ namespace bmmo::session {
         std::function<void()> ending;
     };
 
+    // A mirror's body (design 2.2 make_mirror; E6): the entity the host named
+    // for `player`'s ball of `ball_type` (mirror_entity), posed and
+    // physicalized with the recipe in the player's collision group, and
+    // kicked with the spawn impulse of `kick_index`
+    // (session/spawn_impulse.hpp kSpawnDirectionTable) when `kick`.
+    struct mirror_spec {
+        uint32_t player = 0;
+        uint8_t ball_type = 0;
+        std::string entity;
+        float position[3] = {};
+        float rotation[9] = {};
+        bmmo_physics_ball_recipe recipe{};
+        std::string group;
+        bool kick = false;
+        uint32_t kick_index = 0;
+        float kick_strength = 0.0f;
+    };
+    // What make_mirror did: `made` (false: `error` says why, and nothing was
+    // kicked), and when the spec asked for a kick, whether it took
+    // (`kick_error` otherwise).
+    struct mirror_made {
+        bool made = false;
+        std::string error;
+        bool kicked = false;
+        std::string kick_error;
+    };
+    // attach_mirror_navigation's answer: the host has no navigation to give
+    // yet (nothing done, nothing to say), the mirror is driven now, or the
+    // attach failed (`error` says why).
+    enum class mirror_navigation : uint8_t { unavailable, attached, failed };
+
     // The host's work around a scope of the core (keep_live_cells): what it
     // did on entry is the host's; `on_exit` runs when the scope ends, once.
     class scope_guard {
@@ -117,6 +150,32 @@ namespace bmmo::session {
         // across its writes and logs it only after a failed one.
         std::function<bool(const std::string& entity, const double position[3], const double rotation[4],
                            const float linear[3], const float angular[3], bool wake, std::string& error)> write_body;
+
+        // ---- mirrors (design 2.2; E6) ----
+        // The entity that mirrors `player` with a ball of `ball_type`, made
+        // when it does not exist yet; "" with `error` when there is none.
+        std::function<std::string(uint32_t player, uint8_t ball_type, std::string& error)> mirror_entity;
+        // Pose, physicalize and kick a mirror's body (mirror_spec).  The core
+        // asks mirror_entity for `spec.entity` first, in the same frame, but
+        // the operation stands alone: the spec names the player and the ball
+        // type, so a host that keeps nothing from mirror_entity finds the
+        // entity again (headless: the pointer mirror_entity found when it
+        // names spec.entity, else the same lookup).
+        std::function<mirror_made(const mirror_spec& spec)> make_mirror;
+        // A mirror's body goes (unphysicalized).  Only the body: the core
+        // takes the navigation out first (detach_mirror_navigation) and mutes
+        // the event log around it where its flow does (mute_event_log).
+        std::function<void(const std::string& entity)> unmake_mirror;
+        // A mirror's navigation replica goes.
+        std::function<void(const std::string& entity)> detach_mirror_navigation;
+        // A physicalized mirror without navigation is driven by the shared
+        // navigation from now on (headless: the leaf directions of the
+        // level's graph, the ball row's force, CamRef_BMMO_<player>).
+        std::function<mirror_navigation(uint32_t player, const std::string& entity, uint8_t ball_type,
+                                        std::string& error)> attach_mirror_navigation;
+        // The bridge's event log muted or not; the core keeps the nesting
+        // (session_client_core::event_log_mute).
+        std::function<void(bool muted)> mute_event_log;
 
         // ---- driving (design 2.2; E4) ----
         // The entity the own navigation replica drives, "" when there is none.
@@ -179,6 +238,13 @@ namespace bmmo::session {
         if (!platform.own_driven_entity) return "own_driven_entity";
         if (!platform.bind_world) return "bind_world";
         if (!platform.keep_live_cells) return "keep_live_cells";
+        // The remote lifecycle (E6): every host mirrors the other players.
+        if (!platform.mirror_entity) return "mirror_entity";
+        if (!platform.make_mirror) return "make_mirror";
+        if (!platform.unmake_mirror) return "unmake_mirror";
+        if (!platform.detach_mirror_navigation) return "detach_mirror_navigation";
+        if (!platform.attach_mirror_navigation) return "attach_mirror_navigation";
+        if (!platform.mute_event_log) return "mute_event_log";
         // A host that journals (session/client_journal.hpp) stamps the header,
         // and writes bodies into LOCAL checkpoints (body_state, which body
         // corrections read too, is required above).

@@ -34,6 +34,13 @@
 // replays they ask for, replay_corrected_inputs and force_rewind
 // (client_core_frame.cpp).
 //
+// Step E6 moves the remote lifecycle (design 6.1 row E6): SessionEvent's
+// intake, the drain at the due tick and the held body changes, apply_event,
+// the births made inside a replay (pending births) and the core half of the
+// mirrors' birth and death, in client_core_lifecycle.cpp, over the platform's
+// mirror_entity, make_mirror, unmake_mirror, detach_mirror_navigation,
+// attach_mirror_navigation and mute_event_log.
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -411,6 +418,9 @@ namespace bmmo::session {
         uint64_t resyncs_sent_ = 0, resyncs_done_ = 0, sessions_ended_ = 0;
         bmmo::session::rollback_engine rollback_;
         std::map<uint32_t, bmmo::session::input_frame> own_inputs_;
+        // The event log's mute in force (session_client_core::event_log_mute;
+        // moved from the headless client at E6).
+        bool event_log_muted_ = false;
         // The black box (design 9.15) and its bookkeeping moved into
         // core::client_journal at E2 (session_client_core::journal()).
 
@@ -460,9 +470,11 @@ namespace bmmo::session {
         // (E3's reset_held_epoch, drop_pending_rewind and finish_lead_slew,
         // and E4's drop_carried_own_replay, were removed at E5: section J and
         // SessionLead moved into the core.)
-        // E3: end - the own body guard off, and every mirror's navigation and
-        // body taken out (E6: unmake_mirror; the guard is host state).
-        std::function<void()> end_session_world;
+        // E3: end - the own body guard off (host state).  Until E6 this was
+        // end_session_world, which took every mirror's navigation and body
+        // out too; end does that now (detach_mirror_navigation,
+        // unmake_mirror).
+        std::function<void()> own_body_guard_off;
         // E3: end prints the status line (E10: status_text and hooks.status).
         std::function<void()> report;
         // E4: apply_snapshot; E5: replay_corrected_inputs and force_rewind.
@@ -479,6 +491,13 @@ namespace bmmo::session {
         // E4: the movable objects' description, the --trace line after a
         // snapshot rollback (a headless diagnostic, design 2.4).
         std::function<std::string()> describe_movable_objects;
+        // E6: the own lives' part of the lifecycle (E7 moves them).  The
+        // own body changes due at the frame's tick, made live at our place
+        // among the held events (apply_held_lifecycle); whether a replayed
+        // tick has any, and making them there (drain_pending_births).
+        std::function<void(uint32_t frame_tick)> live_own_lives;
+        std::function<bool(uint32_t tick)> own_lives_due;
+        std::function<void(uint32_t tick, const char* where, bool live)> apply_own_lives;
     };
 
     // anchor (design 1.3): what the host's anchor work found.
@@ -575,6 +594,42 @@ namespace bmmo::session {
         // protocol error (design 2.3): counted, journaled, not applied, not
         // acknowledged.
         void on_session_lead(const bmmo::session_lead_msg& msg);
+        // SessionEvent (E6): counted; when it is this running session's and
+        // its first arrival, an echo of our own event is queued for the
+        // frame's echoes, another member's for its due tick.
+        void on_session_event(bmmo::session_event_msg&& msg);
+
+        // ---- the remote lifecycle (E6; pre_step steps 2 and 8) ----
+        // Every queued event due at `tick`, in the server's order; a body
+        // change stamped for `tick` itself is held for apply_held_lifecycle.
+        void drain_due_events(uint32_t tick);
+        // The held body changes, after the frame's rewinds and before the
+        // union's pass, with our own changes due at the tick at our place.
+        void apply_held_lifecycle(uint32_t frame_tick);
+        // Before a replayed tick (the host's binding, before_replayed_tick):
+        // the births deferred into the replay, made at their tick.
+        void drain_pending_births(uint32_t tick);
+        // A physicalized mirror without navigation is driven from now on, if
+        // the host has the navigation (post_step step 16, and every birth).
+        void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote);
+        // The frame a live step of `tick` drives a predicted mirror with
+        // (post_step step 28).
+        static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick);
+
+        // The event log muted for a scope, nesting (platform mute_event_log;
+        // the flag in force is client_core_state::event_log_muted_).  Public
+        // while the own body's re-make and removal are the host's (E7).
+        class event_log_mute {
+        public:
+            explicit event_log_mute(session_client_core& core);
+            ~event_log_mute();
+            event_log_mute(const event_log_mute&) = delete;
+            event_log_mute& operator=(const event_log_mute&) = delete;
+
+        private:
+            session_client_core& owner;
+            const bool was;
+        };
 
         // ---- the frame's rewinds (E5; pre_step steps 5 and 7, design 1.3) ----
         // One replay for every input correction the frame collected (the
@@ -677,6 +732,17 @@ namespace bmmo::session {
         void reset_held_epoch(const char* why = "the new base");
         void drop_pending_rewind();
         bool own_notices_coming() const;
+
+        // The remote lifecycle (E6, client_core_lifecycle.cpp).
+        uint32_t join_rank(uint32_t player) const;
+        void apply_event(const bmmo::session_event_msg& event);
+        void make_remote_birth(const bmmo::session_event_msg& event);
+        void rewind_for_lifecycle(const bmmo::session_event_msg& event);
+        void rewind_for_lifecycle(uint32_t player, uint32_t event_tick);
+        bool unphysicalize_remote(uint32_t player, uint32_t tick);
+        uint32_t live_first_tick(uint32_t stamp) const;
+        void unphysicalize_mirror(const std::string& entity);
+        void physicalize_remote(const client_core_state::pending_birth& event, uint32_t first_tick);
 
         session_platform platform_;
         session_capabilities caps_;

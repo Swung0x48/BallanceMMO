@@ -17,7 +17,10 @@
 // forced and the ack at the slew's end, without it nothing applied or
 // acknowledged; the relay intake; the forced own frames; the input replay and
 // the forced rewind's call order).  E5 moved the targets of four back-calls
-// into the core, so the call lists below no longer show them.
+// into the core, so the call lists below no longer show them.  Step E6 adds
+// the remote lifecycle (design 5.1 "Events": the intake, the drain's order,
+// the held body changes, the supersede guards, the births made inside a
+// replay, the mirrors' platform calls and the event log's mute).
 
 #include <gtest/gtest.h>
 
@@ -33,6 +36,7 @@
 #include <vector>
 
 #include <session/client_core.hpp>
+#include <session/spawn_impulse.hpp>
 // After client_core.hpp: the message headers are not self-contained.
 #include <message/session_lead_msg.hpp>
 #include <message/session_ready_msg.hpp>
@@ -54,6 +58,9 @@ namespace {
         std::chrono::steady_clock::time_point clock{std::chrono::milliseconds(1000)};
         std::string driven;              // what own_driven_entity answers
         bool write_ok = true;            // what write_body answers (false: "no body")
+        bool mirror_ok = true;           // what mirror_entity answers (false: "" and "no ball")
+        bmmo::session::mirror_navigation attach_answer = bmmo::session::mirror_navigation::attached;
+        std::vector<bmmo::session::mirror_spec> specs;   // every make_mirror's spec, in order
 
         session_platform make() {
             session_platform p;
@@ -95,6 +102,34 @@ namespace {
                                                                                       : "keep_live_cells:exit");
                 });
             };
+            // The mirrors' (E6): an entity named Ball_<type>_BMMO_<player>.
+            p.mirror_entity = [this](uint32_t player, uint8_t ball_type, std::string& error) {
+                calls.push_back("mirror_entity:" + std::to_string(player) + ":" + std::to_string(ball_type));
+                if (!mirror_ok) {
+                    error = "no ball";
+                    return std::string();
+                }
+                return "Ball_" + std::to_string(ball_type) + "_BMMO_" + std::to_string(player);
+            };
+            p.make_mirror = [this](const bmmo::session::mirror_spec& spec) {
+                calls.push_back("make_mirror:" + spec.entity + ":" + spec.group
+                                + (spec.kick ? ":kick" + std::to_string(spec.kick_index) : std::string()));
+                specs.push_back(spec);
+                bmmo::session::mirror_made made;
+                made.made = true;
+                made.kicked = spec.kick;
+                return made;
+            };
+            p.unmake_mirror = [this](const std::string& entity) { calls.push_back("unmake_mirror:" + entity); };
+            p.detach_mirror_navigation = [this](const std::string& entity) {
+                calls.push_back("detach_mirror_navigation:" + entity);
+            };
+            p.attach_mirror_navigation = [this](uint32_t player, const std::string& entity, uint8_t, std::string& error) {
+                calls.push_back("attach_mirror_navigation:" + std::to_string(player) + ":" + entity);
+                if (attach_answer == bmmo::session::mirror_navigation::failed) error = "no graph";
+                return attach_answer;
+            };
+            p.mute_event_log = [this](bool muted) { calls.push_back(muted ? "mute_event_log:on" : "mute_event_log:off"); };
             return p;
         }
     };
@@ -106,7 +141,7 @@ namespace {
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 8; ++missing) {
+        for (int missing = 0; missing < 14; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
@@ -117,6 +152,12 @@ namespace {
             if (missing == 5) p.own_driven_entity = nullptr;
             if (missing == 6) p.bind_world = nullptr;
             if (missing == 7) p.keep_live_cells = nullptr;
+            if (missing == 8) p.mirror_entity = nullptr;
+            if (missing == 9) p.make_mirror = nullptr;
+            if (missing == 10) p.unmake_mirror = nullptr;
+            if (missing == 11) p.detach_mirror_navigation = nullptr;
+            if (missing == 12) p.attach_mirror_navigation = nullptr;
+            if (missing == 13) p.mute_event_log = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         EXPECT_STREQ(bmmo::session::missing_platform_operation(session_platform{}, session_capabilities{}), "send");
@@ -153,18 +194,23 @@ namespace {
     // The back-calls (design 6.1) are the host's to fill: a core starts with
     // none.  E3 adds the seven its moved code calls, E4 four more; E5 removes
     // four (reset_held_epoch, drop_pending_rewind, finish_lead_slew,
-    // drop_carried_own_replay: their targets are the core's now).
+    // drop_carried_own_replay: their targets are the core's now).  E6 adds
+    // the own lives' three and narrows end_session_world to
+    // own_body_guard_off (the mirrors are the core's now).
     TEST(SessionClientCore, LegacyCallsStartEmpty) {
         fake_platform fake;
         session_client_core core(fake.make(), session_capabilities{});
         const auto& l = core.legacy;
         EXPECT_FALSE(l.rebase_own_lives);
         EXPECT_FALSE(l.set_aside_unanswered);
-        EXPECT_FALSE(l.end_session_world);
+        EXPECT_FALSE(l.own_body_guard_off);
         EXPECT_FALSE(l.report);
         EXPECT_FALSE(l.recorded_input_at);
         EXPECT_FALSE(l.own_ball);
         EXPECT_FALSE(l.describe_movable_objects);
+        EXPECT_FALSE(l.live_own_lives);
+        EXPECT_FALSE(l.own_lives_due);
+        EXPECT_FALSE(l.apply_own_lives);
     }
 
     // The state moved with its initializers unchanged (design 6.1, E1): the
@@ -208,6 +254,7 @@ namespace {
         EXPECT_TRUE(s.remotes_.empty());
         EXPECT_TRUE(s.own_life_.empty());
         EXPECT_TRUE(s.pending_events_.empty());
+        EXPECT_FALSE(s.event_log_muted_);
         EXPECT_FALSE(core.journal().journalling());
         EXPECT_EQ(core.config.journal_checkpoint_ticks, 0u);
         EXPECT_TRUE(core.config.rollback);
@@ -529,7 +576,7 @@ namespace {
             l.set_aside_unanswered = [this](client_core_state::own_life::aside why) {
                 calls.push_back("legacy:set_aside_unanswered:" + std::to_string(static_cast<int>(why)));
             };
-            l.end_session_world = [this]() { calls.push_back("legacy:end_session_world"); };
+            l.own_body_guard_off = [this]() { calls.push_back("legacy:own_body_guard_off"); };
             l.report = [this]() { calls.push_back("legacy:report"); };
             l.recorded_input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame&) {
                 calls.push_back("legacy:recorded_input_at:" + entity + ":" + std::to_string(tick));
@@ -543,8 +590,17 @@ namespace {
                 calls.push_back("legacy:describe_movable_objects");
                 return std::string("-");
             };
+            l.live_own_lives = [this](uint32_t tick) { calls.push_back("legacy:live_own_lives:" + std::to_string(tick)); };
+            l.own_lives_due = [this](uint32_t tick) {
+                calls.push_back("legacy:own_lives_due:" + std::to_string(tick));
+                return tick == own_lives_due_at;
+            };
+            l.apply_own_lives = [this](uint32_t tick, const char* where, bool live) {
+                calls.push_back("legacy:apply_own_lives:" + std::to_string(tick) + ":" + where + ":" + (live ? "1" : "0"));
+            };
         }
         std::string own_ball_name = "Ball_Wood";
+        uint32_t own_lives_due_at = 0;   // the tick own_lives_due answers true for
 
         void advance(std::chrono::milliseconds ms) { clock += ms; }
     };
@@ -991,7 +1047,7 @@ namespace {
         from = fake.calls.size();
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
-            "log:0:session 9 ended: ", "hook:ending", "legacy:end_session_world",
+            "log:0:session 9 ended: ", "hook:ending", "legacy:own_body_guard_off",
             "legacy:report"};
         EXPECT_EQ(since(fake.calls, from), expected);
         EXPECT_EQ(core.s.phase_, client_core_state::phase::idle);
@@ -1485,5 +1541,415 @@ namespace {
             EXPECT_EQ(core.s.forced_rollbacks_missed_, 1u);
         }
         EXPECT_TRUE(since(fake.calls, from).empty());
+    }
+
+    // ------------------------------------------------- the remote lifecycle
+    // Step E6: SessionEvent's intake, the drain at the due tick in the
+    // server's order (join, applied, origin, rank), the body changes held
+    // past the frame's rewinds with our own lives at our place, the
+    // supersede guards, the births made inside a replay with the event log
+    // muted, live_drive and the mirrors taken out at the end, over the
+    // platform's mirror operations (design 5.1 "Events").
+
+    bmmo::session_event_msg event_message(uint32_t player, bmmo::session::event_type type, uint32_t tick, uint32_t origin) {
+        bmmo::session_event_msg msg;
+        msg.session = 9;
+        msg.player = player;
+        msg.type = type;
+        msg.tick = tick;
+        msg.origin_tick = origin;
+        return msg;
+    }
+
+    bmmo::session_event_msg sector_message(uint32_t player, int sector, uint32_t tick, uint32_t origin) {
+        auto msg = event_message(player, bmmo::session::event_type::Sector, tick, origin);
+        msg.sector = sector;
+        return msg;
+    }
+
+    // run_to_tick_125 with two more members: 5 (join order 1) and 6 (join
+    // order 3); the own player 3 is join order 2, player 4 join order 0.
+    void run_to_tick_125_four(session_client_core& core, flow_fake& fake) {
+        run_to_tick_125(core, fake);
+        bmmo::session::player_entry five, six;
+        five.id = 5; five.join_order = 1;
+        six.id = 6; six.join_order = 3;
+        core.s.players_.push_back(five);
+        core.s.players_.push_back(six);
+    }
+
+    // Counted always; this running session's only; a copy is counted and
+    // dropped; our own is an echo for the frame, another member's waits for
+    // its due tick.  Nothing reaches the platform.
+    TEST(SessionClientCoreLifecycle, IntakeCountsQueuesAndEchoes) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125(core, fake);
+        const size_t from = fake.calls.size();
+        auto other = event_message(4, bmmo::session::event_type::Physicalize, 126, 126);
+        other.session = 8;
+        core.on_session_event(std::move(other));
+        EXPECT_EQ(core.s.events_received_, 1u);
+        EXPECT_TRUE(core.s.pending_events_.empty());
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
+        core.on_session_event(event_message(3, bmmo::session::event_type::Physicalize, 127, 126));
+        EXPECT_EQ(core.s.events_received_, 4u);
+        EXPECT_EQ(core.s.event_dups_, 1u);
+        ASSERT_EQ(core.s.pending_events_.size(), 1u);
+        EXPECT_EQ(core.s.pending_events_[0].player, 4u);
+        ASSERT_EQ(core.s.own_echoes_.size(), 1u);
+        EXPECT_EQ(core.s.own_echoes_[0].tick, 127u);
+        EXPECT_TRUE(since(fake.calls, from).empty());
+        // Not running: dropped before the copy check.
+        core.s.phase_ = client_core_state::phase::loading;
+        core.on_session_event(event_message(4, bmmo::session::event_type::Sector, 126, 126));
+        EXPECT_EQ(core.s.events_received_, 5u);
+        EXPECT_EQ(core.s.pending_events_.size(), 1u);
+        EXPECT_EQ(core.s.event_dups_, 1u);
+    }
+
+    // Design 5.1 "Events": the drain takes every event due at the tick, in
+    // (join, applied, origin, rank); a Physicalize or Unphysicalize stamped
+    // for the tick itself is held until apply_held_lifecycle, which makes
+    // them in the same order with our own lives at our join rank (between
+    // player 4's and player 6's), and once more at the end.
+    TEST(SessionClientCoreLifecycle, DrainsInTheServersOrderAndHoldsTheTicksBodyChanges) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125_four(core, fake);
+        auto spawn = event_message(6, bmmo::session::event_type::Physicalize, 126, 126);
+        spawn.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        spawn.ball_type = 1;
+        // Arrival order scrambled.
+        core.on_session_event(sector_message(6, 2, 124, 124));
+        core.on_session_event(sector_message(4, 3, 124, 123));
+        core.on_session_event(std::move(spawn));
+        core.on_session_event(sector_message(4, 5, 127, 127));
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
+        core.on_session_event(sector_message(4, 4, 123, 123));
+        size_t from = fake.calls.size();
+        core.drain_due_events(126);
+        {
+            const std::vector<std::string> expected = {
+                "log:0:remote player 4 entered sector 4, stamped for tick 123 (LATE: the server started it already)",
+                "log:0:remote player 4 entered sector 3, stamped for tick 124 (LATE: the server started it already)",
+                "log:0:remote player 6 entered sector 2, stamped for tick 124 (LATE: the server started it already)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        ASSERT_EQ(core.s.pending_events_.size(), 1u);
+        EXPECT_EQ(core.s.pending_events_[0].tick, 127u);
+        ASSERT_EQ(core.s.held_lifecycle_.size(), 2u);
+        EXPECT_EQ(core.s.held_lifecycle_[0].player, 4u);
+        EXPECT_EQ(core.s.held_lifecycle_[1].player, 6u);
+        EXPECT_TRUE(core.s.remotes_.empty()) << "held, not made";
+
+        from = fake.calls.size();
+        core.apply_held_lifecycle(126);
+        const uint32_t kick = bmmo::session::spawn_direction_index(11, 3, 126);
+        {
+            const std::vector<std::string> expected = {
+                "mirror_entity:4:0", "make_mirror:Ball_0_BMMO_4:P#0",
+                "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote Ball_0_BMMO_4 now predicted",
+                "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 126, predicted",
+                "legacy:live_own_lives:126",
+                "mirror_entity:6:1", "make_mirror:Ball_1_BMMO_6:P#3:kick" + std::to_string(kick),
+                "log:0:remote spawn impulse index=" + std::to_string(kick) + " for player 6 at tick 126",
+                "attach_mirror_navigation:6:Ball_1_BMMO_6", "log:0:remote Ball_1_BMMO_6 now predicted",
+                "log:0:remote player 6 physicalized (Ball_1_BMMO_6) at tick 126, predicted",
+                "legacy:live_own_lives:126"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(core.s.held_lifecycle_.empty());
+        // The spec names the player and the ball type: make_mirror stands
+        // alone (a host finds the entity again from them).
+        ASSERT_EQ(fake.specs.size(), 2u);
+        EXPECT_EQ(fake.specs[0].player, 4u);
+        EXPECT_EQ(fake.specs[0].ball_type, 0u);
+        EXPECT_EQ(fake.specs[1].player, 6u);
+        EXPECT_EQ(fake.specs[1].ball_type, 1u);
+        EXPECT_EQ(fake.specs[1].entity, "Ball_1_BMMO_6");
+        ASSERT_EQ(core.s.remotes_.count(6), 1u);
+        const auto& six = core.s.remotes_.at(6);
+        EXPECT_TRUE(six.physicalized);
+        EXPECT_TRUE(six.navigation);
+        EXPECT_EQ(six.born_tick, 126u);
+        EXPECT_EQ(six.driven_from, 126u);
+        EXPECT_EQ(core.s.generations_.at("Ball_1_BMMO_6"), 1u);
+        EXPECT_EQ(core.s.remote_last_physicalize_.at(6), 126u);
+        EXPECT_EQ(core.s.life_rewinds_ + core.s.life_rewinds_missed_, 0u) << "on time: no rewind";
+
+        // Nothing held: our own lives once.
+        from = fake.calls.size();
+        core.apply_held_lifecycle(127);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"legacy:live_own_lives:127"});
+    }
+
+    // The supersede guards: a death no newer (by origin) than the player's
+    // last applied birth is a stale copy (counted, nothing done); a birth
+    // older than an applied death is dropped in the death's tick, and made
+    // and the death applied again when it lived before it.  A late birth
+    // outside the history is made live, and its rewind refused and logged.
+    TEST(SessionClientCoreLifecycle, SupersedeGuards) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125_four(core, fake);
+        // A death of player 4, applied while it has no mirror: remembered.
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 124, 124));
+        size_t from = fake.calls.size();
+        core.drain_due_events(126);
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "no mirror: nothing to take out, no rewind";
+        EXPECT_EQ(core.s.remote_last_unphysicalize_.at(4).origin, 124u);
+
+        // A birth stamped before it, applied in its tick: no ball.
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 124, 122));
+        from = fake.calls.size();
+        core.drain_due_events(126);
+        EXPECT_EQ(core.s.births_overtaken_, 1u);
+        {
+            const std::vector<std::string> expected = {
+                "log:0:remote physicalize of 4 stamped 122 (applied 124) is older than its death stamped 124, applied at "
+                "124 already: no ball"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(core.s.remotes_.empty());
+
+        // ...applied before it: made (late, outside the history: live), and
+        // the death applied again with its own rewind.
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 123, 121));
+        from = fake.calls.size();
+        core.drain_due_events(126);
+        EXPECT_EQ(core.s.births_overtaken_, 2u);
+        {
+            const std::vector<std::string> expected = {
+                "log:0:remote physicalize of 4 stamped 121 (applied 123) is older than its death stamped 124, applied at "
+                "124 already: made, and the death applied again",
+                "mirror_entity:4:0", "make_mirror:Ball_0_BMMO_4:P#0",
+                "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote Ball_0_BMMO_4 now predicted",
+                "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 123, predicted",
+                "keep_live_cells:enter:125", "bind_world",
+                "log:0:lifecycle event of 4 stamped tick 123 is outside the rollback history at local tick 125: the "
+                "body set disagrees until a snapshot re-anchors it",
+                "keep_live_cells:exit",
+                "detach_mirror_navigation:Ball_0_BMMO_4",
+                "mute_event_log:on", "unmake_mirror:Ball_0_BMMO_4", "mute_event_log:off",
+                "log:0:remote player 4 unphysicalized at tick 124",
+                "keep_live_cells:enter:125", "bind_world",
+                "log:0:lifecycle event of 4 stamped tick 124 is outside the rollback history at local tick 125: the "
+                "body set disagrees until a snapshot re-anchors it",
+                "keep_live_cells:exit"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.life_rewinds_missed_, 2u);
+        const auto& four = core.s.remotes_.at(4);
+        EXPECT_FALSE(four.physicalized);
+        EXPECT_FALSE(four.navigation);
+        EXPECT_EQ(core.s.generations_.at("Ball_0_BMMO_4"), 2u) << "born, then gone";
+        EXPECT_EQ(four.born_tick, 126u) << "made live: the next tick";
+
+        // A newer birth, then a death stamped no later than it: a stale copy.
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 125, 125));
+        core.drain_due_events(126);
+        ASSERT_TRUE(core.s.remotes_.at(4).physicalized);
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 125, 125));
+        from = fake.calls.size();
+        core.drain_due_events(126);
+        EXPECT_EQ(core.s.events_superseded_, 1u);
+        EXPECT_TRUE(since(fake.calls, from).empty());
+        EXPECT_TRUE(core.s.remotes_.at(4).physicalized);
+    }
+
+    // The births deferred into a replay, made at their tick before its step:
+    // in join order with our own lives at our rank, each with the event log
+    // muted (a trafo's take-out nests inside the birth's mute and leaves it
+    // on); a birth of another tick waits.
+    TEST(SessionClientCoreLifecycle, PendingBirthsMadeInTheReplayMuted) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125_four(core, fake);
+        fake.own_lives_due_at = 124;
+        // Player 4 has a mirror of another ball type: the birth is a trafo.
+        auto& four = core.s.remotes_[4];
+        four.entity = "Ball_1_BMMO_4";
+        four.physicalized = true;
+        four.navigation = true;
+        auto birth = [](uint32_t player, uint32_t tick, uint32_t origin) {
+            client_core_state::pending_birth b;
+            b.player = player; b.tick = tick; b.origin = origin;
+            return b;
+        };
+        core.s.pending_births_ = {birth(6, 124, 124), birth(5, 125, 125), birth(4, 124, 123)};
+        size_t from = fake.calls.size();
+        core.drain_pending_births(124);
+        {
+            const std::vector<std::string> expected = {
+                "legacy:own_lives_due:124",
+                "mute_event_log:on",
+                "mirror_entity:4:0", "detach_mirror_navigation:Ball_1_BMMO_4",
+                "mute_event_log:on", "unmake_mirror:Ball_1_BMMO_4", "mute_event_log:on",
+                "make_mirror:Ball_0_BMMO_4:P#0",
+                "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote Ball_0_BMMO_4 now predicted",
+                "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 124, predicted",
+                "mute_event_log:off",
+                "legacy:apply_own_lives:124:replay:0",
+                "mute_event_log:on",
+                "mirror_entity:6:0", "make_mirror:Ball_0_BMMO_6:P#3",
+                "attach_mirror_navigation:6:Ball_0_BMMO_6", "log:0:remote Ball_0_BMMO_6 now predicted",
+                "log:0:remote player 6 physicalized (Ball_0_BMMO_6) at tick 124, predicted",
+                "mute_event_log:off"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        ASSERT_EQ(core.s.pending_births_.size(), 1u);
+        EXPECT_EQ(core.s.pending_births_[0].player, 5u);
+        EXPECT_FALSE(core.s.event_log_muted_);
+        EXPECT_EQ(core.s.generations_.at("Ball_1_BMMO_4"), 1u) << "the trafo ends the old mirror's lifetime";
+        EXPECT_EQ(core.s.remotes_.at(4).born_tick, 124u) << "made inside the replay: its stamp";
+
+        // No birth due and no own life: nothing at all past the check.
+        from = fake.calls.size();
+        core.s.pending_births_.clear();
+        core.drain_pending_births(130);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"legacy:own_lives_due:130"});
+    }
+
+    // A late birth inside the history is deferred into the replay of its
+    // rewind; when that replay does not make it (it never ran the tick's
+    // pre_step), it is made live after the rewind, with the next live tick
+    // as its first, and nothing is left pending.
+    TEST(SessionClientCoreLifecycle, BirthTheReplayDidNotReachIsMadeLive) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        // A world the engine can rewind and replay: no tracked body, every
+        // step taken, and no pre_step (the births deferred into the replay
+        // are never drained).
+        platform.bind_world = [&fake]() {
+            fake.calls.push_back("bind_world");
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.step = [&fake]() {
+                fake.calls.push_back("step");
+                return true;
+            };
+            return world;
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        for (uint32_t tick = 118; tick <= 125; ++tick)
+            core.s.rollback_.record(core.platform().bind_world(), tick, bmmo::session::rollback_tracked{}, {});
+        ASSERT_TRUE(core.s.rollback_.knows_tick(122));
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 123, 123));
+        size_t from = fake.calls.size();
+        core.drain_due_events(126);
+        {
+            const std::vector<std::string> expected = {
+                "keep_live_cells:enter:125", "bind_world", "step", "step", "step",
+                "keep_live_cells:exit:rolled back",
+                "log:0:remote physicalize of 4: the replay did not reach tick 123, made live",
+                "mirror_entity:4:0", "make_mirror:Ball_0_BMMO_4:P#0",
+                "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote Ball_0_BMMO_4 now predicted",
+                "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 123, predicted"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(core.s.pending_births_.empty());
+        EXPECT_EQ(core.s.life_rewinds_, 1u);
+        EXPECT_EQ(core.s.life_rewinds_missed_, 0u);
+        EXPECT_EQ(core.s.life_rewind_depth_, 3u);
+        const auto& four = core.s.remotes_.at(4);
+        EXPECT_TRUE(four.physicalized);
+        EXPECT_EQ(four.born_tick, 126u) << "made live: the next tick";
+        EXPECT_EQ(four.driven_from, 126u);
+        EXPECT_EQ(core.s.generations_.at("Ball_0_BMMO_4"), 1u) << "made once";
+    }
+
+    // A navigation the host cannot give yet leaves the mirror undriven
+    // without a word; a failed attach is logged.
+    TEST(SessionClientCoreLifecycle, MirrorNavigationAnswers) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125_four(core, fake);
+        fake.attach_answer = bmmo::session::mirror_navigation::unavailable;
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
+        core.drain_due_events(126);
+        size_t from = fake.calls.size();
+        core.apply_held_lifecycle(126);
+        {
+            const std::vector<std::string> expected = {
+                "mirror_entity:4:0", "make_mirror:Ball_0_BMMO_4:P#0", "attach_mirror_navigation:4:Ball_0_BMMO_4",
+                "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 126, mirrored",
+                "legacy:live_own_lives:126"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        fake.attach_answer = bmmo::session::mirror_navigation::failed;
+        from = fake.calls.size();
+        core.attach_remote_navigation(4, core.s.remotes_.at(4));
+        {
+            const std::vector<std::string> expected = {
+                "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote navigation for Ball_0_BMMO_4: no graph"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_FALSE(core.s.remotes_.at(4).navigation);
+        // A refused mirror entity or body: logged, nothing made.
+        fake.mirror_ok = false;
+        core.on_session_event(event_message(5, bmmo::session::event_type::Physicalize, 127, 127));
+        core.drain_due_events(127);
+        from = fake.calls.size();
+        core.apply_held_lifecycle(127);
+        {
+            const std::vector<std::string> expected = {
+                "mirror_entity:5:0", "log:0:remote physicalize: no ball", "legacy:live_own_lives:127"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.s.remotes_.count(5), 0u);
+    }
+
+    // live_drive: the relayed frame of the tick, else the newest (the
+    // predictor), else no keys and the navigation off.
+    TEST(SessionClientCoreLifecycle, LiveDrive) {
+        client_core_state::remote_ball remote;
+        auto none = session_client_core::live_drive(remote, 130);
+        EXPECT_EQ(none.keys, 0u);
+        EXPECT_EQ(none.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0);
+        remote.have_input = true;
+        remote.input = keys_frame(0x05);
+        remote.input.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+        auto predicted = session_client_core::live_drive(remote, 130);
+        EXPECT_EQ(predicted.keys, 0x05u);
+        EXPECT_NE(predicted.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0);
+        remote.inputs[130] = keys_frame(0x09);
+        auto exact = session_client_core::live_drive(remote, 130);
+        EXPECT_EQ(exact.keys, 0x09u);
+        EXPECT_EQ(exact.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0) << "the relayed frame's navigation was off";
+    }
+
+    // The session's end takes every mirror's navigation and body out after
+    // the own body guard, with the event log as it is (not muted).
+    TEST(SessionClientCoreLifecycle, EndTakesTheMirrorsOut) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        fake.fill_legacy(core);
+        run_to_tick_125_four(core, fake);
+        auto& four = core.s.remotes_[4];
+        four.entity = "Ball_0_BMMO_4";
+        four.physicalized = true;
+        four.navigation = true;
+        auto& five = core.s.remotes_[5];
+        five.entity = "Ball_0_BMMO_5";
+        bmmo::session_end_msg ours;
+        ours.session = 9;
+        const size_t from = fake.calls.size();
+        core.on_session_end(ours);
+        const std::vector<std::string> expected = {
+            "log:0:session 9 ended: ", "hook:ending", "legacy:own_body_guard_off",
+            "detach_mirror_navigation:Ball_0_BMMO_4", "unmake_mirror:Ball_0_BMMO_4", "legacy:report"};
+        EXPECT_EQ(since(fake.calls, from), expected);
+        EXPECT_TRUE(core.s.remotes_.empty());
     }
 }

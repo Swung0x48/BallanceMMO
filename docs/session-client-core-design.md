@@ -1,8 +1,8 @@
 # Session-client core: one implementation of the client flow, two hosts
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
-what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4
-and E5 (§6.1, "As built (step E1)" ... "As built (step E5)") are built.
+what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
+E5 and E6 (§6.1, "As built (step E1)" ... "As built (step E6)") are built.
 Nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
@@ -463,7 +463,7 @@ value, as the free functions do today.
 | sector_manager_active | `bool()` | `Gameplay_SectorManager->IsActive()` (SC:2100-2104) | `physics_session_sector_manager_active` |
 | **writing the world** | | | |
 | write_body | `bool(const std::string&, const session::body_state& row, bool wake)`; as built (E4): `bool(entity, const double position[3], const double rotation[4], const float linear[3], const float angular[3], bool wake, std::string& error)`, the bool overload of `set_body_state` | `set_body_state` (resync rebuild SC:2803-2822; legacy ladder) | `physics_view_.set_body_state` (PSC:3290-3351) |
-| mute_event_log | `void(bool)` (the core keeps the nesting counter, SC:4607-4620) | `set_event_log_muted` | `physics_view_.set_event_log_muted` |
+| mute_event_log | `void(bool)` (the core keeps the nesting counter, SC:4607-4620); as built (E6): the core's `session_client_core::event_log_mute` scope keeps the flag in force (`event_log_muted_`, core state) and restores it | `set_event_log_muted` | `physics_view_.set_event_log_muted` |
 | keep_live_cells | `scope_guard(const session_client_core&)`, RAII around every `rewind_to` / `on_snapshot` (SC:2874, 3709, 3807, 4342, 4401); the guard reads `core.rollback_stats()` and `core.current_tick()` (SC:5728-5738) | `live_cells_guard` (SC:5719-5739) | the same write-back of `CurrentLevel[0][4]`, `IngameParameter[0][1..2]` + `replay_manager_activation` (PSC:2037-2046) |
 | run_sector | `void(int sector)` | SC:1346-1357 | PSC:2962-2986 |
 | record_activation / record_pending_activation | `void(uint32_t tick, bool reset)` / `void(uint32_t tick)` | `record_manager_activation` (SC:5695-5711, 2180-2184) | `record_manager_activation` (PSC:64-88, 2032-2036) |
@@ -477,10 +477,12 @@ value, as the free functions do today.
 | own_replica_name (added at E5, built at E9) | `std::string()`: the entity the own replica was last named by, kept after the replica is gone (a failed re-attach); "" if it never had one. `recorded_input_at` tells the own ball's records by it (SC's `entity == own_nav_entity_`, without the `own_navigation_` gate that `own_driven_entity` has) | `own_nav_entity_` | `s.own_nav_entity` |
 | arm_own_capture | `void(uint32_t tick)` | `arm_own_physicalize_capture` | empty |
 | **mirrors** | | | |
-| make_mirror | `std::optional<mirror_made>(const mirror_spec&)`; the spec is `{player, ball_type, pose[12], recipe, group, kick?{index, strength}}`; the result is `{entity, navigated}` | `remote_entity` (CopyObject) + the shared `make_mirror_body` (§2.4) | `objects_.ensure_player` / `get_ball_entity` + the shared `make_mirror_body`; then `objects_.set_physicalized` / `on_trafo` |
-| unmake_mirror | `void(const std::string& entity)` (navigation destroyed, body unphysicalized, log muted by the core) | SC:4415-4428, 4636-4643 | PSC:2439-2448 |
+| mirror_entity (added at E6) | `std::string(uint32_t player, uint8_t ball_type, std::string& error)`: the entity that mirrors the player, made if missing; "" and `error` when there is none. Asked first, before the core takes the old mirror's navigation and (a trafo) body out, as SC did | `remote_entity` (CopyObject) | `objects_.ensure_player` / `get_ball_entity` |
+| make_mirror | `std::optional<mirror_made>(const mirror_spec&)`; the spec is `{player, ball_type, pose[12], recipe, group, kick?{index, strength}}`; the result is `{entity, navigated}`; as built (E6): `mirror_made(const mirror_spec&)`, the spec `{player, ball_type, entity, position[3], rotation[9], recipe (bridge), group, kick, kick_index, kick_strength}` and the result `{made, error, kicked, kick_error}`: pose, physicalize and the spawn kick only; the entity is `mirror_entity`'s and the navigation `attach_mirror_navigation`'s, both asked by the core; the spec's player and ball type let a host find the entity again (it need keep nothing from `mirror_entity`) and key `set_physicalized` / `on_trafo` | `SetWorldMatrix` + `physicalize` + `push_impulse` (the shared `make_mirror_body`, §2.4, at E9) | the shared `make_mirror_body`; then `objects_.set_physicalized` / `on_trafo` |
+| unmake_mirror | `void(const std::string& entity)` (navigation destroyed, body unphysicalized, log muted by the core); as built (E6): the body only, unmuted by itself: the core mutes around it where SC did (a death, a trafo) and not at the session's end (SC's `end_session_world` did not) | `unphysicalize` | PSC:2439-2448 |
+| detach_mirror_navigation (added at E6) | `void(const std::string& entity)`: the mirror's navigation replica goes (unmuted: SC destroyed it before the muted unphysicalize) | `navigation_destroy` | `physics_view_.navigation_destroy` |
 | discover_navigation | `bool()`: the leaf keys are known | `read_navigation_graph`, every leaf keyed (SC:2189-2196) | `read_navigation_graph` with the unbound-leaf filter, ≥ 4 leaves (PSC:1716-1742) |
-| attach_mirror_navigation | `bool(uint32_t player, const std::string& entity)` | shared `attach_navigation` (SC:4734-4805) | shared `attach_navigation` (PSC:3451-3475) |
+| attach_mirror_navigation | `bool(uint32_t player, const std::string& entity)`; as built (E6): `mirror_navigation(uint32_t player, const std::string& entity, uint8_t ball_type, std::string& error)`, `{unavailable, attached, failed}`: `unavailable` (the graph is not known yet) is neither a log line nor a change; the core checks `physicalized` / `navigation` first and logs the other two | shared `attach_navigation` (SC:4734-4805) | shared `attach_navigation` (PSC:3451-3475) |
 | **own ball** (only with `own_body_control`) | | | |
 | make_own | `bool(const own_body_spec&)`: `{entity, pose[12], recipe, group, kick?}` | `remake_own_body` (SC:1547-1588) | empty (the game's Physicalize block owns the ball) |
 | unmake_own | `void(const std::string& entity, const float pose[12])` | `unmake_own_body` (SC:1522-1537) | empty |
@@ -2132,6 +2134,259 @@ and the row above:
   reach or the history, a pacer rebase and its resync, or the teardown,
   and every N run is reproduced exactly by the old binary from its own
   inbound capture.
+
+**As built (step E6).** Where the code made E6 differ from §1.1, §1.3, §2.2
+and the row above:
+
+- **What moved** (`src/session/client_core_lifecycle.cpp`, new, in
+  `cmake/SessionCore.cmake`), verbatim but for the platform calls, the
+  configuration (`config.rollback`) and the back-calls: SessionEvent's
+  intake (`on_session_event`), `drain_due_events`, `apply_held_lifecycle`
+  (whole: its own-lives half is a back-call), `join_rank`, `apply_event`,
+  `make_remote_birth`, both `rewind_for_lifecycle`s, `unphysicalize_remote`,
+  `drain_pending_births`, `live_first_tick`, `unphysicalize_mirror`,
+  `live_drive`, `physicalize_remote` and `attach_remote_navigation` (their
+  core halves), and the event log's mute (`event_log_mute`, with
+  `event_log_muted_` moved into `client_core_state`, as the E1 note said).
+  The thirteen moved `logf` lines are unchanged. The headless client keeps a
+  one-line call at every old call site: the intake, pre_step steps 2 and 8,
+  step 16's attach, step 28's `live_drive`, and its binding's
+  `before_replayed_tick` (`core_.drain_pending_births`). The own body's
+  re-make and removal (`remake_own_body`, `unmake_own_body`, E7) mute through
+  the core's `event_log_mute`, which is public until they move.
+- **The mirrors' platform operations differ from §2.2** (rows amended). SC
+  asks for the entity (CopyObject) first, then takes the old mirror's
+  navigation and, on a trafo, its body out, then poses and physicalizes the
+  new body; the pose may not move before the take-out, nor the lookup after
+  it (a failed lookup must leave the old mirror alone). So:
+  - `mirror_entity(player, ball_type, error)`, new: the lookup alone;
+  - `make_mirror(mirror_spec) -> mirror_made`: pose, `physicalize` and the
+    spawn kick, `{made, error, kicked, kick_error}`. The core logs the
+    result where SC logged it (the kick's line after the relay take, which
+    is core state only), so the physics calls and the log lines keep their
+    order;
+  - `unmake_mirror(entity)`: the body only. The core mutes around it where
+    SC muted (a death, a trafo) and not at the session's end;
+  - `detach_mirror_navigation(entity)`, new: SC destroyed the navigation
+    unmuted, before the muted unphysicalize;
+  - `attach_mirror_navigation(player, entity, ball_type, error) ->
+    {unavailable, attached, failed}`: `unavailable` (the graph not known)
+    logs nothing and changes nothing, as SC's guard returned.
+
+  Headless implements them with SC's calls; `make_mirror` poses the entity
+  `mirror_entity` returned last (`mirror_made_entity_`, the one SC held as
+  `entity`) when it is the one the spec names - which the core's flow always
+  makes it, since it asks `mirror_entity` first in the same frame - and else
+  looks it up again from the spec's `player` and `ball_type` (SC's
+  `remote_entity`), so the operation stands alone for a later caller (E7,
+  E9). All six are required by `missing_platform_operation`: every host
+  mirrors the other players.
+- **Session end.** The legacy entry `end_session_world` became
+  `own_body_guard_off` (the guard is host state); `end` takes every
+  mirror's navigation and body out after it with `detach_mirror_navigation`
+  and an unmuted `unmake_mirror`, in SC's order. E11 has to give the guard a
+  home (a hook; `own_body_upkeep` has no "off").
+- **`legacy_calls`.** Added: `live_own_lives`, `own_lives_due`,
+  `apply_own_lives` (the own lives' part of the held events and of the
+  births made inside a replay; E7 moves them). Renamed:
+  `end_session_world` to `own_body_guard_off`. Removed: none.
+  `recorded_input_at` (E9) is used by the lifecycle rewinds too.
+- **Entry points the design does not name** (the E3 pattern):
+  `on_session_event(msg&&)` instead of `on_message`; `drain_due_events`,
+  `apply_held_lifecycle`, `drain_pending_births`, `attach_remote_navigation`
+  and the static `live_drive` are public while the frame and the binding are
+  the host's (E9).
+- **§5.1**: 7 new tests, 8 after the review (`SessionClientCoreLifecycle.*`): the intake (counted,
+  another session's and a not-running one's dropped, a copy counted, an echo
+  queued for the frame); the drain's order (join, applied, origin, rank) with
+  same-tick births held and made after the rewinds, our own lives at our join
+  rank and once more at the end, the spawn kick's index and log; the
+  supersede guards (a stale death; an older birth dropped in the death's tick,
+  and made and the death applied again before it, with both rewinds refused
+  and logged); the births made inside a replay in join order with the own
+  lives at our rank, each muted, a trafo's take-out nesting inside the mute;
+  a navigation unavailable or failed, a refused entity; `live_drive`; the
+  session's end. The existing tests fill the six operations, check the new
+  back-calls empty and the renamed one. 386 tests pass on Windows and, built
+  with GCC 16.2.1 on Arch, there too.
+- **Results.** Old is 8d933ad's binary (`build-agent-E5/`, build id
+  `bmmo-9029872673bd-dirty`), new the E6 binary (`build-agent-E6/`,
+  `bmmo-8d933adbaf0d-dirty`).
+  - §5.2 (5) and (6), `wire_check.sh E5 E6 e6w`: WIRE-CHECK: ALL SAME, 62914
+    sends on the 16 clients equal but each login; every replay reached its
+    end marker (rc 0); all 16 journals IDENTICAL with `e0_compare.py` and the
+    same length as their live references, 12 bytes differing per file, all
+    inside the header's build id. Rerun on the final copy against the same
+    old traces (`e6f`): ALL SAME, 16 IDENTICAL, byte-identical outside the
+    build id. What the captures exercise of the moved code: the intake on all
+    16 (1046 to 1174 events received per client, 898 to 1002 of them
+    copies), remote births and deaths (6 to 12 births, 5 to 11 deaths per
+    client, every birth with its spawn kick and navigation), remote Sector
+    events (3 to 9), and the late births and deaths rewound for (`life` 9 to
+    20 per client, none refused), the births among them made inside the
+    replay. **Covered by no capture**: an overtaken birth, a superseded death,
+    a refused life rewind, a birth the replay did not reach, a mirror
+    without navigation, a failed entity or body, a trafo (a live mirror
+    re-made with another ball type: every `physicalized (` line of the 16
+    logs names a `Ball_Stone_BMMO_*` mirror), and the teardown at the
+    session's end (it runs after the journal is closed and logs nothing, so
+    no check of §5.2 sees it; it is SC's `end_session_world` in the same
+    order, by reading and by `EndTakesTheMirrorsOut`). The unit tests cover
+    each of them (the replay that did not reach its birth from the review
+    on, below).
+  - §5.2 (4): 188 literals against 8d933ad's 188 (SC + `src/session/*.cpp`),
+    EQUAL.
+  - §5.2 (3): the old SimTool on its replay of each capture against the new
+    one on the E6 replay (`--continue-after-jump`): all 16 the same rc and
+    summary line; the four reference server journals rc 0 with 0 checkpoint
+    mismatches on both (3986 to 4257 ticks).
+  - §5.2 (2): solo snapshots off (`solo/e6_new1`, starved=0) against `old1`:
+    TICK hash and pose identical at all 2426 common ticks (8-2433), LOCAL
+    checkpoints 1213/1213, the 8 RECEIVED snapshots equal in content, other
+    records 6101/6101: IDENTICAL.
+  - CPU parity (`cpu_parity.sh`, three rounds each): PASS every time, but
+    the new binary is consistently 0.4 to 0.8 s (2 to 4 %) slower: E5 20.24 /
+    20.48 / 20.28 s against E6 21.03 / 20.86 / 20.74 s (limit 21.74); again
+    20.09 / 19.96 / 20.09 against 20.77 / 20.74 / 20.91 (limit 21.22).
+    Control: 8d933ad's code rebuilt in today's tree (`build-agent-e6ctl`)
+    against the final E6 rebuild: 20.27 / 20.43 / 20.16 against 20.82 /
+    20.99 / 20.86 (limit 21.72), and E5 against it 20.07 / 20.33 / 20.09
+    against 20.78 / 20.93 / 20.84 (limit 21.61). The control is as fast as
+    E5, so the 3 % belongs to E6's code or its layout, not to the build; it
+    stays inside the one-sided limit, and no cause was found (the moved
+    paths run per event, per birth and per replayed tick, a few
+    `std::function` calls each).
+  - Builds: x64 BUILD-OK; x86 mod CLIENT-BUILD-OK with the target's objects
+    deleted first (25 objects now, `client_core_lifecycle.cpp` among them);
+    `linux_test_syntax.sh` every line ok (24 sources); GCC compiles the
+    headless client syntax-only with the Arch flags, and the six core
+    sources with `-Wall -Wextra`, with no error or warning; the Arch tree
+    builds and links the headless client and the tests. No server source
+    changed, so the Arch server was not rebuilt.
+  - §5.3, the row's three arms under the host-load guard, O1 N1 O2 N2 each,
+    every client capturing its inbound (`e6ab1_*`: lane control, A6m, swing
+    bay; then `e6ab2_lane`). Host peak 15.2 to 18.4 % total, no other
+    process above 3.5 %: no void run. No crash; every client reached its
+    time limit with rc 0 and a status line; every server journal replays
+    rc 0 with 0 checkpoint mismatches. **The trace by replay:** each N run's
+    four captures replayed with the old binary (E5) give client journals
+    IDENTICAL to the N run's live ones, and each O run's replayed with E6
+    give its live ones (16 runs, 64 journals, all IDENTICAL); and every
+    `window:` and `status:` line of the old binary's replay of each N run of
+    batch 1 equals the live N log's once the CPU timings are removed (24
+    client logs, 0 lines differ). The §5.3 events behind each difference
+    (rebase and resync ticks per client in `e6ab*.judge`, session
+    scratchpad):
+    - **A6m hold: PASS.** No rebase; both N runs' criteria equal O2's; no
+      zero broken (the late mirror is non-zero in the O runs). Band 17 of 313
+      out.
+    - **Swing bay** (no rebase or resync in any run). Both N runs' criteria
+      equal both O runs'. Zeros broken, each a snapshot delivered past the
+      reach or the history (the log's refusal line names it, the journal its
+      depth): N1 client 1 `far` 1 = the full snapshot of 702 at 752 (50
+      deep), client 2 `far` 1 = 1092 at 1162 (70); N2 client 1 `far` 2 = 844
+      at 893 (49) and 868 at 918 (50); client 3 `unmatched` 1 = the full
+      snapshot of 3333 at 3429, 96 deep, past the history (its `far` 1 = 868
+      at 925, where O1 has 4). Band 19 of 138 out.
+    - **Lane control.** Batch 1 rebases: O1 clients 2 and 3 at 2669 / 2688
+      (resyncs applied 2682 / 2709), N1 all four (0 at 2965, 1 at 2693, 2 at
+      2686, 3 at 2959; applied 2979 / 2707 / 2700 / 2973), none in O2 or N2.
+      Batch 2: none in O1, N1 or O2; N2 clients 1, 2, 3 at 2698 / 2676 /
+      2692 (applied 2715 / 2689 / 2705). Zeros broken, each the resync's:
+      batch 1 N1 client 2 `unmatched` 1 = the full snapshot of 2707 at 2733,
+      after its resync from 2700; client 3 = 2979 at 3005, after its resync
+      from 2973; batch 2 N2 client 2 = 2705 at 2730 (resync from 2689),
+      client 3 = 2715 at 2738 (resync from 2705). Criteria: batch 2's N1
+      equals both O runs of its batch (and `e5ab1_lane_o1`,
+      `e5ab3_lane_o2`). The other three N runs equal no O run of the pool
+      (the 2 + 2 O runs of these batches and the 14 of E3 and E5): each
+      differs from its nearest O run only in "own ball 0.0000 in D" of one or
+      two clients (batch 1 N1 client 3 PASS where the nearest fails; batch 1
+      N2 client 3; batch 2 N2 clients 1 and 3), the sub-millimetre phase-D
+      criterion E5 met too: every client's value occurs both ways among this
+      batch's O runs (batch 1 O2 passes it on all four clients, O1 fails it
+      on clients 1-3 with 0.0001 to 0.0007 m), and the N runs' values are
+      the old binary's own from their inbound captures (the trace by replay
+      above). That is the E5 closing round's standard; as written, the
+      criteria item names no event of §5.3 for it. Band 57 of 305 (batch 1)
+      and 93 of 301 (batch 2, against a pool of 18 O runs) out.
+- **The first round's status.** Every exact check (§5.2 (2) to (6))
+  passed, CPU parity passed (with the 3 % above recorded), A6m and the swing
+  bay passed the §5.3 rule, and the lane arm's broken zeros were each a pacer
+  rebase's resync; three of its four N runs differed from every O run in the
+  phase-D own-ball criterion, which the old binary reproduces exactly from
+  those runs' captures. So the step was not committed then.
+- **After the review.** Two reviews; their findings and what was done:
+  - `mirror_spec` lacked the player and the ball type the design's row
+    had, which retail's `set_physicalized` / `on_trafo` are keyed by:
+    added (`player`, `ball_type`), filled by `physicalize_remote` from the
+    birth, and the §2.2 row amended.
+  - Headless `make_mirror` worked only on the pointer the last
+    `mirror_entity` cached: it now looks the entity up again from the
+    spec's player and ball type when the cache does not name the spec's
+    entity (the comment at `client_platform.hpp` says so). In the core's
+    flow the cache always names it, so the headless calls are unchanged.
+  - The birth a replay did not reach (made live after the rewind) had no
+    test: `SessionClientCoreLifecycle.BirthTheReplayDidNotReachIsMadeLive`
+    rewinds a world with no `pre_step` three ticks and expects the "did not
+    reach" line, the mirror made with the next live tick as its first
+    (`born_tick` 126 at tick 125), one generation and nothing pending. The
+    drain test checks the spec's player and ball type.
+  - The trafo and the end teardown are added to the coverage list above.
+  - Refuted: none. Not changed (as the reviews concluded): the unguarded
+    `legacy` back-calls (the E3-E5 convention), the direct mutes of the
+    script replay (as before), the kick's place before the relay take (core
+    state only; physics calls and log lines in SC's order).
+- **The closing round.** The binary rebuilt with the review's fixes
+  (`bmmo-8d933adbaf0d-dirty`, copied to `build-agent-E6/`), every check run
+  again on it, old = `build-agent-E5`:
+  - x64 BUILD-OK; x86 CLIENT-BUILD-OK with its 25 objects deleted first
+    (`mirror_spec` changed layout); 387 tests pass on Windows and, built
+    with GCC 16.2.1 on Arch, there too; `linux_test_syntax.sh` 24 lines ok;
+    the headless client and the six core sources with GCC `-Wall -Wextra`
+    rc 0 with no warning.
+  - §5.2 (5)/(6), `wire_check.sh E5 E6 e6x`: WIRE-CHECK: ALL SAME (62914
+    sends on the 16 clients), every replay rc 0 at its end marker, all 16
+    journals IDENTICAL and BYTE-IDENTICAL-EXCEPT-BUILD-ID (same length, 12
+    bytes differing per file, inside the build id); (4) 188 against 188
+    literals, EQUAL; (3) all 16 clients the same rc and summary line, the
+    four server journals rc 0 with 0 mismatches on both; (2)
+    `solo/e6_newx1` IDENTICAL to `old1` (2459 common ticks, LOCAL 1230/1230,
+    other records 6185/6185, starved=0).
+  - CPU parity: the first two rounds against E5 FAILED by 0.02 s (old
+    20.35 / 20.26 s, new 21.48 / 20.81 s, limit 21.46), so it was judged
+    against the control `build-agent-e6ctl` (8d933ad's code built in
+    today's tree), as §5.3 says: PASS, control 20.21 / 20.22 / 20.26 s, new
+    20.82 / 20.96 / 21.23 s, limit 21.32. A further three rounds against E5
+    PASS (old 20.34 / 19.96 / 20.17, new 20.92 / 20.87 / 20.97, limit
+    21.74). The new binary stays 3 to 5 % slower than the same code's
+    control, as in the first round, with no cause found in the moved paths
+    (the same work per frame, per event and per replayed tick, plus a few
+    `std::function` hops); it is inside the one-sided limit only against
+    the control and in two of three rounds against E5.
+  - §5.3, one batch per arm (`e6abx1_*`), every client capturing its
+    inbound. Host peak 15.5 to 19.9 % total, no other process above 3.5 %:
+    no void run. No crash; every client reached its time limit with rc 0
+    and a status line; every server journal replays rc 0 with 0 mismatches.
+    Each N run's captures replayed with E5 give its live journals, each O
+    run's with E6 give its own (12 runs, 48 journals, all IDENTICAL).
+    - **Lane control: PASS.** Rebases: O1 client 1 at 1676 (applied 1713)
+      and client 2 at 2683 (2697); none in N1; O2 clients 2 and 3 at 2696
+      (2709 both); N2 client 2 at 2685 (2698) and client 3 at 2687 (2700).
+      N1's criteria equal `e5ab1_lane_o1`'s, `e5ab3_lane_o2`'s and both of
+      `e6ab2`'s O runs'; N2's equal O2's of this batch. One zero broken,
+      traced: N2 client 2 `unmatched` 1 = the full snapshot of 2700 at
+      2725, after its resync rebuilt from 2698 (a pacer rebase's resync).
+      Band 29 of 303 out.
+    - **A6m hold: PASS.** No rebase; both N runs' criteria equal both O
+      runs'; no zero broken (the late mirror is non-zero in the O runs).
+      Band 25 of 313 out.
+    - **Swing bay: PASS.** No rebase or resync; both N runs' criteria equal
+      both O runs'; no zero broken (`far` is non-zero in an O run of every
+      client where an N run has it). Band 8 of 138 out.
+- **The step's status.** Every exact check, CPU parity (against the control,
+  as §5.3 prescribes on a failure) and the row's three arms pass on the
+  closing round. Committed.
 
 ### 6.2 R steps: the retail mod hosts the core
 
