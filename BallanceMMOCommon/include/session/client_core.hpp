@@ -27,6 +27,13 @@
 // ladder - in client_core_messages.cpp, over the platform's write_body,
 // own_driven_entity, bind_world and keep_live_cells.
 //
+// Step E5 moves the relay and late-player parts one and two (design 6.1 row
+// E5): SessionRemoteInput's intake and note_input_correction
+// (client_core_messages.cpp); the held section, the own correction and
+// SessionLead with its forced own frames (client_core_held.cpp); and the
+// replays they ask for, replay_corrected_inputs and force_rewind
+// (client_core_frame.cpp).
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -46,6 +53,8 @@
 #include "../message/session_end_msg.hpp"
 #include "../message/session_event_msg.hpp"
 #include "../message/session_input_msg.hpp"
+#include "../message/session_lead_msg.hpp"
+#include "../message/session_remote_input_msg.hpp"
 #include "../message/session_start_msg.hpp"
 #include "../physics/world_hash.hpp"
 
@@ -355,6 +364,10 @@ namespace bmmo::session {
         int lead_offset_ = 0;
         uint64_t lead_adjustments_ = 0, lead_forced_played_ = 0, lead_dups_ = 0, lead_stale_ = 0, lead_void_ = 0;
         uint64_t lead_force_logs_ = 0;
+        // SessionLeads a host without the slew capability received (design
+        // 2.3: a protocol error - counted and journaled, never applied or
+        // acknowledged).  Always 0 on the headless client, which can slew.
+        uint64_t lead_refused_ = 0;
         // The completeness check (check_held_complete): the ticks learned
         // since the epoch, the recent ones by tick, the shortfall already
         // counted, and the datagrams whose held_total was ahead (tick ->
@@ -444,20 +457,21 @@ namespace bmmo::session {
         // E3: SessionAssign (they move with the own lives, E7).
         std::function<void()> rebase_own_lives;
         std::function<void(client_core_state::own_life::aside why)> set_aside_unanswered;
-        // E3: SessionAssign, begin and end (section J, E5).
-        std::function<void(const char* why)> reset_held_epoch;
-        // E3: anchor (moves with note_input_correction, E5).
-        std::function<void()> drop_pending_rewind;
-        // E3: request_resync ends a slew in flight (SessionLead, E5).
-        std::function<void(const std::string& why, bool reanchored)> finish_lead_slew;
+        // (E3's reset_held_epoch, drop_pending_rewind and finish_lead_slew,
+        // and E4's drop_carried_own_replay, were removed at E5: section J and
+        // SessionLead moved into the core.)
         // E3: end - the own body guard off, and every mirror's navigation and
         // body taken out (E6: unmake_mirror; the guard is host state).
         std::function<void()> end_session_world;
         // E3: end prints the status line (E10: status_text and hooks.status).
         std::function<void()> report;
-        // E4: apply_snapshot.  The input a navigated ball had at `tick`, for a
-        // re-simulation: the own ball's exact record, a remote's relayed frame
-        // (moves with the relay, E5).
+        // E4: apply_snapshot; E5: replay_corrected_inputs and force_rewind.
+        // The input a navigated ball had at `tick`, for a re-simulation: the
+        // own ball's exact record, a remote's relayed frame.  It stays in the
+        // host past E5 (design 6.1 had it move with the relay): it tells the
+        // own ball by the own replica's entity as the host last named it,
+        // whether or not the replica still exists, which own_driven_entity
+        // does not say (E9: the own ball's platform half).
         std::function<bool(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out)> recorded_input_at;
         // E4: the own ball's entity name, "" when the level has none (E9: the
         // platform's own_ball).
@@ -465,9 +479,6 @@ namespace bmmo::session {
         // E4: the movable objects' description, the --trace line after a
         // snapshot rollback (a headless diagnostic, design 2.4).
         std::function<std::string()> describe_movable_objects;
-        // E4: a waiting own replay the snapshot rollback carried is dropped
-        // (section J, E5).
-        std::function<void(uint32_t anchor, bool server_rows)> drop_carried_own_replay;
     };
 
     // anchor (design 1.3): what the host's anchor work found.
@@ -554,6 +565,58 @@ namespace bmmo::session {
         // SessionSnapshot (E4): counted, then applied when it is this
         // running session's.
         void on_session_snapshot(const bmmo::session_snapshot_msg& msg);
+        // SessionRemoteInput (E5): counted; when it is this session's, the
+        // held section (our own substituted ticks) and the relayed frames of
+        // the other players - stored, journaled, and a replay asked for
+        // where a frame differs from the one the prediction used.
+        void on_session_remote_input(const bmmo::session_remote_input_msg& msg);
+        // SessionLead (E5, late-player design 2.4): this running session's,
+        // for our own player, once assigned.  Without the slew capability a
+        // protocol error (design 2.3): counted, journaled, not applied, not
+        // acknowledged.
+        void on_session_lead(const bmmo::session_lead_msg& msg);
+
+        // ---- the frame's rewinds (E5; pre_step steps 5 and 7, design 1.3) ----
+        // One replay for every input correction the frame collected (the
+        // relay's and our own substituted frames').
+        void replay_corrected_inputs();
+        // A forced rollback `depth` ticks deep from the current tick (the
+        // headless --force-rollback, the retail forced-rollback verb).  The
+        // live cells are kept (keep_live_cells) for as long as the caller
+        // keeps the result: the host's traces after the rewind still run
+        // inside that scope, as they did when the whole of it was the host's.
+        // Without rollback, or before `depth + 2` ticks are played, it does
+        // nothing (not rolled, not counted, no cells kept).
+        struct forced_rewind {
+            bool rolled = false;
+            scope_guard keep_cells;
+        };
+        forced_rewind force_rewind(uint32_t depth);
+
+        // ---- part two's forced own frames (E5; design 1.3 steps 11 and 21) ----
+        // The forced frame of `tick` (a SessionLead's (c, E)), taken: the
+        // older ones are dropped.  False: `tick` is not forced.
+        bool take_forced_own(uint32_t tick, client_core_state::forced_own& out);
+        // A forced tick plays the server's frame: `input` becomes it, counted
+        // as played, and as a received notice when no notice named it first.
+        void play_forced_own(uint32_t tick, const client_core_state::forced_own& forced,
+                             bmmo::session::input_frame& input);
+
+        // ---- part one (E5; post_step step 24) ----
+        // After the live frame of `tick` is recorded: a notice that named it
+        // earlier is applied now.
+        void take_held_ahead(uint32_t tick);
+        // The SessionLead slew ends: acknowledged with what it moved (all of
+        // it when `reanchored`, a resync request ended it).  The host's
+        // pacer calls it when the slew is done (E9: slew_step).
+        void finish_lead_slew(const std::string& why, bool reanchored = false);
+        // Another rewind from `anchor` carried a waiting own-only replay
+        // (any anchor when `server_rows`): dropped instead of run.
+        void drop_carried_own_replay(uint32_t anchor, bool server_rows);
+        // The newest relay header is of our own epoch (the status line).
+        bool held_header_current() const {
+            return s.held_header_known_ && s.held_header_epoch_ == s.tick_base_;
+        }
 
         // ---- numbering and resync ----
         // `owed`: the own correction needs this resync; one the limiter
@@ -591,6 +654,29 @@ namespace bmmo::session {
         // The snapshot path (E4, client_core_messages.cpp): the resync
         // rebuild, the snapshot rollback, or the legacy ladder.
         void apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
+
+        // The relay (E5, client_core_messages.cpp): a relayed frame for a
+        // tick already simulated, against the frame the prediction used.
+        void note_input_correction(const client_core_state::remote_ball& remote, uint32_t tick,
+                                   const bmmo::session::input_frame& relayed);
+        // Section J (E5, client_core_held.cpp): late-player parts one and two.
+        static bool same_frame(const bmmo::session::input_frame& a, const bmmo::session::input_frame& b);
+        void note_held_section(const bmmo::session_remote_input_msg& msg);
+        bool held_tick_is_base(uint32_t tick) const;
+        void settle_held_tick(uint32_t tick, const bmmo::session::input_frame& frame);
+        void drop_lead_state(const char* why);
+        bool resolve_held_frame(const bmmo::session_remote_input_msg::held_record& record,
+                                bmmo::session::input_frame& out) const;
+        void store_held_frame(uint32_t tick, const bmmo::session::input_frame& frame);
+        void hold_ahead(uint32_t tick, const bmmo::session::input_frame& frame, bool correct);
+        void correct_own_tick(uint32_t tick, const bmmo::session::input_frame& frame);
+        void learn_held_tick(uint32_t tick);
+        uint64_t held_learned_upto(uint32_t tick) const;
+        static constexpr uint32_t kHeldGapTicks = 64;
+        void check_held_complete(const bmmo::session_remote_input_msg& msg);
+        void reset_held_epoch(const char* why = "the new base");
+        void drop_pending_rewind();
+        bool own_notices_coming() const;
 
         session_platform platform_;
         session_capabilities caps_;

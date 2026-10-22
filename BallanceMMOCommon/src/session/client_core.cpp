@@ -120,7 +120,7 @@ namespace bmmo::session {
         s.held_header_known_ = false;
         s.acked_header_known_ = false;
         s.held_floor_ = 0;
-        legacy.reset_held_epoch("a new session");
+        reset_held_epoch("a new session");
         // Decision ids are unique per player for a session's life; the
         // offset is this session's.
         s.lead_seen_.clear();
@@ -155,7 +155,7 @@ namespace bmmo::session {
         s.window_index_ = 0xFFFFFFFFu;
         s.window_lag_.clear();
         s.window_inrew_src_.clear();
-        legacy.drop_pending_rewind();
+        drop_pending_rewind();
         s.resync_in_flight_ = false;
         s.resync_owed_ = false;
         // Hold the world here until the tick base arrives (design 9.25
@@ -226,7 +226,7 @@ namespace bmmo::session {
         s.relay_seen_.clear();
         s.held_seen_.clear();
         s.held_stale_seen_.clear();
-        legacy.reset_held_epoch("the session's end");
+        reset_held_epoch("the session's end");
         s.pending_relay_.clear();
         s.event_seen_.clear();
         s.own_event_repeats_.clear();
@@ -263,7 +263,7 @@ namespace bmmo::session {
             // current tick; the next full snapshot rebuilds every body.
             s.tick_base_ = msg.first_tick;
             s.held_floor_ = s.tick_base_;
-            legacy.reset_held_epoch("the new base");
+            reset_held_epoch("the new base");
             s.frames_since_anchor_ = 0;
             s.input_history_.clear();
             s.corrector_.clear();
@@ -314,7 +314,7 @@ namespace bmmo::session {
         }
         s.tick_base_ = msg.first_tick;
         s.held_floor_ = s.tick_base_;
-        legacy.reset_held_epoch("the new base");
+        reset_held_epoch("the new base");
         // The anchor hold ends here: the next frame is the world's
         // first step and it is numbered `tick_base_`, exactly like the
         // server's own first step (design 9.25 phase alignment).
@@ -369,7 +369,7 @@ namespace bmmo::session {
         // moved.  Only here, past the limiter: a request held back
         // re-anchors nothing, and the slew carries on.
         if (s.lead_slew_.active())
-            legacy.finish_lead_slew(std::string("ended by a resync request (") + reason + ")", true);
+            finish_lead_slew(std::string("ended by a resync request (") + reason + ")", true);
         bmmo::session_resync_msg msg;
         msg.session = s.session_;
         msg.last_full_tick = s.last_snapshot_tick_;

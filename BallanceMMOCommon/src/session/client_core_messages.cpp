@@ -5,11 +5,16 @@
 // verbatim but for the platform calls (body_state, write_body,
 // own_driven_entity, bind_world, keep_live_cells), the configuration
 // (rollback, correct, trace) and the legacy back-calls (recorded_input_at,
-// own_ball, describe_movable_objects, drop_carried_own_replay, design 6.1).
-// The relay intake and the SessionLead follow at E5.
+// own_ball, describe_movable_objects, design 6.1; drop_carried_own_replay was
+// one until E5).
+// Step E5 adds the relay: SessionRemoteInput's intake and
+// note_input_correction (session_client.cpp at 9029872), verbatim but for the
+// configuration (rollback) and the journal; the held section it hands on and
+// SessionLead are in client_core_held.cpp.
 
 #include "session/client_core.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -49,7 +54,7 @@ namespace bmmo::session {
             // ...and so does a replay a correction of this poll asked
             // for: its anchor is gone with the history, and a refused own
             // replay would answer this resync with another.
-            legacy.drop_pending_rewind();
+            drop_pending_rewind();
             // The dictionary and the newest rows first, then one resolve
             // pass - this is the moment the registry knows the most about a
             // world that has just been rebuilt (design 9.25).
@@ -147,7 +152,7 @@ namespace bmmo::session {
                 for (const auto& body: snapshot.bodies)
                     if (body.kind == bmmo::session::body_kind::Ball && body.owner == s.own_id_ && !entity_of(body).empty())
                         own_row = true;
-                legacy.drop_carried_own_replay(snapshot.tick, own_row);
+                drop_carried_own_replay(snapshot.tick, own_row);
             }
             if (rolled && config.trace && s.rollback_diag_++ < 16)
                 logf("after rollback: movable=%s", legacy.describe_movable_objects().c_str());
@@ -241,6 +246,135 @@ namespace bmmo::session {
                 journal_.body_correction(3, entity, snapshot.tick, corrector.stats().last_error, body.position);
             }
         }
+    }
+
+    // ------------------------------------------------------------ the relay
+    void session_client_core::on_session_remote_input(const bmmo::session_remote_input_msg& msg) {
+        ++s.remote_inputs_received_;
+        if (msg.session != s.session_) return;
+        note_held_section(msg);
+        for (const auto& entry: msg.entries) {
+            auto it = s.remotes_.find(entry.player);
+            // The journal's PLAYER record goes in at the oldest tick this
+            // entry covers, so no INPUT record of the player can precede
+            // it in tick order (a replay needs the player before its
+            // inputs); after the first time it is a no-op.
+            if (journal_.journalling()) journal_.announce_player(entry.player, msg.frame_tick(entry, 0));
+            for (size_t i = 0; i < entry.frames.size(); ++i) {
+                const uint32_t tick = msg.frame_tick(entry, i);
+                const auto& frame = entry.frames[i];
+                // The window re-delivers a frame up to relay_window
+                // times: the first arrival is the truth, the rest change
+                // nothing (no record, no correction, no predictor move).
+                if (!s.relay_seen_.first(entry.player, tick)) { ++s.relay_dup_; continue; }
+                ++s.relay_new_;
+                // How late the first arrival is, in ticks already
+                // simulated: what the rollback has to reach to apply it.
+                if (s.assigned_ && static_cast<int32_t>(current_tick() - tick) > 0) {
+                    const uint32_t lag = current_tick() - tick;
+                    s.relay_lag_max_ = std::max(s.relay_lag_max_, lag);
+                    ++s.relay_lag_hist_[std::min<uint32_t>(lag, client_core_state::kRelayLagBuckets - 1)];
+                    ++s.window_lag_[entry.player][lag];
+                }
+                // What the server applied for that player at that tick,
+                // whether or not this client mirrors the ball.
+                if (journal_.journalling())
+                    journal_.writer().input(tick, entry.player, frame, bmmo::session::JOURNAL_INPUT_RELAYED);
+                if (it == s.remotes_.end()) {
+                    // No mirror yet: the datagram beat the Physicalize
+                    // here (the ordered stream used to mask this).  Parked
+                    // by tick, moved into the ring when the mirror is made.
+                    s.pending_relay_.store(entry.player, tick, frame);
+                    ++s.relay_parked_;
+                    continue;
+                }
+                auto& remote = it->second;
+                // A reordered frame is still authoritative for its
+                // historical tick: keep it for the rollback without
+                // letting it replace the live predictor with an older
+                // input.  The retail mod has always done it in this order
+                // (physics_session_client.cpp); doing the guard first, as
+                // this client used to, dropped a late frame on the floor
+                // and left the rollback replaying a prediction the server
+                // had already corrected.
+                if (bmmo::session::relay_store(remote.inputs, tick, frame, bmmo::session::kRelayRing)
+                        == bmmo::session::relay_store_result::stored)
+                    note_input_correction(remote, tick, frame);
+                if (remote.have_input && static_cast<int32_t>(tick - remote.input_tick) < 0) continue;   // out of order
+                remote.input = frame;
+                remote.input_tick = tick;
+                remote.have_input = true;
+            }
+        }
+    }
+
+    // A relayed frame for a tick this client has already simulated: if it
+    // differs from the frame the prediction used, that tick and every tick
+    // after it ran on the wrong input.  Remember the earliest such tick and
+    // let frame() replay from it once, before the next step - the frames of
+    // several remotes arrive together, and one rewind covers them all.
+
+    void session_client_core::note_input_correction(const client_core_state::remote_ball& remote, uint32_t tick,
+                                                    const bmmo::session::input_frame& relayed) {
+        const std::string& entity = remote.entity;
+        if (!config.rollback || entity.empty() || tick == 0) return;
+        if (static_cast<int32_t>(tick - current_tick()) > 0) return;   // not simulated yet
+        // Deeper than the engine re-simulates (48 ticks), or past the
+        // history: nothing to replay from.  Measured at the anchor the
+        // rewind will use, the tick before the corrected one
+        // (replay_corrected_inputs rewinds to tick - 1).  Counted - the
+        // relay's pass criterion is that this never happens.
+        const uint32_t anchor = tick - 1;
+        if (current_tick() - anchor > s.rollback_.thresholds().max_resim_ticks || !s.rollback_.knows_tick(anchor)) {
+            ++s.relay_late_;
+            return;
+        }
+        // A frame also stands in for the holes after it (the nearest
+        // earlier one, relay_frame_or_earlier): it can still change the
+        // replay of tick + 1 when the ring has no frame there but has a
+        // later one, and the body was there at tick + 1.
+        const bool feeds_next = remote.inputs.find(tick + 1) == remote.inputs.end()
+                             && remote.inputs.upper_bound(tick + 1) != remote.inputs.end()
+                             && s.rollback_.recorded_body(entity, tick + 1);
+        // No body behind the name at that tick - the player was dead there,
+        // or the birth that makes the mirror has not arrived yet: the frame
+        // drove nothing, and a replay from it reproduces what the records
+        // have (measured: 154-200 rewinds per client in a lane run spent
+        // on dead players' mirrors).  The frame is in the ring already, so
+        // the replay of a late birth still feeds it.
+        if (!s.rollback_.recorded_body(entity, tick) && !feeds_next) {
+            ++s.relay_bodiless_;
+            return;
+        }
+        // The birth tick: every rewind across it parks the body and re-poses
+        // it at that tick's record after the step, so a different frame for
+        // it changes nothing a replay can reach - a whole replay for the
+        // same world.  (The one-tick error stays until a snapshot.)
+        if (remote.physicalized && tick == remote.born_tick && !feeds_next) {
+            ++s.relay_birth_frozen_;
+            return;
+        }
+        // No record of an input for this body at this tick is NEWS, not a
+        // reason to do nothing: we stepped that tick without driving the
+        // body at all.  It is the normal state of a mirror that was just
+        // rewound into existence - the replay could only feed it the frames
+        // that had arrived by then, which for most of the birth window is
+        // none - so skipping it here was stopping those balls from ever
+        // converging.
+        bmmo::session::input_frame predicted{};
+        if (s.rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, relayed))
+            return;   // the prediction was right
+        if (!s.input_rewind_pending_ || static_cast<int32_t>(tick - s.input_rewind_tick_) < 0) {
+            s.input_rewind_pending_ = true;
+            s.input_rewind_tick_ = tick;
+            s.input_rewind_entity_ = entity;
+            s.input_rewind_own_ = false;
+        }
+        // Every ball corrected this frame, not only the earliest: the one
+        // replay below re-runs them all, and the window: line credits it
+        // to each source (late-player design 5.2, input rewinds naming the
+        // late ball).
+        s.input_rewind_entities_.insert(entity);
     }
 
 }

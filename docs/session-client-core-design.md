@@ -1,9 +1,9 @@
 # Session-client core: one implementation of the client flow, two hosts
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
-what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3 and E4
-(§6.1, "As built (step E1)" ... "As built (step E4)") are built. Nothing
-else is yet.
+what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4
+and E5 (§6.1, "As built (step E1)" ... "As built (step E5)") are built.
+Nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -474,6 +474,7 @@ value, as the free functions do today.
 | own_camera_rows | `void(const float basis[3][3])`: own replica rows + zero the retail forces | SC:2363-2367 | PSC:1905-1911 |
 | force_own / unforce_own | `bool(const input_frame&)` / `void()` | `navigation_poll(off)` + `navigation_input` (SC:2149-2161) / `navigation_poll(on)` (SC:2168) | the same calls; `unforce_own` restores `navigation_poll(!input_muted)`, never plain on. (After a replay the shared binding already keeps polling off while muted: `nav_poll` gates on `input_muted`, RBB:193-201, PSC:3034. `tracked.own_polls` needs no change.) |
 | own_driven_entity | `std::string()`: the own replica's entity, "" if none | `own_nav_entity_` | `s.own_nav_entity` |
+| own_replica_name (added at E5, built at E9) | `std::string()`: the entity the own replica was last named by, kept after the replica is gone (a failed re-attach); "" if it never had one. `recorded_input_at` tells the own ball's records by it (SC's `entity == own_nav_entity_`, without the `own_navigation_` gate that `own_driven_entity` has) | `own_nav_entity_` | `s.own_nav_entity` |
 | arm_own_capture | `void(uint32_t tick)` | `arm_own_physicalize_capture` | empty |
 | **mirrors** | | | |
 | make_mirror | `std::optional<mirror_made>(const mirror_spec&)`; the spec is `{player, ball_type, pose[12], recipe, group, kick?{index, strength}}`; the result is `{entity, navigated}` | `remote_entity` (CopyObject) + the shared `make_mirror_body` (§2.4) | `objects_.ensure_player` / `get_ball_entity` + the shared `make_mirror_body`; then `objects_.set_physicalized` / `on_trafo` |
@@ -1141,7 +1142,7 @@ right after E1 (E2), because every area journals.
 | **E6** remote lifecycle | Event intake (SC:824-856), `drain_due_events`, `apply_held_lifecycle`'s remote half, `apply_event`, `make_remote_birth`, `rewind_for_lifecycle`, pending births, `live_drive`, the core half of `physicalize_remote` / `unphysicalize_remote` (SC:3977-4042, 4389-4700). Platform: `make_mirror`, `unmake_mirror`, `mute_event_log`, `attach_mirror_navigation`. | §5.1 (event order); §5.2; A/B arms lane control + A6m + swing bay (the late births and deaths under loss: event repeats, overtaken births, `rewind_for_lifecycle`) |
 | **E7** own lives and echoes | `own_life` and SC:1416-1756 (C parts), `report_physicalize`'s C half, `process_own_echo(es)`, `answer_set_aside`, `expire_own_echoes`, `resync_own_life`, `move_own_birth` (SC:4043-4388), the beam record and `request_beam`. Platform: `make_own`, `unmake_own`, `has_body`, `own_birth_capture`; `session_capabilities` with headless all true; the `own_echoes` switch. | §5.1 (echo, beam and own-report tests, both capability settings); §5.2; **§5.3 full A/B** |
 | **E8** sectors | `hold_sector`, `request_sector` with the pending start sector, the union pass, own sector detection (`poll_sector`), `sector_cell_`. | §5.1 (sector request); §5.2; A/B arm swing bay (`--sectors 4`) |
-| **E9** the frame | `pre_step` and `post_step` (§1.3 tables) replace the body of `frame()`; the host keeps keys, step and hooks. Input building, record, amend, drive; `bind_session_world` and the rest of host support (§2.4), used by headless only; `poll_hold`, `slew_step`, `rebase_threshold`, `schedule_rebased`, `hooks.numbering_restarted`, `after_amend`, `after_journal`. | §5.1 (frame-order test); §5.2; **§5.3 full A/B** |
+| **E9** the frame | `pre_step` and `post_step` (§1.3 tables) replace the body of `frame()`; the host keeps keys, step and hooks. Input building, record, amend, drive; `bind_session_world` and the rest of host support (§2.4), used by headless only; `poll_hold`, `slew_step`, `rebase_threshold`, `schedule_rebased`, `hooks.numbering_restarted`, `after_amend`, `after_journal`. `recorded_input_at` (left a legacy call at E5) moves into the core over `own_replica_name` (§2.2), and its legacy call is deleted. The §1.2 switches `input_rewind` and `own_corrections` are built (headless: both = `rollback`), gating `replay_corrected_inputs`, the remote half of `note_input_correction` and the own amend/rewind of part one. | §5.1 (frame-order test; both switches off: no replay, no own amend); §5.2 (the switches change nothing on headless: (5)/(6) identical); **§5.3 full A/B** |
 | **E10** reports | `status_text(host_counters)`, `window_text(tick, host_counters)`, one literal each; `hooks.window/status`. | §5.2 (4) with zero differences; the harness parses the A/B runs of E9 again from the new binary's logs, and its report is identical to E9's numbers on the same inputs (a lane-control A/B pair) |
 | **E11** close the core | Make the state private; delete the dead state (§1.2), the `core_.s.` access and `legacy_calls`; SC ends as the host of §3.1. No logic change. | §5.1; §5.2; **§5.3 full A/B** against the base of E1 (the cumulative check) |
 
@@ -1833,6 +1834,304 @@ the row above:
 
     Every exact check passed, including the wire check and the legacy
     ladder replayed against old.
+
+**As built (step E5).** Where the code made E5 differ from §1.1, §1.3, §2.2
+and the row above:
+
+- **What moved**, verbatim but for the platform calls (`send`, `now`,
+  `bind_world`, `keep_live_cells`), the configuration (`config.rollback` for
+  `args_.rollback`) and the one back-call left (`recorded_input_at`):
+  - `client_core_messages.cpp`: the SessionRemoteInput intake (SC's case
+    body) as `on_session_remote_input`, and `note_input_correction`;
+  - `client_core_held.cpp` (new): section J - `note_held_section`,
+    `held_tick_is_base`, `settle_held_tick`, SessionLead
+    (`on_session_lead`, `finish_lead_slew`, `drop_lead_state`),
+    `resolve_held_frame`, `store_held_frame`, `hold_ahead`,
+    `take_held_ahead`, `correct_own_tick`, `learn_held_tick`,
+    `held_learned_upto`, `check_held_complete` (with `kHeldGapTicks`),
+    `reset_held_epoch`, `drop_pending_rewind`, `own_notices_coming`,
+    `drop_carried_own_replay`, `held_header_current`, `same_frame`; and the
+    forced own frames' core half;
+  - `client_core_frame.cpp` (new; §1.1 names it for `pre_step` /
+    `post_step`, which join it at E9): `replay_corrected_inputs` and
+    `force_rewind`.
+
+  Both new files are in `cmake/SessionCore.cmake`. The headless client
+  keeps one-line calls into the core at every old call site (the frame,
+  `advance_lead_slew`, `move_own_birth`, `rewind_for_lifecycle`, `report`).
+  `relay_lag_p99` stays in the host: only the status line reads it (E10).
+  The eight moved `logf` literals are unchanged.
+- **Entry points the design does not name.**
+  - `on_session_remote_input` / `on_session_lead` instead of `on_message`
+    (the E3 pattern). `on_session_lead` takes SC's whole filter: this
+    running session's, assigned, our own player.
+  - **`force_rewind(depth)` returns `forced_rewind {rolled, keep_cells}`**,
+    not `void`. SC's `live_cells_guard` lived until the end of
+    `maybe_force_rollback`, after the `--trace-restore` lines and the
+    `dump_savestate(t, "replayed")` loop that follow the rewind. The guard's
+    exit writes the three data-array cells back and may re-issue a manager
+    activation (with its own trace line), so ending it inside `force_rewind`
+    would have moved those writes before the host's dumps and traces. The
+    core builds the guard before `bind_world`, as SC did; the host keeps the
+    result until the end of `maybe_force_rollback`. The cadence (`now %
+    every`, the `depth + 2` start) and every trace stay host code
+    (§3.1 "`--force-rollback`").
+  - The forced own frames' core half is two calls, since the frame is still
+    SC's until E9: `take_forced_own(T, out)` (step 11's selection, older
+    ticks dropped) and `play_forced_own(T, forced, input)` (step 21: the
+    record takes the server's frame, `lead_forced_played_`, and a first
+    notice counted base or recv + same). `force_own` / `unforce_own` (the
+    `navigation_poll` / `navigation_input` pair and the `lead: forced own
+    input` / `lead: own polling` lines) stay host code until E9.
+  - Public, because unmoved host code calls them: `take_held_ahead` (step
+    24), `finish_lead_slew` (the host's pacer ends the slew, E9:
+    `slew_step`), `drop_carried_own_replay` (`move_own_birth`, E7;
+    `rewind_for_lifecycle`, E6), `held_header_current` (the status line,
+    E10). `reset_held_epoch` and `drop_pending_rewind` are private.
+- **SessionLead without `slew`** (§2.3, §5.1) is built: counted in a new
+  core counter `lead_refused_`, journaled (`lead: SessionLead N refused:
+  this host cannot slew (no CAP_LEAD)`, a note, not a `logf` line, so the
+  §5.2 (4) multiset is unchanged), nothing amended, forced, slewed or
+  acknowledged. The headless client declares `slew` (E3), so the branch is
+  inert there. The counter is printed nowhere yet.
+- **`legacy_calls`.** Removed, four: `reset_held_epoch`,
+  `drop_pending_rewind`, `finish_lead_slew` (E3) and
+  `drop_carried_own_replay` (E4); their targets are the core's. Added:
+  none. **`recorded_input_at` stays a back-call**, against the E4 note's
+  "moves with the relay": SC tells the own ball by `entity ==
+  own_nav_entity_`, without the `own_navigation_` gate that
+  `own_driven_entity` has (E4). The two differ after a failed
+  `navigation_set_ball` followed by a failed `navigation_create`
+  (`attach_own_navigation`): the replica is gone, its old entity is still
+  named, and records before the failure name it as the own ball. Moving
+  the function over `own_driven_entity` would feed such a replay the
+  recorded prediction instead of `own_inputs_`. It moves with the own
+  ball's platform half at E9: the E9 row now names it, over a new §2.2
+  operation `own_replica_name` (the name the own replica last had, kept
+  after it is gone). Until then the core needs this back-call filled;
+  the mod's empty `legacy` would throw at the first replay, which is why
+  E11's empty-struct assertion and R1 come after E9.
+- **Not built:** the §1.2 feature switches `input_rewind` and
+  `own_corrections` (the E5 row did not name them; headless would set both
+  from `rollback`, which the moved code reads already). The E9 row now
+  builds them, so the headless exact and A/B checks show they change
+  nothing before R1 is the first host to turn them off.
+- **Guards the host had** (review of E5): `force_rewind` returns at once,
+  not rolled, nothing counted, no cells kept, without `rollback` or before
+  `depth + 2` ticks are played (the anchor would wrap); the headless host
+  checks both itself first, so this is redundant there, but a retail verb
+  (R0/R2) would otherwise count a false `unmatched`. A refused SessionLead
+  is refused once per seq: the seq goes into `lead_seen_`, so the server's
+  copies of the decision count as `lead_dups_`, not as more refusals.
+- **§5.1**: 4 new tests (`SessionClientCoreLead.*`,
+  `SessionClientCoreRelay.*`):
+  - with `slew`: a SessionLead at c = 125 over [121, 130) amends 121-125
+    (stored, counted), forces 126-129, starts the slew on the
+    `slew_start` clock, sends nothing until `finish_lead_slew`, which sends
+    the reliable ack with what moved; copies and another base's decisions
+    dropped; the forced frames taken by tick (older ones dropped) and
+    played; a new base drops them;
+  - without `slew`: SessionReady caps 0; a SessionLead counted and
+    journaled, no clock read, no log line, no send, nothing amended,
+    forced or learned;
+  - the relay intake: counted before the session filter, stored or parked,
+    lag counted, re-deliveries only counted, a simulated tick past the
+    history late, the live predictor moved; another base's held records
+    counted once;
+  - `replay_corrected_inputs` inside the live-cells scope, a refused remote
+    replay logged, a refused own one resyncing; `force_rewind` keeping the
+    cells while its result lives.
+
+  The existing tests lost the four back-calls from their call lists (the
+  resync limiter's now shows the ack and its line). 379 tests pass on
+  Windows and, built with GCC 16.2.1 on Arch, there too.
+- **Results.** Old is 9029872's binary (`build-agent-E4/`, build id
+  `bmmo-7c9764aa757c-dirty`), new the E5 binary (`build-agent-E5/`,
+  `bmmo-9029872673bd-dirty`).
+  - §5.2 (5) and (6), `wire_check.sh E4 E5 e5w`: WIRE-CHECK: ALL SAME,
+    62914 sends on the 16 clients equal but each login; every replay
+    reached its end marker; all 16 journals IDENTICAL with `e0_compare.py`
+    and the same length as their live references, 12 bytes differing per
+    file, all inside the header's build id. The replay logs of old and new
+    are identical line for line (41423 lines) once the CPU timings
+    (`t_rest`, `t_rep`, `t_cap`, `t_max`) and the journal path are taken
+    out. What the captures exercise of the moved code: the relay intake
+    and input replays on all 16 (`inrew` 158 to 635 per client), held
+    notices and the own replays (`subst` up to 1830 received on `a5u_lead`
+    client 2, coalesced and deferred ones among them), the late gate
+    (`relay_late` 84-87 on `resync_snapoff`, 264 on `a5u_lead` client 2),
+    and one SessionLead (`a5u_lead` client 2: k=+15, 23 ticks amended, 32
+    forced, the slew at 2x, acknowledged at 1773 with +15). **Covered by no
+    capture**: `force_rewind` (no capture runs `--force-rollback`; §5.2 (1)
+    below runs it), a voided, superseded or zero-delta SessionLead, a lost
+    held notice (`held notices lost`), a refused input replay, and the
+    no-`slew` branch (unit tests).
+  - §5.2 (4): 188 literals against 9029872's 188 (SC + `src/session/*.cpp`),
+    EQUAL.
+  - §5.2 (3): the old SimTool on its replay of each capture against the new
+    one on the E5 replay (`--continue-after-jump`): all 16 the same rc and
+    summary line; the four reference server journals rc 0 with 0
+    checkpoint mismatches on both (3986 to 4257 ticks).
+  - §5.2 (2): solo snapshots off (`solo/e5_new1`, starved=0) against `old1`:
+    TICK hash and pose identical at all 2462 common ticks (8-2469), LOCAL
+    checkpoints 1231/1231, the 8 RECEIVED snapshots equal in content, other
+    records 6192/6192: IDENTICAL.
+  - §5.2 (1), run because `force_rewind` moved and no capture covers it:
+    `savestate_check.py --journals` with the E5 binary against
+    `arch_server_snap.sh wsl 26700 2 66 4.2`, starved=0: forced-50x12 (49
+    forced rollbacks), forced-97x24 (25) and forced-131x47 (18) EXACT, all
+    53 bodies 0.0 m over 1731 pairs.
+  - CPU parity (`cpu_parity.sh E4 E5`, three rounds): PASS, old 20.75 /
+    20.27 / 20.17 s, new 20.09 / 20.47 / 20.36 s, limit 22.37 s.
+  - Builds: x64 BUILD-OK; x86 mod CLIENT-BUILD-OK with the target's 22
+    objects deleted first (`client_core.hpp` changed; 24 objects now, the two
+    new core files among them); `linux_test_syntax.sh` every line ok (23
+    sources); GCC compiles the headless client syntax-only with the Arch
+    flags, and the five core sources with `-Wall -Wextra`, with no error or
+    warning; the Arch tree builds and links the headless client and the
+    tests. No server source changed, so the Arch server was not rebuilt.
+  - §5.3, the full arm set under the host-load guard, O1 N1 O2 N2 each
+    (`e5ab1_*`: all five arms; then `e5ab2_lane`, `e5ab3_lane`, `e5ab4_a1`
+    and `e5ab5_a6m`; at most 23.9 % total, no other process above 3.8 %, no
+    void run). Every client of every run reached its time limit with rc 0
+    and a status line; every server journal replays rc 0 with 0 checkpoint
+    mismatches. Judged with `e4_judge.py` (rebase and resync ticks per
+    client in `e5ab*.judge`, session scratchpad):
+    - **Swing bay** (10 % loss, beams): PASS. No rebase or resync in any
+      run; `far` differs only where an O run is non-zero; band 14 of 138
+      out (the old runs of E4's four batches against these O runs as if
+      new: 18 to 24).
+    - **A6m hold**: PASS in both batches (band 34 and 30 of ~313). The arm
+      is bimodal on both binaries: client 0's phase-B mechanism error is
+      4.7097 m or 8.7235 m (client 3: 8.2028 or 7.6935 m), which moves most
+      of its metrics; `e5ab1_a6m_n2` is in the second mode, and so is the
+      old `e5ab5_a6m_o2`.
+    - **Snapshots on**: the zero rule broken once, traced. `e5ab1_snapon_n1`
+      client 2 `unmatched` 1: the FULL snapshots of 3293 and 3313 arrived
+      at its local tick 3389, 96 and 76 ticks deep (past the history),
+      before any client's time limit (client 0's at 3395). Criteria of
+      both N runs equal both O runs'; no rebase; band 8 of 138 out (old
+      against old across E4's batches: 24 and 25).
+    - **A1 burst**: batch 1 broke the zero rule once and one criterion,
+      both traced; batch 4 PASSES (band 28 of 303). In `e5ab1_a1_n1`
+      clients 2 and 3 rebased at 2694 (O1: client 3 at 2689, O2: client 2
+      at 2691). Client 2 `unmatched` 1 is that resync's: rebuilt from the
+      full snapshot of 2707, it then received the full snapshot of 2711 at
+      2736, before its new base 2734 has a record. Its criterion "subst
+      recv == server count, subst late 0" fails on 236 against 211, late 0:
+      the client's SUBSTITUTED records through its last window inside the
+      harness's span (tick 3479, span end 3504 = last tick - 60) number
+      exactly 211, and the 25 others are ticks 3514-3538, past the span,
+      in the run's end (client 0's time limit at 3527, client 1's at 3536).
+      The old `e5ab4_a1_o2` fails the same criterion the same way (273
+      against 259, late 0). The server's 11 late events (5 in O1 and O2)
+      follow the two rebases.
+    - **Lane control**: three batches. No crash, every server journal
+      exact, no zero broken (every `unmatched` sits beside a non-zero O
+      value). The criteria item: 3 of the 6 N runs equal an O run of the
+      pool (the 6 O runs of these batches and E3's 6), and 3 do not. In all
+      three the difference is the pacer regime - which clients rebased at
+      2674-3006 decides their `relay_late 0` and `resyncs 0` criteria, and
+      every value occurs in the O pool - except one: in `e5ab2_lane_n1`
+      client 3's "own ball 0.0000 in D" PASSES (0.0000 m), where the 12 O
+      runs have 0.0015 to 9.1 m (and E3's new runs 0.0003 to 0.0115 m).
+      Client 3 had no substituted tick in phase D and rebased only at 2698,
+      after it; this one is **not traced** to a §5.3 run event. It is a
+      zero-threshold criterion on a sub-millimetre error that moves between
+      runs of one binary (client 2's flips between 0.0000 and 0.0002 m in
+      the O runs; client 1 passes in one O run of 12). Band: 22, 49 and 38
+      of ~303 out; old against old across the E3 batches: 40 to 96.
+
+    The out-of-band count metrics (events, inputs, echoes, rewinds, relay
+    lag) were not traced one by one; per 1000 frames most stay outside on
+    the swing and snapshots-on arms too, and the old-against-old bands of
+    the same arms are as wide or wider.
+- **The first round's status.** Every exact check passed (§5.2 (1) to
+  (6)), CPU parity passed, and swing bay, A6m and snapshots on passed the
+  §5.3 rule. The lane control arm did not meet the criteria item as
+  written (the phase-D own-ball criterion above, not traced), so the step
+  was not committed then.
+- **After the review: the closing round.** The review's fixes (the
+  refusal once per seq, the `force_rewind` guard, `<algorithm>`, the two
+  doc rows) change nothing on headless; the binary was rebuilt
+  (`bmmo-9029872673bd-dirty`, copied to `build-agent-E5/`) and every check
+  run again on it:
+  - x64 BUILD-OK, x86 CLIENT-BUILD-OK (its 24 objects deleted first),
+    379 tests on Windows and with GCC 16.2.1 on Arch, `linux_test_syntax.sh`
+    23 lines ok, the headless client and the five core sources with GCC
+    `-Wall -Wextra` rc 0 with no warning;
+  - §5.2 (5)/(6) `wire_check.sh E4 E5 e5x`: WIRE-CHECK: ALL SAME (the same
+    62914 sends), all 16 journals IDENTICAL, same length as the live
+    references, 12 bytes differing per file at offsets 93-104, the build
+    id; (4) 188 against 188 literals, EQUAL; (3) all 16 clients the same
+    rc and summary line, the four server journals rc 0 with 0 mismatches
+    on both; (2) `solo/e5_newx1` IDENTICAL to `old1` (2459 common ticks,
+    LOCAL 1230/1230, other records 6185/6185, starved=0); (1)
+    forced-50x12, 97x24 and 131x47 EXACT (48/25/18 forced rollbacks, 53
+    bodies, 0.0 m);
+  - CPU parity (three rounds): PASS, old 20.54 / 20.25 / 20.26 s, new
+    20.16 / 20.24 / 20.30 s, limit 21.86 s.
+  - §5.3, all five arms, one batch each (`e5abx1_*`), **every client of
+    every run capturing its inbound** (`--capture-inbound`, O and N runs
+    alike), so that any difference can be put to the old binary. Host
+    peak 16.0-17.9 % total, no other process above 3.5 %: no void run.
+    No crash; every client reached its time limit with rc 0; every server
+    journal replays rc 0 with 0 mismatches. **The trace by replay:** each
+    N run's four captures replayed with the old binary (`build-agent-E4`)
+    give client journals IDENTICAL to the N run's live ones, and each O
+    run's replayed with the new binary give its live ones (20 runs, 80
+    journals, all IDENTICAL); and every `window:` and `status:` line of
+    the old binary's replay of each N run equals the live N log's once
+    the CPU timings are removed (36 client logs, 0 lines differ). Every
+    count, error and criterion of an N run is therefore what the old code
+    computes from that run's inbound stream: a property of the run (its
+    timing and loss), not of the code. The §5.3 events behind each
+    difference, with each run's rebases:
+    - **Lane control: PASS.** Rebases: O1 clients 1-3 at 2693/2693/2694
+      (resyncs applied 2706/2706/2707), none in N1, O2 or N2. No zero
+      broken; both N runs' criteria equal `e5ab1_lane_o1`'s and
+      `e5ab3_lane_o2`'s. Band 29 of 306 out.
+    - **Swing bay** (no rebase in any run). Criteria of both N runs equal
+      both O runs'. Zeros broken, each a snapshot delivered past the
+      reach (the log's refusal line names it, the journal its depth):
+      N1 client 1 `far` 1 = the full snapshot of 871 at 920 (49 deep),
+      client 3 `far` 2 = 844 at 895 (51) and 871 at 920 (49); N2 client 1
+      = 868 at 918 (50), client 3 `far` 3 = 3141-3143 at 3205 (62-64), and
+      client 0 `unmatched` 1 = the full snapshot of 231 at 327, 96 deep,
+      past the history (its `far` 2 = 868 at 918 and 3339 at 3388, where
+      O1 has 2). Band 17 of 138 out.
+    - **A1 burst.** Rebases: O1 client 3 at 2709 (applied 2722), O2
+      client 3 at 2706 (2720), none in N1, N2 all four: client 0 at 2958
+      (2971), 1 at 2695 (2709), 2 at 2693 (2705), 3 at 2697 (2715). N1's
+      criteria equal `e5ab1_a1_o2`'s. N2's differ from O1's only in
+      client 0's and client 1's `relay_late 0` and `resyncs 0`, the two
+      clients that rebased in N2 and not in O1 (client 3's, rebased in
+      both, are the same). Zeros broken: N2 client 1 `unmatched` 1 = the
+      full snapshot of 2705, arrived at 2716 between its rebase (2695) and
+      its resync's base (2709); client 2 `unmatched` 2 = the full
+      snapshots of 2709 and 2715, arrived at 2735 and 2737 right after
+      its resync from 2705 (2732), before its new history holds them. The
+      late mirror is non-zero in every O run. Band 97 of 303 out.
+    - **A6m hold: PASS.** No rebase; N1's criteria equal O1's, N2's O2's;
+      no zero broken (the late mirror is non-zero in the O runs). Band 17
+      of 313 out.
+    - **Snapshots on.** Rebases: O2 client 3 at 3410, N2 client 3 at
+      3407, both in the teardown (no resync applied before the end).
+      Criteria of both N runs equal both O runs'. Zero broken: N2 client
+      0 `far` 1 = the full snapshot of 3294 at 3348, 54 deep. Band 11 of
+      138 out.
+
+    The first round's untraced `e5ab2_lane_n1` (client 3's phase-D own
+    error 0.0000 m) was a run of the pre-review binary without captures;
+    the phase-D error is continuous across runs of both binaries (client
+    3: 0.0007 to 0.0536 m in the other N runs, 0.0015 to 9.1 m in the O
+    runs; client 1 0.0000 in the O run `e3ab4_lane_o2`), and the closing
+    round's replays show the class of difference is the inbound stream's.
+- **The step's status.** Every exact check, CPU parity and every arm pass;
+  each broken zero and each criterion difference is a snapshot past the
+  reach or the history, a pacer rebase and its resync, or the teardown,
+  and every N run is reproduced exactly by the old binary from its own
+  inbound capture.
 
 ### 6.2 R steps: the retail mod hosts the core
 
