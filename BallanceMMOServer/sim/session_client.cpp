@@ -1390,6 +1390,8 @@ namespace {
             bool origin_live = false;   // the live run has made the origin's change (a birth: the scripts did)
             bool applied_live = false;  // ...and the body at `applied`
             bool retired = false;       // its lifetime ended before a replay could make it again
+            // The missing-echo deadline and its uplink gate (expire_own_echoes).
+            bmmo::session::own_echo_deadline echo_deadline;
             bool moved() const { return made && applied != origin; }
         };
 
@@ -3060,6 +3062,7 @@ namespace {
             if (newer_ack) {
                 acked_header_known_ = true;
                 acked_header_tick_ = msg.tick;
+                header_acked_ = msg.acked;
             }
             if (newer_ack && static_cast<int32_t>(msg.tick - tick_base_) >= 0) {
                 ++input_reports_;
@@ -4175,22 +4178,45 @@ namespace {
                  missing ? "taken out already as missing" : "sent before the last resync");
         }
 
-        // An own birth with no echo while the server's world (the snapshots'
-        // tick) is kOwnEchoDeadlineTicks past its stamp: the Physicalize never
-        // reached the server (the A6 drop variant), or it will be applied so
-        // late that the move is past the reach anyway.  Either way the answer
-        // is a resync, and since the server has no body for it now, the body
-        // goes first (resync_own_life with `made` false).  The birth is set
-        // aside, so an echo that comes after all is still answered
-        // (answer_set_aside), and the box gets the event as never made
-        // (state REJECTED: sim_tool drops it), so the client journal replays
-        // to the server's world; a later echo is journaled after it and wins.
-        // Without snapshots there is no deadline: the server's tick is unknown.
+        // An own birth with no echo while the server's tick is
+        // kOwnEchoDeadlineTicks past its stamp: the Physicalize never reached
+        // the server (the A6 drop variant), or it will be applied so late
+        // that the move is past the reach anyway.  Either way the answer is a
+        // resync of this client alone, and since the server has no body for
+        // it now, the body goes first (resync_own_life with `made` false).
+        // The birth is set aside, so an echo that comes after all is still
+        // answered (answer_set_aside), and the box gets the event as never
+        // made (state REJECTED: sim_tool drops it), so the client journal
+        // replays to the server's world; a later echo is journaled after it
+        // and wins.
+        //
+        // The server's tick comes from the relay header, which every relayed
+        // datagram carries every tick (plan step 20), and from the snapshots
+        // when they run: the server is authoritative with snapshots off too,
+        // and a birth it never made must not live on here for good.  The
+        // server echoes an event when it accepts it, before it steps that
+        // event's applied tick and so before it relays that tick, so an echo
+        // that exists is sent ahead of the datagram that passes the deadline;
+        // one that loses the race is answered as set aside.
+        //
+        // The deadline is gated on our uplink (bmmo::session::
+        // own_echo_deadline): it counts only once the header's acked shows
+        // the server applied a frame of ours at or past the origin, and only
+        // kOwnEchoUplinkSettleTicks after that was first seen.  The server's
+        // tick moves with the downlink; with the uplink out for longer than
+        // the deadline the reliable copy is still queued here, and giving the
+        // birth up would resync this client twice (the give-up, then the
+        // late copy echoed as made).
         void expire_own_echoes() {
-            if (!args_.rollback || !have_snapshot_ || resync_pending_) return;
+            if (!args_.rollback || resync_pending_) return;
+            uint32_t server_tick = 0;
+            if (!bmmo::session::newest_server_tick(acked_header_known_, acked_header_tick_, have_snapshot_,
+                                                   last_snapshot_tick_, server_tick))
+                return;
             for (auto& life: own_life_) {
                 if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
-                if (static_cast<int32_t>(last_snapshot_tick_ - life.origin) <= static_cast<int32_t>(kOwnEchoDeadlineTicks))
+                if (!life.echo_deadline.missing(server_tick, acked_header_known_, header_acked_, life.origin,
+                                                kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks))
                     continue;
                 ++own_echo_missing_;
                 life.state = own_life::verdict::missing;
@@ -4210,8 +4236,8 @@ namespace {
                 never.recipe = life.recipe;
                 journal_lifecycle_event(own_id_, never);
                 journal_note("own echo: Physicalize stamped " + std::to_string(life.origin) + " missing at the server's tick "
-                             + std::to_string(last_snapshot_tick_));
-                resync_own_life(life, false, life.origin, "no echo by the server's tick " + std::to_string(last_snapshot_tick_));
+                             + std::to_string(server_tick));
+                resync_own_life(life, false, life.origin, "no echo by the server's tick " + std::to_string(server_tick));
             }
         }
 
@@ -5944,13 +5970,17 @@ namespace {
         // late as a whole (a beam, a trafo, a respawn's pair), which moving
         // the birth alone cannot match (the own death's move is plan step 22).
         std::vector<uint32_t> own_moved_unphysicalize_;
-        // How long an own birth waits for its echo: the server's world (the
-        // snapshots' tick) this far past its stamp with no echo, and the
-        // Physicalize either never reached the server or will be applied
-        // past the reach - a resync either way, and a never-made body has to
-        // go first.  Twice the history (2.9 s): far past every hold arm, so a
-        // merely late event's echo always comes first.
+        // How long an own birth waits for its echo: the server's tick (the
+        // relay header's, or the snapshots') this far past its stamp with no
+        // echo, and the Physicalize either never reached the server or will
+        // be applied past the reach - a resync either way, and a never-made
+        // body has to go first.  Twice the history (2.9 s): far past every
+        // hold arm, so a merely late event's echo always comes first.
         static constexpr uint32_t kOwnEchoDeadlineTicks = 192;
+        // ...counted only once the server has applied a frame of ours at or
+        // past the birth's origin, and this long after that was first seen
+        // (one second for the reliable copy's retransmission).
+        static constexpr uint32_t kOwnEchoUplinkSettleTicks = 66;
         // A birth unanswered this long retires anyway (retire_own_lives).
         static constexpr uint32_t kOwnRecordKeepTicks = 512;
         // Body changes stamped for the frame's own tick, held past the frame's
@@ -6077,6 +6107,7 @@ namespace {
         bool held_header_known_ = false;
         bool acked_header_known_ = false;     // the newest server tick whose header counted for acked
         uint32_t acked_header_tick_ = 0;
+        uint32_t header_acked_ = 0;            // that header's acked: our newest frame the server applied fresh
         uint32_t held_header_epoch_ = 0, held_header_tick_ = 0, held_header_acked_ = 0, held_header_total_ = 0;
         // Lifecycle events (protocol 6): the first arrival of each counts, and
         // our own are repeated unreliably on the next ticks (flush_inputs).

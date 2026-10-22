@@ -394,7 +394,7 @@ namespace bmmo::sim {
             s.patience.erase(player);
             s.leads.erase(player);
             s.acked.erase(player);
-            s.lifecycle_missing.erase(player);
+            s.bodiless.forget(player);
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
@@ -699,7 +699,8 @@ namespace bmmo::sim {
                 + " pending_events=" + std::to_string(s.events.size())
                 + " restamped=" + std::to_string(s.restamped_events)
                 + " superseded=" + std::to_string(s.superseded_births) + "/" + std::to_string(s.superseded_events)
-                + " barrier=" + (config_.lifecycle_barrier ? "on" : "off");
+                + " bodiless=" + std::to_string(s.bodiless.runs()) + "/" + std::to_string(s.bodiless.open_runs())
+                + "/" + std::to_string(s.bodiless_short);
             for (auto& [player, buffer]: s.inputs)
                 text += " in[" + std::to_string(player) + "]=" + std::to_string(buffer.pending())
                       + "@" + std::to_string(buffer.last_fresh_tick())
@@ -721,49 +722,49 @@ namespace bmmo::sim {
         if (callbacks_.on_snapshot) callbacks_.on_snapshot(snapshot);
     }
 
-    // True while an input for `tick` claims a physicalized ball the world does
-    // not have and no Physicalize event for it has arrived yet; gives the
-    // reliable event up to a second to catch up with the unreliable input.
-    bool session_runner::waiting_for_lifecycle(session_state& s, uint32_t tick) {
-        std::vector<uint32_t> blocking;
-        for (const auto& [player, buffer]: s.inputs) {
-            const auto* frame = buffer.peek(tick);
-            if (!frame || !(frame->flags & bmmo::session::INPUT_FLAG_PHYSICALIZED)) continue;
-            if (s.world->player_physicalized(player)) { s.lifecycle_missing.erase(player); continue; }
-            // A Physicalize that belongs to the frame at `tick` is stamped at
-            // most tick + input_delay + 1 (see session/lifecycle.hpp), so ask
-            // for that horizon: the event is already queued, and waiting for it
-            // does not apply it any earlier than its own stamp tick.
-            const uint32_t horizon = tick + s.input_delay + 1;
-            if (bmmo::session::physicalize_pending(s.events, player, horizon)) {
-                s.lifecycle_missing.erase(player);
+    // S4 (late-player design 3.2, plan step 20).  The lifecycle barrier used
+    // to hold the whole session up to a second here, waiting for the
+    // Physicalize of a frame that claimed a ball; a late event is re-stamped
+    // at acceptance instead (design 3.1), so every receiver applies it at the
+    // same later tick and the tick is stepped without the ball - the world
+    // never reads INPUT_FLAG_PHYSICALIZED.  Only the record is left: one
+    // line per run of such ticks longer than input_delay + 1 when it ends,
+    // one while it is still open after a second (a dropped birth never
+    // ends), capped per session, and a journal note for each, so a run is
+    // visible beside the substitutions and the re-stamped event that explain
+    // it; the short runs every birth makes are only counted.
+    void session_runner::note_bodiless(session_state& s, uint32_t tick,
+                                       const std::vector<bmmo::session::applied_input>& applied, bool recording) {
+        using change = bmmo::session::bodiless_tracker::change;
+        static constexpr uint32_t kBodilessLogCap = 50;
+        for (const auto& a: applied) {
+            const bool claimed = (a.frame.flags & bmmo::session::INPUT_FLAG_PHYSICALIZED) != 0;
+            // Cheap first: a frame that claims nothing and no open run is
+            // the common case, and asks the world nothing.
+            if (!claimed && !s.bodiless.open(a.player)) continue;
+            bmmo::session::bodiless_tracker::run run;
+            const auto what = s.bodiless.step(a.player, tick, claimed, s.world->player_physicalized(a.player), run);
+            if (what == change::none) continue;
+            // A run no longer than input_delay + 1 comes with every birth
+            // (its stamp trails the first flagged frame by up to that): only
+            // counted (describe), so the cap is spent on the runs a late or
+            // lost Physicalize makes, the ones the measurement looks for.
+            if (what == change::ended && run.ticks() <= s.input_delay + 1) {
+                ++s.bodiless_short;
                 continue;
             }
-            // Already waited a second for this player's event and gave up; the
-            // session must keep running at full speed for everybody else.
-            if (s.lifecycle_missing.count(player)) continue;
-            blocking.push_back(player);
-        }
-        if (blocking.empty()) {
-            s.barrier_armed = false;
-            return false;
-        }
-        const auto now = clock::now();
-        if (!s.barrier_armed) {
-            s.barrier_armed = true;
-            s.barrier_deadline = now + std::chrono::seconds(1);
-            return true;
-        }
-        if (now >= s.barrier_deadline) {
-            s.barrier_armed = false;
-            for (uint32_t player: blocking) {
-                s.lifecycle_missing.insert(player);
-                log("[session " + std::to_string(s.id) + "] no Physicalize for player " + std::to_string(player)
-                    + " at tick " + std::to_string(tick) + "; its ball stays out of the simulation until one arrives");
+            const std::string range = std::to_string(run.first) + ".." + std::to_string(run.last);
+            const std::string text = what == change::ended
+                ? "S4 bodiless player=" + std::to_string(a.player) + " ticks=" + range + " n=" + std::to_string(run.ticks())
+                : "S4 bodiless player=" + std::to_string(a.player) + " ticks=" + range + " n=" + std::to_string(run.ticks())
+                  + " open";
+            if (s.bodiless_logs < kBodilessLogCap) {
+                ++s.bodiless_logs;
+                log("[session " + std::to_string(s.id) + "] " + text
+                    + (s.bodiless_logs == kBodilessLogCap ? " (S4 lines capped here)" : ""));
             }
-            return false;
+            if (recording) s.journal.note(tick, text);
         }
-        return true;
     }
 
     // One simulated tick of a running session: inputs, due events, physics,
@@ -904,6 +905,8 @@ namespace bmmo::sim {
                 if (recording) s.journal.note(tick, "event failed: " + error);
             }
         }
+        // After the events: a Physicalize due this tick has made its ball.
+        note_bodiless(s, tick, applied, recording);
         std::string error;
         if (!s.world->tick(error)) {
             s.failed = true;
@@ -1124,9 +1127,12 @@ namespace bmmo::sim {
             if (!config_.patience) {
                 bmmo::session::patience_member m;
                 m.has = buffer.has(tick);
-                // Only a lead reset (lead_adjust) makes a held range; without
-                // one this is false and the test is the old has-only rule.
-                m.held = buffer.held(tick);
+                // A lead reset's held range (lead_adjust), or ticks a resync's
+                // or a late joiner's base skipped (plan step 20): nothing comes
+                // for either, so the session does not wait for their
+                // deadlines while another member's frame paces it.  Without
+                // either this is false and the test is the old has-only rule.
+                m.held = buffer.held(tick) || buffer.reanchored(tick);
                 members.push_back(m);
                 continue;
             }
@@ -1235,7 +1241,6 @@ namespace bmmo::sim {
                         }
                         break;
                     }
-                    if (config_.lifecycle_barrier && waiting_for_lifecycle(s, tick)) break;
                     if (verdict.early) {
                         // Stepped before the deadline without some frames:
                         // remember which, so a frame that still beats the

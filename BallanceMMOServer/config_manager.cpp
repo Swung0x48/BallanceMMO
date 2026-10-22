@@ -81,7 +81,6 @@ bool config_manager::load() {
         physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
-        physics_lifecycle_barrier = yaml_load_value(physics, "lifecycle_barrier", physics_lifecycle_barrier);
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
         physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
         physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",
@@ -238,9 +237,6 @@ void config_manager::save(bool reload_values) {
                    "#     gets a longer lead of its own through SessionLead, if its client declared it can apply\n"
                    "#     one; a late joiner's first lead and a resync's lead are then per player instead of\n"
                    "#     capped at 34 ticks; keep it off until the clients apply the lead),\n"
-                   "#   lifecycle_barrier (default true: a tick whose input claims a ball the server has no\n"
-                   "#     Physicalize for yet is held up to a second; protocol 9 re-stamps a late event at\n"
-                   "#     acceptance instead, and late-player design step 20 turns this off),\n"
                    "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
                    "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
                    "#     relative to the server's own directory, empty = record nothing),\n"

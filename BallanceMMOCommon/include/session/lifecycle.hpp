@@ -4,8 +4,15 @@
 // pure functions so the unit tests can exercise them without linking the
 // simulation (the test target has no physics).
 //
-//   physicalize_pending    - the server's lifecycle barrier: is a Physicalize
-//                            for this player already queued within reach?
+//   bodiless_tracker       - S4 (late-player design 3.2): the runs of ticks a
+//                            player's frame claimed a ball the server's world
+//                            did not have, which the server steps through
+//                            since the lifecycle barrier is gone (plan step 20);
+//   own_echo_missing       - the owner's deadline for the echo of its own
+//                            Physicalize, on the server's tick the relay
+//                            header carries every tick (snapshots or not),
+//                            and own_echo_deadline, its gate on the
+//                            header's acked (the uplink worked after it);
 //   lifecycle_acceptance   - protocol 9, late-player design 3.1: the tick the
 //                            server applies an event at, max(stamp, N), and
 //                            whether a birth was overtaken by a newer event;
@@ -28,27 +35,138 @@
 #include "../entity/session.hpp"
 
 namespace bmmo::session {
-    // True when `events` holds a Physicalize for `player` applied no later
-    // than `horizon`.  The range may be any container whose elements expose
-    // .player, .applied and .event.type (session_runner::pending_event does).
-    // Since protocol 9 an event is queued at its applied tick, never before
-    // its stamp, and a late one at the session's next tick, which is inside
-    // any horizon the barrier asks for.
+    // S4 (late-player design 3.2, plan step 20): the lifecycle barrier is
+    // gone.  It held every member up to a second when a present frame was
+    // flagged INPUT_FLAG_PHYSICALIZED and the world had no ball for that
+    // player and no Physicalize queued - one late or lost event stalled the
+    // whole session, and the catch-up put every member's relay past its
+    // reach.  A late event is re-stamped at acceptance now (design 3.1) and
+    // the world never reads the flag (physics_world::set_input), so such a
+    // tick is simply stepped without the ball, as every receiver of the
+    // re-stamped event steps it too.  What is left is a diagnostic: the run
+    // of ticks a player's frame claimed a ball the world did not have, one
+    // run per (player, first tick), told when it ends and once while it is
+    // still open after kBodilessOpenReportTicks (a dropped birth never ends).
     //
-    // The barrier used to ask for `tick`, which is too strict: the client
-    // stamps a lifecycle event one tick past the frame that reports it
-    // (physics_session_client.cpp:1135/1230 use current_tick() + 1) and the
-    // server runs `input_delay` ticks behind the client frame it consumes, so
-    // an event that belongs to the frame at `tick` is stamped at most
-    // tick + input_delay + 1.  Asking for that horizon does not apply anything
-    // earlier - the consumer still takes e.tick <= tick - it only stops the
-    // barrier from burning a full second of wall clock on an event that is
-    // already queued.
-    template <typename EventRange>
-    inline bool physicalize_pending(const EventRange& events, uint32_t player, uint32_t horizon) {
-        for (const auto& e: events)
-            if (e.player == player && e.applied <= horizon && e.event.type == event_type::Physicalize) return true;
-        return false;
+    // Short runs are ordinary: a birth is stamped up to input_delay + 1
+    // ticks past the frame that first reports the ball, and a death's frame
+    // can still carry the flag for a tick.  The length is what tells a
+    // late or lost Physicalize apart.
+    inline constexpr uint32_t kBodilessOpenReportTicks = 66;
+
+    class bodiless_tracker {
+    public:
+        struct run {
+            uint32_t player = 0;
+            uint32_t first = 0;   // the first tick stepped without the claimed ball
+            uint32_t last = 0;    // the last one so far
+            bool told_open = false;   // the still_open line was given
+            uint32_t ticks() const { return last - first + 1; }
+        };
+        // What one call found: the run that ended before `tick` (ended), or
+        // the run reaching kBodilessOpenReportTicks at `tick` (still_open),
+        // with `out` filled; otherwise none (a run began, went on, or nothing
+        // was claimed).
+        enum class change : uint8_t { none, ended, still_open };
+
+        // One player's frame at `tick`, after the tick's events were applied:
+        // `claimed` its INPUT_FLAG_PHYSICALIZED, `has_ball` the world's view.
+        change step(uint32_t player, uint32_t tick, bool claimed, bool has_ball, run& out) {
+            const auto it = open_.find(player);
+            const bool bodiless = claimed && !has_ball;
+            if (!bodiless) {
+                if (it == open_.end()) return change::none;
+                out = it->second;
+                open_.erase(it);
+                ++ended_;
+                return change::ended;
+            }
+            if (it == open_.end()) {
+                open_.emplace(player, run{player, tick, tick});
+                ++runs_;
+                return change::none;
+            }
+            it->second.last = tick;
+            // At or past the mark, once: a player missing from a tick's
+            // applied inputs (a leaver's last ticks, a member not ready)
+            // makes `last` jump, and an equality test would skip the line a
+            // dropped birth exists to give.
+            if (!it->second.told_open && it->second.ticks() >= kBodilessOpenReportTicks) {
+                it->second.told_open = true;
+                out = it->second;
+                return change::still_open;
+            }
+            return change::none;
+        }
+        // A player that left: its open run ends with it, untold.
+        void forget(uint32_t player) { open_.erase(player); }
+        bool open(uint32_t player) const { return open_.count(player) != 0; }
+        size_t open_runs() const { return open_.size(); }
+        uint64_t runs() const { return runs_; }
+        uint64_t ended() const { return ended_; }
+    private:
+        std::map<uint32_t, run> open_;
+        uint64_t runs_ = 0;
+        uint64_t ended_ = 0;
+    };
+
+    // The owner's deadline for the echo of its own Physicalize (late-player
+    // design 3.2-3.3, plan step 20).  The server echoes every accepted event
+    // to its owner from the simulation thread before it steps the event's
+    // applied tick, and relays each stepped tick right after it; the relay
+    // header names that tick (session_remote_input_msg::tick) on every
+    // datagram, so the owner knows the server's tick every tick, with
+    // snapshots off too.  An own birth with no echo while the server's tick
+    // is more than `deadline_ticks` past its origin never reached the server
+    // (or will be applied so late that the move is past the reach anyway):
+    // missing.  The comparison is signed, so a tick older than the origin
+    // (a datagram from before the birth) is never past it.
+    inline bool own_echo_missing(uint32_t server_tick, uint32_t origin, uint32_t deadline_ticks) {
+        return static_cast<int32_t>(server_tick - origin) > static_cast<int32_t>(deadline_ticks);
+    }
+
+    // The uplink gate on that deadline (step 20 review).  The server's tick
+    // moves with the DOWNLINK; an uplink outage (or a hold longer than the
+    // deadline) leaves the reliable Physicalize queued at the owner while
+    // that tick passes origin + deadline, and giving the birth up then
+    // resyncs the owner twice: once for the give-up, once more when the
+    // queued copy arrives and is echoed as made.  So the deadline counts
+    // only once the server has applied a frame of ours fresh at or past the
+    // birth's origin (the relay header's `acked`, the server's own
+    // numbering): our uplink worked after the event was sent.  From the
+    // server tick that was first seen at, the reliable copy gets
+    // `settle_ticks` more for its retransmission.  A server that has none of
+    // our frames since the origin has not lost the event.  One per own birth.
+    class own_echo_deadline {
+    public:
+        // One look, with the newest server tick and the header's acked (when
+        // known): true when the birth is missing.
+        bool missing(uint32_t server_tick, bool acked_known, uint32_t acked, uint32_t origin,
+                     uint32_t deadline_ticks, uint32_t settle_ticks) {
+            if (!uplink_ && acked_known && static_cast<int32_t>(acked - origin) >= 0) {
+                uplink_ = true;
+                since_ = server_tick;
+            }
+            if (!own_echo_missing(server_tick, origin, deadline_ticks)) return false;
+            return uplink_ && static_cast<int32_t>(server_tick - since_) > static_cast<int32_t>(settle_ticks);
+        }
+        bool uplink_seen() const { return uplink_; }
+        uint32_t uplink_since() const { return since_; }
+    private:
+        bool uplink_ = false;
+        uint32_t since_ = 0;
+    };
+
+    // The newest server tick the owner knows of: the relay header's (every
+    // tick, any epoch: its tick is the server's own number) and, when
+    // snapshots run, the newest snapshot's.  False when it knows neither.
+    inline bool newest_server_tick(bool relay_known, uint32_t relay_tick, bool snapshot_known,
+                                   uint32_t snapshot_tick, uint32_t& out) {
+        if (!relay_known && !snapshot_known) return false;
+        if (!relay_known) out = snapshot_tick;
+        else if (!snapshot_known) out = relay_tick;
+        else out = static_cast<int32_t>(snapshot_tick - relay_tick) > 0 ? snapshot_tick : relay_tick;
+        return true;
     }
 
     // The tick before whose step the runner takes a leaver out of its world

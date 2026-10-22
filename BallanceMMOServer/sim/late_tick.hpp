@@ -132,4 +132,21 @@ namespace bmmo::sim {
         const uint32_t room = kStartBaseLagBudgetTicks > input_delay ? kStartBaseLagBudgetTicks - input_delay : 0;
         return std::max<uint32_t>(1, std::min(lead, room));
     }
+
+    // The lead a resync re-anchors a member at, off the per-player path
+    // (late-player plan step 20): a resync is a fresh start for that one
+    // member, so it gets the start base's lead, clamped inside the window
+    // the same way - not the late joiner's capped lead, which the clamp does
+    // not bound.  Measured (lp19b_a6_1500, input delay 17, 150 ms each way):
+    // the start members' relay lag was 20 (the round trip) at the start's
+    // lead of 27; the owner resynced at the late-tick lead of 31 settled at
+    // 27-28 once the session ran normally again.  Its 48-49 right after the
+    // resync, at its reach, was that plus the 22 ticks the whole session
+    // stalled for while it waited for the deadlines of the ticks the resync
+    // skipped - fixed in the step test (input_buffer::reanchored), not
+    // here.  This clamp only brings a resynced member's lag back to about
+    // where it was before (27 -> about 23 at these numbers).
+    inline uint32_t resync_lead_ticks(uint32_t input_delay, uint32_t rtt_ms) {
+        return session_start_tick_base(input_delay, rtt_ms);
+    }
 }

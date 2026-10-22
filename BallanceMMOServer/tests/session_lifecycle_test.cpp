@@ -1,8 +1,11 @@
-// Unit tests for the two lifecycle judgements of a physics session
-// (session/lifecycle.hpp): the server's barrier horizon, which decides whether
-// a Physicalize is already queued within reach, and the intake-side repeat
-// guard, which drops the client's per-frame BodyRevived re-reports without
-// ever dropping a late one.
+// Unit tests for the lifecycle judgements of a physics session
+// (session/lifecycle.hpp): the S4 record of the ticks the server steps without
+// a ball a frame claims (the lifecycle barrier that used to wait for it is
+// gone, plan step 20), the owner's deadline for the echo of its own
+// Physicalize on the server's tick from the relay header (gated on the
+// header's acked: the uplink worked after the birth), and the intake-side
+// repeat guard, which drops the client's per-frame BodyRevived re-reports
+// without ever dropping a late one.
 //
 // Also covers the timeline half of the same judgements (session/timeline.hpp):
 // what a SessionAssign or a resync may do to a client's input_buffer, and the
@@ -11,7 +14,8 @@
 // Finally the server-side halves this test target cannot link (server.cpp): the
 // caps on the lead a late joiner is anchored at, the base the members present at
 // the start are numbered from and the window its clamp keeps the start lag
-// inside, all shared through sim/late_tick.hpp, and the rule that only the first
+// inside, all shared through sim/late_tick.hpp, the lead a resync re-anchors a
+// member at (the start base's, plan step 20), and the rule that only the first
 // join before the start barrier arms it (that one is still mirrored).  The
 // budgets they have to fit in are the production ones.
 #include <gtest/gtest.h>
@@ -31,52 +35,197 @@ using namespace bmmo::session;
 using bmmo::sim::kLateTickLeadCapTicks;
 using bmmo::sim::kLateTickRttCapTicks;
 using bmmo::sim::late_tick_lead_ticks;
+using bmmo::sim::resync_lead_ticks;
 using bmmo::sim::session_start_tick_base;
 
+// ---------------------------------------------------------------------------
+// S4 (late-player design 3.2, plan step 20).  The barrier that held every
+// member up to a second for the Physicalize of a frame that claimed a ball is
+// gone: the tick is stepped without the ball, and a run of such ticks is told
+// once when it ends, and once while still open at kBodilessOpenReportTicks
+// (a dropped birth never ends).
+// ---------------------------------------------------------------------------
+
 namespace {
-    struct stub_event { event_type type = event_type::Physicalize; };
-    struct stub_pending {
-        uint32_t player = 0;
-        uint32_t applied = 0;
-        stub_event event;
-    };
+    using bodiless_change = bodiless_tracker::change;
+}
 
-    stub_pending event_of(uint32_t player, uint32_t tick, event_type type = event_type::Physicalize) {
-        return stub_pending{player, tick, stub_event{type}};
+TEST(LifecycleBodiless, ARunIsToldWhenTheBallComesWithItsLength) {
+    bodiless_tracker t;
+    bodiless_tracker::run run;
+    // Ordinary ticks: the frame claims a ball the world has.
+    EXPECT_EQ(t.step(7, 100, true, true, run), bodiless_change::none);
+    EXPECT_EQ(t.runs(), 0u);
+    // A birth stamped input_delay + 1 past its first flagged frame: the
+    // server steps those ticks without the ball, and waits for nothing.
+    for (uint32_t tick = 101; tick <= 107; ++tick)
+        EXPECT_EQ(t.step(7, tick, true, false, run), bodiless_change::none) << "tick " << tick;
+    EXPECT_TRUE(t.open(7));
+    EXPECT_EQ(t.runs(), 1u);
+    // The Physicalize applied at 108 made the ball before that step.
+    ASSERT_EQ(t.step(7, 108, true, true, run), bodiless_change::ended);
+    EXPECT_EQ(run.player, 7u);
+    EXPECT_EQ(run.first, 101u);
+    EXPECT_EQ(run.last, 107u);
+    EXPECT_EQ(run.ticks(), 7u);
+    EXPECT_FALSE(t.open(7));
+    EXPECT_EQ(t.ended(), 1u);
+}
+
+TEST(LifecycleBodiless, AFrameThatStopsClaimingEndsTheRunToo) {
+    bodiless_tracker t;
+    bodiless_tracker::run run;
+    t.step(7, 200, true, false, run);
+    // The client's own death: its frames stop claiming the ball.
+    ASSERT_EQ(t.step(7, 201, false, false, run), bodiless_change::ended);
+    EXPECT_EQ(run.ticks(), 1u);
+    // Nothing claimed and nothing open: no run, and the world is not asked.
+    EXPECT_EQ(t.step(7, 202, false, false, run), bodiless_change::none);
+    EXPECT_EQ(t.runs(), 1u);
+}
+
+TEST(LifecycleBodiless, ADroppedBirthIsToldOnceWhileOpenAndNeverStallsAnything) {
+    bodiless_tracker t;
+    bodiless_tracker::run run;
+    int open_reports = 0;
+    uint32_t told_at = 0;
+    for (uint32_t tick = 2502; tick < 2502 + 1000; ++tick) {
+        const auto what = t.step(7, tick, true, false, run);
+        ASSERT_NE(what, bodiless_change::ended) << "tick " << tick;
+        if (what == bodiless_change::still_open) {
+            ++open_reports;
+            told_at = tick;
+        }
     }
+    EXPECT_EQ(open_reports, 1);
+    EXPECT_EQ(told_at, 2502u + kBodilessOpenReportTicks - 1);
+    EXPECT_EQ(run.first, 2502u);
+    EXPECT_EQ(run.ticks(), kBodilessOpenReportTicks);
+    EXPECT_EQ(t.runs(), 1u);
+    EXPECT_EQ(t.open_runs(), 1u);
 }
 
-// The production shape: input_delay 6 (journal header), so the barrier at tick
-// T asks for the horizon T + 7.
-TEST(LifecycleBarrier, AcceptsThePhysicalizeStampedInputDelayPlusOne) {
-    const std::vector<stub_pending> events{event_of(7, 124)};
-    EXPECT_TRUE(physicalize_pending(events, 7, 117 + 6 + 1));
+TEST(LifecycleBodiless, TheOpenLineIsGivenOnceEvenWhenTheRunSkipsTheMark) {
+    // A player missing from some ticks' applied inputs: `last` jumps over
+    // kBodilessOpenReportTicks, and the line still comes, once.
+    bodiless_tracker t;
+    bodiless_tracker::run run;
+    EXPECT_EQ(t.step(7, 1000, true, false, run), bodiless_change::none);
+    EXPECT_EQ(t.step(7, 1060, true, false, run), bodiless_change::none);   // 61 ticks
+    ASSERT_EQ(t.step(7, 1070, true, false, run), bodiless_change::still_open);   // 71: past 66
+    EXPECT_EQ(run.first, 1000u);
+    EXPECT_EQ(run.ticks(), 71u);
+    for (uint32_t tick = 1071; tick < 1300; ++tick)
+        EXPECT_EQ(t.step(7, tick, true, false, run), bodiless_change::none) << "tick " << tick;
+    ASSERT_EQ(t.step(7, 1300, true, true, run), bodiless_change::ended);
+    EXPECT_EQ(run.ticks(), 300u);
+    EXPECT_TRUE(run.told_open);
 }
 
-TEST(LifecycleBarrier, RejectsThePhysicalizeStampedPastTheHorizon) {
-    const std::vector<stub_pending> events{event_of(7, 125)};
-    EXPECT_FALSE(physicalize_pending(events, 7, 117 + 6 + 1));
+TEST(LifecycleBodiless, PlayersAreTrackedApartAndALeaverIsForgotten) {
+    bodiless_tracker t;
+    bodiless_tracker::run run;
+    t.step(7, 300, true, false, run);
+    t.step(8, 300, true, false, run);
+    EXPECT_EQ(t.open_runs(), 2u);
+    ASSERT_EQ(t.step(8, 301, true, true, run), bodiless_change::ended);
+    EXPECT_EQ(run.player, 8u);
+    EXPECT_TRUE(t.open(7));
+    t.forget(7);
+    EXPECT_FALSE(t.open(7));
+    EXPECT_EQ(t.ended(), 1u) << "a leaver's run ends with it, untold";
+    // The same player back later starts a new run.
+    EXPECT_EQ(t.step(7, 400, true, false, run), bodiless_change::none);
+    EXPECT_EQ(t.runs(), 3u);
 }
 
-TEST(LifecycleBarrier, AcceptsEarlierStampsIncludingLateOnes) {
-    EXPECT_TRUE(physicalize_pending(std::vector<stub_pending>{event_of(7, 123)}, 7, 124));
-    EXPECT_TRUE(physicalize_pending(std::vector<stub_pending>{event_of(7, 117)}, 7, 124));
-    EXPECT_TRUE(physicalize_pending(std::vector<stub_pending>{event_of(7, 112)}, 7, 124));
+// ---------------------------------------------------------------------------
+// The owner's deadline for the echo of its own Physicalize (plan step 20).
+// Step 19 read the server's tick from the snapshots only, so with snapshots
+// off a birth whose every copy was lost (the A6 drop arm) lived on at its
+// owner for good while the server never made it.  The relay header carries
+// the server's tick on every datagram, every tick.
+// ---------------------------------------------------------------------------
+
+TEST(OwnEchoDeadline, MissingOnlyPastTheDeadlineOnTheServersTick) {
+    constexpr uint32_t deadline = 192;
+    EXPECT_FALSE(own_echo_missing(2502, 2502, deadline));
+    EXPECT_FALSE(own_echo_missing(2502 + deadline, 2502, deadline)) << "at the deadline the echo still has its tick";
+    EXPECT_TRUE(own_echo_missing(2502 + deadline + 1, 2502, deadline));
+    // A datagram from before the birth (reordered, or an old epoch's) is
+    // never past it: the difference is signed.
+    EXPECT_FALSE(own_echo_missing(2400, 2502, deadline));
+    // Across the wrap of the tick counter.
+    EXPECT_TRUE(own_echo_missing(200u, 0xFFFFFFF0u, deadline));
+    EXPECT_FALSE(own_echo_missing(150u, 0xFFFFFFF0u, deadline));
 }
 
-TEST(LifecycleBarrier, IgnoresAnotherPlayersPhysicalize) {
-    const std::vector<stub_pending> events{event_of(8, 120)};
-    EXPECT_FALSE(physicalize_pending(events, 7, 124));
+TEST(OwnEchoDeadline, TheServersTickComesFromTheRelayWithSnapshotsOff) {
+    uint32_t tick = 0;
+    EXPECT_FALSE(newest_server_tick(false, 0, false, 0, tick)) << "nothing heard yet: no deadline";
+    // Snapshots off (the deployment the A6 drop arm runs): the relay header
+    // alone sets the deadline.
+    ASSERT_TRUE(newest_server_tick(true, 2700, false, 0, tick));
+    EXPECT_EQ(tick, 2700u);
+    EXPECT_TRUE(own_echo_missing(tick, 2502, 192));
+    // Both known: the newer one, signed.
+    ASSERT_TRUE(newest_server_tick(true, 2700, true, 2650, tick));
+    EXPECT_EQ(tick, 2700u);
+    ASSERT_TRUE(newest_server_tick(true, 2700, true, 2710, tick));
+    EXPECT_EQ(tick, 2710u);
+    ASSERT_TRUE(newest_server_tick(false, 0, true, 2650, tick));
+    EXPECT_EQ(tick, 2650u);
+    ASSERT_TRUE(newest_server_tick(true, 5, true, 0xFFFFFFF0u, tick));
+    EXPECT_EQ(tick, 5u) << "the relay's tick is newer across the wrap";
 }
 
-TEST(LifecycleBarrier, IgnoresOtherEventTypes) {
-    EXPECT_FALSE(physicalize_pending(std::vector<stub_pending>{event_of(7, 120, event_type::Unphysicalize)}, 7, 124));
-    EXPECT_FALSE(physicalize_pending(std::vector<stub_pending>{event_of(7, 120, event_type::BodyRevived)}, 7, 124));
-    EXPECT_FALSE(physicalize_pending(std::vector<stub_pending>{event_of(7, 120, event_type::Sector)}, 7, 124));
-}
-
-TEST(LifecycleBarrier, EmptyQueueIsNeverPending) {
-    EXPECT_FALSE(physicalize_pending(std::vector<stub_pending>{}, 7, 124));
+// The uplink gate (step 20 review): the server's tick moves with the
+// downlink, so an uplink outage longer than the deadline would give up a
+// birth whose reliable copy is still queued at the owner, and the copy's
+// later echo would resync it a second time.  The deadline counts only once
+// the header's acked shows a frame of ours at or past the origin, and only
+// kOwnEchoUplinkSettleTicks (66 in the client) after that.
+TEST(OwnEchoDeadline, CountsOnlyOnceTheServerHasOurFramesPastTheOrigin) {
+    constexpr uint32_t deadline = 192, settle = 66, origin = 2500;
+    // The drop arm: our frames keep arriving, the event never does.  The
+    // server applies our frame for the origin at about the origin.
+    {
+        own_echo_deadline d;
+        EXPECT_FALSE(d.missing(2490, true, 2489, origin, deadline, settle));
+        EXPECT_FALSE(d.uplink_seen());
+        EXPECT_FALSE(d.missing(2501, true, 2500, origin, deadline, settle));
+        EXPECT_TRUE(d.uplink_seen());
+        EXPECT_EQ(d.uplink_since(), 2501u);
+        EXPECT_FALSE(d.missing(origin + deadline, true, origin + deadline, origin, deadline, settle));
+        EXPECT_TRUE(d.missing(origin + deadline + 1, true, origin + deadline + 1, origin, deadline, settle))
+            << "the deadline binds, as without the gate";
+    }
+    // An uplink outage from before the birth: the server's tick runs on, our
+    // acked stays behind the origin, and nothing is given up.
+    {
+        own_echo_deadline d;
+        for (uint32_t tick = origin; tick < origin + 600; ++tick)
+            EXPECT_FALSE(d.missing(tick, true, origin - 3, origin, deadline, settle)) << "tick " << tick;
+        // The uplink comes back at origin + 600: frames past the origin are
+        // applied fresh again.  The queued reliable copy gets `settle` more.
+        const uint32_t back = origin + 600;
+        EXPECT_FALSE(d.missing(back, true, back, origin, deadline, settle));
+        EXPECT_FALSE(d.missing(back + settle, true, back + settle, origin, deadline, settle));
+        EXPECT_TRUE(d.missing(back + settle + 1, true, back + settle + 1, origin, deadline, settle));
+    }
+    // No header acked known (nothing relayed yet): never missing.
+    {
+        own_echo_deadline d;
+        EXPECT_FALSE(d.missing(origin + 1000, false, 0, origin, deadline, settle));
+    }
+    // Across the wrap of the tick counter.
+    {
+        own_echo_deadline d;
+        const uint32_t o = 0xFFFFFFF0u;
+        EXPECT_FALSE(d.missing(o + 1, true, o, o, deadline, settle));
+        EXPECT_TRUE(d.uplink_seen());
+        EXPECT_TRUE(d.missing(o + deadline + 1, true, o + deadline, o, deadline, settle));
+    }
 }
 
 namespace {
@@ -312,6 +461,30 @@ TEST(SessionStartBase, ClampKeepsTheStartLagInsideTheClientResimWindow) {
     }
     EXPECT_EQ(session_start_tick_base(kInputDelayMaxTicks, 65535), budget - kInputDelayMaxTicks);
     EXPECT_GE(session_start_tick_base(kInputDelayMaxTicks, 65535), 1u);
+}
+
+// Plan step 20: a resync off the per-player path re-anchors at the start
+// base's lead, clamped inside the window, not at the late joiner's capped
+// lead.  The measured case (lp19b_a6_1500): input delay 17 at 150 ms each
+// way, the late-tick lead 31 against the start's 27; the resynced owner's
+// relay lag settled at 27-28 against the start members' 20.  (Its 48-50
+// right after the resync was the session's stall on the skipped ticks'
+// deadlines on top: input_buffer::reanchored, lead_test.)
+TEST(ResyncLead, IsTheStartBasesLeadClampedInsideTheWindow) {
+    constexpr uint32_t budget = 44;
+    EXPECT_EQ(late_tick_lead_ticks(17, 300), 31u);
+    EXPECT_EQ(resync_lead_ticks(17, 300), 27u);
+    EXPECT_EQ(resync_lead_ticks(17, 300), session_start_tick_base(17, 300));
+    for (uint32_t ping = 0; ping <= 1000; ping += 25) {
+        const uint32_t delay = input_delay_for_ping(static_cast<int>(ping), 6);
+        const uint32_t lead = resync_lead_ticks(delay, ping);
+        EXPECT_LE(lead + delay, budget) << "ping " << ping;
+        EXPECT_LE(lead, late_tick_lead_ticks(delay, ping)) << "never longer than the late-tick lead, ping " << ping;
+        EXPECT_GE(lead, 1u) << "ping " << ping;
+    }
+    // Where the late-tick lead fits the window it is unchanged.
+    EXPECT_EQ(resync_lead_ticks(6, 300), late_tick_lead_ticks(6, 300));
+    EXPECT_EQ(resync_lead_ticks(6, 0), late_tick_lead_ticks(6, 0));
 }
 
 // ---------------------------------------------------------------------------

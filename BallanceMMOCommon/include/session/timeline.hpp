@@ -138,11 +138,21 @@ namespace bmmo::session {
         // patience step test reads this instead of has().
         bool settled(uint32_t tick) const { return has(tick) || tick < next_tick_; }
         // `tick` lies in the range the last reset_hold() froze: no frame
-        // will be applied there, the frozen substitute is.  Only that range,
-        // not a resync's re-anchor: the runner's step test without patience
-        // treats these as settled behind physics.lead_adjust and nothing else
-        // (late-player design 2.3).
+        // will be applied there, the frozen substitute is (late-player design
+        // 2.3).
         bool held(uint32_t tick) const { return tick >= hold_from_ && tick < hold_until_; }
+        // `tick` was skipped by a re-anchor - reset() moved the cursor past it
+        // (a resync's or a late joiner's base) before it was taken - and is
+        // not in a held range: nothing will ever come for it either, the
+        // substitute is applied.  The runner's step test without patience
+        // treats it like a held tick, behind the same pacing floor (plan step
+        // 20): waiting for its deadline put the whole session 22 ticks
+        // (337 ms) behind for the 31 ticks between a resync's server tick and
+        // its base in lp19b_a6_1500, every member's relay lag with it, and
+        // the resynced owner's at 48-49 - its reach.
+        bool reanchored(uint32_t tick) const {
+            return tick < next_tick_ && !held(tick) && !(have_taken_ && tick <= taken_);
+        }
         uint32_t hold_from() const { return hold_from_; }
         uint32_t hold_until() const { return hold_until_; }
         const input_frame* peek(uint32_t tick) const {

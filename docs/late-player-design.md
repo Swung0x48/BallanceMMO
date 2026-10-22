@@ -669,7 +669,12 @@ new base (or the first untaken tick): the client on the new base dropped the
 SessionLead by its epoch, and its real frames for [base, E) must count.
 Without patience, only a `reset_hold` range counts as settled in the step
 test (a resync's re-anchored cursor does not), behind the same pacing floor
-as §2.6. (Revision 3, step R5: the Sector bound is kept per pair of members,
+as §2.6. *Adapted in step 20:* the ticks a re-anchor skips (a resync's or a
+late joiner's base, `input_buffer::reanchored`) count too, behind the same
+floor. Waiting for their deadlines stalled the whole session: in
+lp19b_a6_1500 a resync at server tick 2618 with base 2649 put every member
+22 ticks (the TICK gap of 337 ms) behind for those 31 ticks, the others'
+relay lag went 20 → 42 and the resynced owner's to 48-49, its reach (§2.8). (Revision 3, step R5: the Sector bound is kept per pair of members,
 from every datagram and every on-time event of each sender. It binds only
 senders that are on time, and only while the level has a sector nobody has
 entered yet (§2.9).)
@@ -1017,6 +1022,20 @@ revision 3 it had only 14 to give back.
 
 ### 2.8 Resync, rebase and late join
 
+- *As built (step 20):* the second owner resync of lp19b_a6_1500 (D = 17,
+  150 ms each way) had two causes. The session stalled 22 ticks on the
+  deadlines of the 31 ticks the first resync skipped (§2.2, now fixed with
+  `input_buffer::reanchored`), which put the owner's relay lag at 48-49; its
+  deep replays then sent its own frames late (2747..2755 substituted, the
+  CPU shared by four clients), and their notices arrived past the reach.
+  Separately, off the per-player path a resync now re-anchors at the start
+  base's lead (`resync_lead_ticks` = `session_start_tick_base`, the
+  late-tick lead clamped to `44 - D`), 27 instead of 31 there: the owner's
+  steady lag after the resync was 27-28 against the start members' 20, and
+  the clamp brings it back to about 23. A late joiner keeps the unclamped
+  late-tick lead: it has no earlier lag to come back to, its steady lag at
+  31 is about 27 (inside the reach once the stall is gone), and no arm of
+  this step measures it (A8 would).
 - A resync re-anchors at `L_eff_p` (§2.5). It resets that player's meter
   samples, `held_total` and epoch, and keeps `lead_offset[p]` **and the
   baseline**: re-anchoring at `L_eff` restores the lead the baseline was
@@ -1276,6 +1295,27 @@ capped log line and a journal note record it (S4). Until plan step 20 the
 barrier sits behind a runner config `lifecycle_barrier` (default on), so the
 move arms can be run without it before the code is deleted.
 
+*As built (step 20):* the barrier, `physicalize_pending` and the config are
+deleted. S4 is one line per run of such ticks (`S4 bodiless player= ticks=A..B
+n=`) when the run ends, and one more marked `open` at 66 ticks, capped at 50
+lines per session, each with a journal NOTE; a line per tick would repeat at
+every birth, whose stamp trails its first flagged frame by up to
+`input_delay + 1` ticks. The owner's deadline for a missing echo (§3.3,
+`kOwnEchoDeadlineTicks`) reads the server's tick from the relay header as
+well as the snapshots, so with snapshots off a Physicalize that never reached
+the server no longer leaves its owner a ball for good. The deadline counts
+only once the header's `acked` shows the server applied a frame of the owner
+at or past the birth's origin, and 66 ticks after that was first seen
+(`own_echo_deadline`): the server's tick moves with the downlink, and with
+the uplink out longer than the deadline the reliable copy is still queued at
+the owner, whose give-up would be followed by a second resync when the copy
+is echoed as made. Runs of at most `input_delay + 1` ticks (every birth makes
+one) are counted in `describe` (`bodiless=runs/open/short`) and not logged,
+so the cap is spent on the long ones; the `open` line is given once at or
+past 66 ticks. This is the headless client only: the retail mod still has no
+deadline of its own and keeps a ball the server never made, with snapshots
+off, until plan step 24 (§3.5).
+
 Other server-side fixes come with it:
 
 - **The leaver's Unphysicalize.** It is produced by `remove_player` on the
@@ -1432,7 +1472,7 @@ If A0j fails, this is the next lever.
 | # | cost | decision |
 |---|---|---|
 | 1 | lifecycle barrier | removed (§3.2) |
-| 2 | one missing frame puts the session on deadlines | removed: patience per player with the streak waiver (§2.6), and `settled()` for reset ranges (§2.3) |
+| 2 | one missing frame puts the session on deadlines | removed: patience per player with the streak waiver (§2.6), and `settled()` for reset ranges (§2.3); without patience, a lead reset's held range and, since step 20, the ticks a resync's or late joiner's base skips (`reanchored`, §2.2) |
 | 3 | 10 ticks per pass, one simulation thread for all sessions | **kept.** Without the barrier a session falls behind only when the server's CPU does, which is the server's cost and not a player's. The cap is fairness between sessions. |
 | 4 | start barrier, 8 s | **kept.** It acts before play, while every member is loading, and it is bounded. |
 | 5 | `input_delay`, `sector_lead`, start base from the worst ping | **kept,** as the principles require. Sizing them from a robust statistic and letting part two absorb the outlier is open question 2. |
@@ -1490,6 +1530,7 @@ server's world (plan step 19).
 | 3 | own record retired before the echo | records retire only when `!knows_tick(min(T, applied)-1)`; by then the echo is past the reach anyway, and §3.3 step 1 applies |
 | 3 | multi-tick own absence (T..T'-1) confusing the retail scripts | to be measured in plan step 21; the server already runs these ticks without the ball |
 | 3 | determinism | one rule (`max(stamp, N)`) taken on the thread that owns N; every receiver sees one applied tick per event and one origin order; the impulse comes from the applied tick everywhere |
+| 3 | a resync with snapshots off is not exact (step 20) | the server sends its state at its tick S and the client applies it at its base B > S, its history gone; the server steps S..B-1 on substitutes the client is never told about, and with snapshots off nothing corrects the gap: the owner's ball stays 10-50 m off after a resync past the reach (lp4_a3, lp19b). The A6 1500 criterion "own ball 0.0000 48 ticks after the resync" fails by construction until plan step 25; the drop arm's own error can too once the owner's ball is back |
 
 ## 5. Verification
 
@@ -1810,6 +1851,7 @@ replaced by §6.1, which runs before step 12.
 | 22 | Owner death move (headless) | session_client.cpp | SimTool forced death move | an A6m variant holding an Unphysicalize: owner exact |
 | 23 | Own Sector move (headless) | session_client.cpp (on step 13's facility) | SimTool forced own Sector move | an A6m variant holding a Sector event: the owner's mechanism error ≤ control |
 | 24 | Retail part three | physics_session_client.cpp (origin echoes; moved/rejected/superseded → self-resync with snapshots off; REJECTED fast path) | none | A6 drop with a retail late client: no stall, the retail client converges |
+| 25 | Exact resync (added by the step 20 review) | server.cpp, session_runner.{hpp,cpp} (the resynced member's full snapshot taken when the server steps B-1, to that member only, with the held notices for S..B-1); session_client.cpp (the snapshot as a rollback anchor at B-1, its own and the relayed frames replayed from B) | session_logic_test: the snapshot's tick and target | A6 1500: own ball 0.0000 48 ticks after the resync with snapshots off; the others untouched (needs step 5's per-player full snapshot, §3.6 #8) |
 
 ### 6.1 Revision 3: the follow-up to steps 7-11, in order
 

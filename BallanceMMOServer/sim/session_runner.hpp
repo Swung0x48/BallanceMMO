@@ -65,13 +65,9 @@ namespace bmmo::sim {
         // is logged and nothing is sent.  Off, the runner does exactly what it
         // did before: the decisions are observed and logged, nothing else.
         bool lead_adjust = false;
-        // The lifecycle barrier (late-player design 3.2): a tick whose input
-        // shows a physicalized ball the world does not have waits up to a
-        // second for the Physicalize.  On by default, as it always was; plan
-        // step 20 deletes it once the arms without it pass.  Off, the tick is
-        // stepped with the ball missing, which the world tolerates (it never
-        // reads INPUT_FLAG_PHYSICALIZED).
-        bool lifecycle_barrier = true;
+        // (The lifecycle barrier is gone, plan step 20: a tick whose input
+        // shows a ball the world does not have is stepped without it, and
+        // the S4 line says so - session/lifecycle.hpp, bodiless_tracker.)
     };
 
     // One lifecycle event the runner accepted (late-player design 3.1), for
@@ -381,22 +377,25 @@ namespace bmmo::sim {
             bmmo::session::snapshot_cadence cadence;
             bool running = false;
             bool failed = false;
-            // Barrier: a tick whose input shows a not-yet-known physicalized ball
-            // waits (briefly) for the reliable Physicalize event that carries the
-            // recipe and pose.
-            std::chrono::steady_clock::time_point barrier_deadline{};
-            bool barrier_armed = false;
-            // Players whose Physicalize the barrier already waited a second
-            // for: without this the barrier re-arms every tick and a single
-            // lost or rejected event pins the whole session at 1 tick/s.
-            std::set<uint32_t> lifecycle_missing;
+            // S4 (late-player design 3.2): the runs of ticks a member's frame
+            // claimed a ball the world did not have.  The session steps them
+            // (nothing waits for a Physicalize any more); the runs are logged
+            // (capped by bodiless_logs) and noted in the box.
+            bmmo::session::bodiless_tracker bodiless;
+            uint32_t bodiless_logs = 0;
+            // Runs no longer than input_delay + 1 ticks (every birth makes
+            // one): counted, not logged.
+            uint64_t bodiless_short = 0;
             // The black box (design 9.15).  Touched on the simulation thread
             // only; `journal_start` is the instant its header was written, the
             // origin every TICK record's `ms` is measured from.
             bmmo::session::journal_writer journal;
             std::chrono::steady_clock::time_point journal_start{};
         };
-        bool waiting_for_lifecycle(session_state& s, uint32_t tick);
+        // S4: every applied frame of `tick` that claims a ball the world
+        // has none of, after the tick's events (step()).
+        void note_bodiless(session_state& s, uint32_t tick, const std::vector<bmmo::session::applied_input>& applied,
+                           bool recording);
         // Takes a leaver out of the world before the step of `tick`, with
         // the journal's PLAYER record at that tick.
         void finish_leave(session_state& s, uint32_t player, uint32_t tick);

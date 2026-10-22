@@ -751,7 +751,6 @@ public:
         rc.trace = config_.physics_debug_trace;
         rc.patience = config_.physics_patience;
         rc.lead_adjust = config_.physics_lead_adjust;
-        rc.lifecycle_barrier = config_.physics_lifecycle_barrier;
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
         // server was started from before the first world boots.
@@ -775,11 +774,11 @@ public:
         };
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
-               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s, lifecycle barrier %s).",
+               "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).",
                config_.physics_game_root,
                config_.physics_input_delay, rc.snapshot_interval, rc.full_snapshot_interval,
                rc.journal_dir.empty() ? std::string("off") : rc.journal_dir.string(), rc.patience ? "on" : "off",
-               rc.lead_adjust ? "on" : "off", rc.lifecycle_barrier ? "on" : "off");
+               rc.lead_adjust ? "on" : "off");
     }
 
     bmmo::room::error_code check_physics_mods(const bmmo::server_room& r) {
@@ -1268,19 +1267,20 @@ public:
         else assign_start_members(s);   // the leaver may have been the one everybody waited for
     }
 
-    // The tick a late joiner (or a resync) is anchored at.  input_delay ticks
-    // ahead of the server is not enough on its own: the SessionAssign that
-    // carries the base is reliable, so the client only learns it a full round
-    // trip after the server computed it, and the frames it stamps from there
-    // would reach the server behind the ticks they name.  The member's worst
-    // observed round trip, rounded up to whole ticks, pays for that trip - up
-    // to the caps in sim/late_tick.hpp, which keep the client's lag inside its
-    // rollback window up to a 424 ms round trip; past that the client's resync
-    // guard takes over.
-    uint32_t late_tick_base(const physics_session_state& s, HSteamNetConnection c) const {
+    // The tick a resync is anchored at off the per-player path.  input_delay
+    // ticks ahead of the server is not enough on its own: the SessionAssign
+    // that carries the base is reliable, so the client only learns it a full
+    // round trip after the server computed it, and the frames it stamps from
+    // there would reach the server behind the ticks they name.  The member's
+    // worst observed round trip, rounded up to whole ticks, pays for that
+    // trip - up to the caps in sim/late_tick.hpp - and, since plan step 20,
+    // clamped inside the rollback window exactly as the start base is
+    // (resync_lead_ticks), so a resynced member's relay lag comes back to
+    // about where the start put it instead of 4 ticks past it.
+    uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c) const {
         const auto it = clients_.find(c);
         const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
-        return runner_->current_tick(s.id) + bmmo::sim::late_tick_lead_ticks(s.input_delay, rtt_ms);
+        return runner_->current_tick(s.id) + bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms);
     }
 
     // The lead a late joiner is anchored at.  On the per-player path
@@ -1629,8 +1629,12 @@ public:
         // member's first assignment plus its acknowledged offset, the lead
         // measured to work, instead of the capped late-tick lead from the
         // peak round trip.  The offset is kept; the runner measures the
-        // reference anew.  Every other member resyncs as before the flag.
-        uint32_t assigned = late_tick_base(s, c);
+        // reference anew.  Every other member at the start base's lead,
+        // clamped inside the window (plan step 20, resync_lead_ticks).  The
+        // ticks between the server's tick and that base are not waited for
+        // (input_buffer::reanchored): the stall that used to cost every
+        // member 22 ticks of relay lag here is gone.
+        uint32_t assigned = resync_tick_base(s, c);
         if (const auto lead = s.leads.find(c);
                 lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
             assigned = runner_->current_tick(s.id)

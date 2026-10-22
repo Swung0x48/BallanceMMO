@@ -130,7 +130,7 @@ namespace {
                 if (!o.patience) {
                     patience_member m;
                     m.has = buffers[p].has(tick);
-                    m.held = buffers[p].held(tick);
+                    m.held = buffers[p].held(tick) || buffers[p].reanchored(tick);
                     members.push_back(m);
                     continue;
                 }
@@ -406,13 +406,76 @@ TEST(LeadReset, WithoutAResetTheStepTestIsTheDeadlineRule) {
     }
     std::vector<patience_member> members(2);
     members[0].has = true;
-    members[1].settled = true;   // settled by a resync's cursor, not held: no exemption without patience
+    members[1].settled = true;   // settled alone is no exemption without patience: the runner sets held
     EXPECT_FALSE(patience_step_test(members, false, 3.0, false).step);
     members[1].held = true;
     EXPECT_TRUE(patience_step_test(members, false, 3.0, false).step);
     members[0].has = false;      // the pacing floor
     EXPECT_FALSE(patience_step_test(members, false, 3.0, false).step);
     EXPECT_TRUE(patience_step_test(members, true, 0.0, false).step);
+}
+
+// Plan step 20: the ticks a resync's (or a late joiner's) base skips are
+// treated like a held range by the step test without patience.  Waiting for
+// their deadlines put the whole session 22 ticks behind for the 31 ticks
+// between the server's tick and the base in lp19b_a6_1500.
+TEST(LeadReset, AReanchorsSkippedTicksDoNotWaitForTheirDeadlines) {
+    input_buffer paced, resynced;
+    paced.reset(100);
+    resynced.reset(100);
+    std::vector<input_frame> frames;
+    for (uint32_t t = 100; t < 140; ++t) frames.push_back(frame_of(0, t));
+    paced.submit(100, frames);
+    bool fresh = false;
+    uint32_t source = 0;
+    resynced.submit(100, std::vector<input_frame>{frame_of(1, 100)});
+    resynced.take(100, fresh, source);
+    paced.take(100, fresh, source);
+    // The resync: the server is at 101, the base 131.
+    resynced.reset(131);
+    EXPECT_FALSE(resynced.reanchored(100));   // taken
+    for (uint32_t t = 101; t < 131; ++t) {
+        EXPECT_TRUE(resynced.reanchored(t)) << t;
+        EXPECT_FALSE(resynced.held(t)) << t;
+        EXPECT_TRUE(resynced.settled(t)) << t;
+    }
+    EXPECT_FALSE(resynced.reanchored(131));
+    const auto members_at = [&](uint32_t t) {
+        std::vector<patience_member> members(2);
+        members[0].has = paced.has(t);
+        members[0].held = paced.held(t) || paced.reanchored(t);
+        members[1].has = resynced.has(t);
+        members[1].held = resynced.held(t) || resynced.reanchored(t);
+        return members;
+    };
+    for (uint32_t t = 101; t < 131; ++t) {
+        EXPECT_TRUE(patience_step_test(members_at(t), false, 20.0, false).step) << t;
+        paced.take(t, fresh, source);
+        resynced.take(t, fresh, source);
+        EXPECT_FALSE(fresh) << t;
+        EXPECT_EQ(source, 100u) << t;   // the substitute, as on a deadline
+        EXPECT_FALSE(resynced.reanchored(t)) << t;   // taken now
+    }
+    // From the base the resynced member's own frame is waited for again.
+    EXPECT_FALSE(patience_step_test(members_at(131), false, 20.0, false).step);
+    EXPECT_TRUE(patience_step_test(members_at(131), true, 0.0, false).step);
+    // The pacing floor: with nobody's real frame there, the skipped ticks
+    // wait for the deadline like any other.
+    input_buffer alone;
+    alone.reset(100);
+    alone.reset(120);
+    std::vector<patience_member> solo(1);
+    solo[0].held = alone.held(110) || alone.reanchored(110);
+    EXPECT_TRUE(solo[0].held);
+    EXPECT_FALSE(patience_step_test(solo, false, 20.0, false).step);
+    EXPECT_TRUE(patience_step_test(solo, true, 0.0, false).step);
+    // A lead reset's held range is held, not reanchored.
+    input_buffer hold;
+    hold.reset(100);
+    hold.take(100, fresh, source);
+    ASSERT_EQ(hold.reset_hold(110), 0);
+    EXPECT_TRUE(hold.held(105));
+    EXPECT_FALSE(hold.reanchored(105));
 }
 
 // ---------------------------------------------------------------------------

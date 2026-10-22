@@ -598,10 +598,11 @@ namespace bmmo::session {
         double r01 = 0.0;              // that reference's q01, when has_statistics
         double lead = 0.0;             // set by patience_assign_leads
         bool capped = false;           // lead is the statistics-less cap, not its own
-        // input_buffer::held(T): T lies in a lead reset's frozen range
-        // (design 2.3).  Read by the step test without patience, where it is
-        // the only kind of settled that counts; with patience it is part of
-        // `settled` anyway.
+        // input_buffer::held(T) or reanchored(T): T lies in a lead reset's
+        // frozen range (design 2.3), or a resync's or late joiner's base
+        // skipped it (plan step 20).  Read by the step test without
+        // patience, where it is the only kind of settled that counts; with
+        // patience it is part of `settled` anyway.
         bool held = false;
         // Assigned after the session's start (a late joiner, a resync): the
         // statistics-less cap applies to it.  A member measuring since the
@@ -707,12 +708,14 @@ namespace bmmo::session {
                                                double to_deadline, bool patience) {
         patience_verdict v;
         if (!patience) {
-            // A member whose tick lies in a lead reset's held range has
-            // nothing coming for it (design 2.3: settled() replaces has()
-            // there), behind the same pacing floor as below: only while some
-            // member's real frame is here, so a solo held player still steps
-            // at the deadline.  Without a reset no member is held, and this
-            // is exactly the rule the runner had before patience existed.
+            // A member whose tick lies in a lead reset's held range, or
+            // below a re-anchor's base, has nothing coming for it (design
+            // 2.3: settled() replaces has() there; plan step 20 for the
+            // re-anchor), behind the same pacing floor as below: only while
+            // some member's real frame is here, so a solo held player still
+            // steps at the deadline.  Without a reset no member is held, and
+            // this is exactly the rule the runner had before patience
+            // existed.
             bool paced = false;
             for (const auto& m: members) if (m.has) { paced = true; break; }
             bool all = true;

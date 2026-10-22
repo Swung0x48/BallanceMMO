@@ -79,12 +79,6 @@ public:
     // the clients apply the lead (plan steps 11 and 15); off, the server does
     // exactly what it did before the flag existed.
     bool physics_lead_adjust = false;
-    // Late-player design 3.2: the lifecycle barrier - a tick whose input
-    // shows a physicalized ball the world does not have waits up to a second
-    // for its Physicalize, stalling every member.  On by default (what the
-    // server always did); plan step 20 deletes it once the arms run without
-    // it.  Off, the tick is stepped without the ball.
-    bool physics_lifecycle_barrier = true;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

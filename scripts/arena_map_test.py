@@ -833,6 +833,10 @@ RE_ECHO = re.compile(r'\becho=(\d+)/(\d+)/(\d+)/(\d+)(?:/(\d+))?')
 RE_OWNLIFE = re.compile(r'\bownlife=([0-9/]+)')
 RE_LATE_BY = re.compile(r'event type (\d+) from (\d+) stamped (\d+) applied at tick (\d+) \(late by (\d+)\)')
 RE_BARRIER = re.compile(r'no Physicalize for player (\d+) at tick (\d+)')
+# Plan step 20 (late-player design 3.2, S4): the barrier is gone; a run of
+# ticks a member's frame claimed a ball the server's world did not have is
+# stepped and told when it ends (or once while still open after 66 ticks).
+RE_S4 = re.compile(r'S4 bodiless player=(\d+) ticks=(\d+)\.\.(\d+) n=(\d+)( open)?')
 # Protocol 9 (late-player plan step 8, the gate of step 17): the server's
 # intake-to-send delay of every accepted lifecycle event.
 RE_S5 = re.compile(r'\bS5 event player=(\d+) type=(\w+) origin=(\d+) applied=(\d+) late=(-?\d+) delay_us=(\d+)'
@@ -1191,7 +1195,7 @@ def event_report(args, case, case_dir):
                     'player': e['id'], 'client': index_of.get(e['id']), 'state': e.get('state', 0)}
                    for e in server.events() if e['tick'] != e.get('origin_tick', e['event_tick'])]
     server_log = case_dir / 'server.log'
-    late_by_lines, barrier_lines, s5_lines = [], [], []
+    late_by_lines, barrier_lines, s5_lines, bodiless = [], [], [], []
     counted_through = {}   # resync base -> the old epoch's last counted tick
     # SessionLeads sent to this run's players and their acks (an external
     # server's log holds other runs too: kept to this run's ids and ticks).
@@ -1221,6 +1225,11 @@ def event_report(args, case, case_dir):
             m = RE_BARRIER.search(line)
             if m:
                 barrier_lines.append({'player': int(m.group(1)), 'tick': int(m.group(2))})
+            m = RE_S4.search(line)
+            if m and int(m.group(1)) in index_of and first <= int(m.group(2)) <= last:
+                bodiless.append({'player': int(m.group(1)), 'client': index_of[int(m.group(1))],
+                                 'first': int(m.group(2)), 'last': int(m.group(3)), 'n': int(m.group(4)),
+                                 'open': bool(m.group(5))})
             # This run's players and ticks only (an external server's log
             # holds other runs too).
             m = RE_S5.search(line)
@@ -1230,6 +1239,7 @@ def event_report(args, case, case_dir):
                                  'delay_ticks': float(m.group(7)), 'to': int(m.group(8)), 'flag': m.group(9) or ''})
     report['server'] = {'ticks': [first, last], 'tick_gaps': tick_gaps, 'late_events': late_events,
                         'late_by_lines': late_by_lines, 'barrier_lines': barrier_lines, 'leads': leads,
+                        'bodiless': bodiless,
                         's5': s5_summary(s5_lines), 's5_superseded': sum(1 for e in s5_lines if e['flag'] == 'superseded'),
                         # the whole run in 30-tick buckets, so a later arm can
                         # re-cut this run's gaps on its own phases
@@ -1364,6 +1374,24 @@ def event_report(args, case, case_dir):
         # ball and the server has not, or the other way round.
         row['own_presence_mismatch'] = sum(1 for t, (srv, loc) in presence.items()
                                            if t_on + REACH <= t <= end and srv != loc)
+        # ...and from 48 ticks after the owner gave its birth up as never
+        # made (plan step 20: the missing echo's deadline, on the server's
+        # tick from the relay header, or a REJECTED/SUPERSEDED echo), which is
+        # where design 5.2 judges the drop: the own ball's presence on each
+        # side and its error where both have it.
+        never = [mv['at'] for mv in log['own_moves'] if mv['applied'] is None and mv['at'] >= t_on]
+        if never:
+            settle_never = min(never) + REACH
+            after_never = [t for t in presence if settle_never <= t <= end]
+            row['own_never'] = {
+                'at': min(never), 'from': settle_never, 'compared': len(after_never),
+                'mismatch': sum(1 for t in after_never if presence[t][0] != presence[t][1]),
+                'server_has': sum(1 for t in after_never if presence[t][0]),
+                'client_has': sum(1 for t in after_never if presence[t][1]),
+                'own_err': max([v[0] for t, v in per_tick.items() if settle_never <= t <= end and v[0] is not None]
+                               or [0.0])}
+        else:
+            row['own_never'] = None
         row['received_in_event'] = sum(1 for t in received if t_on <= t <= t_off + REACH)
         row['received_total'] = len(received)
 
@@ -1647,11 +1675,35 @@ def criteria(report, case, controls):
                 '%s ms at tick %s vs control %s' % (gap.get('max_ms'), gap.get('at'), 'n/a' if edge is None else edge))
             near = [b for b in report['server']['barrier_lines'] if lo <= b['tick'] < hi]
             add(who, 'no barrier line', not near, '%d in D (%d in the run)' % (len(near), len(report['server']['barrier_lines'])))
+            if resyncs:
+                # Plan step 20 (step-20 review): a resync must not leave the
+                # owner's relay lag past where the start put it.  In
+                # lp19b_a6_1500 it went 33 -> 49 (p99, B -> A): the session
+                # stalled 22 ticks on the deadlines of the ticks the resync
+                # skipped, and the late-tick lead added 4 more.  4 ticks of
+                # slack: the resync's anchoring error (A0j: up to 2.1 ticks)
+                # and the SessionAssign's jitter.
+                before = (row['phases'].get('B') or {}).get('lag') or {}
+                after_lag = (row['phases'].get('A') or {}).get('lag') or {}
+                ok = None if before.get('p99') is None or after_lag.get('p99') is None \
+                    else after_lag['p99'] <= before['p99'] + 4
+                add(who, "owner's relay lag p99 after the resync <= before the event + 4", ok,
+                    'B %s, A %s (max %s -> %s)' % (before.get('p99'), after_lag.get('p99'), before.get('max'),
+                                                   after_lag.get('max')))
             if report.get('drop'):
-                add(who, 'drop: the owner matches the server within 48 ticks', row['own_presence_mismatch'] == 0
-                    and row['own_after'] < ZERO_M,
-                    '%d checkpoints from T_on+48 where the own ball exists on one side only; own error %.4f m' % (
-                        row['own_presence_mismatch'], row['own_after']))
+                nv = row.get('own_never')
+                add(who, 'drop: the owner gave the birth up (missing or rejected echo)', nv is not None,
+                    'own moves %s; echo acked/moved/superseded/rejected/missing %s' % (
+                        row.get('own_moves') or '-', row.get('echo')))
+                add(who, 'drop: the owner matches the server within 48 ticks of that',
+                    (row['own_presence_mismatch'] == 0 and row['own_after'] < ZERO_M) if nv is None
+                    else nv['mismatch'] == 0 and nv['own_err'] < ZERO_M,
+                    ('no decision; %d checkpoints from T_on+48 where the own ball exists on one side only' %
+                     row['own_presence_mismatch']) if nv is None else
+                    ('given up at tick %d; from %d: %d of %d checkpoints with the own ball on one side only '
+                     '(server has it %d, client %d), own error %.4f m; %d mismatched from T_on+48 in all' % (
+                         nv['at'], nv['from'], nv['mismatch'], nv['compared'], nv['server_has'], nv['client_has'],
+                         nv['own_err'], row['own_presence_mismatch'])))
             elif arm == 'A6M':
                 # The move inside the reach (plan step 19): the owner rewinds
                 # to T-1 and makes its ball again at T', no resync.
@@ -1666,10 +1718,29 @@ def criteria(report, case, controls):
                     "no moved birth found (client log or server journal)" if after is None
                     else "%.4f m from tick %d (T' %d)" % (after[2], after[1], after[0]))
             else:
-                add(who, 'owner exactly one resync (past its reach at 150 ms)', resyncs == 1,
-                    '%d (bases %s); own moves %s' % (resyncs, row['resync_bases'], row.get('own_moves')))
-                add(who, 'own ball 0.0000 48 ticks after the resync (or the release)', row['own_after_resync'][1] < ZERO_M,
-                    '%.4f m from tick %d' % (row['own_after_resync'][1], row['own_after_resync'][0]))
+                # At 150 ms each way the move is past the owner's reach
+                # (design 3.3) unless the hold is short: lp19b_a6_300 fitted
+                # inside it, and a move inside the reach with no resync is
+                # the better outcome, so it passes too (plan step 20).
+                moves = row.get('own_moves') or []
+                rewound = [mv for mv in moves if mv['how'] == 'rewound' and mv['applied'] is not None]
+                inside = resyncs == 0 and bool(rewound)
+                add(who, 'owner exactly one resync (past its reach at 150 ms), or the move inside the reach',
+                    resyncs == 1 or inside,
+                    '%d (bases %s)%s; own moves %s' % (resyncs, row['resync_bases'],
+                                                      ', moved inside the reach' if inside else '', moves))
+                after = row.get('own_after_move')
+                if inside and after is not None:
+                    add(who, "own ball 0.0000 from T'+48 (the move inside the reach)", after[2] < ZERO_M,
+                        "%.4f m from tick %d (T' %d)" % (after[2], after[1], after[0]))
+                else:
+                    # Expected to fail at step 20 with snapshots off: the
+                    # resync applies the server's state of its own tick S at
+                    # the client's base B > S, and nothing tells the client
+                    # what the server did from S to B (plan step 25).
+                    add(who, 'own ball 0.0000 48 ticks after the resync (or the release) [exact resync: plan step 25]',
+                        row['own_after_resync'][1] < ZERO_M,
+                        '%.4f m from tick %d' % (row['own_after_resync'][1], row['own_after_resync'][0]))
         elif family == 'join':
             info = next((j for j in report.get('join', []) if j['client'] == row['index']), None)
             if info and row['input_delays']:
@@ -1735,6 +1806,12 @@ def format_report(report, crit):
                              'n/a' if ph['moved'] is None else ph['moved']))
         if row['holds'] or row['stalls']:
             lines.append('  holds %s stalls %s' % (row['holds'], row['stalls']))
+        if row.get('own_never'):
+            nv = row['own_never']
+            lines.append('  own birth given up at tick %d: from %d, %d of %d checkpoints with the own ball on one side '
+                         'only (server has it %d, client %d), own error %.4f m' % (
+                             nv['at'], nv['from'], nv['mismatch'], nv['compared'], nv['server_has'],
+                             nv['client_has'], nv['own_err']))
         if row.get('echo') or row.get('own_moves'):
             after = row.get('own_after_move')
             lines.append("  own echoes acked/moved/superseded/rejected/missing %s; ownlife moved/removed/resynced/remade/other %s; "
@@ -1743,12 +1820,15 @@ def format_report(report, crit):
                              row.get('own_moves') or '-',
                              'n/a' if not after else "%.4f m from tick %d (T' %d)" % (after[2], after[1], after[0])))
     s = report['server']
-    lines.append('server: ticks %d..%d; TICK gap max/p99 ms %s; late events %d %s; "late by" lines %d; barrier give-ups %d' % (
+    lines.append('server: ticks %d..%d; TICK gap max/p99 ms %s; late events %d %s; "late by" lines %d; barrier give-ups %d; '
+                 'S4 bodiless runs %s' % (
         s['ticks'][0], s['ticks'][1],
         ' '.join('%s %d@%d/%d' % (p, g['max_ms'], g['at'], g['p99_ms']) for p, g in sorted(s['tick_gaps'].items(),
                                                                                          key=lambda kv: PHASES.index(kv[0]))),
         len(s['late_events']), [(e['client'], e['type'], e['stamp'], e['tick']) for e in s['late_events'][:8]],
-        len(s['late_by_lines']), len(s['barrier_lines'])))
+        len(s['late_by_lines']), len(s['barrier_lines']),
+        ' '.join('c%s:%d..%d%s' % (b['client'], b['first'], b['last'], '+' if b['open'] else '')
+                 for b in (s.get('bodiless') or [])[:12]) or '-'))
     s5 = s.get('s5') or {}
     if s5:
         lines.append('server S5 intake-to-send ticks (n p50/p99/max; step 17: all p99 <= 2): %s; superseded %d' % (
@@ -1859,6 +1939,10 @@ def selftest():
                      'delay_us=21000 delay_ticks=1.40 to=1 superseded')
     check('RE_S5', m is not None and m.group(2) == 'Physicalize' and int(m.group(5)) == 30 and m.group(9) == 'superseded',
           str(m.groups() if m else None))
+    m = RE_S4.search('[Sim] [session 1] S4 bodiless player=17 ticks=2502..2567 n=66 open')
+    m2 = RE_S4.search('[Sim] [session 1] S4 bodiless player=17 ticks=2500..2503 n=4')
+    check('RE_S4', m is not None and int(m.group(2)) == 2502 and int(m.group(4)) == 66 and bool(m.group(5))
+          and m2 is not None and not m2.group(5), str((m.groups() if m else None, m2.groups() if m2 else None)))
     s5 = s5_summary([{'type': 'Sector', 'late': 0, 'delay_ticks': d} for d in (0.1, 0.2, 3.0)]
                     + [{'type': 'Physicalize', 'late': 4, 'delay_ticks': 1.0}])
     check('s5_summary', s5['all']['n'] == 4 and s5['Sector/on-time']['max'] == 3.0 and s5['all/restamped']['n'] == 1
