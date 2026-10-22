@@ -2739,6 +2739,13 @@ namespace {
                         "and its TICK hashes are of its own world, so only the received snapshots are compared.\n",
                         header.own_player);
             std::printf("client journal: same-tick events applied in join-order order, the server's rule\n");
+            // Its own events the server applied elsewhere or never are in it
+            // twice, as sent and as echoed (late-player design 3.3): the last
+            // record of each is the server's world.
+            const size_t superseded_records = bmmo::session::journal_keep_last_events(journal);
+            if (superseded_records != 0)
+                std::printf("client journal: %zu event records replaced by a later record of the same event (the"
+                            " server's echo: moved, superseded or rejected)\n", superseded_records);
         }
         const std::string build = bmmo::physics::build_id();
         if (engine_build(build) != engine_build(header.build_id))

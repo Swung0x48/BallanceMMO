@@ -57,6 +57,7 @@
 #include <map>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <vector>
 
 #include "../entity/session.hpp"
@@ -154,6 +155,10 @@ namespace bmmo::session {
         // Version 3: session::EVENT_STATE_* as the event arrived (0 in a
         // server journal and for a client's own events).
         uint8_t state = 0;
+        // Not on disk: the record's position in the file, set by
+        // read_journal, so that "the last record of an event" means the
+        // last one written (journal_keep_last_events).
+        uint64_t seq = 0;
         uint32_t id = 0;
         event_type type = event_type::Physicalize;
         uint8_t ball_type = 0;
@@ -913,6 +918,7 @@ namespace bmmo::session {
                     e.origin_tick = in.size - in.pos >= 4 ? in.u32() : e.event_tick;
                     e.state = in.size - in.pos >= 1 ? in.u8() : 0;
                     if (!in.ok) break;
+                    e.seq = seen;
                     auto& group = groups[e.tick];
                     group.tick = e.tick;
                     group.events.push_back(std::move(e));
@@ -1024,5 +1030,37 @@ namespace bmmo::session {
             warn(std::to_string(duplicate_ticks) + " duplicate TICK records (first at tick "
                + std::to_string(first_duplicate_tick) + ", kept the last of each)");
         return true;
+    }
+    // A client journal records its own events twice when the server did not
+    // apply them as stamped (protocol 9, late-player design 3.3): once as
+    // sent, at the stamp, and once more as the server's echo said, at the
+    // applied tick and with its state - MOVED, SUPERSEDED or REJECTED.  The
+    // last record of an event is what the server's world had: this keeps,
+    // per (player, origin, type, ball type, sector, name) - the event's
+    // identity without the applied tick, as lifecycle_event_key has it - the
+    // record written last, and drops that one too when its state says the
+    // server never applied the event.  Groups left with nothing to replay
+    // keep their other records.  Returns the records dropped.
+    inline size_t journal_keep_last_events(journal& j) {
+        using key = std::tuple<uint32_t, uint32_t, uint8_t, uint8_t, int32_t, std::string>;
+        const auto key_of = [](const journal_event& e) {
+            return key{e.id, e.origin_tick, static_cast<uint8_t>(e.type), e.ball_type, e.sector, e.name};
+        };
+        std::map<key, uint64_t> last;
+        for (const auto& group: j.ticks)
+            for (const auto& e: group.events) {
+                auto [it, fresh] = last.try_emplace(key_of(e), e.seq);
+                if (!fresh && e.seq > it->second) it->second = e.seq;
+            }
+        size_t dropped = 0;
+        constexpr uint8_t never = EVENT_STATE_SUPERSEDED | EVENT_STATE_REJECTED;
+        for (auto& group: j.ticks) {
+            const size_t before = group.events.size();
+            group.events.erase(std::remove_if(group.events.begin(), group.events.end(), [&](const journal_event& e) {
+                return last.at(key_of(e)) != e.seq || (e.state & never) != 0;
+            }), group.events.end());
+            dropped += before - group.events.size();
+        }
+        return dropped;
     }
 }

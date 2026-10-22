@@ -1013,3 +1013,65 @@ TEST(SessionJournal, V3EventRecordRoundTripsTheOriginAndTheState) {
     EXPECT_FALSE(read_journal(v1, refused, error));
     EXPECT_NE(std::string::npos, error.find("version")) << error;
 }
+
+// Late-player design 3.3: a client journals its own event as sent, at its
+// stamp, and again as the server's echo said when the server applied it
+// elsewhere (MOVED, at the applied tick) or never (SUPERSEDED, REJECTED).
+// journal_keep_last_events leaves the last record of each event, by file
+// order and not by tick, and none for an event the server never applied;
+// an echo of one event never touches another (a different origin, type,
+// ball type, sector or name), and a remote's MOVED event stays.
+TEST(SessionJournal, TheLastRecordOfAnEventIsTheServersAndANeverAppliedOneGoes) {
+    const temp_dir dir("keep_last");
+    const auto path = dir.file("client.bmjr");
+    const auto own = [](uint32_t tick, uint32_t origin, event_type type, uint8_t state, const std::string& name = {}) {
+        journal_event e;
+        e.tick = tick;
+        e.event_tick = tick;
+        e.origin_tick = origin;
+        e.state = state;
+        e.id = 42;
+        e.type = type;
+        e.ball_type = 1;
+        e.name = name;
+        return e;
+    };
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        writer.event(own(100, 100, event_type::Physicalize, 0));                      // sent, then moved to 118
+        writer.event(own(100, 100, event_type::Unphysicalize, 0));                    // another type: kept
+        writer.event(own(105, 105, event_type::BodyRevived, 0, "Plate_A"));           // two names, one origin:
+        writer.event(own(105, 105, event_type::BodyRevived, 0, "Plate_B"));           // both kept
+        writer.tick(105, make_hash(105), 10);
+        writer.event(own(110, 110, event_type::Physicalize, 0));                      // sent, then superseded
+        journal_event remote = own(112, 104, event_type::Physicalize, EVENT_STATE_MOVED);
+        remote.id = 43;                                                               // a remote's re-stamped birth
+        writer.event(remote);
+        writer.tick(112, make_hash(112), 20);
+        writer.event(own(118, 100, event_type::Physicalize, EVENT_STATE_MOVED));      // the echo of the first
+        writer.event(own(130, 110, event_type::Physicalize, EVENT_STATE_MOVED | EVENT_STATE_SUPERSEDED));
+        writer.tick(130, make_hash(130), 30);
+        writer.close();
+    }
+
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(3u, journal_keep_last_events(out));   // the two sends that were echoed, and the superseded echo
+    std::map<uint32_t, std::vector<std::pair<event_type, uint32_t>>> left;   // tick -> (type, player)
+    for (const auto& group: out.ticks)
+        for (const auto& e: group.events) left[group.tick].push_back({e.type, e.id});
+    ASSERT_EQ(1u, left[100].size());
+    EXPECT_EQ(event_type::Unphysicalize, left[100][0].first);
+    EXPECT_EQ(2u, left[105].size());
+    EXPECT_TRUE(left[110].empty());
+    ASSERT_EQ(1u, left[112].size());
+    EXPECT_EQ(43u, left[112][0].second);
+    ASSERT_EQ(1u, left[118].size());
+    EXPECT_EQ(event_type::Physicalize, left[118][0].first);
+    EXPECT_TRUE(left[130].empty());
+    // Idempotent: nothing more to drop.
+    EXPECT_EQ(0u, journal_keep_last_events(out));
+}

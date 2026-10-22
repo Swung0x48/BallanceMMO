@@ -389,7 +389,10 @@ namespace bmmo::session {
         // (session assignment, resync, a full snapshot overwriting the world)
         // still has to say that the recorded ticks no longer describe
         // anything.  Keeps session diagnostics across the boundary.
-        void invalidate_history() { history_.clear(); }
+        void invalidate_history() {
+            history_.clear();
+            moved_births_.clear();
+        }
 
         void clear() {
             invalidate_history();
@@ -689,6 +692,11 @@ namespace bmmo::session {
                 // body this one replaced (or one the server does not have yet).
                 const tick_state* birth = recorded ? nullptr
                                                    : birth_record(entity, anchor, generation_now(entity));
+                // A lifetime with a gap the server put in it (move_birth): the
+                // body made again at the applied tick is born there, even when
+                // the same lifetime has records before the gap (a beam keeps
+                // its generation) that make the oldest record useless.
+                if (!recorded && !birth) birth = moved_birth_record(entity, anchor, generation_now(entity));
                 restore item;
                 if (birth) {
                     // It did not exist at T: it was created during the window
@@ -1432,6 +1440,62 @@ namespace bmmo::session {
             return true;
         }
 
+        // An own birth the server applied later than this client made it, or
+        // never (late-player design 3.3: a MOVED, SUPERSEDED or REJECTED
+        // echo).  The body `entity` of lifetime `generation` was made at
+        // `origin` in the live run; the server's world has it only from
+        // `applied` on, or not at all when `made` is false.
+        //
+        // Every record of that lifetime from `origin` on loses the body - its
+        // pose, extra, contacts and navigation state describe motion the
+        // server never stepped - so the next restore has no opinion about it
+        // (the caller takes the live body out itself before rewinding).  The
+        // records before `applied` (all of them when `made` is false) lose the
+        // name and its input too: a replay neither feeds nor re-captures the
+        // body there, and the re-captured records say there was none.  The
+        // records from `applied` on keep the name, the generation and the
+        // input, so the replay drives the body the caller makes again at
+        // `applied` and re-captures it under the same lifetime.  From then on
+        // a rewind anchored inside the gap finds the body born at `applied`
+        // (moved_birth_record), also for a lifetime that has records before
+        // `origin` (a beam keeps its generation).  Returns the number of
+        // records changed.
+        size_t move_birth(const std::string& entity, uint32_t generation, uint32_t origin, uint32_t applied, bool made) {
+            if (entity.empty()) return 0;
+            size_t changed = 0;
+            for (auto& state: history_) {
+                if (static_cast<int32_t>(state.tick - origin) < 0) continue;
+                if (generation_in(state, entity) != generation) continue;
+                const bool gap = !made || static_cast<int32_t>(state.tick - applied) < 0;
+                bool touched = state.bodies.erase(entity) > 0;
+                touched = state.extras.erase(entity) > 0 || touched;
+                touched = state.contacts.erase(entity) > 0 || touched;
+                touched = state.navs.erase(entity) > 0 || touched;
+                if (gap) {
+                    touched = state.inputs.erase(entity) > 0 || touched;
+                    if (state.tracked.own_entity == entity) {
+                        state.tracked.own_entity.clear();
+                        state.tracked.own_polls = false;
+                        touched = true;
+                    }
+                    for (auto* names: {&state.tracked.remote_entities, &state.tracked.mechanisms}) {
+                        const size_t before = names->size();
+                        names->erase(std::remove(names->begin(), names->end(), entity), names->end());
+                        touched = touched || names->size() != before;
+                    }
+                }
+                if (touched) ++changed;
+            }
+            // One entry per lifetime and origin: a later echo of the same
+            // birth replaces it.  Entries whose gap no rewind can be anchored
+            // in any more go.
+            moved_births_.erase(std::remove_if(moved_births_.begin(), moved_births_.end(), [&](const moved_birth& m) {
+                return (m.entity == entity && m.origin == origin) || !find(m.applied - 1);
+            }), moved_births_.end());
+            if (made) moved_births_.push_back(moved_birth{entity, generation, origin, applied});
+            return changed;
+        }
+
         // Whether the record of `tick` holds a body for `entity`: a relayed
         // frame for a tick at which the name had none drove nothing, and is
         // no reason to replay.
@@ -1590,6 +1654,21 @@ namespace bmmo::session {
             return nullptr;
         }
 
+        // The birth record of a lifetime whose birth the server moved
+        // (move_birth): for an anchor inside the gap, the record of the
+        // applied tick, once a replay has re-captured the body there.  Null
+        // when no moved birth of this lifetime covers the anchor, or the
+        // applied tick's record has no body yet.
+        const tick_state* moved_birth_record(const std::string& entity, uint32_t anchor, uint32_t generation) const {
+            for (const auto& m: moved_births_) {
+                if (m.entity != entity || m.generation != generation) continue;
+                if (static_cast<int32_t>(anchor - m.applied) >= 0) continue;
+                const tick_state* at = find_const(m.applied);
+                if (at && at->bodies.find(entity) != at->bodies.end() && generation_in(*at, entity) == generation) return at;
+            }
+            return nullptr;
+        }
+
         // Every name the restore may have an opinion about: recorded at T,
         // carried by a row, or recorded somewhere in the window we are about to
         // replay (a body born mid-window still has to be held at its birth pose
@@ -1674,6 +1753,13 @@ namespace bmmo::session {
 
         rollback_thresholds thresholds_;
         std::deque<tick_state> history_;
+        // The births the server moved (move_birth), while a rewind can still
+        // be anchored inside their gap.
+        struct moved_birth {
+            std::string entity;
+            uint32_t generation = 0, origin = 0, applied = 0;
+        };
+        std::vector<moved_birth> moved_births_;
         rollback_stats stats_;
         uint32_t detailed_logs_ = 0;   // mismatch detail lines logged (capped)
         uint32_t resim_traces_ = 0;    // re-simulation trace lines logged (capped)

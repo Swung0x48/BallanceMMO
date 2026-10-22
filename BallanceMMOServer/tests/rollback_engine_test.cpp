@@ -2787,3 +2787,176 @@ TEST(RollbackEngine, ManyRewindsStayBitExact) {
             EXPECT_FALSE(beam.exact) << "the per-body restore stayed bit-exact: the hidden state is not exercised";
         }
 }
+
+// Late-player design 3.3: the owner's own birth, made live at tick 5, was
+// applied by the server at tick 8 (a MOVED echo).  move_birth puts the
+// records where the server's world is: no body from 5 to 7 (no name, no
+// input, no pose), and from 8 on the name, its generation and its input but
+// no pose - the live run's pose there is motion the server never stepped.
+// A body of another lifetime is left alone.
+namespace {
+    constexpr uint32_t kMoveOrigin = 5, kMoveApplied = 8, kMoveNow = 12;
+
+    fake_body moved_birth_body() {
+        fake_body fresh;
+        fresh.position[0] = 10.0;
+        return fresh;
+    }
+
+    // Ticks 1..kMoveNow, the own ball born at kMoveOrigin (lifetime 1) and
+    // holding key 0 from then on; with `beam`, it lives from tick 1 and is
+    // rebuilt at kMoveOrigin under the same lifetime (the --beam pair).
+    void record_moved_birth(fake_world& world, rollback_engine& engine, bool beam) {
+        world.savestates = true;
+        world.bodies["Remote"].position[0] = 5.0;
+        auto w = world.adapter();
+        if (beam) world.bodies["Own"].position[0] = -3.0;
+        for (uint32_t tick = 1; tick <= kMoveNow; ++tick) {
+            if (tick == kMoveOrigin) world.bodies["Own"] = moved_birth_body();
+            const bool alive = beam || tick >= kMoveOrigin;
+            rollback_tracked tracked;
+            tracked.remote_entities = {"Remote"};
+            std::map<std::string, input_frame> applied{{"Remote", input_frame{}}};
+            if (alive) {
+                tracked.own_entity = "Own";
+                tracked.own_polls = true;
+                tracked.generations["Own"] = 1;
+                input_frame own{};
+                own.keys = 1;
+                applied["Own"] = own;
+                world.pending_keys["Own"] = 1;
+            }
+            w.step();
+            engine.record(w, tick, tracked, applied);
+        }
+        world.calls.clear();
+    }
+
+    bool same_fake_body(const fake_body& a, const fake_body& b) {
+        return std::memcmp(a.position, b.position, sizeof a.position) == 0
+            && std::memcmp(a.linear, b.linear, sizeof a.linear) == 0;
+    }
+}
+
+TEST(RollbackEngine, AMovedBirthLeavesItsGapWithoutTheBodyAndKeepsItsNameFromTheAppliedTick) {
+    fake_world world;
+    rollback_engine engine;
+    record_moved_birth(world, engine, false);
+    EXPECT_EQ(0u, engine.move_birth("Own", 2, kMoveOrigin, kMoveApplied, true));   // another lifetime
+    EXPECT_EQ(kMoveNow - kMoveOrigin + 1, engine.move_birth("Own", 1, kMoveOrigin, kMoveApplied, true));
+    input_frame frame{};
+    for (uint32_t tick = kMoveOrigin; tick <= kMoveNow; ++tick) {
+        SCOPED_TRACE(tick);
+        EXPECT_FALSE(engine.recorded_body("Own", tick));
+        const bool gap = tick < kMoveApplied;
+        EXPECT_EQ(gap ? std::string() : std::string("Own"), engine.recorded_own_entity(tick));
+        EXPECT_EQ(!gap, engine.recorded_input("Own", tick, frame));
+        EXPECT_TRUE(engine.recorded_body("Remote", tick));
+    }
+    EXPECT_EQ(std::string(), engine.recorded_own_entity(kMoveOrigin - 1));
+}
+
+// The first replay after the echo: the caller has taken the live body out,
+// and the rewind to T-1 neither feeds nor records a body in the gap; the body
+// the caller makes again at T' (its pre_step) is fed from the kept input and
+// re-captured under the same lifetime.  A later rewind anchored inside the gap
+// - or before the birth - finds the body born at T', has the world destroy it
+// at the restore and make it again there, bit for bit, with no re-pose.
+TEST(RollbackEngine, AMovedBirthIsMadeAgainAtItsAppliedTickByEveryLaterReplay) {
+    fake_world world;
+    rollback_engine engine;
+    record_moved_birth(world, engine, false);
+    engine.move_birth("Own", 1, kMoveOrigin, kMoveApplied, true);
+    world.bodies.erase("Own");   // the caller's own destroy, before the rewind
+    auto w = world.adapter();
+    w.pre_step = [&world](uint32_t tick) {
+        if (tick == kMoveApplied) world.bodies["Own"] = moved_birth_body();
+    };
+    w.destroy_body = [&world](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+        return world.bodies.erase(entity) > 0;
+    };
+    ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin - 1, kMoveNow, no_input, "own birth moved 5 -> 8"));
+    EXPECT_EQ(0, world.count("destroy"));
+    EXPECT_EQ(static_cast<int>(kMoveNow - kMoveApplied + 1), world.count("nav_input Own"));
+    for (uint32_t tick = kMoveOrigin; tick <= kMoveNow; ++tick)
+        EXPECT_EQ(tick >= kMoveApplied, engine.recorded_body("Own", tick)) << tick;
+    const fake_body made = world.bodies.at("Own");
+    EXPECT_FLOAT_EQ(static_cast<float>(kMoveNow - kMoveApplied + 1), made.linear[0]);
+
+    for (const uint32_t anchor: {kMoveOrigin + 1, kMoveOrigin - 2}) {
+        SCOPED_TRACE(anchor);
+        world.calls.clear();
+        const auto exact_before = engine.stats().births_recreated_exact;
+        ASSERT_TRUE(engine.rewind_to(w, anchor, kMoveNow, no_input, "later"));
+        EXPECT_EQ(1, world.count("destroy Own@8"));
+        EXPECT_EQ(exact_before + 1, engine.stats().births_recreated_exact);
+        EXPECT_EQ(0, world.count("set_body Own"));
+        EXPECT_TRUE(same_fake_body(made, world.bodies.at("Own")));
+    }
+}
+
+// The --beam pair keeps the lifetime, so the body has records of the same
+// generation before the stamp: the oldest record is no birth record for an
+// anchor inside the gap.  The moved birth's own entry makes the applied
+// tick's record the birth there, while an anchor before the stamp restores
+// the old body from its record and the replay takes it out at the stamp.
+TEST(RollbackEngine, AMovedBeamIsBornAtItsAppliedTickForAnAnchorInsideItsGap) {
+    fake_world world;
+    rollback_engine engine;
+    record_moved_birth(world, engine, true);
+    engine.move_birth("Own", 1, kMoveOrigin, kMoveApplied, true);
+    auto w = world.adapter();
+    w.pre_step = [&world](uint32_t tick) {
+        if (tick == kMoveOrigin) world.bodies.erase("Own");
+        if (tick == kMoveApplied) world.bodies["Own"] = moved_birth_body();
+    };
+    w.destroy_body = [&world](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+        return world.bodies.erase(entity) > 0;
+    };
+    ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin - 1, kMoveNow, no_input, "own beam moved 5 -> 8"));
+    EXPECT_EQ(0, world.count("destroy"));
+    EXPECT_TRUE(engine.recorded_body("Own", kMoveOrigin - 1));
+    for (uint32_t tick = kMoveOrigin; tick <= kMoveNow; ++tick)
+        EXPECT_EQ(tick >= kMoveApplied, engine.recorded_body("Own", tick)) << tick;
+    const fake_body made = world.bodies.at("Own");
+
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin + 1, kMoveNow, no_input, "inside the gap"));
+    EXPECT_EQ(1, world.count("destroy Own@8"));
+    EXPECT_EQ(1u, engine.stats().births_recreated_exact);
+    EXPECT_TRUE(same_fake_body(made, world.bodies.at("Own")));
+
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin - 2, kMoveNow, no_input, "before the stamp"));
+    EXPECT_EQ(0, world.count("destroy"));
+    EXPECT_TRUE(same_fake_body(made, world.bodies.at("Own")));
+}
+
+// A birth the server never applied (SUPERSEDED, REJECTED): every record from
+// its origin on loses it, name and input included, and no replay brings a
+// body back.
+TEST(RollbackEngine, ABirthTheServerNeverMadeLeavesTheHistoryFromItsOrigin) {
+    fake_world world;
+    rollback_engine engine;
+    record_moved_birth(world, engine, false);
+    EXPECT_EQ(kMoveNow - kMoveOrigin + 1, engine.move_birth("Own", 1, kMoveOrigin, kMoveOrigin, false));
+    world.bodies.erase("Own");
+    input_frame frame{};
+    for (uint32_t tick = kMoveOrigin; tick <= kMoveNow; ++tick) {
+        EXPECT_EQ(std::string(), engine.recorded_own_entity(tick)) << tick;
+        EXPECT_FALSE(engine.recorded_input("Own", tick, frame)) << tick;
+    }
+    auto w = world.adapter();
+    w.destroy_body = [&world](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+        return world.bodies.erase(entity) > 0;
+    };
+    ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin - 1, kMoveNow, no_input, "own birth superseded"));
+    EXPECT_EQ(0, world.count("nav_input Own"));
+    EXPECT_EQ(0, world.count("destroy"));
+    EXPECT_EQ(0u, world.bodies.count("Own"));
+    ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin + 2, kMoveNow, no_input, "later"));
+    EXPECT_EQ(0u, world.bodies.count("Own"));
+}

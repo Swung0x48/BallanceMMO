@@ -819,6 +819,18 @@ RE_LEAD_ADJ = re.compile(r'\blead_adj=(\d+)')
 RE_HOLD = re.compile(r'^hold-event: own (\w+) (?:#\d+ )?stamped tick (\d+) (held at tick (\d+)|dropped at tick (\d+)|'
                      r'\(held at tick (\d+)\) released at tick (\d+)|\(held at tick \d+\) discarded(:))')
 RE_STALL = re.compile(r'^stall: (\d+) ms at tick (\d+)')
+# Plan step 19 (late-player design 3.3): the owner's own birth the server
+# applied later (moved inside the history, or past the reach: a resync) or
+# never, and the echo counters of the status line.
+RE_OWN_MOVE = re.compile(r'^own physicalize stamped (\d+) (?:moved to (\d+)|never made) by the server at local tick (\d+): '
+                         r'rewound to (\d+)')
+# Every resync the owner asks for about its own birth: past the reach, no
+# record (past the history), a refused rewind, a life ended since, a pair
+# moved as a whole, a missing echo; the reason is kept.
+RE_OWN_MOVE_FAR = re.compile(r'^own (?:birth|beam) moved (\d+) -> (\d+|never) at local tick (\d+): (.+), resync\s*$')
+# acked/moved/superseded/rejected[/missing]
+RE_ECHO = re.compile(r'\becho=(\d+)/(\d+)/(\d+)/(\d+)(?:/(\d+))?')
+RE_OWNLIFE = re.compile(r'\bownlife=([0-9/]+)')
 RE_LATE_BY = re.compile(r'event type (\d+) from (\d+) stamped (\d+) applied at tick (\d+) \(late by (\d+)\)')
 RE_BARRIER = re.compile(r'no Physicalize for player (\d+) at tick (\d+)')
 # Protocol 9 (late-player plan step 8, the gate of step 17): the server's
@@ -909,7 +921,8 @@ WINDOW_TICKS = 60
 def read_client_log(path):
     """What the report needs from one client log."""
     out = {'own_id': 0, 'bases': [], 'windows': [], 'subst': None, 'lead_adj': None, 'holds': [], 'stalls': [],
-           'last_tick': 0, 'input_delays': [], 'status_lead': None, 'exists': path.exists()}
+           'last_tick': 0, 'input_delays': [], 'status_lead': None, 'exists': path.exists(),
+           'echo': None, 'ownlife': None, 'own_moves': []}
     if not path.exists():
         return out
     for line in path.read_text(errors='replace').replace('\x00', '').splitlines():
@@ -941,6 +954,23 @@ def read_client_log(path):
             m = re.search(r'\btick=(\d+)', line)
             if m:
                 out['last_tick'] = max(out['last_tick'], int(m.group(1)))
+            # acked/moved/superseded/rejected and moved/removed/resynced/
+            # remade/other, cumulative: the last status line wins
+            m = RE_ECHO.search(line)
+            if m:
+                out['echo'] = [int(m.group(k)) for k in range(1, 5)] + [int(m.group(5) or 0)]
+            m = RE_OWNLIFE.search(line)
+            if m:
+                out['ownlife'] = m.group(1)
+        m = RE_OWN_MOVE.match(line)
+        if m:
+            out['own_moves'].append({'origin': int(m.group(1)), 'applied': int(m.group(2)) if m.group(2) else None,
+                                     'at': int(m.group(3)), 'how': 'rewound'})
+        m = RE_OWN_MOVE_FAR.match(line)
+        if m:
+            out['own_moves'].append({'origin': int(m.group(1)),
+                                     'applied': None if m.group(2) == 'never' else int(m.group(2)),
+                                     'at': int(m.group(3)), 'how': 'resync', 'why': m.group(4)})
         m = RE_HOLD.match(line)
         if m:
             if m.group(4):
@@ -1213,6 +1243,7 @@ def event_report(args, case, case_dir):
         row = {'index': i, 'id': pid, 'base': log['bases'][0] if log['bases'] else None,
                'resync_bases': log['bases'][1:], 'subst_client': log['subst'], 'lead_adj': log['lead_adj'],
                'holds': log['holds'], 'stalls': log['stalls'], 'input_delays': log['input_delays'],
+               'echo': log['echo'], 'ownlife': log['ownlife'], 'own_moves': log['own_moves'],
                'status_lead': log['status_lead'], 'never_started': not log['exists'], 'phases': {}}
         report['clients'].append(row)
         base = row['base'] if row['base'] is not None else first
@@ -1311,6 +1342,21 @@ def event_report(args, case, case_dir):
                              'first_fresh': fresh_from_e,
                              'own_after': max([v[0] for t, v in per_tick.items()
                                                if e + REACH <= t <= end and v[0] is not None] or [0.0])}
+        # Plan step 19: the own ball from T'+48 on, T' the last tick the
+        # server applied one of this client's own births at, later than
+        # stamped (the client's own move line, else the server journal's
+        # re-stamped Physicalize of this player).
+        moved_to = [mv['applied'] for mv in log['own_moves'] if mv['applied'] is not None]
+        if not moved_to:
+            moved_to = [e['tick'] for e in late_events
+                        if e['player'] == pid and e['type'] in (0, 'Physicalize', 'physicalize') and not e['state'] & 2]
+        if moved_to:
+            t_prime = max(moved_to)
+            row['own_after_move'] = [t_prime, t_prime + REACH,
+                                     max([v[0] for t, v in per_tick.items()
+                                          if t_prime + REACH <= t <= end and v[0] is not None] or [0.0])]
+        else:
+            row['own_after_move'] = None
         settle = max([t_off] + [b for b in row['resync_bases'] if b >= t_on]) + REACH
         row['own_after_resync'] = [settle, max([v[0] for t, v in per_tick.items()
                                                 if settle <= t <= end and v[0] is not None] or [0.0])]
@@ -1606,9 +1652,22 @@ def criteria(report, case, controls):
                     and row['own_after'] < ZERO_M,
                     '%d checkpoints from T_on+48 where the own ball exists on one side only; own error %.4f m' % (
                         row['own_presence_mismatch'], row['own_after']))
+            elif arm == 'A6M':
+                # The move inside the reach (plan step 19): the owner rewinds
+                # to T-1 and makes its ball again at T', no resync.
+                moves = row.get('own_moves') or []
+                rewound = [mv for mv in moves if mv['how'] == 'rewound' and mv['applied'] is not None]
+                add(who, 'owner moved its birth inside the history', bool(rewound),
+                    'moves %s; echo acked/moved/superseded/rejected/missing %s; ownlife %s' % (
+                        moves, row.get('echo'), row.get('ownlife')))
+                add(who, 'owner no resync', resyncs == 0, '%d (bases %s)' % (resyncs, row['resync_bases']))
+                after = row.get('own_after_move')
+                add(who, "own ball 0.0000 from T'+48", None if after is None else after[2] < ZERO_M,
+                    "no moved birth found (client log or server journal)" if after is None
+                    else "%.4f m from tick %d (T' %d)" % (after[2], after[1], after[0]))
             else:
                 add(who, 'owner exactly one resync (past its reach at 150 ms)', resyncs == 1,
-                    '%d (bases %s)' % (resyncs, row['resync_bases']))
+                    '%d (bases %s); own moves %s' % (resyncs, row['resync_bases'], row.get('own_moves')))
                 add(who, 'own ball 0.0000 48 ticks after the resync (or the release)', row['own_after_resync'][1] < ZERO_M,
                     '%.4f m from tick %d' % (row['own_after_resync'][1], row['own_after_resync'][0]))
         elif family == 'join':
@@ -1676,6 +1735,13 @@ def format_report(report, crit):
                              'n/a' if ph['moved'] is None else ph['moved']))
         if row['holds'] or row['stalls']:
             lines.append('  holds %s stalls %s' % (row['holds'], row['stalls']))
+        if row.get('echo') or row.get('own_moves'):
+            after = row.get('own_after_move')
+            lines.append("  own echoes acked/moved/superseded/rejected/missing %s; ownlife moved/removed/resynced/remade/other %s; "
+                         "own moves %s; own after T'+48 %s" % (
+                             '/'.join(map(str, row['echo'])) if row.get('echo') else 'n/a', row.get('ownlife') or 'n/a',
+                             row.get('own_moves') or '-',
+                             'n/a' if not after else "%.4f m from tick %d (T' %d)" % (after[2], after[1], after[0])))
     s = report['server']
     lines.append('server: ticks %d..%d; TICK gap max/p99 ms %s; late events %d %s; "late by" lines %d; barrier give-ups %d' % (
         s['ticks'][0], s['ticks'][1],
@@ -1842,7 +1908,12 @@ def selftest():
            b'hold-event: own physicalize #2 stamped tick 900 held at tick 893 for 300 ms\n',
            b'hold-event: own physicalize stamped tick 900 (held at tick 893) released at tick 913\n',
            b'stall: 500 ms at tick 1500 (--stall-ms)\n', b'resynced: tick base 1600\n',
-           b'window: tick=1619 inrew=0/0 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=1/1 rebases=1 relay=0 late=0\n']
+           b'window: tick=1619 inrew=0/0 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=1/1 rebases=1 relay=0 late=0\n',
+           b'own physicalize stamped 900 moved to 921 by the server at local tick 958: rewound to 899 (12 records changed,'
+           b' made again in the replay)\n',
+           b'own birth moved 1700 -> 1760 at local tick 1790: past the reach (depth 91), resync\n',
+           b'own birth moved 2100 -> never at local tick 2330: no echo by the server\'s tick 2293, resync\n',
+           b'status: phase=2 session=1 tick=1800 events=3/9/0 echo=4/2/0/0/1 ownlife=1/0/1/6/0 overtaken=0\n']
 
     # The window grid and the phases: a window that overlaps D at all is D's.
     ph = {'B': (27, 1500), 'D': (1500, 1568), 'A': (1568, 3600)}
@@ -1890,6 +1961,14 @@ def selftest():
         check('read_client_log', parsed['own_id'] == 77 and parsed['bases'] == [27, 1600]
               and parsed['holds'] == [{'type': 'physicalize', 'stamp': 900, 'held_at': 893, 'released_at': 913}]
               and parsed['stalls'] == [{'ms': 500, 'tick': 1500}] and len(parsed['windows']) == 1, str(parsed))
+        check('read_client_log: own moves and echoes (plan step 19)',
+              parsed['own_moves'] == [{'origin': 900, 'applied': 921, 'at': 958, 'how': 'rewound'},
+                                      {'origin': 1700, 'applied': 1760, 'at': 1790, 'how': 'resync',
+                                       'why': 'past the reach (depth 91)'},
+                                      {'origin': 2100, 'applied': None, 'at': 2330, 'how': 'resync',
+                                       'why': "no echo by the server's tick 2293"}]
+              and parsed['echo'] == [4, 2, 0, 0, 1] and parsed['ownlife'] == '1/0/1/6/0',
+              str((parsed['own_moves'], parsed['echo'], parsed['ownlife'])))
         # The arming: a log that names tick base 100 arms tick 166 one second on.
         armed = LinkEvent(0, 166, 'blackout', 100)
         watch_log = pathlib.Path(tmp) / 'watch.log'
