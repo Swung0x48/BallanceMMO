@@ -27,6 +27,7 @@
 
 #include "crash_report.hpp"
 #include "headless_engine.hpp"
+#include "inbound_capture.hpp"
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
@@ -295,6 +296,13 @@ namespace {
         // with the record's keys.
         bool keep_lane = false;
         double keep_lane_z = 0.0;
+        // --capture-inbound FILE / --replay-inbound FILE (shared-core design
+        // 5.2 (5), inbound_capture.hpp): record every message handled, every
+        // connection state change and every wall-clock read of the session
+        // flow, by loop pass; or run the loop from such a file, unpaced, with
+        // no network and nothing sent.  Off by default.
+        std::string capture_inbound;
+        std::string replay_inbound;
     };
 
     // The record's keys (scripts/arena_map_test.py write_drive_record) are
@@ -312,7 +320,9 @@ namespace {
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
                   "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--park-births] [--insert-births]\n"
-                  "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)");
+                  "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)\n"
+                  "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
+                  "replay them, unpaced, sending nothing)");
     }
 
     const char* event_type_name(int type) {
@@ -447,6 +457,8 @@ namespace {
                 if (!(v = next())) return false;
                 if (!parse_hold_event(v, out)) return false;
             }
+            else if (arg == "--capture-inbound") { if (!(v = next())) return false; out.capture_inbound = v; }
+            else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
             else if (arg == "--beam") {
                 for (int k = 0; k < 3; ++k) {
@@ -460,6 +472,7 @@ namespace {
             else return false;
         }
         if (out.root.empty()) return false;
+        if (!out.capture_inbound.empty() && !out.replay_inbound.empty()) return false;
         if (!out.host && !out.join_first && out.room == 0) out.join_first = true;
         return true;
     }
@@ -598,36 +611,40 @@ namespace {
         }
 
         int exit_code() const {
+            if (inbound_failed_) return 3;
             const auto& st = corrector_.stats();
             return (st.blended + st.hard + st.unmatched) == 0 ? 0 : 2;
         }
 
         // ------------------------------------------------------------ role
         void run() override {
-            const auto started = clock_type::now();
+            sync_report_clock();
+            const auto started = wall_now(bmmo::sim::wall_site::run_start);
             mark_running();
             const char* stopped = "the client stopped";
             while (running_) {
+                if (!inbound_pass()) { stopped = "the inbound capture ended"; break; }
                 update();
                 release_held_events();
                 if (ended_) { stopped = "the client ended the session"; break; }
-                if (std::chrono::duration<double>(clock_type::now() - started).count() > args_.seconds) {
+                if (std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::run_limit) - started).count() > args_.seconds) {
                     logf("time limit reached");
                     stopped = "the client's time limit was reached";
                     break;
                 }
                 switch (phase_) {
                 case phase::idle:
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    wall_sleep(std::chrono::milliseconds(5));
                     break;
                 case phase::loading:
+                    ++flow_steps_;
                     load_step();
                     break;
                 case phase::running:
                     pace_and_frame();
                     break;
                 }
-                const auto now = clock_type::now();
+                const auto now = wall_now(bmmo::sim::wall_site::run_report);
                 if (now - last_report_ > std::chrono::seconds(5)) {
                     last_report_ = now;
                     report();
@@ -637,24 +654,109 @@ namespace {
             // box rather than just stopping mid-file.
             close_journal(stopped);
             report();
+            finish_inbound();
         }
 
+        // --capture-inbound / --replay-inbound (inbound_capture.hpp).  Opened
+        // before the engine boots: the engine changes the working directory.
+        bool open_inbound(const std::string& command_line) {
+            std::string error;
+            const int64_t den = static_cast<int64_t>(clock_type::period::den / clock_type::period::num);
+            if (!args_.capture_inbound.empty()) {
+                if (!inbound_.open_capture(args_.capture_inbound, command_line, den, error)) {
+                    logf("capture-inbound: %s", error.c_str());
+                    return false;
+                }
+                logf("capture-inbound: recording to %s", args_.capture_inbound.c_str());
+            } else if (!args_.replay_inbound.empty()) {
+                if (!inbound_.open_replay(args_.replay_inbound, den, error)) {
+                    logf("replay-inbound: %s", error.c_str());
+                    return false;
+                }
+                logf("replay-inbound: replaying %s, captured as: %s", args_.replay_inbound.c_str(),
+                     inbound_.command_line().c_str());
+                const std::string differ = replay_arguments_differ(inbound_.command_line(), command_line);
+                if (!differ.empty())
+                    logf("replay-inbound: warning: the arguments differ from the capture's (%s); a divergence may be "
+                         "the command line, not the code", differ.c_str());
+            }
+            return true;
+        }
+
+        // The arguments a replay must share with its capture: all but the
+        // program, the network and output paths (--server, --journal, the
+        // capture flags) and --record's path (a stored copy of the same
+        // record).  "" when they agree; else the first difference.
+        static std::string replay_arguments_differ(const std::string& captured, const std::string& current) {
+            const auto words = [](const std::string& line) {
+                std::vector<std::string> out;
+                size_t at = 0;
+                while (at < line.size()) {
+                    const size_t space = line.find(' ', at);
+                    const size_t end = space == std::string::npos ? line.size() : space;
+                    if (end > at) out.push_back(line.substr(at, end - at));
+                    at = end + 1;
+                }
+                std::vector<std::string> kept;
+                for (size_t i = 1; i < out.size(); ++i) {
+                    const std::string& w = out[i];
+                    if (w == "--server" || w == "--journal" || w == "--capture-inbound" || w == "--replay-inbound") {
+                        ++i;
+                        continue;
+                    }
+                    kept.push_back(w);
+                    if (w == "--record") { kept.push_back("<path>"); ++i; }
+                }
+                return kept;
+            };
+            const auto a = words(captured), b = words(current);
+            for (size_t i = 0; i < a.size() || i < b.size(); ++i) {
+                const std::string x = i < a.size() ? a[i] : "(none)", y = i < b.size() ? b[i] : "(none)";
+                if (x != y) return "argument " + std::to_string(i + 1) + ": captured " + x + ", here " + y;
+            }
+            return "";
+        }
+
+        bool replaying_inbound() const { return inbound_.replaying(); }
+
         int poll_incoming_messages() override {
+            if (inbound_.replaying()) return replay_incoming_messages();
             const int count = interface_->ReceiveMessagesOnConnection(connection_, incoming_messages_, ONCE_RECV_MSG_COUNT);
             if (count <= 0) return 0;
             for (int i = 0; i < count; ++i) {
+                if (inbound_.capturing())
+                    inbound_.message(incoming_messages_[i]->m_pData, static_cast<uint32_t>(incoming_messages_[i]->m_cbSize));
                 on_message(incoming_messages_[i]);
                 incoming_messages_[i]->Release();
             }
             return count;
         }
 
+        void poll_connection_state_changes() override {
+            if (!inbound_.replaying()) {
+                role::poll_connection_state_changes();
+                return;
+            }
+            int32_t state = 0;
+            uint32_t handle = 0;
+            std::string end_debug;
+            while (inbound_.take_connection(state, handle, end_debug)) {
+                SteamNetConnectionStatusChangedCallback_t info{};
+                info.m_hConn = handle;
+                info.m_info.m_eState = static_cast<ESteamNetworkingConnectionState>(state);
+                std::snprintf(info.m_info.m_szEndDebug, sizeof(info.m_info.m_szEndDebug), "%s", end_debug.c_str());
+                on_connection_status_changed(&info);
+            }
+        }
+
         void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* info) override {
+            if (inbound_.capturing())
+                inbound_.connection(static_cast<int32_t>(info->m_info.m_eState), info->m_hConn, info->m_info.m_szEndDebug);
             switch (info->m_info.m_eState) {
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
                 logf("connection lost: %s", info->m_info.m_szEndDebug);
-                interface_->CloseConnection(info->m_hConn, 0, nullptr, false);
+                if (!inbound_.replaying()) interface_->CloseConnection(info->m_hConn, 0, nullptr, false);
                 connection_ = k_HSteamNetConnection_Invalid;
                 running_ = false;
                 break;
@@ -767,7 +869,7 @@ namespace {
                     mechanism_tracking_.clear();
                     resync_pending_ = true;
                     have_snapshot_ = false;
-                    origin_ = clock_type::now();
+                    origin_ = wall_now(bmmo::sim::wall_site::assign_resync);
                     logf("resynced: tick base %u", tick_base_);
                     journal_note("resync: tick base " + std::to_string(tick_base_));
                     break;
@@ -794,7 +896,7 @@ namespace {
                     set_aside_unanswered(own_life::aside::resync);
                     own_life_.clear();
                     mechanism_tracking_.clear();
-                    origin_ = clock_type::now();
+                    origin_ = wall_now(bmmo::sim::wall_site::assign_renumber);
                 }
                 tick_base_ = msg.first_tick;
                 held_floor_ = tick_base_;
@@ -804,7 +906,7 @@ namespace {
                 // server's own first step (design 9.25 phase alignment).
                 if (held_) {
                     held_ = false;
-                    origin_ = clock_type::now();
+                    origin_ = wall_now(bmmo::sim::wall_site::assign_release);
                     logf("anchor hold released after %d polls: the first frame is tick %u", hold_polls_, tick_base_);
                     journal_note("anchor hold released at tick base " + std::to_string(tick_base_));
                 }
@@ -965,8 +1067,134 @@ namespace {
             uint64_t blends = 0, hard_sets = 0;
         };
 
+        // ------------------------------------------------- inbound capture
+        // The wall clock as the session flow reads it: the live clock, written
+        // to the capture by `site` when capturing; the captured value when
+        // replaying (a read at another site than the capture's next one is a
+        // divergence).
+        clock_type::time_point wall_now(bmmo::sim::wall_site site) {
+            if (inbound_.replaying()) {
+                int64_t value = 0;
+                std::string error;
+                if (!inbound_.take_clock(site, value, error)) inbound_diverged(error);
+                return clock_type::time_point(clock_type::duration(value));
+            }
+            const auto now = clock_type::now();
+            if (inbound_.capturing()) inbound_.clock(site, static_cast<int64_t>(now.time_since_epoch().count()));
+            return now;
+        }
+
+        // The system clock in ms since the epoch (the journal header's utc_ms).
+        uint64_t wall_utc_ms() {
+            if (inbound_.replaying()) {
+                int64_t value = 0;
+                std::string error;
+                if (!inbound_.take_clock(bmmo::sim::wall_site::journal_utc, value, error)) inbound_diverged(error);
+                return static_cast<uint64_t>(value);
+            }
+            const auto ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            if (inbound_.capturing()) inbound_.clock(bmmo::sim::wall_site::journal_utc, static_cast<int64_t>(ms));
+            return ms;
+        }
+
+        // A replay is unpaced: its clock is the capture's, so a wait only
+        // costs time.
+        template <class Duration>
+        void wall_sleep(Duration duration) {
+            if (!inbound_.replaying()) std::this_thread::sleep_for(duration);
+        }
+
+        // last_report_ is read at construction, before the capture is open:
+        // its value goes into the file at the start of run() instead.
+        void sync_report_clock() {
+            if (inbound_.replaying()) last_report_ = wall_now(bmmo::sim::wall_site::report_init);
+            else if (inbound_.capturing())
+                inbound_.clock(bmmo::sim::wall_site::report_init,
+                               static_cast<int64_t>(last_report_.time_since_epoch().count()));
+        }
+
+        // The start of a main-loop pass: its index and the steps before it
+        // (the frame index of every record that follows).  False when a
+        // replay has reached the end of its capture.
+        bool inbound_pass() {
+            const uint64_t pass = flow_pass_++;
+            if (inbound_.capturing()) inbound_.iteration(pass, flow_steps_);
+            if (!inbound_.replaying()) return true;
+            if (inbound_.exhausted()) {
+                // The live run ended inside its last pass (a break, or the
+                // connection lost): a replay that starts one more pass than
+                // the capture holds has left the live run's control flow.
+                if (inbound_.complete())
+                    inbound_diverged("the live run ended before this pass (the capture's end marker)");
+                logf("replay-inbound: the capture ends before pass %llu (%s)", static_cast<unsigned long long>(pass),
+                     "no end marker: the live run was cut short");
+                return false;
+            }
+            uint64_t index = 0, steps = 0;
+            if (!inbound_.take_iteration(index, steps))
+                inbound_diverged("expected a loop pass, the capture has " + inbound_.describe_next());
+            if (index != pass || steps != flow_steps_)
+                inbound_diverged("the capture's pass " + std::to_string(index) + " ran after " + std::to_string(steps)
+                                 + " steps, this replay's pass " + std::to_string(pass) + " after "
+                                 + std::to_string(flow_steps_));
+            return true;
+        }
+
+        int replay_incoming_messages() {
+            int count = 0;
+            std::string bytes;
+            while (inbound_.take_message(bytes)) {
+                ISteamNetworkingMessage* message = SteamNetworkingUtils()->AllocateMessage(static_cast<int>(bytes.size()));
+                if (!message) inbound_diverged("AllocateMessage failed");
+                if (!bytes.empty()) std::memcpy(message->m_pData, bytes.data(), bytes.size());
+                message->m_cbSize = static_cast<int>(bytes.size());
+                on_message(message);
+                message->Release();
+                ++count;
+            }
+            return count;
+        }
+
+        // A replay that met a read or a pass the live run did not make: the
+        // world is no longer the captured one, so it stops here.
+        [[noreturn]] void inbound_diverged(const std::string& why) {
+            logf("replay-inbound: DIVERGED at pass %llu (%llu steps), %s: %s",
+                 static_cast<unsigned long long>(flow_pass_ ? flow_pass_ - 1 : 0),
+                 static_cast<unsigned long long>(flow_steps_), inbound_.where().c_str(), why.c_str());
+            close_journal("the inbound replay diverged");
+            std::fflush(stdout);
+            std::exit(3);
+        }
+
+        void finish_inbound() {
+            if (inbound_.capturing()) {
+                logf("capture-inbound: %llu passes, %llu steps, %llu messages written",
+                     static_cast<unsigned long long>(flow_pass_), static_cast<unsigned long long>(flow_steps_),
+                     static_cast<unsigned long long>(inbound_.messages()));
+                inbound_.close();
+                if (inbound_.write_failed())
+                    logf("capture-inbound: WRITE FAILED: %s is incomplete (no end marker); do not replay it",
+                         args_.capture_inbound.c_str());
+            }
+            if (inbound_.replaying()) {
+                if (!inbound_.exhausted()) {
+                    logf("replay-inbound: DIVERGED: the replay stopped at pass %llu with %s left in the capture (%s)",
+                         static_cast<unsigned long long>(flow_pass_), inbound_.describe_next().c_str(),
+                         inbound_.where().c_str());
+                    inbound_failed_ = true;
+                } else {
+                    logf("replay-inbound: done, %llu passes, %llu steps, %llu messages (%s)",
+                         static_cast<unsigned long long>(flow_pass_), static_cast<unsigned long long>(flow_steps_),
+                         static_cast<unsigned long long>(inbound_.messages()),
+                         inbound_.complete() ? "the capture's end marker reached" : "the capture had no end marker");
+                }
+            }
+        }
+
         // ------------------------------------------------------ networking
         void send_bytes(const std::string& bytes, int flags) {
+            if (inbound_.replaying()) return;   // a replay sends nothing
             interface_->SendMessageToConnection(connection_, bytes.data(), static_cast<uint32_t>(bytes.size()), flags, nullptr);
         }
 
@@ -977,6 +1205,7 @@ namespace {
             bmmo::hex_chars_from_string(msg.content.map.md5, bmmo::map::original_map_hashes[std::clamp(args_.level, 0, 13)]);
             msg.content.sector = 1;
             msg.content.type = bmmo::current_map_state::EnteringMap;
+            if (inbound_.replaying()) return;
             interface_->SendMessageToConnection(connection_, &msg, sizeof(msg), k_nSteamNetworkingSend_Reliable, nullptr);
         }
 
@@ -1001,7 +1230,7 @@ namespace {
                 if (target == 0 && !msg.rooms.empty()) target = msg.rooms.front().id;
                 if (target == 0) {
                     if (!msg.rooms.empty() || list_retries_++ % 20 == 0) logf("no lobby room to join yet (%zu rooms)", msg.rooms.size());
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    wall_sleep(std::chrono::milliseconds(500));
                     room_request(bmmo::room::action::List, 0);
                     return;
                 }
@@ -1017,7 +1246,7 @@ namespace {
             if (!own_ready) {
                 // First time, or the room went back to the lobby (session ended
                 // by the server, host restart): ready again, at most once a second.
-                const auto now = clock_type::now();
+                const auto now = wall_now(bmmo::sim::wall_site::room_ready);
                 if (!ready_sent_ || now - last_ready_sent_ > std::chrono::seconds(1)) {
                     ready_sent_ = true;
                     last_ready_sent_ = now;
@@ -1276,7 +1505,7 @@ namespace {
             }
             frames_since_anchor_ = 0;
             phase_ = phase::running;
-            origin_ = clock_type::now();
+            origin_ = wall_now(bmmo::sim::wall_site::anchor_origin);
             rebases_ = 0;
             // The window: line starts over with the session (its first call
             // takes the base, prints nothing), and --hold-event counts the
@@ -1297,7 +1526,7 @@ namespace {
             // not exist.
             held_ = true;
             hold_polls_ = 0;
-            hold_deadline_ = clock_type::now() + kAnchorHoldTimeout;
+            hold_deadline_ = wall_now(bmmo::sim::wall_site::anchor_hold) + kAnchorHoldTimeout;
             bmmo::session_ready_msg ready;
             ready.session = session_;
             ready.first_tick = 0;
@@ -1930,12 +2159,12 @@ namespace {
             // here for ever, and says so.
             if (held_) {
                 ++hold_polls_;
-                if (clock_type::now() < hold_deadline_) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (wall_now(bmmo::sim::wall_site::hold_poll) < hold_deadline_) {
+                    wall_sleep(std::chrono::milliseconds(1));
                     return;   // poll the network, step nothing
                 }
                 held_ = false;
-                origin_ = clock_type::now();
+                origin_ = wall_now(bmmo::sim::wall_site::hold_timeout);
                 logf("anchor hold: no tick base after %.1f s; running anyway (the world will be out of phase with "
                      "the server's)", std::chrono::duration<double>(kAnchorHoldTimeout).count());
                 journal_note("anchor hold timed out; running without a tick base");
@@ -1950,20 +2179,20 @@ namespace {
                 paused_once_ = true;
                 logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
                 if (args_.stall_named) logf("stall: %d ms at tick %u (--stall-ms)", args_.pause_ms, current_tick());
-                std::this_thread::sleep_for(std::chrono::milliseconds(args_.pause_ms));
+                wall_sleep(std::chrono::milliseconds(args_.pause_ms));
             }
             // A SessionLead's slew (late-player design 2.4) moves the origin
             // before the schedule is read: one tick earlier per tick period
             // for a raise (two frames per slot), one later per ten for a
             // lower.
             if (lead_slew_.active()) advance_lead_slew(next_frame);
-            const double expected = std::chrono::duration<double>(clock_type::now() - origin_).count() * bmmo::sim::kTickRate;
+            const double expected = std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count() * bmmo::sim::kTickRate;
             // 33 frames behind is a stall, plus whatever a slew still has to
             // gain: the slew never runs the pacer more than a frame behind
             // (lead_slew::kRaiseMaxBehind), so a real stall still rebases.
             if (static_cast<double>(next_frame) + bmmo::session::lead_rebase_threshold(lead_slew_.outstanding()) < expected) {
                 // far behind (a long pause): restart the schedule instead of fast-forwarding
-                origin_ = clock_type::now() - std::chrono::duration_cast<clock_type::duration>(
+                origin_ = wall_now(bmmo::sim::wall_site::pace_rebase) - std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
                 ++rebases_;
                 // A slew in flight is not ended here: the ticks it moved are
@@ -1976,12 +2205,13 @@ namespace {
             } else if (static_cast<double>(next_frame) > expected) {
                 const auto due = origin_ + std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
-                const auto now = clock_type::now();
+                const auto now = wall_now(bmmo::sim::wall_site::pace_due);
                 if (due > now) {
-                    std::this_thread::sleep_for(std::min(due - now, clock_type::duration(std::chrono::milliseconds(2))));
+                    wall_sleep(std::min(due - now, clock_type::duration(std::chrono::milliseconds(2))));
                     return;   // poll the network again before the frame is due
                 }
             }
+            ++flow_steps_;
             frame();
         }
 
@@ -1990,7 +2220,7 @@ namespace {
         // moves by what it returns (+1: a tick earlier, the clock runs ahead).
         // The whole delta moved: acknowledged.
         void advance_lead_slew(uint64_t next_frame) {
-            const auto now = clock_type::now();
+            const auto now = wall_now(bmmo::sim::wall_site::slew_step);
             const double wall = std::chrono::duration<double>(now - lead_slew_clock_).count() * bmmo::sim::kTickRate;
             lead_slew_clock_ = now;
             const double behind = std::chrono::duration<double>(now - origin_).count() * bmmo::sim::kTickRate
@@ -2670,7 +2900,7 @@ namespace {
                 return true;
             }
             held_events_.push_back(held_event{event.raw.str(), event.tick, current_tick(),
-                                              clock_type::now() + std::chrono::milliseconds(args_.hold_event_ms)});
+                                              wall_now(bmmo::sim::wall_site::hold_event_stamp) + std::chrono::milliseconds(args_.hold_event_ms)});
             logf("hold-event: own %s #%u stamped tick %u held at tick %u for %d ms",
                  event_type_name(args_.hold_event_type), hold_event_seen_, event.tick, current_tick(), args_.hold_event_ms);
             journal_note("hold-event: held " + std::string(event_type_name(args_.hold_event_type)) + " stamped "
@@ -2682,7 +2912,7 @@ namespace {
         // poll at most, not by a frame.
         void release_held_events() {
             if (held_events_.empty()) return;
-            const auto now = clock_type::now();
+            const auto now = wall_now(bmmo::sim::wall_site::hold_event_release);
             for (auto it = held_events_.begin(); it != held_events_.end();) {
                 if (now < it->release) { ++it; continue; }
                 if (phase_ != phase::running) {
@@ -3201,7 +3431,7 @@ namespace {
             const uint64_t resyncs_before = resyncs_sent_;
             if (!voided) {
                 lead_slew_.start(msg.seq, msg.delta);
-                lead_slew_clock_ = clock_type::now();
+                lead_slew_clock_ = wall_now(bmmo::sim::wall_site::slew_start);
             }
             const uint32_t next_unsimulated = frames_since_anchor_ >= 1 ? current_tick() + 1 : tick_base_;
             const auto ranges = bmmo::session::lead_cap_forced(
@@ -5083,7 +5313,7 @@ namespace {
         // the limiter's 2 s; 10 s is the give-up for an answer never coming).
         void request_resync(const char* reason, bool owed = false) {
             if (phase_ != phase::running || !assigned_) return;
-            const auto now = clock_type::now();
+            const auto now = wall_now(bmmo::sim::wall_site::resync_limiter);
             if (resync_in_flight_ && now - last_resync_request_ < std::chrono::seconds(10)) return;
             if (resyncs_sent_ > 0 && now - last_resync_request_ < std::chrono::seconds(2)) {
                 if (owed && !resync_owed_) {
@@ -5139,9 +5369,9 @@ namespace {
         // so there is no lock anywhere near the writer.
         bool journalling() const { return journal_.is_open() && !journal_.capped(); }
 
-        uint32_t journal_ms() const {
+        uint32_t journal_ms() {
             return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                clock_type::now() - journal_start_).count());
+                wall_now(bmmo::sim::wall_site::journal_ms) - journal_start_).count());
         }
 
         // Opened at the anchor, where the hash the server has to agree with is
@@ -5165,11 +5395,10 @@ namespace {
             header.anchor_hash = hash.pose;
             header.anchor_surfaces = hash.surfaces;
             header.build_id = bmmo::physics::build_id();
-            header.utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+            header.utc_ms = wall_utc_ms();
             header.own_player = own_id_;
             header.own_join_order = own_join_order_ < 0 ? 255 : static_cast<uint8_t>(own_join_order_);
-            journal_start_ = clock_type::now();
+            journal_start_ = wall_now(bmmo::sim::wall_site::journal_start);
             std::string error;
             if (!journal_.open(path, header, kJournalMaxBytes, error)) {
                 logf("journal: %s", error.c_str());
@@ -5646,6 +5875,14 @@ namespace {
         uint32_t room_id_ = 0;
         bool ended_ = false;
         clock_type::time_point last_report_ = clock_type::now();
+        // --capture-inbound / --replay-inbound (inbound_capture.hpp): the file,
+        // the main loop's passes and the steps (load_step() and frame() calls)
+        // so far - the frame index of every captured record - and a replay
+        // that ended with records left.
+        bmmo::sim::inbound_capture inbound_;
+        uint64_t flow_pass_ = 0;
+        uint64_t flow_steps_ = 0;
+        bool inbound_failed_ = false;
 
         phase phase_ = phase::idle;
         uint32_t session_ = 0;
@@ -6202,8 +6439,14 @@ int main(int argc, char** argv) {
     }
     role::init_socket();
     session_client client(args);
+    {
+        std::string command_line;
+        for (int i = 0; i < argc; ++i) command_line += (i ? " " : "") + std::string(argv[i]);
+        if (!client.open_inbound(command_line)) return 1;
+    }
     if (!client.boot()) return 1;
-    if (!client.connect()) { logf("connect failed"); return 1; }
+    // A replay has no network: the capture is its server.
+    if (!client.replaying_inbound() && !client.connect()) { logf("connect failed"); return 1; }
     client.run();
     const int code = client.exit_code();
     logf("exit code %d", code);

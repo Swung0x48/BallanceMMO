@@ -1,7 +1,8 @@
 # Session-client core: one implementation of the client flow, two hosts
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
-what became of it). Nothing here is built yet.
+what became of it). Step E0 is built (§5.2, "As built (step E0)"); nothing
+else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -358,8 +359,10 @@ T+1 on both hosts.
 **Messages** run C code identical to SC:714-931:
 
 - `SessionAssign`: SC:726-816. The host clock touches (`origin_ = now()` at
-  770/797/807) become `hooks.numbering_restarted()`. Headless resets `origin_`
-  there. Retail does nothing, because `fixed_tick_` counts its own ticks and
+  770/797/807) become `hooks.numbering_restarted(site)`, the site being
+  `assign_resync`, `assign_renumber` or `assign_release` (E0: each is its
+  own clock read in the capture). Headless resets `origin_` there with
+  `wall_now(site)`. Retail does nothing, because `fixed_tick_` counts its own ticks and
   holds through `set_hold`.
 - `SessionSnapshot`: `apply_snapshot`, SC:2757-2981.
 - `SessionEvent`: intake, SC:824-856.
@@ -443,7 +446,7 @@ value, as the free functions do today.
 |---|---|---|---|
 | **transport and time** | | | |
 | send | `void(const std::string& bytes, send_mode)` | `send_bytes` → `SendMessageToConnection` (SC:969-971) | `client::send` (client.h:52) |
-| now | `steady_clock::time_point()` | `clock_type::now()` | `steady_clock::now()` |
+| now | `steady_clock::time_point(clock_site)`: the site is the read's place in the flow (`session/clock_site.hpp`, E0) | `wall_now(site)`: `clock_type::now()`, captured or replayed by site | `steady_clock::now()`; the site is ignored |
 | log | `void(log_level, const std::string&)` | `logf` (stdout; the harness parses it, so the text is kept verbatim) | `logger_->Info/Warn` |
 | **reading the world** | | | |
 | body_state | `bool(const std::string& entity, body_state&)` | `get_body_state(physics, …)` | `physics_view_.get_body_state` |
@@ -487,7 +490,7 @@ value, as the free functions do today.
 | **host hooks** (all optional, H) | | | |
 | hooks.after_rewinds / after_record / after_amend / after_journal | `void(uint32_t tick)` | `maybe_force_rollback`, `dump_savestate`, traces, `report_queued_impulses` | a forced-rollback verb (R0/R2), nothing else |
 | hooks.filter_event | `event_send_verdict(const session_event_msg&)`: send / hold / drop | `--hold-event` (SC:2662-2703); the host later calls `core.release_event` | empty |
-| hooks.numbering_restarted | `void()` | `origin_ = now()` | empty |
+| hooks.numbering_restarted | `void(clock_site)`: `assign_resync`, `assign_renumber` or `assign_release` | `origin_ = wall_now(site)` | empty |
 | hooks.window / hooks.status | `void(const std::string&)` | `logf` | the log, plus the F3 overlay reads `status_text` |
 
 **What the host feeds the core, and when.**
@@ -831,6 +834,109 @@ at every step, and the four-client A/B at the steps §6.1 names.
    under the (2) exclusions. This is the only exact check of the snapshot
    path, the relay, the lifecycle drain and the union under loss; the
    §5.3 A/B stays as the live check.
+
+**As built (step E0).** Where the code made (5) and (2) differ from the
+text above:
+
+- **The unit is a main-loop pass, not a frame.** `inbound_capture.hpp`
+  (`BallanceMMOServer/sim/`) writes, in order: `I` at the start of every
+  pass of `run()` (its index and the steps before it, a step being a
+  `load_step()` or `frame()` call: the frame index), `M` every message
+  `poll_incoming_messages` handled, `S` every connection state change, `C`
+  every wall-clock read with its site. A replay re-runs the same passes,
+  with no sleeping. A frame-indexed feed could not reproduce the session:
+  the slew advances once per *pass* with the wall time since the previous
+  one, `hold_polls_` counts passes, `release_held_events` runs per pass,
+  and the hold timeout, the rebase (and its `request_resync`) and "wait or
+  step" are decided per pass.
+- **The pacer's reads are captured too**, not only those "outside the
+  pacer". All 23 sites are in `bmmo::session::clock_site`
+  (`BallanceMMOCommon/include/session/clock_site.hpp`, so the core can name
+  them; `inbound_capture.hpp`'s `wall_site` is an alias, and the values are
+  the file format): the run limit and report clock,
+  the Ready limiter, the three SessionAssign origins, the anchor origin and
+  hold deadline, the hold poll and timeout, the schedule, rebase and due
+  reads, the slew's two, the `--hold-event` stamp and release, the resync
+  limiter, `journal_ms`, `journal_start`, the header's `utc_ms` and
+  `last_report_`'s initial value. A replay therefore takes every pacer
+  decision the live run took.
+- **A read that moves into the core keeps its site.** The replay hands a
+  captured value only to a read at the same site, so the core cannot read
+  a site-less clock. §2.2 is amended to match: the platform op is
+  `now(clock_site)` (headless: `wall_now(site)`; retail ignores the
+  argument), and the hook is `numbering_restarted(clock_site)`, called with
+  `assign_resync`, `assign_renumber` or `assign_release` (headless:
+  `origin_ = wall_now(site)`). So `journal_ms` moving into the core's
+  journal at E2 reads `now(clock_site::journal_ms)`, the resync limiter at
+  E3 `now(clock_site::resync_limiter)`, and so on for `hold_poll`,
+  `anchor_hold`, `slew_start` and `slew_step` at E3/E5/E9. The order of
+  the reads must not change either.
+- **Not captured:** the login uuid's seed (it only shapes bytes that are
+  sent) and the rollback engine's CPU timings (`t_rest`, `t_rep`, `t_cap`:
+  status line only). A replay's log differs from the live log in those
+  fields, the journal path and GNS's "connected" line, and in nothing else.
+- **A replay checks itself.** A clock read at a site other than the
+  capture's next, a pass with another step count, a pass the live run
+  never started (the end marker met at a pass start: the live run ended
+  inside its last pass), or records left at the end prints
+  `replay-inbound: DIVERGED ...` and exits 3. Only a capture without an
+  end marker (the live run was killed) ends softly. A capture whose write
+  failed gets no end marker and logs `capture-inbound: WRITE FAILED`. A
+  replay whose arguments differ from those in the capture's header (apart
+  from `--server`, `--journal`, the capture flags and `--record`'s path)
+  logs a warning that names the first difference. A change inside a
+  frame that keeps the control flow shows in the journal comparison
+  instead. Negative control: replaying swing client 0 with `--no-savestate`
+  diverges at tick 249, and 3213 of 3435 TICK records differ.
+- **Results.** There are four capture runs:
+  - a swing bay with snapshots on (the beam arm of `runs_lp20.sh`);
+  - A6m with snapshots off and a held own birth;
+  - the §5.3 forced-resync arm (`resync_snapoff`), which covers a rebase,
+    the resync limiter and the re-assignment on all four clients;
+  - A5u with the lead on (`a5u_lead`), where client 2 has a SessionLead
+    slew.
+
+  All 16 client journals replay **byte-identical to the live journal,
+  twice**. Together the captures cover every clock site except
+  `hold_timeout`, which no server run produces. They do not cover the
+  limiter's held-back branches ("resync owed", or a request while one is
+  in flight). The README lists the sites each capture covers. A replay
+  refuses to run (exit 4) when the game data it reads (`base.cmo`,
+  `Database.tdb`, `3D Entities/**`) differs from the sha256 pins in
+  `pins.json`. That
+  includes `build_id`, `utc_ms` and the TICK `ms`, since the binary is the
+  same and the clock is the captured one. The captures, journals, drive
+  records, a README with the commands and the tools (`e0_replay.py`,
+  `e0_compare.py`, `e0_replay_all.sh`, `e0_logfmt.py`) are in
+  `maps/arena-test/core_ref_e0/`. "Old" for the later E steps is the E0
+  binary: it carries the capture. A moved clock read must keep its site
+  and its place in the order.
+- **(2) cannot be byte-identical outside `build_id`, `utc_ms` and `ms`,
+  even for two old runs.** Three more things differ between live runs,
+  and none of them is the world:
+  - the own player id: the server assigns it per connection, and it
+    appears in the header, the start note, the own INPUT records and the
+    checkpoint owners;
+  - the length: `--seconds` is wall-clock;
+  - where a RECEIVED checkpoint lands: with snapshots off the server
+    still sends a few full snapshots, and each is written on arrival.
+
+  `e0_compare.py --live` maps the own id to OWN and compares up to the
+  shorter run's last tick. It compares the received snapshots as an
+  ordered list by content, and every other record field by field. Under
+  that comparison, old-old, old-new and old against new-with-capture are
+  identical: TICK hash and pose at every tick from the anchor to the end,
+  every LOCAL checkpoint and every other record.
+- **(1) is only valid when no run starved.** In the solo check the client
+  runs about 0.1 tick ahead of the server. A run in which the server
+  starved of the client's input (`input: ... starved=` above 0)
+  substitutes that input, and the snapshots move the own ball. Two of
+  three attempts after the review showed a MISMATCH this way: one starved
+  arm, then a starved control. HEAD's binary starved too. The third
+  attempt had no starvation and was EXACT on all three pairs.
+- **(4)** The new literals are the eleven `capture-inbound:` /
+  `replay-inbound:` lines of the opt-in modes (176 old literals, 187 new).
+  No existing literal changed.
 
 ### 5.3 Four-client A/B in the same batch
 
