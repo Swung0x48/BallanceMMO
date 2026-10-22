@@ -842,6 +842,18 @@ at every step, and the four-client A/B at the steps §6.1 names.
    under the (2) exclusions. This is the only exact check of the snapshot
    path, the relay, the lifecycle drain and the union under loss; the
    §5.3 A/B stays as the live check.
+6. **The wire check (from E4 on).** A replay sends nothing, so (5) cannot
+   see what the flow puts on the wire. `--trace-sends <file>` (SC, added
+   after E3) writes one line per payload, the tick, the Steam flags, the
+   size and an FNV-1a 64 of the bytes, before the replay's early return, so
+   a replay writes it too. The build id inside SessionReady (and its length)
+   is replaced by a fixed token before hashing, since any two builds differ
+   there. Each E step replays the 16 captures with old and new, both with
+   the trace (`wire_check.sh OLD NEW TAG` in the tools), and the traces
+   must match line for line, except the first 36-byte send: the login,
+   whose uuid comes from the system clock, which the capture does not hold.
+   E3 ran the same check with a temporary copy of the trace: 62898 sends
+   equal.
 
 **As built (step E0).** Where the code made (5) and (2) differ from the
 text above:
@@ -1031,6 +1043,38 @@ A step passes an arm when:
 - **When the batch is void.** If both runs of an O pair or of an N pair are
   void twice, the step waits for a quiet host. It does not judge on noisy
   numbers.
+
+**The pass rule on this host (from E4 on).** E3 showed that the band rule
+cannot be met here. At 150 ms every client falls 33 ticks behind while it
+rolls back for corrected inputs, and rebases once, at a tick that moves from
+run to run. Which regime a run lands in decides most metrics. Two old runs
+fail the rule against each other (34 to 88 metrics out of band), even though
+the logic is exact under the captured clocks. An E step is therefore judged
+on three things:
+
+1. **The exact checks of §5.2 (2) to (6).** They are the proof that the
+   behaviour has not changed.
+2. **CPU parity.**
+   - Replay the four captures of `resync_snapoff` at once, unpaced, two
+     rounds per binary, alternating old and new, and record the wall time of
+     each.
+   - The new times must lie within the old range, widened by its spread plus
+     3 %.
+   - CPU is the one thing a host-side move can change that the exact checks
+     do not see, and a slower step would move the rebase.
+3. **The row's arms, as a live check.** One batch, O1 N1 O2 N2, with the
+   host-load guard. Each run lists its clients' rebase ticks. The step
+   passes an arm when all of these hold:
+   - no client crashes, and every client reaches the end;
+   - every server journal replays with rc 0 and 0 checkpoint mismatches;
+   - `far`, `overtaken`, `unmatched`, `lead_adj`, and the late mirror stay 0
+     in both N runs wherever they are 0 in both O runs;
+   - each N run's harness criteria equal those of an O run of the same arm,
+     in this batch or an earlier batch of the same arm.
+
+   The band rule is still computed and reported, but it does not decide the
+   step. A metric outside the band must be traced to a rebase tick. Any
+   difference that is not traced to one fails the step.
 
 ## 6. Migration plan
 

@@ -299,6 +299,11 @@ namespace {
         // no network and nothing sent.  Off by default.
         std::string capture_inbound;
         std::string replay_inbound;
+        // --trace-sends FILE: one line per payload the session flow sends
+        // (tick, Steam flags, size, FNV-1a 64), written in a replay too, where
+        // nothing reaches the wire: the replay's check of the sends.  Off by
+        // default.
+        std::string trace_sends;
     };
 
     // The record's keys (scripts/arena_map_test.py write_drive_record) are
@@ -318,7 +323,8 @@ namespace {
                   "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--park-births] [--insert-births]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)\n"
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
-                  "replay them, unpaced, sending nothing)");
+                  "replay them, unpaced, sending nothing)\n"
+                  "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)");
     }
 
     const char* event_type_name(int type) {
@@ -455,6 +461,7 @@ namespace {
             }
             else if (arg == "--capture-inbound") { if (!(v = next())) return false; out.capture_inbound = v; }
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
+            else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
             else if (arg == "--beam") {
                 for (int k = 0; k < 3; ++k) {
@@ -659,6 +666,13 @@ namespace {
                     logf("replay-inbound: warning: the arguments differ from the capture's (%s); a divergence may be "
                          "the command line, not the code", differ.c_str());
             }
+            if (!args_.trace_sends.empty()) {
+                send_trace_ = std::fopen(args_.trace_sends.c_str(), "wb");
+                if (!send_trace_) {
+                    logf("trace-sends: cannot open %s", args_.trace_sends.c_str());
+                    return false;
+                }
+            }
             return true;
         }
 
@@ -679,7 +693,8 @@ namespace {
                 std::vector<std::string> kept;
                 for (size_t i = 1; i < out.size(); ++i) {
                     const std::string& w = out[i];
-                    if (w == "--server" || w == "--journal" || w == "--capture-inbound" || w == "--replay-inbound") {
+                    if (w == "--server" || w == "--journal" || w == "--capture-inbound" || w == "--replay-inbound" ||
+                        w == "--trace-sends") {
                         ++i;
                         continue;
                     }
@@ -1147,10 +1162,35 @@ namespace {
                          inbound_.complete() ? "the capture's end marker reached" : "the capture had no end marker");
                 }
             }
+            if (send_trace_) {
+                std::fclose(send_trace_);
+                send_trace_ = nullptr;
+            }
         }
 
         // ------------------------------------------------------ networking
+        // --trace-sends: before the replay's early return, so a replay's sends
+        // can be compared with another binary's.  The build id (SessionReady
+        // carries it, a uint16 length and the string) differs between any two
+        // builds, so it and its length are replaced by a fixed token first;
+        // the size printed is the masked one.
+        void trace_send(const void* data, size_t size, int flags) {
+            if (!send_trace_) return;
+            std::string bytes(static_cast<const char*>(data), size);
+            const std::string id = std::string(bmmo::physics::build_id()).substr(0, bmmo::session::MAX_NAME);
+            const size_t at = id.empty() ? std::string::npos : bytes.find(id);
+            if (at != std::string::npos && at >= 2 &&
+                static_cast<unsigned char>(bytes[at - 2]) == (id.size() & 0xff) &&
+                static_cast<unsigned char>(bytes[at - 1]) == (id.size() >> 8))
+                bytes.replace(at - 2, id.size() + 2, "<build-id>");
+            uint64_t h = 1469598103934665603ull;
+            for (unsigned char c : bytes) { h ^= c; h *= 1099511628211ull; }
+            std::fprintf(send_trace_, "%u %d %zu %016llx\n", static_cast<unsigned>(core_.current_tick()), flags,
+                         bytes.size(), static_cast<unsigned long long>(h));
+        }
+
         void send_bytes(const std::string& bytes, int flags) {
+            trace_send(bytes.data(), bytes.size(), flags);
             if (inbound_.replaying()) return;   // a replay sends nothing
             interface_->SendMessageToConnection(connection_, bytes.data(), static_cast<uint32_t>(bytes.size()), flags, nullptr);
         }
@@ -1162,6 +1202,7 @@ namespace {
             bmmo::hex_chars_from_string(msg.content.map.md5, bmmo::map::original_map_hashes[std::clamp(args_.level, 0, 13)]);
             msg.content.sector = 1;
             msg.content.type = bmmo::current_map_state::EnteringMap;
+            trace_send(&msg, sizeof(msg), k_nSteamNetworkingSend_Reliable);
             if (inbound_.replaying()) return;
             interface_->SendMessageToConnection(connection_, &msg, sizeof(msg), k_nSteamNetworkingSend_Reliable, nullptr);
         }
@@ -5311,6 +5352,7 @@ namespace {
         uint64_t flow_pass_ = 0;
         uint64_t flow_steps_ = 0;
         bool inbound_failed_ = false;
+        std::FILE* send_trace_ = nullptr;   // --trace-sends
 
         uint8_t snapshot_interval_ = 2;
         int restore_traces_ = 0;
