@@ -42,6 +42,7 @@
 #include <physics/ball_navigation.hpp>
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_direct.hpp>
+#include <session/client_core.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
 #include <physics/physics_state.hpp>
@@ -486,6 +487,14 @@ namespace {
         std::fflush(stdout);
     }
 
+    // One line written as it is, as logf writes a formatted one: the shared
+    // core's log operation (it formats the text itself).
+    void log_line(const std::string& text) {
+        std::fputs(text.c_str(), stdout);
+        std::putchar('\n');
+        std::fflush(stdout);
+    }
+
     void copy_name(char* dst, size_t size, const std::string& src) {
         std::snprintf(dst, size, "%s", src.c_str());
     }
@@ -564,6 +573,10 @@ namespace {
         friend class own_physicalize_callback;
     public:
         explicit session_client(arguments args) : args_(std::move(args)) {}
+        // make_platform() hands core_ lambdas that hold `this`: a moved (or
+        // copied) client would leave them calling into the old object.
+        session_client(session_client&&) = delete;
+        session_client& operator=(session_client&&) = delete;
 
         // A fresh engine at the main menu.  Also used when a session starts
         // while the previous level is still loaded (host restart): the menu
@@ -612,7 +625,7 @@ namespace {
 
         int exit_code() const {
             if (inbound_failed_) return 3;
-            const auto& st = corrector_.stats();
+            const auto& st = core_.s.corrector_.stats();
             return (st.blended + st.hard + st.unmatched) == 0 ? 0 : 2;
         }
 
@@ -632,7 +645,7 @@ namespace {
                     stopped = "the client's time limit was reached";
                     break;
                 }
-                switch (phase_) {
+                switch (core_.s.phase_) {
                 case phase::idle:
                     wall_sleep(std::chrono::milliseconds(5));
                     break;
@@ -789,8 +802,8 @@ namespace {
                 bmmo::login_accepted_v3_msg msg;
                 if (!fill(msg)) return;
                 for (const auto& [id, data]: msg.online_players)
-                    if (data.name == args_.name) own_id_ = id;
-                logf("logged in (own id %u, %zu online)", own_id_, msg.online_players.size());
+                    if (data.name == args_.name) core_.s.own_id_ = id;
+                logf("logged in (own id %u, %zu online)", core_.s.own_id_, msg.online_players.size());
                 announce_map();
                 if (args_.host) room_request(bmmo::room::action::Create, 0, "headless");
                 else room_request(bmmo::room::action::List, 0);
@@ -828,53 +841,53 @@ namespace {
             case bmmo::SessionAssign: {
                 bmmo::session_assign_msg msg;
                 if (!fill(msg)) return;
-                if (msg.session != session_ || phase_ != phase::running) return;
+                if (msg.session != core_.s.session_ || core_.s.phase_ != phase::running) return;
                 // The server sends an assignment several times, unreliably,
                 // beside the reliable one (a lost reliable copy used to arrive
                 // ~400 ms late and start this client that far behind for good):
                 // a copy of the one already applied changes nothing.
                 // ...and a copy of an older one (a resync's base is always
                 // newer than the start's) must not be taken for a re-assignment.
-                if (assigned_ && static_cast<int32_t>(msg.first_tick - last_assign_first_tick_) <= 0) {
-                    ++duplicate_assigns_;
+                if (core_.s.assigned_ && static_cast<int32_t>(msg.first_tick - core_.s.last_assign_first_tick_) <= 0) {
+                    ++core_.s.duplicate_assigns_;
                     return;
                 }
-                last_assign_first_tick_ = msg.first_tick;
+                core_.s.last_assign_first_tick_ = msg.first_tick;
                 // A newer base answers every resync asked for so far, and any
                 // the limiter still owes: its full snapshot replaces the world.
-                resync_in_flight_ = false;
-                resync_owed_ = false;
-                if (assigned_) {
+                core_.s.resync_in_flight_ = false;
+                core_.s.resync_owed_ = false;
+                if (core_.s.assigned_) {
                     // Resync (design 9.2): numbering restarts from the server's
                     // current tick; the next full snapshot rebuilds every body.
-                    tick_base_ = msg.first_tick;
-                    held_floor_ = tick_base_;
+                    core_.s.tick_base_ = msg.first_tick;
+                    core_.s.held_floor_ = core_.s.tick_base_;
                     reset_held_epoch();
-                    frames_since_anchor_ = 0;
-                    input_history_.clear();
-                    corrector_.clear();
-                    for (auto& [name, corrector]: mechanism_correctors_) corrector.clear();
-                    for (auto& [id, remote]: remotes_) remote.corrector.clear();
+                    core_.s.frames_since_anchor_ = 0;
+                    core_.s.input_history_.clear();
+                    core_.s.corrector_.clear();
+                    for (auto& [name, corrector]: core_.s.mechanism_correctors_) corrector.clear();
+                    for (auto& [id, remote]: core_.s.remotes_) remote.corrector.clear();
                     // A renumbering makes every record unreachable: no incoming
                     // snapshot can match a tick of the old base (design 9.25 -
                     // the retail mod does this in rebase_tick).  The registry
                     // goes with it: its rows are keyed by the old numbers.
-                    rollback_.invalidate_history();
+                    core_.s.rollback_.invalidate_history();
                     // An own beam the new numbering has not reached yet is the
                     // server's to apply at its stamp, and so ours: live once
                     // more, rather than retired with the history.  The births
                     // go: the full snapshot puts the server's own ball in.
                     rebase_own_lives();
-                    own_inputs_.clear();
-                    mechanism_tracking_.clear();
-                    resync_pending_ = true;
-                    have_snapshot_ = false;
+                    core_.s.own_inputs_.clear();
+                    core_.s.mechanism_tracking_.clear();
+                    core_.s.resync_pending_ = true;
+                    core_.s.have_snapshot_ = false;
                     origin_ = wall_now(bmmo::sim::wall_site::assign_resync);
-                    logf("resynced: tick base %u", tick_base_);
-                    journal_note("resync: tick base " + std::to_string(tick_base_));
+                    logf("resynced: tick base %u", core_.s.tick_base_);
+                    journal_note("resync: tick base " + std::to_string(core_.s.tick_base_));
                     break;
                 }
-                assigned_ = true;
+                core_.s.assigned_ = true;
                 // A numbered base is the ordinary case: the server anchors the
                 // members present at the start at its start lead and a late
                 // joiner (or a resync) at its current tick plus the same lead,
@@ -884,57 +897,57 @@ namespace {
                 // case left over: a server that still numbers a start member
                 // from its own anchor leaves the numbering alone.
                 if (msg.first_tick != 0) {
-                    frames_since_anchor_ = 0;
-                    input_history_.clear();
+                    core_.s.frames_since_anchor_ = 0;
+                    core_.s.input_history_.clear();
                     // Same as the resync above: the frames recorded under the
                     // anchor-relative numbering name ticks the server never
                     // asked us for, and nothing can match them again.
-                    rollback_.invalidate_history();
-                    own_inputs_.clear();
+                    core_.s.rollback_.invalidate_history();
+                    core_.s.own_inputs_.clear();
                     // ...and our own body changes, numbered the same way
                     // (an unanswered birth is set aside for its echo).
                     set_aside_unanswered(own_life::aside::resync);
-                    own_life_.clear();
-                    mechanism_tracking_.clear();
+                    core_.s.own_life_.clear();
+                    core_.s.mechanism_tracking_.clear();
                     origin_ = wall_now(bmmo::sim::wall_site::assign_renumber);
                 }
-                tick_base_ = msg.first_tick;
-                held_floor_ = tick_base_;
+                core_.s.tick_base_ = msg.first_tick;
+                core_.s.held_floor_ = core_.s.tick_base_;
                 reset_held_epoch();
                 // The anchor hold ends here: the next frame is the world's
                 // first step and it is numbered `tick_base_`, exactly like the
                 // server's own first step (design 9.25 phase alignment).
-                if (held_) {
-                    held_ = false;
+                if (core_.s.held_) {
+                    core_.s.held_ = false;
                     origin_ = wall_now(bmmo::sim::wall_site::assign_release);
-                    logf("anchor hold released after %d polls: the first frame is tick %u", hold_polls_, tick_base_);
-                    journal_note("anchor hold released at tick base " + std::to_string(tick_base_));
+                    logf("anchor hold released after %d polls: the first frame is tick %u", core_.s.hold_polls_, core_.s.tick_base_);
+                    journal_note("anchor hold released at tick base " + std::to_string(core_.s.tick_base_));
                 }
-                logf("tick base %u assigned (%lld frames since anchor)", tick_base_, static_cast<long long>(frames_since_anchor_));
-                journal_note("assigned: tick base " + std::to_string(tick_base_) + " ("
-                             + std::to_string(frames_since_anchor_) + " frames since the anchor)");
+                logf("tick base %u assigned (%lld frames since anchor)", core_.s.tick_base_, static_cast<long long>(core_.s.frames_since_anchor_));
+                journal_note("assigned: tick base " + std::to_string(core_.s.tick_base_) + " ("
+                             + std::to_string(core_.s.frames_since_anchor_) + " frames since the anchor)");
                 flush_inputs();
                 break;
             }
             case bmmo::SessionSnapshot: {
                 bmmo::session_snapshot_msg msg;
                 if (!fill(msg)) return;
-                ++snapshots_received_;
-                if (msg.session == session_ && phase_ == phase::running) apply_snapshot(msg);
+                ++core_.s.snapshots_received_;
+                if (msg.session == core_.s.session_ && core_.s.phase_ == phase::running) apply_snapshot(msg);
                 break;
             }
             case bmmo::SessionEvent: {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
-                ++events_received_;
-                if (msg.session != session_ || phase_ != phase::running) break;
+                ++core_.s.events_received_;
+                if (msg.session != core_.s.session_ || core_.s.phase_ != phase::running) break;
                 // The server sends every event several times (protocol 6): the
                 // first arrival is the event, the rest are nothing.  Judged
                 // only once this client runs: an event relayed while it loads
                 // is dropped, and the server's catch-up after SessionReady
                 // sends the same bytes again - those must not read as copies.
-                if (!event_seen_.first(bmmo::session::lifecycle_key_of(msg, msg.player))) {
-                    ++event_dups_;
+                if (!core_.s.event_seen_.first(bmmo::session::lifecycle_key_of(msg, msg.player))) {
+                    ++core_.s.event_dups_;
                     break;
                 }
                 // Protocol 9: the server relays every event to every member,
@@ -944,8 +957,8 @@ namespace {
                 // own birth is then moved inside our history (late-player
                 // design 3.3).  Handled in the frame, before its other
                 // rewinds (process_own_echoes), not here between two frames.
-                if (msg.player == own_id_ && own_id_ != 0) {
-                    own_echoes_.push_back(std::move(msg));
+                if (msg.player == core_.s.own_id_ && core_.s.own_id_ != 0) {
+                    core_.s.own_echoes_.push_back(std::move(msg));
                     break;
                 }
                 // Queued, not applied here: an event applied on arrival lands
@@ -953,17 +966,17 @@ namespace {
                 // and in network arrival order, while the server applies every
                 // due event before its step in the members' join order.  The
                 // drain in frame() matches the server; see drain_due_events.
-                pending_events_.push_back(std::move(msg));
+                core_.s.pending_events_.push_back(std::move(msg));
                 break;
             }
             case bmmo::SessionRemoteInput: {
                 bmmo::session_remote_input_msg msg;
                 if (!fill(msg)) return;
-                ++remote_inputs_received_;
-                if (msg.session != session_) return;
+                ++core_.s.remote_inputs_received_;
+                if (msg.session != core_.s.session_) return;
                 note_held_section(msg);
                 for (const auto& entry: msg.entries) {
-                    auto it = remotes_.find(entry.player);
+                    auto it = core_.s.remotes_.find(entry.player);
                     // The journal's PLAYER record goes in at the oldest tick this
                     // entry covers, so no INPUT record of the player can precede
                     // it in tick order (a replay needs the player before its
@@ -975,26 +988,26 @@ namespace {
                         // The window re-delivers a frame up to relay_window
                         // times: the first arrival is the truth, the rest change
                         // nothing (no record, no correction, no predictor move).
-                        if (!relay_seen_.first(entry.player, tick)) { ++relay_dup_; continue; }
-                        ++relay_new_;
+                        if (!core_.s.relay_seen_.first(entry.player, tick)) { ++core_.s.relay_dup_; continue; }
+                        ++core_.s.relay_new_;
                         // How late the first arrival is, in ticks already
                         // simulated: what the rollback has to reach to apply it.
-                        if (assigned_ && static_cast<int32_t>(current_tick() - tick) > 0) {
+                        if (core_.s.assigned_ && static_cast<int32_t>(current_tick() - tick) > 0) {
                             const uint32_t lag = current_tick() - tick;
-                            relay_lag_max_ = std::max(relay_lag_max_, lag);
-                            ++relay_lag_hist_[std::min<uint32_t>(lag, kRelayLagBuckets - 1)];
-                            ++window_lag_[entry.player][lag];
+                            core_.s.relay_lag_max_ = std::max(core_.s.relay_lag_max_, lag);
+                            ++core_.s.relay_lag_hist_[std::min<uint32_t>(lag, kRelayLagBuckets - 1)];
+                            ++core_.s.window_lag_[entry.player][lag];
                         }
                         // What the server applied for that player at that tick,
                         // whether or not this client mirrors the ball.
                         if (journalling())
-                            journal_.input(tick, entry.player, frame, bmmo::session::JOURNAL_INPUT_RELAYED);
-                        if (it == remotes_.end()) {
+                            core_.s.journal_.input(tick, entry.player, frame, bmmo::session::JOURNAL_INPUT_RELAYED);
+                        if (it == core_.s.remotes_.end()) {
                             // No mirror yet: the datagram beat the Physicalize
                             // here (the ordered stream used to mask this).  Parked
                             // by tick, moved into the ring when the mirror is made.
-                            pending_relay_.store(entry.player, tick, frame);
-                            ++relay_parked_;
+                            core_.s.pending_relay_.store(entry.player, tick, frame);
+                            ++core_.s.relay_parked_;
                             continue;
                         }
                         auto& remote = it->second;
@@ -1020,7 +1033,7 @@ namespace {
             case bmmo::SessionLead: {
                 bmmo::session_lead_msg msg;
                 if (!fill(msg)) return;
-                if (msg.session != session_ || phase_ != phase::running) break;
+                if (msg.session != core_.s.session_ || core_.s.phase_ != phase::running) break;
                 on_session_lead(msg);
                 break;
             }
@@ -1028,7 +1041,7 @@ namespace {
                 bmmo::session_end_msg msg;
                 if (!fill(msg)) return;
                 logf("session %u ended: %s", msg.session, msg.reason.c_str());
-                if (msg.session == session_) end_session(msg.reason.empty() ? "session ended" : msg.reason);
+                if (msg.session == core_.s.session_) end_session(msg.reason.empty() ? "session ended" : msg.reason);
                 break;
             }
             case bmmo::PlainText: {
@@ -1042,30 +1055,33 @@ namespace {
         }
 
     private:
-        enum class phase { idle, loading, running };
+        // The core's state and its types moved to session/client_core.hpp
+        // (shared-core design step E1); reached as core_.s.<member>.
+        using phase = bmmo::session::client_core_state::phase;
+        using remote_ball = bmmo::session::client_core_state::remote_ball;
+        using forced_own = bmmo::session::client_core_state::forced_own;
+        using applied_death = bmmo::session::client_core_state::applied_death;
+        using window_base = bmmo::session::client_core_state::window_base;
 
-        struct remote_ball {
-            std::string entity;
-            uint8_t ball_type = 0;
-            bool physicalized = false;
-            bool navigation = false;        // driven by the shared navigation (design 9.1)
-            bool have_input = false;
-            uint32_t input_tick = 0;
-            bmmo::session::input_frame input{};
-            bmmo::session::input_frame applied{};
-            // The first tick this world stepped the current body: the stamp of
-            // a birth made inside a replay, the live tick after the frame that
-            // made it otherwise.  Its record is the body's birth record, which
-            // every rewind across it re-poses the body to.
-            uint32_t born_tick = 0;
-            // The first tick a replay drives it from (rollback_world::
-            // replay_remotes): born_tick, or the tick its navigation was
-            // attached when that came later.
-            uint32_t driven_from = 0;
-            std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
-            bmmo::session::body_corrector corrector;
-            uint64_t blends = 0, hard_sets = 0;
-        };
+        // ------------------------------------------- the core's platform
+        // The headless platform (shared-core design 2.2): the operations the
+        // core calls, each the call this client makes today.  E1 starts it
+        // with send, now and log; the steps that move code add the rest.
+        bmmo::session::session_platform make_platform() {
+            bmmo::session::session_platform p;
+            p.send = [this](const std::string& bytes, bmmo::session::send_mode mode) {
+                int flags = k_nSteamNetworkingSend_Reliable;
+                if (mode == bmmo::session::send_mode::reliable_no_nagle) flags = k_nSteamNetworkingSend_ReliableNoNagle;
+                else if (mode == bmmo::session::send_mode::unreliable_no_delay) flags = k_nSteamNetworkingSend_UnreliableNoDelay;
+                send_bytes(bytes, flags);
+            };
+            p.now = [this](bmmo::session::clock_site site) { return wall_now(site); };
+            p.log = [](bmmo::session::log_level, const std::string& text) { log_line(text); };
+            return p;
+        }
+        // Declared as each capability's operations arrive (design 2.3): none
+        // is read before E3.
+        static bmmo::session::session_capabilities make_capabilities() { return {}; }
 
         // ------------------------------------------------- inbound capture
         // The wall clock as the session flow reads it: the live clock, written
@@ -1242,7 +1258,7 @@ namespace {
             room_id_ = msg.own_room;
             bool own_ready = true;
             for (const auto& m: msg.members)
-                if (m.id == own_id_) own_ready = m.ready;
+                if (m.id == core_.s.own_id_) own_ready = m.ready;
             if (!own_ready) {
                 // First time, or the room went back to the lobby (session ended
                 // by the server, host restart): ready again, at most once a second.
@@ -1280,91 +1296,91 @@ namespace {
             // A box of the previous session is closed with its own numbering,
             // before begin_session resets the tick base under it.
             close_journal("a new session started");
-            rollback_.set_verbose(args_.trace);
-            rollback_.set_recheck_on_restore(args_.restore_recheck);
-            rollback_.set_two_pass_recheck(args_.two_pass_recheck);
-            rollback_.set_restore_impulses(args_.restore_impulses);
-            rollback_.set_restore_quaternions(args_.restore_quaternions);
-            rollback_.set_restore_clock(args_.restore_clock);
-            rollback_.set_restore_calm(args_.restore_calm);
-            rollback_.set_restore_unit(args_.restore_unit);
-            rollback_.set_restore_contacts(args_.restore_contacts);
-            rollback_.set_contact_flags(args_.contact_flags);
-            rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
-            rollback_.set_replay_scripts(args_.script_replay);
-            rollback_.set_exact_restore(args_.savestate);
-            rollback_.set_script_log_cap(args_.script_diff_logs);
-            rollback_.set_trace_plan(args_.trace_plan);
-            session_ = msg.session;
+            core_.s.rollback_.set_verbose(args_.trace);
+            core_.s.rollback_.set_recheck_on_restore(args_.restore_recheck);
+            core_.s.rollback_.set_two_pass_recheck(args_.two_pass_recheck);
+            core_.s.rollback_.set_restore_impulses(args_.restore_impulses);
+            core_.s.rollback_.set_restore_quaternions(args_.restore_quaternions);
+            core_.s.rollback_.set_restore_clock(args_.restore_clock);
+            core_.s.rollback_.set_restore_calm(args_.restore_calm);
+            core_.s.rollback_.set_restore_unit(args_.restore_unit);
+            core_.s.rollback_.set_restore_contacts(args_.restore_contacts);
+            core_.s.rollback_.set_contact_flags(args_.contact_flags);
+            core_.s.rollback_.set_sleep_as_recorded(args_.sleep_as_recorded);
+            core_.s.rollback_.set_replay_scripts(args_.script_replay);
+            core_.s.rollback_.set_exact_restore(args_.savestate);
+            core_.s.rollback_.set_script_log_cap(args_.script_diff_logs);
+            core_.s.rollback_.set_trace_plan(args_.trace_plan);
+            core_.s.session_ = msg.session;
             snapshot_interval_ = msg.snapshot_interval;
-            input_delay_ = msg.input_delay;
-            sector_lead_ = msg.sector_lead;
-            seed_ = msg.seed;
-            spawn_impulse_ = msg.spawn_impulse;
-            spawn_spacing_ = msg.spawn_spacing;
-            level_ = msg.map.level > 0 ? msg.map.level : args_.level;
-            players_ = msg.players;
-            own_join_order_ = -1;
+            core_.s.input_delay_ = msg.input_delay;
+            core_.s.sector_lead_ = msg.sector_lead;
+            core_.s.seed_ = msg.seed;
+            core_.s.spawn_impulse_ = msg.spawn_impulse;
+            core_.s.spawn_spacing_ = msg.spawn_spacing;
+            core_.s.level_ = msg.map.level > 0 ? msg.map.level : args_.level;
+            core_.s.players_ = msg.players;
+            core_.s.own_join_order_ = -1;
             spawn_known_ = false;
-            for (const auto& p: players_) {
-                if (p.id != own_id_) continue;
-                own_join_order_ = p.join_order;
+            for (const auto& p: core_.s.players_) {
+                if (p.id != core_.s.own_id_) continue;
+                core_.s.own_join_order_ = p.join_order;
                 for (int k = 0; k < 3; ++k) spawn_position_[k] = p.spawn_position[k];
                 spawn_known_ = true;
             }
-            own_group_ = "P#" + std::to_string(own_join_order_ < 0 ? 63 : own_join_order_);
+            core_.s.own_group_ = "P#" + std::to_string(core_.s.own_join_order_ < 0 ? 63 : core_.s.own_join_order_);
             logf("session %u starting: level %d, %zu players, join order %d, seed %d, input delay %u, sector lead %u",
-                 session_, level_, players_.size(), own_join_order_, seed_, static_cast<unsigned>(input_delay_),
-                 static_cast<unsigned>(sector_lead_));
+                 core_.s.session_, core_.s.level_, core_.s.players_.size(), core_.s.own_join_order_, core_.s.seed_, static_cast<unsigned>(core_.s.input_delay_),
+                 static_cast<unsigned>(core_.s.sector_lead_));
             // Fresh runtime state.
-            assigned_ = false;
-            held_ = false;
-            hold_polls_ = 0;
-            tick_base_ = 0;
-            frames_since_anchor_ = -1;
-            input_history_.clear();
-            previous_cam_valid_ = false;
+            core_.s.assigned_ = false;
+            core_.s.held_ = false;
+            core_.s.hold_polls_ = 0;
+            core_.s.tick_base_ = 0;
+            core_.s.frames_since_anchor_ = -1;
+            core_.s.input_history_.clear();
+            core_.s.previous_cam_valid_ = false;
             navigation_known_ = false;
-            corrector_.clear();
-            mechanism_correctors_.clear();
-            mechanism_tracking_.clear();
-            generations_.clear();
+            core_.s.corrector_.clear();
+            core_.s.mechanism_correctors_.clear();
+            core_.s.mechanism_tracking_.clear();
+            core_.s.generations_.clear();
             local_births_.clear();
             manager_activations_.clear();
             activations_replayed_ = 0;
-            amend_failures_ = 0;
+            core_.s.amend_failures_ = 0;
             beam_done_ = false;
-            own_life_.clear();
-            own_echoes_.clear();
-            own_echoes_stale_.clear();
-            own_unanswered_.clear();
-            own_moved_unphysicalize_.clear();
-            held_lifecycle_.clear();
-            remotes_.clear();
-            relay_seen_.clear();
-            held_seen_.clear();
-            held_stale_seen_.clear();
-            held_header_known_ = false;
-            acked_header_known_ = false;
-            held_floor_ = 0;
+            core_.s.own_life_.clear();
+            core_.s.own_echoes_.clear();
+            core_.s.own_echoes_stale_.clear();
+            core_.s.own_unanswered_.clear();
+            core_.s.own_moved_unphysicalize_.clear();
+            core_.s.held_lifecycle_.clear();
+            core_.s.remotes_.clear();
+            core_.s.relay_seen_.clear();
+            core_.s.held_seen_.clear();
+            core_.s.held_stale_seen_.clear();
+            core_.s.held_header_known_ = false;
+            core_.s.acked_header_known_ = false;
+            core_.s.held_floor_ = 0;
             reset_held_epoch("a new session");
             // Decision ids are unique per player for a session's life; the
             // offset is this session's.
-            lead_seen_.clear();
-            lead_offset_ = 0;
-            pending_relay_.clear();
-            event_seen_.clear();
-            own_event_repeats_.clear();
-            remote_last_physicalize_.clear();
-            remote_last_unphysicalize_.clear();
+            core_.s.lead_seen_.clear();
+            core_.s.lead_offset_ = 0;
+            core_.s.pending_relay_.clear();
+            core_.s.event_seen_.clear();
+            core_.s.own_event_repeats_.clear();
+            core_.s.remote_last_physicalize_.clear();
+            core_.s.remote_last_unphysicalize_.clear();
             own_group_set_ = false;
-            own_physicalized_ = false;
-            own_body_entity_.clear();
+            core_.s.own_physicalized_ = false;
+            core_.s.own_body_entity_.clear();
             own_capture_.valid = false;
-            start_sector_pending_ = false;
-            sectors_.reset();
-            sectors_requested_.clear();
-            sector_cell_ = 0;
+            core_.s.start_sector_pending_ = false;
+            core_.s.sectors_.reset();
+            core_.s.sectors_requested_.clear();
+            core_.s.sector_cell_ = 0;
             scripts_.clear();
             script_reset_ticks_.clear();
             reset_guard_.restore(engine_->context());
@@ -1373,26 +1389,26 @@ namespace {
             std::string error;
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
-                logf("session %u: level still loaded, rebooting the engine", session_);
-                for (auto& [id, remote]: remotes_) {
+                logf("session %u: level still loaded, rebooting the engine", core_.s.session_);
+                for (auto& [id, remote]: core_.s.remotes_) {
                     if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 }
-                remotes_.clear();
-                relay_seen_.clear();
-                held_seen_.clear();
-                held_stale_seen_.clear();
-                pending_relay_.clear();
-                event_seen_.clear();
-                own_event_repeats_.clear();
-                remote_last_physicalize_.clear();
-                remote_last_unphysicalize_.clear();
+                core_.s.remotes_.clear();
+                core_.s.relay_seen_.clear();
+                core_.s.held_seen_.clear();
+                core_.s.held_stale_seen_.clear();
+                core_.s.pending_relay_.clear();
+                core_.s.event_seen_.clear();
+                core_.s.own_event_repeats_.clear();
+                core_.s.remote_last_physicalize_.clear();
+                core_.s.remote_last_unphysicalize_.clear();
                 if (!boot_engine()) { ended_ = true; return; }
             }
             engine_->clear_keys();
-            engine_->request_level(level_);
+            engine_->request_level(core_.s.level_);
             load_waited_ = 0;
             level_sequencers_.clear();
-            phase_ = phase::loading;
+            core_.s.phase_ = phase::loading;
         }
 
         void load_step() {
@@ -1422,7 +1438,7 @@ namespace {
         void anchor() {
             std::string error;
             CKIpionManager* physics = engine_->physics();
-            if (!bmmo::physics::reset_session_clock(physics, seed_, error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
+            if (!bmmo::physics::reset_session_clock(physics, core_.s.seed_, error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
             {
                 // Design 9.26: the mechanisms start from the level file's
                 // Sequencer counters on every side.
@@ -1445,9 +1461,9 @@ namespace {
             // the step of the tick each is due at.  Sector 1 is the level's own
             // on every side, and the anchor hash is unaffected: nothing is
             // activated before the server's world has.
-            sectors_requested_ = {1};
+            core_.s.sectors_requested_ = {1};
             if (CKDataArray* parameters = engine_->data_array("IngameParameter"))
-                parameters->GetElementValue(0, 1, &sector_cell_);
+                parameters->GetElementValue(0, 1, &core_.s.sector_cell_);
             // The script replay (game/script_replay.hpp): the mechanism scripts
             // whose state travels with the rollback records, and the hooks
             // that carry the force blocks' controllers through the bridge.
@@ -1492,30 +1508,30 @@ namespace {
                 checkpoint_held_ = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
                 if (checkpoint_held_)
                     logf("the level's checkpoint sector activation is held: a crossing is stamped %u ticks ahead",
-                         static_cast<unsigned>(sector_lead_));
+                         static_cast<unsigned>(core_.s.sector_lead_));
                 else
                     logf("the level's checkpoint sector activation was NOT held (%s): crossings activate here at "
                          "once and are reported after the fact - this client is out of lockstep on every sector it enters",
                          hold_error.c_str());
             }
             if (args_.start_sector > 0) {
-                start_sector_pending_ = true;
+                core_.s.start_sector_pending_ = true;
                 logf("--start-sector %d will be stamped %u ticks ahead of the first assigned frame", args_.start_sector,
-                     static_cast<unsigned>(sector_lead_));
+                     static_cast<unsigned>(core_.s.sector_lead_));
             }
-            frames_since_anchor_ = 0;
-            phase_ = phase::running;
+            core_.s.frames_since_anchor_ = 0;
+            core_.s.phase_ = phase::running;
             origin_ = wall_now(bmmo::sim::wall_site::anchor_origin);
             rebases_ = 0;
             // The window: line starts over with the session (its first call
             // takes the base, prints nothing), and --hold-event counts the
             // N-th own event of this session.
-            window_index_ = 0xFFFFFFFFu;
-            window_lag_.clear();
-            window_inrew_src_.clear();
+            core_.s.window_index_ = 0xFFFFFFFFu;
+            core_.s.window_lag_.clear();
+            core_.s.window_inrew_src_.clear();
             drop_pending_rewind();
-            resync_in_flight_ = false;
-            resync_owed_ = false;
+            core_.s.resync_in_flight_ = false;
+            core_.s.resync_owed_ = false;
             hold_event_seen_ = 0;
             // Hold the world here until the tick base arrives (design 9.25
             // phase alignment): the first frame this client steps must be the
@@ -1524,11 +1540,11 @@ namespace {
             // wait; nothing else in the frame runs, so no input, no journal
             // TICK record and no rollback record is made for a tick that does
             // not exist.
-            held_ = true;
-            hold_polls_ = 0;
-            hold_deadline_ = wall_now(bmmo::sim::wall_site::anchor_hold) + kAnchorHoldTimeout;
+            core_.s.held_ = true;
+            core_.s.hold_polls_ = 0;
+            core_.s.hold_deadline_ = wall_now(bmmo::sim::wall_site::anchor_hold) + kAnchorHoldTimeout;
             bmmo::session_ready_msg ready;
-            ready.session = session_;
+            ready.session = core_.s.session_;
             ready.first_tick = 0;
             ready.anchor_hash = hash.pose;
             ready.anchor_surfaces = hash.surfaces;
@@ -1549,7 +1565,7 @@ namespace {
         }
 
         // The lead the server sized for this session (SessionStart).
-        uint32_t sector_lead_ticks() const { return sector_lead_; }
+        uint32_t sector_lead_ticks() const { return core_.s.sector_lead_; }
 
         // A sector this client enters, as an input: stamped for `due`, sent at
         // once, and handed to the union, which starts it before the step of
@@ -1557,16 +1573,16 @@ namespace {
         // server does with the event, and every other member with its relay.
         // Once per sector per session.
         void hold_sector(int sector, uint32_t due, const char* why) {
-            if (sectors_requested_.count(sector)) return;
-            sectors_requested_.insert(sector);
+            if (core_.s.sectors_requested_.count(sector)) return;
+            core_.s.sectors_requested_.insert(sector);
             bmmo::session_event_msg event;
             event.tick = due;
             event.type = bmmo::session::event_type::Sector;
             event.sector = sector;
             send_event(event);
-            sectors_.stamp(own_id_, sector, due);
+            core_.s.sectors_.stamp(core_.s.own_id_, sector, due);
             logf("sector %d stamped for tick %u (%s, lead %u, input_delay %u), event sent ahead", sector, due, why,
-                 sector_lead_ticks(), static_cast<unsigned>(input_delay_));
+                 sector_lead_ticks(), static_cast<unsigned>(core_.s.input_delay_));
         }
 
         // One pass of the sector union: deactivate nothing, activate `sector`,
@@ -1585,44 +1601,9 @@ namespace {
             if (CKScene* scene = engine_->context()->GetCurrentScene()) scene->Activate(manager, TRUE);
         }
 
-        // The own ball's body changes the history has to keep (late-player
-        // design 3.3): a birth this client made - a spawn, a respawn or a
-        // trafo, the retail scripts' Physicalize that report_physicalize sends
-        // - and the --beam pair, rebuilt here at its stamp (beam_own_ball).
-        // Each carries what its Physicalize event carried, so the body can be
-        // made again exactly as the server makes it, and what the server did
-        // with it (its echo, protocol 9).  Kept while a rewind can be anchored
-        // before it (retire_own_lives): every replay that crosses a change
-        // makes it again (apply_own_lives).
-        struct own_life {
-            enum class kind : uint8_t { birth, beam };
-            enum class verdict : uint8_t { sent, acked, moved, rejected, superseded, missing };
-            // Why a birth sits in own_unanswered_: its echo was given up as
-            // missing (expire_own_echoes), or it was still unanswered when a
-            // resync renumbered the history it lived in.
-            enum class aside : uint8_t { none, missing, resync };
-            kind what = kind::birth;
-            verdict state = verdict::sent;
-            aside why = aside::none;
-            uint32_t aside_at = 0;      // the local tick it was set aside at
-            uint32_t origin = 0;        // T: the tick this client made the body at (a beam: its stamp)
-            uint32_t applied = 0;       // where the server made it: T until a MOVED echo says T'
-            bool made = true;           // false: the server never made it (SUPERSEDED, REJECTED)
-            std::string entity;
-            uint32_t generation = 0;    // the ball's lifetime it belongs to
-            uint8_t ball_type = 0;
-            float position[3] = {};     // the pose its Physicalize carried (after the birth cell offset)
-            float rotation[9] = {};
-            bmmo::session::ball_recipe recipe;
-            std::string group;
-            bool spawn = false;         // kicked with the spawn impulse of `applied`
-            bool origin_live = false;   // the live run has made the origin's change (a birth: the scripts did)
-            bool applied_live = false;  // ...and the body at `applied`
-            bool retired = false;       // its lifetime ended before a replay could make it again
-            // The missing-echo deadline and its uplink gate (expire_own_echoes).
-            bmmo::session::own_echo_deadline echo_deadline;
-            bool moved() const { return made && applied != origin; }
-        };
+        // struct own_life: the own ball's body changes the history has to keep
+        // (session/client_core.hpp).
+        using own_life = bmmo::session::client_core_state::own_life;
 
         // The automation `beam` verb, headless: the own ball at `position`,
         // upright and at rest.  The server's copy is moved by re-reporting the
@@ -1645,7 +1626,7 @@ namespace {
         void beam_own_ball(uint32_t tick) {
             CK3dEntity* ball = current_ball();
             const std::string name = ball && ball->GetName() ? ball->GetName() : "";
-            if (name.empty() || !own_physicalized_) {
+            if (name.empty() || !core_.s.own_physicalized_) {
                 logf("--beam at tick %u: no own body to beam", tick);
                 return;
             }
@@ -1662,22 +1643,22 @@ namespace {
                     logf("--beam at tick %u: %s", tick, error.c_str());
                     return;
                 }
-                ++generations_[name];   // the server rebuilds its copy: a new lifetime
+                ++core_.s.generations_[name];   // the server rebuilds its copy: a new lifetime
             }
             own_life beam;
             beam.what = own_life::kind::beam;
             beam.origin = beam.applied = tick + 1;
             beam.entity = name;
             {
-                const auto generation = generations_.find(name);
-                beam.generation = generation == generations_.end() ? 0u : generation->second;
+                const auto generation = core_.s.generations_.find(name);
+                beam.generation = generation == core_.s.generations_.end() ? 0u : generation->second;
             }
             beam.ball_type = static_cast<uint8_t>(std::max(ball_type_of(name), 0));
             for (int k = 0; k < 3; ++k) beam.position[k] = static_cast<float>(args_.beam_position[k]);
             for (int r = 0; r < 3; ++r)
                 for (int k = 0; k < 3; ++k) beam.rotation[r * 3 + k] = r == k ? 1.0f : 0.0f;
             fill_retail_recipe(ball_type_of(name), beam.recipe);
-            beam.group = own_group_;
+            beam.group = core_.s.own_group_;
             bmmo::session_event_msg down;
             down.tick = beam.origin;
             down.type = bmmo::session::event_type::Unphysicalize;
@@ -1693,7 +1674,7 @@ namespace {
             logf("--beam: %s to (%.3f,%.3f,%.3f), reported to the server for tick %u and %s", name.c_str(),
                  args_.beam_position[0], args_.beam_position[1], args_.beam_position[2], beam.origin,
                  own_navigation_ ? "rebuilt here at that tick" : "moved here now (no navigation replica)");
-            if (own_navigation_) own_life_.push_back(std::move(beam));
+            if (own_navigation_) core_.s.own_life_.push_back(std::move(beam));
         }
 
         // A birth the retail scripts made this frame and report_physicalize
@@ -1708,17 +1689,17 @@ namespace {
             birth.origin = birth.applied = event.tick;
             birth.entity = entity;
             {
-                const auto generation = generations_.find(entity);
-                birth.generation = generation == generations_.end() ? 0u : generation->second;
+                const auto generation = core_.s.generations_.find(entity);
+                birth.generation = generation == core_.s.generations_.end() ? 0u : generation->second;
             }
             birth.ball_type = event.ball_type;
             std::copy(std::begin(event.position), std::end(event.position), birth.position);
             std::copy(std::begin(event.rotation), std::end(event.rotation), birth.rotation);
             birth.recipe = event.recipe;
-            birth.group = own_group_;
+            birth.group = core_.s.own_group_;
             birth.spawn = (event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) != 0;
             birth.origin_live = birth.applied_live = true;
-            own_life_.push_back(std::move(birth));
+            core_.s.own_life_.push_back(std::move(birth));
         }
 
         // Whether the ball's lifetime `life` belongs to is still the one the
@@ -1727,8 +1708,8 @@ namespace {
         // put back a body the live run no longer has, with nothing in the
         // replay to take it out again.
         bool own_life_current(const own_life& life) const {
-            const auto generation = generations_.find(life.entity);
-            return (generation == generations_.end() ? 0u : generation->second) == life.generation;
+            const auto generation = core_.s.generations_.find(life.entity);
+            return (generation == core_.s.generations_.end() ? 0u : generation->second) == life.generation;
         }
 
         // The navigation replica shut down before the core goes: its
@@ -1759,8 +1740,8 @@ namespace {
             if (auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
                         const_cast<CKSTRING>(life.entity.c_str()), CKCID_3DENTITY, nullptr)))
                 entity->SetWorldMatrix(matrix_from_pose(life.position, life.rotation));
-            mechanism_tracking_.mark_dirty();
-            if (!ok && own_lives_applied_ < 16)
+            core_.s.mechanism_tracking_.mark_dirty();
+            if (!ok && core_.s.own_lives_applied_ < 16)
                 logf("own body at tick %u (%s): unphysicalize %s: %s", tick, where, life.entity.c_str(), error.c_str());
             return ok;
         }
@@ -1794,21 +1775,21 @@ namespace {
                 const auto recipe = to_bridge_recipe(life.recipe);
                 made = bmmo::physics::physicalize(physics, life.entity.c_str(), recipe, life.group.c_str(), error);
             }
-            mechanism_tracking_.mark_dirty();
-            ++own_lives_applied_;
+            core_.s.mechanism_tracking_.mark_dirty();
+            ++core_.s.own_lives_applied_;
             if (!made) {
                 logf("own body at tick %u (%s): physicalize %s: %s", tick, where, life.entity.c_str(), error.c_str());
                 return false;
             }
-            if (life.spawn && spawn_impulse_ > 0.0f) {
-                const uint8_t join_order = static_cast<uint8_t>(own_join_order_ < 0 ? 63 : own_join_order_);
-                const uint32_t idx = bmmo::session::spawn_direction_index(seed_, join_order, tick);
+            if (life.spawn && core_.s.spawn_impulse_ > 0.0f) {
+                const uint8_t join_order = static_cast<uint8_t>(core_.s.own_join_order_ < 0 ? 63 : core_.s.own_join_order_);
+                const uint32_t idx = bmmo::session::spawn_direction_index(core_.s.seed_, join_order, tick);
                 std::string impulse_error;
                 if (!bmmo::physics::push_impulse(physics, life.entity.c_str(), bmmo::session::kSpawnDirectionTable[idx],
-                                                 spawn_impulse_, 0, impulse_error))
+                                                 core_.s.spawn_impulse_, 0, impulse_error))
                     logf("own body at tick %u: spawn impulse: %s", tick, impulse_error.c_str());
             }
-            if (own_lives_applied_ <= 16)
+            if (core_.s.own_lives_applied_ <= 16)
                 logf("own body: %s made at (%.3f,%.3f,%.3f) before tick %u (%s, %s%s)", life.entity.c_str(),
                      static_cast<double>(life.position[0]), static_cast<double>(life.position[1]),
                      static_cast<double>(life.position[2]), tick, where,
@@ -1833,17 +1814,17 @@ namespace {
         // replay reaches it.  A lifetime that ended since is never made again
         // (own_life_current) and retires.
         void apply_own_lives(uint32_t tick, const char* where, bool live) {
-            for (auto& life: own_life_) {
+            for (auto& life: core_.s.own_life_) {
                 if (life.retired) continue;
                 const bool beam_stamp = life.what == own_life::kind::beam && life.origin == tick
                                      && (live ? !life.origin_live : life.origin_live);
                 const bool remake_due = life.moved() && life.applied == tick && (!live || !life.applied_live);
                 if (!beam_stamp && !remake_due) continue;
                 if (!own_life_current(life)) {
-                    const auto generation = generations_.find(life.entity);
+                    const auto generation = core_.s.generations_.find(life.entity);
                     logf("own %s stamped %u retired at tick %u (%s): %s has had another life since (generation %u -> %u)",
                          life.what == own_life::kind::beam ? "beam" : "birth", life.origin, tick, where,
-                         life.entity.c_str(), life.generation, generation == generations_.end() ? 0u : generation->second);
+                         life.entity.c_str(), life.generation, generation == core_.s.generations_.end() ? 0u : generation->second);
                     life.retired = true;
                     continue;
                 }
@@ -1852,13 +1833,13 @@ namespace {
                         remake_own_body(life, tick, where);
                     } else {
                         unmake_own_body(life, tick, where);
-                        ++own_lives_applied_;
+                        ++core_.s.own_lives_applied_;
                     }
                     if (live) life.origin_live = true;
                     if (live && life.applied == life.origin) life.applied_live = true;
                 }
                 if (remake_due) {
-                    if (remake_own_body(life, tick, where)) ++own_remakes_;
+                    if (remake_own_body(life, tick, where)) ++core_.s.own_remakes_;
                     if (live) life.applied_live = true;
                 }
                 if (live) {
@@ -1868,14 +1849,14 @@ namespace {
                     bmmo_physics_body_state state{};
                     std::string error;
                     if (bmmo::physics::get_body_state(engine_->physics(), life.entity.c_str(), state, error))
-                        own_body_entity_ = life.entity;
+                        core_.s.own_body_entity_ = life.entity;
                 }
             }
         }
 
         // Whether apply_own_lives has anything for a replayed `tick`.
         bool own_lives_due(uint32_t tick) const {
-            for (const auto& life: own_life_) {
+            for (const auto& life: core_.s.own_life_) {
                 if (life.retired) continue;
                 if (life.what == own_life::kind::beam && life.origin == tick && life.origin_live) return true;
                 if (life.moved() && life.applied == tick) return true;
@@ -1890,7 +1871,7 @@ namespace {
         // was skipped (a resync renumbered past it) is dropped.  The records
         // retire once no rewind can be anchored before them.
         void live_own_lives(uint32_t frame_tick) {
-            for (auto& life: own_life_) {
+            for (auto& life: core_.s.own_life_) {
                 if (life.retired) continue;
                 const bool beam_late = life.what == own_life::kind::beam && !life.origin_live
                                     && static_cast<int32_t>(frame_tick - life.origin) > 0;
@@ -1920,15 +1901,15 @@ namespace {
         // makes nothing in a replay (it is not moved), so keeping it is free.
         void retire_own_lives() {
             const uint32_t now = current_tick();
-            own_life_.erase(std::remove_if(own_life_.begin(), own_life_.end(), [this, now](const own_life& life) {
+            core_.s.own_life_.erase(std::remove_if(core_.s.own_life_.begin(), core_.s.own_life_.end(), [this, now](const own_life& life) {
                 if (life.retired) return true;
                 if (life.what == own_life::kind::birth && life.state == own_life::verdict::sent
                         && static_cast<int32_t>(now - life.origin) < static_cast<int32_t>(kOwnRecordKeepTicks))
                     return false;
                 const bool done = life.origin_live && (life.applied_live || !life.made);
                 const uint32_t last = life.moved() ? life.applied : life.origin;
-                return done && !rollback_.knows_tick(last - 1);
-            }), own_life_.end());
+                return done && !core_.s.rollback_.knows_tick(last - 1);
+            }), core_.s.own_life_.end());
         }
 
         // A resync renumbers onto the server's tick and its full snapshot
@@ -1939,12 +1920,12 @@ namespace {
         // when it comes, is not one a record of the new numbering can take.
         void rebase_own_lives() {
             set_aside_unanswered(own_life::aside::resync);
-            own_life_.erase(std::remove_if(own_life_.begin(), own_life_.end(), [this](own_life& life) {
-                if (life.what != own_life::kind::beam || static_cast<int32_t>(life.origin - tick_base_) < 0) return true;
+            core_.s.own_life_.erase(std::remove_if(core_.s.own_life_.begin(), core_.s.own_life_.end(), [this](own_life& life) {
+                if (life.what != own_life::kind::beam || static_cast<int32_t>(life.origin - core_.s.tick_base_) < 0) return true;
                 life.origin_live = false;
                 life.applied_live = false;
                 return false;
-            }), own_life_.end());
+            }), core_.s.own_life_.end());
         }
 
         // The births still waiting for their echo, kept aside (with the echoes
@@ -1953,21 +1934,21 @@ namespace {
         // round trip or two, and an old entry answers nothing any more.
         void set_aside_unanswered(own_life::aside why) {
             const uint32_t now = current_tick();
-            for (const auto& life: own_life_) {
+            for (const auto& life: core_.s.own_life_) {
                 if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
                 own_life aside = life;
                 aside.why = why;
                 aside.aside_at = now;
-                own_unanswered_.push_back(std::move(aside));
+                core_.s.own_unanswered_.push_back(std::move(aside));
             }
-            for (auto& msg: own_echoes_) own_echoes_stale_.push_back(std::move(msg));
-            own_echoes_.clear();
-            while (own_unanswered_.size() > 16) own_unanswered_.erase(own_unanswered_.begin());
+            for (auto& msg: core_.s.own_echoes_) core_.s.own_echoes_stale_.push_back(std::move(msg));
+            core_.s.own_echoes_.clear();
+            while (core_.s.own_unanswered_.size() > 16) core_.s.own_unanswered_.erase(core_.s.own_unanswered_.begin());
         }
 
         // The set-aside birth an echo answers, or null.
         own_life* find_unanswered(uint32_t origin, uint8_t ball_type) {
-            for (auto& life: own_unanswered_)
+            for (auto& life: core_.s.own_unanswered_)
                 if (life.origin == origin && life.ball_type == ball_type) return &life;
             return nullptr;
         }
@@ -1977,7 +1958,7 @@ namespace {
         // birth record of that lifetime is the applied tick's, and the body
         // is made again there (apply_own_lives).
         const own_life* moved_own_life(const std::string& entity, uint32_t birth_tick) const {
-            for (const auto& life: own_life_)
+            for (const auto& life: core_.s.own_life_)
                 if (!life.retired && life.moved() && life.entity == entity && life.applied == birth_tick
                         && own_life_current(life))
                     return &life;
@@ -2036,7 +2017,7 @@ namespace {
         }
 
         uint32_t current_tick() const {
-            return frames_since_anchor_ >= 1 ? tick_base_ + static_cast<uint32_t>(frames_since_anchor_ - 1) : tick_base_;
+            return core_.s.frames_since_anchor_ >= 1 ? core_.s.tick_base_ + static_cast<uint32_t>(core_.s.frames_since_anchor_ - 1) : core_.s.tick_base_;
         }
 
         CK3dEntity* current_ball() const {
@@ -2086,7 +2067,7 @@ namespace {
             CK3dEntity* ball = current_ball();
             if (!ball || !ball->GetName()) return;
             const std::string name = ball->GetName();
-            if (name == own_body_entity_) return;   // the body was there before this tick
+            if (name == core_.s.own_body_entity_) return;   // the body was there before this tick
             bmmo_physics_body_state state{};
             std::string error;
             if (!bmmo::physics::get_body_state(engine_->physics(), name.c_str(), state, error)) return;   // no body yet
@@ -2107,16 +2088,16 @@ namespace {
                 }
             }
             if (!own_capture_.spawn) return;
-            const uint8_t join_order = static_cast<uint8_t>(own_join_order_ < 0 ? 63 : own_join_order_);
+            const uint8_t join_order = static_cast<uint8_t>(core_.s.own_join_order_ < 0 ? 63 : core_.s.own_join_order_);
             // The birth cell (session/spawn_impulse.hpp): the ball is moved
             // off the resetpoint before anything else sees it - the kick
             // below, the pose the Physicalize event carries, this tick's step
             // - so every side creates the clone where this ball is.
-            if (spawn_spacing_ > 0.0f && have_reset && join_order % bmmo::session::kSpawnOffsets != 0) {
+            if (core_.s.spawn_spacing_ > 0.0f && have_reset && join_order % bmmo::session::kSpawnOffsets != 0) {
                 const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
                 const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
                 float offset[3];
-                bmmo::session::spawn_offset(join_order, spawn_spacing_, right, dir, offset);
+                bmmo::session::spawn_offset(join_order, core_.s.spawn_spacing_, right, dir, offset);
                 double target[3];
                 for (int k = 0; k < 3; ++k) target[k] = state.position[k] + static_cast<double>(offset[k]);
                 const float still[3] = {0.0f, 0.0f, 0.0f};
@@ -2129,10 +2110,10 @@ namespace {
                          static_cast<double>(offset[1]), static_cast<double>(offset[2]), join_order, tick);
                 }
             }
-            if (spawn_impulse_ <= 0.0f) return;
-            const uint32_t idx = bmmo::session::spawn_direction_index(seed_, join_order, tick);
+            if (core_.s.spawn_impulse_ <= 0.0f) return;
+            const uint32_t idx = bmmo::session::spawn_direction_index(core_.s.seed_, join_order, tick);
             if (!bmmo::physics::push_impulse(engine_->physics(), name.c_str(), bmmo::session::kSpawnDirectionTable[idx],
-                        spawn_impulse_, 0, error))
+                        core_.s.spawn_impulse_, 0, error))
                 logf("spawn impulse: %s", error.c_str());
             else
                 logf("spawn impulse index=%u at tick %u", idx, tick);
@@ -2157,13 +2138,13 @@ namespace {
             // and bought nothing but the offset.)  A bounded wait: if the
             // assignment never comes the client runs on rather than sitting
             // here for ever, and says so.
-            if (held_) {
-                ++hold_polls_;
-                if (wall_now(bmmo::sim::wall_site::hold_poll) < hold_deadline_) {
+            if (core_.s.held_) {
+                ++core_.s.hold_polls_;
+                if (wall_now(bmmo::sim::wall_site::hold_poll) < core_.s.hold_deadline_) {
                     wall_sleep(std::chrono::milliseconds(1));
                     return;   // poll the network, step nothing
                 }
-                held_ = false;
+                core_.s.held_ = false;
                 origin_ = wall_now(bmmo::sim::wall_site::hold_timeout);
                 logf("anchor hold: no tick base after %.1f s; running anyway (the world will be out of phase with "
                      "the server's)", std::chrono::duration<double>(kAnchorHoldTimeout).count());
@@ -2174,7 +2155,7 @@ namespace {
             // assignment would be that many steps ahead of the world for good.
             // Inputs before the assignment queue up and flush_inputs() sends
             // them when the tick base lands.
-            const uint64_t next_frame = static_cast<uint64_t>(frames_since_anchor_ + 1);
+            const uint64_t next_frame = static_cast<uint64_t>(core_.s.frames_since_anchor_ + 1);
             if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
                 paused_once_ = true;
                 logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
@@ -2185,12 +2166,12 @@ namespace {
             // before the schedule is read: one tick earlier per tick period
             // for a raise (two frames per slot), one later per ten for a
             // lower.
-            if (lead_slew_.active()) advance_lead_slew(next_frame);
+            if (core_.s.lead_slew_.active()) advance_lead_slew(next_frame);
             const double expected = std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::pace_expected) - origin_).count() * bmmo::sim::kTickRate;
             // 33 frames behind is a stall, plus whatever a slew still has to
             // gain: the slew never runs the pacer more than a frame behind
             // (lead_slew::kRaiseMaxBehind), so a real stall still rebases.
-            if (static_cast<double>(next_frame) + bmmo::session::lead_rebase_threshold(lead_slew_.outstanding()) < expected) {
+            if (static_cast<double>(next_frame) + bmmo::session::lead_rebase_threshold(core_.s.lead_slew_.outstanding()) < expected) {
                 // far behind (a long pause): restart the schedule instead of fast-forwarding
                 origin_ = wall_now(bmmo::sim::wall_site::pace_rebase) - std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
@@ -2221,15 +2202,15 @@ namespace {
         // The whole delta moved: acknowledged.
         void advance_lead_slew(uint64_t next_frame) {
             const auto now = wall_now(bmmo::sim::wall_site::slew_step);
-            const double wall = std::chrono::duration<double>(now - lead_slew_clock_).count() * bmmo::sim::kTickRate;
-            lead_slew_clock_ = now;
+            const double wall = std::chrono::duration<double>(now - core_.s.lead_slew_clock_).count() * bmmo::sim::kTickRate;
+            core_.s.lead_slew_clock_ = now;
             const double behind = std::chrono::duration<double>(now - origin_).count() * bmmo::sim::kTickRate
                                 - static_cast<double>(next_frame);
-            const int moved = lead_slew_.advance(wall, behind);
+            const int moved = core_.s.lead_slew_.advance(wall, behind);
             if (moved != 0)
                 origin_ -= std::chrono::duration_cast<clock_type::duration>(
                     std::chrono::duration<double>(static_cast<double>(moved) / bmmo::sim::kTickRate));
-            if (lead_slew_.done()) finish_lead_slew("slew complete");
+            if (core_.s.lead_slew_.done()) finish_lead_slew("slew complete");
         }
 
         // --keep-lane: the record's keys of this frame with LEFT or RIGHT added
@@ -2241,11 +2222,11 @@ namespace {
         const unsigned char* keep_lane(const unsigned char* keys) {
             std::memcpy(lane_keys_, keys, sizeof(lane_keys_));
             const bool driving = keys[kKeyUp] || keys[kKeyDown];
-            if (!driving || !own_physicalized_ || own_body_entity_.empty() || !navigation_known_ || !previous_cam_valid_)
+            if (!driving || !core_.s.own_physicalized_ || core_.s.own_body_entity_.empty() || !navigation_known_ || !core_.s.previous_cam_valid_)
                 return lane_keys_;
             bmmo_physics_body_state body{};
             std::string error;
-            if (!bmmo::physics::get_body_state(engine_->physics(), own_body_entity_.c_str(), body, error)) return lane_keys_;
+            if (!bmmo::physics::get_body_state(engine_->physics(), core_.s.own_body_entity_.c_str(), body, error)) return lane_keys_;
             const double error_z = body.position[2] - args_.keep_lane_z;
             const double a = error_z + kLaneDamping * static_cast<double>(body.linear[2]);
             if (std::fabs(a) < kLaneDeadband) return lane_keys_;
@@ -2254,8 +2235,8 @@ namespace {
             double best = 0.0;
             for (const auto& leaf: navigation_.leaves) {
                 if (leaf.key == kKeyUp || leaf.key == kKeyDown || leaf.key < 0 || leaf.key >= 256) continue;
-                const double z = leaf.direction.x * previous_cam_[0][2] + leaf.direction.y * previous_cam_[1][2]
-                               + leaf.direction.z * previous_cam_[2][2];
+                const double z = leaf.direction.x * core_.s.previous_cam_[0][2] + leaf.direction.y * core_.s.previous_cam_[1][2]
+                               + leaf.direction.z * core_.s.previous_cam_[2][2];
                 if (z * push > best) { best = z * push; best_key = leaf.key; }
             }
             if (best_key >= 0) {
@@ -2269,7 +2250,7 @@ namespace {
 
         void frame() {
             std::string error;
-            const int64_t f = frames_since_anchor_ + 1;
+            const int64_t f = core_.s.frames_since_anchor_ + 1;
             // Keys of this frame come from the recording (frame f of the record).
             const unsigned char* keyboard = nullptr;
             if (!record_.frames.empty() && f >= 0 && static_cast<size_t>(f) < record_.frames.size()) {
@@ -2285,12 +2266,12 @@ namespace {
             // about to simulate - the one current_tick() returns once
             // frames_since_anchor_ is advanced to f below, and so the tick
             // report_physicalize sends for this very frame.
-            const uint32_t frame_tick = tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
+            const uint32_t frame_tick = core_.s.tick_base_ + static_cast<uint32_t>(std::max<int64_t>(f - 1, 0));
             // A held --start-sector: on the first frame the session is assigned
             // (tick base and lead known), stamp it `lead` ticks ahead like any
             // other sector this client enters.
-            if (start_sector_pending_ && assigned_) {
-                start_sector_pending_ = false;
+            if (core_.s.start_sector_pending_ && core_.s.assigned_) {
+                core_.s.start_sector_pending_ = false;
                 hold_sector(args_.start_sector, frame_tick + sector_lead_ticks(), "--start-sector");
             }
             // This tick's events first - a relayed Sector event stamped for it
@@ -2303,7 +2284,7 @@ namespace {
             process_own_echoes();
             // The sector resets stay neutralized (the level-reset one once the
             // sector is up: this client has resolved a mechanism of its own).
-            for (const auto& chain: reset_guard_.apply(engine_->context(), mechanism_tracking_.resolved() > 0))
+            for (const auto& chain: reset_guard_.apply(engine_->context(), core_.s.mechanism_tracking_.resolved() > 0))
                 logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
             // After the late events, so a birth and an input correction in the
             // same frame leave the world replayed from the earlier of the two - and
@@ -2331,14 +2312,14 @@ namespace {
                     if (CKBehavior* manager = bmmo::game::find_root_script(engine_->context(), "Gameplay_SectorManager"))
                         sector_manager_id_ = manager->GetID();
                 auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
-                const auto pass = sectors_.tick(frame_tick, manager && manager->IsActive());
+                const auto pass = core_.s.sectors_.tick(frame_tick, manager && manager->IsActive());
                 if (pass) {
-                    sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
+                    core_.s.sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
                     start_sector(pass.sector);
                     record_manager_activation(frame_tick, true);
                     logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s", pass.sector, frame_tick,
                          pass.player, pass.stamped_tick, frame_tick > pass.stamped_tick ? ", held by the pacer" : "",
-                         [this] { std::string s; for (int x: sectors_.active()) s += std::to_string(x) + " "; return s; }().c_str());
+                         [this] { std::string s; for (int x: core_.s.sectors_.active()) s += std::to_string(x) + " "; return s; }().c_str());
                 }
             }
             // A rewind above replayed up to the previous tick and left every
@@ -2347,7 +2328,7 @@ namespace {
             // (remote.applied, chosen at the end of the previous frame), or
             // the record and the step disagree and the relayed frame for this
             // tick compares equal to a prediction the step never ran on.
-            for (auto& [id, remote]: remotes_) {
+            for (auto& [id, remote]: core_.s.remotes_) {
                 if (!remote.physicalized || !remote.navigation) continue;
                 const bool active = (remote.applied.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
                 std::string drive_error;
@@ -2367,12 +2348,12 @@ namespace {
             // the rewinds above, whose replays switch the polling back on.
             forced_own forced_frame;
             const bool forced = [&] {
-                while (!forced_own_.empty() && static_cast<int32_t>(forced_own_.begin()->first - frame_tick) < 0)
-                    forced_own_.erase(forced_own_.begin());
-                const auto it = forced_own_.find(frame_tick);
-                if (it == forced_own_.end()) return false;
+                while (!core_.s.forced_own_.empty() && static_cast<int32_t>(core_.s.forced_own_.begin()->first - frame_tick) < 0)
+                    core_.s.forced_own_.erase(core_.s.forced_own_.begin());
+                const auto it = core_.s.forced_own_.find(frame_tick);
+                if (it == core_.s.forced_own_.end()) return false;
                 forced_frame = it->second;
-                forced_own_.erase(it);
+                core_.s.forced_own_.erase(it);
                 return true;
             }();
             std::string forced_entity;
@@ -2386,7 +2367,7 @@ namespace {
                                                             held.cam_right, held.cam_up, held.cam_dir,
                                                             (held.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0,
                                                             force_error))
-                    if (lead_force_logs_++ < 8)   // the ball may be unphysicalized for the whole range
+                    if (core_.s.lead_force_logs_++ < 8)   // the ball may be unphysicalized for the whole range
                         logf("lead: forced own input at tick %u: %s", frame_tick, force_error.c_str());
             }
             live_tick_serial_ = ++live_ticks_;
@@ -2397,11 +2378,11 @@ namespace {
                 std::string force_error;
                 if (!bmmo::physics::navigation_poll(engine_->physics(), forced_entity.c_str(), true, own_key_codes_,
                                                     own_key_blocks_, own_key_count_, force_error))
-                    if (lead_force_logs_++ < 8)
+                    if (core_.s.lead_force_logs_++ < 8)
                         logf("lead: own polling after the forced tick %u: %s", frame_tick, force_error.c_str());
             }
             if (!ticked) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
-            frames_since_anchor_ = f;
+            core_.s.frames_since_anchor_ = f;
             // An activation of Gameplay_SectorManager this frame's scripts asked
             // for (Init Ingame's Execute Script at the level start, Event_handler):
             // pending as next-frame flags now, consumed by the next frame.  A
@@ -2424,7 +2405,7 @@ namespace {
                     navigation_ = graph;
                     navigation_known_ = true;
                     logf("navigation keys known at tick %u (%zu leaves)", tick, graph.leaves.size());
-                    for (auto& [id, remote]: remotes_) {
+                    for (auto& [id, remote]: core_.s.remotes_) {
                         const bool navigated = remote.navigation;
                         attach_remote_navigation(id, remote);
                         // The ticks before this one ran it undriven: a replay
@@ -2450,7 +2431,7 @@ namespace {
             const bool physicalized = !ball_name.empty() && bmmo::physics::get_body_state(physics, ball_name.c_str(), own, error);
             if (physicalized) {
                 if (!own_group_set_) {
-                    if (bmmo::physics::set_body_group(physics, ball_name.c_str(), own_group_.c_str(), error)) own_group_set_ = true;
+                    if (bmmo::physics::set_body_group(physics, ball_name.c_str(), core_.s.own_group_.c_str(), error)) own_group_set_ = true;
                     else logf("own ball group: %s", error.c_str());
                 }
                 if (args_.rollback && navigation_known_ && (!own_navigation_ || own_nav_entity_ != ball_name))
@@ -2459,25 +2440,25 @@ namespace {
                 pose.tick = tick;
                 for (int k = 0; k < 3; ++k) { pose.position[k] = own.position[k]; pose.linear[k] = own.linear[k]; pose.angular[k] = own.angular[k]; }
                 for (int k = 0; k < 4; ++k) pose.rotation[k] = own.rotation[k];
-                corrector_.record(pose);
+                core_.s.corrector_.record(pose);
             } else {
                 own_group_set_ = false;
             }
-            own_physicalized_ = physicalized;
-            own_body_entity_ = physicalized ? ball_name : std::string();
+            core_.s.own_physicalized_ = physicalized;
+            core_.s.own_body_entity_ = physicalized ? ball_name : std::string();
 
             // Mechanism states after this tick (the legacy blending path;
             // with the rollback engine on, the engine keeps its own records).
-            for (const auto& name: mechanism_tracking_.tracked_entities()) {
+            for (const auto& name: core_.s.mechanism_tracking_.tracked_entities()) {
                 bmmo_physics_body_state local{};
                 if (!bmmo::physics::get_body_state(physics, name.c_str(), local, error)) continue;
                 bmmo::session::ball_pose pose;
                 pose.tick = tick;
                 for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
                 for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
-                mechanism_correctors_[name].record(pose);
+                core_.s.mechanism_correctors_[name].record(pose);
             }
-            for (auto& [id, remote]: remotes_) {
+            for (auto& [id, remote]: core_.s.remotes_) {
                 if (!remote.physicalized || !remote.navigation) continue;
                 bmmo_physics_body_state local{};
                 if (!bmmo::physics::get_body_state(physics, remote.entity.c_str(), local, error)) continue;
@@ -2525,8 +2506,8 @@ namespace {
                     // The body behind a tracked name changed: a new lifetime for
                     // it, and the mechanism registry has to ask the world again.
                     if (!name.empty()) {
-                        ++generations_[name];
-                        mechanism_tracking_.mark_dirty();
+                        ++core_.s.generations_[name];
+                        core_.s.mechanism_tracking_.mark_dirty();
                     }
                 }
                 if (kind == "created" && !ball_name.empty() && name == ball_name) {
@@ -2550,8 +2531,8 @@ namespace {
             }
             // Which mechanism rows are about one of our bodies, before the
             // record: the tracked set of a tick has to name bodies it contains.
-            if (mechanism_tracking_.due(tick))
-                mechanism_tracking_.resolve(tick, [physics](const char* entity, bmmo_physics_body_state& out) {
+            if (core_.s.mechanism_tracking_.due(tick))
+                core_.s.mechanism_tracking_.resolve(tick, [physics](const char* entity, bmmo_physics_body_state& out) {
                     std::string probe_error;
                     return bmmo::physics::get_body_state(physics, entity, out, probe_error);
                 });
@@ -2567,9 +2548,9 @@ namespace {
                     for (int k = 0; k < 3; ++k) cam[r][k] = m[r][k];
                 cam_valid = true;
             }
-            const float (*basis)[3] = previous_cam_valid_ ? previous_cam_ : cam;
+            const float (*basis)[3] = core_.s.previous_cam_valid_ ? core_.s.previous_cam_ : cam;
             for (int k = 0; k < 3; ++k) { input.cam_right[k] = basis[0][k]; input.cam_up[k] = basis[1][k]; input.cam_dir[k] = basis[2][k]; }
-            if (cam_valid) { std::memcpy(previous_cam_, cam, sizeof(cam)); previous_cam_valid_ = true; }
+            if (cam_valid) { std::memcpy(core_.s.previous_cam_, cam, sizeof(cam)); core_.s.previous_cam_valid_ = true; }
             input.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);
             const bool nav_active = navigation_known_ && navigation_active();
             input.flags = static_cast<uint8_t>((physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
@@ -2580,10 +2561,10 @@ namespace {
             // notice, when it comes, changes nothing.
             if (forced) {
                 input = forced_frame.frame;
-                ++lead_forced_played_;
+                ++core_.s.lead_forced_played_;
                 if (forced_frame.count) {
-                    if (held_tick_is_base(tick)) ++subst_base_;
-                    else { ++subst_recv_; ++subst_same_; }
+                    if (held_tick_is_base(tick)) ++core_.s.subst_base_;
+                    else { ++core_.s.subst_recv_; ++core_.s.subst_same_; }
                 }
             }
             if (args_.trace && (input.keys != last_keys_ || nav_active != last_nav_active_))
@@ -2595,15 +2576,15 @@ namespace {
                     logf("own navigation rows: %s", error.c_str());
                 zero_retail_forces();
             }
-            input_history_.emplace_back(tick, input);
+            core_.s.input_history_.emplace_back(tick, input);
             // The frame is finished: journal it before it goes on the wire, so
             // the box holds what this client played even when the send is lost.
             if (journalling())
-                journal_.input(tick, own_id_, input,
+                core_.s.journal_.input(tick, core_.s.own_id_, input,
                                forced ? bmmo::session::JOURNAL_INPUT_SUBSTITUTED : bmmo::session::JOURNAL_INPUT_FRESH);
             if (args_.rollback) {
-                own_inputs_[tick] = input;
-                while (own_inputs_.size() > 128) own_inputs_.erase(own_inputs_.begin());
+                core_.s.own_inputs_[tick] = input;
+                while (core_.s.own_inputs_.size() > 128) core_.s.own_inputs_.erase(core_.s.own_inputs_.begin());
                 bmmo::session::rollback_tracked tracked;
                 std::map<std::string, bmmo::session::input_frame> applied;
                 if (physicalized && own_navigation_) {
@@ -2611,7 +2592,7 @@ namespace {
                     tracked.own_polls = true;
                     applied[own_nav_entity_] = input;
                 }
-                for (const auto& [id, remote]: remotes_)
+                for (const auto& [id, remote]: core_.s.remotes_)
                     if (remote.physicalized && remote.navigation) {
                         tracked.remote_entities.push_back(remote.entity);
                         applied[remote.entity] = remote.applied;
@@ -2637,7 +2618,7 @@ namespace {
                 // the replay has to put back. A body the snapshot says nothing
                 // about is restored from our own record, which is right.
                 for (const auto& name: movable_body_names()) tracked.mechanisms.push_back(name);
-                tracked.generations = generations_;
+                tracked.generations = core_.s.generations_;
                 for (CK_ID id: bmmo::game::script_replay::resets_pending(engine_->context(), scripts_)) {
                     script_reset_ticks_[id] = tick;
                     if (script_reset_logs_++ < 12) {
@@ -2646,30 +2627,30 @@ namespace {
                              beh && beh->GetName() ? beh->GetName() : "?", tick);
                     }
                 }
-                rollback_.record(rollback_world(), tick, tracked, applied);
+                core_.s.rollback_.record(rollback_world(), tick, tracked, applied);
                 dump_savestate(tick);
             }
             // A notice that named this tick before it was simulated: the
             // record just made holds what we played, the server applied
             // something else (late-player design 1.3).
             take_held_ahead(tick);
-            if (assigned_) {
-                while (input_history_.size() > bmmo::session::MAX_INPUT_FRAMES) input_history_.pop_front();
+            if (core_.s.assigned_) {
+                while (core_.s.input_history_.size() > bmmo::session::MAX_INPUT_FRAMES) core_.s.input_history_.pop_front();
                 bmmo::session_input_msg msg;
-                msg.session = session_;
-                msg.first_tick = input_history_.front().first;
-                for (const auto& [t, fr]: input_history_) msg.frames.push_back(fr);
+                msg.session = core_.s.session_;
+                msg.first_tick = core_.s.input_history_.front().first;
+                for (const auto& [t, fr]: core_.s.input_history_) msg.frames.push_back(fr);
                 remember_sent(msg);
                 msg.serialize();
                 send_bytes(msg.raw.str(), k_nSteamNetworkingSend_UnreliableNoDelay);
-                ++inputs_sent_;
+                ++core_.s.inputs_sent_;
                 // The unreliable copies of our recent lifecycle events, one per
                 // frame (send_event; protocol 6).
-                own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
+                core_.s.own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
                     send_bytes(bytes, k_nSteamNetworkingSend_UnreliableNoDelay);
                 });
-            } else if (input_history_.size() > 660) {
-                input_history_.pop_front();
+            } else if (core_.s.input_history_.size() > 660) {
+                core_.s.input_history_.pop_front();
             }
 
             // Sector: the sector the level's scripts last wrote.  With the
@@ -2697,13 +2678,13 @@ namespace {
             }
             if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
                 int sector = 0;
-                if (parameters->GetElementValue(0, 1, &sector) && (sector != sector_cell_ || resetpoint_moved)) {
-                    sector_cell_ = sector;
-                    if (sector > 0 && !sectors_requested_.count(sector)) {
+                if (parameters->GetElementValue(0, 1, &sector) && (sector != core_.s.sector_cell_ || resetpoint_moved)) {
+                    core_.s.sector_cell_ = sector;
+                    if (sector > 0 && !core_.s.sectors_requested_.count(sector)) {
                         if (checkpoint_held_) {
                             hold_sector(sector, tick + 1 + sector_lead_ticks(), "checkpoint");
                         } else {
-                            sectors_requested_.insert(sector);
+                            core_.s.sectors_requested_.insert(sector);
                             bmmo::session_event_msg event;
                             event.tick = tick;
                             event.type = bmmo::session::event_type::Sector;
@@ -2717,15 +2698,15 @@ namespace {
 
             // Continue running blends.
             if (args_.correct) {
-                if (physicalized) apply_blend(ball_name, corrector_);
-                for (auto& [name, corrector]: mechanism_correctors_) apply_blend(name, corrector);
-                for (auto& [id, remote]: remotes_)
+                if (physicalized) apply_blend(ball_name, core_.s.corrector_);
+                for (auto& [name, corrector]: core_.s.mechanism_correctors_) apply_blend(name, corrector);
+                for (auto& [id, remote]: core_.s.remotes_)
                     if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
             }
             // Next tick's input of every predicted remote ball: the frame the
             // server applied at that tick when the relay has it already (a
             // client running behind the relay), else the last relayed frame.
-            for (auto& [id, remote]: remotes_) {
+            for (auto& [id, remote]: core_.s.remotes_) {
                 if (!remote.physicalized || !remote.navigation) continue;
                 remote.applied = live_drive(remote, tick + 1);
                 const bool active = (remote.applied.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0;
@@ -2743,8 +2724,8 @@ namespace {
             // lose the correction on the first re-simulated tick.  Re-capture
             // it now, exactly like the retail mod (design 9.25 item 4 of
             // findings/A5 section 3.1: the headless client never did).
-            if (args_.rollback && !rollback_.amend_record(rollback_world(), tick)) {
-                if (amend_failures_++ == 0)
+            if (args_.rollback && !core_.s.rollback_.amend_record(rollback_world(), tick)) {
+                if (core_.s.amend_failures_++ == 0)
                     logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
             }
             if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
@@ -2755,7 +2736,7 @@ namespace {
             // --trace: what pushes the own ball - the navigation replica's
             // leaves, every controller on its core, the mechanism force blocks
             // whose target it is - logged whenever that changes.
-            if (args_.trace && own_physicalized_ && own_navigation_) {
+            if (args_.trace && core_.s.own_physicalized_ && own_navigation_) {
                 std::string text;
                 bmmo_physics_nav_state nav{};
                 std::string nav_error;
@@ -2811,7 +2792,7 @@ namespace {
                     p = nl + 1;
                 }
             }
-            if (assigned_) report_window(tick);
+            if (core_.s.assigned_) report_window(tick);
             // The box's own view of this frame, last: the fingerprint of the
             // world the corrections above have finished with, and the bodies
             // when a checkpoint is due.
@@ -2819,7 +2800,7 @@ namespace {
                 bmmo::physics::world_hash hash;
                 std::string hash_error;
                 if (bmmo::physics::capture_world_hash(physics, hash, hash_error))
-                    journal_.tick(tick, hash, journal_ms());
+                    core_.s.journal_.tick(tick, hash, journal_ms());
                 if (journal_checkpoint_due(tick)) journal_local_checkpoint(tick);
             if (args_.trace && tick % 200 == 0) report_queued_impulses(tick);
             }
@@ -2858,16 +2839,16 @@ namespace {
         }
 
         void send_event(bmmo::session_event_msg& event) {
-            event.session = session_;
+            event.session = core_.s.session_;
             // Protocol 9: a client's event goes out with its origin equal to
             // its stamp; only the server re-stamps.
             event.origin_tick = event.tick;
             event.state = 0;
             event.serialize();
-            ++events_sent_;
+            ++core_.s.events_sent_;
             // Own events go on the wire with player 0; the box names the
             // player the server will fill in.
-            journal_lifecycle_event(own_id_, event);
+            journal_lifecycle_event(core_.s.own_id_, event);
             if (hold_event(event)) return;
             put_event_on_wire(event.raw.str());
         }
@@ -2882,7 +2863,7 @@ namespace {
             send_bytes(bytes, k_nSteamNetworkingSend_ReliableNoNagle);
             // ...and again, unreliably, on each of the next ticks
             // (flush_inputs): the server takes the first copy to arrive.
-            own_event_repeats_.push(bytes, {0u});
+            core_.s.own_event_repeats_.push(bytes, {0u});
         }
 
         // --hold-event: true when this event is the one to hold back.  Held
@@ -2915,7 +2896,7 @@ namespace {
             const auto now = wall_now(bmmo::sim::wall_site::hold_event_release);
             for (auto it = held_events_.begin(); it != held_events_.end();) {
                 if (now < it->release) { ++it; continue; }
-                if (phase_ != phase::running) {
+                if (core_.s.phase_ != phase::running) {
                     // end_session clears the list, so this is a safety net;
                     // said aloud either way, so a hold never ends silently.
                     logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: no session running",
@@ -2923,7 +2904,7 @@ namespace {
                     it = held_events_.erase(it);
                     continue;
                 }
-                if (!assigned_) { ++it; continue; }   // a session but no tick base yet: wait for it
+                if (!core_.s.assigned_) { ++it; continue; }   // a session but no tick base yet: wait for it
                 put_event_on_wire(it->bytes);
                 logf("hold-event: own %s stamped tick %u (held at tick %u) released at tick %u",
                      event_type_name(args_.hold_event_type), it->stamp, it->held_at, current_tick());
@@ -2933,24 +2914,24 @@ namespace {
         }
 
         void flush_inputs() {
-            if (!assigned_) return;
-            own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
+            if (!core_.s.assigned_) return;
+            core_.s.own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
                 send_bytes(bytes, k_nSteamNetworkingSend_UnreliableNoDelay);
             });
-            if (input_history_.empty()) return;
+            if (core_.s.input_history_.empty()) return;
             size_t index = 0;
-            while (index < input_history_.size()) {
+            while (index < core_.s.input_history_.size()) {
                 bmmo::session_input_msg msg;
-                msg.session = session_;
-                msg.first_tick = input_history_[index].first;
-                while (index < input_history_.size() && msg.frames.size() < bmmo::session::MAX_INPUT_FRAMES) {
-                    msg.frames.push_back(input_history_[index].second);
+                msg.session = core_.s.session_;
+                msg.first_tick = core_.s.input_history_[index].first;
+                while (index < core_.s.input_history_.size() && msg.frames.size() < bmmo::session::MAX_INPUT_FRAMES) {
+                    msg.frames.push_back(core_.s.input_history_[index].second);
                     ++index;
                 }
                 remember_sent(msg);
                 msg.serialize();
                 send_bytes(msg.raw.str(), k_nSteamNetworkingSend_UnreliableNoDelay);
-                ++inputs_sent_;
+                ++core_.s.inputs_sent_;
             }
         }
 
@@ -2963,8 +2944,8 @@ namespace {
         // record inside the deepest reach can make (input_relay.hpp).
         void remember_sent(const bmmo::session_input_msg& msg) {
             for (size_t i = 0; i < msg.frames.size(); ++i)
-                sent_inputs_.emplace(msg.first_tick + static_cast<uint32_t>(i), msg.frames[i]);
-            while (sent_inputs_.size() > bmmo::session::kSentInputRing) sent_inputs_.erase(sent_inputs_.begin());
+                core_.s.sent_inputs_.emplace(msg.first_tick + static_cast<uint32_t>(i), msg.frames[i]);
+            while (core_.s.sent_inputs_.size() > bmmo::session::kSentInputRing) core_.s.sent_inputs_.erase(core_.s.sent_inputs_.begin());
         }
 
         void apply_blend(const std::string& name, bmmo::session::body_corrector& corrector) {
@@ -2994,9 +2975,9 @@ namespace {
                 // other way to tell which received rows hold it.
                 const uint8_t flags = static_cast<uint8_t>(bmmo::session::JOURNAL_CHECKPOINT_RECEIVED
                     | (snapshot.full ? bmmo::session::JOURNAL_CHECKPOINT_FULL : 0));
-                journal_.checkpoint(snapshot.tick, flags, snapshot.bodies);
+                core_.s.journal_.checkpoint(snapshot.tick, flags, snapshot.bodies);
             }
-            if (have_snapshot_ && snapshot.tick <= last_snapshot_tick_ && !snapshot.full) { ++snapshots_stale_; return; }
+            if (core_.s.have_snapshot_ && snapshot.tick <= core_.s.last_snapshot_tick_ && !snapshot.full) { ++core_.s.snapshots_stale_; return; }
             // (Whether the server had our input for the tick it simulated is
             // read from the relay header's `acked` now, every tick and with
             // snapshots off too: note_held_section.)
@@ -3004,14 +2985,14 @@ namespace {
             CKIpionManager* physics = engine_->physics();
             CK3dEntity* ball = current_ball();
             const std::string ball_name = ball && ball->GetName() ? ball->GetName() : "";
-            if (resync_pending_) {
+            if (core_.s.resync_pending_) {
                 if (!snapshot.full) return;
-                have_snapshot_ = true;
-                last_snapshot_tick_ = snapshot.tick;
-                ++snapshots_applied_;
+                core_.s.have_snapshot_ = true;
+                core_.s.last_snapshot_tick_ = snapshot.tick;
+                ++core_.s.snapshots_applied_;
                 // A hard world overwrite: the records collected while we waited
                 // for this snapshot describe the world it is about to replace.
-                rollback_.invalidate_history();
+                core_.s.rollback_.invalidate_history();
                 // ...and so does a replay a correction of this poll asked
                 // for: its anchor is gone with the history, and a refused own
                 // replay would answer this resync with another.
@@ -3021,11 +3002,11 @@ namespace {
                 // world that has just been rebuilt (design 9.25).
                 for (const auto& body: snapshot.bodies)
                     if (body.kind == bmmo::session::body_kind::Mechanism) {
-                        if (!body.name.empty()) mechanism_tracking_.note_name(body.owner, body.name);
-                        mechanism_tracking_.note_row(snapshot.tick, body);
+                        if (!body.name.empty()) core_.s.mechanism_tracking_.note_name(body.owner, body.name);
+                        core_.s.mechanism_tracking_.note_row(snapshot.tick, body);
                     }
-                mechanism_tracking_.mark_dirty();
-                mechanism_tracking_.resolve(snapshot.tick, [physics](const char* entity, bmmo_physics_body_state& out) {
+                core_.s.mechanism_tracking_.mark_dirty();
+                core_.s.mechanism_tracking_.resolve(snapshot.tick, [physics](const char* entity, bmmo_physics_body_state& out) {
                     std::string probe_error;
                     return bmmo::physics::get_body_state(physics, entity, out, probe_error);
                 });
@@ -3034,23 +3015,23 @@ namespace {
                     const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
                     const char* target = nullptr;
                     if (body.kind == bmmo::session::body_kind::Ball) {
-                        if (body.owner == own_id_) {
-                            if (!own_physicalized_ || ball_name.empty()) continue;
+                        if (body.owner == core_.s.own_id_) {
+                            if (!core_.s.own_physicalized_ || ball_name.empty()) continue;
                             target = ball_name.c_str();
                         } else {
-                            auto it = remotes_.find(body.owner);
-                            if (it == remotes_.end() || !it->second.physicalized) continue;
+                            auto it = core_.s.remotes_.find(body.owner);
+                            if (it == core_.s.remotes_.end() || !it->second.physicalized) continue;
                             target = it->second.entity.c_str();
                         }
                     } else {
-                        mechanism_entity = mechanism_tracking_.entity_of(body.owner);
+                        mechanism_entity = core_.s.mechanism_tracking_.entity_of(body.owner);
                         if (mechanism_entity.empty()) continue;   // another sector's instance
                         target = mechanism_entity.c_str();
                     }
                     bmmo::physics::set_body_state(physics, target, body.position, body.rotation, body.linear, body.angular,
-                                                  body.owner == own_id_ ? true : wake, error);
+                                                  body.owner == core_.s.own_id_ ? true : wake, error);
                 }
-                resync_pending_ = false;
+                core_.s.resync_pending_ = false;
                 // Every own tick up to the snapshot's is the server's now,
                 // substituted ones included: no held notice of them is late.
                 // Nor is one up to the next tick we step: the snapshot replaced
@@ -3063,36 +3044,36 @@ namespace {
                 // (Before the first step of the new numbering there is no
                 // current tick: the next record is the base's, which the
                 // floor already is.)
-                const uint32_t first_record = frames_since_anchor_ >= 1 ? current_tick() + 1 : tick_base_;
-                if (static_cast<int32_t>(snapshot.tick - held_floor_) > 0) held_floor_ = snapshot.tick;
-                if (static_cast<int32_t>(first_record - held_floor_) > 0) held_floor_ = first_record;
-                ++resyncs_done_;
+                const uint32_t first_record = core_.s.frames_since_anchor_ >= 1 ? current_tick() + 1 : core_.s.tick_base_;
+                if (static_cast<int32_t>(snapshot.tick - core_.s.held_floor_) > 0) core_.s.held_floor_ = snapshot.tick;
+                if (static_cast<int32_t>(first_record - core_.s.held_floor_) > 0) core_.s.held_floor_ = first_record;
+                ++core_.s.resyncs_done_;
                 logf("resync applied from the full snapshot of tick %u (%zu bodies)", snapshot.tick, snapshot.bodies.size());
                 journal_body_correction(4, {}, snapshot.tick, 0.0, nullptr);
                 journal_note("resync: rebuilt from the full snapshot of tick " + std::to_string(snapshot.tick)
                              + " (" + std::to_string(snapshot.bodies.size()) + " bodies)");
                 return;
             }
-            have_snapshot_ = true;
-            last_snapshot_tick_ = snapshot.tick;
-            ++snapshots_applied_;
+            core_.s.have_snapshot_ = true;
+            core_.s.last_snapshot_tick_ = snapshot.tick;
+            ++core_.s.snapshots_applied_;
             if (args_.rollback) {
                 for (const auto& body: snapshot.bodies)
                     if (body.kind == bmmo::session::body_kind::Mechanism) {
-                        if (snapshot.full && !body.name.empty()) mechanism_tracking_.note_name(body.owner, body.name);
-                        mechanism_tracking_.note_row(snapshot.tick, body);
+                        if (snapshot.full && !body.name.empty()) core_.s.mechanism_tracking_.note_name(body.owner, body.name);
+                        core_.s.mechanism_tracking_.note_row(snapshot.tick, body);
                     }
                 auto entity_of = [&](const bmmo::session::body_state& body) -> std::string {
                     if (body.kind == bmmo::session::body_kind::Ball) {
-                        if (body.owner == own_id_) return own_physicalized_ && own_navigation_ ? own_nav_entity_ : std::string();
-                        auto it = remotes_.find(body.owner);
-                        if (it == remotes_.end() || !it->second.physicalized || !it->second.navigation) return {};
+                        if (body.owner == core_.s.own_id_) return core_.s.own_physicalized_ && own_navigation_ ? own_nav_entity_ : std::string();
+                        auto it = core_.s.remotes_.find(body.owner);
+                        if (it == core_.s.remotes_.end() || !it->second.physicalized || !it->second.navigation) return {};
                         return it->second.entity;
                     }
                     // Design 9.25: the resolved local body, "" when this client
                     // has none (another sector) or the identity guard refused
                     // the pick - the mod does exactly the same.
-                    return mechanism_tracking_.entity_of(body.owner);
+                    return core_.s.mechanism_tracking_.entity_of(body.owner);
                 };
                 // Only an exact hit counts, like the mod: the engine feeds a
                 // relayed frame instead of the recorded prediction when this
@@ -3102,17 +3083,17 @@ namespace {
                     return recorded_input_at(entity, tick, out);
                 };
                 const live_cells_guard keep_cells(*this);
-                const bool rolled = rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
+                const bool rolled = core_.s.rollback_.on_snapshot(rollback_world(), snapshot, current_tick(), entity_of, input_at);
                 if (rolled) {
-                    ++snapshot_rollbacks_;
-                    snapshot_rollback_depth_ += current_tick() - snapshot.tick;
+                    ++core_.s.snapshot_rollbacks_;
+                    core_.s.snapshot_rollback_depth_ += current_tick() - snapshot.tick;
                     // The rows were the server's world at the anchor, our own
                     // ball's among them when it has one here: that world ran on
                     // the frames the server substituted, and the replay after it
                     // fed our amended records.
                     bool own_row = false;
                     for (const auto& body: snapshot.bodies)
-                        if (body.kind == bmmo::session::body_kind::Ball && body.owner == own_id_ && !entity_of(body).empty())
+                        if (body.kind == bmmo::session::body_kind::Ball && body.owner == core_.s.own_id_ && !entity_of(body).empty())
                             own_row = true;
                     drop_carried_own_replay(snapshot.tick, own_row);
                 }
@@ -3122,16 +3103,16 @@ namespace {
             }
             for (const auto& body: snapshot.bodies) {
                 if (body.kind == bmmo::session::body_kind::Ball) {
-                    if (body.owner == own_id_) {
-                        if (!own_physicalized_ || ball_name.empty()) continue;
+                    if (body.owner == core_.s.own_id_) {
+                        if (!core_.s.own_physicalized_ || ball_name.empty()) continue;
                         bmmo::session::ball_pose pose;
                         pose.tick = snapshot.tick;
                         for (int k = 0; k < 3; ++k) { pose.position[k] = body.position[k]; pose.linear[k] = body.linear[k]; pose.angular[k] = body.angular[k]; }
                         for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
-                        const auto step = corrector_.compare(pose);
-                        const double err = corrector_.stats().last_error;
+                        const auto step = core_.s.corrector_.compare(pose);
+                        const double err = core_.s.corrector_.stats().last_error;
                         if (step.action == bmmo::session::correction_step::kind::hard) {
-                            if (++consecutive_hard_ >= 3) request_resync("3 hard corrections in a row");
+                            if (++core_.s.consecutive_hard_ >= 3) request_resync("3 hard corrections in a row");
                             logf("hard correction of own ball for tick %u (error %.4f m, local tick %u)", snapshot.tick, err, current_tick());
                             // Before the set, or the recorded local pose would
                             // be the server's own.
@@ -3140,7 +3121,7 @@ namespace {
                                     step.target.rotation, step.target.linear, step.target.angular, true, error))
                                 logf("hard set: %s", error.c_str());
                         } else if (step.action == bmmo::session::correction_step::kind::blend) {
-                            consecutive_hard_ = 0;
+                            core_.s.consecutive_hard_ = 0;
                             logf("blend correction of own ball for tick %u (error %.4f m, local tick %u)", snapshot.tick, err, current_tick());
                             journal_body_correction(3, ball_name, snapshot.tick, err, body.position);
                         } else if (args_.trace && err > 0.002) {
@@ -3148,8 +3129,8 @@ namespace {
                         }
                         continue;
                     }
-                    auto it = remotes_.find(body.owner);
-                    if (it == remotes_.end() || !it->second.physicalized) continue;
+                    auto it = core_.s.remotes_.find(body.owner);
+                    if (it == core_.s.remotes_.end() || !it->second.physicalized) continue;
                     const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
                     auto& remote = it->second;
                     if (remote.navigation) {
@@ -3178,14 +3159,14 @@ namespace {
                     if (!bmmo::physics::set_body_state(physics, it->second.entity.c_str(), body.position, body.rotation,
                                                        body.linear, body.angular, wake, error))
                         logf("remote %u: %s", body.owner, error.c_str());
-                    else ++remote_writes_;
+                    else ++core_.s.remote_writes_;
                     continue;
                 }
                 // The legacy blending path (--no-rollback): the row corrects the
                 // locally simulated mechanism through a body_corrector instead.
-                if (snapshot.full && !body.name.empty()) mechanism_tracking_.note_name(body.owner, body.name);
-                mechanism_tracking_.note_row(snapshot.tick, body);
-                const std::string entity = mechanism_tracking_.entity_of(body.owner);
+                if (snapshot.full && !body.name.empty()) core_.s.mechanism_tracking_.note_name(body.owner, body.name);
+                core_.s.mechanism_tracking_.note_row(snapshot.tick, body);
+                const std::string entity = core_.s.mechanism_tracking_.entity_of(body.owner);
                 if (entity.empty()) continue;
                 const bool wake = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
                 bmmo_physics_body_state local{};
@@ -3194,16 +3175,16 @@ namespace {
                 pose.tick = snapshot.tick;
                 for (int k = 0; k < 3; ++k) { pose.position[k] = body.position[k]; pose.linear[k] = body.linear[k]; pose.angular[k] = body.angular[k]; }
                 for (int k = 0; k < 4; ++k) pose.rotation[k] = body.rotation[k];
-                auto& corrector = mechanism_correctors_[entity];
+                auto& corrector = core_.s.mechanism_correctors_[entity];
                 const auto step = corrector.compare(pose);
                 if (step.action == bmmo::session::correction_step::kind::hard) {
-                    ++mechanism_hard_;
+                    ++core_.s.mechanism_hard_;
                     logf("hard correction of %s for tick %u (error %.4f m)", entity.c_str(), snapshot.tick, corrector.stats().last_error);
                     journal_body_correction(2, entity, snapshot.tick, corrector.stats().last_error, body.position);
                     if (args_.correct) bmmo::physics::set_body_state(physics, entity.c_str(), step.target.position, step.target.rotation,
                                                                      step.target.linear, step.target.angular, wake, error);
                 } else if (step.action == bmmo::session::correction_step::kind::blend) {
-                    ++mechanism_blends_;
+                    ++core_.s.mechanism_blends_;
                     logf("blend correction of %s for tick %u (error %.4f m)", entity.c_str(), snapshot.tick, corrector.stats().last_error);
                     journal_body_correction(3, entity, snapshot.tick, corrector.stats().last_error, body.position);
                 }
@@ -3240,11 +3221,11 @@ namespace {
         // The 99th percentile of the relayed frames' arrival lag, in ticks.
         uint32_t relay_lag_p99() const {
             uint64_t total = 0;
-            for (uint32_t n: relay_lag_hist_) total += n;
+            for (uint32_t n: core_.s.relay_lag_hist_) total += n;
             if (!total) return 0;
             uint64_t seen = 0;
             for (uint32_t b = 0; b < kRelayLagBuckets; ++b) {
-                seen += relay_lag_hist_[b];
+                seen += core_.s.relay_lag_hist_[b];
                 if (seen * 100 >= total * 99) return b;
             }
             return kRelayLagBuckets - 1;
@@ -3279,7 +3260,7 @@ namespace {
         // epoch, and the header's held_total is checked against it
         // (check_held_complete).
         void note_held_section(const bmmo::session_remote_input_msg& msg) {
-            if (!assigned_) return;
+            if (!core_.s.assigned_) return;
             // Did the server have our frame for the tick it just simulated, or
             // substitute one?  Once per server tick, from the header, so it
             // works with snapshots off (design 1.3; it used to need a
@@ -3288,44 +3269,44 @@ namespace {
             // another epoch's datagram still says - but only for the ticks of
             // our numbering.  `lead` is how far our tick runs ahead of the
             // server's newest.
-            const bool newer_ack = !acked_header_known_ || static_cast<int32_t>(msg.tick - acked_header_tick_) > 0;
+            const bool newer_ack = !core_.s.acked_header_known_ || static_cast<int32_t>(msg.tick - core_.s.acked_header_tick_) > 0;
             if (newer_ack) {
-                acked_header_known_ = true;
-                acked_header_tick_ = msg.tick;
-                header_acked_ = msg.acked;
+                core_.s.acked_header_known_ = true;
+                core_.s.acked_header_tick_ = msg.tick;
+                core_.s.header_acked_ = msg.acked;
             }
-            if (newer_ack && static_cast<int32_t>(msg.tick - tick_base_) >= 0) {
-                ++input_reports_;
+            if (newer_ack && static_cast<int32_t>(msg.tick - core_.s.tick_base_) >= 0) {
+                ++core_.s.input_reports_;
                 if (static_cast<int32_t>(msg.tick - msg.acked) > 0) {
                     const uint32_t behind = msg.tick - msg.acked;
-                    ++input_starved_;
-                    if (behind > worst_starved_) worst_starved_ = behind;
+                    ++core_.s.input_starved_;
+                    if (behind > core_.s.worst_starved_) core_.s.worst_starved_ = behind;
                 }
-                lead_sum_ += static_cast<int32_t>(current_tick() - msg.tick) > 0 ? current_tick() - msg.tick : 0;
-                ++lead_count_;
+                core_.s.lead_sum_ += static_cast<int32_t>(current_tick() - msg.tick) > 0 ? current_tick() - msg.tick : 0;
+                ++core_.s.lead_count_;
             }
-            if (msg.epoch != tick_base_) {
+            if (msg.epoch != core_.s.tick_base_) {
                 for (const auto& record: msg.held)
-                    if (held_stale_seen_.first(msg.epoch, msg.held_tick(record))) ++subst_stale_epoch_;
+                    if (core_.s.held_stale_seen_.first(msg.epoch, msg.held_tick(record))) ++core_.s.subst_stale_epoch_;
                 return;
             }
-            if (!held_header_current() || static_cast<int32_t>(msg.tick - held_header_tick_) >= 0) {
-                held_header_known_ = true;
-                held_header_epoch_ = msg.epoch;
-                held_header_tick_ = msg.tick;
-                held_header_acked_ = msg.acked;
-                held_header_total_ = msg.held_total;
+            if (!held_header_current() || static_cast<int32_t>(msg.tick - core_.s.held_header_tick_) >= 0) {
+                core_.s.held_header_known_ = true;
+                core_.s.held_header_epoch_ = msg.epoch;
+                core_.s.held_header_tick_ = msg.tick;
+                core_.s.held_header_acked_ = msg.acked;
+                core_.s.held_header_total_ = msg.held_total;
             }
             for (const auto& record: msg.held) {
                 const uint32_t tick = msg.held_tick(record);
-                if (static_cast<int32_t>(tick - tick_base_) < 0) continue;   // before our numbering: never noticed
-                if (!held_seen_.first(own_id_, tick)) { ++subst_dup_; continue; }
+                if (static_cast<int32_t>(tick - core_.s.tick_base_) < 0) continue;   // before our numbering: never noticed
+                if (!core_.s.held_seen_.first(core_.s.own_id_, tick)) { ++core_.s.subst_dup_; continue; }
                 learn_held_tick(tick);
                 bmmo::session::input_frame frame{};
                 if (!resolve_held_frame(record, frame)) {
-                    if (held_tick_is_base(tick)) { ++subst_base_; continue; }
-                    ++subst_late_;
-                    if (subst_unresolved_logs_++ < 8)
+                    if (held_tick_is_base(tick)) { ++core_.s.subst_base_; continue; }
+                    ++core_.s.subst_late_;
+                    if (core_.s.subst_unresolved_logs_++ < 8)
                         logf("held notice for own tick %u names source %u, which the sent ring no longer holds", tick,
                              record.source);
                     request_resync("a substituted own frame could not be resolved", true);
@@ -3340,7 +3321,7 @@ namespace {
         // note_held_section): without --rollback, while a resync waits for
         // its full snapshot, or at or below held_floor_.
         bool held_tick_is_base(uint32_t tick) const {
-            return !args_.rollback || resync_pending_ || static_cast<int32_t>(tick - held_floor_) <= 0;
+            return !args_.rollback || core_.s.resync_pending_ || static_cast<int32_t>(tick - core_.s.held_floor_) <= 0;
         }
 
         // One own tick the server applied `frame` at, resolved: base, held
@@ -3348,7 +3329,7 @@ namespace {
         // SessionLead's simulated range takes the same path).
         void settle_held_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
             if (held_tick_is_base(tick)) {
-                ++subst_base_;
+                ++core_.s.subst_base_;
                 // Kept all the same (design 1.3: stored with or without a
                 // way to replay it) - a tick not simulated yet when its live
                 // frame is.
@@ -3357,7 +3338,7 @@ namespace {
                 return;
             }
             if (static_cast<int32_t>(tick - current_tick()) > 0) {   // not simulated yet
-                ++subst_recv_;
+                ++core_.s.subst_recv_;
                 hold_ahead(tick, frame, true);
                 return;
             }
@@ -3365,17 +3346,17 @@ namespace {
             // The gate note_input_correction applies: the anchor of the
             // rewind, tick - 1, still re-simulable and in the history.
             const uint32_t anchor = tick - 1;
-            const bool reachable = current_tick() - anchor <= rollback_.thresholds().max_resim_ticks
-                                && rollback_.knows_tick(anchor);
+            const bool reachable = current_tick() - anchor <= core_.s.rollback_.thresholds().max_resim_ticks
+                                && core_.s.rollback_.knows_tick(anchor);
             if (!reachable) {
-                ++subst_late_;
-                if (subst_late_logs_++ < 8)
+                ++core_.s.subst_late_;
+                if (core_.s.subst_late_logs_++ < 8)
                     logf("held notice for own tick %u arrived at tick %u, past the reach of %u ticks", tick,
-                         current_tick(), rollback_.thresholds().max_resim_ticks);
+                         current_tick(), core_.s.rollback_.thresholds().max_resim_ticks);
                 request_resync("a substituted own frame arrived past the reach", true);
                 return;
             }
-            ++subst_recv_;
+            ++core_.s.subst_recv_;
             correct_own_tick(tick, frame);
         }
 
@@ -3403,19 +3384,19 @@ namespace {
         // frames from.  Copies are dropped by seq; a decision of another
         // base by epoch (a resync crossed it: the server dropped it too).
         void on_session_lead(const bmmo::session_lead_msg& msg) {
-            if (!assigned_ || msg.player != own_id_) return;
-            if (lead_seen_.count(msg.seq)) { ++lead_dups_; return; }
-            if (msg.epoch != tick_base_) {
+            if (!core_.s.assigned_ || msg.player != core_.s.own_id_) return;
+            if (core_.s.lead_seen_.count(msg.seq)) { ++core_.s.lead_dups_; return; }
+            if (msg.epoch != core_.s.tick_base_) {
                 // An older base: void.  A newer one: an unreliable copy that
                 // overtook its assignment; the reliable one follows it.
-                ++lead_stale_;
-                logf("lead: SessionLead %u of base %u dropped (our base %u)", msg.seq, msg.epoch, tick_base_);
+                ++core_.s.lead_stale_;
+                logf("lead: SessionLead %u of base %u dropped (our base %u)", msg.seq, msg.epoch, core_.s.tick_base_);
                 return;
             }
-            lead_seen_.insert(msg.seq);
+            core_.s.lead_seen_.insert(msg.seq);
             // A slew still running (the server never overlaps two, so this is
             // defensive): it ends here with what it moved, acknowledged.
-            if (lead_slew_.active()) finish_lead_slew("superseded by SessionLead " + std::to_string(msg.seq));
+            if (core_.s.lead_slew_.active()) finish_lead_slew("superseded by SessionLead " + std::to_string(msg.seq));
             // A resync of ours in flight: the server answers it with an
             // assignment at L_eff that voids this decision (send_session_assign
             // clears the outstanding one, and our ack would come after the
@@ -3423,17 +3404,17 @@ namespace {
             // still applied - the server plays `held` there until it
             // re-anchors us - but the clock is not slewed for an assignment
             // that replaces it, and nothing is acknowledged or counted.
-            const bool voided = resync_in_flight_;
+            const bool voided = core_.s.resync_in_flight_;
             // The slew starts before the range is settled: an amended tick
             // past the reach asks for a resync (settle_held_tick), and
             // request_resync then acknowledges this decision in full ahead of
             // the request, so the re-anchor at L_eff carries it.
-            const uint64_t resyncs_before = resyncs_sent_;
+            const uint64_t resyncs_before = core_.s.resyncs_sent_;
             if (!voided) {
-                lead_slew_.start(msg.seq, msg.delta);
-                lead_slew_clock_ = wall_now(bmmo::sim::wall_site::slew_start);
+                core_.s.lead_slew_.start(msg.seq, msg.delta);
+                core_.s.lead_slew_clock_ = wall_now(bmmo::sim::wall_site::slew_start);
             }
-            const uint32_t next_unsimulated = frames_since_anchor_ >= 1 ? current_tick() + 1 : tick_base_;
+            const uint32_t next_unsimulated = core_.s.frames_since_anchor_ >= 1 ? current_tick() + 1 : core_.s.tick_base_;
             const auto ranges = bmmo::session::lead_cap_forced(
                 bmmo::session::lead_split_range(msg.held_from, msg.effective, next_unsimulated),
                 static_cast<uint32_t>(bmmo::session::kSentInputRing));
@@ -3443,7 +3424,7 @@ namespace {
                 // are not ours to force or learn (lead_cap_forced), their
                 // notices settle them.
                 for (uint32_t t = msg.held_from; static_cast<int32_t>(t - ranges.force_to) < 0; ++t) {
-                    const bool first = held_seen_.first(own_id_, t);
+                    const bool first = core_.s.held_seen_.first(core_.s.own_id_, t);
                     if (first) learn_held_tick(t);
                     else ++known;
                     if (static_cast<int32_t>(t - ranges.force_from) < 0) {
@@ -3457,22 +3438,22 @@ namespace {
                     // server froze it for the range): dropped, and a recv one
                     // counted as the same frame here, since the forced tick
                     // does not count it again.
-                    if (const auto ahead = held_ahead_.find(t); ahead != held_ahead_.end()) {
-                        if (ahead->second.second) ++subst_same_;
-                        held_ahead_.erase(ahead);
+                    if (const auto ahead = core_.s.held_ahead_.find(t); ahead != core_.s.held_ahead_.end()) {
+                        if (ahead->second.second) ++core_.s.subst_same_;
+                        core_.s.held_ahead_.erase(ahead);
                     }
-                    forced_own_[t] = forced_own{msg.held, first};
+                    core_.s.forced_own_[t] = forced_own{msg.held, first};
                     ++forced;
                 }
             }
-            const bool reanchored = resyncs_sent_ != resyncs_before;
-            if (!voided) ++lead_adjustments_;
-            else ++lead_void_;
+            const bool reanchored = core_.s.resyncs_sent_ != resyncs_before;
+            if (!voided) ++core_.s.lead_adjustments_;
+            else ++core_.s.lead_void_;
             logf("lead: SessionLead %u %s: k=%+d N=%u E=%u at tick %u (base %u): amended %u [%u,%u) forced %u [%u,%u) "
                  "already noticed %u, held-source=%s; %s",
                  msg.seq, voided ? "void (a resync of ours is in flight), range applied" : "applied",
                  static_cast<int>(msg.delta), msg.held_from, msg.effective,
-                 frames_since_anchor_ >= 1 ? current_tick() : tick_base_, tick_base_, amended, ranges.amend_from,
+                 core_.s.frames_since_anchor_ >= 1 ? current_tick() : core_.s.tick_base_, core_.s.tick_base_, amended, ranges.amend_from,
                  ranges.amend_to, forced, ranges.force_from, ranges.force_to, known,
                  msg.held_source == bmmo::session::INPUT_SOURCE_DEFAULT ? "default" : std::to_string(msg.held_source).c_str(),
                  voided ? "no slew" : reanchored ? "acknowledged in full ahead of the resync it asked for"
@@ -3483,7 +3464,7 @@ namespace {
                          + (voided ? " (void: resync in flight)" : ""));
             // A zero delta: nothing to slew, acknowledged at once (unless a
             // resync request did it, or the decision is void).
-            if (!voided && !reanchored && !lead_slew_.active()) finish_lead_slew("nothing to slew");
+            if (!voided && !reanchored && !core_.s.lead_slew_.active()) finish_lead_slew("nothing to slew");
         }
 
         // The slew ends - moved in full, superseded, or ended by a resync
@@ -3494,19 +3475,19 @@ namespace {
         // ordered before the resync request request_resync sends right after
         // it, so the re-anchor already counts it.
         void finish_lead_slew(const std::string& why, bool reanchored = false) {
-            const uint32_t seq = lead_slew_.seq();
-            const int delta = lead_slew_.delta();
-            const int moved = lead_slew_.applied();
-            const int applied = reanchored ? lead_slew_.finish_reanchored() : lead_slew_.finish();
-            lead_offset_ += applied;
+            const uint32_t seq = core_.s.lead_slew_.seq();
+            const int delta = core_.s.lead_slew_.delta();
+            const int moved = core_.s.lead_slew_.applied();
+            const int applied = reanchored ? core_.s.lead_slew_.finish_reanchored() : core_.s.lead_slew_.finish();
+            core_.s.lead_offset_ += applied;
             bmmo::session_lead_ack_msg ack;
-            ack.session = session_;
+            ack.session = core_.s.session_;
             ack.seq = seq;
             ack.applied = static_cast<int16_t>(std::clamp(applied, -32768, 32767));
             ack.serialize();
             send_bytes(ack.raw.str(), k_nSteamNetworkingSend_Reliable);
             logf("lead: SessionLead %u acknowledged at tick %u: applied %+d of %+d, the slew moved %+d (%s); lead offset %+d",
-                 seq, current_tick(), applied, delta, moved, why.c_str(), lead_offset_);
+                 seq, current_tick(), applied, delta, moved, why.c_str(), core_.s.lead_offset_);
             journal_note("lead: SessionLead " + std::to_string(seq) + " applied " + std::to_string(applied) + " of "
                          + std::to_string(delta) + " (" + why + ")");
         }
@@ -3516,12 +3497,12 @@ namespace {
         // with its base and ignores an ack of it.  `why`: a new base, or the
         // session's end.
         void drop_lead_state(const char* why) {
-            if (lead_slew_.active()) {
-                logf("lead: SessionLead %u voided by %s after %+d of %+d ticks", lead_slew_.seq(), why,
-                     lead_slew_.applied(), lead_slew_.delta());
-                lead_slew_.finish();
+            if (core_.s.lead_slew_.active()) {
+                logf("lead: SessionLead %u voided by %s after %+d of %+d ticks", core_.s.lead_slew_.seq(), why,
+                     core_.s.lead_slew_.applied(), core_.s.lead_slew_.delta());
+                core_.s.lead_slew_.finish();
             }
-            forced_own_.clear();
+            core_.s.forced_own_.clear();
         }
 
         // The frame a held record says the server applied.  False when it
@@ -3532,8 +3513,8 @@ namespace {
                                 bmmo::session::input_frame& out) const {
             if (record.has_frame) { out = record.frame; return true; }
             if (record.source == bmmo::session::kHeldSourceDefault) { out = bmmo::session::input_frame{}; return true; }
-            const auto it = sent_inputs_.find(record.source);
-            if (it == sent_inputs_.end()) return false;
+            const auto it = core_.s.sent_inputs_.find(record.source);
+            if (it == core_.s.sent_inputs_.end()) return false;
             out = it->second;
             return true;
         }
@@ -3545,10 +3526,10 @@ namespace {
         // one, and a reader takes the later.
         void store_held_frame(uint32_t tick, const bmmo::session::input_frame& frame) {
             if (args_.rollback) {
-                own_inputs_[tick] = frame;
-                while (own_inputs_.size() > 128) own_inputs_.erase(own_inputs_.begin());
+                core_.s.own_inputs_[tick] = frame;
+                while (core_.s.own_inputs_.size() > 128) core_.s.own_inputs_.erase(core_.s.own_inputs_.begin());
             }
-            if (journalling()) journal_.input(tick, own_id_, frame, bmmo::session::JOURNAL_INPUT_SUBSTITUTED);
+            if (journalling()) core_.s.journal_.input(tick, core_.s.own_id_, frame, bmmo::session::JOURNAL_INPUT_SUBSTITUTED);
         }
 
         // A notice for a tick this client has not simulated yet (it runs
@@ -3557,8 +3538,8 @@ namespace {
         // waits for that frame (take_held_ahead).  `correct`: a recv record,
         // compared and replayed then; a base one is only stored.
         void hold_ahead(uint32_t tick, const bmmo::session::input_frame& frame, bool correct) {
-            held_ahead_[tick] = {frame, correct};
-            while (held_ahead_.size() > bmmo::session::kSentInputRing) held_ahead_.erase(held_ahead_.begin());
+            core_.s.held_ahead_[tick] = {frame, correct};
+            while (core_.s.held_ahead_.size() > bmmo::session::kSentInputRing) core_.s.held_ahead_.erase(core_.s.held_ahead_.begin());
         }
 
         // After the live frame of `tick` is recorded: a notice that named it
@@ -3566,17 +3547,17 @@ namespace {
         // server applied and the tick replayed on the next frame when they
         // differ.  Notices the numbering moved past are dropped.
         void take_held_ahead(uint32_t tick) {
-            while (!held_ahead_.empty() && static_cast<int32_t>(held_ahead_.begin()->first - tick) < 0)
-                held_ahead_.erase(held_ahead_.begin());
-            const auto it = held_ahead_.find(tick);
-            if (it == held_ahead_.end()) return;
+            while (!core_.s.held_ahead_.empty() && static_cast<int32_t>(core_.s.held_ahead_.begin()->first - tick) < 0)
+                core_.s.held_ahead_.erase(core_.s.held_ahead_.begin());
+            const auto it = core_.s.held_ahead_.find(tick);
+            if (it == core_.s.held_ahead_.end()) return;
             const bmmo::session::input_frame frame = it->second.first;
             const bool correct = it->second.second;
-            held_ahead_.erase(it);
+            core_.s.held_ahead_.erase(it);
             store_held_frame(tick, frame);
             // A resync since the notice arrived: its snapshot is the server's
             // world, our record of this tick is not.
-            if (!correct || !args_.rollback || resync_pending_ || static_cast<int32_t>(tick - held_floor_) <= 0) return;
+            if (!correct || !args_.rollback || core_.s.resync_pending_ || static_cast<int32_t>(tick - core_.s.held_floor_) <= 0) return;
             correct_own_tick(tick, frame);
         }
 
@@ -3592,27 +3573,27 @@ namespace {
         // own and remote; an own-only one may wait a few frames for the
         // notices still coming, own_replay_pacer).
         void correct_own_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
-            const std::string entity = rollback_.recorded_own_entity(tick);
-            if (entity.empty()) { ++subst_bodiless_; return; }
+            const std::string entity = core_.s.rollback_.recorded_own_entity(tick);
+            if (entity.empty()) { ++core_.s.subst_bodiless_; return; }
             bmmo::session::input_frame played{};
-            const bool have_played = rollback_.recorded_input(entity, tick, played);
-            if (have_played && same_frame(played, frame)) { ++subst_same_; return; }
-            ++subst_diff_;
-            if (!rollback_.amend_recorded_input(entity, tick, frame)) return;   // the tick was dropped meanwhile
+            const bool have_played = core_.s.rollback_.recorded_input(entity, tick, played);
+            if (have_played && same_frame(played, frame)) { ++core_.s.subst_same_; return; }
+            ++core_.s.subst_diff_;
+            if (!core_.s.rollback_.amend_recorded_input(entity, tick, frame)) return;   // the tick was dropped meanwhile
             // A difference no replay can see (a camera turned with no leaf
             // key down, Shift or Space, navigation off in both): the record
             // holds the server's frame now, which every later replay feeds,
             // and a replay of its own would step the same world again.
-            if (have_played && !bmmo::session::replay_sees_difference(played, frame)) { ++subst_unseen_; return; }
+            if (have_played && !bmmo::session::replay_sees_difference(played, frame)) { ++core_.s.subst_unseen_; return; }
             // Earliest or not, the replay carries an own correction: counted
             // under subst rew, and a refusal resyncs (replay_corrected_inputs).
-            input_rewind_has_own_ = true;
-            ++input_rewind_own_amends_;
-            if (!input_rewind_pending_ || static_cast<int32_t>(tick - input_rewind_tick_) < 0) {
-                input_rewind_pending_ = true;
-                input_rewind_tick_ = tick;
-                input_rewind_entity_ = entity;
-                input_rewind_own_ = true;
+            core_.s.input_rewind_has_own_ = true;
+            ++core_.s.input_rewind_own_amends_;
+            if (!core_.s.input_rewind_pending_ || static_cast<int32_t>(tick - core_.s.input_rewind_tick_) < 0) {
+                core_.s.input_rewind_pending_ = true;
+                core_.s.input_rewind_tick_ = tick;
+                core_.s.input_rewind_entity_ = entity;
+                core_.s.input_rewind_own_ = true;
             }
         }
 
@@ -3621,15 +3602,15 @@ namespace {
         // count those at or below a datagram's tick (a notice rides at most
         // kHeldNoticeTicks datagrams, and a datagram is judged 64 ticks on).
         void learn_held_tick(uint32_t tick) {
-            ++held_learned_total_;
-            held_learned_recent_.insert(tick);
-            while (held_learned_recent_.size() > 256) held_learned_recent_.erase(held_learned_recent_.begin());
+            ++core_.s.held_learned_total_;
+            core_.s.held_learned_recent_.insert(tick);
+            while (core_.s.held_learned_recent_.size() > 256) core_.s.held_learned_recent_.erase(core_.s.held_learned_recent_.begin());
         }
 
         uint64_t held_learned_upto(uint32_t tick) const {
             uint64_t later = 0;
-            for (auto it = held_learned_recent_.upper_bound(tick); it != held_learned_recent_.end(); ++it) ++later;
-            return held_learned_total_ - later;
+            for (auto it = core_.s.held_learned_recent_.upper_bound(tick); it != core_.s.held_learned_recent_.end(); ++it) ++later;
+            return core_.s.held_learned_total_ - later;
         }
 
         // Completeness (design 1.3): `held_total` counts our substituted
@@ -3645,18 +3626,18 @@ namespace {
         // again.
         static constexpr uint32_t kHeldGapTicks = 64;
         void check_held_complete(const bmmo::session_remote_input_msg& msg) {
-            if (msg.held_total > held_learned_upto(msg.tick) + held_gap_credit_) {
-                auto& total = held_gap_watch_[msg.tick];
+            if (msg.held_total > held_learned_upto(msg.tick) + core_.s.held_gap_credit_) {
+                auto& total = core_.s.held_gap_watch_[msg.tick];
                 total = std::max(total, msg.held_total);
-                while (held_gap_watch_.size() > 256) held_gap_watch_.erase(held_gap_watch_.begin());
+                while (core_.s.held_gap_watch_.size() > 256) core_.s.held_gap_watch_.erase(core_.s.held_gap_watch_.begin());
             }
-            for (auto it = held_gap_watch_.begin(); it != held_gap_watch_.end();) {
+            for (auto it = core_.s.held_gap_watch_.begin(); it != core_.s.held_gap_watch_.end();) {
                 if (static_cast<int32_t>(msg.tick - it->first) <= static_cast<int32_t>(kHeldGapTicks)) break;
-                const uint64_t have = held_learned_upto(it->first) + held_gap_credit_;
+                const uint64_t have = held_learned_upto(it->first) + core_.s.held_gap_credit_;
                 if (it->second > have) {
                     const uint64_t missing = it->second - have;
-                    subst_late_ += missing;
-                    held_gap_credit_ += missing;
+                    core_.s.subst_late_ += missing;
+                    core_.s.held_gap_credit_ += missing;
                     logf("held notices lost: held_total %u at tick %u, %llu of them never arrived", it->second, it->first,
                          static_cast<unsigned long long>(missing));
                     // The base rule a received record follows: no resync for
@@ -3664,10 +3645,10 @@ namespace {
                     // --rollback every record is base, and a datagram at or
                     // below the floor names only ticks a resync's snapshot
                     // covered.
-                    if (!resync_pending_ && args_.rollback && static_cast<int32_t>(it->first - held_floor_) > 0)
+                    if (!core_.s.resync_pending_ && args_.rollback && static_cast<int32_t>(it->first - core_.s.held_floor_) > 0)
                         request_resync("substituted own frames whose every notice was lost", true);
                 }
-                it = held_gap_watch_.erase(it);
+                it = core_.s.held_gap_watch_.erase(it);
             }
         }
 
@@ -3680,22 +3661,22 @@ namespace {
         void reset_held_epoch(const char* why = "the new base") {
             drop_pending_rewind();
             drop_lead_state(why);
-            own_replay_pacer_.reset();
-            held_seen_.clear();
-            held_ahead_.clear();
-            sent_inputs_.clear();
-            held_learned_recent_.clear();
-            held_learned_total_ = 0;
-            held_gap_credit_ = 0;
-            held_gap_watch_.clear();
+            core_.s.own_replay_pacer_.reset();
+            core_.s.held_seen_.clear();
+            core_.s.held_ahead_.clear();
+            core_.s.sent_inputs_.clear();
+            core_.s.held_learned_recent_.clear();
+            core_.s.held_learned_total_ = 0;
+            core_.s.held_gap_credit_ = 0;
+            core_.s.held_gap_watch_.clear();
         }
 
         void drop_pending_rewind() {
-            input_rewind_pending_ = false;
-            input_rewind_own_ = false;
-            input_rewind_has_own_ = false;
-            input_rewind_own_amends_ = 0;
-            input_rewind_entities_.clear();
+            core_.s.input_rewind_pending_ = false;
+            core_.s.input_rewind_own_ = false;
+            core_.s.input_rewind_has_own_ = false;
+            core_.s.input_rewind_own_amends_ = 0;
+            core_.s.input_rewind_entities_.clear();
         }
 
         // Whether the server is still substituting our ticks: its newest
@@ -3703,7 +3684,7 @@ namespace {
         // simulated (acked < tick).  Unknown (no header of this epoch yet)
         // counts as yes - the pacer's reach deadline still bounds the wait.
         bool own_notices_coming() const {
-            return !held_header_current() || static_cast<int32_t>(held_header_tick_ - held_header_acked_) > 0;
+            return !held_header_current() || static_cast<int32_t>(core_.s.held_header_tick_ - core_.s.held_header_acked_) > 0;
         }
 
         // Another rewind that replayed from `anchor` already carried a
@@ -3714,15 +3695,15 @@ namespace {
         // prediction over the snapshot's rows.  A pending replay that carries
         // a remote's correction is left to replay_corrected_inputs as before.
         void drop_carried_own_replay(uint32_t anchor, bool server_rows) {
-            if (!input_rewind_pending_ || !input_rewind_own_ || !input_rewind_entities_.empty()) return;
-            if (!server_rows && !bmmo::session::replay_subsumes(anchor, input_rewind_tick_)) return;
-            ++subst_subsumed_;
-            subst_saved_ += input_rewind_own_amends_;
-            own_replay_pacer_.ran();
+            if (!core_.s.input_rewind_pending_ || !core_.s.input_rewind_own_ || !core_.s.input_rewind_entities_.empty()) return;
+            if (!server_rows && !bmmo::session::replay_subsumes(anchor, core_.s.input_rewind_tick_)) return;
+            ++core_.s.subst_subsumed_;
+            core_.s.subst_saved_ += core_.s.input_rewind_own_amends_;
+            core_.s.own_replay_pacer_.ran();
             drop_pending_rewind();
         }
 
-        bool held_header_current() const { return held_header_known_ && held_header_epoch_ == tick_base_; }
+        bool held_header_current() const { return core_.s.held_header_known_ && core_.s.held_header_epoch_ == core_.s.tick_base_; }
 
         // A relayed frame for a tick this client has already simulated: if it
         // differs from the frame the prediction used, that tick and every tick
@@ -3741,8 +3722,8 @@ namespace {
             // (replay_corrected_inputs rewinds to tick - 1).  Counted - the
             // relay's pass criterion is that this never happens.
             const uint32_t anchor = tick - 1;
-            if (current_tick() - anchor > rollback_.thresholds().max_resim_ticks || !rollback_.knows_tick(anchor)) {
-                ++relay_late_;
+            if (current_tick() - anchor > core_.s.rollback_.thresholds().max_resim_ticks || !core_.s.rollback_.knows_tick(anchor)) {
+                ++core_.s.relay_late_;
                 return;
             }
             // A frame also stands in for the holes after it (the nearest
@@ -3751,15 +3732,15 @@ namespace {
             // later one, and the body was there at tick + 1.
             const bool feeds_next = remote.inputs.find(tick + 1) == remote.inputs.end()
                                  && remote.inputs.upper_bound(tick + 1) != remote.inputs.end()
-                                 && rollback_.recorded_body(entity, tick + 1);
+                                 && core_.s.rollback_.recorded_body(entity, tick + 1);
             // No body behind the name at that tick - the player was dead there,
             // or the birth that makes the mirror has not arrived yet: the frame
             // drove nothing, and a replay from it reproduces what the records
             // have (measured: 154-200 rewinds per client in a lane run spent
             // on dead players' mirrors).  The frame is in the ring already, so
             // the replay of a late birth still feeds it.
-            if (!rollback_.recorded_body(entity, tick) && !feeds_next) {
-                ++relay_bodiless_;
+            if (!core_.s.rollback_.recorded_body(entity, tick) && !feeds_next) {
+                ++core_.s.relay_bodiless_;
                 return;
             }
             // The birth tick: every rewind across it parks the body and re-poses
@@ -3767,7 +3748,7 @@ namespace {
             // it changes nothing a replay can reach - a whole replay for the
             // same world.  (The one-tick error stays until a snapshot.)
             if (remote.physicalized && tick == remote.born_tick && !feeds_next) {
-                ++relay_birth_frozen_;
+                ++core_.s.relay_birth_frozen_;
                 return;
             }
             // No record of an input for this body at this tick is NEWS, not a
@@ -3778,19 +3759,19 @@ namespace {
             // none - so skipping it here was stopping those balls from ever
             // converging.
             bmmo::session::input_frame predicted{};
-            if (rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, relayed))
+            if (core_.s.rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, relayed))
                 return;   // the prediction was right
-            if (!input_rewind_pending_ || static_cast<int32_t>(tick - input_rewind_tick_) < 0) {
-                input_rewind_pending_ = true;
-                input_rewind_tick_ = tick;
-                input_rewind_entity_ = entity;
-                input_rewind_own_ = false;
+            if (!core_.s.input_rewind_pending_ || static_cast<int32_t>(tick - core_.s.input_rewind_tick_) < 0) {
+                core_.s.input_rewind_pending_ = true;
+                core_.s.input_rewind_tick_ = tick;
+                core_.s.input_rewind_entity_ = entity;
+                core_.s.input_rewind_own_ = false;
             }
             // Every ball corrected this frame, not only the earliest: the one
             // replay below re-runs them all, and the window: line credits it
             // to each source (late-player design 5.2, input rewinds naming the
             // late ball).
-            input_rewind_entities_.insert(entity);
+            core_.s.input_rewind_entities_.insert(entity);
         }
 
         // The engine clock and the frame step on one line, in hex floats: the
@@ -3818,7 +3799,7 @@ namespace {
             compare_scripts(tick, source);
             if (args_.dump_savestate_dir.empty() || tick < args_.dump_savestate_from || tick > args_.dump_savestate_until) return;
             dump_scripts(tick);
-            const std::vector<uint8_t>* blob = rollback_.recorded_savestate(tick);
+            const std::vector<uint8_t>* blob = core_.s.rollback_.recorded_savestate(tick);
             if (savestate_dump_logs_ == 0) {
                 ++savestate_dump_logs_;
                 logf("--dump-savestate: first tick %u in range, record %s, into %s (cwd %s)", tick, blob ? "has a blob" : "HAS NO BLOB",
@@ -3839,7 +3820,7 @@ namespace {
         // The scripts' state beside the blob: <tick>.scr, the bytes the record
         // of this tick carries (after a rewind, the replayed state's).
         void dump_scripts(uint32_t tick) {
-            const std::vector<uint8_t>* recorded = rollback_.recorded_scripts(tick);
+            const std::vector<uint8_t>* recorded = core_.s.rollback_.recorded_scripts(tick);
             if (!recorded) return;
             const std::vector<uint8_t>& bytes = *recorded;
             std::error_code ec;
@@ -3857,7 +3838,7 @@ namespace {
         // own, if the live record agreed).
         void compare_scripts(uint32_t tick, const char* source) {
             if (args_.compare_scripts_dir.empty() || !args_.script_replay || scripts_.empty()) return;
-            const std::vector<uint8_t>* recorded = rollback_.recorded_scripts(tick);
+            const std::vector<uint8_t>* recorded = core_.s.rollback_.recorded_scripts(tick);
             if (!recorded) return;
             const std::vector<uint8_t>& mine = *recorded;
             const std::filesystem::path path = std::filesystem::path(args_.compare_scripts_dir) / (std::to_string(tick) + ".scr");
@@ -3897,10 +3878,10 @@ namespace {
         // arena with --force-rollback 7:5: 6 mm at the edge, a metre 1300
         // ticks later; a 20:12 cadence never put an edge on that tick).
         void rearm_own_navigation() {
-            if (!own_navigation_ || !previous_cam_valid_) return;
+            if (!own_navigation_ || !core_.s.previous_cam_valid_) return;
             std::string error;
-            if (!bmmo::physics::navigation_input(engine_->physics(), own_nav_entity_.c_str(), 0, previous_cam_[0], previous_cam_[1],
-                                                 previous_cam_[2], false, error))
+            if (!bmmo::physics::navigation_input(engine_->physics(), own_nav_entity_.c_str(), 0, core_.s.previous_cam_[0], core_.s.previous_cam_[1],
+                                                 core_.s.previous_cam_[2], false, error))
                 logf("own navigation rows after a rewind: %s", error.c_str());
         }
 
@@ -3926,10 +3907,10 @@ namespace {
                 bmmo::physics::get_clock(engine_->physics(), factor_before, delta_before, clock_error);
                 bmmo::physics::get_clock_state(engine_->physics(), clock_before, clock_error);
             }
-            if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+            if (args_.trace_restore && core_.s.own_physicalized_ && !core_.s.own_body_entity_.empty() && contact_traces_ < 48) {
                 ++contact_traces_;
-                logf("contacts of %s before the rewind at %u: %s", own_body_entity_.c_str(), now,
-                     bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+                logf("contacts of %s before the rewind at %u: %s", core_.s.own_body_entity_.c_str(), now,
+                     bmmo::physics::describe_contacts(engine_->physics(), core_.s.own_body_entity_.c_str()).c_str());
             }
             if (args_.trace_restore && queue_traces_ < 24) {
                 ++queue_traces_;
@@ -3937,9 +3918,9 @@ namespace {
                      bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
             }
             const live_cells_guard keep_cells(*this);
-            if (rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
-                ++forced_rollbacks_;
-                forced_rollback_depth_ += now - anchor;
+            if (core_.s.rollback_.rewind_to(rollback_world(), anchor, now, input_at, "forced")) {
+                ++core_.s.forced_rollbacks_;
+                core_.s.forced_rollback_depth_ += now - anchor;
                 drop_carried_own_replay(anchor, false);
                 for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t, "replayed");
                 if (args_.trace_restore && queue_traces_ < 24) {
@@ -3948,15 +3929,15 @@ namespace {
                          bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
                 }
             } else {
-                ++forced_rollbacks_missed_;
+                ++core_.s.forced_rollbacks_missed_;
             }
-            if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+            if (args_.trace_restore && core_.s.own_physicalized_ && !core_.s.own_body_entity_.empty() && contact_traces_ < 48) {
                 ++contact_traces_;
                 if (!args_.trace_body.empty() && now >= args_.trace_from && now <= args_.trace_until)
                     logf("body %s after the rewind (replayed to %u): %s", args_.trace_body.c_str(), now,
                          bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
-                logf("contacts of %s after the rewind (replayed to %u): %s", own_body_entity_.c_str(), now,
-                     bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+                logf("contacts of %s after the rewind (replayed to %u): %s", core_.s.own_body_entity_.c_str(), now,
+                     bmmo::physics::describe_contacts(engine_->physics(), core_.s.own_body_entity_.c_str()).c_str());
             }
             if (args_.trace_restore && restore_traces_ < 8) {
                 ++restore_traces_;
@@ -3993,8 +3974,8 @@ namespace {
 
         // One replay for every input correction this frame collected.
         void replay_corrected_inputs() {
-            own_replay_pacer_.frame();
-            if (!input_rewind_pending_) return;
+            core_.s.own_replay_pacer_.frame();
+            if (!core_.s.input_rewind_pending_) return;
             // Our own corrections alone are coalesced (own_replay_pacer): while
             // the server keeps substituting our ticks, one notice per server
             // tick would otherwise be one replay per frame across whatever the
@@ -4008,25 +3989,25 @@ namespace {
             // Only while the server still substitutes our ticks: once its
             // header says it has our frames again no notice will join the
             // waiting replay, which then runs at once.
-            if (input_rewind_own_ && input_rewind_entities_.empty()
-                    && !own_replay_pacer_.due(current_tick(), input_rewind_tick_, rollback_.thresholds().max_resim_ticks,
+            if (core_.s.input_rewind_own_ && core_.s.input_rewind_entities_.empty()
+                    && !core_.s.own_replay_pacer_.due(current_tick(), core_.s.input_rewind_tick_, core_.s.rollback_.thresholds().max_resim_ticks,
                                               own_notices_coming())) {
-                ++subst_deferred_;
+                ++core_.s.subst_deferred_;
                 return;
             }
-            const uint32_t anchor = input_rewind_tick_;
-            const std::string entity = input_rewind_entity_;
+            const uint32_t anchor = core_.s.input_rewind_tick_;
+            const std::string entity = core_.s.input_rewind_entity_;
             // The earliest correction names the replay: our own frame the
             // server substituted (late-player design 1.3) or a remote's
             // relayed frame.  One replay covers both kinds and is counted in
             // each class it carries: subst rew / the window's substrew when
             // an own correction is among this frame's, inrew when a remote's
             // is (both, when both are).
-            const bool own = input_rewind_own_;
-            const bool has_own = input_rewind_has_own_ || own;
-            const uint32_t own_amends = input_rewind_own_amends_;
+            const bool own = core_.s.input_rewind_own_;
+            const bool has_own = core_.s.input_rewind_has_own_ || own;
+            const uint32_t own_amends = core_.s.input_rewind_own_amends_;
             std::set<std::string> corrected;
-            corrected.swap(input_rewind_entities_);
+            corrected.swap(core_.s.input_rewind_entities_);
             const bool has_remote = !corrected.empty() || !own;
             drop_pending_rewind();
             const uint32_t now = current_tick();
@@ -4037,34 +4018,34 @@ namespace {
             const live_cells_guard keep_cells(*this);
             const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
                                            : entity + " input corrected at tick " + std::to_string(anchor);
-            if (has_own) own_replay_pacer_.ran();
-            if (rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at, reason)) {
+            if (has_own) core_.s.own_replay_pacer_.ran();
+            if (core_.s.rollback_.rewind_to(rollback_world(), anchor - 1, now, input_at, reason)) {
                 if (has_own) {
-                    ++subst_rewinds_;
-                    subst_rewind_depth_ += now - (anchor - 1);
-                    if (own_amends > 1) subst_saved_ += own_amends - 1;   // amendments that rode along
+                    ++core_.s.subst_rewinds_;
+                    core_.s.subst_rewind_depth_ += now - (anchor - 1);
+                    if (own_amends > 1) core_.s.subst_saved_ += own_amends - 1;   // amendments that rode along
                 }
                 if (has_remote) {
-                    ++input_rewinds_;
-                    input_rewind_depth_ += now - (anchor - 1);
+                    ++core_.s.input_rewinds_;
+                    core_.s.input_rewind_depth_ += now - (anchor - 1);
                 }
                 // Named by every source ball it corrects: the harness asks
                 // whether rewinds naming a late player grow (late-player
                 // design 5.2), and one replay covers all of this frame's.
-                for (const auto& [id, remote]: remotes_)
-                    if (corrected.count(remote.entity)) ++window_inrew_src_[id];
+                for (const auto& [id, remote]: core_.s.remotes_)
+                    if (corrected.count(remote.entity)) ++core_.s.window_inrew_src_[id];
                 return;
             }
-            if (has_remote) ++input_rewinds_missed_;
-            if (has_own) ++subst_rewinds_missed_;
-            if (input_rewinds_missed_ + subst_rewinds_missed_ < 8)
+            if (has_remote) ++core_.s.input_rewinds_missed_;
+            if (has_own) ++core_.s.subst_rewinds_missed_;
+            if (core_.s.input_rewinds_missed_ + core_.s.subst_rewinds_missed_ < 8)
                 logf("input correction for %s at tick %u is outside the rollback history at local tick %u: "
                      "a snapshot has to re-anchor it", entity.c_str(), anchor, now);
             // Our own ball ran on a frame the server did not apply (its
             // record is amended, never replayed), and with snapshots off
             // nothing else would ever repair it.  Not while a resync waits
             // for its snapshot: that snapshot is the repair.
-            if (has_own && !resync_pending_) request_resync("a substituted own frame could not be replayed", true);
+            if (has_own && !core_.s.resync_pending_) request_resync("a substituted own frame could not be replayed", true);
         }
 
         // Every movable body in this client's world except the balls, which
@@ -4168,12 +4149,12 @@ namespace {
         // window old, where the recorded prediction is a round trip old).
         bool recorded_input_at(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) const {
             const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
-            if (entity == own_nav_entity_) inputs = &own_inputs_;
+            if (entity == own_nav_entity_) inputs = &core_.s.own_inputs_;
             else
-                for (const auto& [id, remote]: remotes_)
+                for (const auto& [id, remote]: core_.s.remotes_)
                     if (remote.entity == entity) inputs = &remote.inputs;
             if (!inputs) return false;
-            if (inputs == &own_inputs_) {
+            if (inputs == &core_.s.own_inputs_) {
                 auto it = inputs->find(tick);
                 if (it == inputs->end()) return false;
                 out = it->second;
@@ -4205,14 +4186,14 @@ namespace {
         // derives it from the stamp too, so the two must not be re-stamped
         // with their differing consumption ticks.
         void drain_due_events(uint32_t tick) {
-            if (pending_events_.empty()) return;
+            if (core_.s.pending_events_.empty()) return;
             std::vector<bmmo::session_event_msg> due;
-            auto keep = pending_events_.begin();
-            for (auto it = pending_events_.begin(); it != pending_events_.end(); ++it) {
+            auto keep = core_.s.pending_events_.begin();
+            for (auto it = core_.s.pending_events_.begin(); it != core_.s.pending_events_.end(); ++it) {
                 if (static_cast<int32_t>(it->tick - tick) <= 0) due.push_back(std::move(*it));
                 else *keep++ = std::move(*it);
             }
-            pending_events_.erase(keep, pending_events_.end());
+            core_.s.pending_events_.erase(keep, core_.s.pending_events_.end());
             if (due.empty()) return;
             // (join, applied, origin, rank): the server applies each event at
             // its applied tick, and one player's events of one tick by origin
@@ -4236,7 +4217,7 @@ namespace {
             for (auto& event: due) {
                 if (event.tick == tick && (event.type == bmmo::session::event_type::Physicalize
                                            || event.type == bmmo::session::event_type::Unphysicalize)) {
-                    held_lifecycle_.push_back(std::move(event));   // the message is move-only
+                    core_.s.held_lifecycle_.push_back(std::move(event));   // the message is move-only
                     continue;
                 }
                 apply_event(event);
@@ -4250,9 +4231,9 @@ namespace {
         // place.
         void apply_held_lifecycle(uint32_t frame_tick) {
             std::vector<bmmo::session_event_msg> held;
-            held.swap(held_lifecycle_);
+            held.swap(core_.s.held_lifecycle_);
             if (!held.empty()) {
-                const uint32_t own_rank = join_rank(own_id_);
+                const uint32_t own_rank = join_rank(core_.s.own_id_);
                 bool own_placed = false;
                 for (const auto& event: held) {
                     if (!own_placed && join_rank(event.player) > own_rank) {
@@ -4271,14 +4252,14 @@ namespace {
         // births it set aside, then the rest; then the births whose echo is
         // overdue (expire_own_echoes).
         void process_own_echoes() {
-            if (!own_echoes_stale_.empty()) {
+            if (!core_.s.own_echoes_stale_.empty()) {
                 std::vector<bmmo::session_event_msg> stale;
-                stale.swap(own_echoes_stale_);
+                stale.swap(core_.s.own_echoes_stale_);
                 for (const auto& msg: stale) process_own_echo(msg, true);
             }
-            if (!own_echoes_.empty()) {
+            if (!core_.s.own_echoes_.empty()) {
                 std::vector<bmmo::session_event_msg> echoes;
-                echoes.swap(own_echoes_);
+                echoes.swap(core_.s.own_echoes_);
                 for (const auto& msg: echoes) process_own_echo(msg, false);
             }
             expire_own_echoes();
@@ -4313,7 +4294,7 @@ namespace {
             const bool birth = msg.type == bmmo::session::event_type::Physicalize;
             own_life* life = nullptr;
             if (birth && !stale)
-                for (auto& candidate: own_life_)
+                for (auto& candidate: core_.s.own_life_)
                     if (!candidate.retired && candidate.origin == msg.origin_tick && candidate.ball_type == msg.ball_type
                             && candidate.state == own_life::verdict::sent) {
                         life = &candidate;
@@ -4321,31 +4302,31 @@ namespace {
                     }
             own_life* aside = birth && !life ? find_unanswered(msg.origin_tick, msg.ball_type) : nullptr;
             if (made && !moved) {
-                ++own_echo_acked_;
+                ++core_.s.own_echo_acked_;
                 if (life) life->state = own_life::verdict::acked;
                 if (aside) answer_set_aside(*aside, true, msg.tick, "acked");
                 return;
             }
             const char* verdict = rejected ? "rejected" : superseded ? "superseded" : "moved";
-            if (rejected) ++own_echo_rejected_;
-            else if (superseded) ++own_echo_superseded_;
-            else ++own_echo_moved_;
-            if (birth && moved) ++own_birth_echo_moved_;
-            journal_lifecycle_event(own_id_, msg);
+            if (rejected) ++core_.s.own_echo_rejected_;
+            else if (superseded) ++core_.s.own_echo_superseded_;
+            else ++core_.s.own_echo_moved_;
+            if (birth && moved) ++core_.s.own_birth_echo_moved_;
+            journal_lifecycle_event(core_.s.own_id_, msg);
             journal_note(std::string("own echo: ") + event_type_name(static_cast<int>(msg.type)) + " stamped "
                          + std::to_string(msg.origin_tick) + " " + verdict + " (applied " + std::to_string(msg.tick) + ")");
             if (!birth) {
-                if (moved) ++own_moves_other_;
+                if (moved) ++core_.s.own_moves_other_;
                 logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u; "
                      "kept where we stamped it (only an own Physicalize is moved here)",
                      event_type_name(static_cast<int>(msg.type)), msg.origin_tick, verdict, msg.tick,
                      static_cast<unsigned>(msg.state), current_tick());
                 if (msg.type == bmmo::session::event_type::Unphysicalize && moved && args_.rollback && !stale) {
-                    own_moved_unphysicalize_.push_back(msg.origin_tick);
-                    while (own_moved_unphysicalize_.size() > 32) own_moved_unphysicalize_.erase(own_moved_unphysicalize_.begin());
+                    core_.s.own_moved_unphysicalize_.push_back(msg.origin_tick);
+                    while (core_.s.own_moved_unphysicalize_.size() > 32) core_.s.own_moved_unphysicalize_.erase(core_.s.own_moved_unphysicalize_.begin());
                     // The birth of the pair already moved inside the history:
                     // the old body's late end is what it missed.
-                    for (auto& candidate: own_life_)
+                    for (auto& candidate: core_.s.own_life_)
                         if (!candidate.retired && candidate.origin == msg.origin_tick
                                 && candidate.state == own_life::verdict::moved) {
                             resync_own_life(candidate, candidate.made, candidate.applied,
@@ -4358,8 +4339,8 @@ namespace {
             if (life) {
                 life->state = rejected ? own_life::verdict::rejected
                             : superseded ? own_life::verdict::superseded : own_life::verdict::moved;
-                if (std::find(own_moved_unphysicalize_.begin(), own_moved_unphysicalize_.end(), msg.origin_tick)
-                        != own_moved_unphysicalize_.end()) {
+                if (std::find(core_.s.own_moved_unphysicalize_.begin(), core_.s.own_moved_unphysicalize_.end(), msg.origin_tick)
+                        != core_.s.own_moved_unphysicalize_.end()) {
                     resync_own_life(*life, made, msg.tick, "its Unphysicalize was moved too (an own pair, plan step 22)");
                     return;
                 }
@@ -4373,7 +4354,7 @@ namespace {
             // No record: never recorded (no rollback), sent before the last
             // resync and answered by it, or retired after kOwnRecordKeepTicks
             // with no echo.
-            const bool before_base = static_cast<int32_t>(msg.origin_tick - tick_base_) < 0;
+            const bool before_base = static_cast<int32_t>(msg.origin_tick - core_.s.tick_base_) < 0;
             if (!args_.rollback || stale || before_base) {
                 logf("own physicalize stamped %u echoed %s by the server (applied %u) at local tick %u: no record of it, %s",
                      msg.origin_tick, verdict, msg.tick, current_tick(),
@@ -4384,7 +4365,7 @@ namespace {
                                    + (made ? std::to_string(msg.tick) : std::string("never"));
             logf("%s at local tick %u: no record of it (past the history), resync", head.c_str(), current_tick());
             journal_note(head + ": no record of it (past the history), resync");
-            ++own_moves_resynced_;
+            ++core_.s.own_moves_resynced_;
             request_resync("own birth moved past the history", true);
         }
 
@@ -4396,7 +4377,7 @@ namespace {
         // the server has it, and the poses are the snapshots'.
         void answer_set_aside(own_life& entry, bool made, uint32_t applied, const char* verdict) {
             own_life life = entry;
-            own_unanswered_.erase(own_unanswered_.begin() + (&entry - own_unanswered_.data()));
+            core_.s.own_unanswered_.erase(core_.s.own_unanswered_.begin() + (&entry - core_.s.own_unanswered_.data()));
             const bool missing = life.why == own_life::aside::missing;
             if (missing == made) {
                 resync_own_life(life, made, applied, missing ? "made after its echo was given up as missing"
@@ -4438,23 +4419,23 @@ namespace {
         // birth up would resync this client twice (the give-up, then the
         // late copy echoed as made).
         void expire_own_echoes() {
-            if (!args_.rollback || resync_pending_) return;
+            if (!args_.rollback || core_.s.resync_pending_) return;
             uint32_t server_tick = 0;
-            if (!bmmo::session::newest_server_tick(acked_header_known_, acked_header_tick_, have_snapshot_,
-                                                   last_snapshot_tick_, server_tick))
+            if (!bmmo::session::newest_server_tick(core_.s.acked_header_known_, core_.s.acked_header_tick_, core_.s.have_snapshot_,
+                                                   core_.s.last_snapshot_tick_, server_tick))
                 return;
-            for (auto& life: own_life_) {
+            for (auto& life: core_.s.own_life_) {
                 if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
-                if (!life.echo_deadline.missing(server_tick, acked_header_known_, header_acked_, life.origin,
+                if (!life.echo_deadline.missing(server_tick, core_.s.acked_header_known_, core_.s.header_acked_, life.origin,
                                                 kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks))
                     continue;
-                ++own_echo_missing_;
+                ++core_.s.own_echo_missing_;
                 life.state = own_life::verdict::missing;
                 own_life aside = life;
                 aside.why = own_life::aside::missing;
                 aside.aside_at = current_tick();
-                own_unanswered_.push_back(aside);
-                while (own_unanswered_.size() > 16) own_unanswered_.erase(own_unanswered_.begin());
+                core_.s.own_unanswered_.push_back(aside);
+                while (core_.s.own_unanswered_.size() > 16) core_.s.own_unanswered_.erase(core_.s.own_unanswered_.begin());
                 bmmo::session_event_msg never;
                 never.tick = never.origin_tick = life.origin;
                 never.type = bmmo::session::event_type::Physicalize;
@@ -4464,7 +4445,7 @@ namespace {
                 std::copy(std::begin(life.position), std::end(life.position), never.position);
                 std::copy(std::begin(life.rotation), std::end(life.rotation), never.rotation);
                 never.recipe = life.recipe;
-                journal_lifecycle_event(own_id_, never);
+                journal_lifecycle_event(core_.s.own_id_, never);
                 journal_note("own echo: Physicalize stamped " + std::to_string(life.origin) + " missing at the server's tick "
                              + std::to_string(server_tick));
                 resync_own_life(life, false, life.origin, "no echo by the server's tick " + std::to_string(server_tick));
@@ -4489,17 +4470,17 @@ namespace {
                 std::string error;
                 const bool there = bmmo::physics::get_body_state(engine_->physics(), life.entity.c_str(), state, error);
                 if (!made) {
-                    rollback_.move_birth(life.entity, life.generation, life.origin, life.origin, false);
+                    core_.s.rollback_.move_birth(life.entity, life.generation, life.origin, life.origin, false);
                     if (there) unmake_own_body(life, now, "never made");
-                    own_physicalized_ = false;
-                    own_body_entity_.clear();
+                    core_.s.own_physicalized_ = false;
+                    core_.s.own_body_entity_.clear();
                 } else if (!there && remake_own_body(life, now, "resync")) {
-                    ++own_remakes_;
-                    own_body_entity_ = life.entity;
+                    ++core_.s.own_remakes_;
+                    core_.s.own_body_entity_ = life.entity;
                 }
             }
             life.retired = true;
-            ++own_moves_resynced_;
+            ++core_.s.own_moves_resynced_;
             logf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str());
             journal_note(head + ": " + why + ", resync");
             request_resync("own birth: resync", true);
@@ -4537,7 +4518,7 @@ namespace {
             const std::string reason = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
                                      + (made ? std::to_string(applied) : std::string("never"));
             if (!args_.rollback || static_cast<int32_t>(now - anchor) < 0
-                    || now - anchor > rollback_.thresholds().max_resim_ticks || !rollback_.knows_tick(anchor)) {
+                    || now - anchor > core_.s.rollback_.thresholds().max_resim_ticks || !core_.s.rollback_.knows_tick(anchor)) {
                 resync_own_life(life, made, applied, "past the reach (depth " + std::to_string(static_cast<int>(now - anchor)) + ")");
                 return;
             }
@@ -4554,35 +4535,35 @@ namespace {
                 if (bmmo::physics::get_body_state(engine_->physics(), life.entity.c_str(), state, error))
                     unmake_own_body(life, now, "moved");
             }
-            const size_t changed = rollback_.move_birth(life.entity, life.generation, life.origin, life.applied, made);
+            const size_t changed = core_.s.rollback_.move_birth(life.entity, life.generation, life.origin, life.applied, made);
             if (!made) {
-                ++own_births_removed_;
+                ++core_.s.own_births_removed_;
                 if (life.what == own_life::kind::birth) life.retired = true;   // a beam's stamp still takes the old body out
             }
             // The replay below makes it when it reaches T'; past the live
             // tick the live frame of T' does.
             life.applied_live = !made || static_cast<int32_t>(life.applied - now) <= 0;
             if (life.what == own_life::kind::birth && alive && !life.applied_live) {
-                own_physicalized_ = false;
-                own_body_entity_.clear();
+                core_.s.own_physicalized_ = false;
+                core_.s.own_body_entity_.clear();
             }
             auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
                 return recorded_input_at(entity, tick, out);
             };
             const live_cells_guard keep_cells(*this);
-            if (!rollback_.rewind_to(rollback_world(), anchor, now, input_at, reason)) {
+            if (!core_.s.rollback_.rewind_to(rollback_world(), anchor, now, input_at, reason)) {
                 // The body set put back the way the server has it, then the
                 // resync (a refusal leaves the world at the live tick).
                 resync_own_life(life, made, applied, "the rewind to " + std::to_string(anchor) + " was refused");
                 return;
             }
-            ++life_rewinds_;
-            life_rewind_depth_ += now - anchor;
-            if (made) ++own_births_moved_;
+            ++core_.s.life_rewinds_;
+            core_.s.life_rewind_depth_ += now - anchor;
+            if (made) ++core_.s.own_births_moved_;
             drop_carried_own_replay(anchor, false);
             if (life.what == own_life::kind::birth && !made) {
-                own_physicalized_ = false;
-                own_body_entity_.clear();
+                core_.s.own_physicalized_ = false;
+                core_.s.own_body_entity_.clear();
             }
             logf("own physicalize stamped %u %s by the server at local tick %u: rewound to %u (%zu records changed%s)",
                  life.origin, made ? ("moved to " + std::to_string(applied)).c_str() : "never made", now, anchor, changed,
@@ -4594,7 +4575,7 @@ namespace {
         // A member's place in the server's order of a tick's events: its join
         // order, an unknown player after every known one.
         uint32_t join_rank(uint32_t player) const {
-            for (const auto& p: players_) if (p.id == player) return static_cast<uint32_t>(p.join_order);
+            for (const auto& p: core_.s.players_) if (p.id == player) return static_cast<uint32_t>(p.join_order);
             return 256u;
         }
 
@@ -4629,13 +4610,13 @@ namespace {
             const std::string reason = "ball of " + std::to_string(player) + " born at tick "
                                      + std::to_string(event_tick);
             const live_cells_guard keep_cells(*this);
-            if (rollback_.rewind_to(rollback_world(), event_tick - 1, now, input_at, reason)) {
-                ++life_rewinds_;
-                life_rewind_depth_ += now - (event_tick - 1);
+            if (core_.s.rollback_.rewind_to(rollback_world(), event_tick - 1, now, input_at, reason)) {
+                ++core_.s.life_rewinds_;
+                core_.s.life_rewind_depth_ += now - (event_tick - 1);
                 drop_carried_own_replay(event_tick - 1, false);
                 return;
             }
-            ++life_rewinds_missed_;
+            ++core_.s.life_rewinds_missed_;
             logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
                  "the body set disagrees until a snapshot re-anchors it", player, event_tick, now);
         }
@@ -4643,13 +4624,13 @@ namespace {
         // The remote's mirror goes (an Unphysicalize applied); false when
         // there is no such remote.
         bool unphysicalize_remote(uint32_t player, uint32_t tick) {
-            auto it = remotes_.find(player);
-            if (it == remotes_.end()) return false;
+            auto it = core_.s.remotes_.find(player);
+            if (it == core_.s.remotes_.end()) return false;
             std::string error;
             if (it->second.navigation) bmmo::physics::navigation_destroy(engine_->physics(), it->second.entity.c_str(), error);
             it->second.navigation = false;
             if (it->second.physicalized) {
-                ++generations_[it->second.entity];   // the body goes: a new lifetime
+                ++core_.s.generations_[it->second.entity];   // the body goes: a new lifetime
                 unphysicalize_mirror(it->second.entity);
             }
             it->second.physicalized = false;
@@ -4670,16 +4651,16 @@ namespace {
         void make_remote_birth(const bmmo::session_event_msg& event) {
             const uint32_t now = current_tick();
             if (args_.rollback && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
-                    && rollback_.knows_tick(event.tick - 1)) {
-                pending_births_.push_back(pending_birth::of(event));
+                    && core_.s.rollback_.knows_tick(event.tick - 1)) {
+                core_.s.pending_births_.push_back(pending_birth::of(event));
                 rewind_for_lifecycle(event);
                 // The replay made it at its tick; if it did not get that
                 // far, make it now.
-                for (auto it = pending_births_.begin(); it != pending_births_.end();)
+                for (auto it = core_.s.pending_births_.begin(); it != core_.s.pending_births_.end();)
                     if (it->player == event.player) {
                         logf("remote physicalize of %u: the replay did not reach tick %u, made live", event.player, event.tick);
                         physicalize_remote(*it, live_first_tick(event.tick));
-                        it = pending_births_.erase(it);
+                        it = core_.s.pending_births_.erase(it);
                     } else ++it;
                 return;
             }
@@ -4688,7 +4669,7 @@ namespace {
         }
 
         void apply_event(const bmmo::session_event_msg& event) {
-            if (event.player == 0 || event.player == own_id_) return;
+            if (event.player == 0 || event.player == core_.s.own_id_) return;
             journal_lifecycle_event(event.player, event);
             std::string error;
             switch (event.type) {
@@ -4704,11 +4685,11 @@ namespace {
                 // rewound for, so nothing is left of it after the death's
                 // tick (review of step 16: applied alone, the mirror lived on
                 // where the server and every other side had none).
-                const auto death = remote_last_unphysicalize_.find(event.player);
-                const bool overtaken = death != remote_last_unphysicalize_.end()
+                const auto death = core_.s.remote_last_unphysicalize_.find(event.player);
+                const bool overtaken = death != core_.s.remote_last_unphysicalize_.end()
                                     && static_cast<int32_t>(death->second.origin - event.origin_tick) > 0;
                 if (overtaken && static_cast<int32_t>(event.tick - death->second.applied) >= 0) {
-                    ++births_overtaken_;
+                    ++core_.s.births_overtaken_;
                     logf("remote physicalize of %u stamped %u (applied %u) is older than its death stamped %u, applied"
                          " at %u already: no ball", event.player, event.origin_tick, event.tick,
                          death->second.origin, death->second.applied);
@@ -4716,11 +4697,11 @@ namespace {
                 }
                 // The origin, which the guard below compares (design 3.1);
                 // never backwards (an older birth relayed late).
-                if (auto [last, fresh] = remote_last_physicalize_.try_emplace(event.player, event.origin_tick);
+                if (auto [last, fresh] = core_.s.remote_last_physicalize_.try_emplace(event.player, event.origin_tick);
                         !fresh && static_cast<int32_t>(event.origin_tick - last->second) > 0)
                     last->second = event.origin_tick;
                 if (overtaken) {
-                    ++births_overtaken_;
+                    ++core_.s.births_overtaken_;
                     const applied_death later = death->second;
                     logf("remote physicalize of %u stamped %u (applied %u) is older than its death stamped %u, applied"
                          " at %u already: made, and the death applied again", event.player, event.origin_tick,
@@ -4738,7 +4719,7 @@ namespace {
                 // step of the stamped tick - this very frame when the relay was
                 // on time (drain_due_events runs before the union's tick), the
                 // next one when it was late, which the union counts.
-                sectors_.stamp(event.player, event.sector, event.tick);
+                core_.s.sectors_.stamp(event.player, event.sector, event.tick);
                 logf("remote player %u entered sector %d, stamped for tick %u%s", event.player, event.sector, event.tick,
                      static_cast<int32_t>(event.tick - current_tick()) <= 0 ? " (LATE: the server started it already)" : "");
                 break;
@@ -4747,16 +4728,16 @@ namespace {
                 // is a copy that lost its place (protocol 6); applied, it would
                 // take the newer mirror out.  Stamped: compared on origins, as
                 // the server does (design 3.1).
-                if (const auto last = remote_last_physicalize_.find(event.player);
+                if (const auto last = core_.s.remote_last_physicalize_.find(event.player);
                         bmmo::session::lifecycle_unphysicalize_superseded(
-                                event.origin_tick, last != remote_last_physicalize_.end(),
-                                last == remote_last_physicalize_.end() ? 0 : last->second)) {
-                    ++events_superseded_;
+                                event.origin_tick, last != core_.s.remote_last_physicalize_.end(),
+                                last == core_.s.remote_last_physicalize_.end() ? 0 : last->second)) {
+                    ++core_.s.events_superseded_;
                     return;
                 }
                 // Newest by origin, with its applied tick: an older birth
                 // relayed after it is put back in front of it (above).
-                if (auto [death, fresh] = remote_last_unphysicalize_.try_emplace(
+                if (auto [death, fresh] = core_.s.remote_last_unphysicalize_.try_emplace(
                             event.player, applied_death{event.origin_tick, event.tick});
                         !fresh && static_cast<int32_t>(event.origin_tick - death->second.origin) > 0)
                     death->second = applied_death{event.origin_tick, event.tick};
@@ -4769,22 +4750,7 @@ namespace {
             }
         }
 
-        struct pending_birth {
-            uint32_t player = 0, tick = 0, origin = 0;   // tick: applied (protocol 9)
-            uint8_t ball_type = 0, flags = 0;
-            float position[3] = {};
-            float rotation[9] = {};
-            bmmo::session::ball_recipe recipe;
-            static pending_birth of(const bmmo::session_event_msg& event) {
-                pending_birth b;
-                b.player = event.player; b.tick = event.tick; b.origin = event.origin_tick;
-                b.ball_type = event.ball_type; b.flags = event.flags;
-                std::copy(std::begin(event.position), std::end(event.position), b.position);
-                std::copy(std::begin(event.rotation), std::end(event.rotation), b.rotation);
-                b.recipe = event.recipe;
-                return b;
-            }
-        };
+        using pending_birth = bmmo::session::client_core_state::pending_birth;
         // Births deferred into a replay (apply_event): made at their tick,
         // before its step.
         // The event log is muted around them: physicalize_remote bumps the
@@ -4801,12 +4767,12 @@ namespace {
         // stamp is applied here only once its live frame has run: before that
         // no replay reaches it.
         void drain_pending_births(uint32_t tick) {
-            if (pending_births_.empty() && !own_lives_due(tick)) return;
+            if (core_.s.pending_births_.empty() && !own_lives_due(tick)) return;
             std::vector<pending_birth> due;
-            for (auto it = pending_births_.begin(); it != pending_births_.end();)
+            for (auto it = core_.s.pending_births_.begin(); it != core_.s.pending_births_.end();)
                 if (it->tick == tick) {
                     due.push_back(*it);
-                    it = pending_births_.erase(it);
+                    it = core_.s.pending_births_.erase(it);
                 } else ++it;
             std::stable_sort(due.begin(), due.end(), [this](const pending_birth& a, const pending_birth& b) {
                 return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin,
@@ -4815,7 +4781,7 @@ namespace {
                                                              bmmo::session::event_type::Physicalize);
             });
             bool own = own_lives_due(tick);
-            const uint32_t own_rank = join_rank(own_id_);
+            const uint32_t own_rank = join_rank(core_.s.own_id_);
             for (const auto& birth: due) {
                 if (own && join_rank(birth.player) > own_rank) {
                     apply_own_lives(tick, "replay", false);
@@ -4825,7 +4791,7 @@ namespace {
                     const event_log_mute mute(*this);
                     physicalize_remote(birth, tick);
                 }
-                mechanism_tracking_.mark_dirty();
+                core_.s.mechanism_tracking_.mark_dirty();
             }
             if (own) apply_own_lives(tick, "replay", false);
         }
@@ -4869,7 +4835,7 @@ namespace {
                 const event_log_mute mute(*this);
                 bmmo::physics::unphysicalize(engine_->physics(), entity.c_str(), error);
             }
-            mechanism_tracking_.mark_dirty();
+            core_.s.mechanism_tracking_.mark_dirty();
         }
 
         // The frame a live step of `tick` drives a predicted mirror with: the
@@ -4892,17 +4858,17 @@ namespace {
             {
                 CK3dEntity* entity = remote_entity(event.player, event.ball_type, error);
                 if (!entity) { logf("remote physicalize: %s", error.c_str()); return; }
-                auto& remote = remotes_[event.player];
+                auto& remote = core_.s.remotes_[event.player];
                 if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 remote.navigation = false;
                 if (remote.physicalized && remote.entity != entity->GetName()) {
-                    ++generations_[remote.entity];   // a trafo: the old mirror's lifetime ends here
+                    ++core_.s.generations_[remote.entity];   // a trafo: the old mirror's lifetime ends here
                     unphysicalize_mirror(remote.entity);
                 }
                 entity->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
                 const auto recipe = to_bridge_recipe(event.recipe);
                 int join_order = 63;
-                for (const auto& p: players_) if (p.id == event.player) join_order = p.join_order;
+                for (const auto& p: core_.s.players_) if (p.id == event.player) join_order = p.join_order;
                 const std::string group = "P#" + std::to_string(join_order);
                 if (!bmmo::physics::physicalize(engine_->physics(), entity->GetName(), recipe, group.c_str(), error)) {
                     logf("remote physicalize %s: %s", entity->GetName(), error.c_str());
@@ -4910,7 +4876,7 @@ namespace {
                 }
                 // The mirror's body is new: a new lifetime, so no record of the
                 // previous one can restore it (design 9.25).
-                ++generations_[entity->GetName()];
+                ++core_.s.generations_[entity->GetName()];
                 remote.entity = entity->GetName();
                 remote.ball_type = event.ball_type;
                 remote.physicalized = true;
@@ -4926,18 +4892,18 @@ namespace {
                 // body at those ticks.
                 {
                     bmmo::session::input_frame newest{};
-                    const uint32_t newest_tick = pending_relay_.take(event.player, remote.inputs, bmmo::session::kRelayRing, &newest);
+                    const uint32_t newest_tick = core_.s.pending_relay_.take(event.player, remote.inputs, bmmo::session::kRelayRing, &newest);
                     if (newest_tick && (!remote.have_input || static_cast<int32_t>(newest_tick - remote.input_tick) >= 0)) {
                         remote.input = newest;
                         remote.input_tick = newest_tick;
                         remote.have_input = true;
                     }
                 }
-                if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && spawn_impulse_ > 0.0f) {
-                    const uint32_t idx = bmmo::session::spawn_direction_index(seed_, static_cast<uint8_t>(join_order), event.tick);
+                if ((event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) && core_.s.spawn_impulse_ > 0.0f) {
+                    const uint32_t idx = bmmo::session::spawn_direction_index(core_.s.seed_, static_cast<uint8_t>(join_order), event.tick);
                     std::string impulse_error;
                     if (!bmmo::physics::push_impulse(engine_->physics(), entity->GetName(), bmmo::session::kSpawnDirectionTable[idx],
-                                spawn_impulse_, 0, impulse_error))
+                                core_.s.spawn_impulse_, 0, impulse_error))
                         logf("remote spawn impulse for %u: %s", event.player, impulse_error.c_str());
                     else
                         logf("remote spawn impulse index=%u for player %u at tick %u", idx, event.player, event.tick);
@@ -5068,10 +5034,10 @@ namespace {
                          bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
                 if (args_.trace_clock_until && tick >= args_.trace_clock_from && tick <= args_.trace_clock_until)
                     logf("clock before replayed tick %u: %s", tick, describe_clock().c_str());
-                if (args_.trace_restore && own_physicalized_ && !own_body_entity_.empty() && contact_traces_ < 48) {
+                if (args_.trace_restore && core_.s.own_physicalized_ && !core_.s.own_body_entity_.empty() && contact_traces_ < 48) {
                     ++contact_traces_;
-                    logf("contacts of %s at replayed tick %u, before its step: %s", own_body_entity_.c_str(), tick,
-                         bmmo::physics::describe_contacts(engine_->physics(), own_body_entity_.c_str()).c_str());
+                    logf("contacts of %s at replayed tick %u, before its step: %s", core_.s.own_body_entity_.c_str(), tick,
+                         bmmo::physics::describe_contacts(engine_->physics(), core_.s.own_body_entity_.c_str()).c_str());
                 }
             };
             // The mirrors a replayed tick drives: every predicted remote this
@@ -5085,10 +5051,10 @@ namespace {
             // impulse to the live tick and being parked at that record by
             // every later correction.
             o.replay_remotes = [this](uint32_t tick, std::map<std::string, uint32_t>& out) {
-                for (const auto& [id, remote]: remotes_) {
+                for (const auto& [id, remote]: core_.s.remotes_) {
                     if (!remote.physicalized || !remote.navigation || static_cast<int32_t>(remote.driven_from - tick) > 0) continue;
-                    const auto generation = generations_.find(remote.entity);
-                    out[remote.entity] = generation == generations_.end() ? 0u : generation->second;
+                    const auto generation = core_.s.generations_.find(remote.entity);
+                    out[remote.entity] = generation == core_.s.generations_.end() ? 0u : generation->second;
                 }
             };
             if (args_.replay_scripts) {
@@ -5166,7 +5132,7 @@ namespace {
             if (args_.insert_births) world.insert_birth = [this](const std::string& entity, uint32_t birth_tick) {
                 // The balls stay on the parking path (exact there in every arm;
                 // the replica's controllers are on them).
-                if (entity.rfind("Ball_", 0) == 0 || entity == own_body_entity_) return false;
+                if (entity.rfind("Ball_", 0) == 0 || entity == core_.s.own_body_entity_) return false;
                 const local_birth* birth = find_local_birth(entity, birth_tick);
                 if (!birth) return false;
                 std::string error;
@@ -5215,8 +5181,8 @@ namespace {
                         if (!ok && recreate_logs_++ < 8) logf("own body %s could not be destroyed at the restore", entity.c_str());
                         return ok;
                     }
-                    if (entity.rfind("Ball_", 0) == 0 || entity == own_body_entity_) return false;
-                    for (const auto& [id, remote]: remotes_) if (remote.entity == entity) return false;
+                    if (entity.rfind("Ball_", 0) == 0 || entity == core_.s.own_body_entity_) return false;
+                    for (const auto& [id, remote]: core_.s.remotes_) if (remote.entity == entity) return false;
                     const local_birth* birth = find_local_birth(entity, birth_tick);
                     if (!birth) birth = find_local_birth(entity, 0);
                     std::string error;
@@ -5287,13 +5253,13 @@ namespace {
                 world.step = [this, inner, physics]() {
                     const bool diag = step_diag_ < 24;
                     if (diag)
-                        for (const auto& [id, remote]: remotes_)
+                        for (const auto& [id, remote]: core_.s.remotes_)
                             if (remote.navigation)
                                 logf("core before step: %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
                     const bool ok = inner();
                     if (diag) {
                         ++step_diag_;
-                        for (const auto& [id, remote]: remotes_)
+                        for (const auto& [id, remote]: core_.s.remotes_)
                             if (remote.navigation)
                                 logf("core after step:  %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
                     }
@@ -5312,21 +5278,21 @@ namespace {
         // every reason found meanwhile (a blackout can hold the answer past
         // the limiter's 2 s; 10 s is the give-up for an answer never coming).
         void request_resync(const char* reason, bool owed = false) {
-            if (phase_ != phase::running || !assigned_) return;
+            if (core_.s.phase_ != phase::running || !core_.s.assigned_) return;
             const auto now = wall_now(bmmo::sim::wall_site::resync_limiter);
-            if (resync_in_flight_ && now - last_resync_request_ < std::chrono::seconds(10)) return;
-            if (resyncs_sent_ > 0 && now - last_resync_request_ < std::chrono::seconds(2)) {
-                if (owed && !resync_owed_) {
-                    resync_owed_ = true;
-                    resync_owed_reason_ = reason;
+            if (core_.s.resync_in_flight_ && now - core_.s.last_resync_request_ < std::chrono::seconds(10)) return;
+            if (core_.s.resyncs_sent_ > 0 && now - core_.s.last_resync_request_ < std::chrono::seconds(2)) {
+                if (owed && !core_.s.resync_owed_) {
+                    core_.s.resync_owed_ = true;
+                    core_.s.resync_owed_reason_ = reason;
                     logf("resync owed (%s) at tick %u: the limiter holds it back", reason, current_tick());
                 }
                 return;
             }
-            resync_owed_ = false;
-            resync_in_flight_ = true;
-            last_resync_request_ = now;
-            consecutive_hard_ = 0;
+            core_.s.resync_owed_ = false;
+            core_.s.resync_in_flight_ = true;
+            core_.s.last_resync_request_ = now;
+            core_.s.consecutive_hard_ = 0;
             // A SessionLead's slew in flight ends here, acknowledged in full
             // (late-player design 2.8, lead_slew::finish_reanchored): the
             // server re-anchors this client at L_eff, the first lead plus the
@@ -5335,14 +5301,14 @@ namespace {
             // whole delta the server decided, not the part the slew had
             // moved.  Only here, past the limiter: a request held back
             // re-anchors nothing, and the slew carries on.
-            if (lead_slew_.active())
+            if (core_.s.lead_slew_.active())
                 finish_lead_slew(std::string("ended by a resync request (") + reason + ")", true);
             bmmo::session_resync_msg msg;
-            msg.session = session_;
-            msg.last_full_tick = last_snapshot_tick_;
+            msg.session = core_.s.session_;
+            msg.last_full_tick = core_.s.last_snapshot_tick_;
             msg.serialize();
             send_bytes(msg.raw.str(), k_nSteamNetworkingSend_Reliable);
-            ++resyncs_sent_;
+            ++core_.s.resyncs_sent_;
             logf("resync requested (%s) at tick %u", reason, current_tick());
             // Why this client gave up on its own world belongs in the box: the
             // reason ("tick schedule rebased") leaves no other trace in the
@@ -5354,9 +5320,9 @@ namespace {
         // now if the limiter allows (it keeps the debt otherwise).  A resync
         // waiting for its snapshot already is the answer.
         void retry_owed_resync() {
-            if (!resync_owed_) return;
-            if (resync_pending_) { resync_owed_ = false; return; }
-            const std::string reason = resync_owed_reason_ + " (owed)";
+            if (!core_.s.resync_owed_) return;
+            if (core_.s.resync_pending_) { core_.s.resync_owed_ = false; return; }
+            const std::string reason = core_.s.resync_owed_reason_ + " (owed)";
             request_resync(reason.c_str(), true);
         }
 
@@ -5367,11 +5333,11 @@ namespace {
         // up with the server's own journal of the same room.  Single threaded
         // like the rest of this client: the network is polled between frames,
         // so there is no lock anywhere near the writer.
-        bool journalling() const { return journal_.is_open() && !journal_.capped(); }
+        bool journalling() const { return core_.s.journal_.is_open() && !core_.s.journal_.capped(); }
 
         uint32_t journal_ms() {
             return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                wall_now(bmmo::sim::wall_site::journal_ms) - journal_start_).count());
+                wall_now(bmmo::sim::wall_site::journal_ms) - core_.s.journal_start_).count());
         }
 
         // Opened at the anchor, where the hash the server has to agree with is
@@ -5385,52 +5351,52 @@ namespace {
             if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
             bmmo::session::journal_header header;
             header.kind = bmmo::session::journal_kind::client;
-            header.session = session_;
-            header.level = level_;
-            header.seed = seed_;
-            header.spawn_impulse = spawn_impulse_;
-            header.input_delay = input_delay_;
+            header.session = core_.s.session_;
+            header.level = core_.s.level_;
+            header.seed = core_.s.seed_;
+            header.spawn_impulse = core_.s.spawn_impulse_;
+            header.input_delay = core_.s.input_delay_;
             header.checkpoint_ticks = args_.checkpoint_ticks ? args_.checkpoint_ticks : kJournalCheckpointTicks;
-            header.first_tick = tick_base_;
+            header.first_tick = core_.s.tick_base_;
             header.anchor_hash = hash.pose;
             header.anchor_surfaces = hash.surfaces;
             header.build_id = bmmo::physics::build_id();
             header.utc_ms = wall_utc_ms();
-            header.own_player = own_id_;
-            header.own_join_order = own_join_order_ < 0 ? 255 : static_cast<uint8_t>(own_join_order_);
-            journal_start_ = wall_now(bmmo::sim::wall_site::journal_start);
+            header.own_player = core_.s.own_id_;
+            header.own_join_order = core_.s.own_join_order_ < 0 ? 255 : static_cast<uint8_t>(core_.s.own_join_order_);
+            core_.s.journal_start_ = wall_now(bmmo::sim::wall_site::journal_start);
             std::string error;
-            if (!journal_.open(path, header, kJournalMaxBytes, error)) {
+            if (!core_.s.journal_.open(path, header, kJournalMaxBytes, error)) {
                 logf("journal: %s", error.c_str());
                 return;
             }
             // The headless client knows ids, not nicknames: only its own name
             // comes from the command line.
-            std::string note = "start: session " + std::to_string(session_) + " level " + std::to_string(level_)
-                             + " as " + args_.name + "(" + std::to_string(own_id_) + ", join "
-                             + std::to_string(own_join_order_) + "):";
-            journal_announced_.clear();
-            for (const auto& p: players_) {
-                const std::string name = p.id == own_id_ ? args_.name : std::to_string(p.id);
-                journal_.player(header.first_tick, p.id, p.join_order, true, name);
-                journal_announced_.insert(p.id);
+            std::string note = "start: session " + std::to_string(core_.s.session_) + " level " + std::to_string(core_.s.level_)
+                             + " as " + args_.name + "(" + std::to_string(core_.s.own_id_) + ", join "
+                             + std::to_string(core_.s.own_join_order_) + "):";
+            core_.s.journal_announced_.clear();
+            for (const auto& p: core_.s.players_) {
+                const std::string name = p.id == core_.s.own_id_ ? args_.name : std::to_string(p.id);
+                core_.s.journal_.player(header.first_tick, p.id, p.join_order, true, name);
+                core_.s.journal_announced_.insert(p.id);
                 note += " " + name + "(" + std::to_string(p.id) + ", join " + std::to_string(p.join_order) + ")";
             }
-            journal_.note(header.first_tick, note);
-            journal_last_checkpoint_ = 0;
-            journal_have_checkpoint_ = false;
-            journal_checkpoint_pending_ = false;
+            core_.s.journal_.note(header.first_tick, note);
+            core_.s.journal_last_checkpoint_ = 0;
+            core_.s.journal_have_checkpoint_ = false;
+            core_.s.journal_checkpoint_pending_ = false;
             logf("journal: %s", path.string().c_str());
         }
 
         void close_journal(const std::string& reason) {
-            if (!journal_.is_open()) return;
-            journal_.note(current_tick(), "end: " + reason);
-            journal_.close();
+            if (!core_.s.journal_.is_open()) return;
+            core_.s.journal_.note(current_tick(), "end: " + reason);
+            core_.s.journal_.close();
         }
 
         void journal_note(const std::string& text) {
-            if (journalling()) journal_.note(current_tick(), text);
+            if (journalling()) core_.s.journal_.note(current_tick(), text);
         }
 
         // The roster only ever comes from SessionStart, which the server sends
@@ -5442,13 +5408,13 @@ namespace {
         // spawn impulse direction, so a guessed one is worth a warning rather
         // than a silent wrong answer.
         void journal_announce_player(uint32_t player, uint32_t tick) {
-            if (player == 0 || !journal_announced_.insert(player).second) return;
+            if (player == 0 || !core_.s.journal_announced_.insert(player).second) return;
             int join_order = -1;
-            for (const auto& p: players_) if (p.id == player) join_order = p.join_order;
-            journal_.player(tick, player, join_order < 0 ? 255 : static_cast<uint8_t>(join_order), true,
+            for (const auto& p: core_.s.players_) if (p.id == player) join_order = p.join_order;
+            core_.s.journal_.player(tick, player, join_order < 0 ? 255 : static_cast<uint8_t>(join_order), true,
                             std::to_string(player));
             if (join_order < 0)
-                journal_.note(tick, "late join: p" + std::to_string(player)
+                core_.s.journal_.note(tick, "late join: p" + std::to_string(player)
                               + " has records but was never announced to this client; join order unknown");
         }
 
@@ -5459,8 +5425,8 @@ namespace {
         // world at that moment, so a replay of this file has to drop it too.
         // Forgetting the id lets a rejoin announce itself again.
         void journal_leave_player(uint32_t player) {
-            if (!journalling() || journal_announced_.erase(player) == 0) return;
-            journal_.player(current_tick(), player, 0, false, {});
+            if (!journalling() || core_.s.journal_announced_.erase(player) == 0) return;
+            core_.s.journal_.player(current_tick(), player, 0, false, {});
         }
 
         // A lifecycle event as the wire carries it; `player` is who it belongs
@@ -5488,7 +5454,7 @@ namespace {
             out.sector = e.sector;
             out.name = e.name;
             out.recipe = to_bridge_recipe(e.recipe);
-            journal_.event(out);
+            core_.s.journal_.event(out);
         }
 
         // The rollback engine's own verdict about a snapshot (kinds 0, 1, 5,
@@ -5506,10 +5472,10 @@ namespace {
                 out.local_position[k] = c.local_position[k];
                 out.server_position[k] = c.server_position[k];
             }
-            journal_.correction(out);
+            core_.s.journal_.correction(out);
             // A rollback, a too-far set and a freeze all moved bodies: the
             // next checkpoint says where they ended up.
-            if (c.kind == 1 || c.kind == 5 || c.kind == 6) journal_checkpoint_pending_ = true;
+            if (c.kind == 1 || c.kind == 5 || c.kind == 6) core_.s.journal_checkpoint_pending_ = true;
         }
 
         // The blending corrector's decisions (hard = 2, blend = 3) and the
@@ -5529,8 +5495,8 @@ namespace {
                 for (int k = 0; k < 3; ++k) c.local_position[k] = local.position[k];
             if (server_position)
                 for (int k = 0; k < 3; ++k) c.server_position[k] = server_position[k];
-            journal_.correction(c);
-            if (kind == 2 || kind == 4) journal_checkpoint_pending_ = true;
+            core_.s.journal_.correction(c);
+            if (kind == 2 || kind == 4) core_.s.journal_checkpoint_pending_ = true;
         }
 
         bool journal_checkpoint_due(uint32_t tick) const {
@@ -5543,9 +5509,9 @@ namespace {
             // at this comparison got 1055 client and 1320 server checkpoints
             // with zero ticks in common.
             if (cadence != 0 && tick % cadence == 0) return true;
-            if (!journal_have_checkpoint_ || tick < journal_last_checkpoint_) return true;
-            const uint32_t since = tick - journal_last_checkpoint_;
-            return journal_checkpoint_pending_ && since >= std::min(cadence, kJournalCheckpointGap);
+            if (!core_.s.journal_have_checkpoint_ || tick < core_.s.journal_last_checkpoint_) return true;
+            const uint32_t since = tick - core_.s.journal_last_checkpoint_;
+            return core_.s.journal_checkpoint_pending_ && since >= std::min(cadence, kJournalCheckpointGap);
         }
 
         // This client's own world, from the bridge's body list: the balls
@@ -5579,9 +5545,9 @@ namespace {
                                                                      : bmmo::session::body_kind::Mechanism;
                 state.owner = 0;
                 if (state.kind == bmmo::session::body_kind::Ball) {
-                    if (!own_name.empty() && own_name == body.name) state.owner = own_id_;
+                    if (!own_name.empty() && own_name == body.name) state.owner = core_.s.own_id_;
                     else
-                        for (const auto& [id, remote]: remotes_)
+                        for (const auto& [id, remote]: core_.s.remotes_)
                             if (remote.physicalized && remote.entity == body.name) { state.owner = id; break; }
                 }
                 state.name = body.name;
@@ -5595,10 +5561,10 @@ namespace {
                     | (body.collision_enabled ? bmmo::session::BODY_FLAG_COLLISION_ENABLED : 0u));
                 out.push_back(std::move(state));
             }
-            journal_.checkpoint(tick, bmmo::session::JOURNAL_CHECKPOINT_LOCAL, out);
-            journal_last_checkpoint_ = tick;
-            journal_have_checkpoint_ = true;
-            journal_checkpoint_pending_ = false;
+            core_.s.journal_.checkpoint(tick, bmmo::session::JOURNAL_CHECKPOINT_LOCAL, out);
+            core_.s.journal_last_checkpoint_ = tick;
+            core_.s.journal_have_checkpoint_ = true;
+            core_.s.journal_checkpoint_pending_ = false;
         }
 
         // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
@@ -5614,26 +5580,26 @@ namespace {
                 body_guard_ = false;
                 body_guard_entity_.clear();
             }
-            for (auto& [id, remote]: remotes_) {
+            for (auto& [id, remote]: core_.s.remotes_) {
                 if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
                 if (remote.physicalized) bmmo::physics::unphysicalize(engine_->physics(), remote.entity.c_str(), error);
             }
-            remotes_.clear();
-            relay_seen_.clear();
-            held_seen_.clear();
-            held_stale_seen_.clear();
+            core_.s.remotes_.clear();
+            core_.s.relay_seen_.clear();
+            core_.s.held_seen_.clear();
+            core_.s.held_stale_seen_.clear();
             reset_held_epoch("the session's end");
-            pending_relay_.clear();
-            event_seen_.clear();
-            own_event_repeats_.clear();
+            core_.s.pending_relay_.clear();
+            core_.s.event_seen_.clear();
+            core_.s.own_event_repeats_.clear();
             held_events_.clear();
-            remote_last_physicalize_.clear();
-            remote_last_unphysicalize_.clear();
+            core_.s.remote_last_physicalize_.clear();
+            core_.s.remote_last_unphysicalize_.clear();
             report();
-            phase_ = phase::idle;
-            session_ = 0;
-            assigned_ = false;
-            ++sessions_ended_;
+            core_.s.phase_ = phase::idle;
+            core_.s.session_ = 0;
+            core_.s.assigned_ = false;
+            ++core_.s.sessions_ended_;
         }
 
         // One line per kWindowTicks ticks (late-player design 5.1 C1): what
@@ -5647,28 +5613,28 @@ namespace {
             // A line closes the window on the first frame of the next index:
             // the ticks t with (t - shift) % 60 == 0 (--window-origin).
             const uint32_t index = (tick + kWindowTicks - args_.window_shift) / kWindowTicks;
-            if (window_index_ == index) return;
-            const bool first = window_index_ == 0xFFFFFFFFu;
-            window_index_ = index;
+            if (core_.s.window_index_ == index) return;
+            const bool first = core_.s.window_index_ == 0xFFFFFFFFu;
+            core_.s.window_index_ = index;
             window_base now;
-            now.inrew = input_rewinds_; now.inrew_depth = input_rewind_depth_;
-            now.life = life_rewinds_; now.life_depth = life_rewind_depth_;
-            now.forced = forced_rollbacks_; now.forced_depth = forced_rollback_depth_;
-            now.snaprb = snapshot_rollbacks_; now.snaprb_depth = snapshot_rollback_depth_;
-            now.snaps = snapshots_applied_; now.resyncs_sent = resyncs_sent_; now.resyncs_done = resyncs_done_;
-            now.relay_new = relay_new_; now.relay_late = relay_late_; now.rebases = rebases_;
-            now.subst_recv = subst_recv_; now.subst_diff = subst_diff_; now.subst_same = subst_same_;
-            now.subst_bodiless = subst_bodiless_; now.subst_late = subst_late_;
-            now.substrew = subst_rewinds_; now.substrew_depth = subst_rewind_depth_;
-            now.subst_deferred = subst_deferred_; now.subst_unseen = subst_unseen_;
-            now.subst_subsumed = subst_subsumed_; now.subst_saved = subst_saved_;
-            now.lead_adj = lead_adjustments_;
-            now.echo_acked = own_echo_acked_; now.echo_moved = own_echo_moved_;
-            now.echo_superseded = own_echo_superseded_; now.echo_rejected = own_echo_rejected_;
-            now.echo_missing = own_echo_missing_;
-            now.birth_moved = own_birth_echo_moved_; now.own_moved = own_births_moved_;
-            now.own_removed = own_births_removed_; now.own_resynced = own_moves_resynced_;
-            const window_base& was = window_base_;
+            now.inrew = core_.s.input_rewinds_; now.inrew_depth = core_.s.input_rewind_depth_;
+            now.life = core_.s.life_rewinds_; now.life_depth = core_.s.life_rewind_depth_;
+            now.forced = core_.s.forced_rollbacks_; now.forced_depth = core_.s.forced_rollback_depth_;
+            now.snaprb = core_.s.snapshot_rollbacks_; now.snaprb_depth = core_.s.snapshot_rollback_depth_;
+            now.snaps = core_.s.snapshots_applied_; now.resyncs_sent = core_.s.resyncs_sent_; now.resyncs_done = core_.s.resyncs_done_;
+            now.relay_new = core_.s.relay_new_; now.relay_late = core_.s.relay_late_; now.rebases = rebases_;
+            now.subst_recv = core_.s.subst_recv_; now.subst_diff = core_.s.subst_diff_; now.subst_same = core_.s.subst_same_;
+            now.subst_bodiless = core_.s.subst_bodiless_; now.subst_late = core_.s.subst_late_;
+            now.substrew = core_.s.subst_rewinds_; now.substrew_depth = core_.s.subst_rewind_depth_;
+            now.subst_deferred = core_.s.subst_deferred_; now.subst_unseen = core_.s.subst_unseen_;
+            now.subst_subsumed = core_.s.subst_subsumed_; now.subst_saved = core_.s.subst_saved_;
+            now.lead_adj = core_.s.lead_adjustments_;
+            now.echo_acked = core_.s.own_echo_acked_; now.echo_moved = core_.s.own_echo_moved_;
+            now.echo_superseded = core_.s.own_echo_superseded_; now.echo_rejected = core_.s.own_echo_rejected_;
+            now.echo_missing = core_.s.own_echo_missing_;
+            now.birth_moved = core_.s.own_birth_echo_moved_; now.own_moved = core_.s.own_births_moved_;
+            now.own_removed = core_.s.own_births_removed_; now.own_resynced = core_.s.own_moves_resynced_;
+            const window_base& was = core_.s.window_base_;
             if (!first) {
                 auto d = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
                 char head[400];
@@ -5704,7 +5670,7 @@ namespace {
                 // flight still has to move (slew, signed).
                 char lead[96];
                 std::snprintf(lead, sizeof(lead), " lead_adj=%llu lead=%d slew=%d", d(now.lead_adj, was.lead_adj),
-                              lead_offset_, lead_slew_.outstanding());
+                              core_.s.lead_offset_, core_.s.lead_slew_.outstanding());
                 text += lead;
                 // Our own events' echoes (protocol 9): moved= the own births
                 // the server applied later than stamped (the harness's moved
@@ -5721,7 +5687,7 @@ namespace {
                               d(now.own_moved, was.own_moved),
                               d(now.own_removed, was.own_removed), d(now.own_resynced, was.own_resynced));
                 text += echo;
-                for (const auto& [player, hist]: window_lag_) {
+                for (const auto& [player, hist]: core_.s.window_lag_) {
                     text += " lag[" + std::to_string(player) + "]=";
                     bool comma = false;
                     for (const auto& [lag, n]: hist) {
@@ -5730,61 +5696,61 @@ namespace {
                         comma = true;
                     }
                 }
-                for (const auto& [player, n]: window_inrew_src_)
+                for (const auto& [player, n]: core_.s.window_inrew_src_)
                     text += " inrew[" + std::to_string(player) + "]=" + std::to_string(n);
                 logf("%s", text.c_str());
             }
-            window_base_ = now;
-            window_lag_.clear();
-            window_inrew_src_.clear();
+            core_.s.window_base_ = now;
+            core_.s.window_lag_.clear();
+            core_.s.window_inrew_src_.clear();
         }
 
         void report() {
-            const auto& st = corrector_.stats();
-            const auto& rs = rollback_.stats();
+            const auto& st = core_.s.corrector_.stats();
+            const auto& rs = core_.s.rollback_.stats();
             uint64_t rc = 0, ri = 0, rb = 0, rh = 0;
-            for (const auto& [id, remote]: remotes_) {
+            for (const auto& [id, remote]: core_.s.remotes_) {
                 const auto& rs = remote.corrector.stats();
                 rc += rs.compared; ri += rs.ignored; rb += rs.blended; rh += rs.hard;
             }
             double mech_max = 0.0;
-            for (const auto& [name, c]: mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
+            for (const auto& [name, c]: core_.s.mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
             logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu snapshots=%llu/%llu/%llu "
                  "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                  "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                  "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                  "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                  "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
-                 static_cast<int>(phase_), session_, current_tick(), assigned_ ? 1 : 0, held_ ? 1 : 0,
-                 static_cast<long long>(frames_since_anchor_),
-                 static_cast<unsigned long long>(inputs_sent_), static_cast<unsigned long long>(events_sent_),
-                 static_cast<unsigned long long>(events_received_), static_cast<unsigned long long>(event_dups_),
+                 static_cast<int>(core_.s.phase_), core_.s.session_, current_tick(), core_.s.assigned_ ? 1 : 0, core_.s.held_ ? 1 : 0,
+                 static_cast<long long>(core_.s.frames_since_anchor_),
+                 static_cast<unsigned long long>(core_.s.inputs_sent_), static_cast<unsigned long long>(core_.s.events_sent_),
+                 static_cast<unsigned long long>(core_.s.events_received_), static_cast<unsigned long long>(core_.s.event_dups_),
                  // echo=acked/moved/superseded/rejected/missing: our own events as the
                  // server echoed them back (protocol 9).
-                 static_cast<unsigned long long>(own_echo_acked_), static_cast<unsigned long long>(own_echo_moved_),
-                 static_cast<unsigned long long>(own_echo_superseded_), static_cast<unsigned long long>(own_echo_rejected_),
-                 static_cast<unsigned long long>(own_echo_missing_),
+                 static_cast<unsigned long long>(core_.s.own_echo_acked_), static_cast<unsigned long long>(core_.s.own_echo_moved_),
+                 static_cast<unsigned long long>(core_.s.own_echo_superseded_), static_cast<unsigned long long>(core_.s.own_echo_rejected_),
+                 static_cast<unsigned long long>(core_.s.own_echo_missing_),
                  // ownlife=moved/removed/resynced/remade/other: own births
                  // moved inside the history, removed from it, resynced past
                  // the reach, the re-makes at an applied tick (live and in
                  // replays), and MOVED echoes of the other types, kept where
                  // stamped (late-player design 3.3).
-                 static_cast<unsigned long long>(own_births_moved_), static_cast<unsigned long long>(own_births_removed_),
-                 static_cast<unsigned long long>(own_moves_resynced_), static_cast<unsigned long long>(own_remakes_),
-                 static_cast<unsigned long long>(own_moves_other_),
+                 static_cast<unsigned long long>(core_.s.own_births_moved_), static_cast<unsigned long long>(core_.s.own_births_removed_),
+                 static_cast<unsigned long long>(core_.s.own_moves_resynced_), static_cast<unsigned long long>(core_.s.own_remakes_),
+                 static_cast<unsigned long long>(core_.s.own_moves_other_),
                  // overtaken: older remote births relayed after their death
                  // and put back in front of it (dropped or re-ordered).
-                 static_cast<unsigned long long>(births_overtaken_),
-                 static_cast<unsigned long long>(snapshots_received_),
-                 static_cast<unsigned long long>(snapshots_applied_), static_cast<unsigned long long>(snapshots_stale_),
-                 static_cast<unsigned long long>(life_rewinds_), static_cast<unsigned long long>(life_rewinds_missed_),
-                 static_cast<unsigned long long>(input_rewinds_), static_cast<unsigned long long>(input_rewinds_missed_),
-                 static_cast<unsigned long long>(relay_bodiless_), static_cast<unsigned long long>(relay_birth_frozen_),
-                 static_cast<unsigned long long>(forced_rollbacks_), static_cast<unsigned long long>(forced_rollbacks_missed_),
-                 own_physicalized_ ? 1 : 0, remotes_.size(), static_cast<unsigned long long>(remote_inputs_received_),
-                 static_cast<unsigned long long>(relay_new_), static_cast<unsigned long long>(relay_dup_),
-                 static_cast<unsigned long long>(relay_parked_), static_cast<unsigned long long>(relay_late_),
-                 relay_lag_max_, relay_lag_p99(),
+                 static_cast<unsigned long long>(core_.s.births_overtaken_),
+                 static_cast<unsigned long long>(core_.s.snapshots_received_),
+                 static_cast<unsigned long long>(core_.s.snapshots_applied_), static_cast<unsigned long long>(core_.s.snapshots_stale_),
+                 static_cast<unsigned long long>(core_.s.life_rewinds_), static_cast<unsigned long long>(core_.s.life_rewinds_missed_),
+                 static_cast<unsigned long long>(core_.s.input_rewinds_), static_cast<unsigned long long>(core_.s.input_rewinds_missed_),
+                 static_cast<unsigned long long>(core_.s.relay_bodiless_), static_cast<unsigned long long>(core_.s.relay_birth_frozen_),
+                 static_cast<unsigned long long>(core_.s.forced_rollbacks_), static_cast<unsigned long long>(core_.s.forced_rollbacks_missed_),
+                 core_.s.own_physicalized_ ? 1 : 0, core_.s.remotes_.size(), static_cast<unsigned long long>(core_.s.remote_inputs_received_),
+                 static_cast<unsigned long long>(core_.s.relay_new_), static_cast<unsigned long long>(core_.s.relay_dup_),
+                 static_cast<unsigned long long>(core_.s.relay_parked_), static_cast<unsigned long long>(core_.s.relay_late_),
+                 core_.s.relay_lag_max_, relay_lag_p99(),
                  // subst=recv/diff/same/bodiless/rew/late (late-player design
                  // 1.3): the notices of our own substituted ticks inside the
                  // reach (recv, of which diff were replayed onto the server's
@@ -5808,22 +5774,22 @@ namespace {
                  // acked/held_total: the newest header of our own epoch (0/0
                  // until one arrives).  recv + late + base per epoch is what
                  // the server's S2 lines count.
-                 static_cast<unsigned long long>(subst_recv_), static_cast<unsigned long long>(subst_diff_),
-                 static_cast<unsigned long long>(subst_same_), static_cast<unsigned long long>(subst_bodiless_),
-                 static_cast<unsigned long long>(subst_rewinds_),
-                 static_cast<unsigned long long>(subst_late_),
-                 static_cast<unsigned long long>(subst_dup_), static_cast<unsigned long long>(subst_stale_epoch_),
-                 static_cast<unsigned long long>(subst_base_),
-                 static_cast<unsigned long long>(subst_rewinds_missed_),
-                 static_cast<unsigned long long>(subst_deferred_), static_cast<unsigned long long>(subst_unseen_),
-                 static_cast<unsigned long long>(subst_subsumed_), static_cast<unsigned long long>(subst_saved_),
-                 held_header_current() ? held_header_acked_ : 0u, held_header_current() ? held_header_total_ : 0u,
-                 static_cast<unsigned long long>(remote_writes_), static_cast<unsigned long long>(rc),
+                 static_cast<unsigned long long>(core_.s.subst_recv_), static_cast<unsigned long long>(core_.s.subst_diff_),
+                 static_cast<unsigned long long>(core_.s.subst_same_), static_cast<unsigned long long>(core_.s.subst_bodiless_),
+                 static_cast<unsigned long long>(core_.s.subst_rewinds_),
+                 static_cast<unsigned long long>(core_.s.subst_late_),
+                 static_cast<unsigned long long>(core_.s.subst_dup_), static_cast<unsigned long long>(core_.s.subst_stale_epoch_),
+                 static_cast<unsigned long long>(core_.s.subst_base_),
+                 static_cast<unsigned long long>(core_.s.subst_rewinds_missed_),
+                 static_cast<unsigned long long>(core_.s.subst_deferred_), static_cast<unsigned long long>(core_.s.subst_unseen_),
+                 static_cast<unsigned long long>(core_.s.subst_subsumed_), static_cast<unsigned long long>(core_.s.subst_saved_),
+                 held_header_current() ? core_.s.held_header_acked_ : 0u, held_header_current() ? core_.s.held_header_total_ : 0u,
+                 static_cast<unsigned long long>(core_.s.remote_writes_), static_cast<unsigned long long>(rc),
                  static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
-                 mechanism_tracking_.known(), mechanism_tracking_.resolved(),
-                 static_cast<unsigned long long>(mechanism_blends_), static_cast<unsigned long long>(mechanism_hard_), mech_max,
-                 static_cast<unsigned long long>(amend_failures_), rebases_,
-                 static_cast<unsigned long long>(resyncs_sent_), static_cast<unsigned long long>(resyncs_done_),
+                 core_.s.mechanism_tracking_.known(), core_.s.mechanism_tracking_.resolved(),
+                 static_cast<unsigned long long>(core_.s.mechanism_blends_), static_cast<unsigned long long>(core_.s.mechanism_hard_), mech_max,
+                 static_cast<unsigned long long>(core_.s.amend_failures_), rebases_,
+                 static_cast<unsigned long long>(core_.s.resyncs_sent_), static_cast<unsigned long long>(core_.s.resyncs_done_),
                  // lead_adj: SessionLeads applied; lead_offset: what their
                  // acks applied in total; slew: ticks the one in flight still
                  // moves; lead_forced: live frames that played the held
@@ -5831,9 +5797,9 @@ namespace {
                  // another base, and decisions a resync of ours in flight
                  // voids (late-player design 2.4, 2.8).  `lead=` further
                  // on is the measured lead over the server, not this.
-                 static_cast<unsigned long long>(lead_adjustments_), lead_offset_, lead_slew_.outstanding(),
-                 static_cast<unsigned long long>(lead_forced_played_), static_cast<unsigned long long>(lead_dups_),
-                 static_cast<unsigned long long>(lead_stale_), static_cast<unsigned long long>(lead_void_),
+                 static_cast<unsigned long long>(core_.s.lead_adjustments_), core_.s.lead_offset_, core_.s.lead_slew_.outstanding(),
+                 static_cast<unsigned long long>(core_.s.lead_forced_played_), static_cast<unsigned long long>(core_.s.lead_dups_),
+                 static_cast<unsigned long long>(core_.s.lead_stale_), static_cast<unsigned long long>(core_.s.lead_void_),
                  static_cast<unsigned long long>(rs.snapshots), static_cast<unsigned long long>(rs.matched),
                  static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
                  static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
@@ -5857,10 +5823,10 @@ namespace {
                  static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                  static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
                  static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error,
-                 static_cast<unsigned long long>(input_reports_), static_cast<unsigned long long>(input_starved_),
-                 input_reports_ ? 100.0 * static_cast<double>(input_starved_) / static_cast<double>(input_reports_) : 0.0,
-                 worst_starved_,
-                 lead_count_ ? static_cast<double>(lead_sum_) / static_cast<double>(lead_count_) : 0.0);
+                 static_cast<unsigned long long>(core_.s.input_reports_), static_cast<unsigned long long>(core_.s.input_starved_),
+                 core_.s.input_reports_ ? 100.0 * static_cast<double>(core_.s.input_starved_) / static_cast<double>(core_.s.input_reports_) : 0.0,
+                 core_.s.worst_starved_,
+                 core_.s.lead_count_ ? static_cast<double>(core_.s.lead_sum_) / static_cast<double>(core_.s.lead_count_) : 0.0);
         }
 
         // ------------------------------------------------------------ state
@@ -5868,7 +5834,6 @@ namespace {
         std::unique_ptr<bmmo::sim::headless_engine> engine_;
         bmmo::physics::tick_record record_;
         HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
-        uint32_t own_id_ = 0;
         bool in_room_ = false, join_sent_ = false, ready_sent_ = false, start_sent_ = false;
         int list_retries_ = 0;
         clock_type::time_point last_ready_sent_{};
@@ -5884,21 +5849,8 @@ namespace {
         uint64_t flow_steps_ = 0;
         bool inbound_failed_ = false;
 
-        phase phase_ = phase::idle;
-        uint32_t session_ = 0;
-        uint8_t snapshot_interval_ = 2, input_delay_ = 6;
-        uint64_t life_rewinds_ = 0, life_rewinds_missed_ = 0;
-        // Births stamped in the past, waiting to be made inside a replay at
-        // their tick (apply_event / drain_pending_births).
-        std::vector<pending_birth> pending_births_;
-        uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
-        uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
+        uint8_t snapshot_interval_ = 2;
         int restore_traces_ = 0;
-        bool start_sector_pending_ = false;  // a --start-sector waiting for the first assigned frame
-        bmmo::session::sector_union sectors_;   // the sectors this session runs, the rule every side runs
-        uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
-        std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
-        int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
         VxVector resetpoint_seen_;           // CurrentLevel[0,3]'s position as last seen: a move is an own crossing
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
         CK_ID sector_manager_id_ = 0;
@@ -5958,7 +5910,7 @@ namespace {
             int values[3] = {};
             bool have[3] = {};
             uint64_t rollbacks_before = 0;
-            explicit live_cells_guard(session_client& c) : client(c), rollbacks_before(c.rollback_.stats().rollbacks) {
+            explicit live_cells_guard(session_client& c) : client(c), rollbacks_before(c.core_.s.rollback_.stats().rollbacks) {
                 if (client.args_.park_births) return;
                 for (int i = 0; i < 3; ++i) have[i] = client.read_cell(i, values[i]);
             }
@@ -5971,7 +5923,7 @@ namespace {
                 // flags in the live record of `now`, absent from the replayed
                 // state.  Re-issued for the frame about to run, as the replay
                 // re-issues them inside its window.
-                if (client.rollback_.stats().rollbacks != rollbacks_before) client.replay_manager_activation(client.current_tick() + 1);
+                if (client.core_.s.rollback_.stats().rollbacks != rollbacks_before) client.replay_manager_activation(client.current_tick() + 1);
             }
         };
         static const char* cell_array(int i) { return i == 0 ? "CurrentLevel" : "IngameParameter"; }
@@ -6113,23 +6065,8 @@ namespace {
         uint32_t queue_traces_ = 0;                          // --trace-restore PreSimulate queue lines (the first 24)
         std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
-        bool input_rewind_pending_ = false;
-        uint32_t input_rewind_tick_ = 0;
-        std::string input_rewind_entity_;
-        bool input_rewind_own_ = false;       // the earliest correction is our own substituted frame
-        bool input_rewind_has_own_ = false;   // an own correction is among this frame's, earliest or not
-        uint32_t input_rewind_own_amends_ = 0;   // own amendments the pending replay carries (subst_saved_)
-        std::set<std::string> input_rewind_entities_;   // every remote ball corrected this frame (window: inrew[P])
-        // Lifecycle events waiting for the tick they are due at (drain_due_events).
-        std::vector<bmmo::session_event_msg> pending_events_;
-        int32_t seed_ = 1;
-        int level_ = 1;
-        std::vector<bmmo::session::player_entry> players_;
-        int own_join_order_ = -1;
         float spawn_position_[3] = {};
         bool spawn_known_ = false;
-        float spawn_impulse_ = 0.0f;             // SessionStart::spawn_impulse (design 9.10)
-        float spawn_spacing_ = 0.0f;             // SessionStart::spawn_spacing (session/spawn_impulse.hpp)
         // The own ball's last Physicalize as capture_own_physicalize() saw it
         // before the step: what report_physicalize sends (design 9.10).
         struct {
@@ -6139,74 +6076,26 @@ namespace {
             VxMatrix pose;
             bool spawn = false;                  // at CurrentLevel[0,3] then: flagged, and kicked
         } own_capture_;
-        std::string own_body_entity_;            // the own ball entity that had a body after the last frame
         // The engine_->tick() frame() is running, numbered from 1, and 0
         // outside it - a replayed step runs the PreSimulate pass too, and only
         // the live tick an own_physicalize_callback was armed for may capture.
         uint64_t live_tick_serial_ = 0;
         uint64_t live_ticks_ = 0;
-        std::string own_group_;
         bool own_group_set_ = false;
-        bool own_physicalized_ = false;
         int load_waited_ = 0;
         uint64_t anchor_hash_ = 0;
-        bool assigned_ = false;
-        uint32_t last_assign_first_tick_ = 0;  // the assignment applied last: its redundant copies are ignored
-        uint64_t duplicate_assigns_ = 0;
-        // Design 9.25 phase alignment: between the anchor and the assignment
-        // the world does not step.  The server's world takes its own first step
-        // under the start base it hands out, so a client that ran k frames in
-        // that window would be k steps further from the anchor at every tick
-        // number for the rest of the session - the phase offset that made every
-        // script-driven mechanism (Level 11's sandbags) fight the rollback
-        // engine.  Bounded: the game must not freeze for ever if the assignment
-        // never comes.
-        bool held_ = false;
-        clock_type::time_point hold_deadline_{};
-        int hold_polls_ = 0;
         bmmo::game::sequencer_state level_sequencers_;
-        uint32_t tick_base_ = 0;
-        int64_t frames_since_anchor_ = -1;
         clock_type::time_point origin_;
         int rebases_ = 0;
-        std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
-        float previous_cam_[3][3] = {};
-        bool previous_cam_valid_ = false;
         unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added
         int lane_steers_ = 0;
-        // Input freshness as the server saw it (session_snapshot_msg.acked_input_tick).
-        uint64_t input_reports_ = 0, input_starved_ = 0;
-        uint32_t worst_starved_ = 0;
-        uint64_t lead_sum_ = 0, lead_count_ = 0;
         bmmo::game::navigation_graph navigation_;
         bool navigation_known_ = false;
         std::vector<ball_row> ball_rows_;
         uint8_t last_keys_ = 0;
         bool last_nav_active_ = false;
         int trace_frames_ = 0;
-        bmmo::session::body_corrector corrector_;
-        std::map<std::string, bmmo::session::body_corrector> mechanism_correctors_;
-        // Design 9.25: the mechanisms are tracked bodies of this client's own
-        // world again, so a row has to be resolved onto one of its bodies
-        // (mechanism_tracking.hpp), and every tracked name carries the
-        // generation of the body behind it.
-        bmmo::session::mechanism_registry mechanism_tracking_;
-        std::map<std::string, uint32_t> generations_;
-        uint64_t amend_failures_ = 0;
         bool beam_done_ = false;
-        std::vector<own_life> own_life_;   // struct own_life, beside beam_own_ball
-        // Our own events' echoes, handled in the frame (process_own_echoes).
-        std::vector<bmmo::session_event_msg> own_echoes_;
-        // ...and those queued before the last SessionAssign: they answer
-        // births of the old numbering (own_unanswered_), never a record.
-        std::vector<bmmo::session_event_msg> own_echoes_stale_;
-        // Own births set aside unanswered (struct own_life::aside).
-        std::vector<own_life> own_unanswered_;
-        // Origins of own Unphysicalize events the server echoed MOVED: an
-        // own birth of the same origin is then a pair the server applied
-        // late as a whole (a beam, a trafo, a respawn's pair), which moving
-        // the birth alone cannot match (the own death's move is plan step 22).
-        std::vector<uint32_t> own_moved_unphysicalize_;
         // How long an own birth waits for its echo: the server's tick (the
         // relay header's, or the snapshots') this far past its stamp with no
         // echo, and the Physicalize either never reached the server or will
@@ -6220,136 +6109,9 @@ namespace {
         static constexpr uint32_t kOwnEchoUplinkSettleTicks = 66;
         // A birth unanswered this long retires anyway (retire_own_lives).
         static constexpr uint32_t kOwnRecordKeepTicks = 512;
-        // Body changes stamped for the frame's own tick, held past the frame's
-        // rewinds (drain_due_events -> apply_held_lifecycle, same frame).
-        std::vector<bmmo::session_event_msg> held_lifecycle_;
-        uint64_t own_lives_applied_ = 0;
-        // Own births the server moved (MOVED echoes of a Physicalize) and
-        // what this client did with them: moved inside the history, removed
-        // from it (SUPERSEDED, REJECTED), resynced (past the reach, a life
-        // that ended since, a pair moved as a whole, a missing echo), the
-        // re-makes at the applied tick (live and in replays), and MOVED
-        // echoes of the other types (kept where stamped).
-        uint64_t own_birth_echo_moved_ = 0;
-        uint64_t own_births_moved_ = 0, own_births_removed_ = 0, own_moves_resynced_ = 0, own_remakes_ = 0;
-        uint64_t own_moves_other_ = 0;
-        std::map<uint32_t, remote_ball> remotes_;
-        bool have_snapshot_ = false;
-        uint32_t last_snapshot_tick_ = 0;
-        uint64_t inputs_sent_ = 0, events_sent_ = 0, events_received_ = 0;
-        uint64_t snapshots_received_ = 0, snapshots_applied_ = 0, snapshots_stale_ = 0;
-        uint64_t remote_writes_ = 0, mechanism_blends_ = 0, mechanism_hard_ = 0;
-        uint64_t remote_inputs_received_ = 0;
-        // The relayed frames, reassembled (session/input_relay.hpp): first
-        // arrivals, re-deliveries of the window, and frames parked for a
-        // player whose mirror did not exist yet.
-        uint64_t relay_new_ = 0, relay_dup_ = 0, relay_parked_ = 0;
-        // ...first arrivals too late for the rollback (deeper than it
-        // re-simulates, or past the history), and the arrival lag of the first
-        // arrivals in ticks (max, and a histogram for the 99th percentile): the
-        // numbers that say whether the relay reaches the rollback in time.
-        uint64_t relay_late_ = 0;
-        // ...and first arrivals for a tick at which the mirror had no body
-        // (dead, or not born here yet): stored, not replayed.
-        uint64_t relay_bodiless_ = 0;
         bool event_log_muted_ = false;   // event_log_mute
-        // ...and for a mirror's birth tick, which no replay can change.
-        uint64_t relay_birth_frozen_ = 0;
-        uint32_t relay_lag_max_ = 0;
-        static constexpr uint32_t kRelayLagBuckets = 129;
-        std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
-        // The window: line (report_window).  The status line's counters are
-        // cumulative and five seconds apart, which cannot say whether a
-        // rollback or a late frame fell before, during or after a burst at
-        // one player; these are reset every kWindowTicks.  The lag histogram
-        // is kept per source player because a late player shows up in the
-        // others' lag for its frames alone.
-        static constexpr uint32_t kWindowTicks = 60;
-        uint32_t window_index_ = 0xFFFFFFFFu;
-        std::map<uint32_t, std::map<uint32_t, uint32_t>> window_lag_;   // source -> lag -> first arrivals
-        std::map<uint32_t, uint32_t> window_inrew_src_;                 // source -> input rewinds naming its ball
-        struct window_base {
-            uint64_t inrew = 0, inrew_depth = 0, life = 0, life_depth = 0, forced = 0, forced_depth = 0;
-            uint64_t snaprb = 0, snaprb_depth = 0, snaps = 0, resyncs_sent = 0, resyncs_done = 0;
-            uint64_t relay_new = 0, relay_late = 0;
-            uint64_t subst_recv = 0, subst_diff = 0, subst_same = 0, subst_bodiless = 0, subst_late = 0;
-            uint64_t substrew = 0, substrew_depth = 0;
-            uint64_t subst_deferred = 0, subst_unseen = 0, subst_subsumed = 0, subst_saved = 0;
-            uint64_t lead_adj = 0;
-            uint64_t echo_acked = 0, echo_moved = 0, echo_superseded = 0, echo_rejected = 0, echo_missing = 0;
-            uint64_t birth_moved = 0, own_moved = 0, own_removed = 0, own_resynced = 0;
-            int rebases = 0;
-        } window_base_;
-        uint64_t input_rewind_depth_ = 0, life_rewind_depth_ = 0, forced_rollback_depth_ = 0;
-        uint64_t snapshot_rollbacks_ = 0, snapshot_rollback_depth_ = 0;
-        bmmo::session::relay_seen relay_seen_;
-        bmmo::session::pending_relay pending_relay_;
-        // Protocol 7 (late-player design 1.3): the server's notices of our own
-        // substituted ticks, taken once per tick (keyed by our own id) and
-        // applied (note_held_section): recv inside the reach, late past it
-        // (a resync), base when no rewind could ever have reached it, dup a
-        // re-delivery, stale_epoch the records of a datagram numbered from
-        // another base (taken once per (epoch, tick) in held_stale_seen_).
-        // Of recv: diff (the record amended and replayed), same (we played
-        // the server's frame), bodiless (no own ball at the tick); rew the
-        // replays our own substitution named, and their depth.
-        // `held_floor_`: a record at or below it has no anchor this
-        // numbering ever recorded - the base itself, or a tick a resync's
-        // full snapshot overwrote.  The header of the newest datagram of our
-        // own epoch: the server's ack and held_total.
-        bmmo::session::relay_seen held_seen_;
-        bmmo::session::relay_seen held_stale_seen_;
-        uint64_t subst_recv_ = 0, subst_late_ = 0, subst_base_ = 0, subst_dup_ = 0, subst_stale_epoch_ = 0;
-        uint64_t subst_diff_ = 0, subst_same_ = 0, subst_bodiless_ = 0, subst_rewinds_ = 0, subst_rewind_depth_ = 0;
-        uint64_t subst_rewinds_missed_ = 0;   // own replays rewind_to refused (a resync each)
-        // Frames a waiting own replay was put off (own_replay_pacer_), diffs
-        // no replay can see (amended without a replay; in diff too), waiting
-        // own replays another rewind carried (drop_carried_own_replay), and
-        // the amendments that needed no own replay of their own (rode along
-        // with another's, or carried by such a rewind).
-        uint64_t subst_deferred_ = 0, subst_unseen_ = 0, subst_subsumed_ = 0, subst_saved_ = 0;
-        bmmo::session::own_replay_pacer own_replay_pacer_;
-        uint32_t subst_late_logs_ = 0, subst_unresolved_logs_ = 0;
-        // The frames each uplink datagram carried (remember_sent), and the
-        // notices of ticks not simulated yet with whether to correct them
-        // (take_held_ahead); both numbered from our base.
-        std::map<uint32_t, bmmo::session::input_frame> sent_inputs_;
-        std::map<uint32_t, std::pair<bmmo::session::input_frame, bool>> held_ahead_;
-        // SessionLead (late-player design 2.4, on_session_lead): the ticks
-        // whose live frame plays the server's held frame, with whether it
-        // still counts as a received notice (no notice named it first); the
-        // decision ids taken this session; the slew in flight and the clock
-        // its steps are measured on; the total acknowledged offset.  Counted
-        // for the status and window lines: adjustments applied (lead_adj),
-        // forced frames played, copies dropped, and decisions of another base.
-        struct forced_own {
-            bmmo::session::input_frame frame{};
-            bool count = false;
-        };
-        std::map<uint32_t, forced_own> forced_own_;
-        std::set<uint32_t> lead_seen_;
-        bmmo::session::lead_slew lead_slew_;
-        clock_type::time_point lead_slew_clock_{};
-        int lead_offset_ = 0;
-        uint64_t lead_adjustments_ = 0, lead_forced_played_ = 0, lead_dups_ = 0, lead_stale_ = 0, lead_void_ = 0;
-        uint64_t lead_force_logs_ = 0;
-        // The completeness check (check_held_complete): the ticks learned
-        // since the epoch, the recent ones by tick, the shortfall already
-        // counted, and the datagrams whose held_total was ahead (tick ->
-        // held_total), judged kHeldGapTicks later.
-        uint64_t held_learned_total_ = 0, held_gap_credit_ = 0;
-        std::set<uint32_t> held_learned_recent_;
-        std::map<uint32_t, uint32_t> held_gap_watch_;
-        uint32_t held_floor_ = 0;
-        bool held_header_known_ = false;
-        bool acked_header_known_ = false;     // the newest server tick whose header counted for acked
-        uint32_t acked_header_tick_ = 0;
-        uint32_t header_acked_ = 0;            // that header's acked: our newest frame the server applied fresh
-        uint32_t held_header_epoch_ = 0, held_header_tick_ = 0, held_header_acked_ = 0, held_header_total_ = 0;
-        // Lifecycle events (protocol 6): the first arrival of each counts, and
-        // our own are repeated unreliably on the next ticks (flush_inputs).
-        bmmo::session::event_seen event_seen_;
-        bmmo::session::event_repeats own_event_repeats_;
+        static constexpr uint32_t kRelayLagBuckets = bmmo::session::client_core_state::kRelayLagBuckets;
+        static constexpr uint32_t kWindowTicks = bmmo::session::client_core_state::kWindowTicks;
         // --hold-event: how many own events of the held type were made, and
         // the one held back until its release time.
         struct held_event {
@@ -6360,52 +6122,20 @@ namespace {
         };
         uint32_t hold_event_seen_ = 0;
         std::vector<held_event> held_events_;
-        uint64_t event_dups_ = 0, events_superseded_ = 0;
-        // Protocol 9: echoes of our own events (process_own_echo).
-        uint64_t own_echo_acked_ = 0, own_echo_moved_ = 0, own_echo_superseded_ = 0, own_echo_rejected_ = 0;
-        uint64_t own_echo_missing_ = 0;   // own births whose echo never came (expire_own_echoes)
-        std::map<uint32_t, uint32_t> remote_last_physicalize_;   // origin of each remote's last applied Physicalize
-        // Each remote's newest applied Unphysicalize, by origin, with the tick
-        // it was applied at: an older birth relayed after it is put back in
-        // front of it (apply_event).
-        struct applied_death { uint32_t origin = 0, applied = 0; };
-        std::map<uint32_t, applied_death> remote_last_unphysicalize_;
-        uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
-        bool resync_pending_ = false;
-        // A resync request sent and not answered yet (no assignment with a
-        // newer base): its full snapshot covers every reason found meanwhile.
-        bool resync_in_flight_ = false;
-        // A resync the own correction needs (a late or lost substituted
-        // frame, a refused own replay) that the 2 s limiter held back: asked
-        // again from frame() once the limiter allows, unless an assignment
-        // with a newer base answers it first.
-        bool resync_owed_ = false;
-        std::string resync_owed_reason_;
         bool paused_once_ = false;
-        int consecutive_hard_ = 0;
-        clock_type::time_point last_resync_request_{};
-        uint64_t resyncs_sent_ = 0, resyncs_done_ = 0, sessions_ended_ = 0;
         bool own_navigation_ = false;
         std::string own_nav_entity_;
         int own_key_codes_[8] = {};
         uint32_t own_key_blocks_[8] = {};
         int own_key_count_ = 0;
-        bmmo::session::rollback_engine rollback_;
-        std::map<uint32_t, bmmo::session::input_frame> own_inputs_;
         bool body_guard_ = false;
         std::string body_guard_entity_;
         int rollback_diag_ = 0;
         int step_diag_ = 0;
-        // The black box (design 9.15).  `journal_start_` is the instant the
-        // header was written, the origin every TICK record's ms is measured
-        // from; the checkpoint bookkeeping is the LOCAL cadence and its rate
-        // limit.
-        bmmo::session::journal_writer journal_;
-        clock_type::time_point journal_start_{};
-        uint32_t journal_last_checkpoint_ = 0;
-        bool journal_have_checkpoint_ = false;
-        bool journal_checkpoint_pending_ = false;
-        std::set<uint32_t> journal_announced_;   // ids that already have a PLAYER record
+        // The shared session-client core (docs/session-client-core-design.md):
+        // its state (design 1.2) is reached as core_.s.<member> until step E11
+        // makes it private.  Last, so it is destroyed first, as the journal was.
+        bmmo::session::session_client_core core_{make_platform(), make_capabilities()};
     };
 
     int own_physicalize_callback::Execute() {

@@ -68,6 +68,9 @@ set(CMAKE_POLICY_VERSION_MINIMUM ${BMMO_CMAKE_MINIMUM_VERSION})
 
 set(YA_GETOPT_SRC "../submodule/ya_getopt/ya_getopt.c")
 
+# The shared session-client core: BMMO_SESSION_CORE_SRC (the headless client and the tests).
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/SessionCore.cmake")
+
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
@@ -159,7 +162,7 @@ if (BMMO_BUILD_SIM)
         # Headless physics-session client (design 8.6 item 3): headless engine
         # + GNS client that plays a session from a recorded keyboard.
         add_executable(BallanceMMOSessionClient sim/session_client.cpp sim/rasterizer_stub.cpp sim/crash_report.cpp
-                ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
+                ${BMMO_COMMON_SRC} ${BMMO_SESSION_CORE_SRC} ${YA_GETOPT_SRC})
         target_link_libraries(BallanceMMOSessionClient PRIVATE BallanceMMOSim GameNetworkingSockets::shared replxx)
         target_compile_definitions(BallanceMMOSessionClient PRIVATE BMMO_INCLUDE_INTERNAL)
         if (WIN32)
@@ -242,7 +245,8 @@ if (BUILD_SERVER_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
     enable_testing()
-    add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp tests/room_manager_test.cpp tests/session_messages_test.cpp tests/session_logic_test.cpp tests/session_lifecycle_test.cpp tests/rollback_engine_test.cpp tests/rollback_binding_test.cpp tests/input_relay_test.cpp tests/spawn_impulse_test.cpp tests/session_journal_test.cpp tests/correction_thresholds_test.cpp tests/sector_pacer_test.cpp tests/sector_union_test.cpp tests/world_hash_test.cpp tests/lateness_test.cpp tests/patience_test.cpp tests/lead_test.cpp)
+    add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp tests/room_manager_test.cpp tests/session_messages_test.cpp tests/session_logic_test.cpp tests/session_lifecycle_test.cpp tests/rollback_engine_test.cpp tests/rollback_binding_test.cpp tests/input_relay_test.cpp tests/spawn_impulse_test.cpp tests/session_journal_test.cpp tests/correction_thresholds_test.cpp tests/sector_pacer_test.cpp tests/sector_union_test.cpp tests/world_hash_test.cpp tests/lateness_test.cpp tests/patience_test.cpp tests/lead_test.cpp tests/session_client_core_test.cpp
+            ${BMMO_SESSION_CORE_SRC})
     target_link_libraries(BallanceMMOMessageTests PRIVATE GTest::gtest_main GameNetworkingSockets::shared)
     if (WIN32)
         target_compile_definitions(BallanceMMOMessageTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

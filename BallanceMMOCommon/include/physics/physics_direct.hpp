@@ -7,9 +7,12 @@
 // the headless session client and the SimTool have the engine in the process;
 // the mod has only the plugin's C API and uses physics_view.
 
+#include <physics/ball_navigation.hpp>
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_state.hpp>
+#include <physics/world_hash.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -84,6 +87,68 @@ namespace bmmo::physics {
         bool set_event_log_muted(bool muted, std::string&) const {
             bmmo::physics::set_event_log_muted(muted);
             return true;
+        }
+
+        // ---- host support (docs/session-client-core-design.md 2.4) ----
+        // The rest of physics_view's methods the helpers both hosts share
+        // call, under physics_view's names and signatures, so the helpers are
+        // templates over either backend.  Added at step E1 with no callers;
+        // the headless client keeps its free calls elsewhere (design 7.1-5).
+        bool capture(world_hash& out, std::string& error) const {
+            return bmmo::physics::capture_world_hash(manager, out, error);
+        }
+        bool reset_session_clock(int seed, std::string& error) const {
+            return bmmo::physics::reset_session_clock(manager, seed, error);
+        }
+        std::string drain_event_log() const { return bmmo::physics::drain_event_log(manager); }
+        // Every physicalized entity, in physics-table order (physics_view::list_bodies).
+        std::vector<bmmo_physics_body_state> list_bodies() const {
+            std::vector<bmmo_physics_body_state> bodies(64);
+            int total = bmmo::physics::list_bodies(manager, bodies.data(), static_cast<int>(bodies.size()));
+            if (total > static_cast<int>(bodies.size())) {
+                bodies.resize(static_cast<size_t>(total));
+                total = bmmo::physics::list_bodies(manager, bodies.data(), static_cast<int>(bodies.size()));
+            }
+            bodies.resize(total > 0 ? std::min(static_cast<size_t>(total), bodies.size()) : 0);
+            return bodies;
+        }
+        bool force_block_get(uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error) const {
+            return bmmo::physics::force_block_get(manager, behavior_id, out, error);
+        }
+        bool force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const {
+            return bmmo::physics::force_block_set(manager, behavior_id, in, error);
+        }
+        bool set_body_matrix(const char* entity, const float matrix[16], bool simulated, std::string& error) const {
+            return bmmo::physics::set_body_matrix(manager, entity, matrix, simulated, error);
+        }
+        bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe, const char* collision_group,
+                         std::string& error) const {
+            return bmmo::physics::physicalize(manager, entity_name, recipe, collision_group, error);
+        }
+        bool unphysicalize(const char* entity_name, std::string& error) const {
+            return bmmo::physics::unphysicalize(manager, entity_name, error);
+        }
+        bool set_body_group(const char* entity_name, const char* collision_group, std::string& error) const {
+            return bmmo::physics::set_body_group(manager, entity_name, collision_group, error);
+        }
+        bool navigation_create(const char* ball_entity, const char* direction_ref_entity, uint32_t behavior_id,
+                               const float (*directions)[3], int leaf_count, float force_value, std::string& error) const {
+            return bmmo::physics::navigation_create(manager, ball_entity, direction_ref_entity, behavior_id, directions,
+                                                    leaf_count, force_value, error);
+        }
+        bool navigation_set_ball(const char* ball_entity, const char* new_ball_entity, float force_value,
+                                 std::string& error) const {
+            return bmmo::physics::navigation_set_ball(manager, ball_entity, new_ball_entity, force_value, error);
+        }
+        bool navigation_destroy(const char* ball_entity, std::string& error) const {
+            return bmmo::physics::navigation_destroy(manager, ball_entity, error);
+        }
+        bool set_body_guard(bool enable, const char* except_entity, std::string& error) const {
+            return bmmo::physics::set_body_guard(manager, enable, except_entity, error);
+        }
+        bool push_impulse(const char* entity_name, const float direction_ws[3], float speed, uint32_t behavior_id,
+                          std::string& error) const {
+            return bmmo::physics::push_impulse(manager, entity_name, direction_ws, speed, behavior_id, error);
         }
     };
 

@@ -1,8 +1,8 @@
 # Session-client core: one implementation of the client flow, two hosts
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
-what became of it). Step E0 is built (§5.2, "As built (step E0)"); nothing
-else is yet.
+what became of it). Steps E0 (§5.2, "As built (step E0)") and E1 (§6.1, "As
+built (step E1)") are built; nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -451,7 +451,7 @@ value, as the free functions do today.
 | **reading the world** | | | |
 | body_state | `bool(const std::string& entity, body_state&)` | `get_body_state(physics, …)` | `physics_view_.get_body_state` |
 | world_hash | `bool(world_hash&)` | `capture_world_hash` | `physics_view_.capture` |
-| list_bodies | `std::vector<bmmo_physics_body_info>()` | `list_bodies` via the `physics_direct` adapter (`physics_direct.hpp:95-102`) | `physics_view_.list_bodies()` |
+| list_bodies | `std::vector<bmmo_physics_body_state>()` | `list_bodies` via the `physics_direct` adapter (`physics_direct::list_bodies`, added at E1) | `physics_view_.list_bodies()` |
 | movable_mechanisms | `std::vector<std::string>()` | `movable_body_names(physics, "Ball_")` (SC:3842-3845) | the `list_bodies` filter of PSC:1956-1960 |
 | own_ball | `own_ball_view()`: `{entity, ball_type, physicalized, state}` | `current_ball`, `ball_type_of`, `get_body_state` (SC:2209-2220) | `get_current_ball`, `db_.get_ball_id`, `get_body_state` (PSC:1656-1759) |
 | own_body_upkeep | `void(const own_ball_view&)`: body guard, own group, own navigation attach | SC:2212-2227 (navigation only with rollback: a host policy) | PSC:1749-1775 |
@@ -1076,6 +1076,123 @@ right after E1 (E2), because every area journals.
 | **E9** the frame | `pre_step` and `post_step` (§1.3 tables) replace the body of `frame()`; the host keeps keys, step and hooks. Input building, record, amend, drive; `bind_session_world` and the rest of host support (§2.4), used by headless only; `poll_hold`, `slew_step`, `rebase_threshold`, `schedule_rebased`, `hooks.numbering_restarted`, `after_amend`, `after_journal`. | §5.1 (frame-order test); §5.2; **§5.3 full A/B** |
 | **E10** reports | `status_text(host_counters)`, `window_text(tick, host_counters)`, one literal each; `hooks.window/status`. | §5.2 (4) with zero differences; the harness parses the A/B runs of E9 again from the new binary's logs, and its report is identical to E9's numbers on the same inputs (a lane-control A/B pair) |
 | **E11** close the core | Make the state private; delete the dead state (§1.2), the `core_.s.` access and `legacy_calls`; SC ends as the host of §3.1. No logic change. | §5.1; §5.2; **§5.3 full A/B** against the base of E1 (the cumulative check) |
+
+**As built (step E1).** Where the code made E1 differ from the text above:
+
+- **The state is `client_core_state`**, the member `s` of
+  `session_client_core` (`include/session/client_core.hpp`). Its
+  declarations are SC's, moved verbatim with their comments and
+  initializers (every removed SC line reappears unchanged in the header,
+  except `uint8_t snapshot_interval_ = 2, input_delay_ = 6;`, split because
+  `snapshot_interval_` is dead state that stays in SC). The nested types
+  moved with it: `phase`, `remote_ball`, `own_life`, `pending_birth`,
+  `forced_own`, `applied_death`, `window_base`, and the constants
+  `kRelayLagBuckets` and `kWindowTicks` (the first sizes a member). SC names
+  them through `using` aliases and `static constexpr` copies, so its code is
+  unchanged but for the `core_.s.` prefix: with that prefix stripped, SC
+  equals its E0 text apart from the removed declarations and the added
+  lines. The rename skipped comments and string literals. `core_` is SC's
+  last member, so it is destroyed first, where the journal was.
+- **Members §1.2 does not name, placed by use.** Core: the counters the
+  status and `window:` lines print (`amend_failures_`, `input_reports_`,
+  `input_starved_`, `worst_starved_`, `lead_sum_`, `lead_count_`,
+  `remote_writes_`, `remote_inputs_received_`, ...), `sessions_ended_`
+  (counted by `end`, a core entry point), the log limiters of core logic (`subst_late_logs_`,
+  `subst_unresolved_logs_`, `lead_force_logs_`), `lead_slew_clock_` (with
+  `lead_slew_`), `header_acked_` (the acked-header family) and the journal's
+  bookkeeping, `journal_start_` included. Host: `event_log_muted_` (it moves
+  with `mute_event_log`'s nesting counter at E6), `resetpoint_seen_` and
+  `checkpoint_held_` (`poll_sector`'s platform half), `beam_done_` (the
+  host's `--beam` trigger), `paused_once_`, `restore_traces_`,
+  `rollback_diag_`, `step_diag_`, the trace and script counters,
+  `manager_activations_`, `local_births_`. The constants
+  `kOwnEcho*` / `kOwnRecordKeepTicks` stay in SC until their functions
+  move (E7). Of the sectors row, `start_sector_pending_` moved; the
+  requested sector it stands for is still `args_.start_sector` (SC:1517,
+  SC:2275) and becomes core state at E8, with `request_sector`.
+- **One source file.** Only `src/session/client_core.cpp` exists (the
+  constructor); each other file of §1.1 is created by the step that fills
+  it. `cmake/SessionCore.cmake` lists it in `BMMO_SESSION_CORE_SRC`, which
+  the three targets add; the retail mod compiles it and never constructs the
+  core.
+- **The platform at E1** (`include/session/client_platform.hpp`) has
+  `send`, `now(clock_site)` and `log`, with `send_mode`, `log_level`,
+  `own_lifecycle_source`, `session_capabilities` and an empty
+  `legacy_calls`. The constructor throws `std::invalid_argument` naming the
+  first missing operation (`missing_platform_operation`): "fails
+  construction" holds in Release builds, where an `assert` would not. The
+  capability checks arrive with their operations. The headless platform is
+  `session_client::make_platform()`, not a class of its own: `send` →
+  `send_bytes` (the mode mapped to `k_nSteamNetworkingSend_*`), `now` →
+  `wall_now(site)`, `log` → `log_line(text)`, a new free function that
+  writes what `logf` writes. It is not `logf("%s", ...)`, which would have
+  added a literal to the §5.2 (4) multiset. Nothing calls the platform yet.
+  The headless client passes default capabilities: nothing reads them
+  before their operations exist, and declaring `own_body_control` before
+  `make_own` exists would defeat the constructor check.
+- **`physics_direct`** gained `capture`, `reset_session_clock`,
+  `drain_event_log`, `list_bodies` (both returning by value, as
+  `physics_view`'s do), `force_block_get/set`, `set_body_matrix`,
+  `physicalize`, `unphysicalize`, `set_body_group`,
+  `navigation_create/set_ball/destroy`, `set_body_guard` and
+  `push_impulse`, under `physics_view`'s names and signatures, with no
+  callers. The header now includes `ball_navigation.hpp` and
+  `world_hash.hpp` itself instead of relying on its includer's order.
+  `list_bodies` returns `std::vector<bmmo_physics_body_state>` on both
+  backends (the §2.2 row is corrected). One known backend difference:
+  `physics_view::drain_event_log` reads through a 262144-byte buffer and
+  truncates a longer log, `physics_direct`'s returns it whole; settle it
+  (or keep it, recorded) when the first caller arrives (E6/E9).
+- **`session_client` is neither copied nor moved** (its move operations
+  are deleted, which deletes the copies too): `make_platform()` hands the
+  core lambdas that hold `this`. A retail host that copies the pattern
+  needs the same.
+- **§5.1 at E1** (`tests/session_client_core_test.cpp`, 7 tests over a
+  recording fake platform): construction calls nothing, a platform without
+  `send`, `now` or `log` is refused, the operations are handed back in order,
+  the capability defaults, `legacy_calls` is empty, the moved state keeps the
+  headless initializers, and the moved types keep their defaults
+  (`own_life::moved()`, `pending_birth::of`). The flow tests of §5.1 arrive
+  with the flow.
+- **Results.**
+  - §5.2 (5): all 16 reference captures replayed with the E1 binary
+    (`build-agent-e1/`, build id `bmmo-9d9cb085a558-dirty`), every replay
+    reached its capture's end marker, and every client journal is the same
+    length as its live reference, with 11 differing bytes, all inside the
+    header's `build_id` (`0180b6e2b2a6` against `9d9cb085a558`). `utc_ms` and
+    the TICK `ms` are identical too, since they are replayed.
+  - §5.2 (4): 187 literals against 187, equal.
+  - §5.2 (2): one solo snapshots-off run of the E1 binary (`solo/e1_new1`,
+    starved=0) against the stored `old1` with `e0_compare.py --live`:
+    TICK hash and pose identical at all 2237 common ticks (8-2244), LOCAL
+    checkpoints 1119/1119, the 8 RECEIVED snapshots equal in content, other
+    records 5627/5627: IDENTICAL.
+  - §5.2 (1): `savestate_check.py --journals` against
+    `arch_server_snap.sh wsl 26700 2 66 4.2`, starved=0 in the control and
+    in all three arms: forced-50x12 (49 forced rollbacks), forced-97x24 (25)
+    and forced-131x47 (18) EXACT, every one of 53 bodies 0.0 m. (Each
+    run's `arena_map_test.py` verdict line says "no mechanism interaction
+    observed", a multi-player criterion the check prints and does not
+    judge.)
+  - Host load over the live runs: 10.2 % total at most, no other process
+    above 2.1 %.
+  - After review (the deleted moves, the quoted include, the notes above),
+    rebuilt and checked again: (5) all 16 replays (`e1b`) byte-identical to
+    their live journals outside the build id; (4) 187 = 187; (2)
+    `solo/e1_new2` (starved=0) IDENTICAL to `old1` at all 2418 common ticks
+    (8-2425), LOCAL checkpoints 1209/1209; (1) the first savestate batch had
+    starved=4 in forced-131x47 and was not read; the rerun, starved=0
+    everywhere, was EXACT in all three arms (46, 25 and 18 forced
+    rollbacks, 53 bodies, 0.0 m). Host load at most 11.3 %, no other
+    process above 4.2 %.
+  - Builds: the x86 mod was rebuilt with its target's objects deleted
+    first (a clean client target; the mod includes no header E1 changed,
+    so nothing could have been stale). The Linux configure of the server
+    tree ran in the Arch build (`arch_build_server_dirty.sh`, ARCH-BUILD-OK),
+    which configures `BallanceMMOSessionClient` with `SessionCore.cmake`;
+    the Ubuntu CI configure and a GCC link of the test target were not run
+    (the sources pass `linux_test_syntax.sh`, and the headless client and
+    `client_core.cpp` a GCC syntax-only compile with the Arch tree's flags).
 
 ### 6.2 R steps: the retail mod hosts the core
 

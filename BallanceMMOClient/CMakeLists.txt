@@ -161,7 +161,9 @@ target_include_directories(bmmo_minhook PUBLIC ${bmmo_minhook_SOURCE_DIR}/includ
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
-add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC})
+# The shared session-client core (cmake/SessionCore.cmake): built in, not run before step R1.
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/SessionCore.cmake")
+add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC} ${BMMO_SESSION_CORE_SRC})
 set_target_properties(BallanceMMOClient PROPERTIES
                       OUTPUT_NAME "BallanceMMOClient"
                       SUFFIX ".bmodp"
