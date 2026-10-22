@@ -13,9 +13,14 @@
 // back-calls into the host that moved code still makes.  E11 makes the state
 // private and deletes `legacy_calls`.
 //
+// Step E2 moves the journal: the core owns one core::client_journal
+// (session/client_journal.hpp), the headless client's helpers, reached as
+// journal().
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
+#include "client_journal.hpp"
 #include "client_platform.hpp"
 #include "correction.hpp"
 #include "input_relay.hpp"
@@ -368,17 +373,18 @@ namespace bmmo::session {
         uint64_t resyncs_sent_ = 0, resyncs_done_ = 0, sessions_ended_ = 0;
         bmmo::session::rollback_engine rollback_;
         std::map<uint32_t, bmmo::session::input_frame> own_inputs_;
-        // The black box (design 9.15).  `journal_start_` is the instant the
-        // header was written, the origin every TICK record's ms is measured
-        // from; the checkpoint bookkeeping is the LOCAL cadence and its rate
-        // limit.
-        bmmo::session::journal_writer journal_;
-        clock_type::time_point journal_start_{};
-        uint32_t journal_last_checkpoint_ = 0;
-        bool journal_have_checkpoint_ = false;
-        bool journal_checkpoint_pending_ = false;
-        std::set<uint32_t> journal_announced_;   // ids that already have a PLAYER record
+        // The black box (design 9.15) and its bookkeeping moved into
+        // core::client_journal at E2 (session_client_core::journal()).
 
+    };
+
+    // Design 1.2 "Configuration": what the host decides for the session, filled
+    // before the session starts (begin takes it from E3 on).  Each step adds
+    // the fields its moved code reads.
+    struct core_config {
+        // The LOCAL checkpoint cadence in ticks (headless --checkpoint-ticks,
+        // retail BMMO_JOURNAL_CHECKPOINT_TICKS); 0 = core::kJournalCheckpointTicks.
+        uint32_t journal_checkpoint_ticks = 0;
     };
 
     class session_client_core {
@@ -388,6 +394,10 @@ namespace bmmo::session {
         // 2.1: "The constructor asserts that every field a declared
         // capability needs is filled").
         session_client_core(session_platform platform, session_capabilities caps);
+        // The journal holds a reference back to the core: neither copied nor
+        // moved.
+        session_client_core(const session_client_core&) = delete;
+        session_client_core& operator=(const session_client_core&) = delete;
 
         // The core's state.  Public from E1 to E10, while the flow still
         // lives in the host: the headless client reaches it as
@@ -397,13 +407,36 @@ namespace bmmo::session {
         // headless client, by the fake-platform test with recorders, and left
         // empty by the retail mod, which does not run the core before R1.
         legacy_calls legacy;
+        // Filled by the host (design 1.2); public until begin takes it (E3).
+        core_config config;
 
         const session_platform& platform() const { return platform_; }
         const session_capabilities& capabilities() const { return caps_; }
 
+        // The tick the world stepped last (design 1.3): the tick base until
+        // the first frame after the anchor.
+        uint32_t current_tick() const {
+            return s.frames_since_anchor_ >= 1 ? s.tick_base_ + static_cast<uint32_t>(s.frames_since_anchor_ - 1) : s.tick_base_;
+        }
+
+        // The session's journal (design 1.2).
+        core::client_journal& journal() { return journal_; }
+        const core::client_journal& journal() const { return journal_; }
+
+        // The core's log line: printf-formatted into a growing buffer and
+        // handed to platform().log as one line (design 6.1).  GCC and Clang
+        // check the format against its arguments (argument 1 is this).
+#if defined(__GNUC__)
+        __attribute__((format(printf, 2, 3)))
+#endif
+        void logf(const char* format, ...);
+
     private:
         session_platform platform_;
         session_capabilities caps_;
+        // Last, so it is destroyed first (the file closes before the state
+        // it describes goes away).
+        core::client_journal journal_{*this};
     };
 
 }

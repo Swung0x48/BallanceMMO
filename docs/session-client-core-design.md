@@ -1,8 +1,8 @@
 # Session-client core: one implementation of the client flow, two hosts
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
-what became of it). Steps E0 (§5.2, "As built (step E0)") and E1 (§6.1, "As
-built (step E1)") are built; nothing else is yet.
+what became of it). Steps E0 (§5.2, "As built (step E0)"), E1 and E2 (§6.1,
+"As built (step E1)", "As built (step E2)") are built; nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -487,6 +487,7 @@ value, as the free functions do today.
 | bind_world | `rollback_world(const core_world_hooks&)`. The core passes its hooks; the host binds through the shared `bind_session_world` (§2.4). **Called on every use, never cached**, as SC:4812 is: the options take `own_key_count_` by value (SC:4822-4824), and a world bound before the own navigation was attached would replay with a key count of 0 | `physics_direct_` + `args_` options | `physics_view_` + fixed options, `input_muted` |
 | **journal** | | | |
 | journal_path | `std::filesystem::path(const journal_header&)`; empty = no journal | `args_.journal` verbatim | `client_journal::directory()/file_name(...)`, after pruning to 10 files |
+| utc_ms (added at E2) | `uint64_t(clock_site)`: milliseconds since the Unix epoch, the header's `utc_ms` (site `journal_utc`); required only with `journal_path` | `wall_utc_ms(site)` (captured and replayed like `now`) | `system_clock::now()` in ms, the site ignored |
 | **host hooks** (all optional, H) | | | |
 | hooks.after_rewinds / after_record / after_amend / after_journal | `void(uint32_t tick)` | `maybe_force_rollback`, `dump_savestate`, traces, `report_queued_impulses` | a forced-rollback verb (R0/R2), nothing else |
 | hooks.filter_event | `event_send_verdict(const session_event_msg&)`: send / hold / drop | `--hold-event` (SC:2662-2703); the host later calls `core.release_event` | empty |
@@ -1193,6 +1194,126 @@ right after E1 (E2), because every area journals.
     the Ubuntu CI configure and a GCC link of the test target were not run
     (the sources pass `linux_test_syntax.sh`, and the headless client and
     `client_core.cpp` a GCC syntax-only compile with the Arch tree's flags).
+
+**As built (step E2).** Where the code made E2 differ from §1.2, §2.2 and
+the row above:
+
+- **The name is `bmmo::session::core::client_journal`**
+  (`include/session/client_journal.hpp`, `src/session/client_journal.cpp`).
+  The retail mod's legacy singleton is `bmmo::session::client_journal` and is
+  compiled into the same DLL until R7, so the core's type lives in the nested
+  namespace `core`, with the design's class name. The constants
+  `kJournalCheckpointTicks` (660), `kJournalCheckpointGap` (33) and
+  `kJournalMaxBytes` (256 MB) moved with it.
+- **It is a member of `session_client_core`, not of `client_core_state`.**
+  It reaches the core through a back reference (state, `config`,
+  `platform()`, `current_tick()`). The writer and the bookkeeping
+  (`journal_start_`, the last and pending checkpoint, `journal_announced_`)
+  left `client_core_state` and are private to it. The back reference makes
+  `session_client_core` non-copyable. `journal_` is the core's last member, so
+  the file closes before the state goes away. When E11 makes the state
+  private, `client_journal` needs `friend class core::client_journal;` or
+  accessors for `s` and `config`.
+- **The helpers became methods** with the prefix dropped: `journalling`,
+  `ms`, `open`, `close`, `note`, `announce_player`, `leave_player`,
+  `lifecycle_event`, `rollback_correction`, `body_correction`,
+  `checkpoint_due` and `local_checkpoint`. SC calls them as
+  `core_.journal().<method>`. The records the flow still in SC writes (INPUT
+  FRESH, SUBSTITUTED and RELAYED, TICK, RECEIVED checkpoints) go through
+  `journal().writer()` until their areas move (E4, E5, E9). So
+  `client_core_journal.cpp` (§1.1) does not exist yet.
+- **Host values the core cannot get itself.**
+  - `open(hash, build_id, own_name)`: `bmmo::physics::build_id()` is in the
+    physics library, which the mod does not link. The headless start note
+    and PLAYER records name the own player `--name` and every other player by
+    id. Retail's nicknames are an R1 question.
+  - `local_checkpoint(tick, own_ball)`: the own ball's name comes from SC
+    (`current_ball()`, CK) until the `own_ball` operation exists (E9). It is
+    read only when a checkpoint is due, as before.
+- **Platform operations added** (`client_platform.hpp`):
+  - `journal_path(const journal_header&)`, as designed. The header passed in
+    has everything but `utc_ms`.
+  - `utc_ms(clock_site)`. This one was not in §2.2 (now added to its table,
+    "utc_ms (added at E2)"): the header's `utc_ms` is
+    a system-clock read at its own site (`journal_utc`), which the
+    steady-clock `now` cannot give. Headless `wall_utc_ms` now takes the site.
+  - `body_state` and `list_bodies`, from §2.2, for body corrections and
+    LOCAL checkpoints. Headless `list_bodies` is
+    `physics_direct(engine_->physics()).list_bodies()`: a first buffer of 64
+    instead of SC's 256, and the same bodies in the same order.
+  - `missing_platform_operation` requires `utc_ms`, `body_state` and
+    `list_bodies` only when `journal_path` is filled. An empty `journal_path`
+    means the host never journals.
+- **The order inside `open`.** The header (without `utc_ms`) is built first,
+  then `journal_path` is asked, then the old journal is closed ("a new
+  session started"), then the directory is made, then `utc_ms` and
+  `journal_start` are read. That is SC's order of effects and clock reads.
+  With no path there is no read and no close, as with SC's
+  `args_.journal.empty()` return.
+- **`core_config` starts here**, with `journal_checkpoint_ticks` only, as
+  the public member `config`. SC fills it in `begin_session`, beside the
+  rollback switches it sets from its arguments; `begin` takes it from E3 on.
+  0 means `kJournalCheckpointTicks`, as SC's
+  `args_.checkpoint_ticks ? ... : 660` did. The §1.2 table's "cadence 0 =
+  off" does not hold: no configuration reaches the `cadence != 0` branch,
+  and `--checkpoint-ticks` clamps to at least 1. Kept verbatim.
+- **Two small moves the journal needed.**
+  - `current_tick()` moved into the core (§1.3 "reading"); SC's forwards to
+    it.
+  - `to_bridge_recipe` (with `copy_name`) moved to the CK-free
+    `include/session/bridge_recipe.hpp`, because the journal's EVENT record
+    needs it. §2.4 had put it in host support, which is CK. SC's copy is
+    deleted, and SC names the shared one with a using-declaration. The
+    retail copy (`physics_session_client.cpp`) stays until R0. It must go
+    then: its unqualified calls would become ambiguous by ADL once that file
+    sees the shared one.
+- **The core's `logf`** is `session_client_core::logf`, formatting into a
+  growing buffer and calling `platform().log` (headless `log_line`: the same
+  bytes as SC's `logf`). The two `journal: %s` literals moved into
+  `client_journal.cpp`, so the §5.2 (4) check now reads
+  `src/session/*.cpp`, not only `client_core*.cpp`.
+- **`legacy_calls`**: no entry added or removed. The journal calls no SC
+  function.
+- **§5.1**: 4 new tests (`SessionClientCoreJournal.*`):
+  - the operations a journalling host must fill;
+  - no path means no journal and no clock read;
+  - every headless record type over a temporary file, read back, with the
+    call order `journal_path`, `utc:journal_utc`, `now:journal_start`, log;
+  - the checkpoint rule.
+
+  `StateKeepsTheHeadlessInitializers` now checks `journal().journalling()`
+  and `config` instead of the moved members. 362 tests pass.
+- **Results.**
+  - §5.2 (5): all 16 reference captures replayed with the E2 binary
+    (`build-agent-e2/`, build id `bmmo-16387edf3b37-dirty`). Every replay
+    reached its capture's end marker, and every one compared IDENTICAL with
+    `e0_compare.py`. Strict byte check (`e1_bytecheck.py`): every journal has
+    the same length as its live reference (7178667 to 10753920 bytes). There
+    are 12 differing bytes per file, all inside the header's build id
+    (`0180b6e2b2a6` against `16387edf3b37`).
+  - §5.2 (4): 187 literals against HEAD's 187, equal (SC + `client_core.cpp`
+    + `client_journal.cpp`).
+  - §5.2 (3): `BallanceMMOSimTool --replay-session --continue-after-jump`,
+    the E1 SimTool on each live client journal against the E2 SimTool on its
+    replay. All 16 return the same rc and summary line. Without
+    `--continue-after-jump`, all 16 stop at the anchor-to-base jump (rc 3),
+    identically. The rc-3 rows past the jump are received-snapshot
+    mismatches that the old run has too. The E2 SimTool replays the four
+    reference server journals exactly (rc 0, 3986 to 4257 ticks, 0
+    checkpoint mismatches).
+  - §5.2 (2): one solo snapshots-off run of the E2 binary (`solo/e2_new1`,
+    starved=0) against the stored `old1` with `e0_compare.py --live`. TICK
+    hash and pose are identical at all 2444 common ticks (8-2451), LOCAL
+    checkpoints 1222/1222, the 8 RECEIVED snapshots equal in content, other
+    records 6146/6146: IDENTICAL. Host load at most 8.5 %, no other process
+    above 3.9 %.
+  - Builds: x64 BUILD-OK. The x86 mod was rebuilt with its target's objects
+    deleted first (it includes no header E2 changed; `client_core.cpp` and
+    `client_journal.cpp` are the only core objects it compiles). Arch server
+    build ARCH-BUILD-OK. `linux_test_syntax.sh` passes on every line,
+    `client_journal.cpp` included. GCC compiles the headless client
+    syntax-only with the Arch flags, and both core sources with
+    `-Wall -Wextra`, with no error or warning.
 
 ### 6.2 R steps: the retail mod hosts the core
 

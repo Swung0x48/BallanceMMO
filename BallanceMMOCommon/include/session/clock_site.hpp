@@ -40,8 +40,8 @@ namespace bmmo::session {
         hold_event_release,   // release_held_events
         resync_limiter,       // request_resync: the 2 s / 10 s limiter
         journal_ms,           // a TICK record's ms
-        journal_start,        // open_journal: the origin of journal_ms
-        journal_utc,          // open_journal: the header's utc_ms (system clock, in ms)
+        journal_start,        // core::client_journal::open: the origin of journal_ms
+        journal_utc,          // core::client_journal::open: the header's utc_ms (system clock, in ms)
         count_
     };
 

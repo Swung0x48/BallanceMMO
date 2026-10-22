@@ -11,18 +11,23 @@
 // Step E1 (design 6.1) starts it with the three operations every host has
 // and the headless platform fills: send, now and log.  Each later step adds
 // the operations its moved code calls (design 2.2), and the capability checks
-// with them.
+// with them: E2 the journal's (journal_path, utc_ms, body_state, list_bodies).
 //
 // CK-free and header-only.
 
 #include "clock_site.hpp"
+#include "../physics/physics_rt_api.h"
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace bmmo::session {
+
+    struct journal_header;   // session/journal.hpp
 
     // How a message goes out; the host maps it to k_nSteamNetworkingSend_*.
     enum class send_mode : uint8_t { reliable, reliable_no_nagle, unreliable_no_delay };
@@ -44,6 +49,23 @@ namespace bmmo::session {
         // One line of text, written as it is (the harness parses the headless
         // client's lines).
         std::function<void(log_level level, const std::string& text)> log;
+        // The system clock in ms since the epoch, by the read's site (the
+        // journal header's utc_ms, clock_site::journal_utc).
+        std::function<uint64_t(clock_site site)> utc_ms;
+
+        // ---- reading the world (design 2.2) ----
+        // One body's state by entity name; false when it has no body.
+        std::function<bool(const std::string& entity, bmmo_physics_body_state& out)> body_state;
+        // Every physicalized entity, in physics-table order.
+        std::function<std::vector<bmmo_physics_body_state>()> list_bodies;
+
+        // ---- journal (design 1.2) ----
+        // The whole path of the session's journal for this header (the
+        // session, level and own player are filled; utc_ms is not yet); an
+        // empty path means no journal.  An empty field means this host never
+        // journals.  Headless: --journal verbatim; retail (R1): its journal
+        // directory and file name, after pruning old files.
+        std::function<std::filesystem::path(const journal_header& header)> journal_path;
     };
 
     // Design 2.3.  Every flag defaults to "cannot"; a host declares what it
@@ -73,6 +95,13 @@ namespace bmmo::session {
         if (!platform.send) return "send";
         if (!platform.now) return "now";
         if (!platform.log) return "log";
+        // A host that journals (session/client_journal.hpp) stamps the header,
+        // and writes bodies into body corrections and LOCAL checkpoints.
+        if (platform.journal_path) {
+            if (!platform.utc_ms) return "utc_ms";
+            if (!platform.body_state) return "body_state";
+            if (!platform.list_bodies) return "list_bodies";
+        }
         return nullptr;
     }
 
