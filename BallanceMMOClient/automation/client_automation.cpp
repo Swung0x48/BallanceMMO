@@ -170,6 +170,9 @@ void BallanceMMOClient::on_input_polled(unsigned char* state) {
         const auto& source = replay_source_.frames[replay_index_];
         std::memcpy(state, source.keys.data(), source.keys.size());
     }
+    // 'replay session <file>': the armed key record's frame for the tick about
+    // to step (session/core_host.cpp).
+    core_host_feed_replay_keys(state);
     std::memcpy(frame_keys_.data(), state, frame_keys_.size());
     frame_keys_tick_ = m_bml->GetTimeManager()->GetMainTickCount();
 }
@@ -261,6 +264,9 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "ping") return "pong";
     if (verb == "status") return automation_status_line();
     if (verb == "session") {
+        // The shared core's transition switch and forced rollbacks
+        // (session/core_host.cpp, design 6.2).
+        if (rest.rfind("core", 0) == 0 || rest.rfind("force-rollback", 0) == 0) return core_host_session_verb(rest);
         if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
         if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }
         if (rest == "rollback on") { physics_session_.rollback_enabled = true; return "ok session rollback on"; }
@@ -519,6 +525,11 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         std::string name = rest;
         if (!name.empty() && name.front() == ' ') name.erase(0, 1);
         CKDataArray* array = m_bml->GetArrayByName(name.c_str());
+        // An array made at run time (N4: CurrentLevel_BMMO_CheckpointPhase,
+        // game/checkpoint_phase.hpp) is not in BML's list: ask the context.
+        if (!array)
+            array = CKDataArray::Cast(m_bml->GetCKContext()->GetObjectByNameAndClass(const_cast<CKSTRING>(name.c_str()),
+                                                                                     CKCID_DATAARRAY, nullptr));
         if (!array) return "error no data array named " + name;
         const int rows = array->GetRowCount(), columns = array->GetColumnCount();
         std::string out = std::format("ok {} rows={} columns={} |", name, rows, columns);
@@ -634,6 +645,13 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         return std::format("ok recording={} frames={}", record_writer_.is_open() ? 1 : 0, record_frames_);
     }
     if (verb == "replay") {
+        // replay session <in.bmrc>|stop: a key record anchored to the session's
+        // first assigned frame (session/core_host.cpp, design 3.2).
+        if (rest.rfind("session", 0) == 0) {
+            std::string what = rest.substr(7);
+            if (!what.empty() && what.front() == ' ') what.erase(0, 1);
+            return core_host_replay_verb(what);
+        }
         // replay start <in.bmrc> <out.bmrc>
         std::istringstream args(rest);
         std::string action, in_path, out_path;
@@ -663,6 +681,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         replay_active_ = true;
         return "ok replaying " + std::to_string(replay_source_.frames.size()) + " frames into " + out_path;
     }
+    if (verb == "net") return core_host_net_verb(rest);   // GNS fake lag / loss (session/core_host.cpp)
     if (verb == "level") {
         std::istringstream args(rest);
         std::string mode;

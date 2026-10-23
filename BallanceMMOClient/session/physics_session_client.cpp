@@ -18,6 +18,7 @@
 
 #include <game/checkpoint_phase.hpp>
 #include <game/menu_driver.hpp>
+#include <session/bridge_recipe.hpp>   // to_bridge_recipe (found by ADL): the shared copy since step R0
 #include <session/spawn_impulse.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
@@ -58,11 +59,6 @@ namespace {
     // warning instead of a frozen game.
     constexpr std::chrono::seconds kAnchorHoldTimeout{10};
 
-    void copy_name(char* out, size_t size, const std::string& text) {
-        std::snprintf(out, size, "%s", text.c_str());
-    }
-
-    // Wire recipe (strings/vectors) -> bridge recipe (fixed arrays).
     // The three data-array cells the replay rewinds and the replayed
     // activations re-write (plan doc 10): CurrentLevel[0][4] and
     // IngameParameter[0][1], [0][2].
@@ -99,31 +95,6 @@ namespace {
         if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, it->second.reset ? TRUE : FALSE);
         ++s.activations_replayed;
         return true;
-    }
-
-    bmmo_physics_ball_recipe to_bridge_recipe(const bmmo::session::ball_recipe& r) {
-        bmmo_physics_ball_recipe p{};
-        p.fixed = r.fixed;
-        p.start_frozen = r.start_frozen;
-        p.enable_collision = r.enable_collision;
-        p.calc_mass_center = r.calc_mass_center;
-        p.friction = r.friction;
-        p.elasticity = r.elasticity;
-        p.mass = r.mass;
-        p.linear_damp = r.linear_damp;
-        p.rot_damp = r.rot_damp;
-        for (int k = 0; k < 3; ++k) p.mass_center[k] = r.mass_center[k];
-        copy_name(p.collision_surface, sizeof(p.collision_surface), r.collision_surface);
-        p.convex_count = static_cast<int32_t>(std::min<size_t>(r.convex_meshes.size(), BMMO_PHYSICS_MAX_CONVEX));
-        for (int i = 0; i < p.convex_count; ++i) copy_name(p.convex[i], sizeof(p.convex[i]), r.convex_meshes[i]);
-        p.ball_count = static_cast<int32_t>(std::min<size_t>(r.balls.size(), BMMO_PHYSICS_MAX_BALLS));
-        for (int i = 0; i < p.ball_count; ++i) {
-            for (int k = 0; k < 3; ++k) p.ball_center[i][k] = r.balls[i].center[k];
-            p.ball_radius[i] = r.balls[i].radius;
-        }
-        p.concave_count = static_cast<int32_t>(std::min<size_t>(r.concave_meshes.size(), BMMO_PHYSICS_MAX_CONCAVE));
-        for (int i = 0; i < p.concave_count; ++i) copy_name(p.concave[i], sizeof(p.concave[i]), r.concave_meshes[i]);
-        return p;
     }
 
     // A lifecycle event in journal shape (session/journal.hpp EVENT records):
@@ -980,10 +951,16 @@ bool BallanceMMOClient::death_reset_resolve() {
 // Keeps the edit applied, like pause_scripts_apply: a level reset that handed
 // the retail target back has to be caught before the next death runs the chain.
 void BallanceMMOClient::death_reset_apply() {
-    CKContext* context = m_bml->GetCKContext();
     // "The sector is up": this client resolved at least one mechanism of its
     // own, so nothing may re-activate the sector from here on.
-    const bool sector_up = physics_session_.mechanism_tracking.resolved() > 0;
+    death_reset_apply(physics_session_.mechanism_tracking.resolved() > 0);
+}
+
+// The same with "the sector is up" from the caller: the retail host of the
+// shared core (session/core_host.cpp, platform script_guards) passes the
+// core's own resolve count.
+void BallanceMMOClient::death_reset_apply(bool sector_up) {
+    CKContext* context = m_bml->GetCKContext();
     for (int i = 0; i < death_reset_count_; ++i) {
         death_reset_write& write = death_reset_[i];
         if (!write.block) continue;
@@ -1283,6 +1260,14 @@ void BallanceMMOClient::checkpoint_phase_resolve() {
         logger_->Error("Physics session: the checkpoint chain's phase cell was NOT split (%s): a crossing 3 ticks "
                        "after a sector pass can cancel that pass's module Physicalize on this client",
                        trouble.c_str());
+}
+
+// The per-frame keep of the split (the retail host of the shared core,
+// session/core_host.cpp, platform script_guards; the legacy frame keeps it
+// itself): targets a level reset handed back to CurrentLevel moved to the copy
+// again, counted.
+int BallanceMMOClient::checkpoint_phase_keep() {
+    return checkpoint_phase_.keep(m_bml->GetCKContext());
 }
 
 void BallanceMMOClient::checkpoint_phase_restore() {

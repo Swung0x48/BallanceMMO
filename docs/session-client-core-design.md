@@ -3,7 +3,8 @@
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
 E5, E6, E7, E8, E9, E10 and E11 (§6.1, "As built (step E1)" ... "As built
-(step E11)") are built: the E steps are done. No R step is built yet.
+(step E11)") are built: the E steps are done. R0 is built (§6.2, "As built
+(step R0)"); R1-R7 are not.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -4051,6 +4052,213 @@ snapshots off is `… 100000 100000 4.2`.
 
 The R steps do not require each other's measurements to be good, only to be
 built. R5 and R6 wait on their capability work; R1-R4 do not.
+
+**As built (step R0).** Where the code made R0 differ from §2.2's retail
+column, §3.2 and the R0 row:
+
+- **What `session core on` does at R0.** The row does not say, and R1 is the
+  step that hands the session to the core, so R0 makes it plumbing only. With
+  the switch on: at each SessionStart the core is made the first time
+  (`session_client_core(core_host_platform(), caps)`; its constructor's
+  `missing_platform_operation` check passing is the proof that every required
+  operation is filled), the login id is given to it (`set_own_id`), and every
+  Session* message is pushed into the mailbox and drained each `OnProcess`.
+  No core session runs (`begin` is R1's), so the drain hands the SessionStart
+  entry to `core_host_session_start` and decodes every other entry into its
+  message (to check the copy), counts it and drops it (`session core` prints
+  `latched / pushed / dropped / drained / starts / discarded / undecodable`);
+  the legacy handlers still run, so the session itself is the legacy one
+  with the switch either way. The decoding dispatch to `on_session_*` is
+  built (`core_host_dispatch`) and runs only for a core session. With the
+  switch off nothing new runs but two atomic loads per message, a per-frame
+  empty mailbox take and the replay-key check.
+- **Where it lives.** `BallanceMMOClient/session/core_host.cpp` (+ a small
+  `core_host.hpp` naming `session_platform` and `retail::core_enabled()`).
+  Its state is file-scope statics: the switch and the latch
+  (`std::atomic<bool>`s, the network thread reads them), the mailbox
+  (load-time), and one `retail_host`
+  struct holding the core (`std::unique_ptr`, made lazily), the platform's
+  own state (navigation graph, own replica, own group, body guard, the mute,
+  the mirrors' player / type maps, ball forces, the birth log, the manager
+  activations, the script replay's selection and bookkeeping) and the verbs'
+  state. `BallanceMMOClient` gained non-virtual methods only
+  (`core_host_*`, `death_reset_apply(bool)`, `checkpoint_phase_keep()`); no
+  data member. The platform's host state is kept apart from
+  `physics_session_state`, which keeps its layout until R7.
+- **The mailbox and the latch.** `core_host_offer` at the top of
+  `on_message`, before the opcode switch. The switch is read once per
+  session, at its SessionStart, on the network thread (where the arrival
+  order is made): a SessionStart that finds it on latches the session
+  (`core_latched`) and is itself pushed; then every SessionAssign, Snapshot,
+  RemoteInput, Event, Lead and End is pushed until the SessionEnd, which
+  unlatches. So the core sees SessionStart and the messages after it in
+  arrival order (a SessionEnd right behind a SessionStart cannot be drained
+  before it), and a session's messages never split between the paths.
+  Snapshot entries are capped at 64 (the oldest snapshot entry goes).
+  SessionLead is the mailbox's alone (the legacy switch never had a case
+  for it and logged it as an invalid opcode, which it still does with the
+  switch off). The legacy SessionStart handler is untouched (its own
+  `run_on_game_thread` post). "`begin` drops only the entries of other
+  sessions" is R1's (no `begin` yet).
+- **The retail platform (`core_host_platform`): every §2.2 operation,** with
+  the retail column's means; the host support templates are instantiated
+  with `physics_view` there (`make_mirror_body`, `attach_mirror_navigation`,
+  `attach_own_replica`, `bind_session_world`, `bind_script_replay`,
+  `live_cells_guard`, `manager_activations`, `put_back_birth`), so R1's
+  "compile-only instantiation" is done. Differences from the table:
+  - `own_ball.ball_type` and `ball_recipe_of`: the `Physicalize_GameBall`
+    row by name (-1 for none), not `db_.get_ball_id`, which answers 0 for an
+    unknown name; the recipe rule is the headless `fill_retail_recipe`'s, so
+    the rule now exists in both hosts (a host-support candidate, left as is:
+    R0 changes no shared file).
+  - `drain_body_events` ignores the event log's `recipe` entries: the retail
+    birth log is fed by `OnPhysicalize` (§2.4), which R1 wires.
+  - `poll_sector` also reads `CurrentLevel[0][4]` (`phase_read`, N4's check);
+    `resetpoint_moved` is always false (the checkpoint hook reports).
+  - `own_body_upkeep` attaches the own replica through host support, which
+    polls on; the retail rule (polling off while muted) is applied after a
+    create.
+  - `script_guards` calls `death_reset_apply(resolved)` (a new overload: the
+    legacy `death_reset_apply()` passes its own `mechanism_tracking`
+    count), `sector_deactivate_apply`, `sector_activate_apply`, and N4's
+    per-frame keep through `checkpoint_phase_keep()` (the split's state is
+    a file-scope static of `physics_session_client.cpp`).
+  - `hooks.after_rewinds` is the forced rollback; `hooks.window` / `status`
+    go to the log; `hooks.ended` lifts the body guard; `counters` are
+    `fixed_tick_.rebases()` and the host's two counts. `arm_own_capture`,
+    `own_birth_capture`, `make_own`, `unmake_own`, `numbering_restarted`,
+    `filter_event`, `ending`, `describe_movables`: empty.
+  - Capabilities as §2.3's retail column: no own body control, no slew,
+    blocking hold, no whole frame, `host_hooks`.
+  - Not built (R1, with `begin`): the `core_config` (and §3.2's "savestate
+    0": the legacy binding's savestate *flags* are 0, but its engine runs
+    with `set_exact_restore` at its default, true, so R1 should keep
+    `core_config.savestate` true and the binding's flags 0, or the A/B
+    measures a policy change), the anchor work that fills the script
+    selection, force hooks and ball forces, the mute's update, the
+    `OnPhysicalize` / `OnUnphysicalize` / checkpoint-hook / `beam` /
+    `sector` / `journal` routing.
+- **The retail `to_bridge_recipe` copy is deleted** (as the E2 note asked):
+  `physics_session_client.cpp` includes `session/bridge_recipe.hpp` and its
+  three calls find the shared one by ADL. The copies were identical.
+- **Verbs.** `session core on|off|status` (the switch acts between sessions:
+  refused while the legacy session is not idle, while a core session is not
+  idle, and while a session is latched and the connection is up - a lost
+  connection, which sends no SessionEnd, lets the verb clear the latch);
+  `session force-rollback E:D` (E 0 = off; acts only through a core
+  session's `after_rewinds`, so it is inert until R1, and says so with the
+  switch off; the host keeps only the cadence, `now % E`, and leaves "not
+  before depth + 2 ticks" to `force_rewind`); `net lag <ms> [up|down] [at
+  <tick>]` (GNS `FakePacketLag_Send` / `_Recv`, global, one way, both
+  directions by default); `net blackout <ms> [up|down] [at <tick>]`
+  (`FakePacketLoss_Send` / `_Recv` at 100 %, a deadline per direction, put
+  back to 0 by `core_host_process` at the first frame boundary past it, so
+  an anchor hold in progress, which waits inside one frame, stretches it; a
+  blackout at least GNS's connected timeout, 7.2 s as `role.hpp` sets it,
+  is accepted with a warning that the connection will drop); `at <tick>`
+  arms either for the first frame boundary at or after that session tick;
+  `net` (status); `replay session <file>|stop` and `replay session`
+  (status). The `array`
+  verb also finds an array made at run time (context lookup): N4's copy is
+  named `CurrentLevel_BMMO_CheckpointPhase` (`CopyObject` appends the
+  name), not `_BMMO_CheckpointPhase`.
+- **`replay session`.** Fed from `on_input_polled` after the automation
+  keys: the tick about to step is the core's `next_tick()` for a running
+  core session, else the legacy `tick_base + frames_since_anchor` once
+  assigned and released; the first such tick is frame 0, and frame k goes
+  to tick `first + k` (a resync's renumbering keeps the server's numbering:
+  a forward jump skips record frames, a backward one feeds frames again or
+  lets live keys through before the first; each jump is logged with its
+  size and counted, `jumps=`). The record's end or the session's end
+  disarms it. No clock reset, nothing recorded.
+
+Measured (x86 mod at e04148d + R0, slot 13 on the arena; the Arch server
+rebuilt with the slot-13 hack, which its cf08f11 binary lacked, build id
+`ballanced-3e4289e95f25+bmmo-e04148d177dd-dirty`):
+
+- Clean x86 build (the client target's objects deleted first). No launch
+  hung: three dedicated launches of the first R0 build (menu in 1.5-2.3 s)
+  and ten of the final one in the runs below. N4 in the game for the first
+  time: `the checkpoint chain's phase cell is split: 2 Set Cells of
+  Gameplay_Events/activate next Checkpoint, 3 of Event_handler/deact.
+  Checkpoints and 2 Get Cells in 2 checkpoint script(s) now use a private
+  copy`; the copy exists during the session and is gone after its end.
+- **Baseline, legacy solo, snapshots off, `replay session` (2400 frames,
+  arena): NOT identical.** Two runs: 2459 of 2515 TICK hashes equal; the
+  only difference is ticks 611-666, where `P_Modul_01_Pusher` is woken at
+  611 in one run and 612 in the other (a third run, with the switch on: 606;
+  every other tick of the three runs is identical, sectors 2-4 held and run
+  at the same ticks, and each client's journal matches its own server's at
+  every tick - the server applies the client's BodyRevived). **Cause:** the
+  pusher's script wakes it from a `TT Scaleable Proximity` (`[50],
+  [Ball_Pos_Frame], [P_Modul_01_Pusher], ..., [55], [100], [10], [60]`),
+  which checks the distance only every 10-60 frames; its countdown is the
+  block's local parameter 1 ("Last Check", ScaleableProximity.cpp), which
+  `CKBehavior::Reset` and the level restart leave alone - so its phase at the
+  anchor is whatever the play before the session left (the 9.27 Sequencer
+  class of leak). **Confirmed by measurement** (a throwaway read-only build
+  logging every `TT Scaleable Proximity`'s local parameters 0 and 1 at the
+  anchor and the pusher's block at every tick to 700, two legacy runs,
+  removed before the final build): at the anchor the pusher's "Last Check"
+  was 16 in one run and 30 in the other (the block inactive, 37 instances
+  in the level). The block is started at tick 15 (local 0 set to "out",
+  local 1 left at 15 / 29), so its distance checks fell at 30, 90, ...,
+  594, 604 in one run and 44, 104, ..., 596, 606 in the other; the first
+  check inside the range (squared distance 2460 / 2379 < 2500) is the tick
+  the pusher wakes, 604 vs 606, and the two journals differ at 604-660
+  only. Two more legacy runs of the final build: the pusher woke at 607 vs
+  609 (the hashes differ at 607-663, 57 ticks), every other tick equal, each client journal equal to its server
+  journal at every tick, both server journals exact in the SimTool. Five
+  of the 37 instances had a different "Last Check" at the two anchors
+  (`P_Extra_Point`, `P_Modul_01`, `P_Modul_18`, `PC_TwoFlames`,
+  `PS_FourFlames`); only the pusher's reached the hash in this test. The
+  fix - record locals 0 and 1 of every `TT Scaleable Proximity` at level
+  load and restore them at the anchor, as `game/script_state.hpp
+  sequencer_state` does for the Sequencers - changes what the legacy retail
+  world does (in both arms), so it is not in R0: it needs its own step,
+  before R1, whose check (a) ("identical at every tick") cannot pass
+  without it.
+- **The legacy two-client test, re-established** (no numbers were recorded
+  for it on the current protocol: the last, `scripts/retail/n28-verify3`,
+  is from 2026-09-11 on a local Windows server): `retail_two_client_test.py
+  start --server 127.0.0.1:26700` (level 11, both clients `replay session`
+  of the same record), Arch server snapshots on (2 / 66, spacing 4.2), two
+  runs. Per client `snaps/ok/mism/rb`, `resim`, `max_err`: run a
+  1289/1269/20/20, 52, 0.310 m and 1289/1269/20/20, 34, 0.201 m; run b
+  1319/1298/21/21, 40, 0.195 m and 1322/1305/17/17, 34, 0.291 m. Both runs,
+  both clients: `unmatched` / `far` / `frozen` 0, resyncs 0, events
+  42/343/294/0, echo 7/0/0/0. The four server journals (two two-client, two
+  solo) replay exact in the SimTool (`matched` = ticks, 0 checkpoint
+  mismatches).
+- With the switch on (solo, the same record): the core made with the
+  platform complete, the mailbox pushed / drained 2611 entries (1
+  SessionStart, 2610 decoded and discarded), undecodable 0; `session core
+  off` mid-session refused, and accepted after the disconnect (latch
+  cleared); the session the legacy one (its journal equal to the switch-off
+  runs but for the pusher window). `net lag 150`: the server's ack of our
+  input fell from 2 to 22 ticks behind and back at `net lag 0`; `net lag
+  150 up`: 12 behind; `net blackout 1500 up`: the ack froze for ~1.5 s
+  while the snapshots went on; `net blackout 1000 down`: both froze; no
+  resync. Overlapping `net blackout 3000 up` + `net blackout 400 down`: the
+  down one ended at tick 704, the up one at 876 (its 3 s uplink gap cost a
+  resync, 1/1); `net blackout 1000 down at 1250` (armed at 1123) fired at
+  1250 and ended at 1316; `net blackout 7500 down` warned of the 7200 ms
+  timeout.
+- The legacy two-client test once more on the final build (run c): per
+  client 1301/1282/19/19, resim 31, 0.180 m and 1304/1284/20/20, resim 42,
+  0.226 m; unmatched / far / frozen 0, resyncs 0, events 42/343/294/0, echo
+  7/0/0/0 - inside runs a and b; its server journal exact in the SimTool.
+- The two reviews: the baseline's cause measured (above); the drain decodes
+  what it drops; the switch read once per session (the latch) and the verb
+  refused while a core session runs; SessionStart in the mailbox (arrival
+  order); a blackout deadline per direction; `net lag [up|down]` and `at
+  <tick>`; the GNS timeout warning; the replay's jumps logged; the
+  "made" line only at the core's making; `force_rewind`'s depth check no
+  longer repeated by the host.
+- Headless unchanged: R0 changes no file under `BallanceMMOCommon` or the
+  headless client, so the wire check was not needed; the x64 build, the 414
+  tests and the GCC syntax check (25 files) pass. Three launches of the
+  final build: menu in 1.6-1.7 s, none hung.
 
 ## 7. Open questions
 

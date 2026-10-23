@@ -119,6 +119,7 @@ set(BMMO_CLIENT_HDR
         utils.h
         automation/command_pipe.h
         session/physics_session.hpp
+        session/core_host.hpp
         session/session_journal_client.hpp
 )
 set(BMMO_CLIENT_SRC
@@ -136,6 +137,7 @@ set(BMMO_CLIENT_SRC
         physics/physics_view.cpp
         session/room_client.cpp
         session/physics_session_client.cpp
+        session/core_host.cpp
         session/session_journal_client.cpp
 )
 
@@ -161,7 +163,8 @@ target_include_directories(bmmo_minhook PUBLIC ${bmmo_minhook_SOURCE_DIR}/includ
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
 
-# The shared session-client core (cmake/SessionCore.cmake): built in, not run before step R1.
+# The shared session-client core (cmake/SessionCore.cmake), hosted by session/core_host.cpp
+# behind 'session core on' (step R0: built and checked; the session runs on it from R1).
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/SessionCore.cmake")
 add_library(BallanceMMOClient SHARED ${BMMO_CLIENT_HDR} ${BMMO_CLIENT_SRC} ${BMMO_COMMON_SRC} ${BMMO_SESSION_CORE_SRC})
 set_target_properties(BallanceMMOClient PROPERTIES

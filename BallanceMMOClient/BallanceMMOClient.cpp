@@ -463,6 +463,7 @@ void BallanceMMOClient::OnProcess() {
     process_command_file();
     fixed_tick_.on_process(m_bml);
     process_physics_session();
+    core_host_process();
     process_command_pipe();
     process_room_requests();
     process_level_request();
@@ -1885,6 +1886,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         return;
     }
     auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
+    // The shared core's mailbox (session/core_host.cpp): only for a session
+    // whose SessionStart found 'session core on'; it keeps the Session*
+    // messages, SessionStart included, for the game thread in arrival order,
+    // and the handlers below still run (step R0) - all but SessionLead, which
+    // only the mailbox takes.
+    if (core_host_offer(network_msg)) return;
 
     switch (raw_msg->code) {
     case bmmo::OwnedBallState: {

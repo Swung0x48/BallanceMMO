@@ -20,6 +20,7 @@
 #include "session/input_injector.hpp"
 #include "physics/physics_view.hpp"
 #include "session/physics_session.hpp"
+#include "session/core_host.hpp"
 #include <game/menu_driver.hpp>
 #include <game/script_state.hpp>
 #include <fstream>
@@ -600,6 +601,7 @@ private:
 	bool death_reset_failed_ = false;
 	bool death_reset_resolve();
 	void death_reset_apply();
+	void death_reset_apply(bool sector_up);   // the retail core host passes "the sector is up" itself
 	void death_reset_restore();
 	// Design 9.25, neutralization N2: crossing a checkpoint runs
 	// Gameplay_Events / activate Sektor, which writes both IngameParameter[0][1]
@@ -666,6 +668,7 @@ private:
 	// does not survive members being added (see apply_pending_ping_text).
 	void checkpoint_phase_resolve();
 	void checkpoint_phase_restore();
+	int checkpoint_phase_keep();   // the per-frame keep, for the retail core host
 	void sector_activate_apply();
 	void sector_activate_restore();
 	// Stamp `sector`'s activation sector_lead() ticks ahead of this frame's step,
@@ -746,6 +749,22 @@ private:
 	void physics_session_on_finish();
 	std::string physics_session_status_text();
 	std::string physics_session_overlay_text();
+	// The retail host of the shared session-client core (session/core_host.cpp,
+	// docs/session-client-core-design.md 3.2; step R0): the mailbox, the
+	// platform, the 'session core|force-rollback', 'net' and 'replay session'
+	// verbs.  Methods only - its state is file-scope statics in that file, as
+	// this class must not gain a data member (see apply_pending_ping_text).
+	bool core_host_offer(ISteamNetworkingMessage* network_msg);   // network thread
+	void core_host_session_start();
+	void core_host_process();
+	std::string core_host_session_verb(const std::string& rest);
+	std::string core_host_net_verb(const std::string& rest);
+	std::string core_host_replay_verb(const std::string& rest);
+	void core_host_feed_replay_keys(unsigned char* state);
+	bmmo::session::session_platform core_host_platform();
+	void core_host_dispatch(int code, const std::string& bytes);
+	void core_host_replay_activation(uint32_t tick);
+	void core_host_zero_retail_forces();
 	CKDataArray* current_level_array() {
 		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;
 	}
