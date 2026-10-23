@@ -1888,9 +1888,8 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
     auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->m_pData);
     // The shared core's mailbox (session/core_host.cpp): only for a session
     // whose SessionStart found 'session core on'; it keeps the Session*
-    // messages, SessionStart included, for the game thread in arrival order,
-    // and the handlers below still run (step R0) - all but SessionLead, which
-    // only the mailbox takes.
+    // messages, SessionStart included, for the game thread, and the core runs
+    // that session: the handlers below never see its messages (step R1).
     if (core_host_offer(network_msg)) return;
 
     switch (raw_msg->code) {

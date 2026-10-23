@@ -3763,4 +3763,276 @@ namespace {
         EXPECT_EQ(shifted.window_text(145, h).rfind("window: tick=145 ", 0), 0u);
     }
 
+    // ---------------------------------------------------------------- R1
+    // Step R1 (design 6.2): what the retail host needs of the core - the
+    // frame refused without its pre_step, the hold given up, the lifecycle
+    // switch off with the mirror started from a row, the own body backstop
+    // and the snapshots' acked input.
+
+    // post_step refuses a frame no pre_step prepared (logged, nothing taken),
+    // takes one frame per pre_step, and begin clears a prepared frame.
+    TEST(SessionClientCoreR1, PostStepRefusesAFrameNoPreStepPrepared) {
+        flow_fake fake;
+        session_client_core core(frame_platform(fake, false), session_capabilities{});
+        run_to_tick_125(core, fake);
+        EXPECT_FALSE(core.post_step(true));
+        EXPECT_EQ(core.current_tick(), 125u) << "nothing taken";
+        EXPECT_EQ(fake.calls.back(), "log:0:post_step refused at tick 125: no pre_step prepared this frame");
+        core.pre_step();
+        EXPECT_TRUE(core.post_step(true));
+        EXPECT_EQ(core.current_tick(), 126u);
+        EXPECT_FALSE(core.post_step(true)) << "one post_step per pre_step";
+        EXPECT_EQ(core.current_tick(), 126u);
+        core.pre_step();
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        EXPECT_FALSE(core.post_step(true)) << "begin clears a prepared frame";
+    }
+
+    // release_hold: the blocking hold given up (the retail host's lost
+    // connection); nothing while not holding.
+    TEST(SessionClientCoreR1, ReleaseHoldEndsTheHold) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_anchor(core, fake);
+        ASSERT_TRUE(core.holding());
+        size_t from = fake.calls.size();
+        core.release_hold("the connection was lost");
+        EXPECT_FALSE(core.holding());
+        const auto calls = since(fake.calls, from);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "log:0:anchor hold released after 0 polls: the connection was lost"),
+                  calls.end());
+        from = fake.calls.size();
+        core.release_hold("again");
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "not holding: nothing";
+        EXPECT_FALSE(core.poll_hold().held);
+    }
+
+    // lifecycle_rewind off (design 1.2; R1): late births and a late death are
+    // made at the drain, at the live tick, with no rewind; with
+    // mirror_start_from_row a birth whose player has a newer snapshot row
+    // starts from it (its pose, no kick, then the row written), one without
+    // starts from the event (kicked).
+    TEST(SessionClientCoreR1, LifecycleRewindOffMakesLateChangesLive) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.lifecycle_rewind = false;
+        core.config.mirror_start_from_row = true;
+        state_of(core).spawn_impulse_ = 3.0f;
+        core.on_session_snapshot(snapshot_message(9, 124, false, {ball_row(4, 7.0, true)}));
+        ASSERT_EQ(state_of(core).ball_rows_.count(4), 1u);
+        EXPECT_EQ(state_of(core).ball_rows_.at(4).tick, 124u);
+        auto four = event_message(4, bmmo::session::event_type::Physicalize, 121, 121);
+        four.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        four.position[0] = 1.0f;
+        auto five = event_message(5, bmmo::session::event_type::Physicalize, 122, 122);
+        five.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        five.position[0] = 2.0f;
+        core.on_session_event(std::move(five));
+        core.on_session_event(std::move(four));
+        size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        auto calls = since(fake.calls, from);
+        for (const auto& call: calls) {
+            EXPECT_NE(call, "bind_world") << "no rewind";
+            EXPECT_NE(call.rfind("keep_live_cells", 0), 0u) << "no rewind";
+        }
+        ASSERT_EQ(fake.specs.size(), 2u);
+        EXPECT_EQ(fake.specs[0].player, 4u) << "join order 0 first";
+        EXPECT_FALSE(fake.specs[0].kick) << "the row carries the server's kick";
+        EXPECT_FLOAT_EQ(fake.specs[0].position[0], 7.0f) << "the row's pose";
+        EXPECT_FLOAT_EQ(fake.specs[0].rotation[0], 1.0f);
+        EXPECT_EQ(fake.specs[1].player, 5u);
+        EXPECT_TRUE(fake.specs[1].kick) << "no row: the event's spawn kick";
+        EXPECT_FLOAT_EQ(fake.specs[1].position[0], 2.0f);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "write_body:Ball_0_BMMO_4:7.000000:wake"), calls.end());
+        EXPECT_EQ(std::count_if(calls.begin(), calls.end(), [](const std::string& c) { return c.rfind("write_body:", 0) == 0; }), 1)
+            << "only the row's mirror is written";
+        EXPECT_EQ(state_of(core).remotes_.at(4).born_tick, 126u) << "made live: the next tick";
+        EXPECT_EQ(state_of(core).remotes_.at(5).born_tick, 126u);
+        EXPECT_TRUE(state_of(core).pending_births_.empty());
+        EXPECT_EQ(state_of(core).life_rewinds_ + state_of(core).life_rewinds_missed_, 0u);
+        // A late death: taken out at the drain, no rewind.
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 124, 124));
+        from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        calls = since(fake.calls, from);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "unmake_mirror:Ball_0_BMMO_4"), calls.end());
+        for (const auto& call: calls) EXPECT_NE(call, "bind_world") << "no rewind";
+        EXPECT_FALSE(state_of(core).remotes_.at(4).physicalized);
+        // The policy off: no rows kept.
+        session_client_core plain(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(plain, fake);
+        plain.on_session_snapshot(snapshot_message(9, 124, false, {ball_row(4, 7.0, true)}));
+        EXPECT_TRUE(state_of(plain).ball_rows_.empty());
+    }
+
+    // own_body_backstop (design 4.1; R1): 30 snapshots in a row without a
+    // body of ours, while ours is physicalized, re-report the last own
+    // Physicalize without the spawn flag; at most every 2 s; a snapshot with
+    // our row, or no birth to report, counts for nothing.
+    TEST(SessionClientCoreR1, OwnBodyBackstopReReportsAfter30Snapshots) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.config.rollback = false;   // the ladder: no rollback needed to see the counts
+        core.config.own_body_backstop = true;
+        state_of(core).own_physicalized_ = true;
+        fake.own_physical = true;
+        state_of(core).own_last_birth_.valid = true;
+        state_of(core).own_last_birth_.ball_type = 1;
+        state_of(core).own_last_birth_.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        uint32_t tick = 100;
+        const auto physicalizes = [&fake]() {
+            int n = 0;
+            for (const auto& [bytes, mode]: fake.sent) {
+                if (mode != send_mode::reliable_no_nagle) continue;
+                bmmo::session_event_msg msg;
+                msg.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                if (msg.deserialize() && msg.type == bmmo::session::event_type::Physicalize) {
+                    EXPECT_EQ(msg.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN, 0) << "no spawn flag";
+                    EXPECT_EQ(msg.tick, 126u);
+                    EXPECT_EQ(msg.ball_type, 1u);
+                    ++n;
+                }
+            }
+            return n;
+        };
+        for (int i = 0; i < 29; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {ball_row(4, 1.0, true)}));
+        EXPECT_EQ(physicalizes(), 0);
+        core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        EXPECT_EQ(physicalizes(), 1);
+        EXPECT_EQ(core.own_body_backstops(), 1u);
+        for (int i = 0; i < 31; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        EXPECT_EQ(core.own_body_backstops(), 1u) << "the 2 s limiter";
+        fake.advance(std::chrono::milliseconds(2000));
+        core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        EXPECT_EQ(core.own_body_backstops(), 2u);
+        // Our row comes back: the count starts over.
+        for (int i = 0; i < 29; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        core.on_session_snapshot(snapshot_message(9, ++tick, false, {ball_row(3, 1.0, true)}));
+        fake.advance(std::chrono::milliseconds(2000));
+        core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        EXPECT_EQ(core.own_body_backstops(), 2u);
+        // The ball unphysicalized: nothing to report.
+        steps{core}.report_unphysicalize(126);
+        for (int i = 0; i < 40; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        EXPECT_EQ(core.own_body_backstops(), 2u);
+        EXPECT_EQ(physicalizes(), 2);
+        // A core reused for another session counts, and limits, from scratch.
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        EXPECT_EQ(core.own_body_backstops(), 0u);
+        EXPECT_TRUE(state_of(core).last_backstop_ == std::chrono::steady_clock::time_point{});
+    }
+
+    // acked_input (R1): the snapshots' acked_input_tick under the current
+    // numbering - its first value the baseline, the frame it last moved at,
+    // the frame of the newest snapshot - and a renumbering forgets it.
+    TEST(SessionClientCoreR1, AckedInputFollowsTheSnapshots) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.config.rollback = false;
+        EXPECT_FALSE(core.acked_input().known);
+        auto snapshot = snapshot_message(9, 120, false, {});
+        snapshot.acked_input_tick = 118;
+        core.on_session_snapshot(snapshot);
+        auto acked = core.acked_input();
+        EXPECT_TRUE(acked.known);
+        EXPECT_EQ(acked.tick, 118u);
+        EXPECT_EQ(acked.frame, 6);
+        EXPECT_EQ(acked.snapshot_frame, 6);
+        state_of(core).frames_since_anchor_ = 9;
+        snapshot = snapshot_message(9, 121, false, {});
+        snapshot.acked_input_tick = 118;
+        core.on_session_snapshot(snapshot);
+        acked = core.acked_input();
+        EXPECT_EQ(acked.frame, 6) << "the cursor did not move";
+        EXPECT_EQ(acked.snapshot_frame, 9);
+        core.on_session_assign(assign_message(9, 300));
+        EXPECT_FALSE(core.acked_input().known) << "a renumbering";
+    }
+
+    // drive_from_newest_relay (R1): with the policy, the step of T drives a
+    // predicted mirror with the frame live_drive chooses at pre_step(T) from
+    // the relay as the messages left it; without (the headless setting), with
+    // the one post_step(T - 1) chose.
+    TEST(SessionClientCoreR1, DriveFromTheNewestRelayAtPreStep) {
+        for (const bool on: {false, true}) {
+            SCOPED_TRACE(on ? "policy on" : "policy off");
+            flow_fake fake;
+            session_client_core core(frame_platform(fake, false), session_capabilities{});
+            run_to_tick_125_four(core, fake);
+            core.config.drive_from_newest_relay = on;
+            auto& four = state_of(core).remotes_[4];
+            four.entity = "Ball_Wood_BMMO_4";
+            four.physicalized = true;
+            four.navigation = true;
+            four.applied = keys_frame(1);   // what post_step(125) chose
+            four.inputs[126] = keys_frame(5);   // relayed since
+            const size_t from = fake.calls.size();
+            core.pre_step();
+            const auto calls = since(fake.calls, from);
+            EXPECT_NE(std::find(calls.begin(), calls.end(), on ? "drive:Ball_Wood_BMMO_4:5" : "drive:Ball_Wood_BMMO_4:1"),
+                      calls.end());
+            EXPECT_EQ(state_of(core).remotes_.at(4).applied.keys, on ? 5 : 1) << "the record of 126 stores what drove it";
+        }
+    }
+
+    // frozen -> resync (design 4.1, 7 Q1; R1, both hosts): a snapshot that
+    // needs a rollback while the local physics clock stands still sets the
+    // bodies and drops the history with no replay, so the core asks for a
+    // resync; with the clock running the same snapshot rolls back and asks
+    // for nothing.
+    TEST(SessionClientCoreR1, FrozenClockAsksForAResync) {
+        for (const bool simulating: {false, true}) {
+            SCOPED_TRACE(simulating ? "clock running" : "clock frozen");
+            flow_fake fake;
+            fake.driven = "Ball_Wood";
+            auto platform = fake.make_flow();
+            auto own = std::make_shared<bmmo_physics_body_state>();
+            own->movable = true;
+            own->simulated = true;
+            own->rotation[3] = 1.0;
+            platform.bind_world = [&fake, own, simulating](const bmmo::session::core_world_hooks&) {
+                fake.calls.push_back("bind_world");
+                bmmo::session::rollback_world world;
+                world.get_body = [own](const std::string& entity, bmmo_physics_body_state& out) {
+                    if (entity != "Ball_Wood") return false;
+                    out = *own;
+                    return true;
+                };
+                world.set_body = [own](const std::string& entity, const bmmo_physics_body_state& state,
+                                       bmmo::session::wake_mode, bool) {
+                    if (entity != "Ball_Wood") return false;
+                    *own = state;
+                    return true;
+                };
+                world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+                world.simulating = [simulating]() { return simulating; };
+                world.step = []() { return true; };
+                return world;
+            };
+            session_client_core core(std::move(platform), session_capabilities{});
+            run_to_tick_125(core, fake);
+            core.config.rollback = true;
+            state_of(core).own_physicalized_ = true;
+            bmmo::session::rollback_tracked tracked;
+            tracked.own_entity = "Ball_Wood";
+            for (uint32_t tick = 118; tick <= 125; ++tick)
+                state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked, {});
+            const uint64_t resyncs_before = core.resyncs_sent();
+            const size_t from = fake.calls.size();
+            // The server had the own ball 5 m away at tick 122.
+            core.on_session_snapshot(snapshot_message(9, 122, false, {ball_row(3, 5.0, true)}));
+            const auto calls = since(fake.calls, from);
+            const bool asked = std::find(calls.begin(), calls.end(),
+                                         "log:0:resync requested (local physics clock frozen) at tick 125") != calls.end();
+            EXPECT_EQ(core.rollback_stats().frozen, simulating ? 0u : 1u);
+            EXPECT_EQ(core.resyncs_sent() - resyncs_before, simulating ? 0u : 1u);
+            EXPECT_EQ(asked, !simulating);
+            EXPECT_EQ(state_of(core).resync_in_flight_, !simulating) << "the request waits for its assignment";
+        }
+    }
+
 }

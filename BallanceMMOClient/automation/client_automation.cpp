@@ -266,7 +266,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "session") {
         // The shared core's transition switch and forced rollbacks
         // (session/core_host.cpp, design 6.2).
-        if (rest.rfind("core", 0) == 0 || rest.rfind("force-rollback", 0) == 0) return core_host_session_verb(rest);
+        if (rest.rfind("core", 0) == 0 || rest.rfind("force-rollback", 0) == 0
+                || rest.rfind("stall", 0) == 0 || rest.rfind("drop-birth", 0) == 0) return core_host_session_verb(rest);
         if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
         if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }
         if (rest == "rollback on") { physics_session_.rollback_enabled = true; return "ok session rollback on"; }
@@ -290,6 +291,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         std::getline(args, text);
         if (!text.empty() && text.front() == ' ') text.erase(0, 1);
         if (action.empty() || action == "status") return "ok " + journal.status();
+        // A session the shared core runs writes the core's journal (R1).
+        if (std::string answer; core_host_journal(action, text, answer)) return answer;
         if (action == "on") {
             journal.set_enabled(true);
             // The property is the setting: the next session start reads it
@@ -484,6 +487,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // In a running session the activation is an input (neutralization N3):
         // stamped ahead, sent, and run here at that tick, like a crossed
         // checkpoint - the server activates at the same tick.
+        if (std::string answer; core_host_sector(sector, answer)) return answer;   // the shared core's session (R1)
         if (physics_session_hold_sector(sector, "automation"))
             return std::format("ok sector {} held for tick {} (Sector event sent ahead)", sector,
                                physics_session_.last_sector_due);
@@ -512,6 +516,9 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         CK3dObject* ball = get_current_ball();
         if (!ball || !ball->GetName()) return "error no current ball";
         const double position[3] = {x, y, z};
+        // A session the shared core runs: a request the core makes at the end
+        // of this frame's step, in place, stamped T + 1 (R1).
+        if (std::string answer; core_host_beam(position, answer)) return answer;
         const double upright[4] = {0.0, 0.0, 0.0, 1.0};
         const float still[3] = {0.0f, 0.0f, 0.0f};
         if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))

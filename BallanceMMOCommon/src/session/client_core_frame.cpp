@@ -289,6 +289,7 @@ namespace bmmo::session {
     // applies them: after this tick's inputs and before its physics step
     // (session_runner::step).
     void session_client_core::pre_step() {
+        frame_.prepared = true;
         frame_.f = s.frames_since_anchor_ + 1;
         const uint32_t frame_tick = s.tick_base_ + static_cast<uint32_t>(std::max<int64_t>(frame_.f - 1, 0));
         frame_.tick = frame_tick;
@@ -335,6 +336,9 @@ namespace bmmo::session {
         // tick compares equal to a prediction the step never ran on.
         for (auto& [id, remote]: s.remotes_) {
             if (!remote.physicalized || !remote.navigation) continue;
+            // drive_from_newest_relay (R1): chosen now, from the relay the
+            // messages since post_step left (the record of T stores it).
+            if (config.drive_from_newest_relay) remote.applied = live_drive(remote, frame_tick);
             std::string drive_error;
             if (!platform_.drive(remote.entity, remote.applied, drive_error))
                 logf("remote navigation input %s: %s", remote.entity.c_str(), drive_error.c_str());
@@ -364,6 +368,15 @@ namespace bmmo::session {
 
     // Design 1.3 post_step: the world has stepped T.
     bool session_client_core::post_step(bool stepped) {
+        // A frame no pre_step prepared (R1): frame_ holds the previous
+        // frame's number and tick, and taking it would count that frame
+        // twice.  The headless frame always pairs the two; a retail anchor
+        // path that skipped the pre_step must not reach the record.
+        if (!frame_.prepared) {
+            logf("post_step refused at tick %u: no pre_step prepared this frame", current_tick());
+            return false;
+        }
+        frame_.prepared = false;
         const uint32_t frame_tick = frame_.tick;
         if (!frame_.forced_entity.empty()) {
             std::string force_error;

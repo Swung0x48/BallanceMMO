@@ -184,7 +184,9 @@ namespace bmmo::session {
         rewind_for_lifecycle(event.player, event.tick);
     }
     void session_client_core::rewind_for_lifecycle(uint32_t player, uint32_t event_tick) {
-        if (!config.rollback || event_tick == 0) return;
+        // lifecycle_rewind off (R1, retail until R3): the change stays where
+        // the drain made it, at the live tick.
+        if (!config.rollback || !config.lifecycle_rewind || event_tick == 0) return;
         const uint32_t now = current_tick();
         if (static_cast<int32_t>(event_tick - now) > 0) return;   // not late: nothing to replay
         auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
@@ -233,7 +235,7 @@ namespace bmmo::session {
     // server's through the start pile).
     void session_client_core::make_remote_birth(const bmmo::session_event_msg& event) {
         const uint32_t now = current_tick();
-        if (config.rollback && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
+        if (config.rollback && config.lifecycle_rewind && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
                 && s.rollback_.knows_tick(event.tick - 1)) {
             s.pending_births_.push_back(pending_birth::of(event));
             rewind_for_lifecycle(event);
@@ -247,8 +249,36 @@ namespace bmmo::session {
                 } else ++it;
             return;
         }
+        // mirror_start_from_row (R1): without the lifecycle rewind the
+        // birth is made at the live tick, where the newest snapshot row of
+        // the player is what the server has - started from it.
+        if (!config.lifecycle_rewind && config.mirror_start_from_row && physicalize_remote_from_row(event)) return;
         physicalize_remote(pending_birth::of(event), live_first_tick(event.tick));
         rewind_for_lifecycle(event);
+    }
+
+    // The retail mod's 9.17 workaround (PSC apply_event): the event carries
+    // the pose of its stamp, while the rows of that player are newer by the
+    // relay's delay - the mirror starts on the row (pose, then the row's
+    // velocity and sleep state), and without the spawn kick, which the row
+    // already carries.  Only for a row newer than the stamp.
+    bool session_client_core::physicalize_remote_from_row(const bmmo::session_event_msg& event) {
+        const auto cached = s.ball_rows_.find(event.player);
+        if (cached == s.ball_rows_.end() || !cached->second.have || !(cached->second.tick > event.tick)) return false;
+        const client_core_state::ball_row row = cached->second;
+        pending_birth birth = pending_birth::of(event);
+        birth.flags = static_cast<uint8_t>(birth.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
+        for (int k = 0; k < 3; ++k) birth.position[k] = static_cast<float>(row.position[k]);
+        quaternion_rows(row.rotation, birth.rotation);
+        if (!physicalize_remote(birth, live_first_tick(event.tick))) return true;   // logged; not again from the event
+        const auto it = s.remotes_.find(event.player);
+        if (it == s.remotes_.end()) return true;
+        std::string error;
+        if (!platform_.write_body(it->second.entity, row.position, row.rotation, row.linear, row.angular, row.simulated, error))
+            logf("remote physicalize %s from the row of tick %u: %s", it->second.entity.c_str(), row.tick, error.c_str());
+        else
+            logf("remote player %u started from its row of tick %u (stamp %u)", event.player, row.tick, event.tick);
+        return true;
     }
 
     void session_client_core::apply_event(const bmmo::session_event_msg& event) {
@@ -416,11 +446,11 @@ namespace bmmo::session {
 
     // `first_tick`: the first tick this world steps the body (the stamp
     // inside a replay, live_first_tick otherwise).
-    void session_client_core::physicalize_remote(const pending_birth& event, uint32_t first_tick) {
+    bool session_client_core::physicalize_remote(const pending_birth& event, uint32_t first_tick) {
         std::string error;
         {
             const std::string entity = platform_.mirror_entity(event.player, event.ball_type, error);
-            if (entity.empty()) { logf("remote physicalize: %s", error.c_str()); return; }
+            if (entity.empty()) { logf("remote physicalize: %s", error.c_str()); return false; }
             auto& remote = s.remotes_[event.player];
             if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
             remote.navigation = false;
@@ -448,7 +478,7 @@ namespace bmmo::session {
             const mirror_made made = platform_.make_mirror(spec);
             if (!made.made) {
                 logf("remote physicalize %s: %s", entity.c_str(), made.error.c_str());
-                return;
+                return false;
             }
             // The mirror's body is new: a new lifetime, so no record of the
             // previous one can restore it (design 9.25).
@@ -498,6 +528,7 @@ namespace bmmo::session {
             // rollback entirely, undriven and unkicked, and the balls ran
             // away instead of converging.)
         }
+        return true;
     }
 
     void session_client_core::attach_remote_navigation(uint32_t player, remote_ball& remote) {
@@ -556,6 +587,12 @@ namespace bmmo::session {
         if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
         event.recipe = report.recipe;
         send_event(event);
+        // own_body_backstop (R1): what a re-report carries.
+        s.own_last_birth_.valid = true;
+        s.own_last_birth_.ball_type = event.ball_type;
+        s.own_last_birth_.flags = event.flags;
+        s.own_last_birth_.recipe = event.recipe;
+        s.snapshots_without_own_ = 0;
         // The birth as the history keeps it: what the server makes when
         // its echo says it applied the event later (record_own_birth).
         record_own_birth(event, report.entity);
@@ -569,6 +606,9 @@ namespace bmmo::session {
         event.tick = tick;
         event.type = bmmo::session::event_type::Unphysicalize;
         send_event(event);
+        // The ball is meant to be gone now (own_body_backstop, R1).
+        s.own_last_birth_.valid = false;
+        s.snapshots_without_own_ = 0;
         logf("own ball unphysicalized at tick %u", tick);
     }
 
@@ -691,6 +731,10 @@ namespace bmmo::session {
         std::copy(std::begin(beam.rotation), std::end(beam.rotation), up.rotation);
         up.recipe = beam.recipe;
         send_event(up);
+        // The server's copy is a fresh body now, not kicked (own_body_backstop,
+        // R1: a re-report carries no spawn flag either).
+        s.own_last_birth_.flags = static_cast<uint8_t>(s.own_last_birth_.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
+        s.snapshots_without_own_ = 0;
         logf("--beam: %s to (%.3f,%.3f,%.3f), reported to the server for tick %u and %s", name.c_str(),
              s.beam_position_[0], s.beam_position_[1], s.beam_position_[2], beam.origin,
              !navigated ? "moved here now (no navigation replica)"

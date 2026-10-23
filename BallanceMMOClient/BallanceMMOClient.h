@@ -750,13 +750,38 @@ private:
 	std::string physics_session_status_text();
 	std::string physics_session_overlay_text();
 	// The retail host of the shared session-client core (session/core_host.cpp,
-	// docs/session-client-core-design.md 3.2; step R0): the mailbox, the
-	// platform, the 'session core|force-rollback', 'net' and 'replay session'
-	// verbs.  Methods only - its state is file-scope statics in that file, as
-	// this class must not gain a data member (see apply_pending_ping_text).
+	// docs/session-client-core-design.md 3.2; steps R0, R1): the mailbox, the
+	// platform, the session a core runs (its start, countdown, anchor, hold,
+	// frame and end), the hooks it takes over, the 'session core|force-rollback',
+	// 'net' and 'replay session' verbs.  Methods only - its state is file-scope
+	// statics in that file, as this class must not gain a data member (see
+	// apply_pending_ping_text).
 	bool core_host_offer(ISteamNetworkingMessage* network_msg);   // network thread
-	void core_host_session_start();
+	void core_host_session_start(const bmmo::session_start_msg& msg);
 	void core_host_process();
+	void core_host_drain();
+	void core_host_countdown();
+	void core_host_anchor();
+	void core_host_frame();
+	void core_host_end_local(const std::string& reason);
+	bool core_host_running() const;   // a core session is between its SessionStart and its end
+	bool core_host_session_running() const;   // ... and anchored, the core running it (the legacy phase 'running')
+	std::string core_host_status_text();
+	std::string core_host_overlay_text();
+	// The legacy hooks and verbs hand over to the core while a core session runs
+	// (true: taken; false: the legacy path goes on).
+	bool core_host_on_physicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
+	                              const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
+	                              float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
+	                              int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter, float* ballRadius,
+	                              int concaveCnt, CKMesh** concaveMesh);
+	bool core_host_on_unphysicalize(CK3dEntity* target);
+	bool core_host_on_sector(int sector, bool checkpoint);
+	bool core_host_on_finish();
+	bool core_host_leave_player(uint32_t player);
+	bool core_host_beam(const double position[3], std::string& answer);
+	bool core_host_sector(int sector, std::string& answer);
+	bool core_host_journal(const std::string& action, const std::string& text, std::string& answer);
 	std::string core_host_session_verb(const std::string& rest);
 	std::string core_host_net_verb(const std::string& rest);
 	std::string core_host_replay_verb(const std::string& rest);
@@ -955,7 +980,8 @@ private:
 			// A union pass wrote a peer's sector into the cell and nothing of
 			// ours has since: not a change of this ball's sector.
 			if (!sector_cell_is_own_
-					&& physics_session_.phase == bmmo::session::physics_session_state::phase_type::running)
+					&& (physics_session_.phase == bmmo::session::physics_session_state::phase_type::running
+						|| core_host_session_running()))
 				return false;
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
 			if (sector == current_sector_) return false;

@@ -19,12 +19,16 @@
 //     default) and the verbs 'session force-rollback E:D', 'net lag|blackout'
 //     and 'replay session <file>' (the R steps' testing tools).
 //
-// Step R0 builds the plumbing only.  With 'session core on' the core is made
-// at the first SessionStart and its platform checked (the constructor throws
-// on a missing operation), and the mailbox is filled and drained; the session
-// itself still runs on the legacy path (physics_session_client.cpp) until R1
-// hands the frame to the core.  With 'session core off' nothing here touches
-// a session: the legacy path does not read the switch.
+// Step R0 built the plumbing.  Step R1 hands a session to the core: with
+// 'session core on' a session's messages are the mailbox's alone (the legacy
+// handlers never see them), and this host runs the session the way the legacy
+// path did - the countdown, the restart, the anchor work and the blocking
+// anchor hold, then one frame per OnProcess (the host's clock guard and pause
+// edits, core.post_step(T), the mailbox drained into the core, core.pre_step()
+// for T + 1) - while the core decides everything the session does (design
+// 1.3, 3.2).  The BML hooks and the automation verbs a session uses hand over
+// to the core for as long as a core session runs.  With 'session core off'
+// nothing here touches a session: the legacy path does not read the switch.
 //
 // The BML constraint (design 3.2): BallanceMMOClient hangs the engine at
 // startup when a data member is added to it, so everything this host keeps is
@@ -45,9 +49,12 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <game/session_host_support.hpp>
+#include <session/bridge_recipe.hpp>
 #include <session/client_core.hpp>
+#include <session/spawn_impulse.hpp>
 #include <session/client_platform.hpp>
 #include <session/rollback_binding_scripts.hpp>
 #include <session/session_host_world.hpp>
@@ -127,11 +134,31 @@ namespace {
     // the anchor's script replay), kept apart from the legacy
     // physics_session_state, which keeps its layout until R7.
     struct retail_host {
-        // The core, made at the first SessionStart with the switch on; the
+        // The core, made at each SessionStart with the switch on (R1: a fresh
+        // core per session, so no state of the last one carries over); the
         // login id is given to it before each begin (design 3.2, E11).
         std::unique_ptr<bs::session_client_core> core;
         std::string core_error;   // why it could not be made
         uint64_t sessions_seen = 0;
+
+        // The session this host runs (R1): its phase - the legacy path's
+        // counting_down / restarting / running, the core's own phase
+        // inside it - and what the countdown, the restart and the frame
+        // keep.
+        enum class phase_type { idle, counting_down, restarting, running };
+        phase_type phase = phase_type::idle;
+        uint32_t session = 0;
+        bool saw_ingame_inactive = false;
+        clock_type::time_point restart_deadline{};
+        uint64_t last_rebases = 0;
+        uint64_t frames = 0, refused = 0;
+        // Transitional host triggers (design 3.2, until R4 and 7.1 decision
+        // 1): the run of snapshots with no record of their tick, and the
+        // starvation detector's window start after it fired.
+        int consecutive_unmatched = 0;
+        uint64_t resyncs_seen = 0;
+        int64_t starvation_from = -1;
+        uint64_t unmatched_resyncs = 0, starvation_resyncs = 0;
 
         // The mailbox drain: what the game thread took, dispatched to the
         // core or - while no core session runs (R0: always) - decoded, to
@@ -176,6 +203,13 @@ namespace {
         // a rewind D ticks deep.
         uint32_t force_every = 0, force_depth = 12;
         uint64_t forced = 0;
+
+        // 'session drop-birth' (a testing tool, R1 (c)): the next own
+        // Physicalize the core sends is kept off the wire (hooks.
+        // filter_event, every copy), so the server has no body for our ball
+        // and own_body_backstop has something to do.
+        int drop_births_armed = 0;
+        uint64_t births_dropped = 0;
 
         // 'net lag <ms> [up|down]' and 'net blackout <ms> [up|down]', each
         // now or 'at <tick>': GNS's fake lag and loss (global configuration
@@ -329,6 +363,79 @@ namespace {
         if (down) return "down";
         return "none";
     }
+
+    // A core session past its anchor whose core runs (the hooks' and verbs'
+    // gate): the legacy path's `phase == running`.
+    bool core_session_running() {
+        return host.phase == retail_host::phase_type::running && host.core
+            && host.core->session_phase() == bs::client_core_state::phase::running;
+    }
+
+    const char* host_phase_name(retail_host::phase_type phase) {
+        switch (phase) {
+        case retail_host::phase_type::counting_down: return "counting_down";
+        case retail_host::phase_type::restarting: return "restarting";
+        case retail_host::phase_type::running: return "running";
+        default: return "idle";
+        }
+    }
+
+    // The platform's own state of one session, back to a session's start
+    // (the legacy reset_runtime's share of it).
+    void reset_session_state() {
+        host.navigation = {};
+        host.navigation_known = false;
+        host.own_replica = {};
+        host.own_group_set = false;
+        host.input_muted = false;
+        host.mirror_player.clear();
+        host.mirror_type.clear();
+        host.ball_forces.clear();
+        host.births.clear();
+        host.activations.clear();
+        host.activations_replayed = 0;
+        host.script_ids = {};
+        host.scripts_replayed.clear();
+        host.script_hooks = {};
+        host.script_reset_ticks.clear();
+        host.script_reset_skips = 0;
+        host.restore_logs = host.savestate_logs = host.contact_logs = host.destroy_logs = host.line_logs = 0;
+        host.forced = 0;
+        host.frames = host.refused = 0;
+        host.consecutive_unmatched = 0;
+        host.resyncs_seen = 0;
+        host.starvation_from = -1;
+        host.unmatched_resyncs = host.starvation_resyncs = 0;
+        host.drop_births_armed = 0;
+        host.births_dropped = 0;
+    }
+
+    // The ball table's "Force" column per ball type (the navigation's force;
+    // the legacy anchor's ball_forces).
+    void read_ball_forces(IBML* bml) {
+        host.ball_forces.clear();
+        if (CKDataArray* balls = bml->GetArrayByName("Physicalize_GameBall")) {
+            const int rows = balls->GetRowCount();
+            for (int row = 0; row < rows; ++row) {
+                float force = 0.0f;
+                balls->GetElementValue(row, 7, &force);
+                host.ball_forces.push_back(force);
+            }
+        }
+    }
+
+    // The behavior the PreSimulate clock guard hangs on (the legacy
+    // clock_guard_behavior_id): the navigation once known, else the level
+    // script; and its pause sensor, the level script.
+    uint32_t clock_guard_behavior(IBML* bml) {
+        if (host.navigation_known && host.navigation.ball_navigation) return host.navigation.ball_navigation;
+        CKBehavior* script = bml->GetScriptByName("Gameplay_Ingame");
+        return script ? script->GetID() : 0;
+    }
+    uint32_t pause_sensor_behavior(IBML* bml) {
+        CKBehavior* script = bml->GetScriptByName("Gameplay_Ingame");
+        return script ? script->GetID() : 0;
+    }
 }
 
 bool bmmo::session::retail::core_enabled() {
@@ -339,10 +446,10 @@ bool bmmo::session::retail::core_enabled() {
 
 // Design 3.2 "Receive": every Session* message of a session whose SessionStart
 // found the switch on goes into the mailbox as its bytes, SessionStart first,
-// so the game thread sees them in arrival order.  The legacy handlers still
-// run in R0 (the core hosts nothing yet); SessionLead, which the legacy path
-// never dispatched, is the mailbox's alone (true: the caller stops there).
-// With the switch off and no session latched: two atomic loads, false.
+// so the game thread sees them in arrival order.  From R1 the core runs such
+// a session, so the legacy handlers never see its messages (true: the caller
+// stops there).  With the switch off and no session latched: two atomic
+// loads, false.
 bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     if (!core_on.load() && !core_latched.load()) return false;
     const auto* raw = reinterpret_cast<const bmmo::general_message*>(network_msg->m_pData);
@@ -350,22 +457,23 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
         // The switch read once per session, here.
         const bool on = core_on.load();
         core_latched.store(on);
-        if (on) mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
-        return false;
+        if (!on) return false;
+        mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+        return true;
     }
     if (!core_latched.load()) return false;
     switch (raw->code) {
     case bmmo::SessionEnd:
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         core_latched.store(false);
-        return false;
+        return true;
     case bmmo::SessionAssign:
     case bmmo::SessionSnapshot:
     case bmmo::SessionRemoteInput:
     case bmmo::SessionEvent:
     case bmmo::SessionLead:
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
-        return raw->code == bmmo::SessionLead;
+        return true;
     default:
         return false;
     }
@@ -373,17 +481,25 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
 
 // ---------------------------------------------------------------- game thread
 
-// A latched session's SessionStart, taken from the mailbox in arrival order:
-// the core is made the first time, its platform checked by the constructor,
-// and the login id handed over.  R1 calls begin here.
-void BallanceMMOClient::core_host_session_start() {
+bool BallanceMMOClient::core_host_running() const {
+    return host.phase != retail_host::phase_type::idle;
+}
+
+// The legacy gates that read phase == running (update_current_sector's union
+// cell): past the anchor, the core running the session; not during the
+// countdown or the restart.
+bool BallanceMMOClient::core_host_session_running() const {
+    return core_session_running();
+}
+
+// A latched session's SessionStart, taken from the mailbox in arrival order
+// (the legacy physics_session_begin, with the core's begin): a fresh core,
+// its platform checked by the constructor, the login id handed over, the
+// session's parameters and the core's configuration; then the not-in-level
+// leave or the countdown.
+void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& msg) {
     ++host.sessions_seen;
-    if (host.core) {
-        host.core->set_own_id(db_.get_client_id());
-        logger_->Info("Physics session core: SessionStart, own id %u (step R0: the session still runs on the legacy "
-                      "path)", db_.get_client_id());
-        return;
-    }
+    if (host.phase != retail_host::phase_type::idle) core_host_end_local("replaced by a new session");
     bs::session_capabilities caps;
     caps.own_body_control = false;   // the game's Physicalize block owns the own ball (design 2.3)
     caps.slew = false;               // no fixed-tick slew until R5: SessionReady caps = 0
@@ -391,23 +507,130 @@ void BallanceMMOClient::core_host_session_start() {
     caps.whole_frame = false;
     caps.own_lifecycle = bs::own_lifecycle_source::host_hooks;   // OnPhysicalize / OnUnphysicalize
     try {
+        host.core.reset();
         host.core = std::make_unique<bs::session_client_core>(core_host_platform(), caps);
         host.core_error.clear();
     } catch (const std::exception& e) {
         host.core_error = e.what();
         logger_->Error("Physics session core: not made: %s", e.what());
+        // The session's messages are dropped from here on: say so in game
+        // too, as the legacy path's refusals do.
+        SendIngameMessage(std::format("Physics session unavailable: the session core could not be made ({}).", e.what()),
+                          bmmo::ansi::BrightRed);
         return;
     }
-    host.core->set_own_id(db_.get_client_id());
-    logger_->Info("Physics session core: made, platform complete, own id %u (step R0: the session still runs on the "
-                  "legacy path)", db_.get_client_id());
+    auto& core = *host.core;
+    core.set_own_id(db_.get_client_id());
+    // The core's configuration (design 3.2 "core_config"): every field set
+    // here.  The engine runs as the legacy path's does - its defaults, the
+    // exact restore (savestate) on with the binding's lenient flags 0, no
+    // clock rewind (the clock guard replaces it); the feature switches of
+    // design 6.2 R1: snapshot rollback, no input or lifecycle rewind, the
+    // echoes and the held section counted only, the two retail policies on.
+    bs::core_config config;
+    config.journal_checkpoint_ticks = static_cast<uint32_t>(bs::client_journal::kCheckpointTicks);
+    if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
+        const long value = std::strtol(env, nullptr, 10);
+        if (value >= 1 && value <= static_cast<long>(bs::client_journal::kCheckpointTicks))
+            config.journal_checkpoint_ticks = static_cast<uint32_t>(value);
+    }
+    config.level = msg.map.level > 0 ? msg.map.level : 1;
+    config.verbose = physics_session_.trace;   // 'session trace on|off' (not reset per session)
+    config.trace = physics_session_.trace;
+    config.restore_recheck = true;
+    config.two_pass_recheck = false;
+    config.restore_impulses = true;
+    config.restore_quaternions = true;
+    config.restore_clock = false;
+    config.restore_calm = true;
+    config.restore_unit = true;
+    config.restore_contacts = true;
+    config.contact_flags = BMMO_PHYSICS_CONTACT_DEFAULT;
+    config.sleep_as_recorded = true;
+    config.script_replay = true;
+    config.savestate = true;
+    config.script_diff_logs = 8;
+    config.trace_plan = false;
+    config.rollback = physics_session_.rollback_enabled;   // 'session rollback on|off'
+    config.correct = true;
+    config.input_rewind = false;
+    config.lifecycle_rewind = false;
+    config.own_echoes = false;
+    config.own_corrections = false;
+    config.mirror_start_from_row = true;
+    config.own_body_backstop = true;
+    config.drive_from_newest_relay = !config.input_rewind;   // the legacy frame's order, only without the input rewind
+    config.window_shift = 0;
+    if (core.begin(msg, config).refused) {
+        SendIngameMessage(std::format("Physics session refused: the server runs physics protocol {}, this mod runs {}. "
+                                      "Update the mod or the server.", msg.protocol,
+                                      bmmo::session::PHYSICS_PROTOCOL_VERSION), bmmo::ansi::BrightRed);
+        return;
+    }
+    reset_session_state();
+    host.session = msg.session;
+    std::string error;
+    if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error)) {
+        SendIngameMessage("Physics session unavailable: " + error, bmmo::ansi::BrightRed);
+        return;   // the core stays idle: the session's messages are dropped
+    }
+    if (!m_bml->IsIngame()) {
+        SendIngameMessage("Physics session: you must be in the level to take part.", bmmo::ansi::BrightRed);
+        // The server's start barrier waits for this member's SessionReady,
+        // which will never come: leaving the room re-runs it without us.
+        bmmo::room_request_msg leave;
+        leave.action = bmmo::room::action::Leave;
+        leave.room = msg.room;
+        leave.serialize();
+        send(leave.raw.str().data(), leave.size(), k_nSteamNetworkingSend_Reliable);
+        logger_->Info("Physics session %u: not in the level, left room %u", msg.session, msg.room);
+        return;   // the core stays idle: the session's messages are dropped
+    }
+    core.level_requested();
+    host.phase = retail_host::phase_type::counting_down;
+    host.saw_ingame_inactive = false;
+    host.restart_deadline = clock_type::now() + std::chrono::seconds(PHYSICS_SESSION_COUNTDOWN + 5);
+    SendIngameMessage(std::format("Physics session {} starting: the level restarts on \"Go!\".", msg.session),
+                      bmmo::ansi::BrightGreen);
+    logger_->Info("Physics session %u (core): countdown started (players=%zu, join order %d, own id %u)", msg.session,
+                  msg.players.size(), core.own_join_order(), db_.get_client_id());
+    core_host_countdown();
 }
 
-// Every OnProcess, after the legacy session's frame: the 'net' actions armed
-// for a tick, the blackouts' ends, and the mailbox drained in arrival order -
-// a SessionStart to core_host_session_start, the rest dispatched to a running
-// core session (R0 has none: each is decoded, to check the copy, counted and
-// dropped).
+// The "3 - 2 - 1 - Go!" lead-in, then the restart (the legacy
+// physics_session_countdown, on this host's phase).
+void BallanceMMOClient::core_host_countdown() {
+    const uint32_t session = host.session;
+    const auto still_starting = [session] {
+        return host.session == session && host.phase == retail_host::phase_type::counting_down;
+    };
+    float delay = 0.0f;
+    for (int i = PHYSICS_SESSION_COUNTDOWN; i >= 1; --i) {
+        m_bml->AddTimer(delay, [this, session, i, still_starting] {
+            if (!still_starting()) return;
+            SendIngameMessage(std::format("Physics session {} - {}", session, i), bmmo::ansi::BrightGreen);
+            play_countdown_sound(bmmo::countdown_type::Countdown_1);
+        });
+        delay += 1000.0f;
+    }
+    m_bml->AddTimer(delay, [this, session, still_starting] {
+        if (!still_starting()) return;
+        SendIngameMessage(std::format("Physics session {} - Go!", session), bmmo::ansi::BrightGreen);
+        play_countdown_sound(bmmo::countdown_type::Go);
+        host.phase = retail_host::phase_type::restarting;
+        host.saw_ingame_inactive = false;
+        host.restart_deadline = clock_type::now() + std::chrono::seconds(20);
+        logger_->Info("Physics session %u: restart requested", session);
+        if (!fixed_tick_.enabled()) fixed_tick_.enable(m_bml);
+        restart_current_level();
+    });
+}
+
+// Every OnProcess, after the legacy session's turn: the 'net' actions armed
+// for a tick, the blackouts' ends, then the core session's phase - the frame
+// while it runs (which drains the mailbox between post_step and pre_step),
+// otherwise the mailbox drained and the countdown's or the restart's checks
+// (the legacy process_physics_session).
 void BallanceMMOClient::core_host_process() {
     if (!host.net_pending.empty()) {
         const uint32_t tick = session_tick_now(physics_session_);
@@ -436,16 +659,88 @@ void BallanceMMOClient::core_host_process() {
             logger_->Info("Automation: net blackout (down) over at tick %u", session_tick_now(physics_session_));
         }
     }
+    if (core_session_running()) {
+        core_host_frame();
+        return;
+    }
+    core_host_drain();
+    switch (host.phase) {
+    case retail_host::phase_type::counting_down:
+        // Leaving the level during the lead-in cancels the session instead
+        // of restarting something else on "Go!".
+        if (!m_bml->IsIngame()) core_host_end_local("the level was left during the countdown");
+        else if (clock_type::now() > host.restart_deadline) core_host_end_local("the countdown did not finish");
+        return;
+    case retail_host::phase_type::restarting: {
+        const bool active = gameplay_ingame_script_active();
+        if (!active) host.saw_ingame_inactive = true;
+        else if (host.saw_ingame_inactive) core_host_anchor();
+        else if (clock_type::now() > host.restart_deadline) core_host_end_local("the level did not restart");
+        return;
+    }
+    case retail_host::phase_type::running:
+        // The core ended under a running host (a SessionEnd is handled in
+        // the drain; this is the safety net).
+        if (!host.core || host.core->session_phase() != bs::client_core_state::phase::running)
+            core_host_end_local("the core session ended");
+        return;
+    default:
+        return;
+    }
+}
+
+// The mailbox, in arrival order (design 3.2): a SessionStart begins a core
+// session; a SessionEnd goes to the core, and the host's session ends with
+// it; every other entry goes to the core while it has a session, or is
+// decoded (to check the copy), counted and dropped.
+void BallanceMMOClient::core_host_drain() {
     auto entries = mailbox.take();
+    // Without the input rewind (R1: until R2), a relayed frame that reaches
+    // the core after a snapshot of the same batch is stored after that
+    // snapshot's replay ran on the prediction, and nothing replays it again
+    // but the next snapshot: within each run of entries between two
+    // numbering messages (SessionStart, SessionAssign, SessionEnd keep their
+    // place), the relay goes first and the snapshots last, as the legacy
+    // frame took them (PSC apply_queues: the snapshots' ball rows cached,
+    // the events applied, the relayed inputs, the snapshots).  The events
+    // and leads sit between the two here: the core only queues an event for
+    // the next pre_step's drain (on_session_event), so by the time a birth
+    // reads the snapshot rows every snapshot of the batch has been taken,
+    // and the event's place in the batch changes nothing.  A departure from
+    // design 3.2's arrival order (As built, step R1); with the input rewind
+    // a late frame asks for its own replay, and arrival order stands.
+    if (host.core && !host.core->config.input_rewind && entries.size() > 1) {
+        const auto rank = [](int code) {
+            return code == bmmo::SessionRemoteInput ? 0 : code == bmmo::SessionSnapshot ? 2 : 1;
+        };
+        const auto fence = [](int code) {
+            return code == bmmo::SessionStart || code == bmmo::SessionAssign || code == bmmo::SessionEnd;
+        };
+        auto begin = entries.begin();
+        while (begin != entries.end()) {
+            auto end = begin;
+            while (end != entries.end() && !fence(end->code)) ++end;
+            std::stable_sort(begin, end, [&](const mailbox_entry& a, const mailbox_entry& b) { return rank(a.code) < rank(b.code); });
+            begin = end == entries.end() ? end : end + 1;
+        }
+    }
     for (auto& entry: entries) {
         ++host.drained;
         if (entry.code == bmmo::SessionStart) {
             ++host.starts;
-            if (!entry_decodes(entry.code, entry.bytes)) {
-                if (host.undecodable++ < 8) logger_->Warn("Physics session core: a SessionStart could not be decoded");
+            bmmo::session_start_msg msg{};
+            if (!decode_bytes(entry.bytes, msg)) {
+                ++host.undecodable;
+                // The legacy on_message's refusal, word for word: a
+                // SessionStart this build cannot read comes from a server of
+                // another physics protocol, and nothing will start.
+                logger_->Error("Physics session: the server's SessionStart could not be decoded; it runs a different "
+                               "physics protocol than this mod (%u)", bmmo::session::PHYSICS_PROTOCOL_VERSION);
+                SendIngameMessage("Physics session refused: the server runs a different physics protocol than this mod. "
+                                  "Update the mod or the server.", bmmo::ansi::BrightRed);
                 continue;
             }
-            core_host_session_start();
+            core_host_session_start(msg);
             continue;
         }
         if (!host.core || host.core->session_phase() == bs::client_core_state::phase::idle) {
@@ -455,8 +750,269 @@ void BallanceMMOClient::core_host_process() {
                               entry.bytes.size());
             continue;
         }
+        if (entry.code == bmmo::SessionEnd) {
+            bmmo::session_end_msg msg{};
+            if (!decode_bytes(entry.bytes, msg)) {
+                if (host.undecodable++ < 8) logger_->Warn("Physics session core: a SessionEnd could not be decoded");
+                continue;
+            }
+            host.core->on_session_end(msg);
+            if (host.core->session_phase() == bs::client_core_state::phase::idle)
+                core_host_end_local("ended by the server: " + msg.reason);
+            continue;
+        }
         core_host_dispatch(entry.code, entry.bytes);
     }
+}
+
+// The anchor frame (the legacy physics_session_anchor): the session clock
+// reset, the clock guard and the pause pin, the script edits (pause, N1-N4),
+// the Sequencers, the world hash and the collision filter - the host's anchor
+// work, in the legacy order - then core.anchor (SessionReady, the journal,
+// the hold armed) and the blocking hold: the mailbox drained every 1 ms
+// until the tick base arrives (design 2.3 nonblocking_hold = no), the
+// connection lost (core.release_hold) or the 10 s timeout.  Then the first
+// pre_step, for the tick base.
+void BallanceMMOClient::core_host_anchor() {
+    auto& core = *host.core;
+    std::string error;
+    {
+        auto* time_manager = m_bml->GetTimeManager();
+        logger_->Info("Physics session anchor timing: driver_enabled=%d last_delta=%.4f cktime=%.3f frames=%d",
+                      fixed_tick_.enabled() ? 1 : 0, time_manager->GetLastDeltaTime(), time_manager->GetTime(),
+                      time_manager->GetMainTickCount());
+    }
+    if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
+    fixed_tick_.enable(m_bml);
+    if (!physics_view_.reset_session_clock(core.seed(), error)) {
+        core_host_end_local("session clock reset failed: " + error);
+        return;
+    }
+    const uint32_t guard_id = clock_guard_behavior(m_bml);
+    const uint32_t pause_id = pause_sensor_behavior(m_bml);
+    if (!guard_id)
+        logger_->Warn("Physics session: no behavior to anchor the clock guard on");
+    else if (!pause_id)
+        logger_->Warn("Physics session: clock guard has no pause sensor (Gameplay_Ingame)");
+    else if (!physics_view_.set_clock_guard(true, 0.001f, guard_id, pause_id, error))
+        logger_->Warn("Physics session: clock guard: %s", error.c_str());
+    if (!pause_clock_resolve())
+        logger_->Warn("Physics session: the pause chain's time factor block was not found");
+    else {
+        float factor = 0.0f, delta = 0.0f;
+        if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
+    }
+    pause_scripts_restore();
+    pause_scripts_resolve();
+    death_reset_restore();
+    sector_deactivate_restore();
+    sector_activate_restore();
+    checkpoint_phase_restore();
+    const bool death_neutralized = death_reset_resolve();
+    const bool sector_neutralized = sector_deactivate_resolve();
+    if (death_neutralized && sector_neutralized)
+        logger_->Info("Physics session: retail world resets neutralized: %d sector reset(s) in Gameplay_Ingame no "
+                      "longer run Gameplay_SectorManager (a death and a level reset), and %d chain(s) activate a "
+                      "sector without deactivating anything (a checkpoint and a level reset)",
+                      death_reset_count_, sector_deactivate_count_);
+    sector_activate_resolve();
+    checkpoint_phase_resolve();
+    {
+        const int restored = level_sequencers_.restore(m_bml->GetCKContext());
+        logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
+                      restored, level_sequencers_.size(), level_sequencers_.describe().c_str());
+    }
+    bmmo::physics::world_hash hash;
+    if (!physics_view_.capture(hash, error)) {
+        core_host_end_local("world hash failed: " + error);
+        return;
+    }
+    if (!physics_view_.install_player_collision_filter("P#", error))
+        logger_->Warn("Physics session: player collision filter: %s", error.c_str());
+    // The world stands still from here until the tick base arrives.
+    fixed_tick_.set_hold(true);
+    physics_view_.drain_event_log();   // install the listener, discard history
+    read_ball_forces(m_bml);
+    // The script replay (game/script_replay.hpp): the mechanism scripts a
+    // replayed tick re-runs, and the force blocks they drive.
+    host.script_ids = bmmo::game::script_replay::select(m_bml->GetCKContext());
+    host.script_hooks.capture_force = [this](CKBehavior* block, bmmo::game::force_block_state& out) {
+        bmmo_physics_force_block state{};
+        std::string e;
+        if (!physics_view_.force_block_get(static_cast<uint32_t>(block->GetID()), state, e)) return false;
+        out.exists = state.exists != 0;
+        for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+        return true;
+    };
+    host.script_hooks.restore_force = [this](CKBehavior* block, const bmmo::game::force_block_state& in) {
+        bmmo_physics_force_block state{};
+        state.exists = in.exists ? 1 : 0;
+        for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+        std::string e;
+        return physics_view_.force_block_set(static_cast<uint32_t>(block->GetID()), state, e);
+    };
+    {
+        const auto st = bmmo::game::script_replay::describe(m_bml->GetCKContext(), host.script_ids);
+        logger_->Info("Physics session: script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, "
+                      "%d force blocks, %d opaque: %s", st.scripts, st.active, st.satellites, st.blocks, st.parameters,
+                      st.force_blocks, st.opaque, bmmo::game::script_replay::names(m_bml->GetCKContext(), host.script_ids).c_str());
+    }
+    bs::anchor_report report;
+    report.hash = hash;
+    report.physics_sha256 = physics_view_.dll_sha256();
+    report.build_id = physics_view_.build_id();
+    report.own_name = get_display_nickname();
+    if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 1, &report.sector_cell);
+    host.phase = retail_host::phase_type::running;
+    host.last_rebases = fixed_tick_.rebases();
+    core.anchor(report);
+    logger_->Info("Physics session %u: anchored (hash %016llx surfaces %016llx), waiting for the tick assignment",
+                  core.session_id(), static_cast<unsigned long long>(hash.pose), static_cast<unsigned long long>(hash.surfaces));
+    SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
+    // The blocking hold (design 2.3): no behaviour frame runs, nothing is
+    // recorded or sent, so the next frame is the world's first step.
+    while (host.core && host.phase == retail_host::phase_type::running && host.core->holding()) {
+        core_host_drain();
+        if (!host.core || host.phase != retail_host::phase_type::running) return;   // ended or replaced meanwhile
+        if (!host.core->holding()) break;
+        if (!connected()) {
+            host.core->release_hold("the connection was lost");
+            break;
+        }
+        if (host.core->poll_hold().timed_out) {
+            SendIngameMessage("Physics session: the server did not assign a tick base; starting out of phase.",
+                              bmmo::ansi::BrightYellow);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!host.core || host.phase != retail_host::phase_type::running) return;
+    // The driver's schedule continues where the hold interrupted it: the
+    // wait is not lag, and `rebases` must not move.
+    fixed_tick_.set_hold(false);
+    host.last_rebases = fixed_tick_.rebases();
+    if (host.core->session_phase() != bs::client_core_state::phase::running) return;
+    // The tick base's frame (design 1.3 "the anchor frame"): today's union
+    // tick at the base is its step 9.
+    host.core->pre_step();
+}
+
+// One OnProcess of a running core session (design 1.3, the retail loop): the
+// game has stepped T.  Host code first - the clock guard re-attached, the
+// pause clock pinned, the pause edits kept, the pause menu's mute and the
+// tick driver's rebase - then post_step(T), the mailbox, the transitional
+// resync triggers and pre_step(T + 1), which the next CKContext::Process
+// steps.
+void BallanceMMOClient::core_host_frame() {
+    std::string error;
+    {
+        auto& core = *host.core;
+        // Re-attached every frame: a sector change or a level reset destroys
+        // the behavior it hung on.  Idempotent while it is still there.
+        const uint32_t guard_id = clock_guard_behavior(m_bml);
+        const uint32_t pause_id = pause_sensor_behavior(m_bml);
+        if (guard_id && pause_id) physics_view_.set_clock_guard(true, 0.001f, guard_id, pause_id, error);
+        {
+            float factor = 0.0f, delta = 0.0f;
+            if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
+        }
+        pause_scripts_apply();
+        // The pause menu (ESC) mutes the own input, from the step after this
+        // frame on, as the legacy frame decides it (the replica's polling
+        // follows; design 4.2 moves the mute to the step it applies at, R2).
+        const bool muted = m_bml->IsIngame() && m_bml->IsPaused();
+        if (muted != host.input_muted) {
+            logger_->Info("Physics session: input %s (ingame script %d, paused %d)", muted ? "muted" : "live",
+                          gameplay_ingame_script_active() ? 1 : 0, m_bml->IsPaused() ? 1 : 0);
+            if (host.own_replica.active
+                    && !physics_view_.navigation_poll(host.own_replica.entity.c_str(), !muted, host.own_replica.key_codes,
+                                                      host.own_replica.key_blocks, host.own_replica.key_count, error))
+                logger_->Warn("Physics session: own polling: %s", error.c_str());
+            host.input_muted = muted;
+        }
+        // The tick driver restarted its schedule (a pause, a long stall): our
+        // tick numbers no longer line up with the server's.
+        if (core.assigned() && fixed_tick_.rebases() != host.last_rebases) {
+            host.last_rebases = fixed_tick_.rebases();
+            core.schedule_rebased("tick driver rebased");
+        }
+        ++host.frames;
+        if (!core.post_step(true)) ++host.refused;
+    }
+    const uint64_t unmatched_before = host.core->rollback_stats().unmatched;
+    core_host_drain();
+    if (!core_session_running()) return;   // the drain ended the session
+    auto& core = *host.core;
+    // Transitional host triggers (design 3.2): 30 snapshots in a row with no
+    // record of their tick (a numbering desync; design 7.1 decision 1) ...
+    if (core.resyncs_sent() != host.resyncs_seen) {
+        host.resyncs_seen = core.resyncs_sent();
+        host.consecutive_unmatched = 0;
+    }
+    if (core.config.rollback && !core.resync_pending()) {
+        const uint64_t unmatched = core.rollback_stats().unmatched - unmatched_before;
+        if (unmatched == 0) host.consecutive_unmatched = 0;
+        else host.consecutive_unmatched += static_cast<int>(unmatched);
+        if (host.consecutive_unmatched >= 30) {
+            ++host.unmatched_resyncs;
+            core.request_resync("30 snapshots with no record of their tick");
+            host.consecutive_unmatched = 0;
+        }
+    }
+    // ... and input starvation until R4 (the legacy
+    // physics_session_check_input_starvation over core.acked_input()): the
+    // server's read cursor for our input has not moved for 2 s while the
+    // snapshot stream is alive.
+    if (core.assigned() && !core.resync_pending()) {
+        const auto acked = core.acked_input();
+        if (!acked.known || core.frames_since_anchor() < host.starvation_from) {
+            host.starvation_from = -1;
+        } else if (core.frames_since_anchor() - acked.snapshot_frame <= 66) {
+            const int64_t from = std::max(acked.frame, host.starvation_from);
+            const int64_t starved = core.frames_since_anchor() - from;
+            if (starved > 132) {
+                logger_->Warn("Physics session %u: server has not consumed a fresh input for %lld ticks (acked %u, our "
+                              "tick %u); tick numbering hole suspected", core.session_id(), static_cast<long long>(starved),
+                              acked.tick, core.current_tick());
+                ++host.starvation_resyncs;
+                core.request_resync("no fresh input consumed for 2 s");
+                host.starvation_from = core.frames_since_anchor();
+            }
+        }
+    }
+    core.pre_step();
+}
+
+// The host's session ends (the legacy physics_session_end_local): the script
+// edits handed back, the clock guard dropped, the core ended when it still
+// runs (journal, body guard, mirrors, status), the own replica gone, the tick
+// driver off.  Nothing while no core session runs.
+void BallanceMMOClient::core_host_end_local(const std::string& reason) {
+    if (host.phase == retail_host::phase_type::idle) return;
+    std::string error;
+    pause_clock_restore();
+    pause_scripts_restore();
+    death_reset_restore();
+    sector_deactivate_restore();
+    sector_activate_restore();
+    checkpoint_phase_restore();
+    physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
+    const uint32_t session = host.session;
+    if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
+    if (host.own_replica.active && physics_view_.available())
+        physics_view_.navigation_destroy(host.own_replica.entity.c_str(), error);
+    if (host.body_guard && physics_view_.available()) {
+        physics_view_.set_body_guard(false, nullptr, error);
+        host.body_guard = false;
+        host.body_guard_entity.clear();
+    }
+    fixed_tick_.set_hold(false);
+    if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
+    reset_session_state();
+    host.phase = retail_host::phase_type::idle;
+    host.session = 0;
+    SendIngameMessage(std::format("Physics session {} over ({}).", session, reason), bmmo::ansi::BrightYellow);
+    logger_->Info("Physics session %u ended: %s", session, reason.c_str());
 }
 
 // One mailbox entry, decoded and handed to the core (design 1.3 "Messages").
@@ -678,10 +1234,12 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.reportable_wakeup = [](const std::string& name, const std::string& own_ball) {
         return name.rfind("Ball_", 0) != 0 && name != own_ball && name.find("_Peer_") == std::string::npos;
     };
-    // What the own replica used for the step just taken: the polled keys
+    // What the own frame of the step just taken records: the polled keys
     // (none while the mute is in force), the camera reference's rows, and the
-    // leaves' Key Events' activity - the source the replica polls
-    // (ball_navigation.cpp), not the BML hook's ball_nav_active_ (design 2.2).
+    // navigation's activity.  R1 keeps the legacy frame's sources (PSC
+    // physics_session_frame): the mute decided in this frame, and the BML
+    // hook's ball_nav_active_; R2 moves both to what the replica stepped (the
+    // leaves' Key Events, the mute in force during the step; design 2.2, 4.2).
     p.observe_input = [this]() {
         bs::input_observation seen;
         if (!host.input_muted && host.navigation_known && input_hook_installed_)
@@ -692,12 +1250,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 for (int k = 0; k < 3; ++k) seen.cam[r][k] = m[r][k];
             seen.cam_valid = true;
         }
-        if (host.navigation_known) {
-            CKContext* context = m_bml->GetCKContext();
-            for (const auto& leaf: host.navigation.leaves)
-                if (auto* key_event = CKBehavior::Cast(context->GetObject(leaf.key_block)))
-                    if (key_event->IsActive()) { seen.nav_active = true; break; }
-        }
+        seen.nav_active = !host.input_muted && ball_nav_active_;
         return seen;
     };
     p.own_camera_rows = [this](const float (*basis)[3]) {
@@ -954,6 +1507,16 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (forced.rolled && host.forced++ < 16)
             logger_->Info("Physics session: forced rewind at tick %u, %u deep", now, host.force_depth);
     };
+    // 'session drop-birth' (testing): an armed drop keeps the next own
+    // Physicalize off the wire; every other event goes out.
+    p.hooks.filter_event = [this](const bmmo::session_event_msg& event) {
+        if (host.drop_births_armed <= 0 || event.type != bmmo::session::event_type::Physicalize)
+            return bs::event_send_verdict::send;
+        --host.drop_births_armed;
+        ++host.births_dropped;
+        logger_->Info("Automation: own Physicalize stamped %u kept off the wire (session drop-birth)", event.tick);
+        return bs::event_send_verdict::drop;
+    };
     // The own body guard lifted after the journal closed (design 2.2
     // hooks.ended).
     p.hooks.ended = [this]() {
@@ -977,27 +1540,33 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         if (value == "on" || value == "off") {
             const bool on = value == "on";
             // The switch takes effect between sessions only: not while the
-            // legacy path or the core runs one, nor while a session's
-            // messages are latched to the mailbox (its SessionStart came,
-            // its SessionEnd not yet; a lost connection ends that).
+            // legacy path or the core runs one.  A session latched to the
+            // mailbox that no one runs (its SessionStart came and the host
+            // gave it up - not in the level, no physics view, no core - and
+            // its SessionEnd not yet, which a member that left the room may
+            // never get) does not hold the switch: the latch stays, so that
+            // session's remaining messages are still dropped, and the next
+            // SessionStart reads the switch again.  A lost connection ends
+            // the latch.
             if (physics_session_.phase != bs::physics_session_state::phase_type::idle)
                 return "error the switch takes effect between sessions: end this one first";
-            if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle)
+            if (host.phase != retail_host::phase_type::idle
+                    || (host.core && host.core->session_phase() != bs::client_core_state::phase::idle))
                 return "error the switch takes effect between sessions: the core runs one";
-            if (core_latched.load() && connected())
-                return "error the switch takes effect between sessions: one has started (SessionStart came, SessionEnd "
-                       "not yet)";
-            core_latched.store(false);
+            if (!connected()) core_latched.store(false);
             core_on.store(on);
             if (!on) return "ok session core off: the next session runs on the legacy path";
-            return "ok session core on (step R0: the core is made and its platform checked at the next SessionStart, "
-                   "and the mailbox fills; the session still runs on the legacy path until R1)";
+            return "ok session core on: the next session runs on the shared core (step R1: snapshot rollback, no input "
+                   "or lifecycle rewind)";
         }
         if (!value.empty() && value != "status") return "error usage: session core on|off|status";
-        return std::format("ok core={} latched={} made={} error='{}' sessions={} mailbox: pushed={} dropped={} "
-                           "drained={} starts={} discarded={} undecodable={}",
+        return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "
+                           "backstops={} births_dropped={} unmatched_resyncs={} starvation_resyncs={} mailbox: pushed={} "
+                           "dropped={} drained={} starts={} discarded={} undecodable={}",
                            core_on.load() ? "on" : "off", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
-                           host.core_error, host.sessions_seen, mailbox.pushed(), mailbox.dropped(), host.drained,
+                           host.core_error, host.sessions_seen, host_phase_name(host.phase), host.frames, host.refused,
+                           host.core ? host.core->own_body_backstops() : 0, host.births_dropped, host.unmatched_resyncs,
+                           host.starvation_resyncs, mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable);
     }
     if (what == "force-rollback") {
@@ -1010,9 +1579,29 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         host.force_depth = static_cast<uint32_t>(depth);
         if (!host.force_every) return "ok forced rollbacks off";
         return std::format("ok a forced rewind {} ticks deep every {} ticks{}", host.force_depth, host.force_every,
-                           core_on.load() ? "" : " (with session core on: the legacy path has no forced rollback)");
+                           core_on.load() ? "" : " (only with session core on: the legacy path has no forced rollback)");
     }
-    return "error usage: session core on|off|status | session force-rollback <every>:<depth>";
+    if (what == "stall") {
+        // A testing tool (R1 (c)): the game thread stands still for <ms>, so
+        // the tick driver falls behind its schedule; past 33 ticks it
+        // rebases, which a session answers with a resync (either path).
+        const long ms = std::strtol(value.c_str(), nullptr, 10);
+        if (ms <= 0 || ms > 10000) return "error usage: session stall <ms> (1..10000)";
+        const uint32_t before = session_tick_now(physics_session_);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        logger_->Info("Automation: the game thread stalled %ld ms at tick %u", ms, before);
+        return std::format("ok stalled {} ms at tick {}", ms, before);
+    }
+    if (what == "drop-birth") {
+        // A testing tool (R1 (c)): the next own Physicalize of this core
+        // session never reaches the server (hooks.filter_event).
+        if (!core_session_running()) return "error session drop-birth: no session core runs";
+        ++host.drop_births_armed;
+        return std::format("ok the next own Physicalize is kept off the wire (armed {}, dropped so far {})",
+                           host.drop_births_armed, host.births_dropped);
+    }
+    return "error usage: session core on|off|status | session force-rollback <every>:<depth> | session stall <ms> | "
+           "session drop-birth";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]
@@ -1142,7 +1731,8 @@ void BallanceMMOClient::core_host_feed_replay_keys(unsigned char* state) {
     if (!r.armed) return;
     uint32_t tick = 0;
     if (!next_session_tick(physics_session_, tick)) {
-        if (r.started && physics_session_.phase != bs::physics_session_state::phase_type::running) {
+        if (r.started && physics_session_.phase != bs::physics_session_state::phase_type::running
+                && host.phase != retail_host::phase_type::running) {
             r.armed = false;
             logger_->Info("Automation: replay session: the session ended after %llu frames",
                           static_cast<unsigned long long>(r.fed));
@@ -1173,4 +1763,277 @@ void BallanceMMOClient::core_host_feed_replay_keys(unsigned char* state) {
     std::memcpy(state, keys.data(), keys.size());
     r.last_frame = k;
     ++r.fed;
+}
+
+// ---------------------------------------------------------------- hooks (R1)
+
+// OnPhysicalize, while a core session runs (the legacy OnPhysicalize, with the
+// own report going to the core, design 3.2 "Own capture"): every body's birth
+// into the birth log (bind_session_world's), and for the current ball the
+// spawn flag (the pose at the level's resetpoint), the birth cell's offset
+// written into the entity before the body is made, the recipe from the
+// block's arguments, core.own_physicalized (queued; committed at post_step
+// step 19), and the spawn impulse queued for this frame's PreSimulate.
+bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity,
+                                                 float mass, const char* collGroup, CKBOOL startFrozen,
+                                                 CKBOOL enableColl, CKBOOL calcMassCenter, float linearDamp,
+                                                 float rotDamp, const char* collSurface, VxVector massCenter,
+                                                 int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
+                                                 float* ballRadius, int concaveCnt, CKMesh** concaveMesh) {
+    if (!core_session_running() || !target) return false;
+    auto& core = *host.core;
+    const uint32_t tick = core.current_tick() + 1;   // this frame's physics step is still ahead
+    bs::ball_recipe r;
+    r.fixed = fixed != 0;
+    r.friction = friction;
+    r.elasticity = elasticity;
+    r.mass = mass;
+    r.start_frozen = startFrozen != 0;
+    r.enable_collision = enableColl != 0;
+    r.calc_mass_center = calcMassCenter != 0;
+    r.linear_damp = linearDamp;
+    r.rot_damp = rotDamp;
+    r.mass_center[0] = massCenter.x; r.mass_center[1] = massCenter.y; r.mass_center[2] = massCenter.z;
+    r.collision_surface = collSurface ? collSurface : "";
+    for (int i = 0; i < convexCnt && convexMesh; ++i)
+        r.convex_meshes.push_back(convexMesh[i] && convexMesh[i]->GetName() ? convexMesh[i]->GetName() : "");
+    for (int i = 0; i < ballCnt; ++i) {
+        bs::ball_recipe::sphere sphere;
+        if (ballCenter) { sphere.center[0] = ballCenter[i].x; sphere.center[1] = ballCenter[i].y; sphere.center[2] = ballCenter[i].z; }
+        sphere.radius = ballRadius ? ballRadius[i] : 0.0f;
+        r.balls.push_back(sphere);
+    }
+    for (int i = 0; i < concaveCnt && concaveMesh; ++i)
+        r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
+    const std::string name = target->GetName() ? target->GetName() : "";
+    const auto record_birth = [&] {
+        bs::local_birth birth;
+        birth.name = name;
+        birth.group = collGroup ? collGroup : "";
+        birth.recipe = to_bridge_recipe(r);
+        const VxMatrix& m = target->GetWorldMatrix();
+        const VxMatrix& l = target->GetLocalMatrix();
+        for (int row = 0; row < 4; ++row)
+            for (int k = 0; k < 4; ++k) {
+                birth.matrix[row * 4 + k] = m[row][k];
+                birth.local_matrix[row * 4 + k] = l[row][k];
+            }
+        birth.has_parent = target->GetParent() != nullptr;
+        birth.has_local = true;
+        host.births.put(tick, std::move(birth));
+    };
+    CK3dObject* ball = get_current_ball();
+    if (!ball || target != static_cast<CK3dEntity*>(ball)) {
+        // A level object's retail Physicalize during the session.
+        record_birth();
+        if (core.config.trace)
+            logger_->Info("Physics session: retail physicalize of %s at tick %u (%d convex, %d balls, %d concave)",
+                          name.c_str(), tick, convexCnt, ballCnt, concaveCnt);
+        return true;
+    }
+    bs::own_birth_report report;
+    report.entity = name;
+    report.tick = tick;
+    report.ball_type = ball_row_of(m_bml, name);
+    report.recipe = r;
+    report.pose.captured = true;   // taken before the body exists (design 2.3 host_hooks)
+    const VxMatrix& world = target->GetWorldMatrix();
+    for (int k = 0; k < 3; ++k) report.pose.position[k] = world[3][k];
+    for (int row = 0; row < 3; ++row)
+        for (int k = 0; k < 3; ++k) report.pose.rotation[row * 3 + k] = world[row][k];
+    // Design 9.10: a Physicalize at the level's current resetpoint is a spawn
+    // or a respawn, flagged so every side applies the same impulse.
+    VxMatrix reset;
+    bool have_reset = false;
+    if (CKDataArray* level = current_level_array()) {
+        if (level->GetElementValue(0, 3, &reset)) {
+            have_reset = true;
+            const float dx = report.pose.position[0] - reset[3][0];
+            const float dy = report.pose.position[1] - reset[3][1];
+            const float dz = report.pose.position[2] - reset[3][2];
+            report.pose.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+        }
+    }
+    const uint8_t join_order = static_cast<uint8_t>(core.own_join_order() < 0 ? 63 : core.own_join_order());
+    // The birth cell (session/spawn_impulse.hpp): the entity moved off the
+    // resetpoint before the Physicalize block makes the body from its matrix.
+    if (report.pose.spawn && core.spawn_spacing() > 0.0f && have_reset && join_order % bs::kSpawnOffsets != 0) {
+        const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
+        const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
+        float offset[3];
+        bs::spawn_offset(join_order, core.spawn_spacing(), right, dir, offset);
+        VxMatrix moved = world;
+        for (int k = 0; k < 3; ++k) moved[3][k] += offset[k];
+        target->SetWorldMatrix(moved);
+        for (int k = 0; k < 3; ++k) report.pose.position[k] = moved[3][k];
+        logger_->Info("Physics session: spawn offset (%.3f,%.3f,%.3f) for join order %u at tick %u",
+                      static_cast<double>(offset[0]), static_cast<double>(offset[1]), static_cast<double>(offset[2]),
+                      join_order, tick);
+    }
+    record_birth();   // after the offset: the matrix the body is made from
+    core.own_physicalized(report);
+    host.own_group_set = false;
+    if (report.pose.spawn && core.spawn_impulse() > 0.0f) {
+        // Queued into this frame's PreSimulate pass, anchored to a live
+        // behavior (the Ball Navigation script).
+        uint32_t behavior_id = host.navigation.ball_navigation;
+        if (behavior_id == 0) behavior_id = bmmo::game::read_navigation_graph(m_bml->GetCKContext()).ball_navigation;
+        const uint32_t index = bs::spawn_direction_index(core.seed(), join_order, tick);
+        std::string error;
+        if (physics_view_.push_impulse(name.c_str(), bs::kSpawnDirectionTable[index], core.spawn_impulse(), behavior_id, error))
+            logger_->Info("Physics session: spawn impulse index=%u speed=%.3f at tick %u", index, core.spawn_impulse(), tick);
+        else
+            logger_->Warn("Physics session: spawn impulse: %s", error.c_str());
+    }
+    // The replica drives the ball, the retail leaves push zero (design 9.6).
+    if (host.own_replica.active) core_host_zero_retail_forces();
+    logger_->Info("Physics session: own ball %s physicalized at tick %u (type %d%s, %d convex, %d balls, %d concave)",
+                  name.c_str(), tick, report.ball_type, report.pose.spawn ? ", spawn" : "", convexCnt, ballCnt, concaveCnt);
+    return true;
+}
+
+// OnUnphysicalize of the current ball: core.own_unphysicalized (queued).
+bool BallanceMMOClient::core_host_on_unphysicalize(CK3dEntity* target) {
+    if (!core_session_running() || !target) return false;
+    CK3dObject* ball = get_current_ball();
+    if (!ball || target != static_cast<CK3dEntity*>(ball)) return true;
+    const uint32_t tick = host.core->current_tick() + 1;
+    host.core->own_unphysicalized(tick);
+    host.own_group_set = false;
+    logger_->Info("Physics session: own ball unphysicalized at tick %u", tick);
+    return true;
+}
+
+// A sector change of this ball (OnPostCheckpointReached and the other
+// reports): a crossed checkpoint with the chain's manager run held (N3) is an
+// input, core.request_sector, once assigned; otherwise it is reported after
+// the fact at once, as the legacy hook does (design 2.2 "request_sector").
+bool BallanceMMOClient::core_host_on_sector(int sector, bool checkpoint) {
+    if (!core_session_running()) return false;
+    auto& core = *host.core;
+    if (checkpoint && core.assigned() && sector_activate_.block && !sector_activate_failed_) {
+        core.request_sector(sector, "checkpoint");
+        return true;
+    }
+    bmmo::session_event_msg event;
+    event.tick = core.current_tick();
+    event.type = bmmo::session::event_type::Sector;
+    event.sector = sector;
+    core.send_event(event);
+    return true;
+}
+
+bool BallanceMMOClient::core_host_on_finish() {
+    if (!core_session_running()) return false;
+    bmmo::session_event_msg event;
+    event.tick = host.core->current_tick();
+    event.type = bmmo::session::event_type::Finish;
+    host.core->send_event(event);
+    return true;
+}
+
+// PlayerLeft: the member goes from the journal's roster (room_client.cpp).
+bool BallanceMMOClient::core_host_leave_player(uint32_t player) {
+    if (host.phase == retail_host::phase_type::idle || !host.core) return false;
+    host.core->journal().leave_player(player);
+    return true;
+}
+
+// The automation 'beam': core.request_beam, made in place at post_step step
+// 29 of this frame and stamped T + 1 (design 2.3, 4.2 R1).
+bool BallanceMMOClient::core_host_beam(const double position[3], std::string& answer) {
+    if (!core_session_running()) return false;
+    auto& core = *host.core;
+    // Unassigned (the hold timed out, or a resync's assignment is awaited):
+    // no tick to stamp the beam with.  Not the legacy verb either - its
+    // in-place move would be one the core and the server never learn of.
+    if (!core.assigned()) {
+        answer = "error session core: not assigned (no tick base to stamp the beam with)";
+        return true;
+    }
+    core.request_beam(position);
+    CK3dObject* ball = get_current_ball();
+    answer = std::format("ok beam of {} to ({:.3f},{:.3f},{:.3f}) requested at tick {}: made after this frame's step, "
+                         "stamped {} (session core)", ball && ball->GetName() ? ball->GetName() : "-", position[0],
+                         position[1], position[2], core.current_tick(), core.current_tick() + 1);
+    return true;
+}
+
+// The automation 'sector N': core.request_sector while the checkpoint hold is
+// in force and the session assigned (the legacy verb's condition).  Without
+// the hold the legacy verb activates the sector by hand (the hook then
+// reports it after the fact, as with the switch off); unassigned, nothing:
+// an activation by hand would be one no replay records.
+bool BallanceMMOClient::core_host_sector(int sector, std::string& answer) {
+    if (!core_session_running()) return false;
+    auto& core = *host.core;
+    if (!core.assigned()) {
+        answer = "error session core: not assigned (no tick to hold the sector for)";
+        return true;
+    }
+    if (!sector_activate_.block || sector_activate_failed_) return false;
+    const uint32_t due = core.current_tick() + 1 + core.sector_lead_ticks();
+    core.request_sector(sector, "automation");
+    answer = std::format("ok sector {} held for tick {} (Sector event sent ahead; session core)", sector, due);
+    return true;
+}
+
+// 'journal off|mark' with a core session: the core's journal (design 1.2).
+bool BallanceMMOClient::core_host_journal(const std::string& action, const std::string& text, std::string& answer) {
+    if (host.phase == retail_host::phase_type::idle || !host.core) return false;
+    auto& journal = host.core->journal();
+    if (action == "mark") {
+        if (text.empty()) { answer = "error usage: journal mark <text>"; return true; }
+        if (!journal.journalling()) { answer = "error no session journal is open"; return true; }
+        const uint32_t tick = host.core->current_tick();
+        journal.note("mark: " + text);
+        journal.local_checkpoint(tick, host.core->own_body_entity());
+        answer = std::format("ok mark at tick {}: {} (session core)", tick, text);
+        return true;
+    }
+    if (action == "off") {
+        config_manager_["session_journal"]->SetBoolean(false);
+        const bool was = journal.journalling();
+        journal.close("recording turned off");
+        answer = was ? "ok journal off (SessionJournal=false), closed the session core's journal"
+                     : "ok journal off (SessionJournal=false), nothing was being recorded";
+        return true;
+    }
+    return false;
+}
+
+// The 'session' verb and the /mmo session line while a core session runs:
+// the host's phase and the fields the retail tools read first, then the
+// core's status line (design 1.3 status_text).
+std::string BallanceMMOClient::core_host_status_text() {
+    if (!host.core) return std::format("session=0 phase={} core=1", host_phase_name(host.phase));
+    auto& core = *host.core;
+    bs::host_counters h;
+    h.rebases = static_cast<int>(fixed_tick_.rebases());
+    h.activations_replayed = host.activations_replayed;
+    h.script_reset_skips = host.script_reset_skips;
+    return std::format("session={} phase={} core=1 tick={} assigned={} held={} keys_known={} own_phys={} "
+                       "backstops={} refused={} unmatched_resyncs={} starvation_resyncs={} {}",
+                       core.session_id(), host_phase_name(host.phase), core.current_tick(), core.assigned() ? 1 : 0,
+                       core.holding() ? 1 : 0, host.navigation_known ? 1 : 0, core.own_physicalized() ? 1 : 0,
+                       core.own_body_backstops(), host.refused, host.unmatched_resyncs, host.starvation_resyncs,
+                       core.status_text(h));
+}
+
+// The F3 panel's physics block for a core session.
+std::string BallanceMMOClient::core_host_overlay_text() {
+    std::string text = std::format("\nPhysics session {} ({}, core)\n", host.session, host_phase_name(host.phase));
+    if (!core_session_running()) return text;
+    auto& core = *host.core;
+    const auto& rs = core.rollback_stats();
+    text += std::format("Tick: {}\n", core.current_tick());
+    text += std::format("Snapshots: {} ok, {} corrected\n", rs.matched, rs.mismatched);
+    if (rs.snapshots)
+        text += std::format("Rollbacks: {} ({:.0f}%), {} ticks resim\n", rs.rollbacks,
+                            100.0 * static_cast<double>(rs.mismatched) / static_cast<double>(rs.snapshots), rs.resim_ticks);
+    text += std::format("Max error: {:.3f} m\n", rs.max_error);
+    if (rs.too_far || rs.frozen || core.resyncs_sent())
+        text += std::format("Too far: {}  Frozen: {}  Resyncs: {}\n", rs.too_far, rs.frozen, core.resyncs_sent());
+    if (!core.remotes().empty()) text += std::format("Remote balls: {}\n", core.remotes().size());
+    return text;
 }

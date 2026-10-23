@@ -56,6 +56,14 @@ namespace bmmo::session {
             by_tick_[tick].push_back(std::move(birth));
             while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
         }
+        // As add, but a birth of the same name at the same tick is replaced
+        // (the retail feed, OnPhysicalize: a Physicalize the scripts repeat
+        // inside one frame describes the body that frame made; R1).
+        void put(uint32_t tick, local_birth&& birth) {
+            for (auto& existing: by_tick_[tick])
+                if (existing.name == birth.name) { existing = std::move(birth); return; }
+            add(tick, std::move(birth));
+        }
         // The birth of `entity` recorded at `tick`, or - tick 0 - its latest.
         const local_birth* find(const std::string& entity, uint32_t tick) const {
             if (tick) {

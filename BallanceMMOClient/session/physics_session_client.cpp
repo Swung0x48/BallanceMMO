@@ -421,6 +421,9 @@ void BallanceMMOClient::physics_session_countdown() {
 }
 
 void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
+    // A session the shared core runs ends the same way (the level left, the
+    // connection lost; session/core_host.cpp, R1): nothing when there is none.
+    core_host_end_local(reason);
     auto& s = physics_session_;
     std::string error;
     pause_clock_restore();
@@ -2749,6 +2752,11 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
                                       float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
                                       int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
                                       float* ballRadius, int concaveCnt, CKMesh** concaveMesh) {
+    // A session the shared core runs (session/core_host.cpp, step R1).
+    if (core_host_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
+                                 calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
+                                 ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh))
+        return;
     auto& s = physics_session_;
     if (s.phase != phase_type::running || !target) return;
     // Every birth, the own ball's included (recorded again below with its
@@ -2926,6 +2934,7 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
 }
 
 void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
+    if (core_host_on_unphysicalize(target)) return;   // a session the shared core runs (R1)
     auto& s = physics_session_;
     if (s.phase != phase_type::running || !target) return;
     CK3dObject* ball = get_current_ball();
@@ -2943,6 +2952,7 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
 }
 
 void BallanceMMOClient::physics_session_on_sector(int sector, bool checkpoint) {
+    if (core_host_on_sector(sector, checkpoint)) return;   // a session the shared core runs (R1)
     auto& s = physics_session_;
     if (s.phase != phase_type::running) return;
     // A crossed checkpoint with the chain's manager run held (N3): the
@@ -3019,6 +3029,7 @@ void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, co
 }
 
 void BallanceMMOClient::physics_session_on_finish() {
+    if (core_host_on_finish()) return;   // a session the shared core runs (R1)
     auto& s = physics_session_;
     if (s.phase != phase_type::running) return;
     bmmo::session_event_msg event;
@@ -3547,6 +3558,7 @@ float BallanceMMOClient::physics_session_ball_force(uint8_t ball_type) const {
 // worth watching live rather than in a log: how far the relay is behind, and
 // whether the corrections are converging.
 std::string BallanceMMOClient::physics_session_overlay_text() {
+    if (core_host_running()) return core_host_overlay_text();   // a session the shared core runs (R1)
     auto& s = physics_session_;
     if (s.phase == phase_type::idle) return {};
     const char* phase = "idle";
@@ -3586,6 +3598,7 @@ std::string BallanceMMOClient::physics_session_overlay_text() {
 }
 
 std::string BallanceMMOClient::physics_session_status_text() {
+    if (core_host_running()) return core_host_status_text();   // a session the shared core runs (R1)
     auto& s = physics_session_;
     const char* phase = "idle";
     switch (s.phase) {

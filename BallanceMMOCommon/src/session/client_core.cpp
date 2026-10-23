@@ -186,6 +186,17 @@ namespace bmmo::session {
         s.sector_cell_ = 0;
         for (auto& pass: s.recent_passes_) pass = {};
         s.phase_misses_ = 0;
+        // R1: the retail policies' and readers' state, and no frame
+        // prepared (post_step refuses one no pre_step of this session made).
+        s.ball_rows_.clear();
+        s.own_last_birth_ = {};
+        s.snapshots_without_own_ = 0;
+        s.own_backstops_ = 0;
+        s.last_backstop_ = {};
+        s.snapshot_acked_known_ = false;
+        s.snapshot_acked_tick_ = 0;
+        s.snapshot_acked_frame_ = s.snapshot_frame_ = -1;
+        frame_ = frame_scratch{};
         return begin_result{};
     }
 
@@ -273,6 +284,17 @@ namespace bmmo::session {
         return state;
     }
 
+    // The hold given up by the host (R1): the retail host waits for the
+    // assignment inside one frame and stops waiting when the connection is
+    // lost (PSC physics_session_hold_until_assigned).  The world then runs
+    // without a tick base, as after a timeout.
+    void session_client_core::release_hold(const char* why) {
+        if (!s.held_) return;
+        s.held_ = false;
+        logf("anchor hold released after %d polls: %s", s.hold_polls_, why);
+        journal_.note(std::string("anchor hold released: ") + why);
+    }
+
     // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
     // same room reloads the level (host restart) through begin.
     void session_client_core::end(const std::string& reason) {
@@ -320,6 +342,12 @@ namespace bmmo::session {
             return;
         }
         s.last_assign_first_tick_ = msg.first_tick;
+        // Both branches below renumber: what the server acked under the old
+        // numbering says nothing about the new one (R1: the retail
+        // starvation detector's baseline, acked_input).
+        s.snapshot_acked_known_ = false;
+        s.snapshot_acked_tick_ = 0;
+        s.snapshot_acked_frame_ = s.snapshot_frame_ = -1;
         // A newer base answers every resync asked for so far, and any
         // the limiter still owes: its full snapshot replaces the world.
         s.resync_in_flight_ = false;

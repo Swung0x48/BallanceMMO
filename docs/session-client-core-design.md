@@ -3,8 +3,8 @@
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
 E5, E6, E7, E8, E9, E10 and E11 (§6.1, "As built (step E1)" ... "As built
-(step E11)") are built: the E steps are done. R0 is built (§6.2, "As built
-(step R0)"); R1-R7 are not.
+(step E11)") are built: the E steps are done. R0 and R1 are built (§6.2, "As built
+(step R0)", "As built (step R1)"); R2-R7 are not.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -4259,6 +4259,275 @@ rebuilt with the slot-13 hack, which its cf08f11 binary lacked, build id
   headless client, so the wire check was not needed; the x64 build, the 414
   tests and the GCC syntax check (25 files) pass. Three launches of the
   final build: menu in 1.6-1.7 s, none hung.
+
+**As built (step R1).** Where the code made R1 differ from §1.2, §1.3,
+§2.2, §3.2, §4 and the R1 row:
+
+- **A core session is the core's alone.** `core_host_offer` swallows every
+  Session* message of a latched session (SessionStart included), so the
+  legacy handlers never see it and the legacy `physics_session_state` stays
+  idle. The host runs the session the legacy way, in file-scope statics of
+  `core_host.cpp` (a host phase: counting_down, restarting, running): the
+  SessionStart from the mailbox (a **fresh core per session**, not one made
+  at the first SessionStart, so no state of the last session carries over;
+  `set_own_id`, `begin` with every `core_config` field set, the not-in-level
+  leave, the countdown, `level_requested`); the restart and the
+  Gameplay_Ingame edge; the anchor work in the legacy order (clock reset,
+  clock guard, pause pin, pause edits, N1-N4, Sequencers, hash, collision
+  filter, ball forces, script selection and force hooks), then
+  `core.anchor` and the blocking hold (the mailbox drained every 1 ms,
+  `poll_hold`, `release_hold("the connection was lost")`), then the first
+  `pre_step`; one frame per OnProcess (clock guard, pause pin, pause edits,
+  the mute, the rebase check, `post_step(true)`, the drain, the
+  transitional triggers, `pre_step`); and the end (edits handed back, guard
+  dropped, `core.end` when it still runs, own replica destroyed, tick driver
+  off). The legacy hooks and verbs hand over while a core session runs:
+  `OnPhysicalize` / `OnUnphysicalize` (recipe, spawn flag, birth cell,
+  spawn impulse, birth log, `own_physicalized` / `own_unphysicalized`),
+  `physics_session_on_sector` (`request_sector` only when assigned and the
+  N3 hold is in force, else today's after-the-fact Sector event through
+  `send_event`), `on_finish`, `end_local` (level left, disconnect), the F3
+  overlay, the `session` status (host fields first, then `status_text`;
+  the retail tools read `phase=` / `assigned=` from the front), PlayerLeft
+  (`journal().leave_player`), `beam` (`request_beam`), `sector N`
+  (`request_sector` under the legacy verb's condition), `journal mark|off`
+  (the core's journal: a note and a LOCAL checkpoint). Each is a guard at
+  the top of the legacy function that is false while no core session runs;
+  no legacy behaviour changed.
+- **Core additions** (all inert on the headless client, which sets none of
+  the new switches; WIRE-CHECK below):
+  - `core_config::lifecycle_rewind` (§1.2 named it; it did not exist):
+    off, `make_remote_birth` skips the pending path and
+    `rewind_for_lifecycle` returns, so a late change is made at the drain,
+    live. `own_birth_move` is **not** built: R6 builds it, and with
+    `own_echoes` off and no `own_body_control` nothing moves an own birth.
+  - The retail policies as `core_config` fields: `mirror_start_from_row`
+    (the core caches each player's newest snapshot ball row at intake, only
+    with the policy; a live birth with a newer row starts from it: the
+    row's pose, no kick, then `write_body` with the row's state, the 9.17
+    workaround) and `own_body_backstop` (`check_own_body` in the snapshot
+    path, before the rollback, PSC's rule: 30 snapshots, 2 s limiter on a
+    new `clock_site::own_backstop`, appended; the last own Physicalize kept
+    at `commit_own_birth`, cleared at the own Unphysicalize, its spawn flag
+    cleared by a beam; counted, `own_body_backstops()`).
+  - **`drive_from_newest_relay`, a policy the design did not have** (a
+    departure from §1.3 and the R1 row, to be signed off). The first batch
+    of (b) put every core-on client above the off band in mismatches
+    (22-29 against 17-21, resim up to 58): §1.3's order has the drive of
+    T + 1 chosen at post_step step 28, before the messages, so a key edge
+    relayed in between is played a tick late, which the legacy frame (relay
+    intake, then the drive) did not do and which, without the input rewind,
+    nothing corrects but the next snapshot. With the policy, pre_step step
+    10 re-chooses `remote.applied = live_drive(remote, T)` before it drives
+    (the record of T stores it). The core does not gate it; the retail host
+    sets it as `!input_rewind`, so the R2 switch turns it off with it and
+    R2 decides whether it stays.
+  - `release_hold(why)`; `post_step` refuses a frame no `pre_step`
+    prepared (`frame_.prepared`, cleared by `begin`; logged, false, nothing
+    taken; the retail host counts `refused`, 0 in every run); the
+    `frozen` → resync rule after `on_snapshot`; `acked_input()` =
+    `{known, tick, frame, snapshot_frame}` from the snapshots'
+    `acked_input_tick` (PSC's `acked_input_state`, reset by every
+    assignment); `resyncs_sent()`; `quaternion_rows` (VxQuaternion::ToMatrix's
+    formula); `local_birth_log::put` (the legacy dedup of a same-name birth
+    in one tick). `begin` resets every R1 field, the backstop's count and
+    2 s limiter (`own_backstops_`, `last_backstop_`) included, so a host
+    that reuses a core starts each session from scratch.
+  - Seven unit tests (`SessionClientCoreR1.*`): the refused frame, the
+    released hold, lifecycle_rewind off with the row start (and no rows
+    without the policy), the backstop's count / limiter / reset (and its
+    reset by `begin`), the acked view, the drive policy on and off, the
+    frozen clock's resync (and none with the clock running). 421 tests.
+- **The mailbox is not dispatched in pure arrival order** while
+  `input_rewind` is off (a departure from §3.2, to be signed off). With
+  the drive policy the (c) arm still had client 2 at 113 / 151 / 113
+  mismatches against the off runs' 103: a relayed frame that arrives
+  behind a snapshot of the same batch is stored after that snapshot's
+  replay ran on the prediction. Within each run of entries between
+  numbering messages (SessionStart, SessionAssign, SessionEnd keep their
+  places) the host dispatches the relay first, events and leads next,
+  snapshots last. The legacy `apply_queues` took a batch as: the
+  snapshots' ball rows cached, the events applied, the relayed inputs, the
+  snapshots; the core only queues an event for the next pre_step's drain
+  (`on_session_event`), so where the events sit in the batch changes
+  nothing (every snapshot row of the batch is cached before a birth reads
+  it) and relay-before-snapshot is the part that matters. With the input
+  rewind (R2) a late frame asks for its own replay and arrival order can
+  stand again; the reorder is skipped then.
+- **`observe_input` keeps the legacy sources until R2:** the mute decided in
+  this frame (keys 0) and `ball_nav_active_` (the BML hook), so the server
+  drives our ball from the same flags as with the switch off; R2 moves both
+  to what the replica stepped (§2.2, §4.2). `INPUT_FLAG_PAUSED` is not sent
+  (no `paused` in `input_observation` before R2; the server never reads it).
+- **Transitional triggers (§3.2):** the 30-unmatched run (rollback stats
+  around the drain, reset by any resync request) and the starvation
+  detector over `core.acked_input()` (132 frames, the stream alive within
+  66) are host code; `too_far` is not ported. For R4: the 30-unmatched
+  counter, ported as the legacy one (PSC:2115), resets on every frame with
+  no unmatched snapshot, frames that took no snapshot at all included, so
+  with a snapshot every 2 ticks a numbering desync never reaches 30 and the
+  trigger is effectively dead on both paths.
+- **The host's own edges.** `update_current_sector`'s union-cell gate reads
+  `core_host_session_running()` (anchored, the core running), the legacy
+  gate's `phase == running`, not the countdown or the restart. With a core
+  session running but not assigned (a hold that timed out, a resync's
+  assignment awaited) `beam` and `sector N` answer an error instead of
+  falling through to the legacy verbs, whose moves the core and the server
+  would never learn of; `sector N` without the N3 hold still activates by
+  hand, as the legacy verb does (the hook reports it after the fact). An
+  undecodable SessionStart prints the legacy on_message's refusal ("a
+  different physics protocol"), and a core that could not be made says so
+  in game. `session core on|off` is refused only while the legacy path or
+  the core runs a session: a latch no one runs (the host gave the session
+  up: not in the level, no physics view, no core) keeps the dead session's
+  messages going to the mailbox to be dropped, but no longer holds the
+  switch until a SessionEnd that a member who left the room may never get.
+- **Testing verbs:** `session stall <ms>` (the game thread sleeps; the tick
+  driver rebases past 33 ticks) and `session drop-birth` (the next own
+  Physicalize of the running core session is kept off the wire through
+  `hooks.filter_event`, every copy, so the server has no body for our ball
+  and `own_body_backstop` has work).
+- **A 300 m beam is not a death, and it is slower with the core.** R1 (c)
+  first beamed each ball 300 m down for its death. On Level 11 that puts
+  the ball below the death volume: no BallOff, no respawn, the ball falls
+  for the rest of the run (the deaths the first form saw came from the 4 m
+  beam and the record). It also makes the IVP savestate of every captured
+  tick grow from ~90 KB to 3.0 MB, 37 ms per capture (measured with a
+  temporary timer around `rollback::capture`, removed), until IVP retires
+  the teleported ball's state: 1-2 ticks on the legacy path, whose beam is
+  stamped at a tick the game had stepped, so the next snapshot mismatches
+  and its restore cleans the state; 7-26 ticks with the core, whose beam
+  the server agrees with (no rollback). Solo on Level 11: legacy 2 slow
+  frames, core 7; two clients: legacy 9 slow frames (~300 ms behind)
+  every time, core 7-26 (up to 750 ms), so 2 of the 7 core-on runs of the
+  first form rebased the tick driver (an extra resync, on both clients
+  once). A 30 m beam lands inside the volume: BallOff ~2 s later, the
+  respawn ~3 s after that, no slow frames. (c) uses the 30 m beam from
+  its second form on (`r1_c2.py`), both arms. A large teleport's capture
+  cost is a property of the savestate (`savestate_get` copies whatever IVP
+  holds); nothing in play teleports 300 m, so it is recorded here, not
+  fixed.
+
+Measured (x86 mod on 791f75a + R1 after the review, slot 13 on the arena
+for (a); the Arch server of R0, engine half `ballanced-3e4289e95f25`
+equal; physics_RT.dll identical in the rR0 and rR1 builds):
+
+- Builds: x86 CLIENT-BUILD-OK with the client target's objects deleted
+  first (`client_core.hpp` layout); x64 BUILD-OK; 421 tests pass;
+  `linux_test_syntax.sh` 25 lines ok. **Headless unchanged:** `wire_check.sh
+  rR0 rR1` WIRE-CHECK: ALL SAME on the final core (every one of the 16
+  journals IDENTICAL, the sends SAME). About fifty game launches, none hung
+  (no data member added).
+- **(a)** solo, snapshots off, `replay session` (2400 frames). The pusher
+  window is R0's baseline class: the TICK record's simulated-core count
+  rises when `P_Modul_01_Pusher` wakes, at a tick set by the TT Scaleable
+  Proximity countdown the play before the session left, and two runs
+  differ in exactly the ticks after the earlier wake. On the final binary:
+  core off ×2 (wakes 607, 606), core on ×2 (604, 606); **`r1_af_off2`
+  against `r1_af_on2` (both 606): 2541 common TICK hashes (8-2548), 0
+  differ** - identical at every tick, as the row asks, given the baseline;
+  `r1_af_off1` (607) against `r1_af_on1` (604): 58 differ, all 604-661.
+  Every client journal of the final binary equals its own server's at
+  every tick (off 2532 and 2551 ticks, on 2498 and 2541). Core off is the
+  legacy path: two core-off runs of the R0 build (wakes 610, 607), each
+  client equal to its server at every tick, and `r1_a0_off2` (R0, 607)
+  against `r1_af_off1` (R1, 607): 2497 common ticks, 0 differ. (The one
+  pre-review core-off run whose client differed from its server in
+  612-667 is the same class: client and server wakes 613 / 612.) R0's
+  countdown fix is still not done; with it the pair-matching would not be
+  needed.
+- **(b)** two clients, level 11, snapshots on (2 / 66, spacing 4.2), both
+  `replay session` of the same record, final binary, 3 off / 3 on
+  interleaved (`r1_bf_*`). Per client `snaps/ok/mism/rb`, resim, max_err,
+  mirror (`_Peer_` kind 0) max / mean: off c1 1322/1303/19/19 35 .246
+  .246/.088, 1326/1307/19/19 37 .272 .272/.087, 1330/1311/19/19 34 .220
+  .220/.077; c2 1317/1298/19/19 34 .226 .226/.086, 1321/1301/20/20 34 .226
+  .226/.078, 1325/1305/20/20 39 .283 .283/.084. On c1 1321/1304/17/17 28
+  .220 .220/.073, 1330/1312/18/18 24 .266 .266/.094, 1326/1310/16/16 21
+  .310 .310/.110; c2 1316/1296/20/20 45 .317 .317/.100, 1326/1305/21/21 31
+  .226 .226/.082, 1322/1306/16/16 22 .226 .226/.089. The off band over the
+  twelve R1 off runs of this file's four batches (the legacy path, the
+  same harness and server): c1 mism 17-24, max_err .195-.310, mirror mean
+  .073-.096; c2 mism 18-22, .181-.317, .060-.090; every on value lies in
+  the §5.3 band they make. This batch's three off runs alone had mism 19
+  / 19-20, so their band (±1) leaves c1's 17 and 16 and c2's 16 below it
+  (fewer mismatches) and the mirror means .110 / .100 just above (by .011
+  / .006). Resim (not a criterion of (b)): on 21-45, off 34-39 in this
+  batch and 28-61 over the twelve.
+  Events applied to tick 2580: each client journaled the server's 42 S5
+  events of the other player (35 BodyRevived, 4 Physicalize, 3
+  Unphysicalize), equal as sets, in every run of both arms. unmatched /
+  far / frozen 0, resyncs 0 everywhere. Every server journal replays exact
+  in the SimTool (matched = ticks, 0 checkpoint mismatches); every client
+  journal replays to its end as the legacy ones do (rc 3: only the
+  received snapshots are compared); `worst_bodies.py` reads both clients'
+  journals of every run (core-on journals list the balls, 0.18-0.21 m;
+  every mechanism 0.0).
+- **(c)**, second form (`r1_c2.py`): `net lag 150` both ways on both
+  clients, a beam 4 m up per client, a death per client (a beam 30 m down:
+  BallOff, respawn), `session stall 1000` on client 2; final binary, 3 off
+  / 3 on interleaved (`r1_cg_*`). Off c1 mism 69/73/69, resim
+  2145/2232/2184, max_err 7.51/30.06/5.55, mirror mean .613/.989/.567,
+  unmatched 0; c2 105/127/114, 2278/2676/2407, 9.48/30.13/12.15,
+  .486/.939/.591, unmatched 32/36/35. On c1 68/69/70, 2099/2127/2196,
+  5.63/7.49/7.45, .555/.577/.561, 0; c2 117/113/122, 2444/2348/2522,
+  11.05/9.92/10.03, .598/.578/.538, 32/32/30. snaps / ok likewise: every on
+  value of every metric lies in this batch's off band. resyncs: c1 0/0,
+  c2 1/1 in every run of both arms (the stall rebased the tick driver; one
+  request, in flight until the reassignment, the full snapshot applied).
+  No slow-frame run of 4 frames or more in any of the six. Events: each
+  client journaled exactly the server's S5 events of the other player
+  (46 = 46, 48 = 48), equal as sets; the late ones (`late>0`: 0-2 per
+  run, both arms) were made at the next pre_step's drain. **The own ball
+  after the beam** (LOCAL checkpoints every 2 ticks against the
+  server's): core on 0.0000-0.0005 m from the stamp to stamp + 66 for the
+  4 m beam of each client, off 0.22-0.30 m (stamped a tick the game had
+  stepped); after the death beam, c1 on 0.03-0.20 m, off 0.28-0.50 m; c2
+  on 3.47-4.97 m, off 3.19-4.26 m in two runs and 0.44-0.47 m in one (the
+  ball dropping through the volume, both arms). Every
+  server journal exact in the SimTool; both client journals replay to
+  their end in every run. The first form (300 m beams, `r1_c*`, `r1_cf*`)
+  is superseded: see the 300 m bullet above.
+- **(c), the paths the plain run does not reach** (core on, `r1_c2.py
+  ... exercise`, `r1_cx_on2`): `session drop-birth` on client 1 after its
+  death beam kept its respawn's Physicalize (stamp 1558) off the wire;
+  `own_body_backstop` re-reported it at 1623 (backstops=1), and client 2
+  made client 1's mirror at 1623, from its row of 1664. `net blackout 1500
+  down` on client 1 over client 2's respawn: "remote player ... started
+  from its row of tick 1434 (stamp 1386)" (`mirror_start_from_row`, which
+  the plain runs never reach: there the relayed birth always arrives
+  before the server has simulated its stamp, as on the legacy path, whose
+  rule is the same). The stall's resync applied on client 2, then `net
+  blackout 900 both`: "resync owed (a substituted own frame arrived past
+  the reach) at tick 1684: the limiter holds it back", then "resync
+  requested (... (owed)) at tick 1714", reassigned and applied (resyncs
+  2/2): the limiter's in-flight and owed paths, each once, with the
+  resync applied. (The owed path is reachable at R1 although the own
+  corrections and the echoes are off: the held section's past-the-reach
+  and lost-notice requests are owed and are not behind `own_corrections`.)
+  Events equal as sets with the server's S5; the server journal exact in
+  the SimTool. A first exercise run (`r1_cx_on1`, the blackout too early
+  for the respawn) showed the backstop (907 dropped, re-reported at 963)
+  and the owed path the same way.
+- The reviews. Fixed: the `update_current_sector` gate (anchored only);
+  `begin` resets the backstop's count and limiter; the drain's comment and
+  this note (the legacy order; the events' place does not matter; both
+  departures marked for sign-off); `drive_from_newest_relay` follows
+  `input_rewind`; the SessionStart refusal and the core-not-made message;
+  `beam` / `sector N` unassigned; the switch no longer held by a latch no
+  one runs (not exercised live: the server starts no physics room for a
+  member in the menu); the stale on_message comment; the frozen-clock
+  test; the 30-unmatched note for R4; core off against R0 measured ((a)
+  above); the backstop and the owed path exercised live. Refuted: that
+  dispatching snapshots last breaks `mirror_start_from_row` - the core
+  queues events for pre_step's drain, after the whole mailbox (snapshots
+  included) has been taken, so a birth always reads every row of its
+  batch; the policy did not fire in the plain runs because no row newer
+  than the stamp exists when the relayed birth arrives, which the
+  blackout run shows. The (c) first form's extra resyncs were the 300 m
+  teleport's savestate cost, not the drain or the policies.
+- Not done: R0's pusher-countdown fix (its own step); the forced-rollback
+  verb is R2's check.
 
 ## 7. Open questions
 

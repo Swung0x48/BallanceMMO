@@ -24,7 +24,26 @@ namespace bmmo::session {
 
     void session_client_core::on_session_snapshot(const bmmo::session_snapshot_msg& msg) {
         ++s.snapshots_received_;
-        if (msg.session == s.session_ && s.phase_ == client_core_state::phase::running) apply_snapshot(msg);
+        if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
+        // mirror_start_from_row (R1): every snapshot's ball rows, stale ones
+        // included, before anything decides about the snapshot - the newest
+        // row of each player is what a mirror made live starts from.
+        if (config.mirror_start_from_row)
+            for (const auto& body: msg.bodies) {
+                if (body.kind != bmmo::session::body_kind::Ball) continue;
+                auto& row = s.ball_rows_[body.owner];
+                if (row.have && row.tick > msg.tick) continue;   // an older snapshot, arriving late
+                row.have = true;
+                row.tick = msg.tick;
+                for (int k = 0; k < 3; ++k) {
+                    row.position[k] = body.position[k];
+                    row.linear[k] = body.linear[k];
+                    row.angular[k] = body.angular[k];
+                }
+                for (int k = 0; k < 4; ++k) row.rotation[k] = body.rotation[k];
+                row.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
+            }
+        apply_snapshot(msg);
     }
 
     void session_client_core::apply_snapshot(const bmmo::session_snapshot_msg& snapshot) {
@@ -40,6 +59,8 @@ namespace bmmo::session {
             journal_.writer().checkpoint(snapshot.tick, flags, snapshot.bodies);
         }
         if (s.have_snapshot_ && snapshot.tick <= s.last_snapshot_tick_ && !snapshot.full) { ++s.snapshots_stale_; return; }
+        // The snapshot stream is alive as of this frame (acked_input, R1).
+        s.snapshot_frame_ = s.frames_since_anchor_;
         // (Whether the server had our input for the tick it simulated is
         // read from the relay header's `acked` now, every tick and with
         // snapshots off too: note_held_section.)
@@ -116,6 +137,14 @@ namespace bmmo::session {
         s.have_snapshot_ = true;
         s.last_snapshot_tick_ = snapshot.tick;
         ++s.snapshots_applied_;
+        // The server's read cursor for our input (acked_input, R1): its first
+        // value of a numbering is the baseline, and every change moves it.
+        if (s.assigned_ && (!s.snapshot_acked_known_ || snapshot.acked_input_tick != s.snapshot_acked_tick_)) {
+            s.snapshot_acked_known_ = true;
+            s.snapshot_acked_tick_ = snapshot.acked_input_tick;
+            s.snapshot_acked_frame_ = s.frames_since_anchor_;
+        }
+        if (config.own_body_backstop) check_own_body(snapshot);
         if (config.rollback) {
             for (const auto& body: snapshot.bodies)
                 if (body.kind == bmmo::session::body_kind::Mechanism) {
@@ -142,7 +171,14 @@ namespace bmmo::session {
                 return recorded_input_at(entity, tick, out);
             };
             const scope_guard keep_cells = platform_.keep_live_cells(*this);
+            const uint64_t frozen_before = s.rollback_.stats().frozen;
             const bool rolled = s.rollback_.on_snapshot(world(), snapshot, current_tick(), entity_of, input_at);
+            // A frozen clock set the bodies and dropped the history with no
+            // replay (rollback.hpp): the world stays on the snapshot while
+            // the tick counter runs on, and only a re-anchor brings the two
+            // back together (design 4.1, 7 Q1: a core rule for both hosts
+            // from R1; retail is the host whose clock can freeze).
+            if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen");
             if (rolled) {
                 ++s.snapshot_rollbacks_;
                 s.snapshot_rollback_depth_ += current_tick() - snapshot.tick;
@@ -248,6 +284,44 @@ namespace bmmo::session {
                 journal_.body_correction(3, entity, snapshot.tick, corrector.stats().last_error, body.position);
             }
         }
+    }
+
+    // ------------------------------------------------- own_body_backstop
+    // Every snapshot carries a ball row for each physicalized player, awake
+    // or not.  Ours missing while our ball is physicalized here says the
+    // server has no body for us: its copy of the last Physicalize never
+    // arrived or was rejected, and no retail script reports it again.  After
+    // about a second of snapshots it is reported once more, with the pose
+    // the ball has now and without the spawn flag (the body was kicked, or
+    // deliberately not, already): the retail mod's check_own_body (design
+    // 4.1 own_body_backstop, R1).
+    void session_client_core::check_own_body(const bmmo::session_snapshot_msg& snapshot) {
+        bool present = false;
+        for (const auto& body: snapshot.bodies)
+            if (body.kind == bmmo::session::body_kind::Ball && body.owner == s.own_id_) { present = true; break; }
+        if (present || !s.own_physicalized_ || !s.own_last_birth_.valid || s.resync_pending_) {
+            s.snapshots_without_own_ = 0;
+            return;
+        }
+        if (++s.snapshots_without_own_ < 30) return;
+        const auto now = platform_.now(clock_site::own_backstop);
+        if (s.own_backstops_ > 0 && now - s.last_backstop_ < std::chrono::seconds(2)) return;
+        const own_ball_view own = platform_.own_ball();
+        if (own.entity.empty() || !own.physicalized) return;
+        s.last_backstop_ = now;
+        s.snapshots_without_own_ = 0;
+        ++s.own_backstops_;
+        bmmo::session_event_msg event;
+        event.tick = current_tick() + 1;
+        event.type = bmmo::session::event_type::Physicalize;
+        event.ball_type = s.own_last_birth_.ball_type;
+        event.flags = static_cast<uint8_t>(s.own_last_birth_.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
+        for (int k = 0; k < 3; ++k) event.position[k] = static_cast<float>(own.state.position[k]);
+        quaternion_rows(own.state.rotation, event.rotation);
+        event.recipe = s.own_last_birth_.recipe;
+        send_event(event);
+        logf("the server has no body for our ball (%llu); Physicalize re-reported at tick %u",
+             static_cast<unsigned long long>(s.own_backstops_), event.tick);
     }
 
     // ------------------------------------------------------------ the relay

@@ -219,6 +219,7 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             // server drops that player from the session world here, so a replay
             // of our file has to drop it too.
             utils_.run_on_game_thread([this, subject = msg.subject] {
+                if (core_host_leave_player(subject)) return;   // a session the shared core runs (R1)
                 if (physics_session_.session == 0) return;
                 bmmo::session::client_journal::instance().leave_player(
                         physics_session_.current_tick(), subject);

@@ -42,6 +42,7 @@ namespace bmmo::session {
         journal_ms,           // a TICK record's ms
         journal_start,        // core::client_journal::open: the origin of journal_ms
         journal_utc,          // core::client_journal::open: the header's utc_ms (system clock, in ms)
+        own_backstop,         // the retail own_body_backstop: the 2 s re-report limiter (R1)
         count_
     };
 
@@ -50,7 +51,7 @@ namespace bmmo::session {
             "?", "run_start", "run_limit", "run_report", "report_init", "room_ready", "assign_resync",
             "assign_renumber", "assign_release", "anchor_origin", "anchor_hold", "hold_poll", "hold_timeout",
             "pace_expected", "pace_rebase", "pace_due", "slew_step", "slew_start", "hold_event_stamp",
-            "hold_event_release", "resync_limiter", "journal_ms", "journal_start", "journal_utc"};
+            "hold_event_release", "resync_limiter", "journal_ms", "journal_start", "journal_utc", "own_backstop"};
         static_assert(sizeof(names) / sizeof(names[0]) == static_cast<size_t>(clock_site::count_),
                       "a name for every clock site");
         const auto i = static_cast<size_t>(site);

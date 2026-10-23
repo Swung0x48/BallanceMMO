@@ -518,6 +518,42 @@ namespace bmmo::session {
         // The black box (design 9.15) and its bookkeeping moved into
         // core::client_journal at E2 (session_client_core::journal()).
 
+        // ---- R1 (design 4.1, the retail host's policies and readers) ----
+        // mirror_start_from_row: the newest snapshot row of every player's
+        // ball, physicalized here or not (the retail mod's latest_ball_rows,
+        // PSC cache_ball_row): a mirror made live starts from it when it is
+        // newer than the birth's stamp.  Kept only with the policy on.
+        struct ball_row {
+            bool have = false;
+            uint32_t tick = 0;
+            double position[3] = {};
+            double rotation[4] = {};
+            float linear[3] = {};
+            float angular[3] = {};
+            bool simulated = false;
+        };
+        std::map<uint32_t, ball_row> ball_rows_;
+        // own_body_backstop: the last own Physicalize sent (what a re-report
+        // carries but the pose), the snapshots in a row that named no body of
+        // ours while ours was physicalized, the last re-report, and the count
+        // (the retail mod's last_physicalize / snapshots_without_own /
+        // physicalize_resends, PSC check_own_body).
+        struct own_last_birth {
+            bool valid = false;
+            uint8_t ball_type = 0, flags = 0;
+            bmmo::session::ball_recipe recipe;
+        } own_last_birth_;
+        uint32_t snapshots_without_own_ = 0;
+        clock_type::time_point last_backstop_{};
+        uint64_t own_backstops_ = 0;
+        // The snapshots' acked_input_tick as the retail starvation detector
+        // reads it (session_client_core::acked_input; the retail mod's
+        // acked_input_state): the newest one under this numbering, the frame
+        // it last moved at, and the frame of the newest applied snapshot.
+        bool snapshot_acked_known_ = false;
+        uint32_t snapshot_acked_tick_ = 0;
+        int64_t snapshot_acked_frame_ = -1;
+        int64_t snapshot_frame_ = -1;
     };
 
     // Design 1.2 "Configuration": what the host decides for the session, filled
@@ -566,6 +602,34 @@ namespace bmmo::session {
         // them its behaviour is today's `rollback` alone.
         bool input_rewind = true;
         bool own_corrections = true;
+        // Design 1.2 feature switch (R1): `lifecycle_rewind` - a remote birth
+        // stamped in the past is made inside a replay at its tick
+        // (make_remote_birth's pending path) and a late body change rewinds
+        // (rewind_for_lifecycle).  Off (retail until R3), each is made or
+        // taken out at the drain, at the live tick, with no rewind.  Needs
+        // `rollback` too; the headless client leaves it on, so with it its
+        // behaviour is today's `rollback` alone.
+        bool lifecycle_rewind = true;
+        // Retail policies (design 4.1; R1), off by default (the headless
+        // client never sets them).  `mirror_start_from_row`: a mirror made
+        // live starts from its player's newest snapshot row when that row is
+        // newer than the birth's stamp - pose and velocity, no spawn kick
+        // (the row carries the server's) - the 9.17 workaround, needed only
+        // while lifecycle_rewind is off.  `own_body_backstop`: 30 snapshots
+        // in a row without a body of ours while our ball is physicalized
+        // re-report its last Physicalize (without the spawn flag, at most
+        // every 2 s; design 7.1 decision 2: retail-only until R6).
+        bool mirror_start_from_row = false;
+        bool own_body_backstop = false;
+        // Retail policy (R1, while input_rewind is off): a predicted mirror's
+        // frame for the step of T is chosen at pre_step(T), from the relay
+        // as the messages between the frames left it (the legacy retail
+        // frame's order: the relay taken, then the next tick's drive), not
+        // at post_step(T - 1) before them.  Without the input rewind nothing
+        // corrects that tick's prediction but the next snapshot, so a key
+        // edge relayed in between is played a tick late and every edge
+        // costs one more mismatched snapshot (R1 (b): 22-29 against 17-21).
+        bool drive_from_newest_relay = false;
         // The window: line's phase (E10; design 1.2): a line closes the
         // window on the ticks t with (t - window_shift) % kWindowTicks == 0
         // (headless --window-origin; 0 = lines at multiples of 60).
@@ -600,6 +664,42 @@ namespace bmmo::session {
         bool held = false;
         bool timed_out = false;
     };
+
+    // acked_input (design 1.3; R1): the snapshots' acked_input_tick - the
+    // last tick the server consumed a fresh input frame of ours for - as the
+    // retail starvation detector reads it (transitional host code until R4,
+    // design 3.2): whether a baseline exists for the current numbering, the
+    // newest value, the frames_since_anchor it last moved at, and the
+    // frames_since_anchor of the newest applied snapshot (a stopped stream is
+    // an outage, not a numbering hole).
+    struct acked_input_view {
+        bool known = false;
+        uint32_t tick = 0;
+        int64_t frame = -1;
+        int64_t snapshot_frame = -1;
+    };
+
+    // A body's quaternion (x, y, z, w) as the rows of the 3x3 rotation a
+    // Physicalize event carries (rotation[r * 3 + k] = row r), the formula of
+    // VxQuaternion::ToMatrix (R1: a mirror started from a snapshot row, the
+    // own_body_backstop's re-report).
+    inline void quaternion_rows(const double q[4], float rows[9]) {
+        const float x = static_cast<float>(q[0]), y = static_cast<float>(q[1]);
+        const float z = static_cast<float>(q[2]), w = static_cast<float>(q[3]);
+        const float norm = x * x + y * y + z * z + w * w;
+        if (norm < 1e-12f) {
+            for (int i = 0; i < 9; ++i) rows[i] = i % 4 == 0 ? 1.0f : 0.0f;
+            return;
+        }
+        const float s = 2.0f / norm;
+        const float xs = x * s, ys = y * s, zs = z * s;
+        const float wx = w * xs, wy = w * ys, wz = w * zs;
+        const float xx = x * xs, xy = x * ys, xz = x * zs;
+        const float yy = y * ys, yz = y * zs, zz = z * zs;
+        rows[0] = 1.0f - (yy + zz); rows[1] = xy - wz;          rows[2] = xz + wy;
+        rows[3] = xy + wz;          rows[4] = 1.0f - (xx + zz); rows[5] = yz - wx;
+        rows[6] = xz - wy;          rows[7] = yz + wx;          rows[8] = 1.0f - (xx + yy);
+    }
 
     // The unit tests' door to the private state and steps
     // (tests/session_client_core_test.cpp defines it; nothing else does).
@@ -666,6 +766,10 @@ namespace bmmo::session {
         void anchor(const anchor_report& report);
         // The anchor hold, once per host loop pass while it holds.
         hold_state poll_hold();
+        // The anchor hold given up by the host (R1; design 1.3): the retail
+        // host's blocking hold when the connection is lost.  Nothing while
+        // not holding.  No headless path calls it.
+        void release_hold(const char* why);
         // SessionEnd: drop the mirrors and go idle.
         void end(const std::string& reason);
 
@@ -718,7 +822,9 @@ namespace bmmo::session {
         // the sector poll, the drive of T + 1, the beam, the amend and the
         // journal follow.  `stepped` false: the step failed - only the
         // forced own polling is restored (step 13), and false is returned
-        // (the host ends the session).
+        // (the host ends the session).  A frame no pre_step prepared is
+        // refused (R1: false, logged, nothing done): the retail anchor path
+        // could skip one, the headless frame always pairs them.
         bool post_step(bool stepped);
 
         // ---- pacing (E9; the host owns the clock, design 1.3) ----
@@ -812,6 +918,14 @@ namespace bmmo::session {
         const bmmo::session::correction_stats& own_correction_stats() const { return s.corrector_.stats(); }
         const std::vector<uint8_t>* recorded_savestate(uint32_t tick) const { return s.rollback_.recorded_savestate(tick); }
         const std::vector<uint8_t>* recorded_scripts(uint32_t tick) const { return s.rollback_.recorded_scripts(tick); }
+        // What the retail host reads (R1): the snapshots' acked input (its
+        // transitional starvation detector), the own_body_backstop's
+        // re-reports, and the resync requests sent.
+        acked_input_view acked_input() const {
+            return {s.snapshot_acked_known_, s.snapshot_acked_tick_, s.snapshot_acked_frame_, s.snapshot_frame_};
+        }
+        uint64_t own_body_backstops() const { return s.own_backstops_; }
+        uint64_t resyncs_sent() const { return s.resyncs_sent_; }
 
         // ---- reports (E10, client_core_report.cpp; design 1.3) ----
         // The status line (the headless 5 s report and the session's end;
@@ -968,7 +1082,10 @@ namespace bmmo::session {
         // What pre_step leaves for post_step: the frame number and tick it
         // prepared, and the forced own frame of that tick (step 11) with the
         // entity the host forced.
+        // `prepared`: a pre_step ran and no post_step has taken its frame
+        // yet (R1: post_step refuses a frame without one; begin clears it).
         struct frame_scratch {
+            bool prepared = false;
             int64_t f = 0;
             uint32_t tick = 0;
             bool forced = false;
@@ -1013,7 +1130,14 @@ namespace bmmo::session {
         bool unphysicalize_remote(uint32_t player, uint32_t tick);
         uint32_t live_first_tick(uint32_t stamp) const;
         void unphysicalize_mirror(const std::string& entity);
-        void physicalize_remote(const client_core_state::pending_birth& event, uint32_t first_tick);
+        // True when the mirror's body was made.
+        bool physicalize_remote(const client_core_state::pending_birth& event, uint32_t first_tick);
+        // mirror_start_from_row (R1): a live birth started from its player's
+        // newest snapshot row; false (nothing done) when no row is newer
+        // than the stamp.
+        bool physicalize_remote_from_row(const bmmo::session_event_msg& event);
+        // The snapshot path's retail policy (R1): own_body_backstop.
+        void check_own_body(const bmmo::session_snapshot_msg& snapshot);
 
         // The event log muted for a scope, nesting (platform mute_event_log;
         // the flag in force is client_core_state::event_log_muted_).  Private
