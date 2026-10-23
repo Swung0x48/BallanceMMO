@@ -48,6 +48,11 @@ namespace bmmo::session {
                 out[remote.entity] = generation == s.generations_.end() ? 0u : generation->second;
             }
         };
+        // The mechanism bodies a replayed tick has: the same list the live
+        // record takes (tracked.mechanisms in the frame), so a body the
+        // replay made before the live frames did is recorded from the
+        // replayed tick that has it.
+        world_hooks_.replay_mechanisms = [this]() { return platform_.movable_mechanisms(); };
         // Every decision the engine takes about a snapshot, straight into
         // the box: no log parsing needed to know what this client did.
         world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };

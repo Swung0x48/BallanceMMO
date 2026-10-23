@@ -131,10 +131,53 @@ namespace bmmo::game {
         struct restore_counters {
             uint32_t joints_reset = 0, joints_missing = 0, links_rearmed = 0, links_unrestorable = 0, links_live_pending = 0;
             uint32_t cells_written = 0;
+            uint32_t joints_released = 0;   // handles nulled because the rollback destroyed their body (release_joints)
         };
         static restore_counters& last_restore() {
             static restore_counters counters;
             return counters;
+        }
+
+        // The joint blocks of the selected scripts that hold a handle on
+        // `entity`: its body is their Target or their Object2 (input 0 of
+        // all four).  IVP deletes a constraint or a spring with either of
+        // its bodies (IVP_Constraint_Local / IVP_Actuator delete themselves
+        // when a core or an anchor goes), so when the rollback destroys
+        // `entity`'s body these handles point at freed memory: the block's
+        // next reset, Create (Hinge deletes a handle it finds) or teardown
+        // DETACH would delete it again.  The force blocks are not here: IVP
+        // only detaches their controller (PhysicsControllerForce::
+        // core_is_going_to_be_deleted_event), which the block still owns.
+        static std::vector<CKBehavior*> joints_on(CKContext* context, const selection& sel, const std::string& entity) {
+            std::vector<CKBehavior*> out;
+            if (!context || entity.empty()) return out;
+            const auto named = [&entity](CKObject* object) {
+                return object && object->GetName() && entity == object->GetName();
+            };
+            for (CK_ID id: sel.scripts) {
+                auto* script = CKBehavior::Cast(context->GetObject(id));
+                if (!script) continue;
+                walk(script, [&](CKBehavior* beh) {
+                    if (!is_joint_block(beh) || !joint_handle(beh)) return;
+                    if (named(beh->GetTarget()) || (beh->GetInputParameterCount() > 0 && named(beh->GetInputParameterObject(0))))
+                        out.push_back(beh);
+                });
+            }
+            return out;
+        }
+        // After the body is gone: the handles IVP freed with it are nulled,
+        // never deleted - nothing in IVP changes, and the block is what a
+        // block with no joint is (its next Create makes one).
+        static uint32_t release_joints(const std::vector<CKBehavior*>& blocks) {
+            uint32_t released = 0;
+            for (CKBehavior* beh: blocks) {
+                void* none = nullptr;
+                if (!joint_handle(beh)) continue;
+                beh->SetLocalParameterValue(0, &none);
+                ++released;
+            }
+            last_restore().joints_released += released;
+            return released;
         }
 
         // Whether a root script is one of the mechanisms': owned by a level

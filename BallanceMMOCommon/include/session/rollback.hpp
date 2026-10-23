@@ -20,6 +20,8 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "../entity/session.hpp"
@@ -163,6 +165,20 @@ namespace bmmo::session {
         // body the history has born later in the window is parked until then
         // and is skipped whatever the caller says.
         std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
+        // Optional: the mechanism bodies the world has now - the very list
+        // the caller's live records track as `mechanisms`.  Asked after each
+        // replayed step.  The replay re-records every tick with the live
+        // record's tracked set, but the replayed world can have a mechanism
+        // the live frames did not have yet (a sector activation the live
+        // frames cancelled or made later, re-issued here at its tick): left
+        // out, the body's first record is the first live tick after the
+        // replay, and a later rewind anchored between the replayed birth and
+        // that tick destroys it as a body born inside its window while the
+        // restored scripts keep the joints they made on it - IVP frees the
+        // joints with the body and the blocks' handles dangle (the teardown
+        // crash of e8ab2_swing_n1/capture3).  Named here, it is recorded from
+        // the replayed tick that has it, with the generation it has now.
+        std::function<std::vector<std::string>()> replay_mechanisms;
         // The mechanism scripts' runtime state as bytes (game/script_replay.hpp):
         // captured with every record, put back at the anchor so the replayed
         // frames start the scripts where the live frames had them.  Optional;
@@ -343,6 +359,7 @@ namespace bmmo::session {
         uint64_t birth_recreate_mismatches = 0;     // ...or not: re-posed from the record as a parked body would be
         uint64_t birth_recreate_failures = 0;       // destroy or recreate refused: the body was parked / is missing
         uint64_t births_missing = 0;                // destroyed at a restore and not made again by its birth tick's replayed scripts
+        uint64_t replay_mechanisms_added = 0;       // replayed ticks' records that name a mechanism body the live record did not (replay_mechanisms)
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
@@ -1273,12 +1290,48 @@ namespace bmmo::session {
                     ++resim_traces_;
                     world.log("resim tick " + std::to_string(t) + ":" + trace);
                 }
+                // The mechanism bodies the replayed world has after this step
+                // that the live record's set does not name (rollback_world::
+                // replay_mechanisms): recorded from here on, under the
+                // lifetime the body has now, as a live record would have
+                // named them.  Not a body still parked for a later birth (it
+                // is held out of the world until then).  A body destroyed at
+                // this restore for a birth the live frames made later
+                // (recreate) that the replayed scripts have made already is
+                // the replay's body from here on: recorded, and taken off its
+                // birth tick, which would otherwise beam it to a birth record
+                // of the other history - the records then start where the
+                // body and the joints the script records hold on it start.
+                if (world.replay_mechanisms) {
+                    auto& mechanisms = step_tracked.mechanisms;
+                    std::unordered_set<std::string_view> named(mechanisms.begin(), mechanisms.end());
+                    std::vector<std::string> added;
+                    for (std::string& name: world.replay_mechanisms()) {
+                        if (named.count(name)) continue;
+                        if (const auto it = plan.find(name); it != plan.end() && it->second.repose_tick != 0
+                                && static_cast<int32_t>(it->second.repose_tick - t) > 0) {
+                            if (!it->second.recreate) continue;   // parked
+                            it->second.repose_tick = t;           // made early by the replay: no birth re-pose later
+                        }
+                        added.push_back(std::move(name));
+                    }
+                    for (std::string& name: added) {
+                        step_tracked.generations[name] = generation_now(name);
+                        ++stats_.replay_mechanisms_added;
+                        if (world.log && replay_mechanism_logs_++ < 8)
+                            world.log("replay: " + name + " is recorded from tick " + std::to_string(t)
+                                      + " on (the live record did not name it)");
+                        mechanisms.push_back(std::move(name));
+                    }
+                }
                 tick_state state;
                 state.tick = t;
                 // The set this tick was replayed with: a remote born inside the
                 // window is recorded from its birth tick on, so a later rewind
                 // anchored there restores it from its own record and the
                 // oldest record of its lifetime (birth_record) is its birth.
+                // The same for a mechanism the replay made earlier than the
+                // live frames did (above).
                 state.tracked = std::move(step_tracked);
                 state.inputs = std::move(inputs);
                 capture(world, state);
@@ -1781,6 +1834,7 @@ namespace bmmo::session {
         uint32_t script_log_cap_ = 8;   // set_script_log_cap: a diagnostic run raises it to name every differing script
         uint32_t savestate_replay_logs_ = 0;
         uint32_t recreate_logs_ = 0;
+        uint32_t replay_mechanism_logs_ = 0;
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;

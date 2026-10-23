@@ -52,6 +52,12 @@ namespace bmmo::physics {
     bool force_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error);
     bool force_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error);
     void set_event_log_muted(bool muted);
+    // While muted, keep the "recipe" entries of the bodies created (the
+    // format drain_event_log has) in a buffer of their own, drained by
+    // drain_muted_recipes: a client's record of the births a replayed frame
+    // made.  Off by default; everything else stays muted.
+    void set_event_log_keep_muted_recipes(bool keep);
+    std::string drain_muted_recipes();
 
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
     // Engine change #6: while enabled, the retail Unphysicalize block keeps

@@ -249,6 +249,7 @@ namespace bmmo::session {
             if (host_before) host_before(tick);
         };
         binding.replay_remotes = hooks.replay_remotes;
+        binding.replay_mechanisms = hooks.replay_mechanisms;
         binding.on_correction = hooks.on_correction;
         rollback_world world = bind_rollback_world(backend, binding);
         const local_birth_log* births = o.births;

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,30 @@ namespace bmmo::session {
             return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
                  + (d.logical && o.diff_detail ? " :: " + d.detail : std::string());
         };
+        // A body the rollback destroys (rollback_world::destroy_body, bound
+        // before this) takes its joints with it inside IVP, and a joint block
+        // of these scripts still holding one would delete it again at its
+        // next reset, Create or teardown.  The records keep that from
+        // happening when they agree - a body born inside the window had no
+        // joint at the anchor, and the script restore has reset it already -
+        // but nothing else enforces it: the handles the destroy freed are
+        // nulled right after it (script_replay::joints_on / release_joints).
+        if (world.destroy_body) {
+            const auto destroy = world.destroy_body;
+            const auto log = world.log;
+            auto logs = std::make_shared<uint32_t>(0);
+            world.destroy_body = [destroy, log, logs, context, selection](const std::string& entity, uint32_t birth_tick) {
+                const std::vector<CKBehavior*> held = bmmo::game::script_replay::joints_on(context, *selection, entity);
+                const bool destroyed = destroy(entity, birth_tick);
+                if (destroyed && !held.empty()) {
+                    const uint32_t released = bmmo::game::script_replay::release_joints(held);
+                    if (log && released && (*logs)++ < 8)
+                        log("joints: " + std::to_string(released) + " joint handle(s) on " + entity
+                            + " released with its body at the restore (the script records held them)");
+                }
+                return destroyed;
+            };
+        }
         const auto before = world.pre_step;
         world.pre_step = [b, o, before, context, selection](uint32_t tick) {
             if (before) before(tick);

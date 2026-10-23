@@ -2697,6 +2697,33 @@ namespace {
                     return ok;
                 };
             }
+            // The births a replayed tick made, in the birth log under that
+            // tick: the event log is muted around the replayed frame, so a
+            // body the replay made where the live frames made none (a sector
+            // activation the live frames cancelled, re-issued in the replay)
+            // had no Physicalize matrix to be put back to when a later rewind
+            // destroyed it, and every rewind across that birth started its
+            // Physicalize from wherever the last one had left the entity.
+            // Only a birth the log does not already have at that tick (a
+            // replay that agrees with the live frames adds nothing), and not
+            // the balls (never destroyed or put back).
+            if (world.pre_step) {
+                const auto inner = world.pre_step;
+                world.pre_step = [this, inner](uint32_t tick) {
+                    bmmo::physics::set_event_log_keep_muted_recipes(true);
+                    inner(tick);
+                    bmmo::physics::set_event_log_keep_muted_recipes(false);
+                    const std::string recipes = bmmo::physics::drain_muted_recipes();
+                    if (recipes.empty()) return;
+                    bmmo::session::parse_event_log(recipes, [&](const std::string& kind, const std::string& text) {
+                        bmmo::session::local_birth birth;
+                        if (kind != "recipe" || !bmmo::session::parse_recipe_event(text, birth)) return;
+                        if (birth.name.rfind("Ball_", 0) == 0 || local_births_.find(birth.name, tick)) return;
+                        if (replay_birth_logs_++ < 8) logf("birth log: %s made by the replayed tick %u", birth.name.c_str(), tick);
+                        local_births_.add(tick, std::move(birth));
+                    });
+                };
+            }
             return world;
         }
 
@@ -2778,7 +2805,7 @@ namespace {
         std::string savestate_clock_before_;                 // describe_clock() just before the last savestate restore (--trace)
         uint32_t savestate_dump_logs_ = 0;                   // --dump-savestate write failures logged (the first 3)                // report warnings logged so far (the first 8)
         uint32_t compare_scripts_ticks_ = 0, compare_scripts_logs_ = 0;
-        uint32_t recipe_parse_logs_ = 0, recreate_logs_ = 0;
+        uint32_t recipe_parse_logs_ = 0, recreate_logs_ = 0, replay_birth_logs_ = 0;
         // Every activation of Gameplay_SectorManager the live frames made, by
         // the tick whose frame consumed it, for the replay to re-issue (host
         // support's manager_activations, plan doc 10).

@@ -59,6 +59,7 @@ namespace bmmo::session {
         std::function<void(uint32_t tick)> before_replayed_tick;   // before a replayed tick's step (and its scripts' frame)
         std::function<bool()> whole_frame;                         // --replay-scripts: the step is the whole engine frame
         std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;   // rollback_world::replay_remotes
+        std::function<std::vector<std::string>()> replay_mechanisms;   // rollback_world::replay_mechanisms
         std::function<void(const std::string& entity, int made, const std::string& error,
                            const std::vector<bmmo_physics_contact>& recorded)> on_contacts_restored;
         std::function<void(const std::string& error)> on_savestate_capture_failed;
@@ -144,6 +145,9 @@ namespace bmmo::session {
         // The remotes a replay drives although the record does not name them
         // (a late birth made inside the replay).
         if (o.replay_remotes) world.replay_remotes = o.replay_remotes;
+        // The mechanism bodies a replayed tick's record names although the
+        // live record did not (a body the replay made earlier).
+        if (o.replay_mechanisms) world.replay_mechanisms = o.replay_mechanisms;
         world.get_nav = [b](const std::string& entity, bmmo_physics_nav_state& out) {
             std::string error;
             return b->navigation_get_state(entity.c_str(), out, error);

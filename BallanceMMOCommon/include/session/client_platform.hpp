@@ -136,6 +136,9 @@ namespace bmmo::session {
         // The mirrors a replayed tick drives, with their generation
         // (rollback_world::replay_remotes).
         std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
+        // The mechanism bodies the world has after a replayed step: the
+        // list the live records track (rollback_world::replay_mechanisms).
+        std::function<std::vector<std::string>()> replay_mechanisms;
         // Every decision the engine takes about a snapshot (the journal).
         std::function<void(const rollback_correction& c)> on_correction;
         // destroy_body's first half: a moved own birth the replay makes

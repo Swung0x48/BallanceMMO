@@ -463,8 +463,15 @@ namespace bmmo::physics {
             // |surf=<name>|convex=a/b|balls=x,y,z,r/..|concave=a/b|group=<g>|mtx=16 hex floats;"
             // - what a rollback needs to re-create a body born inside its
             // window the way the live frame did (docs/rollback-core-unification-plan.md, 9).
+            // While the log is muted (a replayed frame), a recipe goes to its
+            // own buffer instead when the caller asked for it
+            // (set_event_log_keep_muted_recipes): the body the replayed
+            // scripts made, for the caller's birth log.
+            bool keep_muted_recipes = false;
+            std::string muted_recipes;
             void record_recipe(IVP_Event_Object* event) {
-                if (muted || !manager || !manager->m_CurrentCreate || text.size() > 256 * 1024) return;
+                std::string* sink = muted ? (keep_muted_recipes ? &muted_recipes : nullptr) : &text;
+                if (!sink || !manager || !manager->m_CurrentCreate || sink->size() > 256 * 1024) return;
                 const CKIpionManager::PhysicsCreateParams& p = *manager->m_CurrentCreate;
                 if (!p.target || !event || !event->real_object) return;
                 char line[2600];
@@ -529,7 +536,7 @@ namespace bmmo::physics {
                         out += line;
                     }
                 out += ';';
-                text += out;
+                *sink += out;
             }
             void event_object_deleted(IVP_Event_Object* event) override {
                 record("deleted", event);
@@ -646,6 +653,12 @@ namespace bmmo::physics {
     }
 
     void set_event_log_muted(bool muted) { g_event_log.muted = muted; }
+    void set_event_log_keep_muted_recipes(bool keep) { g_event_log.keep_muted_recipes = keep; }
+    std::string drain_muted_recipes() {
+        std::string out;
+        out.swap(g_event_log.muted_recipes);
+        return out;
+    }
 
     std::string drain_event_log(CKIpionManager* physics) {
         IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;

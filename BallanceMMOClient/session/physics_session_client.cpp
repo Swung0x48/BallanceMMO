@@ -35,6 +35,19 @@ namespace {
     using bmmo::session::physics_session_state;
     using phase_type = physics_session_state::phase_type;
 
+    // Every movable body but the balls (tracked by entity, as own and
+    // remote): the mechanism set a record tracks - the live record's, and a
+    // replayed tick's (rollback_world::replay_mechanisms).
+    std::vector<std::string> movable_mechanism_names(const bmmo::physics::physics_view& view) {
+        std::vector<std::string> names;
+        for (const auto& body: view.list_bodies()) {
+            if (!body.movable || !body.name[0]) continue;
+            if (std::strncmp(body.name, "Ball_", 5) == 0) continue;
+            names.emplace_back(body.name);
+        }
+        return names;
+    }
+
     // How long the world waits at the anchor for SessionAssign before it starts
     // stepping anyway (design 9.25 phase alignment).  The assignment is one
     // reliable round trip behind SessionReady plus the slowest member's
@@ -1953,11 +1966,7 @@ void BallanceMMOClient::physics_session_frame() {
         // any body the server never names at all.  Only bodies that exist are
         // listed, so the set does not churn (design 9.25's concern).  The balls
         // are tracked by entity above.
-        for (const auto& body: physics_view_.list_bodies()) {
-            if (!body.movable || !body.name[0]) continue;
-            if (std::strncmp(body.name, "Ball_", 5) == 0) continue;
-            tracked.mechanisms.emplace_back(body.name);
-        }
+        tracked.mechanisms = movable_mechanism_names(physics_view_);
         // The lifetime of every tracked name, so a record of an earlier body
         // under the same name is never used to restore the current one.
         tracked.generations = s.generations;
@@ -3047,6 +3056,9 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
         physics_session_.last_error = error;
         if (physics_session_.savestate_set_logs++ < 8) logger_->Warn("Physics session: savestate restore failed: %s", error.c_str());
     };
+    // A mechanism the replay made before the live frames did is recorded from
+    // the replayed tick that has it, as the live record would name it.
+    o.replay_mechanisms = [this]() { return movable_mechanism_names(physics_view_); };
     // Polling resumed = a rewind replayed: the live input for the next frame
     // was consumed by the re-simulation, so the camera rows are re-armed.
     o.before_replayed_tick = [this](uint32_t tick) { replay_manager_activation(physics_session_, m_bml, tick); };

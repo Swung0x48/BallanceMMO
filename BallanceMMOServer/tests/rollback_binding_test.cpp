@@ -513,6 +513,7 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     bmmo::session::core_world_hooks hooks;
     hooks.before_replayed_tick = [&](uint32_t tick) { order.push_back("core births " + std::to_string(tick)); };
     hooks.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) { out["Ball_Wood_BMMO_4"] = tick; };
+    hooks.replay_mechanisms = []() { return std::vector<std::string>{"P_Box", "P_Plank"}; };
     hooks.on_correction = [&](const bmmo::session::rollback_correction& c) { order.push_back("correction " + c.entity); };
     hooks.destroy_own_birth = [&](const std::string& entity, uint32_t, bool& destroyed) {
         if (entity != "Own_Moved") return false;
@@ -553,6 +554,8 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     std::map<std::string, uint32_t> remotes;
     world.replay_remotes(121, remotes);
     EXPECT_EQ(remotes.at("Ball_Wood_BMMO_4"), 121u);
+    ASSERT_TRUE(world.replay_mechanisms) << "the core's list of the replayed world's mechanisms";
+    EXPECT_EQ(world.replay_mechanisms(), std::vector<std::string>({"P_Box", "P_Plank"}));
     order.clear();
     bmmo::session::rollback_correction c;
     c.entity = "Ball_Wood";

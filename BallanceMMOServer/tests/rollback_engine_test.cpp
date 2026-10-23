@@ -2960,3 +2960,157 @@ TEST(RollbackEngine, ABirthTheServerNeverMadeLeavesTheHistoryFromItsOrigin) {
     ASSERT_TRUE(engine.rewind_to(w, kMoveOrigin + 2, kMoveNow, no_input, "later"));
     EXPECT_EQ(0u, world.bodies.count("Own"));
 }
+
+// A mechanism the replay makes before the live frames did (a sector
+// activation the live frames cancelled, re-issued inside the replay at its
+// tick: e8ab2_swing_n1/capture3).  The live records of the window do not name
+// it; re-recorded with their sets alone, its first record was the first live
+// tick after the replay, and a later rewind anchored between the replayed
+// birth and that tick destroyed it as a body born inside its window - while
+// the restored scripts kept the joints they had made on it.  With
+// replay_mechanisms the replayed ticks name it from the tick that has it, under
+// the lifetime it has now: a rewind anchored inside that window restores it
+// from its record, one anchored before it destroys it at the replayed birth.
+TEST(RollbackEngine, AMechanismTheReplayMadeIsRecordedFromTheReplayedTickThatHasIt) {
+    for (const bool hook: {true, false}) {
+        SCOPED_TRACE(hook ? "replay_mechanisms" : "no hook (the old records)");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Own"];
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked live;
+        live.own_entity = "Own";
+        live.generations = {{"Own", 1}, {"Arm", 1}};
+        for (uint32_t tick = 1; tick <= 10; ++tick) {
+            w.step();
+            engine.record(w, tick, live, {{"Own", input_frame{}}});
+        }
+        constexpr uint32_t kReplayedBirth = 5;
+        fake_body made;
+        made.position[0] = 10.0;
+        w.pre_step = [&](uint32_t tick) {
+            if (tick == kReplayedBirth && !world.bodies.contains("Arm")) world.bodies["Arm"] = made;
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        if (hook) {
+            w.replay_mechanisms = [&]() {
+                std::vector<std::string> names;
+                for (const auto& [name, body]: world.bodies) if (name != "Own") names.push_back(name);
+                return names;
+            };
+        }
+        ASSERT_TRUE(engine.rewind_to(w, 2, 10, no_input, "input corrected at tick 3"));
+        ASSERT_TRUE(world.bodies.contains("Arm"));
+        EXPECT_FALSE(engine.recorded_body("Arm", kReplayedBirth - 1));
+        for (uint32_t tick = kReplayedBirth; tick <= 10; ++tick)
+            EXPECT_EQ(hook, engine.recorded_body("Arm", tick)) << "tick " << tick;
+        EXPECT_EQ(hook ? 10u - kReplayedBirth + 1 : 0u, engine.stats().replay_mechanisms_added);
+
+        // The live tick 11 names it, as every live record from here on does.
+        rollback_tracked with_arm = live;
+        with_arm.mechanisms = {"Arm"};
+        w.step();
+        engine.record(w, 11, with_arm, {{"Own", input_frame{}}});
+
+        // Anchored inside the replayed window: restored from its own record,
+        // not destroyed.  The old records: destroyed as born at tick 11, and
+        // not made again by the replay (its scripts made it at tick 5) - the
+        // bodies capture3's client lost for the rest of the session.
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 7, 11, no_input, "input corrected at tick 8"));
+        EXPECT_EQ(hook ? 0 : 1, world.count("destroy Arm@11"));
+        EXPECT_EQ(0, world.count("destroy Arm@" + std::to_string(kReplayedBirth)));
+        EXPECT_EQ(hook, world.bodies.contains("Arm"));
+        EXPECT_EQ(hook ? 0u : 1u, engine.stats().births_missing);
+        if (!hook) continue;
+
+        // Anchored before the replayed birth: destroyed there and made again
+        // by the replayed scripts at that tick.
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 3, 11, no_input, "input corrected at tick 4"));
+        EXPECT_EQ(1, world.count("destroy Arm@" + std::to_string(kReplayedBirth)));
+        EXPECT_EQ(0, world.count("destroy Arm@11"));
+        EXPECT_TRUE(world.bodies.contains("Arm"));
+        EXPECT_EQ(0u, engine.stats().births_missing);
+    }
+}
+
+// The same with a live birth later in the window (review of the above): the
+// live frames make Arm at tick 8, a rewind anchored before that destroys it
+// for that birth, and the replayed scripts make it again at tick 5.  From the
+// replayed tick that has it on, it is the replay's body: recorded there, and
+// not beamed to the live birth record at tick 8 - a body held back from the
+// records until its live birth tick left the records of 5..7 without it while
+// their script records held its joints, and a later rewind anchored inside
+// 5..7 destroyed it under those joints.
+TEST(RollbackEngine, AMechanismTheReplayMadeBeforeItsLiveBirthIsTheReplaysFromThere) {
+    for (const bool hook: {true, false}) {
+        SCOPED_TRACE(hook ? "replay_mechanisms" : "no hook (the old records)");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Own"];
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked live;
+        live.own_entity = "Own";
+        live.generations = {{"Own", 1}, {"Arm", 1}};
+        rollback_tracked with_arm = live;
+        with_arm.mechanisms = {"Arm"};
+        constexpr uint32_t kLiveBirth = 8, kReplayedBirth = 5;
+        fake_body live_made, replay_made;
+        live_made.position[0] = 20.0;
+        live_made.simulated = false;
+        replay_made.position[0] = 10.0;
+        replay_made.simulated = false;
+        for (uint32_t tick = 1; tick <= 10; ++tick) {
+            if (tick == kLiveBirth) world.bodies["Arm"] = live_made;
+            w.step();
+            engine.record(w, tick, tick >= kLiveBirth ? with_arm : live, {{"Own", input_frame{}}});
+        }
+        w.pre_step = [&](uint32_t tick) {
+            if (tick == kReplayedBirth && !world.bodies.contains("Arm")) world.bodies["Arm"] = replay_made;
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        if (hook) {
+            w.replay_mechanisms = [&]() {
+                std::vector<std::string> names;
+                for (const auto& [name, body]: world.bodies) if (name != "Own") names.push_back(name);
+                return names;
+            };
+        }
+        ASSERT_TRUE(engine.rewind_to(w, 2, 10, no_input, "input corrected at tick 3"));
+        EXPECT_EQ(1, world.count("destroy Arm@" + std::to_string(kLiveBirth)));
+        ASSERT_TRUE(world.bodies.contains("Arm"));
+        for (uint32_t tick = kReplayedBirth; tick < kLiveBirth; ++tick)
+            EXPECT_EQ(hook, engine.recorded_body("Arm", tick)) << "tick " << tick;
+        // Not beamed to the live birth record at tick 8: the replay's body stays.
+        EXPECT_EQ(hook ? 0 : 1, world.count("set_body Arm"));
+        EXPECT_EQ(hook ? 10.0 : 20.0, world.bodies["Arm"].position[0]);
+        EXPECT_EQ(hook ? kLiveBirth - kReplayedBirth : 0u, engine.stats().replay_mechanisms_added);
+
+        // Anchored between the replayed birth and the live one: restored from
+        // its record, not destroyed under the joints its scripts hold.
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 6, 10, no_input, "input corrected at tick 7"));
+        EXPECT_EQ(hook ? 0 : 1, world.count("destroy Arm@"));
+        EXPECT_EQ(hook, world.bodies.contains("Arm"));
+        EXPECT_EQ(hook ? 0u : 1u, engine.stats().births_missing);
+        if (!hook) continue;
+
+        // Anchored before the replayed birth: destroyed at it, made again there.
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 3, 10, no_input, "input corrected at tick 4"));
+        EXPECT_EQ(1, world.count("destroy Arm@" + std::to_string(kReplayedBirth)));
+        EXPECT_EQ(1, world.count("destroy Arm@"));
+        EXPECT_TRUE(world.bodies.contains("Arm"));
+        EXPECT_EQ(0u, world.count("set_body Arm"));
+        EXPECT_EQ(0u, engine.stats().births_missing);
+    }
+}
