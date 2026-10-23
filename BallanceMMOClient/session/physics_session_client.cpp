@@ -16,6 +16,7 @@
 #include <sstream>
 #include <thread>
 
+#include <game/checkpoint_phase.hpp>
 #include <game/menu_driver.hpp>
 #include <session/spawn_impulse.hpp>
 #include <session/rollback_binding.hpp>
@@ -1267,7 +1268,12 @@ bool BallanceMMOClient::sector_activate_resolve() {
 // checkpoint scripts get a private copy of the cell for the session
 // (game/checkpoint_phase.hpp, the same edit the server's and the headless
 // client's worlds make at their anchor); the retail sources go back at session
-// end.
+// end.  The split's state lives here rather than in BallanceMMOClient, which
+// hangs the engine at startup when members are added to it.
+namespace {
+    bmmo::game::checkpoint_phase_split checkpoint_phase_;
+}
+
 void BallanceMMOClient::checkpoint_phase_resolve() {
     const std::string trouble = checkpoint_phase_.apply(m_bml->GetCKContext());
     if (trouble.empty())
