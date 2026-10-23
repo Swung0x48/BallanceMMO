@@ -779,7 +779,8 @@ private:
 	bool core_host_on_sector(int sector, bool checkpoint);
 	bool core_host_on_finish();
 	bool core_host_leave_player(uint32_t player);
-	bool core_host_beam(const double position[3], std::string& answer);
+	bool core_host_beam(const double position[3], std::string& answer, int64_t at = -1);
+	void core_host_due_beams();
 	bool core_host_sector(int sector, std::string& answer);
 	bool core_host_journal(const std::string& action, const std::string& text, std::string& answer);
 	std::string core_host_session_verb(const std::string& rest);

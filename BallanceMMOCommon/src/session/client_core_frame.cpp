@@ -499,6 +499,7 @@ namespace bmmo::session {
         input.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);
         const bool nav_active = seen.nav_active;
         input.flags = static_cast<uint8_t>((physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
+                    | (seen.paused ? bmmo::session::INPUT_FLAG_PAUSED : 0)
                     | (nav_active ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));
         // A forced tick plays the server's frame (design 2.4): recorded,
         // journaled SUBSTITUTED and sent as such - the server drops it as

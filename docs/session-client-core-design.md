@@ -3,8 +3,12 @@
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
 E5, E6, E7, E8, E9, E10 and E11 (§6.1, "As built (step E1)" ... "As built
-(step E11)") are built: the E steps are done. R0 and R1 are built (§6.2, "As built
-(step R0)", "As built (step R1)"); R2-R7 are not.
+(step E11)") are built: the E steps are done. R0 and R1 are built (§6.2, "As
+built (step R0)", "As built (step R1)"). R2 is implemented but OPEN, not
+closed ("As built (step R2)"): its check (a) fails on the trafo's explosion
+pieces in a window that crosses their birth, and its check (b) fails on the
+mirror p99 (above the headless lane O runs, which have lifecycle rewind on:
+R3's switch). R3-R7 are not built.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -4528,6 +4532,183 @@ equal; physics_RT.dll identical in the rR0 and rR1 builds):
   teleport's savestate cost, not the drain or the policies.
 - Not done: R0's pusher-countdown fix (its own step); the forced-rollback
   verb is R2's check.
+
+**As built (step R2).** Where the code made R2 differ from §2.2, §3.2, §4.2
+and the R2 row:
+
+- **What R2 turns on.** The retail `core_config` sets `input_rewind` (a
+  relayed frame that differs from the prediction asks for a replay from its
+  tick; `replay_corrected_inputs` runs it at pre_step step 5 inside the
+  host's `keep_live_cells` guard). Both R1 departures that stood in for it
+  end with it: `drive_from_newest_relay` follows the switch (off: the drive
+  of T + 1 is chosen at post_step(T), the headless order), and the mailbox's
+  relay-first reorder is skipped (it was already conditional on the switch),
+  so the mailbox is dispatched in arrival order, as §3.2 says. `replay_remotes`
+  needed no retail code: the retail binding has been the shared
+  `bind_session_world` since R0, which installs the core's hook. Lifecycle
+  rewind, echoes and own corrections stay off (R3, R4).
+- **`observe_input` records what the replica stepped T with.** The pause
+  menu's mute is now applied after `post_step(T)` (before the mailbox and
+  pre_step's replays, whose polling resumes as the mute for T + 1 says; the
+  log line names the tick it applies from), so `observe_input` reads the mute
+  that was in force during T. Muted: keys 0, navigation off, `paused`. Not
+  muted: the keys the replica polled (`frame_keys_`) and NAV_ACTIVE from the
+  leaves' Key Event `IsActive` (any of the graph's leaves), not
+  `ball_nav_active_`. `unforce_own` already restored `!input_muted` (R0);
+  only a forced own frame calls it, which needs `slew` (R5).
+- **Core addition: `input_observation::paused`** (the field §2.2 names "at
+  R2"), sent and journaled as `INPUT_FLAG_PAUSED`, as the legacy frame does
+  (R1 sent no PAUSED). The headless client never sets it. One unit test
+  (`SessionClientCoreR2.PausedObservationSetsThePausedFlag`): 422 tests.
+- **Testing tool: `beam <x> <y> <z> at <tick>`** (a running core session
+  only): the request is made in the frame whose post_step stamps exactly
+  `<tick>` (`core_host_due_beams`, before `post_step`), so two runs of one key
+  record beam at the same tick. Without `at` the verb is unchanged.
+- **The pause menu inside a session (measured):** ESC opens it but does not
+  close it (record or automation keys); Return (Continue) closes it; an arrow
+  key held while it opens moves its cursor off Continue (Return then closes
+  nothing). The (a) record therefore opens with ESC, closes with Return and
+  holds 'right' (no menu key) over both edges.
+
+Measured (x86 mod on fe1cdde + R2, client objects deleted first, slot 13 on
+the arena; the Arch server of R0/R1):
+
+- Builds: x86 CLIENT-BUILD-OK; x64 BUILD-OK; 422 tests pass;
+  `linux_test_syntax.sh` 25 lines ok. **Headless unchanged:** `wire_check.sh
+  rR1 rR2` WIRE-CHECK: ALL SAME (16 journals IDENTICAL, the sends SAME).
+- **(a)** solo, arena, snapshots off, `replay session` of a 2100-frame record
+  plus three `beam ... at` (r2_run.py). The events and the own record's
+  nav-activity edges, identical in every run: first spawn 212 (NAV on 214);
+  'right' held, the menu opens at 309 (the leaves' Key Events go inactive in
+  that frame: tick 309 is keys 4 with NAV off, a nav-activity edge one tick
+  before the mute), muted 310-429, Return closes it at 430 (NAV back on, keys
+  4); the trafo beam at 650 (NAV off 651, the stone ball unphysicalized 652,
+  its explosion pieces born at 807-808, the wood ball physicalized 817, NAV
+  818); back to the lane at 900; the death beam at 1300 (NAV off 1302,
+  unphysicalized 1369); the respawn 1567 (NAV 1569). Control `r2_a_ctl1`;
+  arms `session force-rollback` 50:12 (44 rewinds), 97:24 (22), 131:47 (16)
+  and 13:24 (169: every tick from 15 on lies in some window, so every event
+  above is crossed). `worst_bodies.py`, every arm against the control: 0.0
+  m on every body it compares (the own ball, `P_Ball_Wood_MF`,
+  `P_Modul_01_Pusher`, `P_Modul_41`), 1104 common checkpoints to 2220.
+  But `worst_bodies.py` keys a kind-0 body by its owner and skips owner 0,
+  so the trafo's 17 `Ball_Stone_piece*` bodies are never compared; over
+  every body by name (position, rotation, velocity; scratchpad
+  `r2_allbodies.py`) 50:12, 97:24 and 131:47 are exact on all 21 bodies (their
+  windows replay the pieces in flight, none crosses their birth), and **13:24
+  is exact on everything but the 17 pieces, which diverge from 820 (up to
+  14.58 m): the step stays open.** The rewind at 819 (24 deep) crosses the
+  pieces' birth. The script is the trafo's explosion, `Ball_Explosion_Stone`
+  (it physicalizes the pieces and pushes them): it is not in the script
+  replay's selection, and `movable_mechanisms` (PSC:1956-1960's rule, the
+  headless host's too: no `Ball_*` name) leaves the pieces untracked, so the
+  replay neither re-runs the explosion nor parks them at a birth record: they
+  are re-stepped from their live state of 819, 24 ticks ahead. A temporary
+  build tracking `Ball_*_piece*` in the retail `movable_mechanisms` made the
+  13:24 arm exact on all 21 bodies (the parking path re-poses each piece at
+  its birth record). It is not in R2: tracked, the pieces' server rows (the
+  server sends every non-ball movable as a mechanism row) are compared
+  instead of taken as restore sources, a snapshot-path change no R2 check
+  covers, and the rule is the headless host's too (where `--replay-scripts`
+  re-runs the explosion instead). It needs its own step with a snapshots-on
+  A/B.
+  - A `journal mark` checkpoint is stamped one tick early (the command file
+    runs before the frame's post_step: `current_tick()` is T - 1 with T
+    stepped), so the comparisons stop before the earlier mark (2226 in the
+    control, 0.0005 m on the ball there). Present since R1; not changed.
+  - A temporary build with R1's sources (the mute decided in the frame,
+    `ball_nav_active_`) is exact in the 13:24 arm too: on this scenario the
+    two records differ only at ticks with the navigation off either way (309:
+    keys 4 / NAV off against keys 0 / PAUSED; 429: keys 4 / NAV off against
+    muted), and the BML hook agreed with the leaves at every spawn, trafo and
+    death edge. So (a) holds the R2 records exact but cannot tell them from
+    R1's here.
+- **(b)** two clients (`retail_two_client_test.py`, level 11), snapshots off
+  (`arch_server_lp.sh ... 100000 100000 4.2 false false`), `net lag 150` both
+  ways on both, both `replay session` of `r0_keys.bmrc`, two runs
+  (`r2_b_on1`, `r2_b_on2`): `inrew` 162 / 167 and 163 / 169, `far` 0,
+  `unmatched` 0, resyncs 0/0, rebases 0 on both clients; both server journals
+  exact in the SimTool (2618 matched, 0 checkpoint mismatches). Each client's
+  mirror against the owner's own LOCAL checkpoints (every 2 ticks, position
+  distance; scratchpad `r2_mirror.py`): run 1 pooled p99 18.35 m (client 1
+  sees 2: 18.72, client 2 sees 1: 13.89), run 2 19.18 m (19.20 / 13.45). The
+  E11 lane O runs, the same measure: pooled p99 6.56, 13.94, 18.04, 6.10 m
+  (per pair 0.99-32.55). **Above the O runs' pooled p99 by 0.3-1.1 m: open,
+  waiting on R3.** The error is the births: with `lifecycle_rewind` off a
+  remote Physicalize (here 20-36 ticks after its stamp at 150 ms each way) is
+  made live at the drain, so the mirror trails its owner by those ticks for
+  the whole life - a constant lag, 2-4 m in the first life and 9-18 m in
+  later ones in client 1's view; client 2's view is 0.0000 m in the lives
+  whose owner had not moved yet when the birth arrived. With a temporary
+  build that also turns `lifecycle_rewind` on, the same run gives pooled p99
+  5.23 m, p50 0.0000, below every O run (with one resync per client, R3's to
+  explain).
+
+**R2 review round (the step stays open).** Two reviews; what each finding
+became (checked against the code):
+
+- **Blocker, (a) on the trafo pieces:** confirmed and NOT fixed in R2. The
+  fix (track `Ball_*_piece*` births in `movable_mechanisms`, or put
+  `Ball_Explosion_*` in the script replay's selection) changes what a
+  snapshot does with the pieces' server rows (the server sends every
+  non-ball movable as a Mechanism row, physics_world.cpp:1132-1140; untracked,
+  a row is a restore source; tracked, it is compared - and the server has one
+  set of pieces for every player's trafo), and the selection is shared with
+  the headless client. Both need their own step with a snapshots-on A/B.
+  `worst_bodies.py` still cannot see the pieces (kind 0, owner 0): the
+  per-name compare (`r2_allbodies.py`) is the one that shows them.
+- **Blocker, (b) mirror p99:** confirmed; it is the births made live 20-36
+  ticks late while `lifecycle_rewind` is off. Not changed: turning the switch
+  on is R3. The bar stays in the R2 row; R2 stays open until it holds.
+- **Should-fix, a replay in the frame the pause menu opens:** confirmed.
+  `navigation_apply_pending` applies only a pending entry
+  (ball_navigation.cpp:456-480), so after a replay that ends while the mute
+  holds (polling kept off) the navigation kept applying the last replayed
+  tick's keys and activity into the live step, while the record and the
+  server had keys 0 / PAUSED. Fixed in the shared binding
+  (`rollback_binding.hpp` `nav_poll`): `on_poll_resumed` now runs whenever a
+  replay hands the entity back (`enable`), muted or not; retail's hook writes
+  keys 0 / inactive, which is what the muted live step needs. The headless
+  client never sets `input_muted`, so its calls are the same (wire check ALL
+  SAME). `RollbackBinding.NavPollAlwaysReachesTheBackendAndRearmsWhenHandedBack`
+  replaces the test that pinned the old rule.
+- **Should-fix, coverage of the new record sources:** two host counters,
+  `nav_source_differs` (frames whose recorded NAV_ACTIVE differs from the
+  BML hook's `ball_nav_active_`) and `mute_source_differs` (frames whose mute
+  in force differs from the pause state decided in the frame, R1's source),
+  in `session core` and logged at the session's end. Every (a) run: 0 and 2
+  (the two menu edges, 310 and 430, where R1 recorded the edge a tick early);
+  (b): 0 and 0 on both clients. So on these scenarios the leaves and the BML
+  hook agree everywhere, and the records differ from R1's only at the two
+  mute edges.
+- **Should-fix, the status header:** says "implemented but open" now.
+- **Nits, all changed:** `observe_input` reads the replica's own key blocks
+  (`own_replica.key_blocks`, leaf indices 0-7) and, without a replica, only
+  leaves with an index in [0, 8); `beam x y z <word>` ignores a trailing word
+  other than `at` again (core off unchanged); `beam ... at` bounds the tick,
+  hands the core the lowest due stamp first, one at a time, and logs the stamp
+  the core actually gave it after a successful `post_step` ("beam armed for
+  tick N stamped N"). A plain `beam` in the same frame still replaces the
+  core's one request. The PAUSED flag's extra peer replay (a flag-only edge)
+  is left as it is: the legacy path sends the flag too.
+
+Re-measured after the review round (x86 mod, client objects deleted first,
+slot 13 on the arena; x64 build): 422 tests pass; `linux_test_syntax.sh`
+every line ok; `wire_check.sh rR1 rR2` WIRE-CHECK: ALL SAME (16 journals
+IDENTICAL, the sends SAME).
+
+- (a) control `r2f_a_ctl`, arms `r2f_a_f50` (44 rewinds), `r2f_a_f97` (22),
+  `r2f_a_f131` (17), `r2f_a_f13` (169); beams stamped 650, 900, 1300 as armed
+  in every run. `worst_bodies.py` (to 2220): 0.0000 m on the four bodies it
+  compares in every arm. Over every body by name: 50:12, 97:24, 131:47 exact
+  on all 21; **13:24 exact on everything but the 17 `Ball_Stone_piece*`, from
+  820, up to 14.58 m (the same numbers as before the round): open.**
+- (b) `r2f_b_on1`, `r2f_b_on2`: `inrew` 164 / 169 and 160 / 163, `far` 0,
+  `unmatched` 0, resyncs 0/0, rebases 0; the server journals exact in the
+  SimTool (2567/2567 and 2617/2617, 0 checkpoint mismatches). Mirror p99
+  pooled **18.35 m and 19.18 m** (client 1 sees 2: 18.36 / 19.20; client 2
+  sees 1: 13.89 / 13.45) against the O runs' 6.56 / 13.94 / 18.04 / 6.10:
+  **open (R3's births).**
 
 ## 7. Open questions
 

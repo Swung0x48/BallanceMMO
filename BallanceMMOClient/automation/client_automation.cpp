@@ -509,7 +509,14 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // would simply drag this one back.
         std::istringstream args(rest);
         double x = 0, y = 0, z = 0;
-        if (!(args >> x >> y >> z)) return "error usage: beam <x> <y> <z>";
+        if (!(args >> x >> y >> z)) return "error usage: beam <x> <y> <z> [at <tick>]";
+        // 'at <tick>' (a core session only): the beam stamped exactly that
+        // session tick (session/core_host.cpp core_host_due_beams).  Any
+        // other trailing word is ignored, as the verb always did.
+        int64_t at = -1;
+        if (std::string word; args >> word && word == "at") {
+            if (!(args >> at) || at < 0) return "error usage: beam <x> <y> <z> [at <tick>]";
+        }
         std::string error;
         if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
             return "error " + error;
@@ -518,7 +525,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         const double position[3] = {x, y, z};
         // A session the shared core runs: a request the core makes at the end
         // of this frame's step, in place, stamped T + 1 (R1).
-        if (std::string answer; core_host_beam(position, answer)) return answer;
+        if (std::string answer; core_host_beam(position, answer, at)) return answer;
+        if (at >= 0) return "error beam ... at <tick>: only a running session core stamps a beam at a tick";
         const double upright[4] = {0.0, 0.0, 0.0, 1.0};
         const float still[3] = {0.0f, 0.0f, 0.0f};
         if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))

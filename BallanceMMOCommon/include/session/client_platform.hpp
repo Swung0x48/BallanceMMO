@@ -173,12 +173,16 @@ namespace bmmo::session {
     // What the own replica used for the step of T (design 2.2 observe_input;
     // E9): the keys as the navigation polls them (0 before the graph is
     // known), the camera reference's rows (`cam_valid` false without one),
-    // and whether the navigation's key events were active.
+    // and whether the navigation's key events were active.  `paused` (R2):
+    // the pause menu's mute was in force during the step (retail; the own
+    // input is then keys 0 with the navigation off), sent as
+    // INPUT_FLAG_PAUSED; the headless client never pauses.
     struct input_observation {
         uint8_t keys = 0;
         float cam[3][3] = {};
         bool cam_valid = false;
         bool nav_active = false;
+        bool paused = false;
     };
 
     // A mirror's body (design 2.2 make_mirror; E6): the entity the host named

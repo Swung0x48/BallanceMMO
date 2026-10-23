@@ -4035,4 +4035,32 @@ namespace {
         }
     }
 
+    // ---------------------------------------------------------------- R2
+    // observe_input's `paused` (R2, design 2.2): the mute in force during the
+    // step is recorded, journaled and sent as INPUT_FLAG_PAUSED with what the
+    // host observed (keys 0, the navigation off); without it the flag stays
+    // clear, as on the headless client, which never sets it.
+    TEST(SessionClientCoreR2, PausedObservationSetsThePausedFlag) {
+        for (const bool paused: {false, true}) {
+            SCOPED_TRACE(paused ? "paused" : "live");
+            flow_fake fake;
+            session_client_core core(frame_platform(fake, false), session_capabilities{});
+            run_to_tick_125(core, fake);
+            fake.own_physical = true;
+            fake.own_ball_name = "Ball_Wood";
+            fake.observation.keys = paused ? 0 : 5;
+            fake.observation.nav_active = !paused;
+            fake.observation.paused = paused;
+            core.pre_step();
+            ASSERT_TRUE(core.post_step(true));
+            ASSERT_FALSE(state_of(core).input_history_.empty());
+            const auto& input = state_of(core).input_history_.back().second;
+            EXPECT_EQ(state_of(core).input_history_.back().first, 126u);
+            EXPECT_EQ(input.keys, paused ? 0 : 5);
+            EXPECT_EQ((input.flags & bmmo::session::INPUT_FLAG_PAUSED) != 0, paused);
+            EXPECT_EQ((input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0, !paused);
+            EXPECT_NE(input.flags & bmmo::session::INPUT_FLAG_PHYSICALIZED, 0);
+        }
+    }
+
 }

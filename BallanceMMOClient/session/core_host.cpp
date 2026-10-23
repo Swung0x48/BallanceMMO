@@ -211,6 +211,30 @@ namespace {
         int drop_births_armed = 0;
         uint64_t births_dropped = 0;
 
+        // 'beam <x> <y> <z> at <tick>' (a testing tool, R2 (a)): a beam of
+        // the running core session stamped exactly <tick>, so two runs of
+        // one key record beam at the same tick (the plain verb's stamp is
+        // the frame the command file happens to be read in).
+        struct pending_beam {
+            uint32_t stamp = 0;
+            double position[3] = {};
+        };
+        std::vector<pending_beam> beams_pending;
+        uint64_t beams_made = 0;
+        // The armed beam handed to the core this frame, logged with the stamp
+        // the core actually gave it (a refused post_step keeps the request
+        // inside the core for a later one).
+        bool beam_in_flight = false;
+        uint32_t beam_in_flight_armed = 0;
+
+        // R2's record sources against R1's (a coverage counter, review
+        // finding R2-3): frames whose recorded NAV_ACTIVE (the replica's
+        // leaves) differs from the BML hook's ball_nav_active_, and frames
+        // whose recorded mute (the one in force during the step) differs from
+        // the pause state decided in the same frame (R1's source).
+        uint64_t nav_source_differs = 0;
+        uint64_t mute_source_differs = 0;
+
         // 'net lag <ms> [up|down]' and 'net blackout <ms> [up|down]', each
         // now or 'at <tick>': GNS's fake lag and loss (global configuration
         // values), a deadline per direction.  A blackout ends at a frame
@@ -408,6 +432,11 @@ namespace {
         host.unmatched_resyncs = host.starvation_resyncs = 0;
         host.drop_births_armed = 0;
         host.births_dropped = 0;
+        host.beams_pending.clear();
+        host.beams_made = 0;
+        host.beam_in_flight = false;
+        host.beam_in_flight_armed = 0;
+        host.nav_source_differs = host.mute_source_differs = 0;
     }
 
     // The ball table's "Force" column per ball type (the navigation's force;
@@ -525,8 +554,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // here.  The engine runs as the legacy path's does - its defaults, the
     // exact restore (savestate) on with the binding's lenient flags 0, no
     // clock rewind (the clock guard replaces it); the feature switches of
-    // design 6.2 R1: snapshot rollback, no input or lifecycle rewind, the
-    // echoes and the held section counted only, the two retail policies on.
+    // design 6.2 R2: snapshot rollback and the input rewind (a relayed frame
+    // that differs from the prediction replays from its tick), no lifecycle
+    // rewind, the echoes and the held section counted only, the two retail
+    // policies on.
     bs::core_config config;
     config.journal_checkpoint_ticks = static_cast<uint32_t>(bs::client_journal::kCheckpointTicks);
     if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
@@ -553,13 +584,17 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.trace_plan = false;
     config.rollback = physics_session_.rollback_enabled;   // 'session rollback on|off'
     config.correct = true;
-    config.input_rewind = false;
+    config.input_rewind = true;   // R2
     config.lifecycle_rewind = false;
     config.own_echoes = false;
     config.own_corrections = false;
     config.mirror_start_from_row = true;
     config.own_body_backstop = true;
-    config.drive_from_newest_relay = !config.input_rewind;   // the legacy frame's order, only without the input rewind
+    // R1's policy (the legacy frame's order) only stood in for the input
+    // rewind: with it a key edge relayed between the frames replays from its
+    // tick, so the drive of T + 1 is chosen at post_step(T) as on the
+    // headless client (As built, step R2).
+    config.drive_from_newest_relay = !config.input_rewind;
     config.window_shift = 0;
     if (core.begin(msg, config).refused) {
         SendIngameMessage(std::format("Physics session refused: the server runs physics protocol {}, this mod runs {}. "
@@ -695,7 +730,7 @@ void BallanceMMOClient::core_host_process() {
 // decoded (to check the copy), counted and dropped.
 void BallanceMMOClient::core_host_drain() {
     auto entries = mailbox.take();
-    // Without the input rewind (R1: until R2), a relayed frame that reaches
+    // Without the input rewind (R1; R2 turns it on), a relayed frame that reaches
     // the core after a snapshot of the same batch is stored after that
     // snapshot's replay ran on the prediction, and nothing replays it again
     // but the next snapshot: within each run of entries between two
@@ -899,10 +934,10 @@ void BallanceMMOClient::core_host_anchor() {
 
 // One OnProcess of a running core session (design 1.3, the retail loop): the
 // game has stepped T.  Host code first - the clock guard re-attached, the
-// pause clock pinned, the pause edits kept, the pause menu's mute and the
-// tick driver's rebase - then post_step(T), the mailbox, the transitional
-// resync triggers and pre_step(T + 1), which the next CKContext::Process
-// steps.
+// pause clock pinned, the pause edits kept and the tick driver's rebase -
+// then post_step(T), the pause menu's mute for T + 1 (R2: after T's record),
+// the mailbox, the transitional resync triggers and pre_step(T + 1), which
+// the next CKContext::Process steps.
 void BallanceMMOClient::core_host_frame() {
     std::string error;
     {
@@ -917,27 +952,41 @@ void BallanceMMOClient::core_host_frame() {
             if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
         }
         pause_scripts_apply();
-        // The pause menu (ESC) mutes the own input, from the step after this
-        // frame on, as the legacy frame decides it (the replica's polling
-        // follows; design 4.2 moves the mute to the step it applies at, R2).
-        const bool muted = m_bml->IsIngame() && m_bml->IsPaused();
-        if (muted != host.input_muted) {
-            logger_->Info("Physics session: input %s (ingame script %d, paused %d)", muted ? "muted" : "live",
-                          gameplay_ingame_script_active() ? 1 : 0, m_bml->IsPaused() ? 1 : 0);
-            if (host.own_replica.active
-                    && !physics_view_.navigation_poll(host.own_replica.entity.c_str(), !muted, host.own_replica.key_codes,
-                                                      host.own_replica.key_blocks, host.own_replica.key_count, error))
-                logger_->Warn("Physics session: own polling: %s", error.c_str());
-            host.input_muted = muted;
-        }
         // The tick driver restarted its schedule (a pause, a long stall): our
         // tick numbers no longer line up with the server's.
         if (core.assigned() && fixed_tick_.rebases() != host.last_rebases) {
             host.last_rebases = fixed_tick_.rebases();
             core.schedule_rebased("tick driver rebased");
         }
+        // 'beam ... at <tick>' (a testing tool, R2 (a)): requested before the
+        // post_step that stamps it (post_step(T) makes a beam stamped T + 1).
+        core_host_due_beams();
         ++host.frames;
+        // post_step(T) records what the replica stepped T with: the mute
+        // that was in force during the step (observe_input reads
+        // host.input_muted before it changes below; design 2.2, 4.2 R2).
         if (!core.post_step(true)) ++host.refused;
+        else if (host.beam_in_flight) {
+            // post_step(T) consumed the request and stamped it T + 1.
+            host.beam_in_flight = false;
+            const uint32_t stamped = core.current_tick() + 1;
+            logger_->Info("Automation: beam armed for tick %u stamped %u%s", host.beam_in_flight_armed, stamped,
+                          stamped == host.beam_in_flight_armed ? "" : " (later than armed)");
+        }
+        // The pause menu (ESC) mutes the own input from the next step on:
+        // decided now, after T's record, and before anything this frame can
+        // rewind (the mailbox, pre_step's replays), whose polling resumes as
+        // the mute for T + 1 says (the binding's input_muted).
+        const bool muted = m_bml->IsIngame() && m_bml->IsPaused();
+        if (muted != host.input_muted) {
+            logger_->Info("Physics session: input %s from tick %u (ingame script %d, paused %d)", muted ? "muted" : "live",
+                          core.current_tick() + 1, gameplay_ingame_script_active() ? 1 : 0, m_bml->IsPaused() ? 1 : 0);
+            if (host.own_replica.active
+                    && !physics_view_.navigation_poll(host.own_replica.entity.c_str(), !muted, host.own_replica.key_codes,
+                                                      host.own_replica.key_blocks, host.own_replica.key_count, error))
+                logger_->Warn("Physics session: own polling: %s", error.c_str());
+            host.input_muted = muted;
+        }
     }
     const uint64_t unmatched_before = host.core->rollback_stats().unmatched;
     core_host_drain();
@@ -998,6 +1047,10 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     checkpoint_phase_restore();
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
     const uint32_t session = host.session;
+    logger_->Info("Physics session: record sources (R2): %llu frame(s) whose NAV_ACTIVE (the leaves) differs from the BML "
+                  "hook's, %llu whose mute in force differs from the pause state decided in the frame",
+                  static_cast<unsigned long long>(host.nav_source_differs),
+                  static_cast<unsigned long long>(host.mute_source_differs));
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     if (host.own_replica.active && physics_view_.available())
         physics_view_.navigation_destroy(host.own_replica.entity.c_str(), error);
@@ -1234,15 +1287,20 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.reportable_wakeup = [](const std::string& name, const std::string& own_ball) {
         return name.rfind("Ball_", 0) != 0 && name != own_ball && name.find("_Peer_") == std::string::npos;
     };
-    // What the own frame of the step just taken records: the polled keys
-    // (none while the mute is in force), the camera reference's rows, and the
-    // navigation's activity.  R1 keeps the legacy frame's sources (PSC
-    // physics_session_frame): the mute decided in this frame, and the BML
-    // hook's ball_nav_active_; R2 moves both to what the replica stepped (the
-    // leaves' Key Events, the mute in force during the step; design 2.2, 4.2).
+    // What the own replica stepped T with (design 2.2 observe_input, 4.2
+    // R2), which every replay drives the own ball from: the mute in force
+    // during the step (host.input_muted: core_host_frame changes it only
+    // after post_step(T)) - with it the replica did not poll, so keys 0, the
+    // navigation off, and the frame flagged PAUSED; otherwise the keys the
+    // replica polled (frame_keys_, this frame's input poll) and whether any
+    // of the leaves' Key Events was active, the source the replica reads at
+    // PreSimulate (ball_navigation.cpp navigation_apply_pending; nothing
+    // between that and OnProcess changes it), not the BML hook's
+    // ball_nav_active_; and the camera reference's rows.
     p.observe_input = [this]() {
         bs::input_observation seen;
-        if (!host.input_muted && host.navigation_known && input_hook_installed_)
+        const bool muted = host.input_muted;
+        if (!muted && host.navigation_known && input_hook_installed_)
             seen.keys = host.navigation.keys_from_state(frame_keys_.data());
         if (auto* orient = m_bml->Get3dEntityByName("Cam_OrientRef")) {
             const VxMatrix& m = orient->GetWorldMatrix();
@@ -1250,7 +1308,29 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 for (int k = 0; k < 3; ++k) seen.cam[r][k] = m[r][k];
             seen.cam_valid = true;
         }
-        seen.nav_active = !host.input_muted && ball_nav_active_;
+        if (!muted && host.navigation_known) {
+            // The blocks the replica polls: its own list when it exists
+            // (bmmo::game::navigation_leaves, leaf indices 0-7), else the
+            // graph's leaves with the same index rule.
+            CKContext* context = m_bml->GetCKContext();
+            const auto active = [context](uint32_t block) {
+                auto* key_event = block ? CKBehavior::Cast(context->GetObject(block)) : nullptr;
+                return key_event && key_event->IsActive();
+            };
+            if (host.own_replica.active) {
+                for (int i = 0; i < host.own_replica.key_count && i < 8 && !seen.nav_active; ++i)
+                    seen.nav_active = active(host.own_replica.key_blocks[i]);
+            } else {
+                for (const auto& leaf: host.navigation.leaves)
+                    if (leaf.index >= 0 && leaf.index < 8 && active(leaf.key_block)) {
+                        seen.nav_active = true;
+                        break;
+                    }
+            }
+        }
+        seen.paused = muted;
+        if (!muted && seen.nav_active != ball_nav_active_) ++host.nav_source_differs;
+        if (muted != (m_bml->IsIngame() && m_bml->IsPaused())) ++host.mute_source_differs;
         return seen;
     };
     p.own_camera_rows = [this](const float (*basis)[3]) {
@@ -1556,18 +1636,20 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
             if (!connected()) core_latched.store(false);
             core_on.store(on);
             if (!on) return "ok session core off: the next session runs on the legacy path";
-            return "ok session core on: the next session runs on the shared core (step R1: snapshot rollback, no input "
-                   "or lifecycle rewind)";
+            return "ok session core on: the next session runs on the shared core (step R2: snapshot rollback and the "
+                   "input rewind, no lifecycle rewind)";
         }
         if (!value.empty() && value != "status") return "error usage: session core on|off|status";
         return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "
                            "backstops={} births_dropped={} unmatched_resyncs={} starvation_resyncs={} mailbox: pushed={} "
-                           "dropped={} drained={} starts={} discarded={} undecodable={}",
+                           "dropped={} drained={} starts={} discarded={} undecodable={} beams_made={} nav_source_differs={} "
+                           "mute_source_differs={}",
                            core_on.load() ? "on" : "off", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
                            host.core_error, host.sessions_seen, host_phase_name(host.phase), host.frames, host.refused,
                            host.core ? host.core->own_body_backstops() : 0, host.births_dropped, host.unmatched_resyncs,
                            host.starvation_resyncs, mailbox.pushed(), mailbox.dropped(), host.drained,
-                           host.starts, host.discarded, host.undecodable);
+                           host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
+                           host.mute_source_differs);
     }
     if (what == "force-rollback") {
         const size_t colon = value.find(':');
@@ -1941,7 +2023,7 @@ bool BallanceMMOClient::core_host_leave_player(uint32_t player) {
 
 // The automation 'beam': core.request_beam, made in place at post_step step
 // 29 of this frame and stamped T + 1 (design 2.3, 4.2 R1).
-bool BallanceMMOClient::core_host_beam(const double position[3], std::string& answer) {
+bool BallanceMMOClient::core_host_beam(const double position[3], std::string& answer, int64_t at) {
     if (!core_session_running()) return false;
     auto& core = *host.core;
     // Unassigned (the hold timed out, or a resync's assignment is awaited):
@@ -1951,12 +2033,59 @@ bool BallanceMMOClient::core_host_beam(const double position[3], std::string& an
         answer = "error session core: not assigned (no tick base to stamp the beam with)";
         return true;
     }
+    if (at >= 0) {
+        // 'at <tick>': the earliest stamp a request can still get is the
+        // next post_step's T + 1 = current + 2 (core_host_due_beams).
+        if (at > static_cast<int64_t>(UINT32_MAX)) {
+            answer = std::format("error beam at {}: not a session tick", at);
+            return true;
+        }
+        if (at < static_cast<int64_t>(core.current_tick()) + 2) {
+            answer = std::format("error beam at {}: too late (tick {} now, the earliest stamp is {})", at,
+                                 core.current_tick(), core.current_tick() + 2);
+            return true;
+        }
+        retail_host::pending_beam beam;
+        beam.stamp = static_cast<uint32_t>(at);
+        for (int k = 0; k < 3; ++k) beam.position[k] = position[k];
+        host.beams_pending.push_back(beam);
+        answer = std::format("ok beam to ({:.3f},{:.3f},{:.3f}) armed for tick {} (now {}; session core)", position[0],
+                             position[1], position[2], at, core.current_tick());
+        return true;
+    }
     core.request_beam(position);
     CK3dObject* ball = get_current_ball();
     answer = std::format("ok beam of {} to ({:.3f},{:.3f},{:.3f}) requested at tick {}: made after this frame's step, "
                          "stamped {} (session core)", ball && ball->GetName() ? ball->GetName() : "-", position[0],
                          position[1], position[2], core.current_tick(), core.current_tick() + 1);
     return true;
+}
+
+// The armed 'beam ... at <tick>' requests whose stamp the coming post_step
+// makes: post_step(T) stamps a request T + 1, and T is current + 1 here, so a
+// beam armed for current + 2 (or one whose tick a renumbering skipped) goes
+// now, the lowest armed tick first.  One at a time: the core holds one
+// request, and a refused post_step keeps it there for a later frame, so the
+// next one waits until core_host_frame has logged the stamp the core gave
+// it.  (A plain 'beam' in the same frame still replaces the request: one
+// request, as the core has it.)
+void BallanceMMOClient::core_host_due_beams() {
+    if (host.beams_pending.empty() || host.beam_in_flight || !host.core || !host.core->assigned()) return;
+    auto& core = *host.core;
+    const uint32_t stamp = core.current_tick() + 2;
+    auto due = host.beams_pending.end();
+    for (auto it = host.beams_pending.begin(); it != host.beams_pending.end(); ++it) {
+        if (static_cast<int32_t>(stamp - it->stamp) < 0) continue;
+        if (due == host.beams_pending.end() || static_cast<int32_t>(it->stamp - due->stamp) < 0) due = it;
+    }
+    if (due == host.beams_pending.end()) return;
+    core.request_beam(due->position);
+    ++host.beams_made;
+    host.beam_in_flight = true;
+    host.beam_in_flight_armed = due->stamp;
+    logger_->Info("Automation: beam to (%.3f,%.3f,%.3f) armed for tick %u requested before post_step(%u)",
+                  due->position[0], due->position[1], due->position[2], due->stamp, stamp - 1);
+    host.beams_pending.erase(due);
 }
 
 // The automation 'sector N': core.request_sector while the checkpoint hold is

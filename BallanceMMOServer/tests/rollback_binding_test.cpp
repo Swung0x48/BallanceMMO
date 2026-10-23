@@ -313,7 +313,7 @@ TEST(RollbackBinding, SavestateHooksFollowTheSwitchAndReportTheOutcome) {
     EXPECT_EQ(restored[1].error, "restore refused");
 }
 
-TEST(RollbackBinding, NavPollAlwaysReachesTheBackendAndResumesOnlyWhenSwitchedOn) {
+TEST(RollbackBinding, NavPollAlwaysReachesTheBackendAndRearmsWhenHandedBack) {
     fake_backend backend;
     const int codes[2] = {38, 40};
     const uint32_t blocks[2] = {1, 2};
@@ -340,12 +340,18 @@ TEST(RollbackBinding, NavPollAlwaysReachesTheBackendAndResumesOnlyWhenSwitchedOn
     ASSERT_EQ(resumed.size(), 1u);
     EXPECT_EQ(resumed[0], "ball");
 
-    // On while the pause menu mutes the input: stays off, nothing resumes.
+    // On while the pause menu mutes the input: the polling stays off, but
+    // the live input is re-armed all the same (R2: nothing polls, so the
+    // last replayed tick's frame would drive the live step).
     muted = true;
     EXPECT_TRUE(world.nav_poll("ball", true));
     EXPECT_FALSE(backend.last_poll_on);
-    EXPECT_EQ(resumed.size(), 1u);
-    EXPECT_EQ(count_calls(backend, "poll_"), 3) << "every call reaches the backend";
+    ASSERT_EQ(resumed.size(), 2u);
+    EXPECT_EQ(resumed[1], "ball");
+    // Off while muted: nothing re-armed (the replay is about to drive it).
+    EXPECT_TRUE(world.nav_poll("ball", false));
+    EXPECT_EQ(resumed.size(), 2u);
+    EXPECT_EQ(count_calls(backend, "poll_"), 4) << "every call reaches the backend";
 }
 
 TEST(RollbackBinding, NavInputPassesTheActiveFlag) {

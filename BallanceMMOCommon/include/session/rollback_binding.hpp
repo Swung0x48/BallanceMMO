@@ -44,11 +44,13 @@ namespace bmmo::session {
         // whatever is here, as the clients always did - disabling needs no
         // codes, enabling without them fails in the bridge).  `input_muted`:
         // polling is not switched back on after a replay while it says so
-        // (the retail pause menu).  `on_poll_resumed`: runs after polling was
-        // switched back on for an entity, i.e. at the end of every rewind
-        // that replayed - the place to re-arm the live frame's own navigation
-        // input, which the replay's own input feed consumed (without it a key
-        // edge on the first live tick after a replay lands a tick late).
+        // (the retail pause menu).  `on_poll_resumed`: runs when a rewind
+        // that replayed hands the entity back to the live frame (polling
+        // switched back on, or kept off by the mute) - the place to re-arm the
+        // live frame's own navigation input, which the replay's own input feed
+        // consumed (without it a key edge on the first live tick after a
+        // replay lands a tick late, and under the mute the navigation would
+        // keep applying the last replayed tick's keys: nothing polls).
         const int* own_key_codes = nullptr;
         const uint32_t* own_key_blocks = nullptr;
         int own_key_count = 0;
@@ -195,13 +197,15 @@ namespace bmmo::session {
             return b->navigation_input(entity.c_str(), frame.keys, frame.cam_right, frame.cam_up, frame.cam_dir, active, error);
         };
         // A replay must not switch the polling back on while the pause menu
-        // has it off: the ball would follow the held arrow keys again.
+        // has it off: the ball would follow the held arrow keys again.  The
+        // entry is re-armed either way: muted, nothing polls, and the last
+        // replayed tick's frame would otherwise drive the live step.
         world.nav_poll = [b, o](const std::string& entity, bool enable) {
             std::string error;
             const bool muted = o.input_muted && o.input_muted();
             const bool on = enable && !muted;
             const bool ok = b->navigation_poll(entity.c_str(), on, o.own_key_codes, o.own_key_blocks, o.own_key_count, error);
-            if (on && o.on_poll_resumed) o.on_poll_resumed(entity);
+            if (enable && o.on_poll_resumed) o.on_poll_resumed(entity);
             return ok;
         };
         // One physics step with the fixed tick: the primitive the live frame's
