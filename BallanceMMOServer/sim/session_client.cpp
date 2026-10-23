@@ -28,6 +28,7 @@
 #include "crash_report.hpp"
 #include "headless_engine.hpp"
 #include "inbound_capture.hpp"
+#include "process_qos.hpp"
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
@@ -2905,6 +2906,7 @@ int main(int argc, char** argv) {
     // had not, which is why a crash here used to be a bare 0xC0000005 from the
     // harness with no stack at all.
     bmmo::sim::install_crash_reporter();
+    bmmo::sim::opt_out_of_power_throttling();
     arguments args;
     if (!parse(argc, argv, args)) { usage(); return 1; }
     // The engine changes the working directory to the game's Bin while it

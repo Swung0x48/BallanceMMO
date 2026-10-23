@@ -1119,7 +1119,19 @@ on three things:
    - the teardown, after the run's first client reached its time limit.
 
    An untraced difference is listed in the step's note, but it does not fail
-   the step. The rule was tightened step by step, at E4 (the events), at E7
+   the step.
+
+   **Host note (after E10).** Most of the rebase regime was the scheduler.
+   On this i7-14700KF, Windows 11 put the windowless headless clients on the
+   efficiency cores whenever the app that launched them was not in the
+   foreground. One replay took 30 to 32 s that way, against 18.6 s pinned to
+   the performance cores. From the commit after E10, the client and SimTool
+   opt out of power throttling at start (`sim/process_qos.hpp`). The lane
+   control at 150 ms then went from every client rebasing in both old runs
+   (client 0 starved 1449 and 409 ticks) to one rebase in one run (client 2
+   at 2686, the heavy window) and none in the other (`e10abq_lane_*`).
+   Runs measured before that commit, the late-player steps and E3 to E10,
+   ran partly on efficiency cores. The rule was tightened step by step, at E4 (the events), at E7
    (the criteria) and at E10, before it was put this way. On this host, two
    old runs differ from each other as much as old and new do: rebase
    regimes, the slot in the batch, and a phase-B own-ball error that heals

@@ -47,6 +47,7 @@
 
 #include "headless_engine.hpp"
 #include "crash_report.hpp"
+#include "process_qos.hpp"
 #include "physics_world.hpp"
 #include <entity/session.hpp>
 #include <game/script_replay.hpp>
@@ -3251,6 +3252,7 @@ namespace {
 
 int main(int argc, char** argv) {
     bmmo::sim::install_crash_reporter();
+    bmmo::sim::opt_out_of_power_throttling();
     // Runs are redirected to files; keep every line up to a crash.
     std::setvbuf(stdout, nullptr, _IOLBF, 1 << 16);
 #if defined(_MSC_VER) && defined(_DEBUG)
