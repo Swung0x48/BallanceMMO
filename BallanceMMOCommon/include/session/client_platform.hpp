@@ -102,6 +102,17 @@ namespace bmmo::session {
         // host prints it (headless: one log line each, as logf wrote it).
         std::function<void(const std::string& text)> window;
         std::function<void(const std::string& text)> status;
+        // The session's end (E11; legacy_calls::own_body_guard_off until
+        // then): after the journal closed and before every mirror's
+        // navigation and body are taken out.  Headless: the own body guard
+        // lifted (host state).
+        std::function<void()> ended;
+        // A --trace diagnostic (E11; legacy_calls::describe_movable_objects
+        // until then): the movable objects' description, the text of the
+        // `after rollback: movable=` line for each of the first 16 snapshot
+        // rollbacks (headless: describe_movable_objects; design 2.4 keeps
+        // such diagnostics in the host).  Empty: the line is not written.
+        std::function<std::string()> describe_movables;
     };
 
     // The host's own counters the status and window: lines print at their
@@ -444,8 +455,8 @@ namespace bmmo::session {
         // Around every rewind_to / on_snapshot: the host keeps the live cells
         // the replay rewinds (headless live_cells_guard) and re-issues what a
         // rollback lost when the returned guard goes out of scope.  The guard
-        // reads the core's rollback_stats() and current_tick() (headless
-        // reads the same state through core_.s until E11).
+        // reads the core's rollback_stats() and current_tick() (headless:
+        // host support's live_cells_guard).
         std::function<scope_guard(const session_client_core& core)> keep_live_cells;
 
         // ---- journal (design 1.2) ----
@@ -482,9 +493,9 @@ namespace bmmo::session {
         own_lifecycle_source own_lifecycle = own_lifecycle_source::event_log;   // or host_hooks
     };
 
-    // legacy_calls (design 6.1, "Linking while the core is incomplete") is in
-    // session/client_core.hpp from E3 on: its entries name the core state's
-    // types (own_life::aside).
+    // (legacy_calls, design 6.1 "Linking while the core is incomplete", was
+    // in session/client_core.hpp from E3 to E10; E11 deleted it, its last
+    // entries being hooks.ended and hooks.describe_movables.)
 
     // The first operation `platform` lacks that every host must fill, or that
     // a capability `caps` declares needs; nullptr when nothing is missing.

@@ -7,6 +7,8 @@
 // (rollback, correct, trace) and the legacy back-calls (recorded_input_at,
 // own_ball, describe_movable_objects, design 6.1; drop_carried_own_replay was
 // one until E5).
+// E11 deleted the back-calls: describe_movable_objects is the optional
+// hooks.describe_movables.
 // Step E5 adds the relay: SessionRemoteInput's intake and
 // note_input_correction (session_client.cpp at 9029872), verbatim but for the
 // configuration (rollback) and the journal; the held section it hands on and
@@ -154,8 +156,8 @@ namespace bmmo::session {
                         own_row = true;
                 drop_carried_own_replay(snapshot.tick, own_row);
             }
-            if (rolled && config.trace && s.rollback_diag_++ < 16)
-                logf("after rollback: movable=%s", legacy.describe_movable_objects().c_str());
+            if (rolled && config.trace && s.rollback_diag_++ < 16 && platform_.hooks.describe_movables)
+                logf("after rollback: movable=%s", platform_.hooks.describe_movables().c_str());
             return;
         }
         for (const auto& body: snapshot.bodies) {

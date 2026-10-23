@@ -39,6 +39,11 @@
 // at their places in the status line, the window: line at its edges and its
 // phase, the window hook at post_step step 31 and the status hook at the
 // session's end) and takes the back-call `report` out of the call lists.
+// Step E11 closes the core: its state and the frame's steps are private, so
+// the tests reach them through core_test_access (defined here, the core's one
+// friend for them: state_of(core), steps{core}); legacy_calls is gone, its last
+// two entries are the optional hooks.ended and hooks.describe_movables, which
+// the flow fake records as "hook:ended" and "hook:describe_movables".
 
 #include <gtest/gtest.h>
 
@@ -47,6 +52,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -63,6 +69,44 @@
 #include <message/session_remote_input_msg.hpp>
 #include <message/session_resync_msg.hpp>
 
+// The core's state and its frame's steps are private (step E11); the tests
+// reach them through this friend.  steps{core}.<step>(...) calls a private
+// step; state_of(core) is the state.
+namespace bmmo::session {
+    struct core_test_access {
+        session_client_core& c;
+        client_core_state& s() { return c.s; }
+#define BMMO_CORE_STEP(name) \
+        template <class... A> decltype(auto) name(A&&... a) { return c.name(std::forward<A>(a)...); }
+        BMMO_CORE_STEP(drain_due_events)
+        BMMO_CORE_STEP(apply_held_lifecycle)
+        BMMO_CORE_STEP(drain_pending_births)
+        BMMO_CORE_STEP(attach_remote_navigation)
+        BMMO_CORE_STEP(process_own_echoes)
+        BMMO_CORE_STEP(report_physicalize)
+        BMMO_CORE_STEP(report_unphysicalize)
+        BMMO_CORE_STEP(commit_own_reports)
+        BMMO_CORE_STEP(apply_requested_beam)
+        BMMO_CORE_STEP(destroy_moved_own_birth)
+        BMMO_CORE_STEP(hold_pending_sector)
+        BMMO_CORE_STEP(sector_union_pass)
+        BMMO_CORE_STEP(poll_own_sector)
+        BMMO_CORE_STEP(replay_corrected_inputs)
+        BMMO_CORE_STEP(retry_owed_resync)
+        BMMO_CORE_STEP(take_forced_own)
+        BMMO_CORE_STEP(play_forced_own)
+        BMMO_CORE_STEP(take_held_ahead)
+        BMMO_CORE_STEP(finish_lead_slew)
+        BMMO_CORE_STEP(drop_carried_own_replay)
+        BMMO_CORE_STEP(held_header_current)
+        BMMO_CORE_STEP(flush_inputs)
+#undef BMMO_CORE_STEP
+        static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
+            return session_client_core::live_drive(remote, tick);
+        }
+    };
+}
+
 namespace {
     using bmmo::session::clock_site;
     using bmmo::session::client_core_state;
@@ -71,6 +115,9 @@ namespace {
     using bmmo::session::session_capabilities;
     using bmmo::session::session_client_core;
     using bmmo::session::session_platform;
+    using steps = bmmo::session::core_test_access;
+
+    client_core_state& state_of(session_client_core& core) { return steps{core}.s(); }
 
     // Records every platform call in order, as "op:detail".
     struct fake_platform {
@@ -378,22 +425,21 @@ namespace {
         EXPECT_EQ(other.capabilities().own_lifecycle, bmmo::session::own_lifecycle_source::host_hooks);
     }
 
-    // The back-calls (design 6.1) are the host's to fill: a core starts with
-    // none.  E3 adds the seven its moved code calls, E4 four more; E5 removes
-    // four (reset_held_epoch, drop_pending_rewind, finish_lead_slew,
-    // drop_carried_own_replay: their targets are the core's now).  E6 adds
-    // the own lives' three and narrows end_session_world to
-    // own_body_guard_off (the mirrors are the core's now).  E7 removes the
-    // own lives' five (rebase_own_lives, set_aside_unanswered,
-    // live_own_lives, own_lives_due, apply_own_lives).  E9 removes
-    // recorded_input_at (the core's now) and own_ball (the platform's).
-    // E10 removes report (the status line is the core's text, hooks.status).
-    TEST(SessionClientCore, LegacyCallsStartEmpty) {
+    // The back-calls (design 6.1) were the host's to fill: E3 added seven, E4
+    // four, E5-E10 moved the targets of all but two into the core.  E11
+    // deleted legacy_calls: its last two entries, own_body_guard_off and
+    // describe_movable_objects, are the optional hooks.ended and
+    // hooks.describe_movables.  Neither is required, and a session ends
+    // without them.
+    TEST(SessionClientCore, BackCallsBecameOptionalHooks) {
         fake_platform fake;
-        session_client_core core(fake.make(), session_capabilities{});
-        const auto& l = core.legacy;
-        EXPECT_FALSE(l.own_body_guard_off);
-        EXPECT_FALSE(l.describe_movable_objects);
+        session_platform p = fake.make();
+        EXPECT_FALSE(p.hooks.ended);
+        EXPECT_FALSE(p.hooks.describe_movables);
+        EXPECT_EQ(bmmo::session::missing_platform_operation(p, session_capabilities{}), nullptr);
+        session_client_core core(std::move(p), session_capabilities{});
+        core.end("no session");
+        EXPECT_EQ(state_of(core).phase_, client_core_state::phase::idle);
     }
 
     // The state moved with its initializers unchanged (design 6.1, E1): the
@@ -401,7 +447,7 @@ namespace {
     TEST(SessionClientCore, StateKeepsTheHeadlessInitializers) {
         fake_platform fake;
         session_client_core core(fake.make(), session_capabilities{});
-        const client_core_state& s = core.s;
+        const client_core_state& s = state_of(core);
         EXPECT_EQ(s.phase_, client_core_state::phase::idle);
         EXPECT_EQ(s.own_id_, 0u);
         EXPECT_EQ(s.session_, 0u);
@@ -563,15 +609,15 @@ namespace {
     };
 
     void start_session(session_client_core& core) {
-        core.s.session_ = 9;
-        core.s.level_ = 13;
-        core.s.seed_ = 5;
-        core.s.own_id_ = 3;
-        core.s.own_join_order_ = 1;
+        state_of(core).session_ = 9;
+        state_of(core).level_ = 13;
+        state_of(core).seed_ = 5;
+        state_of(core).own_id_ = 3;
+        state_of(core).own_join_order_ = 1;
         bmmo::session::player_entry own, other;
         own.id = 3; own.join_order = 1;
         other.id = 4; other.join_order = 0;
-        core.s.players_ = {own, other};
+        state_of(core).players_ = {own, other};
     }
 
     // A host that journals must be able to stamp the header and read bodies.
@@ -634,12 +680,12 @@ namespace {
         }
 
         // Tick base 100, three frames since the anchor: the current tick is 102.
-        core.s.tick_base_ = 100;
-        core.s.frames_since_anchor_ = 3;
+        state_of(core).tick_base_ = 100;
+        state_of(core).frames_since_anchor_ = 3;
         EXPECT_EQ(core.current_tick(), 102u);
         core.journal().note("hello");
 
-        auto& remote = core.s.remotes_[4];
+        auto& remote = state_of(core).remotes_[4];
         remote.entity = "Ball_Wood_BMMO_4";
         remote.physicalized = true;
         fake.bodies = {make_body("Ball_Paper", true, 1.0), make_body("Ball_Wood_BMMO_4", true, 2.0),
@@ -756,8 +802,8 @@ namespace {
     // ------------------------------------------------- numbering and the hold
     // Step E3: begin, anchor's SessionReady half, poll_hold, SessionAssign,
     // the resync request and its limiter, the event sends and end, over a
-    // fake platform whose clock the test moves, with the host hooks and the
-    // legacy back-calls recorded in the same call list.
+    // fake platform whose clock the test moves, with the host hooks (and,
+    // until E11, the legacy back-calls) recorded in the same call list.
 
     struct flow_fake : journal_fake {
         std::vector<std::pair<std::string, send_mode>> sent;   // every send, in order, with its bytes
@@ -773,6 +819,11 @@ namespace {
                 calls.push_back(std::string("hook:numbering_restarted:") + bmmo::session::clock_site_name(site));
             };
             p.hooks.ending = [this]() { calls.push_back("hook:ending"); };
+            p.hooks.ended = [this]() { calls.push_back("hook:ended"); };
+            p.hooks.describe_movables = [this]() {
+                calls.push_back("hook:describe_movables");
+                return std::string("-");
+            };
             p.hooks.status = [this](const std::string& text) {
                 calls.push_back("hook:status");
                 statuses.push_back(text);
@@ -780,14 +831,6 @@ namespace {
             return p;
         }
 
-        void fill_legacy(session_client_core& core) {
-            auto& l = core.legacy;
-            l.own_body_guard_off = [this]() { calls.push_back("legacy:own_body_guard_off"); };
-            l.describe_movable_objects = [this]() {
-                calls.push_back("legacy:describe_movable_objects");
-                return std::string("-");
-            };
-        }
         void advance(std::chrono::milliseconds ms) { clock += ms; }
     };
 
@@ -809,7 +852,7 @@ namespace {
 
     // begin, level_requested and anchor with a session of id 9 for own id 3.
     void run_to_anchor(session_client_core& core, flow_fake& fake) {
-        core.s.own_id_ = 3;
+        state_of(core).own_id_ = 3;
         ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
         core.level_requested();
         bmmo::session::anchor_report report;
@@ -844,60 +887,58 @@ namespace {
     TEST(SessionClientCoreFlow, BeginRefusesAnotherProtocol) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         auto msg = start_message(9, 3);
         msg.protocol = bmmo::session::PHYSICS_PROTOCOL_VERSION + 1;
         EXPECT_TRUE(core.begin(msg, bmmo::session::core_config{}).refused);
         ASSERT_EQ(fake.calls.size(), 1u);
         EXPECT_EQ(fake.calls[0].rfind("log:0:session 9 refused: the server runs physics protocol", 0), 0u) << fake.calls[0];
-        EXPECT_EQ(core.s.session_, 0u);
-        EXPECT_EQ(core.s.phase_, client_core_state::phase::idle);
+        EXPECT_EQ(state_of(core).session_, 0u);
+        EXPECT_EQ(state_of(core).phase_, client_core_state::phase::idle);
     }
 
     TEST(SessionClientCoreFlow, BeginTakesTheSessionAndConfig) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
-        core.s.own_id_ = 3;
-        core.s.assigned_ = true;
-        core.s.tick_base_ = 77;
-        core.s.held_ = true;
-        core.s.hold_polls_ = 5;
-        core.s.remotes_[4].entity = "x";
+        state_of(core).own_id_ = 3;
+        state_of(core).assigned_ = true;
+        state_of(core).tick_base_ = 77;
+        state_of(core).held_ = true;
+        state_of(core).hold_polls_ = 5;
+        state_of(core).remotes_[4].entity = "x";
         bmmo::session::core_config config;
         config.journal_checkpoint_ticks = 2;
         config.level = 5;
         auto msg = start_message(9, 3);
         EXPECT_FALSE(core.begin(msg, config).refused);
         EXPECT_EQ(core.config.journal_checkpoint_ticks, 2u);
-        EXPECT_EQ(core.s.session_, 9u);
-        EXPECT_EQ(core.s.level_, 13) << "the session's level, not the fallback";
-        EXPECT_EQ(core.s.input_delay_, 4u);
-        EXPECT_EQ(core.s.sector_lead_, 7u);
-        EXPECT_EQ(core.s.seed_, 11);
-        EXPECT_EQ(core.s.own_join_order_, 2);
-        EXPECT_EQ(core.s.own_group_, "P#2");
-        EXPECT_FALSE(core.s.assigned_);
-        EXPECT_FALSE(core.s.held_);
-        EXPECT_EQ(core.s.hold_polls_, 0);
-        EXPECT_EQ(core.s.tick_base_, 0u);
-        EXPECT_EQ(core.s.frames_since_anchor_, -1);
-        EXPECT_TRUE(core.s.remotes_.empty());
-        EXPECT_EQ(core.s.phase_, client_core_state::phase::idle) << "loading only once the host requested the level";
+        EXPECT_EQ(state_of(core).session_, 9u);
+        EXPECT_EQ(state_of(core).level_, 13) << "the session's level, not the fallback";
+        EXPECT_EQ(state_of(core).input_delay_, 4u);
+        EXPECT_EQ(state_of(core).sector_lead_, 7u);
+        EXPECT_EQ(state_of(core).seed_, 11);
+        EXPECT_EQ(state_of(core).own_join_order_, 2);
+        EXPECT_EQ(state_of(core).own_group_, "P#2");
+        EXPECT_FALSE(state_of(core).assigned_);
+        EXPECT_FALSE(state_of(core).held_);
+        EXPECT_EQ(state_of(core).hold_polls_, 0);
+        EXPECT_EQ(state_of(core).tick_base_, 0u);
+        EXPECT_EQ(state_of(core).frames_since_anchor_, -1);
+        EXPECT_TRUE(state_of(core).remotes_.empty());
+        EXPECT_EQ(state_of(core).phase_, client_core_state::phase::idle) << "loading only once the host requested the level";
         const std::vector<std::string> expected = {
             "log:0:session 9 starting: level 13, 2 players, join order 2, seed 11, input delay 4, sector lead 7"};
         EXPECT_EQ(fake.calls, expected);
         core.level_requested();
-        EXPECT_EQ(core.s.phase_, client_core_state::phase::loading);
+        EXPECT_EQ(state_of(core).phase_, client_core_state::phase::loading);
 
         // A SessionStart without a level loads the host's; without our id the
         // join order is unknown and the group is the fallback's.
         msg.map.level = 0;
         msg.players.clear();
         core.begin(msg, config);
-        EXPECT_EQ(core.s.level_, 5);
-        EXPECT_EQ(core.s.own_join_order_, -1);
-        EXPECT_EQ(core.s.own_group_, "P#63");
+        EXPECT_EQ(state_of(core).level_, 5);
+        EXPECT_EQ(state_of(core).own_join_order_, -1);
+        EXPECT_EQ(state_of(core).own_group_, "P#63");
     }
 
     // SessionReady carries the anchor hash, the host's strings and CAP_LEAD
@@ -908,10 +949,9 @@ namespace {
             session_capabilities caps;
             caps.slew = slew;
             session_client_core core(fake.make_flow(), caps);
-            fake.fill_legacy(core);
-            core.s.resync_in_flight_ = true;
-            core.s.resync_owed_ = true;
-            core.s.window_index_ = 3;
+            state_of(core).resync_in_flight_ = true;
+            state_of(core).resync_owed_ = true;
+            state_of(core).window_index_ = 3;
             run_to_anchor(core, fake);
             const std::vector<std::string> expected = {
                 "log:0:session 9 starting: level 13, 2 players, join order 2, seed 11, input delay 4, sector lead 7",
@@ -920,13 +960,13 @@ namespace {
                 "send:0",
                 "log:0:anchored after 12 load ticks: pose 0000000000000051 surfaces 0000000000000052 cores=0 factor=0.000000"};
             EXPECT_EQ(fake.calls, expected);
-            EXPECT_EQ(core.s.phase_, client_core_state::phase::running);
-            EXPECT_EQ(core.s.frames_since_anchor_, 0);
+            EXPECT_EQ(state_of(core).phase_, client_core_state::phase::running);
+            EXPECT_EQ(state_of(core).frames_since_anchor_, 0);
             EXPECT_TRUE(core.holding());
-            EXPECT_EQ(core.s.hold_deadline_, fake.clock + bmmo::session::kAnchorHoldTimeout);
-            EXPECT_FALSE(core.s.resync_in_flight_);
-            EXPECT_FALSE(core.s.resync_owed_);
-            EXPECT_EQ(core.s.window_index_, 0xFFFFFFFFu);
+            EXPECT_EQ(state_of(core).hold_deadline_, fake.clock + bmmo::session::kAnchorHoldTimeout);
+            EXPECT_FALSE(state_of(core).resync_in_flight_);
+            EXPECT_FALSE(state_of(core).resync_owed_);
+            EXPECT_EQ(state_of(core).window_index_, 0xFFFFFFFFu);
             ASSERT_EQ(fake.sent.size(), 1u);
             const auto ready = decode<bmmo::session_ready_msg>(fake.sent[0].first);
             EXPECT_EQ(ready.session, 9u);
@@ -944,7 +984,6 @@ namespace {
     TEST(SessionClientCoreFlow, HoldReleasesOnAssign) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         for (int i = 0; i < 3; ++i) {
             fake.advance(std::chrono::milliseconds(1000));
@@ -952,14 +991,14 @@ namespace {
             EXPECT_TRUE(state.held);
             EXPECT_FALSE(state.timed_out);
         }
-        EXPECT_EQ(core.s.hold_polls_, 3);
+        EXPECT_EQ(state_of(core).hold_polls_, 3);
         const size_t from = fake.calls.size();
         core.on_session_assign(assign_message(9, 120));
         EXPECT_TRUE(core.assigned());
         EXPECT_FALSE(core.holding());
-        EXPECT_EQ(core.s.tick_base_, 120u);
-        EXPECT_EQ(core.s.held_floor_, 120u);
-        EXPECT_EQ(core.s.frames_since_anchor_, 0);
+        EXPECT_EQ(state_of(core).tick_base_, 120u);
+        EXPECT_EQ(state_of(core).held_floor_, 120u);
+        EXPECT_EQ(state_of(core).frames_since_anchor_, 0);
         EXPECT_EQ(core.current_tick(), 120u);
         const std::vector<std::string> expected = {
             "hook:numbering_restarted:assign_renumber",
@@ -970,7 +1009,7 @@ namespace {
         const auto after = core.poll_hold();
         EXPECT_FALSE(after.held);
         EXPECT_FALSE(after.timed_out);
-        EXPECT_EQ(core.s.hold_polls_, 3) << "no poll counted once released";
+        EXPECT_EQ(state_of(core).hold_polls_, 3) << "no poll counted once released";
     }
 
     // Design 5.1 "The hold": the timeout at 10 s on the fake clock, with the
@@ -980,7 +1019,6 @@ namespace {
         flow_fake fake;
         fake.path = dir.path / "client.bmjr";
         session_client_core core(fake.make_flow(true), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         fake.advance(std::chrono::milliseconds(9999));
         EXPECT_TRUE(core.poll_hold().held);
@@ -990,7 +1028,7 @@ namespace {
         EXPECT_FALSE(state.held);
         EXPECT_TRUE(state.timed_out);
         EXPECT_FALSE(core.holding());
-        EXPECT_EQ(core.s.hold_polls_, 2);
+        EXPECT_EQ(state_of(core).hold_polls_, 2);
         const std::vector<std::string> expected = {
             "now:hold_poll", "hook:numbering_restarted:hold_timeout",
             "log:0:anchor hold: no tick base after 10.0 s; running anyway (the world will be out of phase with the server's)"};
@@ -1010,35 +1048,33 @@ namespace {
     TEST(SessionClientCoreFlow, DuplicateOrOlderAssignmentChangesNothing) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(8, 120));   // another session
-        core.s.phase_ = client_core_state::phase::loading;
+        state_of(core).phase_ = client_core_state::phase::loading;
         core.on_session_assign(assign_message(9, 120));   // not running yet
-        core.s.phase_ = client_core_state::phase::running;
+        state_of(core).phase_ = client_core_state::phase::running;
         EXPECT_FALSE(core.assigned());
         core.on_session_assign(assign_message(9, 120));
-        core.s.frames_since_anchor_ = 40;
-        core.s.input_history_.push_back({159, bmmo::session::input_frame{}});
+        state_of(core).frames_since_anchor_ = 40;
+        state_of(core).input_history_.push_back({159, bmmo::session::input_frame{}});
         const size_t from = fake.calls.size();
         core.on_session_assign(assign_message(9, 120));
         core.on_session_assign(assign_message(9, 100));
-        EXPECT_EQ(core.s.duplicate_assigns_, 2u);
-        EXPECT_EQ(core.s.tick_base_, 120u);
-        EXPECT_EQ(core.s.frames_since_anchor_, 40);
-        EXPECT_EQ(core.s.input_history_.size(), 1u);
+        EXPECT_EQ(state_of(core).duplicate_assigns_, 2u);
+        EXPECT_EQ(state_of(core).tick_base_, 120u);
+        EXPECT_EQ(state_of(core).frames_since_anchor_, 40);
+        EXPECT_EQ(state_of(core).input_history_.size(), 1u);
         EXPECT_TRUE(since(fake.calls, from).empty());
 
         // Base 0: the numbering stays the anchor's, frames and inputs kept.
         flow_fake zero;
         session_client_core other(zero.make_flow(), session_capabilities{});
-        zero.fill_legacy(other);
         run_to_anchor(other, zero);
-        other.s.frames_since_anchor_ = 2;
+        state_of(other).frames_since_anchor_ = 2;
         const size_t zfrom = zero.calls.size();
         other.on_session_assign(assign_message(9, 0));
         EXPECT_TRUE(other.assigned());
-        EXPECT_EQ(other.s.frames_since_anchor_, 2);
+        EXPECT_EQ(state_of(other).frames_since_anchor_, 2);
         const std::vector<std::string> expected = {
             "hook:numbering_restarted:assign_release",
             "log:0:anchor hold released after 0 polls: the first frame is tick 0",
@@ -1051,15 +1087,14 @@ namespace {
     TEST(SessionClientCoreFlow, ReassignmentResyncs) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
-        core.s.frames_since_anchor_ = 300;
-        core.s.input_history_.push_back({419, bmmo::session::input_frame{}});
-        core.s.own_inputs_[419] = bmmo::session::input_frame{};
-        core.s.have_snapshot_ = true;
-        core.s.resync_in_flight_ = true;
-        core.s.resync_owed_ = true;
+        state_of(core).frames_since_anchor_ = 300;
+        state_of(core).input_history_.push_back({419, bmmo::session::input_frame{}});
+        state_of(core).own_inputs_[419] = bmmo::session::input_frame{};
+        state_of(core).have_snapshot_ = true;
+        state_of(core).resync_in_flight_ = true;
+        state_of(core).resync_owed_ = true;
         // rebase_own_lives (E7, the core's): a birth still unanswered is set
         // aside, an answered one goes; a beam the new numbering has not
         // reached is live once more, an older one goes.
@@ -1071,29 +1106,29 @@ namespace {
         ahead.origin = ahead.applied = 2004;
         behind.origin = behind.applied = 415;
         ahead.origin_live = ahead.applied_live = true;
-        core.s.own_life_ = {sent, acked, ahead, behind};
+        state_of(core).own_life_ = {sent, acked, ahead, behind};
         const size_t from = fake.calls.size();
         core.on_session_assign(assign_message(9, 2000));
-        EXPECT_EQ(core.s.tick_base_, 2000u);
-        EXPECT_EQ(core.s.held_floor_, 2000u);
-        EXPECT_EQ(core.s.last_assign_first_tick_, 2000u);
-        EXPECT_EQ(core.s.frames_since_anchor_, 0);
-        EXPECT_TRUE(core.s.input_history_.empty());
-        EXPECT_TRUE(core.s.own_inputs_.empty());
+        EXPECT_EQ(state_of(core).tick_base_, 2000u);
+        EXPECT_EQ(state_of(core).held_floor_, 2000u);
+        EXPECT_EQ(state_of(core).last_assign_first_tick_, 2000u);
+        EXPECT_EQ(state_of(core).frames_since_anchor_, 0);
+        EXPECT_TRUE(state_of(core).input_history_.empty());
+        EXPECT_TRUE(state_of(core).own_inputs_.empty());
         EXPECT_TRUE(core.resync_pending());
-        EXPECT_FALSE(core.s.have_snapshot_);
-        EXPECT_FALSE(core.s.resync_in_flight_);
-        EXPECT_FALSE(core.s.resync_owed_);
+        EXPECT_FALSE(state_of(core).have_snapshot_);
+        EXPECT_FALSE(state_of(core).resync_in_flight_);
+        EXPECT_FALSE(state_of(core).resync_owed_);
         const std::vector<std::string> expected = {
             "hook:numbering_restarted:assign_resync", "log:0:resynced: tick base 2000"};
         EXPECT_EQ(since(fake.calls, from), expected);
-        ASSERT_EQ(core.s.own_unanswered_.size(), 1u);
-        EXPECT_EQ(core.s.own_unanswered_[0].origin, 410u);
-        EXPECT_EQ(core.s.own_unanswered_[0].why, client_core_state::own_life::aside::resync);
-        ASSERT_EQ(core.s.own_life_.size(), 1u);
-        EXPECT_EQ(core.s.own_life_[0].origin, 2004u);
-        EXPECT_FALSE(core.s.own_life_[0].origin_live);
-        EXPECT_FALSE(core.s.own_life_[0].applied_live);
+        ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_unanswered_[0].origin, 410u);
+        EXPECT_EQ(state_of(core).own_unanswered_[0].why, client_core_state::own_life::aside::resync);
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_life_[0].origin, 2004u);
+        EXPECT_FALSE(state_of(core).own_life_[0].origin_live);
+        EXPECT_FALSE(state_of(core).own_life_[0].applied_live);
         EXPECT_TRUE(fake.sent.size() == 1u) << "a resync sends nothing (the SessionReady only)";
     }
 
@@ -1103,16 +1138,15 @@ namespace {
     TEST(SessionClientCoreFlow, ResyncLimiter) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.request_resync("before the base");
-        EXPECT_EQ(core.s.resyncs_sent_, 0u);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 0u);
         core.on_session_assign(assign_message(9, 120));
-        core.s.last_snapshot_tick_ = 115;
+        state_of(core).last_snapshot_tick_ = 115;
         size_t from = fake.calls.size();
         core.request_resync("first");
-        EXPECT_EQ(core.s.resyncs_sent_, 1u);
-        EXPECT_TRUE(core.s.resync_in_flight_);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
+        EXPECT_TRUE(state_of(core).resync_in_flight_);
         {
             const std::vector<std::string> expected = {"now:resync_limiter", "send:0",
                                                        "log:0:resync requested (first) at tick 120"};
@@ -1125,32 +1159,32 @@ namespace {
         fake.advance(std::chrono::milliseconds(5000));
         from = fake.calls.size();
         core.request_resync("in flight", true);
-        EXPECT_FALSE(core.s.resync_owed_);
+        EXPECT_FALSE(state_of(core).resync_owed_);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"now:resync_limiter"});
         // Answered (a newer base), then asked again within 2 s: owed.
         core.on_session_assign(assign_message(9, 900));
-        core.s.resync_pending_ = false;
+        state_of(core).resync_pending_ = false;
         fake.advance(std::chrono::milliseconds(-4000));   // 1 s after the first request
         from = fake.calls.size();
         core.request_resync("not owed");
-        EXPECT_FALSE(core.s.resync_owed_);
+        EXPECT_FALSE(state_of(core).resync_owed_);
         core.request_resync("owed", true);
-        EXPECT_TRUE(core.s.resync_owed_);
-        EXPECT_EQ(core.s.resync_owed_reason_, "owed");
+        EXPECT_TRUE(state_of(core).resync_owed_);
+        EXPECT_EQ(state_of(core).resync_owed_reason_, "owed");
         {
             const std::vector<std::string> expected = {"now:resync_limiter", "now:resync_limiter",
                                                        "log:0:resync owed (owed) at tick 900: the limiter holds it back"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        core.retry_owed_resync();   // still within 2 s: kept
-        EXPECT_TRUE(core.s.resync_owed_);
-        EXPECT_EQ(core.s.resyncs_sent_, 1u);
+        steps{core}.retry_owed_resync();   // still within 2 s: kept
+        EXPECT_TRUE(state_of(core).resync_owed_);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
         fake.advance(std::chrono::milliseconds(1000));
-        core.s.lead_slew_.start(1, 3);
+        state_of(core).lead_slew_.start(1, 3);
         from = fake.calls.size();
-        core.retry_owed_resync();
-        EXPECT_FALSE(core.s.resync_owed_);
-        EXPECT_EQ(core.s.resyncs_sent_, 2u);
+        steps{core}.retry_owed_resync();
+        EXPECT_FALSE(state_of(core).resync_owed_);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 2u);
         {
             const std::vector<std::string> expected = {
                 "now:resync_limiter", "send:0",
@@ -1160,11 +1194,11 @@ namespace {
             EXPECT_EQ(since(fake.calls, from), expected);
         }
         // A resync waiting for its snapshot is the answer to an owed one.
-        core.s.resync_owed_ = true;
-        core.s.resync_pending_ = true;
+        state_of(core).resync_owed_ = true;
+        state_of(core).resync_pending_ = true;
         from = fake.calls.size();
-        core.retry_owed_resync();
-        EXPECT_FALSE(core.s.resync_owed_);
+        steps{core}.retry_owed_resync();
+        EXPECT_FALSE(state_of(core).resync_owed_);
         EXPECT_TRUE(since(fake.calls, from).empty());
     }
 
@@ -1181,7 +1215,6 @@ namespace {
             return hold ? bmmo::session::event_send_verdict::hold : bmmo::session::event_send_verdict::send;
         };
         session_client_core core(std::move(p), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         bmmo::session_event_msg event;
         event.tick = 130;
@@ -1191,10 +1224,10 @@ namespace {
         core.send_event(event);
         EXPECT_EQ(event.session, 9u);
         EXPECT_EQ(event.origin_tick, 130u);
-        EXPECT_EQ(core.s.events_sent_, 1u);
+        EXPECT_EQ(state_of(core).events_sent_, 1u);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"hook:filter_event"});
         EXPECT_EQ(fake.sent.size(), sent_before);
-        core.flush_inputs();   // not assigned: nothing
+        steps{core}.flush_inputs();   // not assigned: nothing
         EXPECT_EQ(fake.sent.size(), sent_before);
         const std::string held_bytes = event.raw.str();
         core.release_event(held_bytes);
@@ -1213,19 +1246,19 @@ namespace {
         for (uint32_t t = 120; t < 120 + bmmo::session::MAX_INPUT_FRAMES + 3; ++t) {
             bmmo::session::input_frame frame;
             frame.keys = static_cast<uint8_t>(t);
-            core.s.input_history_.push_back({t, frame});
+            state_of(core).input_history_.push_back({t, frame});
         }
-        const uint64_t inputs_before = core.s.inputs_sent_;
-        core.flush_inputs();
-        EXPECT_EQ(core.s.inputs_sent_, inputs_before + 2);
+        const uint64_t inputs_before = state_of(core).inputs_sent_;
+        steps{core}.flush_inputs();
+        EXPECT_EQ(state_of(core).inputs_sent_, inputs_before + 2);
         const auto first = decode<bmmo::session_input_msg>(fake.sent[fake.sent.size() - 2].first);
         const auto second = decode<bmmo::session_input_msg>(fake.sent.back().first);
         EXPECT_EQ(first.first_tick, 120u);
         EXPECT_EQ(first.frames.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES));
         EXPECT_EQ(second.first_tick, 120u + bmmo::session::MAX_INPUT_FRAMES);
         EXPECT_EQ(second.frames.size(), 3u);
-        EXPECT_EQ(core.s.sent_inputs_.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES) + 3);
-        EXPECT_EQ(core.s.sent_inputs_.at(121).keys, 121);
+        EXPECT_EQ(state_of(core).sent_inputs_.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES) + 3);
+        EXPECT_EQ(state_of(core).sent_inputs_.at(121).keys, 121);
     }
 
     // SessionEnd: another session's is only logged; ours goes idle, in
@@ -1234,23 +1267,22 @@ namespace {
     TEST(SessionClientCoreFlow, EndGoesIdle) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
-        core.s.remotes_[4].entity = "Ball_Wood_BMMO_4";
+        state_of(core).remotes_[4].entity = "Ball_Wood_BMMO_4";
         bmmo::session_end_msg other;
         other.session = 8;
         other.reason = "elsewhere";
         size_t from = fake.calls.size();
         core.on_session_end(other);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"log:0:session 8 ended: elsewhere"});
-        EXPECT_EQ(core.s.phase_, client_core_state::phase::running);
+        EXPECT_EQ(state_of(core).phase_, client_core_state::phase::running);
         bmmo::session_end_msg ours;
         ours.session = 9;
         from = fake.calls.size();
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
-            "log:0:session 9 ended: ", "hook:ending", "legacy:own_body_guard_off",
+            "log:0:session 9 ended: ", "hook:ending", "hook:ended",
             "hook:status"};
         EXPECT_EQ(since(fake.calls, from), expected);
         ASSERT_EQ(fake.statuses.size(), 1u);
@@ -1258,18 +1290,18 @@ namespace {
             << "printed before the core goes idle: " << fake.statuses[0];
         EXPECT_NE(fake.statuses[0].find(" remotes=0 "), std::string::npos) << "after the mirrors are gone";
         EXPECT_NE(fake.statuses[0].find(" rebases=0 resyncs="), std::string::npos) << "no counters: zeros";
-        EXPECT_EQ(core.s.phase_, client_core_state::phase::idle);
-        EXPECT_EQ(core.s.session_, 0u);
+        EXPECT_EQ(state_of(core).phase_, client_core_state::phase::idle);
+        EXPECT_EQ(state_of(core).session_, 0u);
         EXPECT_FALSE(core.assigned());
-        EXPECT_TRUE(core.s.remotes_.empty());
-        EXPECT_EQ(core.s.sessions_ended_, 1u);
+        EXPECT_TRUE(state_of(core).remotes_.empty());
+        EXPECT_EQ(state_of(core).sessions_ended_, 1u);
     }
 
     // ---------------------------------------------------- the snapshot path
     // Step E4: SessionSnapshot's count and apply_snapshot - the resync
     // rebuild, the snapshot rollback and the legacy ladder - over the
     // platform's write_body, own_driven_entity, bind_world and
-    // keep_live_cells, with the legacy back-calls recorded.
+    // keep_live_cells, with the host's hooks recorded.
 
     bmmo::session::body_state ball_row(uint32_t owner, double x, bool simulated) {
         bmmo::session::body_state b;
@@ -1298,25 +1330,24 @@ namespace {
     TEST(SessionClientCoreSnapshot, CountedAppliedAndStale) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         core.on_session_snapshot(snapshot_message(9, 100, true, {}));
-        EXPECT_EQ(core.s.snapshots_received_, 1u);
+        EXPECT_EQ(state_of(core).snapshots_received_, 1u);
         EXPECT_TRUE(fake.calls.empty()) << "idle: counted only";
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
         size_t from = fake.calls.size();
         core.on_session_snapshot(snapshot_message(8, 125, true, {ball_row(3, 1.0, true)}));
-        EXPECT_EQ(core.s.snapshots_received_, 2u);
+        EXPECT_EQ(state_of(core).snapshots_received_, 2u);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "another session's: counted only";
-        EXPECT_FALSE(core.s.have_snapshot_);
+        EXPECT_FALSE(state_of(core).have_snapshot_);
 
         core.on_session_snapshot(snapshot_message(9, 125, false, {ball_row(3, 1.0, true)}));
-        EXPECT_EQ(core.s.snapshots_received_, 3u);
-        EXPECT_EQ(core.s.snapshots_applied_, 1u);
-        EXPECT_TRUE(core.s.have_snapshot_);
-        EXPECT_EQ(core.s.last_snapshot_tick_, 125u);
+        EXPECT_EQ(state_of(core).snapshots_received_, 3u);
+        EXPECT_EQ(state_of(core).snapshots_applied_, 1u);
+        EXPECT_TRUE(state_of(core).have_snapshot_);
+        EXPECT_EQ(state_of(core).last_snapshot_tick_, 125u);
         EXPECT_EQ(core.rollback_stats().unmatched, 1u) << "no record of tick 125";
-        EXPECT_EQ(core.s.snapshot_rollbacks_, 0u);
+        EXPECT_EQ(state_of(core).snapshot_rollbacks_, 0u);
         {
             // The own row names no entity while the own ball has no body.
             const std::vector<std::string> expected = {"own_ball", "keep_live_cells:enter:120", "bind_world",
@@ -1326,11 +1357,11 @@ namespace {
         from = fake.calls.size();
         core.on_session_snapshot(snapshot_message(9, 125, false, {}));
         core.on_session_snapshot(snapshot_message(9, 110, false, {}));
-        EXPECT_EQ(core.s.snapshots_stale_, 2u);
-        EXPECT_EQ(core.s.snapshots_applied_, 1u);
+        EXPECT_EQ(state_of(core).snapshots_stale_, 2u);
+        EXPECT_EQ(state_of(core).snapshots_applied_, 1u);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "stale: nothing read";
         core.on_session_snapshot(snapshot_message(9, 110, true, {ball_row(3, 1.0, true)}));
-        EXPECT_EQ(core.s.snapshots_applied_, 2u) << "a full one is never stale";
+        EXPECT_EQ(state_of(core).snapshots_applied_, 2u) << "a full one is never stale";
         EXPECT_EQ(core.rollback_stats().unmatched, 2u);
         {
             const std::vector<std::string> expected = {"own_ball", "keep_live_cells:enter:120", "bind_world",
@@ -1346,23 +1377,22 @@ namespace {
     TEST(SessionClientCoreSnapshot, ResyncRebuildsFromTheFullSnapshot) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
         core.on_session_assign(assign_message(9, 2000));
         ASSERT_TRUE(core.resync_pending());
-        core.s.frames_since_anchor_ = 10;   // current tick 2009
-        core.s.own_physicalized_ = true;
-        core.s.remotes_[4].entity = "Ball_Wood_BMMO_4";
-        core.s.remotes_[4].physicalized = true;
-        core.s.remotes_[5].entity = "Ball_Wood_BMMO_5";
+        state_of(core).frames_since_anchor_ = 10;   // current tick 2009
+        state_of(core).own_physicalized_ = true;
+        state_of(core).remotes_[4].entity = "Ball_Wood_BMMO_4";
+        state_of(core).remotes_[4].physicalized = true;
+        state_of(core).remotes_[5].entity = "Ball_Wood_BMMO_5";
         const std::vector<bmmo::session::body_state> rows = {ball_row(3, 1.0, false), ball_row(4, 2.0, false),
                                                              ball_row(5, 3.0, true), ball_row(6, 4.0, true)};
         size_t from = fake.calls.size();
         core.on_session_snapshot(snapshot_message(9, 1995, false, rows));
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"own_ball"});
         EXPECT_TRUE(core.resync_pending());
-        EXPECT_EQ(core.s.snapshots_applied_, 0u);
+        EXPECT_EQ(state_of(core).snapshots_applied_, 0u);
         from = fake.calls.size();
         core.on_session_snapshot(snapshot_message(9, 1995, true, rows));
         const std::vector<std::string> expected = {
@@ -1371,11 +1401,11 @@ namespace {
             "log:0:resync applied from the full snapshot of tick 1995 (4 bodies)"};
         EXPECT_EQ(since(fake.calls, from), expected);
         EXPECT_FALSE(core.resync_pending());
-        EXPECT_TRUE(core.s.have_snapshot_);
-        EXPECT_EQ(core.s.last_snapshot_tick_, 1995u);
-        EXPECT_EQ(core.s.snapshots_applied_, 1u);
-        EXPECT_EQ(core.s.resyncs_done_, 1u);
-        EXPECT_EQ(core.s.held_floor_, 2010u);
+        EXPECT_TRUE(state_of(core).have_snapshot_);
+        EXPECT_EQ(state_of(core).last_snapshot_tick_, 1995u);
+        EXPECT_EQ(state_of(core).snapshots_applied_, 1u);
+        EXPECT_EQ(state_of(core).resyncs_done_, 1u);
+        EXPECT_EQ(state_of(core).held_floor_, 2010u);
     }
 
     // The legacy ladder (rollback off): the own ball compared with its
@@ -1385,15 +1415,14 @@ namespace {
     TEST(SessionClientCoreSnapshot, LegacyLadder) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
         core.config.rollback = false;
-        core.s.own_physicalized_ = true;
+        state_of(core).own_physicalized_ = true;
         auto hard_at = [&](uint32_t tick) {
             bmmo::session::ball_pose local;
             local.tick = tick;
-            core.s.corrector_.record(local);
+            state_of(core).corrector_.record(local);
             core.on_session_snapshot(snapshot_message(9, tick, false, {ball_row(3, 5.0, true)}));
         };
         size_t from = fake.calls.size();
@@ -1404,7 +1433,7 @@ namespace {
                 "write_body:Ball_Wood:5.000000:wake"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.consecutive_hard_, 1);
+        EXPECT_EQ(state_of(core).consecutive_hard_, 1);
         core.config.correct = false;
         from = fake.calls.size();
         hard_at(126);
@@ -1422,11 +1451,11 @@ namespace {
                 "log:0:hard correction of own ball for tick 127 (error 5.0000 m, local tick 120)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.resyncs_sent_, 1u);
-        EXPECT_EQ(core.s.consecutive_hard_, 0) << "reset by the request";
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
+        EXPECT_EQ(state_of(core).consecutive_hard_, 0) << "reset by the request";
 
-        core.s.remotes_[4].entity = "Ball_Wood_BMMO_4";
-        core.s.remotes_[4].physicalized = true;
+        state_of(core).remotes_[4].entity = "Ball_Wood_BMMO_4";
+        state_of(core).remotes_[4].physicalized = true;
         from = fake.calls.size();
         core.on_session_snapshot(snapshot_message(9, 128, false, {ball_row(4, 2.0, false)}));
         fake.write_ok = false;
@@ -1437,7 +1466,7 @@ namespace {
                 "own_ball", "write_body:Ball_Wood_BMMO_4:3.000000:wake", "log:0:remote 4: no body"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.remote_writes_, 1u);
+        EXPECT_EQ(state_of(core).remote_writes_, 1u);
     }
 
     // ------------------------------- the relay and late-player parts one and two
@@ -1473,8 +1502,8 @@ namespace {
     void run_to_tick_125(session_client_core& core, flow_fake& fake) {
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
-        core.s.frames_since_anchor_ = 6;
-        core.s.held_floor_ = 125;
+        state_of(core).frames_since_anchor_ = 6;
+        state_of(core).held_floor_ = 125;
         ASSERT_EQ(core.current_tick(), 125u);
     }
 
@@ -1488,7 +1517,6 @@ namespace {
         session_capabilities caps;
         caps.slew = true;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         const size_t sent_before = fake.sent.size();
         size_t from = fake.calls.size();
@@ -1501,46 +1529,46 @@ namespace {
             EXPECT_EQ(since(fake.calls, from), expected);
         }
         EXPECT_EQ(fake.sent.size(), sent_before) << "no ack while the slew runs";
-        EXPECT_TRUE(core.s.lead_slew_.active());
-        EXPECT_EQ(core.s.lead_adjustments_, 1u);
-        EXPECT_EQ(core.s.subst_base_, 5u);
+        EXPECT_TRUE(state_of(core).lead_slew_.active());
+        EXPECT_EQ(state_of(core).lead_adjustments_, 1u);
+        EXPECT_EQ(state_of(core).subst_base_, 5u);
         for (uint32_t t = 121; t <= 125; ++t) {
-            ASSERT_TRUE(core.s.own_inputs_.count(t)) << t;
-            EXPECT_EQ(core.s.own_inputs_.at(t).keys, 0x21) << t;
+            ASSERT_TRUE(state_of(core).own_inputs_.count(t)) << t;
+            EXPECT_EQ(state_of(core).own_inputs_.at(t).keys, 0x21) << t;
         }
-        ASSERT_EQ(core.s.forced_own_.size(), 4u);
-        EXPECT_EQ(core.s.forced_own_.begin()->first, 126u);
-        EXPECT_EQ(core.s.held_learned_total_, 9u) << "every tick of the range learned";
+        ASSERT_EQ(state_of(core).forced_own_.size(), 4u);
+        EXPECT_EQ(state_of(core).forced_own_.begin()->first, 126u);
+        EXPECT_EQ(state_of(core).held_learned_total_, 9u) << "every tick of the range learned";
 
         // The forced frames: taken by tick, older ones dropped; played as the
         // server's frame and counted as a received notice the first time.
         client_core_state::forced_own forced;
-        EXPECT_FALSE(core.take_forced_own(125, forced));
-        ASSERT_TRUE(core.take_forced_own(127, forced));
-        EXPECT_EQ(core.s.forced_own_.size(), 2u) << "126 dropped, 127 taken";
+        EXPECT_FALSE(steps{core}.take_forced_own(125, forced));
+        ASSERT_TRUE(steps{core}.take_forced_own(127, forced));
+        EXPECT_EQ(state_of(core).forced_own_.size(), 2u) << "126 dropped, 127 taken";
         bmmo::session::input_frame input = keys_frame(0x01);
-        core.play_forced_own(127, forced, input);
+        steps{core}.play_forced_own(127, forced, input);
         EXPECT_EQ(input.keys, 0x21);
-        EXPECT_EQ(core.s.lead_forced_played_, 1u);
-        EXPECT_EQ(core.s.subst_recv_, 1u);
-        EXPECT_EQ(core.s.subst_same_, 1u);
+        EXPECT_EQ(state_of(core).lead_forced_played_, 1u);
+        EXPECT_EQ(state_of(core).subst_recv_, 1u);
+        EXPECT_EQ(state_of(core).subst_same_, 1u);
 
         // A copy, and a decision of another base: dropped, nothing sent.
         from = fake.calls.size();
         core.on_session_lead(lead_message(1, 4, 121, 130, 120));
-        EXPECT_EQ(core.s.lead_dups_, 1u);
+        EXPECT_EQ(state_of(core).lead_dups_, 1u);
         core.on_session_lead(lead_message(2, 4, 121, 130, 100));
-        EXPECT_EQ(core.s.lead_stale_, 1u);
+        EXPECT_EQ(state_of(core).lead_stale_, 1u);
         EXPECT_EQ(since(fake.calls, from),
                   std::vector<std::string>{"log:0:lead: SessionLead 2 of base 100 dropped (our base 120)"});
         EXPECT_EQ(fake.sent.size(), sent_before);
 
         // The slew moves its four ticks (the host's pacer, E9), then ends:
         // acknowledged, reliable, with what it moved.
-        for (int i = 0; i < 4; ++i) EXPECT_EQ(core.s.lead_slew_.advance(1.0, 0.0), 1);
-        ASSERT_TRUE(core.s.lead_slew_.done());
+        for (int i = 0; i < 4; ++i) EXPECT_EQ(state_of(core).lead_slew_.advance(1.0, 0.0), 1);
+        ASSERT_TRUE(state_of(core).lead_slew_.done());
         from = fake.calls.size();
-        core.finish_lead_slew("slew complete");
+        steps{core}.finish_lead_slew("slew complete");
         {
             const std::vector<std::string> expected = {
                 "send:0",
@@ -1554,12 +1582,12 @@ namespace {
         EXPECT_EQ(ack.session, 9u);
         EXPECT_EQ(ack.seq, 1u);
         EXPECT_EQ(ack.applied, 4);
-        EXPECT_EQ(core.s.lead_offset_, 4);
-        EXPECT_FALSE(core.s.lead_slew_.active());
+        EXPECT_EQ(state_of(core).lead_offset_, 4);
+        EXPECT_FALSE(state_of(core).lead_slew_.active());
 
         // A new base voids what is left: the forced ticks go.
         core.on_session_assign(assign_message(9, 2000));
-        EXPECT_TRUE(core.s.forced_own_.empty());
+        EXPECT_TRUE(state_of(core).forced_own_.empty());
     }
 
     // Design 5.1 "SessionLead", without it (design 2.3): SessionReady's caps
@@ -1571,34 +1599,33 @@ namespace {
         flow_fake fake;
         fake.path = dir.path / "client.bmjr";
         session_client_core core(fake.make_flow(true), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         ASSERT_FALSE(fake.sent.empty());
         EXPECT_EQ(decode<bmmo::session_ready_msg>(fake.sent[0].first).caps, 0u);
         const size_t sent_before = fake.sent.size();
         const size_t from = fake.calls.size();
         core.on_session_lead(lead_message(1, 4, 121, 130, 120));
-        EXPECT_EQ(core.s.lead_refused_, 1u);
+        EXPECT_EQ(state_of(core).lead_refused_, 1u);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "no clock read, no log line, no send";
         EXPECT_EQ(fake.sent.size(), sent_before);
-        EXPECT_FALSE(core.s.lead_slew_.active());
-        EXPECT_TRUE(core.s.forced_own_.empty());
-        EXPECT_EQ(core.s.lead_seen_.count(1u), 1u) << "refused once per decision";
-        EXPECT_EQ(core.s.lead_adjustments_, 0u);
-        EXPECT_EQ(core.s.subst_base_, 0u);
-        EXPECT_TRUE(core.s.own_inputs_.empty());
-        EXPECT_EQ(core.s.held_learned_total_, 0u);
+        EXPECT_FALSE(state_of(core).lead_slew_.active());
+        EXPECT_TRUE(state_of(core).forced_own_.empty());
+        EXPECT_EQ(state_of(core).lead_seen_.count(1u), 1u) << "refused once per decision";
+        EXPECT_EQ(state_of(core).lead_adjustments_, 0u);
+        EXPECT_EQ(state_of(core).subst_base_, 0u);
+        EXPECT_TRUE(state_of(core).own_inputs_.empty());
+        EXPECT_EQ(state_of(core).held_learned_total_, 0u);
         // The server's copy of the same decision: a copy, not refused again.
         const size_t copy_from = fake.calls.size();
         core.on_session_lead(lead_message(1, 4, 121, 130, 120));
-        EXPECT_EQ(core.s.lead_refused_, 1u);
-        EXPECT_EQ(core.s.lead_dups_, 1u);
+        EXPECT_EQ(state_of(core).lead_refused_, 1u);
+        EXPECT_EQ(state_of(core).lead_dups_, 1u);
         EXPECT_TRUE(since(fake.calls, copy_from).empty());
         // Another session's, or before the assignment: not even counted.
         bmmo::session_lead_msg other = lead_message(2, 4, 121, 130, 120);
         other.session = 8;
         core.on_session_lead(other);
-        EXPECT_EQ(core.s.lead_refused_, 1u);
+        EXPECT_EQ(state_of(core).lead_refused_, 1u);
         core.journal().close("done");
         bmmo::session::journal j;
         std::string error;
@@ -1625,9 +1652,8 @@ namespace {
     TEST(SessionClientCoreRelay, IntakeStoresParksAndCounts) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
-        auto& remote = core.s.remotes_[4];
+        auto& remote = state_of(core).remotes_[4];
         remote.entity = "Ball_Wood_BMMO_4";
         remote.physicalized = true;
         remote.navigation = true;
@@ -1635,8 +1661,8 @@ namespace {
         bmmo::session_remote_input_msg other = relay_message(124, 120);
         other.session = 8;
         core.on_session_remote_input(other);
-        EXPECT_EQ(core.s.remote_inputs_received_, 1u);
-        EXPECT_EQ(core.s.relay_new_, 0u) << "another session's: counted only";
+        EXPECT_EQ(state_of(core).remote_inputs_received_, 1u);
+        EXPECT_EQ(state_of(core).relay_new_, 0u) << "another session's: counted only";
 
         bmmo::session_remote_input_msg msg = relay_message(124, 120);
         bmmo::session_remote_input_msg::entry mirrored, unmirrored;
@@ -1648,23 +1674,23 @@ namespace {
         const size_t from = fake.calls.size();
         core.on_session_remote_input(msg);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "nothing logged or sent";
-        EXPECT_EQ(core.s.remote_inputs_received_, 2u);
-        EXPECT_EQ(core.s.relay_new_, 4u);
-        EXPECT_EQ(core.s.relay_parked_, 1u);
-        EXPECT_EQ(core.s.relay_late_, 3u) << "simulated ticks with no history to replay from";
-        EXPECT_EQ(core.s.relay_lag_max_, 3u);
-        EXPECT_EQ(core.s.relay_lag_hist_[1], 2u);   // tick 124, both players
-        EXPECT_EQ(core.s.window_lag_[4][3], 1u);
+        EXPECT_EQ(state_of(core).remote_inputs_received_, 2u);
+        EXPECT_EQ(state_of(core).relay_new_, 4u);
+        EXPECT_EQ(state_of(core).relay_parked_, 1u);
+        EXPECT_EQ(state_of(core).relay_late_, 3u) << "simulated ticks with no history to replay from";
+        EXPECT_EQ(state_of(core).relay_lag_max_, 3u);
+        EXPECT_EQ(state_of(core).relay_lag_hist_[1], 2u);   // tick 124, both players
+        EXPECT_EQ(state_of(core).window_lag_[4][3], 1u);
         ASSERT_EQ(remote.inputs.size(), 3u);
         EXPECT_TRUE(remote.have_input);
         EXPECT_EQ(remote.input_tick, 124u);
         EXPECT_EQ(remote.input.keys, 3);
-        EXPECT_FALSE(core.s.input_rewind_pending_);
-        EXPECT_EQ(core.s.input_reports_, 1u);
+        EXPECT_FALSE(state_of(core).input_rewind_pending_);
+        EXPECT_EQ(state_of(core).input_reports_, 1u);
 
         core.on_session_remote_input(msg);   // the window's re-delivery
-        EXPECT_EQ(core.s.relay_dup_, 4u);
-        EXPECT_EQ(core.s.relay_new_, 4u);
+        EXPECT_EQ(state_of(core).relay_dup_, 4u);
+        EXPECT_EQ(state_of(core).relay_new_, 4u);
 
         bmmo::session_remote_input_msg stale = relay_message(126, 100);
         bmmo::session_remote_input_msg::held_record record;
@@ -1672,9 +1698,9 @@ namespace {
         stale.held = {record};
         core.on_session_remote_input(stale);
         core.on_session_remote_input(stale);
-        EXPECT_EQ(core.s.subst_stale_epoch_, 1u);
-        EXPECT_TRUE(core.held_header_current()) << "the header of our own base stays the newest";
-        EXPECT_EQ(core.s.held_header_tick_, 124u);
+        EXPECT_EQ(state_of(core).subst_stale_epoch_, 1u);
+        EXPECT_TRUE(steps{core}.held_header_current()) << "the header of our own base stays the newest";
+        EXPECT_EQ(state_of(core).held_header_tick_, 124u);
     }
 
     // replay_corrected_inputs: one replay for the frame's corrections, inside
@@ -1684,17 +1710,16 @@ namespace {
     TEST(SessionClientCoreRelay, ReplayAndForcedRewindKeepTheLiveCells) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
-        core.replay_corrected_inputs();   // nothing pending: nothing
+        steps{core}.replay_corrected_inputs();   // nothing pending: nothing
         size_t from = fake.calls.size();
         EXPECT_TRUE(since(fake.calls, from).empty());
 
-        core.s.input_rewind_pending_ = true;
-        core.s.input_rewind_tick_ = 118;
-        core.s.input_rewind_entity_ = "Ball_Wood_BMMO_4";
-        core.s.input_rewind_entities_ = {"Ball_Wood_BMMO_4"};
-        core.replay_corrected_inputs();
+        state_of(core).input_rewind_pending_ = true;
+        state_of(core).input_rewind_tick_ = 118;
+        state_of(core).input_rewind_entity_ = "Ball_Wood_BMMO_4";
+        state_of(core).input_rewind_entities_ = {"Ball_Wood_BMMO_4"};
+        steps{core}.replay_corrected_inputs();
         {
             const std::vector<std::string> expected = {
                 "keep_live_cells:enter:125", "bind_world",
@@ -1703,20 +1728,20 @@ namespace {
                 "keep_live_cells:exit"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.input_rewinds_missed_, 1u);
-        EXPECT_EQ(core.s.subst_rewinds_missed_, 0u);
-        EXPECT_FALSE(core.s.input_rewind_pending_);
-        EXPECT_TRUE(core.s.input_rewind_entities_.empty());
+        EXPECT_EQ(state_of(core).input_rewinds_missed_, 1u);
+        EXPECT_EQ(state_of(core).subst_rewinds_missed_, 0u);
+        EXPECT_FALSE(state_of(core).input_rewind_pending_);
+        EXPECT_TRUE(state_of(core).input_rewind_entities_.empty());
 
         // An own correction among them: the refusal asks for a resync.
-        core.s.input_rewind_pending_ = true;
-        core.s.input_rewind_tick_ = 119;
-        core.s.input_rewind_entity_ = "Ball_Wood";
-        core.s.input_rewind_own_ = true;
-        core.s.input_rewind_has_own_ = true;
-        core.s.input_rewind_entities_ = {"Ball_Wood_BMMO_4"};
+        state_of(core).input_rewind_pending_ = true;
+        state_of(core).input_rewind_tick_ = 119;
+        state_of(core).input_rewind_entity_ = "Ball_Wood";
+        state_of(core).input_rewind_own_ = true;
+        state_of(core).input_rewind_has_own_ = true;
+        state_of(core).input_rewind_entities_ = {"Ball_Wood_BMMO_4"};
         from = fake.calls.size();
-        core.replay_corrected_inputs();
+        steps{core}.replay_corrected_inputs();
         {
             const std::vector<std::string> expected = {
                 "keep_live_cells:enter:125", "bind_world",
@@ -1727,14 +1752,14 @@ namespace {
                 "keep_live_cells:exit"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.input_rewinds_missed_, 2u);
-        EXPECT_EQ(core.s.subst_rewinds_missed_, 1u);
+        EXPECT_EQ(state_of(core).input_rewinds_missed_, 2u);
+        EXPECT_EQ(state_of(core).subst_rewinds_missed_, 1u);
 
         from = fake.calls.size();
         {
             const auto forced = core.force_rewind(12);
             EXPECT_FALSE(forced.rolled);
-            EXPECT_EQ(core.s.forced_rollbacks_missed_, 1u);
+            EXPECT_EQ(state_of(core).forced_rollbacks_missed_, 1u);
             const std::vector<std::string> inside = {"keep_live_cells:enter:125", "bind_world"};
             EXPECT_EQ(since(fake.calls, from), inside) << "the cells stay kept while the result lives";
         }
@@ -1746,7 +1771,7 @@ namespace {
         {
             const auto forced = core.force_rewind(124);
             EXPECT_FALSE(forced.rolled);
-            EXPECT_EQ(core.s.forced_rollbacks_missed_, 1u);
+            EXPECT_EQ(state_of(core).forced_rollbacks_missed_, 1u);
         }
         EXPECT_TRUE(since(fake.calls, from).empty());
     }
@@ -1782,8 +1807,8 @@ namespace {
         bmmo::session::player_entry five, six;
         five.id = 5; five.join_order = 1;
         six.id = 6; six.join_order = 3;
-        core.s.players_.push_back(five);
-        core.s.players_.push_back(six);
+        state_of(core).players_.push_back(five);
+        state_of(core).players_.push_back(six);
     }
 
     // Counted always; this running session's only; a copy is counted and
@@ -1792,30 +1817,29 @@ namespace {
     TEST(SessionClientCoreLifecycle, IntakeCountsQueuesAndEchoes) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         const size_t from = fake.calls.size();
         auto other = event_message(4, bmmo::session::event_type::Physicalize, 126, 126);
         other.session = 8;
         core.on_session_event(std::move(other));
-        EXPECT_EQ(core.s.events_received_, 1u);
-        EXPECT_TRUE(core.s.pending_events_.empty());
+        EXPECT_EQ(state_of(core).events_received_, 1u);
+        EXPECT_TRUE(state_of(core).pending_events_.empty());
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
         core.on_session_event(event_message(3, bmmo::session::event_type::Physicalize, 127, 126));
-        EXPECT_EQ(core.s.events_received_, 4u);
-        EXPECT_EQ(core.s.event_dups_, 1u);
-        ASSERT_EQ(core.s.pending_events_.size(), 1u);
-        EXPECT_EQ(core.s.pending_events_[0].player, 4u);
-        ASSERT_EQ(core.s.own_echoes_.size(), 1u);
-        EXPECT_EQ(core.s.own_echoes_[0].tick, 127u);
+        EXPECT_EQ(state_of(core).events_received_, 4u);
+        EXPECT_EQ(state_of(core).event_dups_, 1u);
+        ASSERT_EQ(state_of(core).pending_events_.size(), 1u);
+        EXPECT_EQ(state_of(core).pending_events_[0].player, 4u);
+        ASSERT_EQ(state_of(core).own_echoes_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_echoes_[0].tick, 127u);
         EXPECT_TRUE(since(fake.calls, from).empty());
         // Not running: dropped before the copy check.
-        core.s.phase_ = client_core_state::phase::loading;
+        state_of(core).phase_ = client_core_state::phase::loading;
         core.on_session_event(event_message(4, bmmo::session::event_type::Sector, 126, 126));
-        EXPECT_EQ(core.s.events_received_, 5u);
-        EXPECT_EQ(core.s.pending_events_.size(), 1u);
-        EXPECT_EQ(core.s.event_dups_, 1u);
+        EXPECT_EQ(state_of(core).events_received_, 5u);
+        EXPECT_EQ(state_of(core).pending_events_.size(), 1u);
+        EXPECT_EQ(state_of(core).event_dups_, 1u);
     }
 
     // Design 5.1 "Events": the drain takes every event due at the tick, in
@@ -1826,7 +1850,6 @@ namespace {
     TEST(SessionClientCoreLifecycle, DrainsInTheServersOrderAndHoldsTheTicksBodyChanges) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
         auto spawn = event_message(6, bmmo::session::event_type::Physicalize, 126, 126);
         spawn.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
@@ -1839,7 +1862,7 @@ namespace {
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
         core.on_session_event(sector_message(4, 4, 123, 123));
         size_t from = fake.calls.size();
-        core.drain_due_events(126);
+        steps{core}.drain_due_events(126);
         {
             const std::vector<std::string> expected = {
                 "log:0:remote player 4 entered sector 4, stamped for tick 123 (LATE: the server started it already)",
@@ -1847,15 +1870,15 @@ namespace {
                 "log:0:remote player 6 entered sector 2, stamped for tick 124 (LATE: the server started it already)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        ASSERT_EQ(core.s.pending_events_.size(), 1u);
-        EXPECT_EQ(core.s.pending_events_[0].tick, 127u);
-        ASSERT_EQ(core.s.held_lifecycle_.size(), 2u);
-        EXPECT_EQ(core.s.held_lifecycle_[0].player, 4u);
-        EXPECT_EQ(core.s.held_lifecycle_[1].player, 6u);
-        EXPECT_TRUE(core.s.remotes_.empty()) << "held, not made";
+        ASSERT_EQ(state_of(core).pending_events_.size(), 1u);
+        EXPECT_EQ(state_of(core).pending_events_[0].tick, 127u);
+        ASSERT_EQ(state_of(core).held_lifecycle_.size(), 2u);
+        EXPECT_EQ(state_of(core).held_lifecycle_[0].player, 4u);
+        EXPECT_EQ(state_of(core).held_lifecycle_[1].player, 6u);
+        EXPECT_TRUE(state_of(core).remotes_.empty()) << "held, not made";
 
         from = fake.calls.size();
-        core.apply_held_lifecycle(126);
+        steps{core}.apply_held_lifecycle(126);
         const uint32_t kick = bmmo::session::spawn_direction_index(11, 3, 126);
         {
             const std::vector<std::string> expected = {
@@ -1868,7 +1891,7 @@ namespace {
                 "log:0:remote player 6 physicalized (Ball_1_BMMO_6) at tick 126, predicted"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_TRUE(core.s.held_lifecycle_.empty());
+        EXPECT_TRUE(state_of(core).held_lifecycle_.empty());
         // The spec names the player and the ball type: make_mirror stands
         // alone (a host finds the entity again from them).
         ASSERT_EQ(fake.specs.size(), 2u);
@@ -1877,19 +1900,19 @@ namespace {
         EXPECT_EQ(fake.specs[1].player, 6u);
         EXPECT_EQ(fake.specs[1].ball_type, 1u);
         EXPECT_EQ(fake.specs[1].entity, "Ball_1_BMMO_6");
-        ASSERT_EQ(core.s.remotes_.count(6), 1u);
-        const auto& six = core.s.remotes_.at(6);
+        ASSERT_EQ(state_of(core).remotes_.count(6), 1u);
+        const auto& six = state_of(core).remotes_.at(6);
         EXPECT_TRUE(six.physicalized);
         EXPECT_TRUE(six.navigation);
         EXPECT_EQ(six.born_tick, 126u);
         EXPECT_EQ(six.driven_from, 126u);
-        EXPECT_EQ(core.s.generations_.at("Ball_1_BMMO_6"), 1u);
-        EXPECT_EQ(core.s.remote_last_physicalize_.at(6), 126u);
-        EXPECT_EQ(core.s.life_rewinds_ + core.s.life_rewinds_missed_, 0u) << "on time: no rewind";
+        EXPECT_EQ(state_of(core).generations_.at("Ball_1_BMMO_6"), 1u);
+        EXPECT_EQ(state_of(core).remote_last_physicalize_.at(6), 126u);
+        EXPECT_EQ(state_of(core).life_rewinds_ + state_of(core).life_rewinds_missed_, 0u) << "on time: no rewind";
 
         // Nothing held and no own life: nothing.
         from = fake.calls.size();
-        core.apply_held_lifecycle(127);
+        steps{core}.apply_held_lifecycle(127);
         EXPECT_TRUE(since(fake.calls, from).empty());
     }
 
@@ -1901,34 +1924,33 @@ namespace {
     TEST(SessionClientCoreLifecycle, SupersedeGuards) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
         // A death of player 4, applied while it has no mirror: remembered.
         core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 124, 124));
         size_t from = fake.calls.size();
-        core.drain_due_events(126);
+        steps{core}.drain_due_events(126);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "no mirror: nothing to take out, no rewind";
-        EXPECT_EQ(core.s.remote_last_unphysicalize_.at(4).origin, 124u);
+        EXPECT_EQ(state_of(core).remote_last_unphysicalize_.at(4).origin, 124u);
 
         // A birth stamped before it, applied in its tick: no ball.
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 124, 122));
         from = fake.calls.size();
-        core.drain_due_events(126);
-        EXPECT_EQ(core.s.births_overtaken_, 1u);
+        steps{core}.drain_due_events(126);
+        EXPECT_EQ(state_of(core).births_overtaken_, 1u);
         {
             const std::vector<std::string> expected = {
                 "log:0:remote physicalize of 4 stamped 122 (applied 124) is older than its death stamped 124, applied at "
                 "124 already: no ball"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_TRUE(core.s.remotes_.empty());
+        EXPECT_TRUE(state_of(core).remotes_.empty());
 
         // ...applied before it: made (late, outside the history: live), and
         // the death applied again with its own rewind.
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 123, 121));
         from = fake.calls.size();
-        core.drain_due_events(126);
-        EXPECT_EQ(core.s.births_overtaken_, 2u);
+        steps{core}.drain_due_events(126);
+        EXPECT_EQ(state_of(core).births_overtaken_, 2u);
         {
             const std::vector<std::string> expected = {
                 "log:0:remote physicalize of 4 stamped 121 (applied 123) is older than its death stamped 124, applied at "
@@ -1949,23 +1971,23 @@ namespace {
                 "keep_live_cells:exit"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.life_rewinds_missed_, 2u);
-        const auto& four = core.s.remotes_.at(4);
+        EXPECT_EQ(state_of(core).life_rewinds_missed_, 2u);
+        const auto& four = state_of(core).remotes_.at(4);
         EXPECT_FALSE(four.physicalized);
         EXPECT_FALSE(four.navigation);
-        EXPECT_EQ(core.s.generations_.at("Ball_0_BMMO_4"), 2u) << "born, then gone";
+        EXPECT_EQ(state_of(core).generations_.at("Ball_0_BMMO_4"), 2u) << "born, then gone";
         EXPECT_EQ(four.born_tick, 126u) << "made live: the next tick";
 
         // A newer birth, then a death stamped no later than it: a stale copy.
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 125, 125));
-        core.drain_due_events(126);
-        ASSERT_TRUE(core.s.remotes_.at(4).physicalized);
+        steps{core}.drain_due_events(126);
+        ASSERT_TRUE(state_of(core).remotes_.at(4).physicalized);
         core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 125, 125));
         from = fake.calls.size();
-        core.drain_due_events(126);
-        EXPECT_EQ(core.s.events_superseded_, 1u);
+        steps{core}.drain_due_events(126);
+        EXPECT_EQ(state_of(core).events_superseded_, 1u);
         EXPECT_TRUE(since(fake.calls, from).empty());
-        EXPECT_TRUE(core.s.remotes_.at(4).physicalized);
+        EXPECT_TRUE(state_of(core).remotes_.at(4).physicalized);
     }
 
     // The births deferred into a replay, made at their tick before its step:
@@ -1975,7 +1997,6 @@ namespace {
     TEST(SessionClientCoreLifecycle, PendingBirthsMadeInTheReplayMuted) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
         // An own beam stamped 124 whose live frame has run: due in the
         // replay of 124, at our rank (written in place: no own body control).
@@ -1985,9 +2006,9 @@ namespace {
         beam.entity = "Ball_Wood";
         beam.position[0] = 711.0f;
         beam.origin_live = beam.applied_live = true;
-        core.s.own_life_.push_back(beam);
+        state_of(core).own_life_.push_back(beam);
         // Player 4 has a mirror of another ball type: the birth is a trafo.
-        auto& four = core.s.remotes_[4];
+        auto& four = state_of(core).remotes_[4];
         four.entity = "Ball_1_BMMO_4";
         four.physicalized = true;
         four.navigation = true;
@@ -1996,9 +2017,9 @@ namespace {
             b.player = player; b.tick = tick; b.origin = origin;
             return b;
         };
-        core.s.pending_births_ = {birth(6, 124, 124), birth(5, 125, 125), birth(4, 124, 123)};
+        state_of(core).pending_births_ = {birth(6, 124, 124), birth(5, 125, 125), birth(4, 124, 123)};
         size_t from = fake.calls.size();
-        core.drain_pending_births(124);
+        steps{core}.drain_pending_births(124);
         {
             const std::vector<std::string> expected = {
                 "mute_event_log:on",
@@ -2016,16 +2037,16 @@ namespace {
                 "mute_event_log:off"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        ASSERT_EQ(core.s.pending_births_.size(), 1u);
-        EXPECT_EQ(core.s.pending_births_[0].player, 5u);
-        EXPECT_FALSE(core.s.event_log_muted_);
-        EXPECT_EQ(core.s.generations_.at("Ball_1_BMMO_4"), 1u) << "the trafo ends the old mirror's lifetime";
-        EXPECT_EQ(core.s.remotes_.at(4).born_tick, 124u) << "made inside the replay: its stamp";
+        ASSERT_EQ(state_of(core).pending_births_.size(), 1u);
+        EXPECT_EQ(state_of(core).pending_births_[0].player, 5u);
+        EXPECT_FALSE(state_of(core).event_log_muted_);
+        EXPECT_EQ(state_of(core).generations_.at("Ball_1_BMMO_4"), 1u) << "the trafo ends the old mirror's lifetime";
+        EXPECT_EQ(state_of(core).remotes_.at(4).born_tick, 124u) << "made inside the replay: its stamp";
 
         // No birth due and no own life: nothing at all past the check.
         from = fake.calls.size();
-        core.s.pending_births_.clear();
-        core.drain_pending_births(130);
+        state_of(core).pending_births_.clear();
+        steps{core}.drain_pending_births(130);
         EXPECT_TRUE(since(fake.calls, from).empty());
     }
 
@@ -2051,15 +2072,14 @@ namespace {
             return world;
         };
         session_client_core core(std::move(platform), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
         core.config.rollback = true;
         for (uint32_t tick = 118; tick <= 125; ++tick)
-            core.s.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, bmmo::session::rollback_tracked{}, {});
-        ASSERT_TRUE(core.s.rollback_.knows_tick(122));
+            state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, bmmo::session::rollback_tracked{}, {});
+        ASSERT_TRUE(state_of(core).rollback_.knows_tick(122));
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 123, 123));
         size_t from = fake.calls.size();
-        core.drain_due_events(126);
+        steps{core}.drain_due_events(126);
         {
             const std::vector<std::string> expected = {
                 "keep_live_cells:enter:125", "bind_world", "step", "step", "step",
@@ -2070,15 +2090,88 @@ namespace {
                 "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 123, predicted"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_TRUE(core.s.pending_births_.empty());
-        EXPECT_EQ(core.s.life_rewinds_, 1u);
-        EXPECT_EQ(core.s.life_rewinds_missed_, 0u);
-        EXPECT_EQ(core.s.life_rewind_depth_, 3u);
-        const auto& four = core.s.remotes_.at(4);
+        EXPECT_TRUE(state_of(core).pending_births_.empty());
+        EXPECT_EQ(state_of(core).life_rewinds_, 1u);
+        EXPECT_EQ(state_of(core).life_rewinds_missed_, 0u);
+        EXPECT_EQ(state_of(core).life_rewind_depth_, 3u);
+        const auto& four = state_of(core).remotes_.at(4);
         EXPECT_TRUE(four.physicalized);
         EXPECT_EQ(four.born_tick, 126u) << "made live: the next tick";
         EXPECT_EQ(four.driven_from, 126u);
-        EXPECT_EQ(core.s.generations_.at("Ball_0_BMMO_4"), 1u) << "made once";
+        EXPECT_EQ(state_of(core).generations_.at("Ball_0_BMMO_4"), 1u) << "made once";
+    }
+
+    // The --trace diagnostic after a snapshot rollback (E11: the optional
+    // hooks.describe_movables, legacy_calls::describe_movable_objects until
+    // then): the first 16 rolled snapshots count rollback_diag_ whether or
+    // not the host fills the hook; the "after rollback: movable=" line is
+    // written only when it does, and never past the 16th.
+    TEST(SessionClientCoreSnapshot, TracedRollbackDescribesTheMovablesWhenTheHostCan) {
+        struct arm {
+            bool hook;
+            int diag_before;
+            bool line;
+        };
+        for (const arm a: {arm{true, 0, true}, arm{false, 0, false}, arm{true, 16, false}}) {
+            SCOPED_TRACE(std::string(a.hook ? "with" : "without") + " the hook, " + std::to_string(a.diag_before)
+                         + " traced before");
+            flow_fake fake;
+            fake.driven = "Ball_Wood";
+            auto platform = fake.make_flow();
+            if (!a.hook) platform.hooks.describe_movables = nullptr;
+            // A world the engine can rewind and replay: the own ball at the
+            // origin, at rest, every step taken.
+            auto own = std::make_shared<bmmo_physics_body_state>();
+            own->movable = true;
+            own->simulated = true;
+            own->rotation[3] = 1.0;
+            platform.bind_world = [&fake, own](const bmmo::session::core_world_hooks&) {
+                fake.calls.push_back("bind_world");
+                bmmo::session::rollback_world world;
+                world.get_body = [own](const std::string& entity, bmmo_physics_body_state& out) {
+                    if (entity != "Ball_Wood") return false;
+                    out = *own;
+                    return true;
+                };
+                world.set_body = [own](const std::string& entity, const bmmo_physics_body_state& state,
+                                       bmmo::session::wake_mode, bool) {
+                    if (entity != "Ball_Wood") return false;
+                    *own = state;
+                    return true;
+                };
+                world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+                world.step = []() { return true; };
+                return world;
+            };
+            session_client_core core(std::move(platform), session_capabilities{});
+            run_to_tick_125(core, fake);
+            core.config.rollback = true;
+            core.config.trace = true;
+            state_of(core).own_physicalized_ = true;
+            state_of(core).rollback_diag_ = a.diag_before;
+            bmmo::session::rollback_tracked tracked;
+            tracked.own_entity = "Ball_Wood";
+            for (uint32_t tick = 118; tick <= 125; ++tick)
+                state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked, {});
+            const size_t from = fake.calls.size();
+            // The server had the own ball 5 m away at tick 122.
+            core.on_session_snapshot(snapshot_message(9, 122, false, {ball_row(3, 5.0, true)}));
+            EXPECT_EQ(state_of(core).snapshot_rollbacks_, 1u);
+            EXPECT_EQ(state_of(core).rollback_diag_, a.diag_before + 1) << "counted with or without the hook";
+            const auto calls = since(fake.calls, from);
+            const auto has = [&calls](const std::string& call) {
+                return std::find(calls.begin(), calls.end(), call) != calls.end();
+            };
+            EXPECT_TRUE(has("keep_live_cells:exit:rolled back"));
+            EXPECT_EQ(has("hook:describe_movables"), a.line);
+            EXPECT_EQ(has("log:0:after rollback: movable=-"), a.line);
+            if (a.line) {
+                // Asked for after the rollback, and written at once.
+                const auto asked = std::find(calls.begin(), calls.end(), "hook:describe_movables");
+                ASSERT_NE(asked + 1, calls.end());
+                EXPECT_EQ(*(asked + 1), "log:0:after rollback: movable=-");
+            }
+        }
     }
 
     // A navigation the host cannot give yet leaves the mirror undriven
@@ -2086,13 +2179,12 @@ namespace {
     TEST(SessionClientCoreLifecycle, MirrorNavigationAnswers) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
         fake.attach_answer = bmmo::session::mirror_navigation::unavailable;
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 126, 126));
-        core.drain_due_events(126);
+        steps{core}.drain_due_events(126);
         size_t from = fake.calls.size();
-        core.apply_held_lifecycle(126);
+        steps{core}.apply_held_lifecycle(126);
         {
             const std::vector<std::string> expected = {
                 "mirror_entity:4:0", "make_mirror:Ball_0_BMMO_4:P#0", "attach_mirror_navigation:4:Ball_0_BMMO_4",
@@ -2101,42 +2193,42 @@ namespace {
         }
         fake.attach_answer = bmmo::session::mirror_navigation::failed;
         from = fake.calls.size();
-        core.attach_remote_navigation(4, core.s.remotes_.at(4));
+        steps{core}.attach_remote_navigation(4, state_of(core).remotes_.at(4));
         {
             const std::vector<std::string> expected = {
                 "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote navigation for Ball_0_BMMO_4: no graph"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_FALSE(core.s.remotes_.at(4).navigation);
+        EXPECT_FALSE(state_of(core).remotes_.at(4).navigation);
         // A refused mirror entity or body: logged, nothing made.
         fake.mirror_ok = false;
         core.on_session_event(event_message(5, bmmo::session::event_type::Physicalize, 127, 127));
-        core.drain_due_events(127);
+        steps{core}.drain_due_events(127);
         from = fake.calls.size();
-        core.apply_held_lifecycle(127);
+        steps{core}.apply_held_lifecycle(127);
         {
             const std::vector<std::string> expected = {
                 "mirror_entity:5:0", "log:0:remote physicalize: no ball"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.remotes_.count(5), 0u);
+        EXPECT_EQ(state_of(core).remotes_.count(5), 0u);
     }
 
     // live_drive: the relayed frame of the tick, else the newest (the
     // predictor), else no keys and the navigation off.
     TEST(SessionClientCoreLifecycle, LiveDrive) {
         client_core_state::remote_ball remote;
-        auto none = session_client_core::live_drive(remote, 130);
+        auto none = steps::live_drive(remote, 130);
         EXPECT_EQ(none.keys, 0u);
         EXPECT_EQ(none.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0);
         remote.have_input = true;
         remote.input = keys_frame(0x05);
         remote.input.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
-        auto predicted = session_client_core::live_drive(remote, 130);
+        auto predicted = steps::live_drive(remote, 130);
         EXPECT_EQ(predicted.keys, 0x05u);
         EXPECT_NE(predicted.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0);
         remote.inputs[130] = keys_frame(0x09);
-        auto exact = session_client_core::live_drive(remote, 130);
+        auto exact = steps::live_drive(remote, 130);
         EXPECT_EQ(exact.keys, 0x09u);
         EXPECT_EQ(exact.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0) << "the relayed frame's navigation was off";
     }
@@ -2146,23 +2238,22 @@ namespace {
     TEST(SessionClientCoreLifecycle, EndTakesTheMirrorsOut) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
-        auto& four = core.s.remotes_[4];
+        auto& four = state_of(core).remotes_[4];
         four.entity = "Ball_0_BMMO_4";
         four.physicalized = true;
         four.navigation = true;
-        auto& five = core.s.remotes_[5];
+        auto& five = state_of(core).remotes_[5];
         five.entity = "Ball_0_BMMO_5";
         bmmo::session_end_msg ours;
         ours.session = 9;
         const size_t from = fake.calls.size();
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
-            "log:0:session 9 ended: ", "hook:ending", "legacy:own_body_guard_off",
+            "log:0:session 9 ended: ", "hook:ending", "hook:ended",
             "detach_mirror_navigation:Ball_0_BMMO_4", "unmake_mirror:Ball_0_BMMO_4", "hook:status"};
         EXPECT_EQ(since(fake.calls, from), expected);
-        EXPECT_TRUE(core.s.remotes_.empty());
+        EXPECT_TRUE(state_of(core).remotes_.empty());
     }
 
     // ------------------------------------------------------ the own lives
@@ -2195,7 +2286,7 @@ namespace {
             };
             world.pre_step = [&fake, &core](uint32_t tick) {
                 fake.calls.push_back("pre_step:" + std::to_string(tick));
-                if (core) core->drain_pending_births(tick);
+                if (core) steps{*core}.drain_pending_births(tick);
             };
             return world;
         };
@@ -2205,7 +2296,7 @@ namespace {
     // Records ticks `from`..`to` of the bound world.
     void record_ticks(session_client_core& core, uint32_t from, uint32_t to) {
         for (uint32_t tick = from; tick <= to; ++tick)
-            core.s.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, bmmo::session::rollback_tracked{}, {});
+            state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, bmmo::session::rollback_tracked{}, {});
     }
 
     // An own birth of Ball_Wood stamped `origin`, as record_own_birth keeps
@@ -2240,9 +2331,8 @@ namespace {
         session_capabilities caps;
         caps.own_body_control = control;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
-        core.s.generations_["Ball_Wood"] = 4;
+        state_of(core).generations_["Ball_Wood"] = 4;
         fake.capture.captured = true;
         fake.capture.spawn = true;
         fake.capture.position[0] = 1.5f;
@@ -2250,7 +2340,7 @@ namespace {
         fake.capture.position[2] = -3.25f;
         size_t from = fake.calls.size();
         size_t sent_from = fake.sent.size();
-        core.report_physicalize("Ball_Wood", 126);
+        steps{core}.report_physicalize("Ball_Wood", 126);
         {
             const std::vector<std::string> expected = {
                 "own_birth_capture:Ball_Wood:126", "ball_recipe_of:Ball_Wood", "send:1",
@@ -2265,8 +2355,8 @@ namespace {
         EXPECT_EQ(event.ball_type, 1u);
         EXPECT_EQ(event.flags, bmmo::session::PHYSICALIZE_FLAG_SPAWN);
         EXPECT_EQ(event.recipe.mass, 1.5f);
-        ASSERT_EQ(core.s.own_life_.size(), 1u);
-        const auto& life = core.s.own_life_[0];
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        const auto& life = state_of(core).own_life_[0];
         EXPECT_EQ(life.what, client_core_state::own_life::kind::birth);
         EXPECT_EQ(life.origin, 126u);
         EXPECT_EQ(life.entity, "Ball_Wood");
@@ -2279,7 +2369,7 @@ namespace {
         fake.capture.captured = false;
         fake.ball_type = -1;
         from = fake.calls.size();
-        core.report_physicalize("Ball_Wood", 130);
+        steps{core}.report_physicalize("Ball_Wood", 130);
         {
             const std::vector<std::string> expected = {
                 "own_birth_capture:Ball_Wood:130", "ball_recipe_of:Ball_Wood",
@@ -2293,7 +2383,7 @@ namespace {
         EXPECT_EQ(unflagged.ball_type, 0u);
 
         from = fake.calls.size();
-        core.report_unphysicalize(131);
+        steps{core}.report_unphysicalize(131);
         {
             const std::vector<std::string> expected = {"send:1", "log:0:own ball unphysicalized at tick 131"};
             EXPECT_EQ(since(fake.calls, from), expected);
@@ -2302,8 +2392,8 @@ namespace {
 
         // Without rollback nothing is recorded.
         core.config.rollback = false;
-        core.report_physicalize("Ball_Wood", 132);
-        EXPECT_EQ(core.s.own_life_.size(), 2u);
+        steps{core}.report_physicalize("Ball_Wood", 132);
+        EXPECT_EQ(state_of(core).own_life_.size(), 2u);
     }
 
     TEST(SessionClientCoreOwnLives, ReportsFromTheEventLog) {
@@ -2321,7 +2411,6 @@ namespace {
         caps.own_lifecycle = bmmo::session::own_lifecycle_source::host_hooks;
         caps.own_body_control = control;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         bmmo::session::own_birth_report report;
         report.entity = "Ball_Wood";
@@ -2334,22 +2423,22 @@ namespace {
         core.own_physicalized(report);
         core.own_unphysicalized(127);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "queued, not sent";
-        EXPECT_EQ(core.s.own_reports_.size(), 2u);
-        EXPECT_TRUE(core.s.own_life_.empty());
+        EXPECT_EQ(state_of(core).own_reports_.size(), 2u);
+        EXPECT_TRUE(state_of(core).own_life_.empty());
         // The drain of the frame that made the body bumps its generation.
-        ++core.s.generations_["Ball_Wood"];
-        core.commit_own_reports();
+        ++state_of(core).generations_["Ball_Wood"];
+        steps{core}.commit_own_reports();
         {
             const std::vector<std::string> expected = {
                 "send:1", "log:0:own ball Ball_Wood physicalized at tick 126 (type 2) pos=" + hex_pos(0.0f, 7.0f, 0.0f),
                 "send:1", "log:0:own ball unphysicalized at tick 127"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_TRUE(core.s.own_reports_.empty());
-        ASSERT_EQ(core.s.own_life_.size(), 1u);
-        EXPECT_EQ(core.s.own_life_[0].generation, 1u) << "the generation after the drain's bump";
-        EXPECT_EQ(core.s.own_life_[0].recipe.mass, 2.5f);
-        EXPECT_EQ(core.s.own_life_[0].ball_type, 2u);
+        EXPECT_TRUE(state_of(core).own_reports_.empty());
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_life_[0].generation, 1u) << "the generation after the drain's bump";
+        EXPECT_EQ(state_of(core).own_life_[0].recipe.mass, 2.5f);
+        EXPECT_EQ(state_of(core).own_life_[0].ball_type, 2u);
     }
 
     TEST(SessionClientCoreOwnLives, ReportsFromHooksCommitAfterTheDrainsBump) {
@@ -2365,15 +2454,14 @@ namespace {
         session_capabilities caps;
         caps.own_body_control = true;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
-        core.s.own_physicalized_ = true;
+        state_of(core).own_physicalized_ = true;
         fake.driven = "Ball_Wood";
         const double position[3] = {711.0, 4.0, 43.0};
         size_t from = fake.calls.size();
         core.request_beam(position);
         EXPECT_TRUE(since(fake.calls, from).empty());
-        core.apply_requested_beam(125);
+        steps{core}.apply_requested_beam(125);
         {
             const std::vector<std::string> expected = {
                 "own_ball", "own_driven_entity", "ball_recipe_of:Ball_Wood", "send:1", "send:1",
@@ -2381,14 +2469,14 @@ namespace {
                 "at that tick"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        ASSERT_EQ(core.s.own_life_.size(), 1u);
-        EXPECT_EQ(core.s.own_life_[0].origin, 126u);
-        EXPECT_EQ(core.s.own_life_[0].generation, 0u) << "the same lifetime on every side";
-        EXPECT_EQ(core.s.generations_.count("Ball_Wood"), 0u);
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_life_[0].origin, 126u);
+        EXPECT_EQ(state_of(core).own_life_[0].generation, 0u) << "the same lifetime on every side";
+        EXPECT_EQ(state_of(core).generations_.count("Ball_Wood"), 0u);
         from = fake.calls.size();
-        core.apply_requested_beam(126);
+        steps{core}.apply_requested_beam(126);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "made once";
-        core.apply_held_lifecycle(126);
+        steps{core}.apply_held_lifecycle(126);
         {
             const std::vector<std::string> expected = {
                 "mute_event_log:on", "make_own:Ball_Wood:P#2:126", "mute_event_log:off",
@@ -2402,10 +2490,10 @@ namespace {
         EXPECT_FALSE(fake.own_specs[0].kick);
 
         // No own body: said, nothing sent.
-        core.s.own_physicalized_ = false;
+        state_of(core).own_physicalized_ = false;
         core.request_beam(position);
         from = fake.calls.size();
-        core.apply_requested_beam(127);
+        steps{core}.apply_requested_beam(127);
         {
             const std::vector<std::string> expected = {"own_ball", "log:0:--beam at tick 127: no own body to beam"};
             EXPECT_EQ(since(fake.calls, from), expected);
@@ -2414,12 +2502,12 @@ namespace {
         // No navigation replica (headless --beam --no-rollback): moved in
         // place at once with the control too (write_beam), a new lifetime,
         // nothing kept; a failed write says why and sends nothing.
-        core.s.own_physicalized_ = true;
+        state_of(core).own_physicalized_ = true;
         fake.driven.clear();
-        const size_t kept = core.s.own_life_.size();
+        const size_t kept = state_of(core).own_life_.size();
         core.request_beam(position);
         from = fake.calls.size();
-        core.apply_requested_beam(127);
+        steps{core}.apply_requested_beam(127);
         {
             const std::vector<std::string> expected = {
                 "own_ball", "own_driven_entity", "write_body:Ball_Wood:711.000000:wake",
@@ -2428,19 +2516,19 @@ namespace {
                 "now (no navigation replica)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.generations_.at("Ball_Wood"), 1u);
-        EXPECT_EQ(core.s.own_life_.size(), kept) << "nothing kept";
+        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u);
+        EXPECT_EQ(state_of(core).own_life_.size(), kept) << "nothing kept";
         fake.write_ok = false;
         core.request_beam(position);
         from = fake.calls.size();
-        core.apply_requested_beam(128);
+        steps{core}.apply_requested_beam(128);
         {
             const std::vector<std::string> expected = {
                 "own_ball", "own_driven_entity", "write_body:Ball_Wood:711.000000:wake",
                 "log:0:--beam at tick 128: no body"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.generations_.at("Ball_Wood"), 1u) << "not bumped";
+        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "not bumped";
     }
 
     // Design 5.1 "Beam", without own body control: the generation bumped at
@@ -2452,15 +2540,14 @@ namespace {
         session_client_core* bound = nullptr;
         session_client_core core(replay_platform(fake, bound), session_capabilities{});
         bound = &core;
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         record_ticks(core, 118, 125);
-        core.s.own_physicalized_ = true;
+        state_of(core).own_physicalized_ = true;
         fake.driven = "Ball_Wood";
         const double position[3] = {711.0, 4.0, 43.0};
         core.request_beam(position);
         size_t from = fake.calls.size();
-        core.apply_requested_beam(125);
+        steps{core}.apply_requested_beam(125);
         {
             const std::vector<std::string> expected = {
                 "own_ball", "own_driven_entity", "ball_recipe_of:Ball_Wood", "send:1", "send:1",
@@ -2468,17 +2555,17 @@ namespace {
                 "at that tick (no own body control)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.generations_.at("Ball_Wood"), 1u) << "bumped at the request";
-        ASSERT_EQ(core.s.own_life_.size(), 1u);
-        EXPECT_EQ(core.s.own_life_[0].generation, 1u);
+        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "bumped at the request";
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_life_[0].generation, 1u);
         from = fake.calls.size();
-        core.apply_held_lifecycle(126);
+        steps{core}.apply_held_lifecycle(126);
         {
             const std::vector<std::string> expected = {"write_body:Ball_Wood:711.000000:wake", "body_state:Ball_Wood"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        ASSERT_EQ(core.s.own_life_.size(), 1u) << "kept while a rewind can cross it";
-        core.s.frames_since_anchor_ = 7;   // the frame of 126 ran
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u) << "kept while a rewind can cross it";
+        state_of(core).frames_since_anchor_ = 7;   // the frame of 126 ran
         record_ticks(core, 126, 126);
         from = fake.calls.size();
         {
@@ -2495,11 +2582,11 @@ namespace {
         }
 
         // No navigation replica: moved at once, nothing kept.
-        core.s.own_life_.clear();
+        state_of(core).own_life_.clear();
         fake.driven.clear();
         core.request_beam(position);
         from = fake.calls.size();
-        core.apply_requested_beam(126);
+        steps{core}.apply_requested_beam(126);
         {
             const std::vector<std::string> expected = {
                 "own_ball", "own_driven_entity", "write_body:Ball_Wood:711.000000:wake",
@@ -2508,8 +2595,8 @@ namespace {
                 "now (no navigation replica)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.generations_.at("Ball_Wood"), 2u);
-        EXPECT_TRUE(core.s.own_life_.empty());
+        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 2u);
+        EXPECT_TRUE(state_of(core).own_life_.empty());
     }
 
     // Design 5.1 "Own echoes": a MOVED birth, with own body control, is
@@ -2526,14 +2613,13 @@ namespace {
             caps.own_body_control = true;
             session_client_core core(replay_platform(fake, bound), caps);
             bound = &core;
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
             record_ticks(core, 118, 125);
-            core.s.own_life_ = {own_birth(122)};
+            state_of(core).own_life_ = {own_birth(122)};
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(124, 122, bmmo::session::EVENT_STATE_MOVED));
             const size_t from = fake.calls.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             const std::vector<std::string> expected = {
                 "body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off",
                 "keep_live_cells:enter:125", "bind_world",
@@ -2545,49 +2631,48 @@ namespace {
                 "changed, made again in the replay)",
                 "keep_live_cells:exit:rolled back"};
             EXPECT_EQ(since(fake.calls, from), expected);
-            EXPECT_EQ(core.s.own_echo_moved_, 1u);
-            EXPECT_EQ(core.s.own_birth_echo_moved_, 1u);
-            EXPECT_EQ(core.s.own_births_moved_, 1u);
-            EXPECT_EQ(core.s.own_remakes_, 1u);
-            EXPECT_EQ(core.s.life_rewinds_, 1u);
-            ASSERT_EQ(core.s.own_life_.size(), 1u);
-            EXPECT_EQ(core.s.own_life_[0].state, client_core_state::own_life::verdict::moved);
-            EXPECT_EQ(core.s.own_life_[0].applied, 124u);
+            EXPECT_EQ(state_of(core).own_echo_moved_, 1u);
+            EXPECT_EQ(state_of(core).own_birth_echo_moved_, 1u);
+            EXPECT_EQ(state_of(core).own_births_moved_, 1u);
+            EXPECT_EQ(state_of(core).own_remakes_, 1u);
+            EXPECT_EQ(state_of(core).life_rewinds_, 1u);
+            ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+            EXPECT_EQ(state_of(core).own_life_[0].state, client_core_state::own_life::verdict::moved);
+            EXPECT_EQ(state_of(core).own_life_[0].applied, 124u);
             // The restore of a later rewind across 124 takes the body out.
             bool destroyed = false;
             const size_t restore = fake.calls.size();
-            EXPECT_TRUE(core.destroy_moved_own_birth("Ball_Wood", 124, destroyed));
+            EXPECT_TRUE(steps{core}.destroy_moved_own_birth("Ball_Wood", 124, destroyed));
             EXPECT_TRUE(destroyed);
             const std::vector<std::string> out = {"mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off"};
             EXPECT_EQ(since(fake.calls, restore), out);
-            EXPECT_FALSE(core.destroy_moved_own_birth("Ball_Wood", 123, destroyed));
+            EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 123, destroyed));
         }
         for (const uint8_t interval: {uint8_t{2}, uint8_t{255}}) {
             flow_fake fake;
             session_client_core core(fake.make_flow(), session_capabilities{});
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
-            core.s.snapshot_interval_ = interval;
-            core.s.own_life_ = {own_birth(122)};
+            state_of(core).snapshot_interval_ = interval;
+            state_of(core).own_life_ = {own_birth(122)};
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(124, 122, bmmo::session::EVENT_STATE_MOVED));
             const size_t from = fake.calls.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             if (interval == 2) {
                 EXPECT_TRUE(since(fake.calls, from).empty()) << "snapshots run: left to them";
-                EXPECT_FALSE(core.s.own_life_[0].retired);
+                EXPECT_FALSE(state_of(core).own_life_[0].retired);
             } else {
                 const std::vector<std::string> expected = {
                     "log:0:own birth moved 122 -> 124 at local tick 125: no own body control, no snapshots, resync",
                     "now:resync_limiter", "send:0", "log:0:resync requested (own birth: resync) at tick 125"};
                 EXPECT_EQ(since(fake.calls, from), expected);
-                EXPECT_EQ(core.s.own_moves_resynced_, 1u);
+                EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
             }
-            EXPECT_EQ(core.s.own_echo_moved_, 1u);
-            EXPECT_EQ(core.s.own_life_[0].state, client_core_state::own_life::verdict::moved);
+            EXPECT_EQ(state_of(core).own_echo_moved_, 1u);
+            EXPECT_EQ(state_of(core).own_life_[0].state, client_core_state::own_life::verdict::moved);
             bool destroyed = false;
-            core.s.own_life_[0].applied = 124;   // as if moved: still inert
-            EXPECT_FALSE(core.destroy_moved_own_birth("Ball_Wood", 124, destroyed));
+            state_of(core).own_life_[0].applied = 124;   // as if moved: still inert
+            EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 124, destroyed));
         }
     }
 
@@ -2604,15 +2689,14 @@ namespace {
             caps.own_body_control = true;
             session_client_core core(replay_platform(fake, bound), caps);
             bound = &core;
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
             record_ticks(core, 118, 125);
-            core.s.own_life_ = {own_birth(122)};
-            core.s.own_physicalized_ = true;
+            state_of(core).own_life_ = {own_birth(122)};
+            state_of(core).own_physicalized_ = true;
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(122, 122, bmmo::session::EVENT_STATE_REJECTED));
             const size_t from = fake.calls.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             const std::vector<std::string> expected = {
                 "body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off",
                 "keep_live_cells:enter:125", "bind_world",
@@ -2621,25 +2705,24 @@ namespace {
                 "changed, removed from the history)",
                 "keep_live_cells:exit:rolled back"};
             EXPECT_EQ(since(fake.calls, from), expected);
-            EXPECT_EQ(core.s.own_echo_rejected_, 1u);
-            EXPECT_EQ(core.s.own_births_removed_, 1u);
-            EXPECT_FALSE(core.s.own_physicalized_);
-            EXPECT_TRUE(core.s.own_life_.empty() || core.s.own_life_[0].retired);
+            EXPECT_EQ(state_of(core).own_echo_rejected_, 1u);
+            EXPECT_EQ(state_of(core).own_births_removed_, 1u);
+            EXPECT_FALSE(state_of(core).own_physicalized_);
+            EXPECT_TRUE(state_of(core).own_life_.empty() || state_of(core).own_life_[0].retired);
         }
         for (const bool current: {true, false}) {
             flow_fake fake;
             session_client_core core(fake.make_flow(), session_capabilities{});
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
-            core.s.own_life_ = {own_birth(122)};
-            core.s.own_life_[0].spawn = true;
-            core.s.own_physicalized_ = true;
-            if (!current) core.s.generations_["Ball_Wood"] = 1;   // a death since
+            state_of(core).own_life_ = {own_birth(122)};
+            state_of(core).own_life_[0].spawn = true;
+            state_of(core).own_physicalized_ = true;
+            if (!current) state_of(core).generations_["Ball_Wood"] = 1;   // a death since
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(122, 122, bmmo::session::EVENT_STATE_REJECTED));
             const size_t from = fake.calls.size();
             const size_t sent_from = fake.sent.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             std::vector<std::string> expected;
             if (current) expected.push_back("send:1");
             for (const char* line: {"log:0:own birth moved 122 -> never at local tick 125: no own body control, resync",
@@ -2654,8 +2737,8 @@ namespace {
                 EXPECT_EQ(again.flags, 0u) << "no spawn flag";
                 EXPECT_EQ(again.position[0], 5.0f);
             }
-            EXPECT_TRUE(core.s.own_physicalized_) << "the body is never touched";
-            EXPECT_TRUE(core.s.own_life_[0].retired);
+            EXPECT_TRUE(state_of(core).own_physicalized_) << "the body is never touched";
+            EXPECT_TRUE(state_of(core).own_life_[0].retired);
         }
     }
 
@@ -2675,17 +2758,16 @@ namespace {
                 caps.own_body_control = control;
                 session_client_core core(replay_platform(fake, bound), caps);
                 bound = &core;
-                fake.fill_legacy(core);
                 run_to_tick_125(core, fake);
                 record_ticks(core, 118, 125);
-                core.s.own_life_ = {own_birth(122)};
-                core.s.own_physicalized_ = true;
+                state_of(core).own_life_ = {own_birth(122)};
+                state_of(core).own_physicalized_ = true;
                 fake.bodies_there = {"Ball_Wood"};
-                if (pair) core.s.own_moved_unphysicalize_ = {122};
+                if (pair) state_of(core).own_moved_unphysicalize_ = {122};
                 core.on_session_event(own_echo(122, 122, bmmo::session::EVENT_STATE_SUPERSEDED));
                 const size_t from = fake.calls.size();
                 const size_t sent_from = fake.sent.size();
-                core.process_own_echoes();
+                steps{core}.process_own_echoes();
                 std::vector<std::string> expected;
                 if (control && !pair) {
                     expected = {
@@ -2703,19 +2785,19 @@ namespace {
                         "now:resync_limiter", "send:0", "log:0:resync requested (own birth: resync) at tick 125"};
                 }
                 EXPECT_EQ(since(fake.calls, from), expected);
-                EXPECT_EQ(core.s.own_echo_superseded_, 1u);
-                ASSERT_EQ(core.s.own_life_.size(), 1u);
-                EXPECT_EQ(core.s.own_life_[0].state, client_core_state::own_life::verdict::superseded);
+                EXPECT_EQ(state_of(core).own_echo_superseded_, 1u);
+                ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+                EXPECT_EQ(state_of(core).own_life_[0].state, client_core_state::own_life::verdict::superseded);
                 if (control) {
-                    EXPECT_FALSE(core.s.own_physicalized_);
-                    EXPECT_TRUE(core.s.own_life_[0].retired);
-                    EXPECT_EQ(core.s.own_births_removed_, pair ? 0u : 1u);
-                    EXPECT_EQ(core.s.own_moves_resynced_, pair ? 1u : 0u);
+                    EXPECT_FALSE(state_of(core).own_physicalized_);
+                    EXPECT_TRUE(state_of(core).own_life_[0].retired);
+                    EXPECT_EQ(state_of(core).own_births_removed_, pair ? 0u : 1u);
+                    EXPECT_EQ(state_of(core).own_moves_resynced_, pair ? 1u : 0u);
                 } else {
                     EXPECT_EQ(fake.sent.size(), sent_from) << "no re-report, no resync";
-                    EXPECT_TRUE(core.s.own_physicalized_) << "the body is never touched";
-                    EXPECT_FALSE(core.s.own_life_[0].retired);
-                    EXPECT_EQ(core.s.own_moves_resynced_, 0u);
+                    EXPECT_TRUE(state_of(core).own_physicalized_) << "the body is never touched";
+                    EXPECT_FALSE(state_of(core).own_life_[0].retired);
+                    EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
                 }
             }
         }
@@ -2733,23 +2815,22 @@ namespace {
             session_capabilities caps;
             caps.own_body_control = true;
             session_client_core core(fake.make_flow(), caps);
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
-            core.s.own_life_ = {own_birth(122)};
-            core.s.own_physicalized_ = true;
+            state_of(core).own_life_ = {own_birth(122)};
+            state_of(core).own_physicalized_ = true;
             fake.bodies_there = {"Ball_Wood"};
             auto unphysicalize = event_message(3, bmmo::session::event_type::Unphysicalize, 124, 122);
             unphysicalize.state = bmmo::session::EVENT_STATE_MOVED;
             if (birth_first) {
-                core.s.own_life_[0].state = client_core_state::own_life::verdict::moved;
-                core.s.own_life_[0].applied = 124;
+                state_of(core).own_life_[0].state = client_core_state::own_life::verdict::moved;
+                state_of(core).own_life_[0].applied = 124;
                 core.on_session_event(std::move(unphysicalize));
             } else {
                 core.on_session_event(std::move(unphysicalize));
                 core.on_session_event(own_echo(124, 122, bmmo::session::EVENT_STATE_MOVED));
             }
             const size_t from = fake.calls.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             const std::vector<std::string> expected = {
                 "log:0:own unphysicalize stamped tick 122 echoed moved by the server (applied 124, state 01) at local "
                 "tick 125; kept where we stamped it (only an own Physicalize is moved here)",
@@ -2758,11 +2839,11 @@ namespace {
                 "plan step 22), resync",
                 "now:resync_limiter", "send:0", "log:0:resync requested (own birth: resync) at tick 125"};
             EXPECT_EQ(since(fake.calls, from), expected);
-            EXPECT_EQ(core.s.own_moves_resynced_, 1u);
-            EXPECT_EQ(core.s.own_moves_other_, 1u);
-            EXPECT_TRUE(core.s.own_life_[0].retired);
-            EXPECT_TRUE(core.s.own_physicalized_);
-            EXPECT_EQ(core.s.own_moved_unphysicalize_, std::vector<uint32_t>{122});
+            EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
+            EXPECT_EQ(state_of(core).own_moves_other_, 1u);
+            EXPECT_TRUE(state_of(core).own_life_[0].retired);
+            EXPECT_TRUE(state_of(core).own_physicalized_);
+            EXPECT_EQ(state_of(core).own_moved_unphysicalize_, std::vector<uint32_t>{122});
         }
     }
 
@@ -2779,16 +2860,15 @@ namespace {
             caps.own_body_control = true;
             session_client_core core(replay_platform(fake, bound), caps);
             bound = &core;
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
             if (which != 0) record_ticks(core, 118, 125);
-            if (which != 2) core.s.own_life_ = {own_birth(122)};
-            if (which == 1) core.s.generations_["Ball_Wood"] = 1;   // a death since
-            core.s.own_physicalized_ = true;
+            if (which != 2) state_of(core).own_life_ = {own_birth(122)};
+            if (which == 1) state_of(core).generations_["Ball_Wood"] = 1;   // a death since
+            state_of(core).own_physicalized_ = true;
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(124, 122, bmmo::session::EVENT_STATE_MOVED));
             const size_t from = fake.calls.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             std::vector<std::string> expected;
             if (which == 0) {
                 expected = {"body_state:Ball_Wood",
@@ -2805,11 +2885,11 @@ namespace {
                             "log:0:resync requested (own birth moved past the history) at tick 125"};
             }
             EXPECT_EQ(since(fake.calls, from), expected);
-            EXPECT_EQ(core.s.own_moves_resynced_, 1u);
-            EXPECT_EQ(core.s.life_rewinds_, 0u);
-            EXPECT_EQ(core.s.own_births_moved_, 0u);
-            EXPECT_TRUE(core.s.own_physicalized_);
-            if (which != 2) EXPECT_TRUE(core.s.own_life_[0].retired);
+            EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
+            EXPECT_EQ(state_of(core).life_rewinds_, 0u);
+            EXPECT_EQ(state_of(core).own_births_moved_, 0u);
+            EXPECT_TRUE(state_of(core).own_physicalized_);
+            if (which != 2) EXPECT_TRUE(state_of(core).own_life_[0].retired);
         }
     }
 
@@ -2830,27 +2910,26 @@ namespace {
                 session_capabilities caps;
                 caps.own_body_control = control;
                 session_client_core core(fake.make_flow(), caps);
-                fake.fill_legacy(core);
                 run_to_tick_125(core, fake);
                 // A record of the new numbering with the same origin: never
                 // answered by a stale echo.
-                core.s.own_life_ = {own_birth(122)};
-                core.s.own_physicalized_ = true;
+                state_of(core).own_life_ = {own_birth(122)};
+                state_of(core).own_physicalized_ = true;
                 const bool missing = which == 0 || which == 1;
                 const bool made = which == 0 || which == 2;
                 if (which < 4) {
                     own_life aside = own_birth(122);
                     aside.why = missing ? own_life::aside::missing : own_life::aside::resync;
                     aside.state = missing ? own_life::verdict::missing : own_life::verdict::sent;
-                    core.s.own_unanswered_ = {aside};
+                    state_of(core).own_unanswered_ = {aside};
                 }
                 fake.bodies_there = (which == 0) ? std::vector<std::string>{} : std::vector<std::string>{"Ball_Wood"};
-                core.s.own_echoes_stale_.push_back(
+                state_of(core).own_echoes_stale_.push_back(
                     own_echo(made || which == 4 ? 124 : 122, 122,
                              made || which == 4 ? bmmo::session::EVENT_STATE_MOVED : bmmo::session::EVENT_STATE_REJECTED));
                 const size_t from = fake.calls.size();
                 const size_t sent_from = fake.sent.size();
-                core.process_own_echoes();
+                steps{core}.process_own_echoes();
                 std::vector<std::string> expected;
                 if (which == 0) {
                     if (control)
@@ -2885,12 +2964,12 @@ namespace {
                                 "tick 125: no record of it, sent before the last resync: nothing to do"};
                 }
                 EXPECT_EQ(since(fake.calls, from), expected);
-                EXPECT_TRUE(core.s.own_unanswered_.empty());
-                EXPECT_TRUE(core.s.own_echoes_stale_.empty());
-                EXPECT_EQ(core.s.own_life_[0].state, own_life::verdict::sent) << "the new numbering's record untouched";
-                EXPECT_FALSE(core.s.own_life_[0].retired);
-                EXPECT_EQ(core.s.own_remakes_, (control && which == 0) ? 1u : 0u);
-                EXPECT_EQ(core.s.own_physicalized_, !(control && which == 3));
+                EXPECT_TRUE(state_of(core).own_unanswered_.empty());
+                EXPECT_TRUE(state_of(core).own_echoes_stale_.empty());
+                EXPECT_EQ(state_of(core).own_life_[0].state, own_life::verdict::sent) << "the new numbering's record untouched";
+                EXPECT_FALSE(state_of(core).own_life_[0].retired);
+                EXPECT_EQ(state_of(core).own_remakes_, (control && which == 0) ? 1u : 0u);
+                EXPECT_EQ(state_of(core).own_physicalized_, !(control && which == 3));
                 if (!control && which == 3) {
                     const auto again = decode<bmmo::session_event_msg>(fake.sent[sent_from].first);
                     EXPECT_EQ(again.tick, 126u);
@@ -2909,7 +2988,6 @@ namespace {
         session_capabilities caps;
         caps.own_body_control = true;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         auto ended = own_birth(122);
         ended.state = client_core_state::own_life::verdict::moved;
@@ -2920,18 +2998,18 @@ namespace {
         skipped.state = client_core_state::own_life::verdict::moved;
         skipped.applied = 124;
         skipped.applied_live = false;
-        core.s.own_life_ = {ended, skipped};
-        core.s.generations_["Ball_Wood"] = 1;   // a death since
+        state_of(core).own_life_ = {ended, skipped};
+        state_of(core).generations_["Ball_Wood"] = 1;   // a death since
         const size_t from = fake.calls.size();
-        core.apply_held_lifecycle(126);
+        steps{core}.apply_held_lifecycle(126);
         const std::vector<std::string> expected = {
             "log:0:own birth stamped 118 (applied 124) never met its live frame (now 126): dropped",
             "log:0:own birth stamped 122 retired at tick 126 (live): Ball_Wood has had another life since (generation "
             "0 -> 1)"};
         EXPECT_EQ(since(fake.calls, from), expected);
         EXPECT_TRUE(fake.own_specs.empty()) << "nothing made";
-        EXPECT_EQ(core.s.own_remakes_, 0u);
-        EXPECT_TRUE(core.s.own_life_.empty()) << "both retired";
+        EXPECT_EQ(state_of(core).own_remakes_, 0u);
+        EXPECT_TRUE(state_of(core).own_life_.empty()) << "both retired";
     }
 
     // Design 5.1 "Own echoes": a MISSING birth (no echo past the deadline,
@@ -2944,21 +3022,20 @@ namespace {
             session_capabilities caps;
             caps.own_body_control = control;
             session_client_core core(fake.make_flow(), caps);
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
-            core.s.own_life_ = {own_birth(122)};
-            core.s.own_physicalized_ = true;
+            state_of(core).own_life_ = {own_birth(122)};
+            state_of(core).own_physicalized_ = true;
             fake.bodies_there = {"Ball_Wood"};
-            core.s.acked_header_known_ = true;
-            core.s.header_acked_ = 122;
-            core.s.acked_header_tick_ = 123;
+            state_of(core).acked_header_known_ = true;
+            state_of(core).header_acked_ = 122;
+            state_of(core).acked_header_tick_ = 123;
             size_t from = fake.calls.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             EXPECT_TRUE(since(fake.calls, from).empty()) << "the uplink seen, the deadline ahead";
-            core.s.acked_header_tick_ = 422;
+            state_of(core).acked_header_tick_ = 422;
             from = fake.calls.size();
             const size_t sent_from = fake.sent.size();
-            core.process_own_echoes();
+            steps{core}.process_own_echoes();
             std::vector<std::string> expected;
             if (control) {
                 for (const char* line: {"body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125",
@@ -2973,10 +3050,10 @@ namespace {
                                     "log:0:resync requested (own birth: resync) at tick 125"})
                 expected.emplace_back(line);
             EXPECT_EQ(since(fake.calls, from), expected) << control;
-            EXPECT_EQ(core.s.own_echo_missing_, 1u);
-            EXPECT_EQ(core.s.own_physicalized_, !control);
-            ASSERT_EQ(core.s.own_unanswered_.size(), 1u);
-            EXPECT_EQ(core.s.own_unanswered_[0].why, client_core_state::own_life::aside::missing);
+            EXPECT_EQ(state_of(core).own_echo_missing_, 1u);
+            EXPECT_EQ(state_of(core).own_physicalized_, !control);
+            ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u);
+            EXPECT_EQ(state_of(core).own_unanswered_[0].why, client_core_state::own_life::aside::missing);
             if (!control) EXPECT_EQ(decode<bmmo::session_event_msg>(fake.sent[sent_from].first).tick, 126u);
         }
     }
@@ -2990,31 +3067,30 @@ namespace {
         session_capabilities caps;
         caps.own_body_control = control;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         core.config.own_echoes = false;
-        core.s.own_life_ = {own_birth(122), own_birth(110)};
+        state_of(core).own_life_ = {own_birth(122), own_birth(110)};
         fake.bodies_there = {"Ball_Wood"};
-        core.s.acked_header_known_ = true;
-        core.s.header_acked_ = 122;
-        core.s.acked_header_tick_ = 900;
+        state_of(core).acked_header_known_ = true;
+        state_of(core).header_acked_ = 122;
+        state_of(core).acked_header_tick_ = 900;
         auto unphysicalize = event_message(3, bmmo::session::event_type::Unphysicalize, 124, 122);
         unphysicalize.state = bmmo::session::EVENT_STATE_MOVED;
         core.on_session_event(own_echo(124, 122, bmmo::session::EVENT_STATE_MOVED));
         core.on_session_event(std::move(unphysicalize));
         const size_t from = fake.calls.size();
-        core.process_own_echoes();
+        steps{core}.process_own_echoes();
         const std::vector<std::string> expected = {
             "log:0:own physicalize stamped 122 echoed moved by the server (applied 124) at local tick 125: no record of "
             "it, own echoes off: kept where we stamped it",
             "log:0:own unphysicalize stamped tick 122 echoed moved by the server (applied 124, state 01) at local tick "
             "125; kept where we stamped it (only an own Physicalize is moved here)"};
         EXPECT_EQ(since(fake.calls, from), expected);
-        EXPECT_EQ(core.s.own_echo_moved_, 2u);
-        EXPECT_TRUE(core.s.own_moved_unphysicalize_.empty());
-        EXPECT_EQ(core.s.own_life_[0].state, client_core_state::own_life::verdict::sent);
-        EXPECT_EQ(core.s.own_echo_missing_, 0u);
-        EXPECT_EQ(core.s.own_moves_resynced_, 0u);
+        EXPECT_EQ(state_of(core).own_echo_moved_, 2u);
+        EXPECT_TRUE(state_of(core).own_moved_unphysicalize_.empty());
+        EXPECT_EQ(state_of(core).own_life_[0].state, client_core_state::own_life::verdict::sent);
+        EXPECT_EQ(state_of(core).own_echo_missing_, 0u);
+        EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
     }
 
     TEST(SessionClientCoreOwnLives, OwnEchoesOffCountsOnly) {
@@ -3041,46 +3117,45 @@ namespace {
     TEST(SessionClientCoreSectors, RequestBeforeTheAssignmentWaitsForTheFirstAssignedFrame) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
-        core.s.own_id_ = 3;
+        state_of(core).own_id_ = 3;
         ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
-        core.s.sector_cell_ = 9;   // begin's reset is the anchor's to overwrite
+        state_of(core).sector_cell_ = 9;   // begin's reset is the anchor's to overwrite
         core.level_requested();
         // A request at the anchor (the headless --start-sector) comes before
         // the anchor's SessionReady: not assigned, so pending.
         size_t from = fake.calls.size();
         core.request_sector(3, "--start-sector");
         EXPECT_TRUE(since(fake.calls, from).empty());
-        EXPECT_TRUE(core.s.start_sector_pending_);
+        EXPECT_TRUE(state_of(core).start_sector_pending_);
         {
             const std::vector<std::pair<int, std::string>> expected = {{3, "--start-sector"}};
-            EXPECT_EQ(core.s.start_sectors_, expected);
+            EXPECT_EQ(state_of(core).start_sectors_, expected);
         }
         // A second request before the assignment (a retail checkpoint, say)
         // waits too, after the first; a repeat is dropped when it is stamped.
         core.request_sector(2, "checkpoint");
         core.request_sector(3, "sector verb");
         EXPECT_TRUE(since(fake.calls, from).empty());
-        ASSERT_EQ(core.s.start_sectors_.size(), 3u);
-        EXPECT_EQ(core.s.start_sectors_[1], std::make_pair(2, std::string("checkpoint")));
+        ASSERT_EQ(state_of(core).start_sectors_.size(), 3u);
+        EXPECT_EQ(state_of(core).start_sectors_[1], std::make_pair(2, std::string("checkpoint")));
         bmmo::session::anchor_report report;
         report.build_id = "build-x";
         report.sector_cell = 1;
         core.anchor(report);
-        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1}));
-        EXPECT_EQ(core.s.sector_cell_, 1);
-        EXPECT_TRUE(core.s.start_sector_pending_) << "the anchor keeps the request";
+        EXPECT_EQ(state_of(core).sectors_requested_, std::set<int>({1}));
+        EXPECT_EQ(state_of(core).sector_cell_, 1);
+        EXPECT_TRUE(state_of(core).start_sector_pending_) << "the anchor keeps the request";
         // Not assigned: the frame (a hold that timed out) stamps nothing.
         from = fake.calls.size();
-        core.hold_pending_sector(5);
+        steps{core}.hold_pending_sector(5);
         EXPECT_TRUE(since(fake.calls, from).empty());
-        EXPECT_TRUE(core.s.start_sector_pending_);
-        EXPECT_EQ(core.s.sectors_.stamps_pending(), 0u);
+        EXPECT_TRUE(state_of(core).start_sector_pending_);
+        EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 0u);
 
         core.on_session_assign(assign_message(9, 120));
         from = fake.calls.size();
         const size_t sent_before = fake.sent.size();
-        core.hold_pending_sector(120);   // the first assigned frame steps 120
+        steps{core}.hold_pending_sector(120);   // the first assigned frame steps 120
         {
             const std::vector<std::string> expected = {
                 "send:1", "log:0:sector 3 stamped for tick 127 (--start-sector, lead 7, input_delay 4), event sent ahead",
@@ -3097,14 +3172,14 @@ namespace {
             EXPECT_EQ(event.origin_tick, 127u);
             EXPECT_EQ(decode<bmmo::session_event_msg>(fake.sent.back().first).sector, 2);
         }
-        EXPECT_FALSE(core.s.start_sector_pending_);
-        EXPECT_TRUE(core.s.start_sectors_.empty());
-        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 2, 3}));
-        EXPECT_EQ(core.s.sectors_.stamps_pending(), 2u);
-        EXPECT_EQ(core.s.events_sent_, 2u);
+        EXPECT_FALSE(state_of(core).start_sector_pending_);
+        EXPECT_TRUE(state_of(core).start_sectors_.empty());
+        EXPECT_EQ(state_of(core).sectors_requested_, std::set<int>({1, 2, 3}));
+        EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 2u);
+        EXPECT_EQ(state_of(core).events_sent_, 2u);
         // Once: the next frame and a repeated request do nothing.
         from = fake.calls.size();
-        core.hold_pending_sector(121);
+        steps{core}.hold_pending_sector(121);
         core.request_sector(3, "sector verb");
         EXPECT_TRUE(since(fake.calls, from).empty());
         // After the assignment: current (120, nothing stepped yet) + 1 + lead.
@@ -3116,15 +3191,15 @@ namespace {
             EXPECT_EQ(since(fake.calls, from), expected);
         }
         EXPECT_EQ(decode<bmmo::session_event_msg>(fake.sent.back().first).tick, 128u);
-        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 2, 3, 4}));
+        EXPECT_EQ(state_of(core).sectors_requested_, std::set<int>({1, 2, 3, 4}));
         // A new session forgets the request.
         core.end("over");
         core.request_sector(5, "x");
-        EXPECT_TRUE(core.s.start_sector_pending_);
+        EXPECT_TRUE(state_of(core).start_sector_pending_);
         ASSERT_FALSE(core.begin(start_message(10, 3), bmmo::session::core_config{}).refused);
-        EXPECT_FALSE(core.s.start_sector_pending_);
-        EXPECT_TRUE(core.s.start_sectors_.empty());
-        EXPECT_TRUE(core.s.sectors_requested_.empty());
+        EXPECT_FALSE(state_of(core).start_sector_pending_);
+        EXPECT_TRUE(state_of(core).start_sectors_.empty());
+        EXPECT_TRUE(state_of(core).sectors_requested_.empty());
     }
 
     // The union's pass before the step (design 1.3 step 9): the manager's
@@ -3138,82 +3213,81 @@ namespace {
     TEST(SessionClientCoreSectors, UnionPassAndTheOwnPoll) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
-        EXPECT_EQ(core.s.sector_cell_, 0);
+        EXPECT_EQ(state_of(core).sector_cell_, 0);
         core.request_sector(3, "sector verb");   // stamped 128
         size_t from = fake.calls.size();
-        for (uint32_t tick = 120; tick <= 127; ++tick) core.sector_union_pass(tick);
+        for (uint32_t tick = 120; tick <= 127; ++tick) steps{core}.sector_union_pass(tick);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>(8, "sector_manager_active:off"));
         from = fake.calls.size();
-        core.sector_union_pass(128);
+        steps{core}.sector_union_pass(128);
         {
             const std::vector<std::string> expected = {
                 "sector_manager_active:off", "run_sector:3", "record_activation:128:reset",
                 "log:0:sector +3 at tick 128 (player 3, stamped 128), running: 1 3 "};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.sector_cell_, 3);
+        EXPECT_EQ(state_of(core).sector_cell_, 3);
         // The pass's own write: no crossing.
         fake.poll = cell_poll(3, true);
         from = fake.calls.size();
-        core.poll_own_sector(128);
+        steps{core}.poll_own_sector(128);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:128"});
 
         // A peer's sector, relayed for 129: the pacer holds it while the
         // manager runs and for the idle ticks after.
         core.on_session_event(sector_message(4, 5, 129, 129));
-        core.drain_due_events(129);
+        steps{core}.drain_due_events(129);
         fake.manager_active = true;
-        core.sector_union_pass(129);
+        steps{core}.sector_union_pass(129);
         fake.manager_active = false;
-        for (uint32_t tick = 130; tick <= 131; ++tick) core.sector_union_pass(tick);
+        for (uint32_t tick = 130; tick <= 131; ++tick) steps{core}.sector_union_pass(tick);
         from = fake.calls.size();
-        core.sector_union_pass(132);
+        steps{core}.sector_union_pass(132);
         {
             const std::vector<std::string> expected = {
                 "sector_manager_active:off", "run_sector:5", "record_activation:132:reset",
                 "log:0:sector +5 at tick 132 (player 4, stamped 129, held by the pacer), running: 1 3 5 "};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.sector_cell_, 5);
+        EXPECT_EQ(state_of(core).sector_cell_, 5);
         fake.poll = cell_poll(5, true);
         from = fake.calls.size();
-        core.poll_own_sector(132);
+        steps{core}.poll_own_sector(132);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:132"}) << "a peer's pass is no crossing of ours";
         // ...but our own ball crossing into it moves the resetpoint: ours too.
         fake.poll = cell_poll(5, true, true);
         from = fake.calls.size();
-        core.poll_own_sector(134);
+        steps{core}.poll_own_sector(134);
         {
             const std::vector<std::string> expected = {
                 "poll_sector:134", "send:1",
                 "log:0:sector 5 stamped for tick 142 (checkpoint, lead 7, input_delay 4), event sent ahead"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 3, 5}));
+        EXPECT_EQ(state_of(core).sectors_requested_, std::set<int>({1, 3, 5}));
         // Moved again into a sector already ours: nothing.
         from = fake.calls.size();
-        core.poll_own_sector(135);
+        steps{core}.poll_own_sector(135);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:135"});
         // A crossing with the chain held: stamped tick + 1 + lead.
         fake.poll = cell_poll(6, true);
         from = fake.calls.size();
-        core.poll_own_sector(136);
+        steps{core}.poll_own_sector(136);
         {
             const std::vector<std::string> expected = {
                 "poll_sector:136", "send:1",
                 "log:0:sector 6 stamped for tick 144 (checkpoint, lead 7, input_delay 4), event sent ahead"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(core.s.sector_cell_, 6);
+        EXPECT_EQ(state_of(core).sector_cell_, 6);
         // Without the hold the chain ran already: reported after the fact,
         // stamped with the tick that ran it, and not handed to the union.
-        const size_t stamps = core.s.sectors_.stamps_pending();
+        const size_t stamps = state_of(core).sectors_.stamps_pending();
         fake.poll = cell_poll(8, false);
         from = fake.calls.size();
-        core.poll_own_sector(140);
+        steps{core}.poll_own_sector(140);
         {
             const std::vector<std::string> expected = {"poll_sector:140", "send:1", "log:0:sector 8 at tick 140"};
             EXPECT_EQ(since(fake.calls, from), expected);
@@ -3224,16 +3298,16 @@ namespace {
             EXPECT_EQ(event.sector, 8);
             EXPECT_EQ(event.tick, 140u);
         }
-        EXPECT_EQ(core.s.sectors_.stamps_pending(), stamps);
-        EXPECT_EQ(core.s.sectors_requested_, std::set<int>({1, 3, 5, 6, 8}));
+        EXPECT_EQ(state_of(core).sectors_.stamps_pending(), stamps);
+        EXPECT_EQ(state_of(core).sectors_requested_, std::set<int>({1, 3, 5, 6, 8}));
         // An unread cell counts for nothing; a cell of 0 is taken, unreported.
         fake.poll = cell_poll(11, true, true, false);
         from = fake.calls.size();
-        core.poll_own_sector(141);
+        steps{core}.poll_own_sector(141);
         fake.poll = cell_poll(0, true);
-        core.poll_own_sector(142);
+        steps{core}.poll_own_sector(142);
         EXPECT_EQ(since(fake.calls, from), std::vector<std::string>({"poll_sector:141", "poll_sector:142"}));
-        EXPECT_EQ(core.s.sector_cell_, 0);
+        EXPECT_EQ(state_of(core).sector_cell_, 0);
     }
 
     // ------------------------------------------------------------ the frame
@@ -3321,10 +3395,9 @@ namespace {
         session_capabilities caps;
         caps.own_body_control = true;
         session_client_core core(frame_platform(fake, true), caps);
-        fake.fill_legacy(core);
         run_to_tick_125_four(core, fake);
         core.config.journal_checkpoint_ticks = 2;
-        auto& four = core.s.remotes_[4];
+        auto& four = state_of(core).remotes_[4];
         four.entity = "Ball_0_BMMO_4";
         four.physicalized = true;
         four.navigation = true;
@@ -3342,7 +3415,7 @@ namespace {
         fake.observation.nav_active = true;
         client_core_state::forced_own forced;
         forced.frame.keys = 9;
-        core.s.forced_own_[126] = forced;
+        state_of(core).forced_own_[126] = forced;
         bmmo::session::body_event box_wakeup;
         box_wakeup.what = bmmo::session::body_event::kind::wakeup;
         box_wakeup.name = "P_Box";
@@ -3351,7 +3424,7 @@ namespace {
         box_made.name = "P_Box";
         fake.body_events = {box_made, box_wakeup, box_wakeup};
         // A window open since before 120 (the index of 60-119): 126 closes it.
-        core.s.window_index_ = 2;
+        state_of(core).window_index_ = 2;
 
         ASSERT_EQ(core.next_tick(), 126u);
         size_t from = fake.calls.size();
@@ -3379,23 +3452,23 @@ namespace {
         ASSERT_EQ(fake.windows.size(), 1u);
         EXPECT_EQ(fake.windows[0].rfind("window: tick=126 inrew=0/0 ", 0), 0u) << fake.windows[0];
         EXPECT_NE(fake.windows[0].find(" rebases=3 relay="), std::string::npos) << "the host's, from a zero base";
-        EXPECT_EQ(core.s.window_index_, 3u);
+        EXPECT_EQ(state_of(core).window_index_, 3u);
         EXPECT_EQ(core.current_tick(), 126u);
         EXPECT_EQ(core.next_tick(), 127u);
         EXPECT_EQ(fake.body_event_answers, std::vector<bool>({false, false, false})) << "none was the own ball's";
-        EXPECT_EQ(core.s.generations_["P_Box"], 1u);
-        EXPECT_EQ(core.s.events_sent_, 1u) << "one BodyRevived per name and frame";
-        ASSERT_EQ(core.s.input_history_.size(), 1u);
-        const auto& input = core.s.input_history_.back().second;
+        EXPECT_EQ(state_of(core).generations_["P_Box"], 1u);
+        EXPECT_EQ(state_of(core).events_sent_, 1u) << "one BodyRevived per name and frame";
+        ASSERT_EQ(state_of(core).input_history_.size(), 1u);
+        const auto& input = state_of(core).input_history_.back().second;
         EXPECT_EQ(input.keys, 9) << "the forced tick plays the server's frame, whole";
         EXPECT_EQ(input.flags, 0u);
         EXPECT_EQ(input.cam_dir[2], 0.0f);
         ASSERT_NE(core.previous_cam(), nullptr);
         EXPECT_EQ(core.previous_cam()[2][2], 1.0f);
-        EXPECT_TRUE(core.s.own_physicalized_);
-        EXPECT_EQ(core.s.own_body_entity_, "Ball_Wood");
-        EXPECT_TRUE(core.s.rollback_.knows_tick(126));
-        EXPECT_EQ(core.s.own_inputs_.at(126).keys, 9);
+        EXPECT_TRUE(state_of(core).own_physicalized_);
+        EXPECT_EQ(state_of(core).own_body_entity_, "Ball_Wood");
+        EXPECT_TRUE(state_of(core).rollback_.knows_tick(126));
+        EXPECT_EQ(state_of(core).own_inputs_.at(126).keys, 9);
         EXPECT_EQ(four.applied.keys, 6) << "the drive of 127 is the newest relayed frame";
 
         // Between frames: an event due at 127 waits for its frame's pre_step,
@@ -3425,7 +3498,6 @@ namespace {
     TEST(SessionClientCoreFrame, TheOwnBallsBodyEventsAreReportedAndAnswered) {
         flow_fake fake;
         session_client_core core(frame_platform(fake, false), session_capabilities{});
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         fake.own_physical = true;
         fake.capture.captured = true;
@@ -3437,11 +3509,11 @@ namespace {
         bmmo::session::body_event ball_wakeup = made;
         ball_wakeup.what = bmmo::session::body_event::kind::wakeup;
         fake.body_events = {gone, made, ball_wakeup};
-        core.s.forced_own_[126] = client_core_state::forced_own{};
+        state_of(core).forced_own_[126] = client_core_state::forced_own{};
         core.pre_step();
         ASSERT_TRUE(core.post_step(true));
         EXPECT_EQ(fake.body_event_answers, std::vector<bool>({true, true, false}));
-        EXPECT_EQ(core.s.generations_["Ball_Wood"], 2u);
+        EXPECT_EQ(state_of(core).generations_["Ball_Wood"], 2u);
         int unforced = 0, reported = 0;
         for (const auto& call: fake.calls) {
             unforced += call.rfind("unforce_own:", 0) == 0;
@@ -3449,7 +3521,7 @@ namespace {
         }
         EXPECT_EQ(unforced, 0) << "no own replica was forced";
         EXPECT_EQ(reported, 1) << "the own birth reported from the capture";
-        EXPECT_EQ(core.s.events_sent_, 2u) << "the Unphysicalize and the Physicalize; a ball's wakeup is no BodyRevived";
+        EXPECT_EQ(state_of(core).events_sent_, 2u) << "the Unphysicalize and the Physicalize; a ball's wakeup is no BodyRevived";
     }
 
     // The input_rewind and own_corrections switches (design 1.2, 5.1; E9).
@@ -3462,12 +3534,11 @@ namespace {
             SCOPED_TRACE(on ? "switches on" : "switches off");
             flow_fake fake;
             session_client_core core(frame_platform(fake, false), session_capabilities{});
-            fake.fill_legacy(core);
             run_to_tick_125(core, fake);
             core.config.input_rewind = on;
             core.config.own_corrections = on;
-            core.s.held_floor_ = 119;
-            auto& four = core.s.remotes_[4];
+            state_of(core).held_floor_ = 119;
+            auto& four = state_of(core).remotes_[4];
             four.entity = "Ball_Wood_BMMO_4";
             four.physicalized = true;
             four.navigation = true;
@@ -3480,7 +3551,7 @@ namespace {
                 applied["Ball_Wood"] = keys_frame(1);
                 applied["Ball_Wood"].flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
                 applied["Ball_Wood_BMMO_4"] = keys_frame(0);
-                core.s.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked, applied);
+                state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked, applied);
             }
             // The relay: player 4 played keys 7 at 124, where we predicted 0.
             bmmo::session_remote_input_msg msg = relay_message(124, 120);
@@ -3492,22 +3563,22 @@ namespace {
             // Our own tick 124: the server applied keys 9 where we played 1.
             bmmo::session::input_frame served = keys_frame(9);
             served.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;   // a difference a replay sees
-            core.s.held_ahead_[124] = {served, true};
-            core.take_held_ahead(124);
+            state_of(core).held_ahead_[124] = {served, true};
+            steps{core}.take_held_ahead(124);
             bmmo::session::input_frame recorded{};
-            ASSERT_TRUE(core.s.rollback_.recorded_input("Ball_Wood", 124, recorded));
+            ASSERT_TRUE(state_of(core).rollback_.recorded_input("Ball_Wood", 124, recorded));
             EXPECT_EQ(recorded.keys, on ? 9 : 1) << "the own record amended only with own_corrections";
-            EXPECT_EQ(core.s.subst_diff_, on ? 1u : 0u);
-            EXPECT_EQ(core.s.input_rewind_pending_, on);
-            EXPECT_EQ(core.s.input_rewind_entities_.count("Ball_Wood_BMMO_4"), on ? 1u : 0u);
-            EXPECT_EQ(core.s.own_inputs_.at(124).keys, 9) << "the server's frame is stored either way";
+            EXPECT_EQ(state_of(core).subst_diff_, on ? 1u : 0u);
+            EXPECT_EQ(state_of(core).input_rewind_pending_, on);
+            EXPECT_EQ(state_of(core).input_rewind_entities_.count("Ball_Wood_BMMO_4"), on ? 1u : 0u);
+            EXPECT_EQ(state_of(core).own_inputs_.at(124).keys, 9) << "the server's frame is stored either way";
             const size_t from = fake.calls.size();
-            core.replay_corrected_inputs();
-            int steps = 0;
-            for (const auto& call: since(fake.calls, from)) steps += call == "step";
-            EXPECT_EQ(steps, on ? 2 : 0) << "one replay from 123 to 125, or none";
-            EXPECT_EQ(core.s.input_rewinds_, on ? 1u : 0u);
-            EXPECT_EQ(core.s.subst_rewinds_, on ? 1u : 0u);
+            steps{core}.replay_corrected_inputs();
+            int stepped = 0;
+            for (const auto& call: since(fake.calls, from)) stepped += call == "step";
+            EXPECT_EQ(stepped, on ? 2 : 0) << "one replay from 123 to 125, or none";
+            EXPECT_EQ(state_of(core).input_rewinds_, on ? 1u : 0u);
+            EXPECT_EQ(state_of(core).subst_rewinds_, on ? 1u : 0u);
         }
     }
 
@@ -3520,21 +3591,20 @@ namespace {
         session_capabilities caps;
         caps.slew = true;
         session_client_core core(fake.make_flow(), caps);
-        fake.fill_legacy(core);
         run_to_tick_125(core, fake);
         EXPECT_EQ(core.rebase_threshold(), 33.0);
         EXPECT_FALSE(core.slewing());
         size_t from = fake.calls.size();
         core.schedule_rebased("tick schedule rebased");
-        EXPECT_EQ(core.s.resyncs_sent_, 1u);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
         {
             const std::vector<std::string> expected = {"now:resync_limiter", "send:0",
                                                        "log:0:resync requested (tick schedule rebased) at tick 125"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
         // A slew of +2 (a raise): the clock moves earlier one tick per period.
-        core.s.lead_slew_.start(7, 2);
-        core.s.lead_slew_clock_ = fake.clock;
+        state_of(core).lead_slew_.start(7, 2);
+        state_of(core).lead_slew_clock_ = fake.clock;
         ASSERT_TRUE(core.slewing());
         EXPECT_EQ(core.rebase_threshold(), 35.0);
         int moved = 0;
@@ -3544,8 +3614,8 @@ namespace {
         }
         EXPECT_EQ(moved, 2);
         EXPECT_FALSE(core.slewing());
-        EXPECT_EQ(core.s.lead_offset_, 2);
-        EXPECT_EQ(core.s.lead_slew_clock_, fake.clock);
+        EXPECT_EQ(state_of(core).lead_offset_, 2);
+        EXPECT_EQ(state_of(core).lead_slew_clock_, fake.clock);
     }
 
 
@@ -3560,11 +3630,11 @@ namespace {
         h.rebases = 7;
         h.activations_replayed = 8;
         h.script_reset_skips = 9;
-        core.s.relay_lag_max_ = 40;
-        core.s.relay_lag_hist_[5] = 98;
-        core.s.relay_lag_hist_[30] = 2;
-        core.s.input_reports_ = 4;
-        core.s.input_starved_ = 1;
+        state_of(core).relay_lag_max_ = 40;
+        state_of(core).relay_lag_hist_[5] = 98;
+        state_of(core).relay_lag_hist_[30] = 2;
+        state_of(core).input_reports_ = 4;
+        state_of(core).input_starved_ = 1;
         const size_t from = fake.calls.size();
         const std::string text = core.status_text(h);
         EXPECT_TRUE(since(fake.calls, from).empty()) << "a text, nothing printed";
@@ -3588,32 +3658,32 @@ namespace {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
         bmmo::session::host_counters h;
-        core.s.input_rewinds_ = 4;
-        core.s.input_rewind_depth_ = 10;
+        state_of(core).input_rewinds_ = 4;
+        state_of(core).input_rewind_depth_ = 10;
         EXPECT_TRUE(core.window_due(59)) << "the first edge is due";
         EXPECT_EQ(core.window_text(59, h), "") << "the first edge only sets the base";
         EXPECT_FALSE(core.window_due(59)) << "the frame reads no counters inside a window";
         EXPECT_EQ(core.window_text(59, h), "") << "the same window";
         EXPECT_TRUE(core.window_due(60));
-        core.s.input_rewinds_ = 6;
-        core.s.input_rewind_depth_ = 15;
-        core.s.subst_recv_ = 3;
-        core.s.lead_offset_ = -2;
-        core.s.window_lag_[3][5] = 2;
-        core.s.window_lag_[3][7] = 1;
-        core.s.window_lag_[6][1] = 4;
-        core.s.window_inrew_src_[3] = 2;
+        state_of(core).input_rewinds_ = 6;
+        state_of(core).input_rewind_depth_ = 15;
+        state_of(core).subst_recv_ = 3;
+        state_of(core).lead_offset_ = -2;
+        state_of(core).window_lag_[3][5] = 2;
+        state_of(core).window_lag_[3][7] = 1;
+        state_of(core).window_lag_[6][1] = 4;
+        state_of(core).window_inrew_src_[3] = 2;
         h.rebases = 1;
         EXPECT_EQ(core.window_text(60, h),
                   "window: tick=60 inrew=2/5 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=0/0 rebases=1 relay=0 "
                   "late=0 subst=3/0/0/0/0/0 substrew=0/0 substco=0/0/0/0 lead_adj=0 lead=-2 slew=0 moved=0 "
                   "echo=0/0/0/0/0 ownlife=0/0/0 lag[3]=5*2,7*1 lag[6]=1*4 inrew[3]=2");
-        EXPECT_TRUE(core.s.window_lag_.empty());
-        EXPECT_TRUE(core.s.window_inrew_src_.empty());
+        EXPECT_TRUE(state_of(core).window_lag_.empty());
+        EXPECT_TRUE(state_of(core).window_inrew_src_.empty());
         EXPECT_FALSE(core.window_due(119));
         EXPECT_EQ(core.window_text(119, h), "");
         EXPECT_EQ(core.window_text(120, h).rfind("window: tick=120 inrew=0/0 ", 0), 0u);
-        EXPECT_NE(core.s.window_base_.rebases, 0) << "the base keeps the host's count";
+        EXPECT_NE(state_of(core).window_base_.rebases, 0) << "the base keeps the host's count";
 
         session_client_core shifted(fake.make_flow(), session_capabilities{});
         shifted.config.window_shift = 25;

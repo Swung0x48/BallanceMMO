@@ -5,6 +5,7 @@
 // numbering, the hold, the resync request and the sends out of the headless
 // client (session_client.cpp at f8b07e5), verbatim but for the platform calls
 // (send, now, the hooks) and the legacy back-calls (design 6.1).
+// E11 deleted the back-calls: end's own_body_guard_off is hooks.ended.
 
 #include "session/client_core.hpp"
 
@@ -271,9 +272,10 @@ namespace bmmo::session {
         if (platform_.hooks.ending) platform_.hooks.ending();
         journal_.close(reason);
         // After the journal closed: the own body guard is lifted (host
-        // state), and every mirror's navigation and body taken out (the
-        // headless end_session_world until E6; not muted).
-        legacy.own_body_guard_off();
+        // state; hooks.ended, a back-call until E11), and every mirror's
+        // navigation and body taken out (the headless end_session_world
+        // until E6; not muted).
+        if (platform_.hooks.ended) platform_.hooks.ended();
         for (auto& [id, remote]: s.remotes_) {
             if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
             if (remote.physicalized) platform_.unmake_mirror(remote.entity);

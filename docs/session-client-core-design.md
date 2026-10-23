@@ -2,8 +2,8 @@
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
-E5, E6, E7, E8, E9 and E10 (§6.1, "As built (step E1)" ... "As built (step
-E10)") are built. Nothing else is yet.
+E5, E6, E7, E8, E9, E10 and E11 (§6.1, "As built (step E1)" ... "As built
+(step E11)") are built: the E steps are done. No R step is built yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -503,6 +503,8 @@ value, as the free functions do today.
 | hooks.ending (added at E3) | `void()`: the first thing `end` does | discards the `--hold-event` sends still held, logging each, before the journal closes | empty |
 | hooks.window / hooks.status | `void(const std::string&)`; as built (E10): `window` at step 31 with a line the window's edge produced, `status` at `end` (the headless 5 s report calls `status_text` itself) | `log_line` (one line, the bytes `logf` wrote) | the log, plus the F3 overlay reads `status_text` |
 | counters (added at E10) | `host_counters()`, optional: the host's own counters (`rebases`, `activations_replayed`, `script_reset_skips`) for the text the core prints itself (step 31's `window:` line, `end`'s status line); empty: zeros | `{rebases_, activations_replayed_, script_reset_skips_}` | the retail counterparts (R1) |
+| hooks.ended (added at E11) | `void()`, optional: `end`, after the journal closed and before the mirrors are taken out (`legacy_calls::own_body_guard_off` until E11) | the own body guard lifted (`own_body_guard_off`) | empty |
+| hooks.describe_movables (added at E11) | `std::string()`, optional: the text of the `--trace` line `after rollback: movable=%s` (the first 16 snapshot rollbacks); empty: the line is not written (`legacy_calls::describe_movable_objects` until E11; a host diagnostic, §2.4) | `describe_movable_objects` | empty |
 
 **What the host feeds the core, and when.**
 
@@ -655,7 +657,8 @@ headless host.
   at startup when members are added (MH:392-396, commit 33cc5c9). So:
   - the core and the `retail_platform` are **file-scope statics**
     (`std::unique_ptr<session_client_core>` etc.) in `core_host.cpp`,
-    created at the first SessionStart;
+    created at the first SessionStart; the login id is kept until then and
+    given to the core with `set_own_id` before each `begin` (E11);
   - the mailbox is a **load-time** file-scope static, never created lazily:
     `begin` runs later, through `run_on_game_thread` (PSC:204-208), while
     the network thread pushes at once. `begin` drops only the entries of
@@ -1172,7 +1175,8 @@ function still calls. SC fills it, the fake-platform test fills it with
 recorders, and the mod leaves it empty (the core is not run there before
 R1). Each E step adds the entries its moved code needs and deletes the
 entries whose target it moves; E11 asserts the struct is empty and deletes
-it. A step's review lists the entries it added and removed. The journal moves
+it. (As built: its last two entries became optional platform hooks, see
+"As built (step E11)".) A step's review lists the entries it added and removed. The journal moves
 right after E1 (E2), because every area journals.
 
 | step | what moves | checks that close it |
@@ -3619,6 +3623,351 @@ and the row above:
   round: CPU parity took 31 to 33 s against 21 to 22 s, alike on both
   binaries. The sampler does not register this. It likely explains why
   every client of that batch rebased early.
+
+**As built (step E11).** Where the code made E11 differ from §1.2, §1.3,
+§2.2, §3.1 and the row above:
+
+- **The state is private.** `client_core_state s` is a private member of
+  `session_client_core`, in its old place (before `config`, so the
+  construction and destruction order is the same; `journal_` is still
+  last). Two friends reach it:
+  - `core::client_journal`, which reads the state and `config` (the E2
+    note's "needs `friend class core::client_journal;`");
+  - `core_test_access`, declared in `client_core.hpp` and defined only in
+    `tests/session_client_core_test.cpp`: the unit tests' door to the state
+    (`state_of(core)`) and to the private steps (`steps{core}.<step>(...)`).
+
+  `config` stays public. It is the host's configuration, not state (§1.2
+  lists it apart), `begin` takes it whole, and the tests set it.
+- **What the host read of the state are accessors now** (§1.3 "reading"
+  gains them): `own_id`, `session_phase`, `session_id`, `level`, `seed`,
+  `own_join_order`, `own_group`, `spawn_impulse`, `spawn_spacing`,
+  `frames_since_anchor`, `own_physicalized`, `own_body_entity`, `remotes`,
+  `own_correction_stats` (the exit code), `recorded_savestate` and
+  `recorded_scripts` (`--dump-savestate`, `--compare-scripts`). The host
+  also uses the ones that already existed: `previous_cam()` (`--keep-lane`
+  and the camera re-arm after a rewind now test its pointer instead of
+  `previous_cam_valid_`, and read the same array through it), `assigned()`
+  and `sector_lead_ticks()`. Every SC site was replaced one for one, with
+  each read at the same place.
+- **One write the design had no operation for: the login id.** SC wrote
+  `own_id_` at LoginAcceptedV3, and `begin` finds the own join order by it.
+  It is `set_own_id(id)` now, in the lifecycle group. The contract: the
+  id must be set before `begin`; `begin` without it finds no own join
+  order (-1, group `P#63`). The headless core exists from the start and SC
+  sets it at login, as before. The retail core does not exist at login
+  (§3.2 creates it at the first SessionStart), so the retail host keeps
+  the id it got at login and calls `set_own_id` after it creates the core
+  and before every `begin` (R1). The setter was kept over a `begin`
+  parameter so that SC's login site and `begin`'s signature stay as they
+  were.
+- **The frame's steps are private too.** E5 to E9 had left them public for
+  the host's frame and the tests, and only `pre_step` / `post_step` call
+  them now:
+  - `drain_due_events`, `apply_held_lifecycle`, `drain_pending_births`,
+    `attach_remote_navigation`, `live_drive`;
+  - `process_own_echoes`, `report_physicalize`, `report_unphysicalize`,
+    `commit_own_reports`, `apply_requested_beam`,
+    `destroy_moved_own_birth`;
+  - `hold_pending_sector`, `sector_union_pass`, `poll_own_sector`;
+  - `replay_corrected_inputs`, `retry_owed_resync`, `take_forced_own`,
+    `play_forced_own`, `take_held_ahead`, `finish_lead_slew`,
+    `drop_carried_own_replay`, `held_header_current`;
+  - `flush_inputs`, `remember_sent`, `put_event_on_wire` (the E3 note's
+    "private once `pre_step` and `post_step` exist", so that a host cannot
+    pass `filter_event` by).
+
+  Still public: §1.3's API as built, `set_own_id`, the `on_session_*`
+  entry points, `own_physicalized` / `own_unphysicalized`, `request_beam`,
+  `request_sector`, `force_rewind`, `request_resync`, `send_event` (the
+  retail host's after-the-fact Sector event, §2.2), `release_event`,
+  `window_text` / `window_due` (§1.3 lists them; the E10 review kept them
+  public) and `logf`.
+- **`legacy_calls` is deleted.** Its last two entries became optional host
+  hooks (§2.2 rows added):
+  - `own_body_guard_off` is `hooks.ended`, called by `end` after the
+    journal closed and before the mirrors are taken out, as before. The E6
+    note asked for "a hook": `own_body_upkeep` has no "off".
+  - `describe_movable_objects` is `hooks.describe_movables`. The `--trace`
+    line `after rollback: movable=%s` is written only when the hook is
+    there. `rollback_diag_` is still counted first, so a host without the
+    hook does not move the 16-line cap. Headless fills both, so its calls
+    and lines are unchanged.
+
+  Neither hook is required by `missing_platform_operation`.
+- **Dead state deleted** (§1.2): `spawn_position_` and `spawn_known_`, with
+  the loop in `begin_session` that set them from `players_`, and
+  `anchor_hash_`. `snapshot_interval_` is not deleted: it has been live core
+  state since E7 (the `own_body_control` fallback reads it).
+- **Dead code deleted from the host.** `begin_session`'s engine-reboot
+  branch took every mirror's navigation out and cleared nine of the core's
+  members (`remotes_`, the relay's and the held section's seen-sets,
+  `pending_relay_`, `event_seen_`, `own_event_repeats_`, the remotes' last
+  Physicalize and Unphysicalize). It ran after `core_.begin`, which has
+  cleared all nine since E3. At E0, `begin_session` cleared `remotes_` before
+  the branch too. So the loop never found a mirror, and the clears never
+  cleared anything. Deleted, with its now unused `error` local; the branch
+  keeps its log line and the reboot.
+- **SC is the host of §3.1.** Deleted: the `send_event` and
+  `request_resync` forwarders and the `remote_ball` / `forced_own` aliases
+  (the E9 note's "until E11"), and `make_legacy_calls`. Kept: the `phase`
+  alias (the run loop's switch) and the `current_tick()` forwarder (host
+  convenience at 14 call sites). SC has no `core_.s.` left. Two §3.1 items
+  are still to come:
+  - **`on_message` is not built** (no E row names it, E9's note). The host
+    decodes the Session* opcodes and calls `on_session_*`. The retail
+    mailbox (R1) is its first user.
+  - **`acked_input()` and `release_hold()` are not built either.** Their
+    readers are retail's (the starvation detector at R4, the lost
+    connection at R1).
+- **§5.1**: `LegacyCallsStartEmpty` became
+  `BackCallsBecameOptionalHooks` (neither hook required; a core without
+  them ends a session). The flow fake records `hook:ended` and
+  `hook:describe_movables` where `fill_legacy` recorded the back-calls, so
+  `fill_legacy` and its 46 calls are gone. The expected call lists name
+  `hook:ended`. The tests reach the state through `state_of(core)` (473
+  sites) and the private steps through `steps{core}` (77 calls, plus
+  `live_drive` 4 times). After the review,
+  `TracedRollbackDescribesTheMovablesWhenTheHostCan` pins the one path
+  the optional hook made new: a traced snapshot rollback counts
+  `rollback_diag_` with or without `hooks.describe_movables`, and writes
+  the `after rollback: movable=` line only with it and only for the first
+  16 (checked against a mutation that tests the hook before the count: the
+  no-hook arm fails). 411 tests pass on Windows and, built with GCC 16.2.1
+  on Arch, there too.
+- **Results.** Old is 863f5ea's binary (`build-agent-qos/`, build id
+  `bmmo-863f5ea335ef`), new the E11 binary (`build-agent-E11/`,
+  `bmmo-863f5ea335ef-dirty`).
+  - §5.2 (5) and (6), `wire_check.sh qos E11 e11w`: WIRE-CHECK: ALL SAME,
+    62914 sends on the 16 clients, equal but for each login. Every replay
+    reached its end marker. All 16 journals are IDENTICAL with
+    `e0_compare.py` and BYTE-IDENTICAL-EXCEPT-BUILD-ID (`e1_bytecheck.py`:
+    the live reference's length, 12 bytes differing per file, all inside
+    the header's build id).
+  - **Cumulative wire check**, `wire_check.sh e3t E11 e11c`: WIRE-CHECK: ALL
+    SAME (the same 62914 sends). The E0 binary has no `--trace-sends`, so
+    e3t (aea9521, the first binary with it) is the earliest wire reference.
+    Against E0 itself, (5) is cumulative by construction: the references
+    are the E0 binary's live journals.
+  - §5.2 (4): 186 plain `logf` literals against 863f5ea's 186 (SC +
+    `src/session/*.cpp`), EQUAL. `client_core_report.cpp` and its two `textf`
+    literals are unchanged.
+  - §5.2 (3): the old SimTool on its replay of each capture against the new
+    one on the E11 replay (`--continue-after-jump`): all 16 have the same rc
+    and summary line. The four reference server journals give rc 0 and 0
+    checkpoint mismatches on both (3986 to 4257 ticks).
+  - §5.2 (2): solo snapshots off (`solo/e11_newa`, starved=0) against
+    `old1`. TICK hash and pose are identical at all 2460 common ticks
+    (8-2467), LOCAL checkpoints 1230/1230, the 8 RECEIVED snapshots equal in
+    content, other records 6187/6187: IDENTICAL. Host load at most 11.6 %.
+  - **The host paths whose reads became accessors, and the two hooks**,
+    replayed with qos and E11 on the same captures with the same flags (E9's
+    `cov_replay.py`):
+    - `--trace` on `swing_snapon`: 16 `after rollback: movable=` lines per
+      client (`hooks.describe_movables`), the step wrapper's mirror lines
+      (`remotes()`) and the ball-force traces;
+    - `--force-rollback 50:12 --trace-restore --dump-savestate 1600 1610`
+      on `resync_snapoff`: the contact lines (`own_physicalized()`,
+      `own_body_entity()`), 8 restore traces, and `dump_savestate` /
+      `dump_scripts` (`recorded_*`).
+
+    Results: 8 client pairs, every one rc 0 at its end marker; the journals
+    IDENTICAL; the logs identical line for line once the paths, the build id
+    and the CPU timings are taken out (1704 to 3319 lines); the sends SAME;
+    and the 88 dump files byte-identical but for the `.sav` header's
+    `environment_id` (bytes 8-15, the `IVP_Environment` pointer, as at E9).
+    `hooks.ended` runs only at a SessionEnd, which no capture has (every run
+    stops by `--seconds`). `EndGoesIdle` and `EndTakesTheMirrorsOut` pin its
+    place. The reboot branch needs a host restart, which no capture has.
+  - CPU parity (`cpu_parity.sh qos E11`, three rounds): PASS, old 20.48 /
+    20.70 / 20.41 s, new 20.68 / 20.58 / 20.56 s, limit 22.02 s.
+  - **Cumulative CPU parity** against the E0 binary (`build-agent-e0`, 9d9cb08,
+    which predates the power-throttling opt-out). Both binaries were pinned
+    to the performance cores (`aff_run.py FFFF` around `cpu_parity.sh`; the
+    children inherit mask 0xFFFF, checked). PASS, E0 21.98 / 21.31 /
+    21.85 s, E11 20.87 / 20.77 / 20.66 s, limit 23.75 s. E11 is 3 to 5 %
+    faster.
+  - Builds: x64 BUILD-OK. The x86 mod is CLIENT-BUILD-OK, built with the
+    target's 26 objects deleted first (`client_core.hpp` and
+    `client_platform.hpp` changed layout). `linux_test_syntax.sh` passes on
+    every line (25 sources). GCC 16.2.1 compiles the headless client
+    syntax-only with the Arch flags, and the seven core sources with `-Wall
+    -Wextra`, with no error or warning. The Arch tree builds and links the
+    headless client and the tests, and 410 tests pass there. No server
+    source changed, so the Arch server was not rebuilt.
+  - §5.3, the full arm set, one batch each (`e11ab1_*`), O1 N1 O2 N2, every
+    client capturing its inbound. Host peak 12.4 to 30.7 % total, no other
+    process above 7.9 % (`msmpeng` in the swing bay): no void run. No crash:
+    every client reached its time limit with a status line, rc 0 (rc 2 on
+    both binaries in the rollback-off arm, the ladder's). Every server
+    journal replays rc 0 with 0 checkpoint mismatches.
+    **The cross-replay:** qos replays each N run's four captures, and E11
+    each O run's. All 28 runs, 112 client journals, are IDENTICAL to their
+    live ones. Per arm (rebases per client in `e11ab1_*.judge`, session
+    scratchpad; the band counts are reported, not deciding):
+    - **Lane control.** Rebases: N1 client 3 at 2694 (applied 2707), O2
+      client 1 at 2701 (2715), none in O1 or N2. N2's criteria equal O1's.
+      N1 differs from O1 in client 3's `relay_late 0` / `resyncs 0` (its
+      rebase) and client 2's phase-D own error, and equals pooled
+      `e9ab2_lane_o2`. No `unmatched` or `far` in any run. Band 36 of 305.
+    - **Swing bay.** No rebase. Both N runs' criteria equal both O runs'.
+      No zero broken: `far` is non-zero in an O run of every client where
+      an N run has it; every refusal is a full snapshot 49 to 77 deep, past
+      the reach. Band 22 of 138.
+    - **A1 burst.** N1 client 2 rebased at 2695 (2708), and N1's criteria
+      equal O1's. **N2 equals no O run, pooled or not.** Its nearest, O1,
+      differs only in client 1's "own ball 0.0000 in D": N2 FAILS it with
+      0.0486 m, O1 passes with 0.0000 m, and O2 fails it with 0.0007 m.
+      Client 1's phase-B error was 1.4173 m in N2 (O1 1.0206, O2 1.3461),
+      and its leftover outlasted D. N2 has no rebase, no late event at the
+      server and no snapshot past the reach, and the window is long before
+      the teardown. This is the phase-B leftover of E5, E6, E9 and E10,
+      **not traced to a §5.3 event**. Under the rule as revised at E10 it
+      is listed and does not fail the step: qos reproduces N2 exactly from
+      its captures. Band 75 of 305.
+    - **A6m hold.** No rebase. Both N runs' criteria equal both O runs'.
+      The held birth was applied at 2482 -> 2501 or 2502 in all four.
+      Band 46 of 314.
+    - **Snapshots on.** Only N2 rebased: clients 0, 1 and 3 at 3293, 3299
+      and 3207 (applied 3306, 3286 and 3220). Both N runs' criteria equal
+      both O runs'. Zeros broken in N2, each traced. Client 0 `unmatched`
+      14 and client 3's 10 are the snapshots after their resync rebuilds
+      (3308-3332, 3222-3244). Client 1's 15 (the trace lists 13): the
+      snapshot of 3105 at 3202, 97 deep, past the 96-tick history, then
+      3306-3350 after its rebuild from 3286. Band 34 of 138.
+    - **Rollback off.** Every client rc 2 on both binaries, with the
+      ladder's "3 hard corrections in a row" resyncs and no pacer rebase.
+      Both N runs' criteria equal O2's. Band 13 of 140.
+    - **Forced resync.** Paused client 2 rebased at 1500 in all four
+      (applied 1548 / 1557 / 1556 / 1556). The others rebased: O1 clients
+      0 / 1 / 3 at 2769 / 2784 / 2769; N1 client 1 at 2782; O2 0 / 1 / 3 at
+      1877 / 1841 / 1845; N2 0 / 1 / 3 at 2710 / 2718 / 2703. N2's criteria
+      equal pooled `e3ab3_resync_o2`, `e7ab3_resync_o1`, `e7ab4_resync_o1`
+      and `e9ab3_resync_o2`. N1 equals no pooled O run. Its nearest,
+      `e9ab2_resync_o1`, differs only in client 1's `relay_late 0` and
+      `resyncs 0`, and those are client 1's own rebase at 2782. No zero
+      broken: every `unmatched` sits beside a non-zero O value, each the
+      snapshot right after its client's rebuild. Band 25 of 304.
+  - **The cumulative check against E0** (`e11cum1_*`): lane control and
+    swing bay, O = `build-agent-e0`, N = E11. The harness was launched
+    through `aff_run.py FFFF`, so both binaries' clients ran pinned to the
+    performance cores. Host peak 20.3 % and 16.4 %, no other process above
+    3.8 %. No crash. Every server journal replays rc 0 with 0 mismatches.
+    **The cross-replay:** E0 replays each N run's captures and E11 each E0
+    run's, and all 8 runs (32 journals) are IDENTICAL. The E0 binary
+    supports `--capture-inbound` / `--replay-inbound` (it is E0), but not
+    `--trace-sends`, so the wire check could not run against it (above).
+    - **Lane control.** Both E0 runs rebased every client: O1 at 2655 /
+      2713 / 2721 / 2728, O2 at 2677 / 2693 / 2690 / 2689. N1 rebased client
+      2 at 2697, and N2 none. The N runs' criteria differ from the E0 runs'
+      only in the `relay_late 0` / `resyncs 0` of the clients that rebased
+      in O and not in N, which are pacer rebases. Pooled, N1 equals
+      `e10ab1_lane_o2` and `e7ab2_lane_o1`; N2 equals `e5ab1_lane_o1`,
+      `e5ab3_lane_o2`, `e6ab2_lane_o1`, `e6ab2_lane_o2` and
+      `e9ab1_lane_o1`. No zero broken: `unmatched` is in the O runs only,
+      each the snapshot after a rebuild. Band 89 of 304. The E0 runs
+      rebasing more fits E0's 3 to 5 % higher cost in the pinned CPU parity
+      above.
+    - **Swing bay.** No rebase. Both N runs' criteria equal both E0 runs'.
+      No zero broken (`far` is non-zero in an E0 run of every client where
+      an N run has it). Band 20 of 138.
+  - §5.2 (1) not run: no forced-rollback path moved, and the forced
+    rollbacks with `--trace-restore` above replay identically on both
+    binaries.
+- **After the review.** Two reviews; what became of their findings:
+  - Review 2, `set_own_id` before `begin` (should-fix): the contract is in
+    the header comment, in the bullet above and in §3.2's retail sequence
+    (the login id kept until the core exists, set before each `begin`).
+  - Review 2, the no-hook branch untested (should-fix): the test
+    `TracedRollbackDescribesTheMovablesWhenTheHostCan` above.
+  - Review 1, the hook comment's "after the first 16" (nit): now "for each
+    of the first 16 snapshot rollbacks".
+  - Review 2, the reboot branch's comment (nit): reworded. `begin` empties
+    the map without taking mirrors out, so mirrors a SessionEnd did not
+    take out are not taken out there either, as before E11.
+  - Review 2, row E11's "asserts the struct is empty" (nit): the row now
+    points here.
+  - Review 2, guarding `core_test_access` with a test-only macro (optional
+    nit): not done. A friend declaration grants nothing a translation unit
+    cannot already take (any TU can redefine the class's access), and a
+    macro in the shared header that only one target defines would make the
+    class read differently per target for no protection.
+  - Review 1, the A1 burst (process question): the closing round below
+    re-ran every arm; its A1 batch has no untraced difference.
+- **The closing round** (after the fixes; comments and one test only, so
+  the shipped code is the code measured above, rebuilt). x64 BUILD-OK, x86
+  CLIENT-BUILD-OK. 411 tests pass on Windows and, built with GCC 16.2.1,
+  on Arch; `linux_test_syntax.sh` is ok on all 25 lines, and the GCC check
+  (the headless client syntax-only, the seven core sources with `-Wall
+  -Wextra`) gives rc 0 and no warning. On the rebuilt binary:
+  `wire_check.sh qos E11` ALL SAME and the 16 replays
+  BYTE-IDENTICAL-EXCEPT-BUILD-ID (12 bytes each); `wire_check.sh e3t E11`
+  ALL SAME; the `logf` literals 186 = 186 against 863f5ea; SimTool's 16
+  client summaries the same on both binaries and the four server journals
+  rc 0, 0 mismatches; solo snapshots off (`e11r_solo`) IDENTICAL to
+  `old1` (LOCAL 1214/1214, other records 6106/6106); CPU parity PASS
+  against qos (old 20.64 / 20.34 s, new 20.29 / 20.20 s, limit 21.97 s) and,
+  pinned through `aff_run.py FFFF`, against E0 (E0 22.03 / 22.10 s, E11
+  20.43 / 20.46 s, limit 23.28 s).
+  The §5.3 arms again, against qos: `e11ab2_*` (all seven) and `e11ab3_*`
+  (rollback off and forced resync, see below), O1 N1 O2 N2, every client
+  capturing its inbound. **The cross-replay: all 36 runs, 144 client
+  journals, IDENTICAL** with the other binary. No crash (rc 0; rc 2 on
+  both binaries with rollback off). Every server journal replays rc 0 with
+  0 mismatches (`e11ab2_resync_o2`'s harness replay failed to start,
+  0xC0000142, as the host process exited at 03:02; replayed by hand: rc 0,
+  4152 ticks, 0 mismatches). Per arm (band counts reported, not deciding):
+  - **Lane control** (`e11ab2`, host peak 21.5 %). Rebase: O1 client 3 at
+    2695 (applied 2709), none elsewhere. Both N runs' criteria equal O2's.
+    No zero broken. Band 24 of 303.
+  - **Swing bay** (`e11ab2`, 24.8 %). No rebase. Both N runs' criteria equal
+    both O runs'. `far` in both binaries' runs, every refusal a snapshot 49
+    to 72 deep; O2 client 2's `unmatched` follows its resync rebuild from
+    701 after the server applied its Physicalize late (701 -> 702). Band 9
+    of 138.
+  - **A1 burst** (`e11ab2`, 21.1 %). N2's criteria equal both O runs'. N1
+    rebased clients 2 and 3 at 2678 and 2691 (applied 2693 and 2705), and
+    differs from the O runs only by them: client 3's `resyncs 0` and
+    `relay_late 0` (84 frames in phase A); client 2's one `unmatched`
+    (the snapshot of 2705 right after its rebuild from 2693); client 2's
+    "subst recv == server count" (209 against 191: after its rebase client
+    2 kept being substituted to the end, and the harness's server count
+    stops 60 ticks before the client's last line). Band 88 of 303.
+  - **A6m hold** (`e11ab2`, 18.1 %). No rebase. Both N runs' criteria equal
+    O1's; the held birth applied 2482 -> 2502 in all four. Band 49 of 313.
+  - **Snapshots on** (`e11ab2`, 23.1 %). No rebase. Both N runs' criteria
+    equal both O runs'. The broken `unmatched` zeros are snapshots deeper
+    than the 96-tick history: N1 client 1 the snapshot of 2215 at 2321 (106
+    deep), N2 client 1 3227 at 3354 (127) and client 3 2743 at 2850 (107);
+    O2 has the same class (109 to 122 deep). Band 10 of 138.
+  - **Rollback off** (`e11ab3`, 13.7 %). `e11ab2`'s N1 is void: the
+    sampler logged `msedge` at 71.9 % of the machine at 02:55:21 (a sample
+    whose total was 10.9 %, so a counter glitch, but the rule is the rule),
+    so the arm was re-run as `e11ab3`, with no other process above 3.0 %.
+    No rebase; both N runs' criteria equal both O runs'. Band 18 of 140.
+  - **Forced resync** (`e11ab3`, 20.3 %). Paused client 2 rebased at 1500
+    (applied 1555) in all four. The others: O1 clients 0 / 1 / 3 at 2950 /
+    2694 / 1858, O2 at 2705 / 2710 / 2708, N1 none, N2 at 1837 / 1836 /
+    1846. N2's criteria equal O1's. N1 equals pooled `e9ab2_resync_o1`, and
+    differs from O1 only in the `relay_late 0` / `resyncs 0` of the three
+    clients that rebased in O1 and not in N1, and in O1 client 1's moved
+    birth (the server applied its Physicalize late, 2676 -> 2683). N2's
+    `unmatched` (client 1: 1850 and 1859) are the snapshots right after its
+    rebuild from 1849. Band 76 of 307. `e11ab2`'s forced resync is
+    superseded by this batch. Its N1 had three moved births, each a
+    Physicalize the server applied late (2634 -> 2644, 2749 -> 2755, 2878 ->
+    2885). It also had a phase-D own-ball difference that no event names,
+    the same class as `e11ab1_a1_n2`.
+- **The step's status.** Every exact check (§5.2 (2) to (6), and the
+  cumulative wire check against e3t), CPU parity against qos and against
+  E0, and every arm's crash, server and cross-replay items pass. In the
+  closing round, each broken zero and each criterion difference is a pacer
+  rebase and its resync, a snapshot past the reach or the history, a
+  lifecycle event the server applied late, or (A1 N1's substitution count)
+  a rebase's substitutions running into the run's last 60 ticks. The first
+  round's `e11ab1_a1_n2` phase-D difference stays listed above; both
+  outcomes occur for that client in the O runs, and the old binary
+  reproduces that run exactly from its captures.
 
 ### 6.2 R steps: the retail mod hosts the core
 

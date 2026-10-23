@@ -534,7 +534,7 @@ namespace {
         // rest of the frame-loop internals.
         friend class own_physicalize_callback;
     public:
-        explicit session_client(arguments args) : args_(std::move(args)) { core_.legacy = make_legacy_calls(); }
+        explicit session_client(arguments args) : args_(std::move(args)) {}
         // make_platform() hands core_ lambdas that hold `this`: a moved (or
         // copied) client would leave them calling into the old object.
         session_client(session_client&&) = delete;
@@ -587,7 +587,7 @@ namespace {
 
         int exit_code() const {
             if (inbound_failed_) return 3;
-            const auto& st = core_.s.corrector_.stats();
+            const auto& st = core_.own_correction_stats();
             return (st.blended + st.hard + st.unmatched) == 0 ? 0 : 2;
         }
 
@@ -607,7 +607,7 @@ namespace {
                     stopped = "the client's time limit was reached";
                     break;
                 }
-                switch (core_.s.phase_) {
+                switch (core_.session_phase()) {
                 case phase::idle:
                     wall_sleep(std::chrono::milliseconds(5));
                     break;
@@ -772,8 +772,8 @@ namespace {
                 bmmo::login_accepted_v3_msg msg;
                 if (!fill(msg)) return;
                 for (const auto& [id, data]: msg.online_players)
-                    if (data.name == args_.name) core_.s.own_id_ = id;
-                logf("logged in (own id %u, %zu online)", core_.s.own_id_, msg.online_players.size());
+                    if (data.name == args_.name) core_.set_own_id(id);
+                logf("logged in (own id %u, %zu online)", core_.own_id(), msg.online_players.size());
                 announce_map();
                 if (args_.host) room_request(bmmo::room::action::Create, 0, "headless");
                 else room_request(bmmo::room::action::List, 0);
@@ -856,10 +856,9 @@ namespace {
 
     private:
         // The core's state and its types moved to session/client_core.hpp
-        // (shared-core design step E1); reached as core_.s.<member>.
+        // (shared-core design step E1); the state is private since E11, and
+        // this client reads what it needs through the core's accessors.
         using phase = bmmo::session::client_core_state::phase;
-        using remote_ball = bmmo::session::client_core_state::remote_ball;
-        using forced_own = bmmo::session::client_core_state::forced_own;
 
         // ------------------------------------------- the core's platform
         // The headless platform (shared-core design 2.2): the operations the
@@ -1086,6 +1085,12 @@ namespace {
             p.hooks.after_journal = [this](uint32_t tick) {
                 if (args_.trace && tick % 200 == 0) report_queued_impulses(tick);
             };
+            // E11: the last two back-calls (legacy_calls, deleted) as hooks:
+            // the own body guard lifted at the session's end, after the
+            // journal closed, and the movable objects' description for the
+            // --trace line after a snapshot rollback.
+            p.hooks.ended = [this]() { own_body_guard_off(); };
+            p.hooks.describe_movables = [this]() { return bmmo::physics::describe_movable_objects(engine_->physics()); };
             return p;
         }
         // Declared as each capability's operations arrive (design 2.3).  E3:
@@ -1102,16 +1107,6 @@ namespace {
             caps.whole_frame = args_.replay_scripts;
             caps.own_lifecycle = bmmo::session::own_lifecycle_source::event_log;
             return caps;
-        }
-        // The transitional back-calls (shared-core design 6.1): the functions
-        // of this client that code moved into the core still calls.
-        bmmo::session::legacy_calls make_legacy_calls() {
-            bmmo::session::legacy_calls l;
-            l.own_body_guard_off = [this]() { own_body_guard_off(); };
-            // E4: apply_snapshot's (recorded_input_at and own_ball left at E9:
-            // the core's, over the platform's own_replica_name and own_ball).
-            l.describe_movable_objects = [this]() { return bmmo::physics::describe_movable_objects(engine_->physics()); };
-            return l;
         }
         // The core's configuration from the arguments (design 1.2).
         bmmo::session::core_config make_core_config() const {
@@ -1345,7 +1340,7 @@ namespace {
             room_id_ = msg.own_room;
             bool own_ready = true;
             for (const auto& m: msg.members)
-                if (m.id == core_.s.own_id_) own_ready = m.ready;
+                if (m.id == core_.own_id()) own_ready = m.ready;
             if (!own_ready) {
                 // First time, or the room went back to the lobby (session ended
                 // by the server, host restart): ready again, at most once a second.
@@ -1377,12 +1372,6 @@ namespace {
                 ended_ = true;
                 return;
             }
-            spawn_known_ = false;
-            for (const auto& p: core_.s.players_) {
-                if (p.id != core_.s.own_id_) continue;
-                for (int k = 0; k < 3; ++k) spawn_position_[k] = p.spawn_position[k];
-                spawn_known_ = true;
-            }
             // This client's fresh runtime state.
             navigation_known_ = false;
             local_births_.clear();
@@ -1396,26 +1385,17 @@ namespace {
             reset_guard_.restore(engine_->context());
             checkpoint_held_ = false;
             sector_manager_id_ = 0;
-            std::string error;
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
-                logf("session %u: level still loaded, rebooting the engine", core_.s.session_);
-                for (auto& [id, remote]: core_.s.remotes_) {
-                    if (remote.navigation) bmmo::physics::navigation_destroy(engine_->physics(), remote.entity.c_str(), error);
-                }
-                core_.s.remotes_.clear();
-                core_.s.relay_seen_.clear();
-                core_.s.held_seen_.clear();
-                core_.s.held_stale_seen_.clear();
-                core_.s.pending_relay_.clear();
-                core_.s.event_seen_.clear();
-                core_.s.own_event_repeats_.clear();
-                core_.s.remote_last_physicalize_.clear();
-                core_.s.remote_last_unphysicalize_.clear();
+                // (The mirrors and the relay's bookkeeping were cleared here
+                // until E11; core_.begin cleared the map before this branch,
+                // so the loop never ran.  Mirrors a SessionEnd did not take
+                // out are not taken out here either, as before.)
+                logf("session %u: level still loaded, rebooting the engine", core_.session_id());
                 if (!boot_engine()) { ended_ = true; return; }
             }
             engine_->clear_keys();
-            engine_->request_level(core_.s.level_);
+            engine_->request_level(core_.level());
             load_waited_ = 0;
             level_sequencers_.clear();
             core_.level_requested();
@@ -1448,7 +1428,7 @@ namespace {
         void anchor() {
             std::string error;
             CKIpionManager* physics = engine_->physics();
-            if (!bmmo::physics::reset_session_clock(physics, core_.s.seed_, error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
+            if (!bmmo::physics::reset_session_clock(physics, core_.seed(), error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
             {
                 // Design 9.26: the mechanisms start from the level file's
                 // Sequencer counters on every side.
@@ -1461,7 +1441,6 @@ namespace {
             if (!bmmo::physics::install_player_collision_filter(physics, "P#", error)) logf("collision filter: %s", error.c_str());
             bmmo::physics::drain_event_log(physics);
             read_ball_rows();
-            anchor_hash_ = hash.pose;
             // Sectors are inputs to the whole session (session/sector_union.hpp):
             // the level's own checkpoint chain no longer runs the manager here
             // (the server's world holds its copy too); the detect block in the
@@ -1520,7 +1499,7 @@ namespace {
                 checkpoint_held_ = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
                 if (checkpoint_held_)
                     logf("the level's checkpoint sector activation is held: a crossing is stamped %u ticks ahead",
-                         static_cast<unsigned>(core_.s.sector_lead_));
+                         static_cast<unsigned>(core_.sector_lead_ticks()));
                 else
                     logf("the level's checkpoint sector activation was NOT held (%s): crossings activate here at "
                          "once and are reported after the fact - this client is out of lockstep on every sector it enters",
@@ -1531,7 +1510,7 @@ namespace {
                 // frame (session_client_core::request_sector, E8).
                 core_.request_sector(args_.start_sector, "--start-sector");
                 logf("--start-sector %d will be stamped %u ticks ahead of the first assigned frame", args_.start_sector,
-                     static_cast<unsigned>(core_.s.sector_lead_));
+                     static_cast<unsigned>(core_.sector_lead_ticks()));
             }
             rebases_ = 0;
             hold_event_seen_ = 0;
@@ -1757,7 +1736,7 @@ namespace {
             CK3dEntity* ball = current_ball();
             if (!ball || !ball->GetName()) return;
             const std::string name = ball->GetName();
-            if (name == core_.s.own_body_entity_) return;   // the body was there before this tick
+            if (name == core_.own_body_entity()) return;   // the body was there before this tick
             bmmo_physics_body_state state{};
             std::string error;
             if (!bmmo::physics::get_body_state(engine_->physics(), name.c_str(), state, error)) return;   // no body yet
@@ -1778,16 +1757,16 @@ namespace {
                 }
             }
             if (!own_capture_.spawn) return;
-            const uint8_t join_order = static_cast<uint8_t>(core_.s.own_join_order_ < 0 ? 63 : core_.s.own_join_order_);
+            const uint8_t join_order = static_cast<uint8_t>(core_.own_join_order() < 0 ? 63 : core_.own_join_order());
             // The birth cell (session/spawn_impulse.hpp): the ball is moved
             // off the resetpoint before anything else sees it - the kick
             // below, the pose the Physicalize event carries, this tick's step
             // - so every side creates the clone where this ball is.
-            if (core_.s.spawn_spacing_ > 0.0f && have_reset && join_order % bmmo::session::kSpawnOffsets != 0) {
+            if (core_.spawn_spacing() > 0.0f && have_reset && join_order % bmmo::session::kSpawnOffsets != 0) {
                 const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
                 const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
                 float offset[3];
-                bmmo::session::spawn_offset(join_order, core_.s.spawn_spacing_, right, dir, offset);
+                bmmo::session::spawn_offset(join_order, core_.spawn_spacing(), right, dir, offset);
                 double target[3];
                 for (int k = 0; k < 3; ++k) target[k] = state.position[k] + static_cast<double>(offset[k]);
                 const float still[3] = {0.0f, 0.0f, 0.0f};
@@ -1800,10 +1779,10 @@ namespace {
                          static_cast<double>(offset[1]), static_cast<double>(offset[2]), join_order, tick);
                 }
             }
-            if (core_.s.spawn_impulse_ <= 0.0f) return;
-            const uint32_t idx = bmmo::session::spawn_direction_index(core_.s.seed_, join_order, tick);
+            if (core_.spawn_impulse() <= 0.0f) return;
+            const uint32_t idx = bmmo::session::spawn_direction_index(core_.seed(), join_order, tick);
             if (!bmmo::physics::push_impulse(engine_->physics(), name.c_str(), bmmo::session::kSpawnDirectionTable[idx],
-                        core_.s.spawn_impulse_, 0, error))
+                        core_.spawn_impulse(), 0, error))
                 logf("spawn impulse: %s", error.c_str());
             else
                 logf("spawn impulse index=%u at tick %u", idx, tick);
@@ -1835,9 +1814,9 @@ namespace {
             // Frames run from the assignment, and the server's world starts at
             // the same tick: a client that stepped between its anchor and the
             // assignment would be that many steps ahead of the world for good.
-            // Inputs before the assignment queue up and core_.flush_inputs()
-            // sends them when the tick base lands.
-            const uint64_t next_frame = static_cast<uint64_t>(core_.s.frames_since_anchor_ + 1);
+            // Inputs before the assignment queue up and the core sends them
+            // when the tick base lands.
+            const uint64_t next_frame = static_cast<uint64_t>(core_.frames_since_anchor() + 1);
             if (args_.pause_at >= 0 && !paused_once_ && static_cast<int64_t>(current_tick()) >= args_.pause_at) {
                 paused_once_ = true;
                 logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
@@ -1902,11 +1881,12 @@ namespace {
         const unsigned char* keep_lane(const unsigned char* keys) {
             std::memcpy(lane_keys_, keys, sizeof(lane_keys_));
             const bool driving = keys[kKeyUp] || keys[kKeyDown];
-            if (!driving || !core_.s.own_physicalized_ || core_.s.own_body_entity_.empty() || !navigation_known_ || !core_.s.previous_cam_valid_)
+            const float (*cam)[3] = core_.previous_cam();   // nullptr until a camera was seen
+            if (!driving || !core_.own_physicalized() || core_.own_body_entity().empty() || !navigation_known_ || !cam)
                 return lane_keys_;
             bmmo_physics_body_state body{};
             std::string error;
-            if (!bmmo::physics::get_body_state(engine_->physics(), core_.s.own_body_entity_.c_str(), body, error)) return lane_keys_;
+            if (!bmmo::physics::get_body_state(engine_->physics(), core_.own_body_entity().c_str(), body, error)) return lane_keys_;
             const double error_z = body.position[2] - args_.keep_lane_z;
             const double a = error_z + kLaneDamping * static_cast<double>(body.linear[2]);
             if (std::fabs(a) < kLaneDeadband) return lane_keys_;
@@ -1915,8 +1895,8 @@ namespace {
             double best = 0.0;
             for (const auto& leaf: navigation_.leaves) {
                 if (leaf.key == kKeyUp || leaf.key == kKeyDown || leaf.key < 0 || leaf.key >= 256) continue;
-                const double z = leaf.direction.x * core_.s.previous_cam_[0][2] + leaf.direction.y * core_.s.previous_cam_[1][2]
-                               + leaf.direction.z * core_.s.previous_cam_[2][2];
+                const double z = leaf.direction.x * cam[0][2] + leaf.direction.y * cam[1][2]
+                               + leaf.direction.z * cam[2][2];
                 if (z * push > best) { best = z * push; best_key = leaf.key; }
             }
             if (best_key >= 0) {
@@ -1930,7 +1910,7 @@ namespace {
 
         void frame() {
             std::string error;
-            const int64_t f = core_.s.frames_since_anchor_ + 1;
+            const int64_t f = core_.frames_since_anchor() + 1;
             // Keys of this frame come from the recording (frame f of the record).
             const unsigned char* keyboard = nullptr;
             if (!record_.frames.empty() && f >= 0 && static_cast<size_t>(f) < record_.frames.size()) {
@@ -1976,7 +1956,7 @@ namespace {
             }
             if (own.physicalized) {
                 if (!own_group_set_) {
-                    if (bmmo::physics::set_body_group(physics, ball_name.c_str(), core_.s.own_group_.c_str(), error)) own_group_set_ = true;
+                    if (bmmo::physics::set_body_group(physics, ball_name.c_str(), core_.own_group().c_str(), error)) own_group_set_ = true;
                     else logf("own ball group: %s", error.c_str());
                 }
                 if (args_.rollback && navigation_known_ && (!own_replica_.active || own_replica_.entity != ball_name))
@@ -2045,7 +2025,7 @@ namespace {
             // --trace: what pushes the own ball - the navigation replica's
             // leaves, every controller on its core, the mechanism force blocks
             // whose target it is - logged whenever that changes.
-            if (args_.trace && core_.s.own_physicalized_ && own_replica_.active) {
+            if (args_.trace && core_.own_physicalized() && own_replica_.active) {
                 std::string text;
                 bmmo_physics_nav_state nav{};
                 std::string nav_error;
@@ -2127,9 +2107,6 @@ namespace {
             return out;
         }
 
-        // Own events go out through the core (shared-core design E3).
-        void send_event(bmmo::session_event_msg& event) { core_.send_event(event); }
-
         // --hold-event: true when this event is the one to hold back.  Held
         // here, before the reliable copy and before the repeat queue, so the
         // one gate covers every path the event leaves by; the bytes go out
@@ -2160,7 +2137,7 @@ namespace {
             const auto now = wall_now(bmmo::sim::wall_site::hold_event_release);
             for (auto it = held_events_.begin(); it != held_events_.end();) {
                 if (now < it->release) { ++it; continue; }
-                if (core_.s.phase_ != phase::running) {
+                if (core_.session_phase() != phase::running) {
                     // the session's end clears the list (discard_held_events), so this is a safety net;
                     // said aloud either way, so a hold never ends silently.
                     logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: no session running",
@@ -2168,7 +2145,7 @@ namespace {
                     it = held_events_.erase(it);
                     continue;
                 }
-                if (!core_.s.assigned_) { ++it; continue; }   // a session but no tick base yet: wait for it
+                if (!core_.assigned()) { ++it; continue; }   // a session but no tick base yet: wait for it
                 core_.release_event(it->bytes);
                 logf("hold-event: own %s stamped tick %u (held at tick %u) released at tick %u",
                      event_type_name(args_.hold_event_type), it->stamp, it->held_at, current_tick());
@@ -2224,7 +2201,7 @@ namespace {
             compare_scripts(tick, source);
             if (args_.dump_savestate_dir.empty() || tick < args_.dump_savestate_from || tick > args_.dump_savestate_until) return;
             dump_scripts(tick);
-            const std::vector<uint8_t>* blob = core_.s.rollback_.recorded_savestate(tick);
+            const std::vector<uint8_t>* blob = core_.recorded_savestate(tick);
             if (savestate_dump_logs_ == 0) {
                 ++savestate_dump_logs_;
                 logf("--dump-savestate: first tick %u in range, record %s, into %s (cwd %s)", tick, blob ? "has a blob" : "HAS NO BLOB",
@@ -2245,7 +2222,7 @@ namespace {
         // The scripts' state beside the blob: <tick>.scr, the bytes the record
         // of this tick carries (after a rewind, the replayed state's).
         void dump_scripts(uint32_t tick) {
-            const std::vector<uint8_t>* recorded = core_.s.rollback_.recorded_scripts(tick);
+            const std::vector<uint8_t>* recorded = core_.recorded_scripts(tick);
             if (!recorded) return;
             const std::vector<uint8_t>& bytes = *recorded;
             std::error_code ec;
@@ -2263,7 +2240,7 @@ namespace {
         // own, if the live record agreed).
         void compare_scripts(uint32_t tick, const char* source) {
             if (args_.compare_scripts_dir.empty() || !args_.script_replay || scripts_.empty()) return;
-            const std::vector<uint8_t>* recorded = core_.s.rollback_.recorded_scripts(tick);
+            const std::vector<uint8_t>* recorded = core_.recorded_scripts(tick);
             if (!recorded) return;
             const std::vector<uint8_t>& mine = *recorded;
             const std::filesystem::path path = std::filesystem::path(args_.compare_scripts_dir) / (std::to_string(tick) + ".scr");
@@ -2303,10 +2280,11 @@ namespace {
         // arena with --force-rollback 7:5: 6 mm at the edge, a metre 1300
         // ticks later; a 20:12 cadence never put an edge on that tick).
         void rearm_own_navigation() {
-            if (!own_replica_.active || !core_.s.previous_cam_valid_) return;
+            const float (*cam)[3] = core_.previous_cam();   // nullptr until a camera was seen
+            if (!own_replica_.active || !cam) return;
             std::string error;
-            if (!bmmo::physics::navigation_input(engine_->physics(), own_replica_.entity.c_str(), 0, core_.s.previous_cam_[0], core_.s.previous_cam_[1],
-                                                 core_.s.previous_cam_[2], false, error))
+            if (!bmmo::physics::navigation_input(engine_->physics(), own_replica_.entity.c_str(), 0, cam[0], cam[1],
+                                                 cam[2], false, error))
                 logf("own navigation rows after a rewind: %s", error.c_str());
         }
 
@@ -2333,10 +2311,10 @@ namespace {
                 bmmo::physics::get_clock(engine_->physics(), factor_before, delta_before, clock_error);
                 bmmo::physics::get_clock_state(engine_->physics(), clock_before, clock_error);
             }
-            if (args_.trace_restore && core_.s.own_physicalized_ && !core_.s.own_body_entity_.empty() && contact_traces_ < 48) {
+            if (args_.trace_restore && core_.own_physicalized() && !core_.own_body_entity().empty() && contact_traces_ < 48) {
                 ++contact_traces_;
-                logf("contacts of %s before the rewind at %u: %s", core_.s.own_body_entity_.c_str(), now,
-                     bmmo::physics::describe_contacts(engine_->physics(), core_.s.own_body_entity_.c_str()).c_str());
+                logf("contacts of %s before the rewind at %u: %s", core_.own_body_entity().c_str(), now,
+                     bmmo::physics::describe_contacts(engine_->physics(), core_.own_body_entity().c_str()).c_str());
             }
             if (args_.trace_restore && queue_traces_ < 24) {
                 ++queue_traces_;
@@ -2352,13 +2330,13 @@ namespace {
                          bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
                 }
             }
-            if (args_.trace_restore && core_.s.own_physicalized_ && !core_.s.own_body_entity_.empty() && contact_traces_ < 48) {
+            if (args_.trace_restore && core_.own_physicalized() && !core_.own_body_entity().empty() && contact_traces_ < 48) {
                 ++contact_traces_;
                 if (!args_.trace_body.empty() && now >= args_.trace_from && now <= args_.trace_until)
                     logf("body %s after the rewind (replayed to %u): %s", args_.trace_body.c_str(), now,
                          bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
-                logf("contacts of %s after the rewind (replayed to %u): %s", core_.s.own_body_entity_.c_str(), now,
-                     bmmo::physics::describe_contacts(engine_->physics(), core_.s.own_body_entity_.c_str()).c_str());
+                logf("contacts of %s after the rewind (replayed to %u): %s", core_.own_body_entity().c_str(), now,
+                     bmmo::physics::describe_contacts(engine_->physics(), core_.own_body_entity().c_str()).c_str());
             }
             if (args_.trace_restore && restore_traces_ < 8) {
                 ++restore_traces_;
@@ -2583,10 +2561,10 @@ namespace {
                          bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
                 if (args_.trace_clock_until && tick >= args_.trace_clock_from && tick <= args_.trace_clock_until)
                     logf("clock before replayed tick %u: %s", tick, describe_clock().c_str());
-                if (args_.trace_restore && core_.s.own_physicalized_ && !core_.s.own_body_entity_.empty() && contact_traces_ < 48) {
+                if (args_.trace_restore && core_.own_physicalized() && !core_.own_body_entity().empty() && contact_traces_ < 48) {
                     ++contact_traces_;
-                    logf("contacts of %s at replayed tick %u, before its step: %s", core_.s.own_body_entity_.c_str(), tick,
-                         bmmo::physics::describe_contacts(engine_->physics(), core_.s.own_body_entity_.c_str()).c_str());
+                    logf("contacts of %s at replayed tick %u, before its step: %s", core_.own_body_entity().c_str(), tick,
+                         bmmo::physics::describe_contacts(engine_->physics(), core_.own_body_entity().c_str()).c_str());
                 }
             };
             if (args_.replay_scripts) {
@@ -2706,13 +2684,13 @@ namespace {
                 world.step = [this, inner, physics]() {
                     const bool diag = step_diag_ < 24;
                     if (diag)
-                        for (const auto& [id, remote]: core_.s.remotes_)
+                        for (const auto& [id, remote]: core_.remotes())
                             if (remote.navigation)
                                 logf("core before step: %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
                     const bool ok = inner();
                     if (diag) {
                         ++step_diag_;
-                        for (const auto& [id, remote]: core_.s.remotes_)
+                        for (const auto& [id, remote]: core_.remotes())
                             if (remote.navigation)
                                 logf("core after step:  %s", bmmo::physics::describe_core(physics, remote.entity.c_str()).c_str());
                     }
@@ -2721,10 +2699,6 @@ namespace {
             }
             return world;
         }
-
-        // The resync request and its limiter are the core's (shared-core
-        // design E3).
-        void request_resync(const char* reason, bool owed = false) { core_.request_resync(reason, owed); }
 
         // SessionEnd (session_client_core::end): what --hold-event still
         // holds is discarded, said aloud (hooks.ending)...
@@ -2736,8 +2710,9 @@ namespace {
         }
 
         // ...and, after the journal closed, the own body guard is lifted
-        // (legacy_calls::own_body_guard_off); the core takes every mirror's
-        // navigation and body out after it (E6; end_session_world until then).
+        // (hooks.ended; legacy_calls::own_body_guard_off until E11); the core
+        // takes every mirror's navigation and body out after it (E6;
+        // end_session_world until then).
         void own_body_guard_off() {
             std::string error;
             if (body_guard_) {
@@ -2828,8 +2803,6 @@ namespace {
         uint32_t queue_traces_ = 0;                          // --trace-restore PreSimulate queue lines (the first 24)
         std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
-        float spawn_position_[3] = {};
-        bool spawn_known_ = false;
         // The own ball's last Physicalize as capture_own_physicalize() saw it
         // before the step: what report_physicalize sends (design 9.10).
         struct {
@@ -2846,7 +2819,6 @@ namespace {
         uint64_t live_ticks_ = 0;
         bool own_group_set_ = false;
         int load_waited_ = 0;
-        uint64_t anchor_hash_ = 0;
         bmmo::game::sequencer_state level_sequencers_;
         clock_type::time_point origin_;
         int rebases_ = 0;
@@ -2883,8 +2855,8 @@ namespace {
         std::string body_guard_entity_;
         int step_diag_ = 0;
         // The shared session-client core (docs/session-client-core-design.md):
-        // its state (design 1.2) is reached as core_.s.<member> until step E11
-        // makes it private.  Last, so it is destroyed first, as the journal was.
+        // its state (design 1.2) is private since step E11.  Last, so it is
+        // destroyed first, as the journal was.
         bmmo::session::session_client_core core_{make_platform(), make_capabilities()};
     };
 

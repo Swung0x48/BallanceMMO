@@ -63,9 +63,18 @@
 // rebase_threshold / schedule_rebased, in client_core_frame.cpp; the host
 // keeps the keys, the step and its hooks.  The rollback binding is the
 // host's through the shared bind_session_world, with the core's half
-// (core_world_hooks).  The steps' entry points E5-E8 made public (the
-// drain, the echoes, the sectors' passes, the forced own frames, ...) stay
-// public for the unit tests until E11.
+// (core_world_hooks).
+//
+// Step E10 moves the reports (design 6.1 row E10): status_text and
+// window_text, in client_core_report.cpp.
+//
+// Step E11 closes the core (design 6.1 row E11): the state is private (the
+// host reads what it needs through the accessors under "reading", and tells
+// the core its login id with set_own_id); the frame's steps E5-E9 had left
+// public are private too (pre_step / post_step call them); `legacy_calls`
+// is gone (its last two entries are the optional hooks.ended and
+// hooks.describe_movables, client_platform.hpp).  The unit tests reach the
+// private state and steps through core_test_access, which only they define.
 //
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
@@ -129,9 +138,10 @@ namespace bmmo::session {
     // and with the same initializers and comments.  The nested types moved
     // with it (remote_ball, own_life, pending_birth, forced_own,
     // applied_death, window_base); the host names them through aliases.
-    // The dead members of design 1.2 (spawn_position_, spawn_known_,
-    // anchor_hash_, snapshot_interval_) stay in the host until E11 deletes
-    // them.
+    // Of the dead members design 1.2 lists, E11 deleted spawn_position_,
+    // spawn_known_ and anchor_hash_ from the host; snapshot_interval_ is
+    // live core state since E7 (the own_body_control fallback reads it).
+    // Private to session_client_core since E11.
     struct client_core_state {
         using clock_type = std::chrono::steady_clock;
 
@@ -557,32 +567,10 @@ namespace bmmo::session {
         uint32_t window_shift = 0;
     };
 
-    // Transitional (design 6.1, "Linking while the core is incomplete"): one
-    // std::function per host function that code already moved into the core
-    // still calls.  Each E step adds the entries its moved code needs and
-    // deletes those whose target it moves; E11 deletes the struct.  The
-    // headless client fills every entry; the core calls them unguarded.
-    struct legacy_calls {
-        // (E3's rebase_own_lives and set_aside_unanswered, and E6's
-        // live_own_lives, own_lives_due and apply_own_lives, were removed at
-        // E7: the own lives moved into the core.)
-        // (E3's reset_held_epoch, drop_pending_rewind and finish_lead_slew,
-        // and E4's drop_carried_own_replay, were removed at E5: section J and
-        // SessionLead moved into the core.)
-        // E3: end - the own body guard off (host state).  Until E6 this was
-        // end_session_world, which took every mirror's navigation and body
-        // out too; end does that now (detach_mirror_navigation,
-        // unmake_mirror).
-        std::function<void()> own_body_guard_off;
-        // (E3's report, end's status line, was removed at E10: the core
-        // writes the text, status_text, and end hands it to hooks.status.)
-        // (E4's recorded_input_at and own_ball were removed at E9: the
-        // first moved into the core over the platform's own_replica_name,
-        // the second is the platform's own_ball.)
-        // E4: the movable objects' description, the --trace line after a
-        // snapshot rollback (a headless diagnostic, design 2.4).
-        std::function<std::string()> describe_movable_objects;
-    };
+    // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
+    // the core is incomplete", was deleted at E11.  Its last two entries
+    // became optional host hooks: own_body_guard_off is hooks.ended, and
+    // describe_movable_objects is hooks.describe_movables.)
 
     // anchor (design 1.3): what the host's anchor work found.
     struct anchor_report {
@@ -608,6 +596,10 @@ namespace bmmo::session {
         bool timed_out = false;
     };
 
+    // The unit tests' door to the private state and steps
+    // (tests/session_client_core_test.cpp defines it; nothing else does).
+    struct core_test_access;
+
     class session_client_core {
     public:
         // Throws std::invalid_argument when the platform lacks an operation
@@ -620,14 +612,15 @@ namespace bmmo::session {
         session_client_core(const session_client_core&) = delete;
         session_client_core& operator=(const session_client_core&) = delete;
 
-        // The core's state.  Public from E1 to E10, while the flow still
-        // lives in the host: the headless client reaches it as
-        // core_.s.<member>.  E11 makes it private.
+    private:
+        // The core's state (design 1.2).  Public from E1 to E10, while the
+        // flow still lived in the host (core_.s.<member>); private since E11.
         client_core_state s;
-        // Transitional back-calls into the host (design 6.1): filled by the
-        // headless client, by the fake-platform test with recorders, and left
-        // empty by the retail mod, which does not run the core before R1.
-        legacy_calls legacy;
+        // The journal reads the state and the configuration (E2).
+        friend class core::client_journal;
+        friend struct core_test_access;
+
+    public:
         // The host's configuration (design 1.2), taken by begin.
         core_config config;
 
@@ -648,6 +641,14 @@ namespace bmmo::session {
         const core::client_journal& journal() const { return journal_; }
 
         // ---- session lifecycle (design 1.3; E3) ----
+        // The player id the server gave this client at its login (headless:
+        // LoginAcceptedV3, the entry with its own name); begin finds the
+        // own join order by it (E11: the host wrote the state until then).
+        // Set it before begin: begin without it finds no own join order
+        // (-1, group P#63).  A host whose core does not exist at login
+        // (retail, design 3.2: created at the first SessionStart) keeps the
+        // id and calls this after it creates the core and before begin.
+        void set_own_id(uint32_t id) { s.own_id_ = id; }
         // SessionStart: the session's parameters and fresh runtime state, the
         // rollback switches from `config`.  Refused on a protocol mismatch.
         // The host then does its own resets, requests the level and calls
@@ -663,7 +664,7 @@ namespace bmmo::session {
         // SessionEnd: drop the mirrors and go idle.
         void end(const std::string& reason);
 
-        // ---- messages (E3: decoded by the host until on_message exists) ----
+        // ---- messages (E3: decoded by the host; on_message is not built) ----
         void on_session_assign(const bmmo::session_assign_msg& msg);
         void on_session_end(const bmmo::session_end_msg& msg);
         // SessionSnapshot (E4): counted, then applied when it is this
@@ -684,52 +685,18 @@ namespace bmmo::session {
         // frame's echoes, another member's for its due tick.
         void on_session_event(bmmo::session_event_msg&& msg);
 
-        // ---- the remote lifecycle (E6; pre_step steps 2 and 8) ----
-        // Every queued event due at `tick`, in the server's order; a body
-        // change stamped for `tick` itself is held for apply_held_lifecycle.
-        void drain_due_events(uint32_t tick);
-        // The held body changes, after the frame's rewinds and before the
-        // union's pass, with our own changes due at the tick at our place.
-        void apply_held_lifecycle(uint32_t frame_tick);
-        // Before a replayed tick (the host's binding, before_replayed_tick):
-        // the births deferred into the replay, made at their tick.
-        void drain_pending_births(uint32_t tick);
-        // A physicalized mirror without navigation is driven from now on, if
-        // the host has the navigation (post_step step 16, and every birth).
-        void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote);
-        // The frame a live step of `tick` drives a predicted mirror with
-        // (post_step step 28).
-        static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick);
-
-        // ---- own lives and echoes (E7, client_core_lifecycle.cpp) ----
-        // The echoes of our own events that arrived since the last frame
-        // (pre_step step 3): the stale ones, the rest, then the births whose
-        // echo is overdue.
-        void process_own_echoes();
-        // The own ball's Physicalize the event log reported for `tick`
-        // (own_lifecycle_source::event_log; post_step step 19): the host's
-        // capture (own_birth_capture) and recipe (ball_recipe_of), sent and
-        // recorded.  And its Unphysicalize, sent.
-        void report_physicalize(const std::string& entity, uint32_t tick);
-        void report_unphysicalize(uint32_t tick);
-        // The same facts from a host_hooks host's hooks (design 1.3), fired in
-        // the behaviour pass and stamped current_tick() + 1: queued, and
-        // committed in order by commit_own_reports at step 19 (after the
-        // drain's generation bump), where report_physicalize runs.
+        // ---- own reports from a host_hooks host (E7; design 1.3) ----
+        // The own ball's Physicalize and Unphysicalize from a host_hooks
+        // host's hooks, fired in the behaviour pass and stamped
+        // current_tick() + 1: queued, and committed in order at post_step
+        // step 19 (after the drain's generation bump), where the event log's
+        // reports (report_physicalize) run.
         void own_physicalized(const own_birth_report& report);
         void own_unphysicalized(uint32_t tick);
-        void commit_own_reports();
         // A beam of the own ball to `position`, upright and at rest (the
-        // headless --beam, the retail verb): made by apply_requested_beam at
-        // post_step step 29 of the frame that stepped T, stamped T + 1.
+        // headless --beam, the retail verb): made at post_step step 29 of
+        // the frame that stepped T, stamped T + 1.
         void request_beam(const double position[3]);
-        void apply_requested_beam(uint32_t tick);
-        // A restore's destroy_body (the host's binding until E9): a moved own
-        // birth whose body the replay makes again at its applied tick is
-        // taken out here.  True when `entity` at `birth_tick` is one
-        // (`destroyed`: taken out); false, and nothing done, otherwise and
-        // always without own_body_control (design 2.3: the branch is inert).
-        bool destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed);
 
         // ---- the tick (E9, client_core_frame.cpp; design 1.3) ----
         // The tick pre_step prepares: the tick base on the first frame
@@ -770,32 +737,18 @@ namespace bmmo::session {
         // ---- sectors (E8, client_core_frame.cpp; design 1.3 steps 1, 9, 26) ----
         // A sector this client enters (the headless --start-sector, the
         // retail checkpoint hook and verb): before the assignment it waits
-        // for the first assigned frame (hold_pending_sector), since the
-        // anchor precedes the renumbering; after it, stamped for the tick
-        // after the current one plus the sector lead.  Once per sector;
-        // every request made before the assignment waits, in order.  It
-        // always holds: a host that reports a crossing after the fact
-        // instead (the retail hook without the checkpoint hold, or before
-        // its assignment) decides that before it calls (design 6.2).
+        // for the first assigned frame (pre_step step 1), since the anchor
+        // precedes the renumbering; after it, stamped for the tick after
+        // the current one plus the sector lead.  Once per sector; every
+        // request made before the assignment waits, in order.  It always
+        // holds: a host that reports a crossing after the fact instead (the
+        // retail hook without the checkpoint hold, or before its
+        // assignment) decides that before it calls (design 6.2).
         void request_sector(int sector, const char* why);
-        // pre_step step 1: the requests waiting for the assignment, stamped
-        // for `tick` (the tick about to be stepped) plus the lead, once
-        // assigned.
-        void hold_pending_sector(uint32_t tick);
-        // pre_step step 9: one pass of the sector union before the step of
-        // `tick` (session/sector_union.hpp), its cell write the core's.
-        void sector_union_pass(uint32_t tick);
-        // post_step step 26: the own sector poll after the step of `tick` -
-        // a crossing stamped ahead (the checkpoint chain held) or reported
-        // after the fact.
-        void poll_own_sector(uint32_t tick);
         // The lead the server sized for this session (SessionStart).
         uint32_t sector_lead_ticks() const { return s.sector_lead_; }
 
-        // ---- the frame's rewinds (E5; pre_step steps 5 and 7, design 1.3) ----
-        // One replay for every input correction the frame collected (the
-        // relay's and our own substituted frames').
-        void replay_corrected_inputs();
+        // ---- rewinds asked for by the host (E5; design 1.3) ----
         // A forced rollback `depth` ticks deep from the current tick (the
         // headless --force-rollback, the retail forced-rollback verb).  The
         // live cells are kept (keep_live_cells) for as long as the caller
@@ -809,47 +762,15 @@ namespace bmmo::session {
         };
         forced_rewind force_rewind(uint32_t depth);
 
-        // ---- part two's forced own frames (E5; design 1.3 steps 11 and 21) ----
-        // The forced frame of `tick` (a SessionLead's (c, E)), taken: the
-        // older ones are dropped.  False: `tick` is not forced.
-        bool take_forced_own(uint32_t tick, client_core_state::forced_own& out);
-        // A forced tick plays the server's frame: `input` becomes it, counted
-        // as played, and as a received notice when no notice named it first.
-        void play_forced_own(uint32_t tick, const client_core_state::forced_own& forced,
-                             bmmo::session::input_frame& input);
-
-        // ---- part one (E5; post_step step 24) ----
-        // After the live frame of `tick` is recorded: a notice that named it
-        // earlier is applied now.
-        void take_held_ahead(uint32_t tick);
-        // The SessionLead slew ends: acknowledged with what it moved (all of
-        // it when `reanchored`, a resync request ended it).  The host's
-        // pacer calls it when the slew is done (E9: slew_step).
-        void finish_lead_slew(const std::string& why, bool reanchored = false);
-        // Another rewind from `anchor` carried a waiting own-only replay
-        // (any anchor when `server_rows`): dropped instead of run.
-        void drop_carried_own_replay(uint32_t anchor, bool server_rows);
-        // The newest relay header is of our own epoch (the status line).
-        bool held_header_current() const {
-            return s.held_header_known_ && s.held_header_epoch_ == s.tick_base_;
-        }
-
         // ---- numbering and resync ----
         // `owed`: the own correction needs this resync; one the limiter
-        // holds back is asked again by retry_owed_resync.
+        // holds back is asked again by the frame (retry_owed_resync).
         void request_resync(const char* reason, bool owed = false);
-        void retry_owed_resync();
 
         // ---- sending ----
-        // The input history and the event repeats due, once assigned.
-        void flush_inputs();
-        // The sent ring: the frames an uplink datagram carried, by tick.
-        void remember_sent(const bmmo::session_input_msg& msg);
         // An own lifecycle event: stamped, counted, journaled, then on the
         // wire unless hooks.filter_event keeps it.
         void send_event(bmmo::session_event_msg& event);
-        // The reliable copy, and the unreliable repeats queued.
-        void put_event_on_wire(const std::string& bytes);
         // A held send (hooks.filter_event) goes out now.
         void release_event(const std::string& wire_bytes) { put_event_on_wire(wire_bytes); }
 
@@ -857,6 +778,31 @@ namespace bmmo::session {
         bool assigned() const { return s.assigned_; }
         bool holding() const { return s.held_; }
         bool resync_pending() const { return s.resync_pending_; }
+        // What the headless host reads of the state (E11; it read the
+        // members themselves until then): the session's phase, id, level,
+        // seed and own player parameters (its loop, its anchor and its
+        // PreSimulate capture of an own spawn), the frames since the anchor
+        // (the record's frame index and the pacer), the own body as the
+        // last frame saw it (--keep-lane and the traces), the mirrors (the
+        // --trace step lines), the own ball's legacy corrections (the exit
+        // code) and the rollback records (--dump-savestate,
+        // --compare-scripts).
+        uint32_t own_id() const { return s.own_id_; }
+        client_core_state::phase session_phase() const { return s.phase_; }
+        uint32_t session_id() const { return s.session_; }
+        int level() const { return s.level_; }
+        int32_t seed() const { return s.seed_; }
+        int own_join_order() const { return s.own_join_order_; }
+        const std::string& own_group() const { return s.own_group_; }
+        float spawn_impulse() const { return s.spawn_impulse_; }
+        float spawn_spacing() const { return s.spawn_spacing_; }
+        int64_t frames_since_anchor() const { return s.frames_since_anchor_; }
+        bool own_physicalized() const { return s.own_physicalized_; }
+        const std::string& own_body_entity() const { return s.own_body_entity_; }
+        const std::map<uint32_t, client_core_state::remote_ball>& remotes() const { return s.remotes_; }
+        const bmmo::session::correction_stats& own_correction_stats() const { return s.corrector_.stats(); }
+        const std::vector<uint8_t>* recorded_savestate(uint32_t tick) const { return s.rollback_.recorded_savestate(tick); }
+        const std::vector<uint8_t>* recorded_scripts(uint32_t tick) const { return s.rollback_.recorded_scripts(tick); }
 
         // ---- reports (E10, client_core_report.cpp; design 1.3) ----
         // The status line (the headless 5 s report and the session's end;
@@ -882,6 +828,104 @@ namespace bmmo::session {
         void logf(const char* format, ...);
 
     private:
+        // ---- the frame's own steps (private since E11: pre_step and
+        // post_step call them; E5-E9 left them public for the host's frame
+        // and the unit tests) ----
+
+        // The remote lifecycle (E6; pre_step steps 2 and 8, post_step steps
+        // 16 and 28, and the binding's before_replayed_tick).
+        // Every queued event due at `tick`, in the server's order; a body
+        // change stamped for `tick` itself is held for apply_held_lifecycle.
+        void drain_due_events(uint32_t tick);
+        // The held body changes, after the frame's rewinds and before the
+        // union's pass, with our own changes due at the tick at our place.
+        void apply_held_lifecycle(uint32_t frame_tick);
+        // Before a replayed tick (the binding's before_replayed_tick): the
+        // births deferred into the replay, made at their tick.
+        void drain_pending_births(uint32_t tick);
+        // A physicalized mirror without navigation is driven from now on, if
+        // the host has the navigation (post_step step 16, and every birth).
+        void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote);
+        // The frame a live step of `tick` drives a predicted mirror with
+        // (post_step step 28).
+        static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick);
+
+        // Own lives and echoes (E7, client_core_lifecycle.cpp).
+        // The echoes of our own events that arrived since the last frame
+        // (pre_step step 3): the stale ones, the rest, then the births whose
+        // echo is overdue.
+        void process_own_echoes();
+        // The own ball's Physicalize the event log reported for `tick`
+        // (own_lifecycle_source::event_log; post_step step 19): the host's
+        // capture (own_birth_capture) and recipe (ball_recipe_of), sent and
+        // recorded.  And its Unphysicalize, sent.
+        void report_physicalize(const std::string& entity, uint32_t tick);
+        void report_unphysicalize(uint32_t tick);
+        // The host_hooks reports (own_physicalized, own_unphysicalized),
+        // committed in order at step 19.
+        void commit_own_reports();
+        // post_step step 29: the requested beam, made after the step of
+        // `tick` and stamped tick + 1.
+        void apply_requested_beam(uint32_t tick);
+        // A restore's destroy_body (core_world_hooks::destroy_own_birth): a
+        // moved own birth whose body the replay makes again at its applied
+        // tick is taken out here.  True when `entity` at `birth_tick` is one
+        // (`destroyed`: taken out); false, and nothing done, otherwise and
+        // always without own_body_control (design 2.3: the branch is inert).
+        bool destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed);
+
+        // The sectors (E8, client_core_frame.cpp).
+        // pre_step step 1: the requests waiting for the assignment, stamped
+        // for `tick` (the tick about to be stepped) plus the lead, once
+        // assigned.
+        void hold_pending_sector(uint32_t tick);
+        // pre_step step 9: one pass of the sector union before the step of
+        // `tick` (session/sector_union.hpp), its cell write the core's.
+        void sector_union_pass(uint32_t tick);
+        // post_step step 26: the own sector poll after the step of `tick` -
+        // a crossing stamped ahead (the checkpoint chain held) or reported
+        // after the fact.
+        void poll_own_sector(uint32_t tick);
+
+        // The frame's rewinds (E5; pre_step steps 5 and 6).
+        // One replay for every input correction the frame collected (the
+        // relay's and our own substituted frames').
+        void replay_corrected_inputs();
+        void retry_owed_resync();
+
+        // Part two's forced own frames (E5; design 1.3 steps 11 and 21).
+        // The forced frame of `tick` (a SessionLead's (c, E)), taken: the
+        // older ones are dropped.  False: `tick` is not forced.
+        bool take_forced_own(uint32_t tick, client_core_state::forced_own& out);
+        // A forced tick plays the server's frame: `input` becomes it, counted
+        // as played, and as a received notice when no notice named it first.
+        void play_forced_own(uint32_t tick, const client_core_state::forced_own& forced,
+                             bmmo::session::input_frame& input);
+
+        // Part one (E5; post_step step 24).
+        // After the live frame of `tick` is recorded: a notice that named it
+        // earlier is applied now.
+        void take_held_ahead(uint32_t tick);
+        // The SessionLead slew ends: acknowledged with what it moved (all of
+        // it when `reanchored`, a resync request ended it).  slew_step calls
+        // it when the slew is done.
+        void finish_lead_slew(const std::string& why, bool reanchored = false);
+        // Another rewind from `anchor` carried a waiting own-only replay
+        // (any anchor when `server_rows`): dropped instead of run.
+        void drop_carried_own_replay(uint32_t anchor, bool server_rows);
+        // The newest relay header is of our own epoch (the status line).
+        bool held_header_current() const {
+            return s.held_header_known_ && s.held_header_epoch_ == s.tick_base_;
+        }
+
+        // Sending (E3).
+        // The input history and the event repeats due, once assigned.
+        void flush_inputs();
+        // The sent ring: the frames an uplink datagram carried, by tick.
+        void remember_sent(const bmmo::session_input_msg& msg);
+        // The reliable copy, and the unreliable repeats queued.
+        void put_event_on_wire(const std::string& bytes);
+
         // The reports' printf formatting into a growing buffer (logf without
         // the log; E10).
 #if defined(__GNUC__)
