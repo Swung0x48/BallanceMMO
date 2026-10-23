@@ -2927,6 +2927,33 @@ and the row above:
   capture, in `e8ab2_swing`, every difference traced to a run event above;
   every run is reproduced exactly by the other binary from its captures.
   §5.2 (1) not run: no forced-rollback path moved.
+- **Later (after E11): the checkpoint chain's phase cell (N4).** The hold
+  empties only the chain's Execute Script; `Gameplay_Events / activate next
+  Checkpoint` still wrote `CurrentLevel[0][4]` 0 at C+2 and 1 at C+4, the
+  cell the modules of a union pass at M branch on in frame M+5. A crossing
+  with C - M = 3 had them take their teardown branch on that client alone
+  (`e8ab2_swing_n1` client 3: six sector-3 bodies missing from 2156 on),
+  and C - M = -4 or -5 had the pass's 0 disarm the next checkpoint. Host
+  support `game/checkpoint_phase.hpp` gives the chain's two Set Cells,
+  Event_handler's `deact. Checkpoints` Set Cells and the checkpoint scripts'
+  `Get Cell(0, 4)` a private copy of `CurrentLevel` (starting at 1) at every
+  world's anchor: the server's (`physics_world`), the headless client's and
+  the retail mod's (resolved with N3, handed back at session end). The
+  core's half is a check: `sector_poll` gained `{phase_read, phase}` (the
+  cell after the step) and `poll_own_sector` counts and logs a pass whose
+  modules found it 0 in frame M+5 (`phase_misses()`; a pass starting at
+  M+5 writes its own 0 and is not counted). The copy's CK objects move the
+  CK_IDs of the bodies made after the anchor, and `list_bodies` iterates an
+  `XHashTable` keyed by them, so a journal's LOCAL checkpoints may list the
+  same bodies in another order (`e0_compare.py --order-free` compares them
+  as sets). Left on the cell besides the manager and the level's init:
+  `Gameplay_Events`' level-finish pair (Level_Finish, End Level, a 50 s
+  Delayer, then 0, the reset of `PE_Balloon Script`, 1), whose reader is a
+  mechanism script the replay records and so must stay on the recorded cell;
+  it fires about 50 s after a ball of that world finished, when the
+  finisher's sectors are long in the union. A checkpoint script that is a
+  mechanism script refuses the split. The poll's tick is the behaviour
+  frame: a live frame steps exactly one tick and a replay does not poll.
 
 **As built (step E9).** Where the code made E9 differ from §1.1, §1.3, §2.2,
 §2.4, §5.1 and the row above:

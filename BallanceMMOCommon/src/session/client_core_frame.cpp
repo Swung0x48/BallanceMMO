@@ -188,6 +188,8 @@ namespace bmmo::session {
     void session_client_core::sector_union_pass(uint32_t tick) {
         const auto pass = s.sectors_.tick(tick, platform_.sector_manager_active());
         if (pass) {
+            s.recent_passes_[1] = s.recent_passes_[0];
+            s.recent_passes_[0] = {tick, pass.sector};
             s.sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
             platform_.run_sector(pass.sector);
             platform_.record_activation(tick, true);
@@ -213,6 +215,23 @@ namespace bmmo::session {
     // OnPostCheckpointReached.
     void session_client_core::poll_own_sector(uint32_t tick) {
         const sector_poll poll = platform_.poll_sector(tick);
+        // A pass at M writes CurrentLevel[0][4] = 0 (M..M+3) and 1 (M+4);
+        // the module scripts it reset branch on the cell in frame M+5, and
+        // take their teardown branch on 0.  Anything else that writes the
+        // cell then (the level's checkpoint chain did, at C+2 of a crossing
+        // three ticks after the pass) leaves this world without the
+        // sector's bodies.  A pass at M+5 writes its own 0 in that frame
+        // and is not counted.  Ticks are the behaviour frames here: the
+        // live frame steps exactly one tick (a frame that does not step
+        // ends the session before this poll), and a replay never polls.
+        if (poll.phase_read && poll.phase == 0)
+            for (const auto& [m, sector]: s.recent_passes_) {
+                if (!m || tick != m + 5 || s.recent_passes_[0].first == tick) continue;
+                ++s.phase_misses_;
+                logf("sector +%d at tick %u: its modules' first frame (tick %u) found CurrentLevel[0][4] = 0, "
+                     "so they took their teardown branch here: this world lacks that pass's bodies (%llu so far)",
+                     sector, m, tick, static_cast<unsigned long long>(s.phase_misses_));
+            }
         if (poll.cell_read && (poll.cell != s.sector_cell_ || poll.resetpoint_moved)) {
             const int sector = poll.cell;
             s.sector_cell_ = sector;

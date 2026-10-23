@@ -36,6 +36,7 @@
 
 #include <entity/version.hpp>
 #include <game/menu_driver.hpp>
+#include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
@@ -984,6 +985,8 @@ namespace {
             p.script_guards = [this](uint32_t, bool resolved) {
                 for (const auto& chain: reset_guard_.apply(engine_->context(), resolved))
                     logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
+                if (const int again = checkpoint_phase_.keep(engine_->context()))
+                    logf("the checkpoint chain's phase cell: %d target(s) handed back to CurrentLevel were moved to the copy again", again);
             };
             p.hooks.after_rewinds = [this](uint32_t) { maybe_force_rollback(); };
             p.drive = [this](const std::string& entity, const bmmo::session::input_frame& frame, std::string& error) {
@@ -1384,6 +1387,10 @@ namespace {
             script_reset_ticks_.clear();
             reset_guard_.restore(engine_->context());
             checkpoint_held_ = false;
+            // The previous session's split handed back, like the reset guard:
+            // base.cmo's chain survives a level exit, and a split it still
+            // carried would have this anchor's apply refuse.
+            checkpoint_phase_.restore(engine_->context());
             sector_manager_id_ = 0;
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
@@ -1505,6 +1512,16 @@ namespace {
                          "once and are reported after the fact - this client is out of lockstep on every sector it enters",
                          hold_error.c_str());
             }
+            {
+                // The chain's own phase cell (game/checkpoint_phase.hpp): its
+                // writes no longer reach the cell the sector's modules branch on.
+                const std::string trouble = checkpoint_phase_.apply(engine_->context());
+                if (trouble.empty())
+                    logf("the checkpoint chain's phase cell is split: %s", checkpoint_phase_.describe().c_str());
+                else
+                    logf("the checkpoint chain's phase cell was NOT split (%s): a crossing 3 ticks after a sector pass "
+                         "can cancel that pass's module Physicalize on this client", trouble.c_str());
+            }
             if (args_.start_sector > 0) {
                 // Before the assignment: pending until the first assigned
                 // frame (session_client_core::request_sector, E8).
@@ -1571,6 +1588,11 @@ namespace {
                 poll.cell = sector;
             }
             poll.checkpoint_held = checkpoint_held_;
+            if (CKDataArray* level = engine_->data_array("CurrentLevel")) {
+                int phase = 0;
+                poll.phase_read = level->GetElementValue(0, 4, &phase) != 0;
+                poll.phase = phase;
+            }
             return poll;
         }
 
@@ -2789,6 +2811,7 @@ namespace {
         bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)
         std::vector<CK_ID> scripts_replayed_;                // the scripts the last restore wrote: active at its anchor
         bmmo::game::script_replay_hooks script_hooks_;
+        bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
         uint32_t script_restore_logs_ = 0;
         uint32_t script_reset_logs_ = 0;

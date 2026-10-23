@@ -3310,6 +3310,74 @@ namespace {
         EXPECT_EQ(state_of(core).sector_cell_, 0);
     }
 
+    // The phase check of the own poll (game/checkpoint_phase.hpp): a pass at
+    // M has its modules branch on CurrentLevel[0][4] in frame M+5; a 0 there
+    // is a pass whose bodies this world never made - counted and logged,
+    // once, for that pass only.  A 0 on any other tick (the pass's own
+    // window, M+6 on) and an unread cell count for nothing, and so does a
+    // 0 at M+5 when another pass starts at M+5 (its own write).
+    TEST(SessionClientCoreSectors, PhaseCellUnderAPass) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        core.request_sector(3, "sector verb");   // stamped 128
+        for (uint32_t tick = 120; tick <= 128; ++tick) steps{core}.sector_union_pass(tick);
+        const auto phase_poll = [](int phase, bool read = true) {
+            bmmo::session::sector_poll poll = cell_poll(3, true);
+            poll.phase_read = read;
+            poll.phase = phase;
+            return poll;
+        };
+        size_t from = fake.calls.size();
+        for (uint32_t tick = 128; tick <= 132; ++tick) {
+            fake.poll = phase_poll(tick < 132 ? 0 : 1);
+            steps{core}.poll_own_sector(tick);
+        }
+        fake.poll = phase_poll(0, false);
+        steps{core}.poll_own_sector(133);
+        EXPECT_EQ(core.phase_misses(), 0u);
+        EXPECT_EQ(since(fake.calls, from).size(), 6u) << "polls only";
+        // A second pass, the cell 0 at its M+5 this time.
+        core.request_sector(4, "sector verb");
+        uint32_t m = 0;
+        for (uint32_t tick = 134; tick <= 160 && !m; ++tick) {
+            steps{core}.sector_union_pass(tick);
+            if (state_of(core).recent_passes_[0].second == 4) m = tick;
+        }
+        ASSERT_NE(m, 0u);
+        fake.poll = phase_poll(1);
+        steps{core}.poll_own_sector(m + 4);
+        from = fake.calls.size();
+        fake.poll = phase_poll(0);
+        steps{core}.poll_own_sector(m + 5);
+        {
+            const std::vector<std::string> expected = {
+                "poll_sector:" + std::to_string(m + 5),
+                "log:0:sector +4 at tick " + std::to_string(m) + ": its modules' first frame (tick " + std::to_string(m + 5)
+                    + ") found CurrentLevel[0][4] = 0, so they took their teardown branch here: this world lacks that "
+                      "pass's bodies (1 so far)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.phase_misses(), 1u);
+        steps{core}.poll_own_sector(m + 6);
+        EXPECT_EQ(core.phase_misses(), 1u) << "M+6 is not the modules' frame";
+        // A pass at M+5 writes its own 0 there: not counted.
+        state_of(core).recent_passes_[1] = {200, 7};
+        state_of(core).recent_passes_[0] = {205, 8};
+        steps{core}.poll_own_sector(205);
+        EXPECT_EQ(core.phase_misses(), 1u);
+        // A new session starts with no passes and no misses: the old pass's
+        // M+5 with the anchor's 0 in the cell is not one of its passes.
+        ASSERT_FALSE(core.begin(start_message(10, 3), bmmo::session::core_config{}).refused);
+        EXPECT_EQ(core.phase_misses(), 0u);
+        EXPECT_EQ(state_of(core).recent_passes_[0].first, 0u);
+        EXPECT_EQ(state_of(core).recent_passes_[1].first, 0u);
+        fake.poll = phase_poll(0);
+        steps{core}.poll_own_sector(210);
+        EXPECT_EQ(core.phase_misses(), 0u);
+    }
+
     // ------------------------------------------------------------ the frame
     // Step E9: pre_step and post_step (design 1.3's tables) over the
     // platform's frame operations and hooks, recorded in the same call list.

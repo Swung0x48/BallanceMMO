@@ -32,6 +32,7 @@
 #include <entity/session.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
+#include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
 #include <session/sector_union.hpp>
 #include <physics/physics_rt_api.h>
@@ -308,6 +309,7 @@ namespace bmmo::sim {
         CK_ID sector_manager_ = 0;
         CK_ID ingame_parameter_ = 0;
         bmmo::session::sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
+        bmmo::game::checkpoint_phase_split checkpoint_phase_;   // the chain's own phase cell (game/checkpoint_phase.hpp)
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
         struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };

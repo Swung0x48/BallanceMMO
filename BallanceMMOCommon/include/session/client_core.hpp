@@ -245,6 +245,11 @@ namespace bmmo::session {
         uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
         std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
+        // The last two union passes (tick, sector; tick 0 = none) and the
+        // passes whose modules found the phase cell 0 in their first frame
+        // (poll_own_sector: the checkpoint chain's race, or any writer like it).
+        std::pair<uint32_t, int> recent_passes_[2] = {};
+        uint64_t phase_misses_ = 0;
         // The sectors start_sector_pending_ stands for, each with why it was
         // asked for, in the order requested (request_sector before the
         // assignment; E8: the headless --start-sector, which was
@@ -747,6 +752,10 @@ namespace bmmo::session {
         void request_sector(int sector, const char* why);
         // The lead the server sized for this session (SessionStart).
         uint32_t sector_lead_ticks() const { return s.sector_lead_; }
+        // This session's union passes whose modules read CurrentLevel[0][4]
+        // = 0 on their first frame (poll_own_sector's check; 1 is the only
+        // right answer there).
+        uint64_t phase_misses() const { return s.phase_misses_; }
 
         // ---- rewinds asked for by the host (E5; design 1.3) ----
         // A forced rollback `depth` ticks deep from the current tick (the

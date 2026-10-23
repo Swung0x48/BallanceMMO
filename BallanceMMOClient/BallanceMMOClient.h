@@ -20,6 +20,7 @@
 #include "session/input_injector.hpp"
 #include "physics/physics_view.hpp"
 #include "session/physics_session.hpp"
+#include <game/checkpoint_phase.hpp>
 #include <game/menu_driver.hpp>
 #include <game/script_state.hpp>
 #include <fstream>
@@ -658,6 +659,13 @@ private:
 	sector_activate_write sector_activate_;
 	bool sector_activate_failed_ = false;
 	bool sector_activate_resolve();
+	// N4, the checkpoint chain's own phase cell (game/checkpoint_phase.hpp): the
+	// chain behind N3 keeps writing CurrentLevel[0][4], the cell the modules of a
+	// stamped pass branch on in their first frame; its writes (and the checkpoint
+	// scripts' reads) move to a private copy for the session.
+	bmmo::game::checkpoint_phase_split checkpoint_phase_;
+	void checkpoint_phase_resolve();
+	void checkpoint_phase_restore();
 	void sector_activate_apply();
 	void sector_activate_restore();
 	// Stamp `sector`'s activation sector_lead() ticks ahead of this frame's step,

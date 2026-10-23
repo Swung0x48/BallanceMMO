@@ -184,6 +184,8 @@ namespace bmmo::session {
         s.sectors_.reset();
         s.sectors_requested_.clear();
         s.sector_cell_ = 0;
+        for (auto& pass: s.recent_passes_) pass = {};
+        s.phase_misses_ = 0;
         return begin_result{};
     }
 

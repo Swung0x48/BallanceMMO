@@ -254,6 +254,18 @@ namespace bmmo::sim {
                 log("world: the level's checkpoint sector activation was NOT held (" + hold_error
                     + "): a checkpoint a clone crosses activates a sector behind update_sectors()");
         }
+        // The chain behind the hold keeps writing CurrentLevel[0][4], the cell
+        // the modules of a pass branch on in their first frame; a clone's
+        // crossing three ticks after a pass would cancel that pass's
+        // Physicalize in this world (game/checkpoint_phase.hpp).
+        {
+            const std::string trouble = checkpoint_phase_.apply(engine_->context());
+            if (trouble.empty())
+                log("world: the checkpoint chain's phase cell is split: " + checkpoint_phase_.describe());
+            else
+                log("world: the checkpoint chain's phase cell was NOT split (" + trouble
+                    + "): a clone's crossing 3 ticks after a sector pass can cancel that pass's module Physicalize");
+        }
         {
             // Hex, like every other place these two are printed (the client's
             // anchor line, SessionEnd's mismatch reason, the sim tool): the

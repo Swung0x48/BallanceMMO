@@ -3186,6 +3186,9 @@ namespace {
             } else if (size == 4) {
                 uint32_t u = 0; std::memcpy(&u, data, 4);
                 std::snprintf(buf, sizeof(buf), " = %u", u);
+                if (guid == CKPGUID_MESSAGE)
+                    if (CKSTRING message = context->GetMessageManager()->GetMessageTypeName(static_cast<CKMessageType>(u)))
+                        return text + buf + " (" + message + ")";
             } else if (size <= 8) {
                 text += " =";
                 for (int i = 0; i < size; ++i) {
@@ -3226,8 +3229,13 @@ namespace {
             for (int i = 0; i < beh->GetSubBehaviorLinkCount(); ++i) {
                 CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
                 if (!link) continue;
-                std::printf("%s    link %s -> %s%s\n", pad.c_str(), io_name(link->GetInBehaviorIO()).c_str(), io_name(link->GetOutBehaviorIO()).c_str(),
-                            link->GetActivationDelay() ? (" delay " + std::to_string(link->GetActivationDelay())).c_str() : "");
+                // The blocks' ids last ([#from -> #to]): a graph has many blocks of one name.
+                CKBehaviorIO* from = link->GetInBehaviorIO();
+                CKBehaviorIO* to = link->GetOutBehaviorIO();
+                std::printf("%s    link %s -> %s%s [#%u -> #%u]\n", pad.c_str(), io_name(from).c_str(), io_name(to).c_str(),
+                            link->GetActivationDelay() ? (" delay " + std::to_string(link->GetActivationDelay())).c_str() : "",
+                            static_cast<unsigned>(from && from->GetOwner() ? from->GetOwner()->GetID() : 0),
+                            static_cast<unsigned>(to && to->GetOwner() ? to->GetOwner()->GetID() : 0));
             }
             for (int i = 0; i < beh->GetSubBehaviorCount(); ++i)
                 if (CKBehavior* child = beh->GetSubBehavior(i)) describe_behavior(context, child, depth + 1);

@@ -263,11 +263,17 @@ namespace bmmo::session {
     // reported after the fact).  A host that reports its crossings itself
     // while the hold is not in force (the retail checkpoint hook) says
     // `cell_read` false then, or the core would report them a second time.
+    // `phase` is CurrentLevel[0][4] ("Activation Phase?"), the cell the
+    // modules of a union pass branch on in their first frame (`phase_read`
+    // false when the host does not read it): the core's check that nothing
+    // else wrote it under a pass (game/checkpoint_phase.hpp).
     struct sector_poll {
         bool cell_read = false;
         int cell = 0;
         bool resetpoint_moved = false;
         bool checkpoint_held = false;
+        bool phase_read = false;
+        int phase = 0;
     };
 
     // The host's work around a scope of the core (keep_live_cells): what it

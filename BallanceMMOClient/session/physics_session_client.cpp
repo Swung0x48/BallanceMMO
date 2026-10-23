@@ -459,6 +459,7 @@ void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
     death_reset_restore();
     sector_deactivate_restore();
     sector_activate_restore();
+    checkpoint_phase_restore();
     // The clock guard is scoped to the session and must not outlive it, so it
     // is dropped even when there is nothing left to tear down.
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
@@ -1258,6 +1259,33 @@ bool BallanceMMOClient::sector_activate_resolve() {
     return true;
 }
 
+// N4: the chain behind N3 keeps its Set Cells of CurrentLevel[0][4], which the
+// modules of a stamped pass read in their first frame; a crossing three frames
+// after a pass had them take their teardown branch on this client alone (the
+// headless e8ab2_swing_n1 client 3: six sector-3 bodies missing for the rest
+// of the session).  The chain, Event_handler's checkpoint resets and the
+// checkpoint scripts get a private copy of the cell for the session
+// (game/checkpoint_phase.hpp, the same edit the server's and the headless
+// client's worlds make at their anchor); the retail sources go back at session
+// end.
+void BallanceMMOClient::checkpoint_phase_resolve() {
+    const std::string trouble = checkpoint_phase_.apply(m_bml->GetCKContext());
+    if (trouble.empty())
+        logger_->Info("Physics session: the checkpoint chain's phase cell is split: %s",
+                      checkpoint_phase_.describe().c_str());
+    else
+        logger_->Error("Physics session: the checkpoint chain's phase cell was NOT split (%s): a crossing 3 ticks "
+                       "after a sector pass can cancel that pass's module Physicalize on this client",
+                       trouble.c_str());
+}
+
+void BallanceMMOClient::checkpoint_phase_restore() {
+    if (!checkpoint_phase_.applied()) return;
+    if (!checkpoint_phase_.restore(m_bml->GetCKContext()))
+        logger_->Warn("Physics session: a checkpoint phase target could not be handed back to CurrentLevel; "
+                      "the session's copy is left in place");
+}
+
 // Keeps the swap applied, like sector_deactivate_apply: a level reset that
 // handed the retail source back has to be caught before the next checkpoint.
 void BallanceMMOClient::sector_activate_apply() {
@@ -1411,6 +1439,7 @@ void BallanceMMOClient::physics_session_anchor() {
     death_reset_restore();
     sector_deactivate_restore();
     sector_activate_restore();
+    checkpoint_phase_restore();
     const bool death_neutralized = death_reset_resolve();
     const bool sector_neutralized = sector_deactivate_resolve();
     if (death_neutralized && sector_neutralized)
@@ -1423,6 +1452,7 @@ void BallanceMMOClient::physics_session_anchor() {
     s.sector_union.reset();
     s.last_sector_due = 0;
     sector_activate_resolve();
+    checkpoint_phase_resolve();
     // Design 9.26: the mechanism Sequencers start from the level file's
     // counters, as they do on the server, instead of wherever the play before
     // the restart left them (Level 11's sandbags swing the other way otherwise).
@@ -1692,6 +1722,9 @@ void BallanceMMOClient::physics_session_frame() {
     death_reset_apply();
     sector_deactivate_apply();
     sector_activate_apply();
+    if (const int again = checkpoint_phase_.keep(m_bml->GetCKContext()))
+        logger_->Info("Physics session: the checkpoint chain's phase cell: %d target(s) handed back to "
+                      "CurrentLevel were moved to the copy again", again);
     // Sector activation as an input: a held sector runs at the end of the frame
     // before the step it is stamped for - or the first one after it the pacer
     // allows, which is the one the server's pacer allows.  This function runs
