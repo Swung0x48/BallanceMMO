@@ -859,7 +859,6 @@ namespace {
         using phase = bmmo::session::client_core_state::phase;
         using remote_ball = bmmo::session::client_core_state::remote_ball;
         using forced_own = bmmo::session::client_core_state::forced_own;
-        using window_base = bmmo::session::client_core_state::window_base;
 
         // ------------------------------------------- the core's platform
         // The headless platform (shared-core design 2.2): the operations the
@@ -868,7 +867,8 @@ namespace {
         // utc_ms, body_state, list_bodies, journal_path; E3: the hooks; E4:
         // write_body, own_driven_entity, bind_world, keep_live_cells; E6: the
         // mirrors' operations and mute_event_log; E7: the own ball's; E8: the
-        // sectors'; E9: the frame's, and bind_world with the core's hooks).
+        // sectors'; E9: the frame's, and bind_world with the core's hooks;
+        // E10: the reports' counters and hooks).
         bmmo::session::session_platform make_platform() {
             bmmo::session::session_platform p;
             p.send = [this](const std::string& bytes, bmmo::session::send_mode mode) {
@@ -1012,8 +1012,8 @@ namespace {
             // post_step: the pending manager activation, the navigation
             // graph, the own ball and its upkeep, the event log, the input,
             // the record's mechanisms and script resets, the hash, and the
-            // hooks of the record (--dump-savestate), the amend (the traces
-            // and the window: line) and the journal (--trace impulses).
+            // hooks of the record (--dump-savestate), the amend (the traces)
+            // and the journal (--trace impulses).
             p.record_pending_activation = [this](uint32_t tick) {
                 if (sector_manager_id_) {
                     if (auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
@@ -1075,10 +1075,13 @@ namespace {
                 return bmmo::physics::capture_world_hash(engine_->physics(), hash, hash_error);
             };
             p.hooks.after_record = [this](uint32_t tick) { dump_savestate(tick); };
-            p.hooks.after_amend = [this](uint32_t tick) {
-                frame_traces(tick);
-                if (core_.s.assigned_) report_window(tick);
-            };
+            p.hooks.after_amend = [this](uint32_t tick) { frame_traces(tick); };
+            // E10: the reports.  The core writes the window: line (step 31,
+            // after the traces) and the status line at the session's end; this
+            // client prints both as one log line each, with its counters.
+            p.counters = [this]() { return counters(); };
+            p.hooks.window = [](const std::string& text) { log_line(text); };
+            p.hooks.status = [](const std::string& text) { log_line(text); };
             p.hooks.after_journal = [this](uint32_t tick) {
                 if (args_.trace && tick % 200 == 0) report_queued_impulses(tick);
             };
@@ -1104,7 +1107,6 @@ namespace {
         bmmo::session::legacy_calls make_legacy_calls() {
             bmmo::session::legacy_calls l;
             l.own_body_guard_off = [this]() { own_body_guard_off(); };
-            l.report = [this]() { report(); };
             // E4: apply_snapshot's (recorded_input_at and own_ball left at E9:
             // the core's, over the platform's own_replica_name and own_ball).
             l.describe_movable_objects = [this]() { return bmmo::physics::describe_movable_objects(engine_->physics()); };
@@ -1136,6 +1138,7 @@ namespace {
             c.own_echoes = args_.rollback;
             c.input_rewind = args_.rollback;
             c.own_corrections = args_.rollback;
+            c.window_shift = args_.window_shift;
             return c;
         }
 
@@ -2195,19 +2198,6 @@ namespace {
             return clone;
         }
 
-        // The 99th percentile of the relayed frames' arrival lag, in ticks.
-        uint32_t relay_lag_p99() const {
-            uint64_t total = 0;
-            for (uint32_t n: core_.s.relay_lag_hist_) total += n;
-            if (!total) return 0;
-            uint64_t seen = 0;
-            for (uint32_t b = 0; b < kRelayLagBuckets; ++b) {
-                seen += core_.s.relay_lag_hist_[b];
-                if (seen * 100 >= total * 99) return b;
-            }
-            return kRelayLagBuckets - 1;
-        }
-
         // The engine clock and the frame step on one line, in hex floats: the
         // IVP times, the event queue, the manager's smoothed delta, the time
         // factor and the physics step it yields (--trace-clock and the
@@ -2756,232 +2746,17 @@ namespace {
             }
         }
 
-        // One line per kWindowTicks ticks (late-player design 5.1 C1): what
-        // happened since the previous line, up to the end of frame `tick`.
-        // lag[P]=L*N,... is the first-arrival lag histogram of source player
-        // P's relayed frames (the status line's semantics: ticks already
-        // simulated at arrival, early frames not counted); inrew[P] the input
-        // rewinds whose correction named P's ball.  Pairs are count/depth in
-        // ticks.  scripts/arena_map_test.py event_report() reads it.
-        void report_window(uint32_t tick) {
-            // A line closes the window on the first frame of the next index:
-            // the ticks t with (t - shift) % 60 == 0 (--window-origin).
-            const uint32_t index = (tick + kWindowTicks - args_.window_shift) / kWindowTicks;
-            if (core_.s.window_index_ == index) return;
-            const bool first = core_.s.window_index_ == 0xFFFFFFFFu;
-            core_.s.window_index_ = index;
-            window_base now;
-            now.inrew = core_.s.input_rewinds_; now.inrew_depth = core_.s.input_rewind_depth_;
-            now.life = core_.s.life_rewinds_; now.life_depth = core_.s.life_rewind_depth_;
-            now.forced = core_.s.forced_rollbacks_; now.forced_depth = core_.s.forced_rollback_depth_;
-            now.snaprb = core_.s.snapshot_rollbacks_; now.snaprb_depth = core_.s.snapshot_rollback_depth_;
-            now.snaps = core_.s.snapshots_applied_; now.resyncs_sent = core_.s.resyncs_sent_; now.resyncs_done = core_.s.resyncs_done_;
-            now.relay_new = core_.s.relay_new_; now.relay_late = core_.s.relay_late_; now.rebases = rebases_;
-            now.subst_recv = core_.s.subst_recv_; now.subst_diff = core_.s.subst_diff_; now.subst_same = core_.s.subst_same_;
-            now.subst_bodiless = core_.s.subst_bodiless_; now.subst_late = core_.s.subst_late_;
-            now.substrew = core_.s.subst_rewinds_; now.substrew_depth = core_.s.subst_rewind_depth_;
-            now.subst_deferred = core_.s.subst_deferred_; now.subst_unseen = core_.s.subst_unseen_;
-            now.subst_subsumed = core_.s.subst_subsumed_; now.subst_saved = core_.s.subst_saved_;
-            now.lead_adj = core_.s.lead_adjustments_;
-            now.echo_acked = core_.s.own_echo_acked_; now.echo_moved = core_.s.own_echo_moved_;
-            now.echo_superseded = core_.s.own_echo_superseded_; now.echo_rejected = core_.s.own_echo_rejected_;
-            now.echo_missing = core_.s.own_echo_missing_;
-            now.birth_moved = core_.s.own_birth_echo_moved_; now.own_moved = core_.s.own_births_moved_;
-            now.own_removed = core_.s.own_births_removed_; now.own_resynced = core_.s.own_moves_resynced_;
-            const window_base& was = core_.s.window_base_;
-            if (!first) {
-                auto d = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
-                char head[400];
-                std::snprintf(head, sizeof(head),
-                              "window: tick=%u inrew=%llu/%llu life=%llu/%llu forced=%llu/%llu snaprb=%llu/%llu snaps=%llu "
-                              "resyncs=%llu/%llu rebases=%d relay=%llu late=%llu",
-                              tick, d(now.inrew, was.inrew), d(now.inrew_depth, was.inrew_depth), d(now.life, was.life),
-                              d(now.life_depth, was.life_depth), d(now.forced, was.forced), d(now.forced_depth, was.forced_depth),
-                              d(now.snaprb, was.snaprb), d(now.snaprb_depth, was.snaprb_depth), d(now.snaps, was.snaps),
-                              d(now.resyncs_sent, was.resyncs_sent), d(now.resyncs_done, was.resyncs_done),
-                              now.rebases - was.rebases, d(now.relay_new, was.relay_new), d(now.relay_late, was.relay_late));
-                std::string text = head;
-                // The own correction (late-player design 1.3): subst= as on
-                // the status line, this window's share, and substrew= the
-                // replays it named as count/depth (a rollback class of its
-                // own; inrew= counts the replays a remote's frame named),
-                // and substco= the coalescing: deferred frames / unseen
-                // diffs / waiting replays another rewind carried /
-                // amendments that needed no own replay (the status line's
-                // subst_coalesce).
-                char subst[240];
-                std::snprintf(subst, sizeof(subst), " subst=%llu/%llu/%llu/%llu/%llu/%llu substrew=%llu/%llu substco=%llu/%llu/%llu/%llu",
-                              d(now.subst_recv, was.subst_recv), d(now.subst_diff, was.subst_diff),
-                              d(now.subst_same, was.subst_same), d(now.subst_bodiless, was.subst_bodiless),
-                              d(now.substrew, was.substrew), d(now.subst_late, was.subst_late),
-                              d(now.substrew, was.substrew), d(now.substrew_depth, was.substrew_depth),
-                              d(now.subst_deferred, was.subst_deferred), d(now.subst_unseen, was.subst_unseen),
-                              d(now.subst_subsumed, was.subst_subsumed), d(now.subst_saved, was.subst_saved));
-                text += subst;
-                // SessionLead (late-player design 2.4): the adjustments
-                // applied in this window (lead_adj, the harness's count), the
-                // acknowledged offset so far (lead) and the ticks the slew in
-                // flight still has to move (slew, signed).
-                char lead[96];
-                std::snprintf(lead, sizeof(lead), " lead_adj=%llu lead=%d slew=%d", d(now.lead_adj, was.lead_adj),
-                              core_.s.lead_offset_, core_.s.lead_slew_.outstanding());
-                text += lead;
-                // Our own events' echoes (protocol 9): moved= the own births
-                // the server applied later than stamped (the harness's moved
-                // births), echo=acked/moved/superseded/rejected/missing of every type,
-                // and ownlife=moved/removed/resynced what this client did with
-                // a moved, superseded or rejected birth (late-player design
-                // 3.3): moved inside the history, removed from it, or resynced
-                // past the reach.
-                char echo[160];
-                std::snprintf(echo, sizeof(echo), " moved=%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu",
-                              d(now.birth_moved, was.birth_moved), d(now.echo_acked, was.echo_acked),
-                              d(now.echo_moved, was.echo_moved), d(now.echo_superseded, was.echo_superseded),
-                              d(now.echo_rejected, was.echo_rejected), d(now.echo_missing, was.echo_missing),
-                              d(now.own_moved, was.own_moved),
-                              d(now.own_removed, was.own_removed), d(now.own_resynced, was.own_resynced));
-                text += echo;
-                for (const auto& [player, hist]: core_.s.window_lag_) {
-                    text += " lag[" + std::to_string(player) + "]=";
-                    bool comma = false;
-                    for (const auto& [lag, n]: hist) {
-                        if (comma) text += ',';
-                        text += std::to_string(lag) + '*' + std::to_string(n);
-                        comma = true;
-                    }
-                }
-                for (const auto& [player, n]: core_.s.window_inrew_src_)
-                    text += " inrew[" + std::to_string(player) + "]=" + std::to_string(n);
-                logf("%s", text.c_str());
-            }
-            core_.s.window_base_ = now;
-            core_.s.window_lag_.clear();
-            core_.s.window_inrew_src_.clear();
+        // The status line (shared-core design 1.3; E10): the core's text with
+        // this client's own counters at their places, one log line.  The
+        // window: line is the core's too (post_step step 31, hooks.window).
+        bmmo::session::host_counters counters() const {
+            bmmo::session::host_counters h;
+            h.rebases = rebases_;
+            h.activations_replayed = activations_replayed_;
+            h.script_reset_skips = script_reset_skips_;
+            return h;
         }
-
-        void report() {
-            const auto& st = core_.s.corrector_.stats();
-            const auto& rs = core_.s.rollback_.stats();
-            uint64_t rc = 0, ri = 0, rb = 0, rh = 0;
-            for (const auto& [id, remote]: core_.s.remotes_) {
-                const auto& rs = remote.corrector.stats();
-                rc += rs.compared; ri += rs.ignored; rb += rs.blended; rh += rs.hard;
-            }
-            double mech_max = 0.0;
-            for (const auto& [name, c]: core_.s.mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
-            logf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu snapshots=%llu/%llu/%llu "
-                 "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
-                 "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
-                 "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
-                 "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
-                 "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
-                 static_cast<int>(core_.s.phase_), core_.s.session_, current_tick(), core_.s.assigned_ ? 1 : 0, core_.s.held_ ? 1 : 0,
-                 static_cast<long long>(core_.s.frames_since_anchor_),
-                 static_cast<unsigned long long>(core_.s.inputs_sent_), static_cast<unsigned long long>(core_.s.events_sent_),
-                 static_cast<unsigned long long>(core_.s.events_received_), static_cast<unsigned long long>(core_.s.event_dups_),
-                 // echo=acked/moved/superseded/rejected/missing: our own events as the
-                 // server echoed them back (protocol 9).
-                 static_cast<unsigned long long>(core_.s.own_echo_acked_), static_cast<unsigned long long>(core_.s.own_echo_moved_),
-                 static_cast<unsigned long long>(core_.s.own_echo_superseded_), static_cast<unsigned long long>(core_.s.own_echo_rejected_),
-                 static_cast<unsigned long long>(core_.s.own_echo_missing_),
-                 // ownlife=moved/removed/resynced/remade/other: own births
-                 // moved inside the history, removed from it, resynced past
-                 // the reach, the re-makes at an applied tick (live and in
-                 // replays), and MOVED echoes of the other types, kept where
-                 // stamped (late-player design 3.3).
-                 static_cast<unsigned long long>(core_.s.own_births_moved_), static_cast<unsigned long long>(core_.s.own_births_removed_),
-                 static_cast<unsigned long long>(core_.s.own_moves_resynced_), static_cast<unsigned long long>(core_.s.own_remakes_),
-                 static_cast<unsigned long long>(core_.s.own_moves_other_),
-                 // overtaken: older remote births relayed after their death
-                 // and put back in front of it (dropped or re-ordered).
-                 static_cast<unsigned long long>(core_.s.births_overtaken_),
-                 static_cast<unsigned long long>(core_.s.snapshots_received_),
-                 static_cast<unsigned long long>(core_.s.snapshots_applied_), static_cast<unsigned long long>(core_.s.snapshots_stale_),
-                 static_cast<unsigned long long>(core_.s.life_rewinds_), static_cast<unsigned long long>(core_.s.life_rewinds_missed_),
-                 static_cast<unsigned long long>(core_.s.input_rewinds_), static_cast<unsigned long long>(core_.s.input_rewinds_missed_),
-                 static_cast<unsigned long long>(core_.s.relay_bodiless_), static_cast<unsigned long long>(core_.s.relay_birth_frozen_),
-                 static_cast<unsigned long long>(core_.s.forced_rollbacks_), static_cast<unsigned long long>(core_.s.forced_rollbacks_missed_),
-                 core_.s.own_physicalized_ ? 1 : 0, core_.s.remotes_.size(), static_cast<unsigned long long>(core_.s.remote_inputs_received_),
-                 static_cast<unsigned long long>(core_.s.relay_new_), static_cast<unsigned long long>(core_.s.relay_dup_),
-                 static_cast<unsigned long long>(core_.s.relay_parked_), static_cast<unsigned long long>(core_.s.relay_late_),
-                 core_.s.relay_lag_max_, relay_lag_p99(),
-                 // subst=recv/diff/same/bodiless/rew/late (late-player design
-                 // 1.3): the notices of our own substituted ticks inside the
-                 // reach (recv, of which diff were replayed onto the server's
-                 // frame, same matched what we played and bodiless had no
-                 // ball - a tick not simulated yet at arrival is sorted when
-                 // its live frame is), the replays they named (rew), and the
-                 // ticks past the reach or never noticed (late, a resync).
-                 // subst_skip=dup/stale_epoch/base: re-deliveries, records of
-                 // a datagram numbered from another base, and records no
-                 // rewind could reach (the base tick, a resync's snapshot).
-                 // subst_missed: own replays rewind_to refused (a resync
-                 // each; inrew's second number is the remotes' only).
-                 // subst_coalesce=deferred/unseen/subsumed/saved: frames on
-                 // which a waiting own replay was put off (own_replay_pacer),
-                 // diffs no replay could see (amended, never replayed; also
-                 // counted in diff), waiting own replays a snapshot,
-                 // lifecycle or forced rewind carried, and amendments that
-                 // needed no own replay of their own.  recv
-                 // can exceed diff + same + bodiless by the notices held
-                 // for a tick not simulated yet and dropped by a resync.
-                 // acked/held_total: the newest header of our own epoch (0/0
-                 // until one arrives).  recv + late + base per epoch is what
-                 // the server's S2 lines count.
-                 static_cast<unsigned long long>(core_.s.subst_recv_), static_cast<unsigned long long>(core_.s.subst_diff_),
-                 static_cast<unsigned long long>(core_.s.subst_same_), static_cast<unsigned long long>(core_.s.subst_bodiless_),
-                 static_cast<unsigned long long>(core_.s.subst_rewinds_),
-                 static_cast<unsigned long long>(core_.s.subst_late_),
-                 static_cast<unsigned long long>(core_.s.subst_dup_), static_cast<unsigned long long>(core_.s.subst_stale_epoch_),
-                 static_cast<unsigned long long>(core_.s.subst_base_),
-                 static_cast<unsigned long long>(core_.s.subst_rewinds_missed_),
-                 static_cast<unsigned long long>(core_.s.subst_deferred_), static_cast<unsigned long long>(core_.s.subst_unseen_),
-                 static_cast<unsigned long long>(core_.s.subst_subsumed_), static_cast<unsigned long long>(core_.s.subst_saved_),
-                 core_.held_header_current() ? core_.s.held_header_acked_ : 0u, core_.held_header_current() ? core_.s.held_header_total_ : 0u,
-                 static_cast<unsigned long long>(core_.s.remote_writes_), static_cast<unsigned long long>(rc),
-                 static_cast<unsigned long long>(ri), static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rh),
-                 core_.s.mechanism_tracking_.known(), core_.s.mechanism_tracking_.resolved(),
-                 static_cast<unsigned long long>(core_.s.mechanism_blends_), static_cast<unsigned long long>(core_.s.mechanism_hard_), mech_max,
-                 static_cast<unsigned long long>(core_.s.amend_failures_), rebases_,
-                 static_cast<unsigned long long>(core_.s.resyncs_sent_), static_cast<unsigned long long>(core_.s.resyncs_done_),
-                 // lead_adj: SessionLeads applied; lead_offset: what their
-                 // acks applied in total; slew: ticks the one in flight still
-                 // moves; lead_forced: live frames that played the held
-                 // frame; lead_skip=dup/stale/void: copies, decisions of
-                 // another base, and decisions a resync of ours in flight
-                 // voids (late-player design 2.4, 2.8).  `lead=` further
-                 // on is the measured lead over the server, not this.
-                 static_cast<unsigned long long>(core_.s.lead_adjustments_), core_.s.lead_offset_, core_.s.lead_slew_.outstanding(),
-                 static_cast<unsigned long long>(core_.s.lead_forced_played_), static_cast<unsigned long long>(core_.s.lead_dups_),
-                 static_cast<unsigned long long>(core_.s.lead_stale_), static_cast<unsigned long long>(core_.s.lead_void_),
-                 static_cast<unsigned long long>(rs.snapshots), static_cast<unsigned long long>(rs.matched),
-                 static_cast<unsigned long long>(rs.mismatched), static_cast<unsigned long long>(rs.rollbacks),
-                 static_cast<unsigned long long>(rs.resim_ticks), static_cast<unsigned long long>(rs.unmatched),
-                 static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen),
-                 static_cast<unsigned long long>(rs.impulses_restored),
-                 static_cast<unsigned long long>(rs.contacts_restored), static_cast<unsigned long long>(rs.contact_restore_failures),
-                 static_cast<unsigned long long>(rs.savestates_restored), static_cast<unsigned long long>(rs.savestate_failures),
-                 static_cast<unsigned long long>(rs.savestate_capture_failures),
-                 static_cast<unsigned long long>(rs.births_inserted), static_cast<unsigned long long>(rs.births_inserted_exact),
-                 static_cast<unsigned long long>(rs.birth_insert_mismatches),
-                 static_cast<unsigned long long>(rs.births_recreated), static_cast<unsigned long long>(rs.births_recreated_exact),
-                 static_cast<unsigned long long>(rs.birth_recreate_mismatches), static_cast<unsigned long long>(rs.birth_recreate_failures),
-                 static_cast<unsigned long long>(rs.births_missing),
-                 static_cast<unsigned long long>(rs.unknown_rechecks_deferred), static_cast<unsigned long long>(activations_replayed_),
-                 static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),
-                 static_cast<unsigned long long>(rs.script_mismatches), static_cast<unsigned long long>(rs.script_float_mismatches),
-                 static_cast<unsigned long long>(script_reset_skips_),
-                 rs.restore_us / 1000.0, rs.replay_us / 1000.0, rs.rewind_us_max / 1000.0,
-                 rs.capture_us / 1000.0, rs.capture_us_max / 1000.0,
-                 rs.max_error, rs.last_mismatch.c_str(),
-                 static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
-                 static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
-                 static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error,
-                 static_cast<unsigned long long>(core_.s.input_reports_), static_cast<unsigned long long>(core_.s.input_starved_),
-                 core_.s.input_reports_ ? 100.0 * static_cast<double>(core_.s.input_starved_) / static_cast<double>(core_.s.input_reports_) : 0.0,
-                 core_.s.worst_starved_,
-                 core_.s.lead_count_ ? static_cast<double>(core_.s.lead_sum_) / static_cast<double>(core_.s.lead_count_) : 0.0);
-        }
+        void report() { log_line(core_.status_text(counters())); }
 
         // ------------------------------------------------------------ state
         arguments args_;
@@ -3088,8 +2863,6 @@ namespace {
         // The entity mirror_entity named last, which make_mirror poses and
         // physicalizes (the core asks for the two in one birth).
         CK3dEntity* mirror_made_entity_ = nullptr;
-        static constexpr uint32_t kRelayLagBuckets = bmmo::session::client_core_state::kRelayLagBuckets;
-        static constexpr uint32_t kWindowTicks = bmmo::session::client_core_state::kWindowTicks;
         // --hold-event: how many own events of the held type were made, and
         // the one held back until its release time.
         struct held_event {

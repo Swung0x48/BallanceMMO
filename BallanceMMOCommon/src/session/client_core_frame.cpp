@@ -583,8 +583,14 @@ namespace bmmo::session {
             if (s.amend_failures_++ == 0)
                 logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
         }
-        // The host's traces of the frame (and, until E10, its window: line).
+        // The host's traces of the frame (step 30a), then the window: line
+        // this tick closes, once assigned (step 31; E10).  The host's
+        // counters are read only on a frame that closes a window.
         if (platform_.hooks.after_amend) platform_.hooks.after_amend(tick);
+        if (s.assigned_ && window_due(tick)) {
+            const std::string text = window_text(tick, host_values());
+            if (!text.empty() && platform_.hooks.window) platform_.hooks.window(text);
+        }
         // The box's own view of this frame, last: the fingerprint of the
         // world the corrections above have finished with, and the bodies
         // when a checkpoint is due.

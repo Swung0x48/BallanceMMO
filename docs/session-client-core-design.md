@@ -2,8 +2,8 @@
 
 Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
-E5, E6, E7, E8 and E9 (§6.1, "As built (step E1)" ... "As built (step E9)") are built.
-Nothing else is yet.
+E5, E6, E7, E8, E9 and E10 (§6.1, "As built (step E1)" ... "As built (step
+E10)") are built. Nothing else is yet.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -250,7 +250,9 @@ public:
     acked_input_view acked_input() const;         // {known, frame, tick}: the newest acked input (retail starvation detector)
     const float (*previous_cam() const)[3];       // the input basis; nullptr until a camera was seen
     std::string status_text(const host_counters& h) const;      // SC report(): one format literal, host values in place
-    std::string window_text(uint32_t tick, const host_counters& h);   // SC report_window(); "" outside a window edge
+    std::string window_text(uint32_t tick, const host_counters& h);   // SC report_window(); "" outside a window edge;
+                                                  // moves the base: step 31 is its only caller, hosts use hooks.window (E10)
+    bool window_due(uint32_t tick) const;         // as built (E10 review): step 31 reads the counters only when due
     client_journal& journal();
 };
 
@@ -499,7 +501,8 @@ value, as the free functions do today.
 | hooks.filter_event | `event_send_verdict(const session_event_msg&)`: send / hold / drop | `--hold-event` (SC:2662-2703); the host later calls `core.release_event` | empty |
 | hooks.numbering_restarted | `void(clock_site)`: `anchor_origin`, `hold_timeout`, `assign_resync`, `assign_renumber` or `assign_release` (the five sites that reset the pacer's origin, E3) | `origin_ = wall_now(site)` | empty |
 | hooks.ending (added at E3) | `void()`: the first thing `end` does | discards the `--hold-event` sends still held, logging each, before the journal closes | empty |
-| hooks.window / hooks.status | `void(const std::string&)` | `logf` | the log, plus the F3 overlay reads `status_text` |
+| hooks.window / hooks.status | `void(const std::string&)`; as built (E10): `window` at step 31 with a line the window's edge produced, `status` at `end` (the headless 5 s report calls `status_text` itself) | `log_line` (one line, the bytes `logf` wrote) | the log, plus the F3 overlay reads `status_text` |
+| counters (added at E10) | `host_counters()`, optional: the host's own counters (`rebases`, `activations_replayed`, `script_reset_skips`) for the text the core prints itself (step 31's `window:` line, `end`'s status line); empty: zeros | `{rebases_, activations_replayed_, script_reset_skips_}` | the retail counterparts (R1) |
 
 **What the host feeds the core, and when.**
 
@@ -1086,28 +1089,28 @@ on three things:
    - CPU is the one thing a host-side move can change that the exact checks
      do not see, and a slower step would move the rebase.
 3. **The row's arms, as a live check.** One batch, O1 N1 O2 N2, with the
-   host-load guard. Each run lists its clients' rebase ticks. The step
-   passes an arm when all of these hold:
-   - no client crashes, and every client reaches the end;
+   host-load guard. Every client of every run captures its inbound stream
+   (`--capture-inbound`). The step passes an arm when all of these hold:
+   - **the cross-replay** (from E5 on): the other binary replays each
+     capture to a journal identical to the live one;
    - every server journal replays with rc 0 and 0 checkpoint mismatches;
-   - `far`, `overtaken`, `unmatched`, `lead_adj`, and the late mirror stay 0
-     in both N runs wherever they are 0 in both O runs;
-   - **cross-replay** (from E5 on): every client of every run captures its
-     inbound stream, and the other binary replays each capture to a journal
-     identical to the live one. This shows that, given the same network,
-     the two binaries do the same thing. That makes it the live check that
-     decides, and the comparisons below report rather than decide.
-   - each N run's harness criteria equal those of an O run of the same arm,
-     in this batch or an earlier batch of the same arm, or the difference is
-     traced as below. Revised at E7: on the forced-resync arm only 6 of 16
-     old runs equal another old run's criteria, because which rebase regime
-     a run lands in follows its slot in the batch, not the binary.
+   - no client crashes, or a crash is reproduced by the other binary from
+     the same capture. E8 hit such a crash: a teardown crash after the time
+     limit, in `CKContext::Reset`, which E7's binary reproduces.
 
-   The band rule is still computed and reported, but it does not decide the
-   step. A metric outside the band, a zero broken, or a criterion no O run
-   shares must be traced, from the journals and logs, to an event of the
-   run rather than of the code.
-   The events (widened at E4 from rebase ticks alone) are:
+   **Why these decide (revised at E10).** The cross-replay shows that both
+   binaries write the same journal from the same inbound stream. The wire
+   check of §5.2 (6) shows that the same journal comes with the same sends.
+   CPU parity shows that the cost is the same. Together they leave nothing
+   in the step's code that could make an N run differ from an O run. A
+   difference between live runs is therefore one between their networks and
+   hosts, whether or not its cause can be named.
+
+   The band rule, the zero rule (`far`, `overtaken`, `unmatched`,
+   `lead_adj` and the late mirror, against both O runs) and the criteria
+   rule (each N run's harness criteria against the O pool of the arm) are
+   still computed and reported. Each difference is traced where the
+   journals and logs allow, to one of these events:
    - a pacer rebase and its resync;
    - a snapshot delivered deeper than the history reaches (its delivery
      depth names it);
@@ -1115,8 +1118,12 @@ on three things:
      and the resync it caused;
    - the teardown, after the run's first client reached its time limit.
 
-   Any difference not traced to one of these fails the step. The traces
-   are listed in the step's note.
+   An untraced difference is listed in the step's note, but it does not fail
+   the step. The rule was tightened step by step, at E4 (the events), at E7
+   (the criteria) and at E10, before it was put this way. On this host, two
+   old runs differ from each other as much as old and new do: rebase
+   regimes, the slot in the batch, and a phase-B own-ball error that heals
+   in one run and lasts in another.
 
 ## 6. Migration plan
 
@@ -3326,6 +3333,280 @@ and the row above:
   the reach or the history, or a lifecycle event the server applied late,
   and every run is reproduced exactly by the other binary from its own
   inbound capture. Committed.
+
+**As built (step E10).** Where the code made E10 differ from §1.2, §1.3,
+§2.2 and the row above:
+
+- **What moved** (`src/session/client_core_report.cpp`, the file §1.1 names
+  for the reports, added to `cmake/SessionCore.cmake`): SC's `report()` body
+  as `status_text(const host_counters&) const`, `report_window(tick)` as
+  `window_text(tick, const host_counters&)`, and `relay_lag_p99` (left in the
+  host at E5, read only by the status line; private in the core). Verbatim
+  but for the state's prefix, the three host values (`h.rebases`,
+  `h.activations_replayed`, `h.script_reset_skips` at the places `rebases_`,
+  `activations_replayed_` and `script_reset_skips_` had) and the window's
+  phase (`config.window_shift`, below). A normalized comparison with
+  6c96154's SC (prefixes and host names mapped, comments and whitespace
+  dropped) finds the status body and `relay_lag_p99` identical, and the
+  window's index arithmetic, its `now` fill, its argument list and its
+  `lag[P]=` / `inrew[P]=` suffix identical.
+- **One literal each.** The status line keeps its one format, now formatted
+  by `textf` (a private static `session_client_core::textf`: the core's
+  `logf` without the log, a growing buffer) and returned. The `window:`
+  line's four `std::snprintf` pieces (head, `subst=`, `lead_adj=`, `moved=`)
+  are one `textf` literal now: they were appended in order with nothing
+  between them, and each old buffer (400 / 240 / 96 / 160 bytes) held its
+  piece with every field at 14 digits, which no window's count reaches, so
+  the text is the same; the per-source `lag[P]=` and `inrew[P]=` suffixes are
+  still appended. **§5.2 (4) as the row asks it ("zero differences in the
+  printed lines"):** the plain `logf` multiset (`e0_logfmt.py`) is 186 against
+  6c96154's 188 - only the status literal (now `textf`'s) and the `"%s"`
+  that printed the window line are gone; the printed formats
+  (`e10_logfmt.py`, session scratchpad: the old `logf` literals with
+  `report_window`'s `logf("%s")` replaced by its four pieces concatenated,
+  against the new `logf` literals plus the two `textf` literals) are 188
+  against 188, EQUAL. The lines themselves: every line of the 16 reference
+  replays' client logs, old against new (`e10_logs_cmp.sh`), is identical
+  once the CPU timings and the journal path are taken out - 208 `status:`
+  and 952 `window:` lines, 41407 lines in all, 0 differ (`resync_snapoff`
+  runs `--window-origin 1500`, so a non-zero `window_shift` is among them).
+- **Where the host values come from: a platform operation the design did
+  not have.** The core prints two of the texts itself - the `window:` line
+  at step 31 and the status line at `end` (E3's `legacy.report`) - so it
+  needs the host's counters there, and §1.3 passed them only as arguments.
+  `session_platform::counters` (`std::function<host_counters()>`, optional:
+  empty means zeros) is read for those two; the headless client fills it
+  with `{rebases_, activations_replayed_, script_reset_skips_}` (§2.2 row
+  added). Step 31 reads it only on a frame that closes a window (or sets
+  the first base): `window_due(tick)`, after the review below.
+  `host_counters` lives in `client_platform.hpp`, with zero defaults.
+- **Hooks** (`session_hooks::window`, `status`, as §2.2): step 31 is
+  `if (assigned) { text = window_text(T, counters()); if (text != "" &&
+  hooks.window) hooks.window(text); }` (gated by `window_due(T)` since the
+  review), right after `hooks.after_amend` (the
+  traces), as SC's `after_amend` hook did it (`frame_traces` then
+  `report_window`, only when assigned). `window_text` runs (and moves the
+  base) whether or not a hook is set; the hook only prints. `end` calls
+  `hooks.status(status_text(counters()))` where it called `legacy.report()`,
+  after the mirrors are gone. The headless hooks are `log_line(text)`, and
+  its 5 s `report()` (and the one after the run's last pass) is
+  `log_line(core_.status_text(counters()))`: no `logf("%s", ...)` in the
+  host, so no literal added.
+- **`core_config::window_shift`** (§1.2 lists it; built now): headless
+  `args_.window_shift` (`--window-origin`), set by `make_core_config`.
+- **`legacy_calls`**: removed `report`. Left: `own_body_guard_off` and
+  `describe_movable_objects` (E11's). SC's aliases `window_base`,
+  `kRelayLagBuckets` and `kWindowTicks`, which only the moved code used, are
+  deleted with it.
+- **§5.1**: 2 new tests (`SessionClientCoreReport.*`): the status text with
+  the host's counters at their places (`rebases=7 resyncs=`, `activations=8
+  scr=0/0/0/0/9 t_rest=`), the relay lag's 99th percentile, nothing printed,
+  the last field whole past the first buffer; the `window:` line at its edges
+  (nothing on the first edge, a whole expected line with the deltas, the
+  host's rebases, a negative `lead=`, two lag sources and an input-rewind
+  source, the per-window maps cleared, nothing inside a window, the next
+  window from the moved base, and `window_shift` 25's edges at 85 and 145).
+  The frame-order test now shows step 31 (`counters`, `hook:window` between
+  `hook:after_amend:126` and the journal, the line's tick and the host's
+  `rebases=3`); `EndGoesIdle` and `EndTakesTheMirrorsOut` end with
+  `hook:status` instead of `legacy:report` (the text printed before idle,
+  `remotes=0`, zeros without counters). 410 tests pass on Windows and, built
+  with GCC 16.2.1 on Arch, there too.
+- **Results.** Old is 6c96154's binary (`build-agent-E9/`, build id
+  `bmmo-0ea2e052a68c-dirty`), new the E10 binary (`build-agent-E10/`,
+  `bmmo-6c96154d4af5-dirty`).
+  - §5.2 (5) and (6), `wire_check.sh E9 E10 e10w`: WIRE-CHECK: ALL SAME,
+    62914 sends on the 16 clients equal but each login; every replay reached
+    its end marker; all 16 journals IDENTICAL with `e0_compare.py` and
+    BYTE-IDENTICAL-EXCEPT-BUILD-ID (`e1_bytecheck.py`: the live reference's
+    length, 12 bytes differing per file, all inside the header's build id).
+  - §5.2 (4): above (printed formats 188 = 188; lines 0 differ).
+  - §5.2 (3): the old SimTool on its replay of each capture against the new
+    one on the E10 replay (`--continue-after-jump`): all 16 the same rc and
+    summary line; the four reference server journals rc 0 with 0 checkpoint
+    mismatches on both (3986 to 4257 ticks).
+  - §5.2 (2): solo snapshots off (`solo/e10_new1`, starved=0) against `old1`:
+    TICK hash and pose identical at all 2230 common ticks (8-2237), LOCAL
+    checkpoints 1115/1115, the 8 RECEIVED snapshots equal in content, other
+    records 5609/5609: IDENTICAL. Host load at most 10.4 %.
+  - CPU parity (`cpu_parity.sh E9 E10`, three rounds): PASS, old 22.09 /
+    21.63 / 21.45 s, new 21.53 / 21.53 / 21.13 s, limit 23.83 s.
+  - **The row's check: the harness parses E9's lane-control A/B pair again
+    from the new binary's logs** (`e10_reparse.py`, session scratchpad).
+    `e9ab3_lane_o1` and `e9ab3_lane_n1` (E9's closing batch, both
+    cross-replay-checked at E9): each run's four captures replayed with E9
+    and with E10 (all 16 journals IDENTICAL to the live ones), each set of
+    logs and journals put in a copy of the run with the run's server journal
+    and log, every client's metrics re-parsed from its log's last `status:`
+    line (`status_metrics`), and the event report and criteria redone with
+    `arena_map_test.py --report-only` and the run's own flags. The E10
+    logs' report is IDENTICAL to the E9 logs' on both runs - the
+    `event_report.txt` (66 lines; criteria 17/12/0/13 and 14/15/0/13
+    pass/fail/masked/n.a.), the `event_report.json`, the summary's metrics
+    and criteria and the printed report - once the report directory's own
+    path and the CPU timings (`t_rest`, `t_rep`, `t_max`, `t_cap`, which no
+    replay reproduces) are taken out; and both are IDENTICAL to the report
+    the same `--report-only` makes from the live E9 logs. Against the report
+    the E9 harness wrote during the run, one line differs on each: the
+    server's last tick (3654 against 4127, 3704 against 4239), because the
+    live harness read the server journal while the server was still writing
+    it and the batch copied it afterwards - not a client log.
+  - Builds: x64 BUILD-OK; x86 mod CLIENT-BUILD-OK with the target's 25
+    objects deleted first (`client_platform.hpp` and `client_core.hpp`
+    changed layout; 26 objects now, `client_core_report.cpp` among them);
+    `linux_test_syntax.sh` every line ok (25 sources); GCC 16.2.1 compiles
+    the headless client syntax-only with the Arch flags, and the seven core
+    sources with `-Wall -Wextra` (`textf` carries the printf format
+    attribute, so both literals are format-checked), with no error or
+    warning; the Arch tree builds and links the headless client and the
+    tests, and 410 tests pass there. No server source changed, so the Arch
+    server was not rebuilt.
+  - §5.3, lane control, two batches (`e10ab1_lane`, `e10ab2_lane`), O1 N1 O2
+    N2, every client capturing its inbound. Host peak 17.1 % and 25.5 %
+    total, no other process above 3.5 %: no void run. No crash: every
+    client reached its time limit with a status line, rc 0. Every server
+    journal replays rc 0 with 0 checkpoint mismatches. **The cross-replay:**
+    each N run's four captures replayed with E9 give client journals
+    IDENTICAL to the N run's live ones, and each O run's replayed with E10
+    give its own (8 runs, 32 journals, all IDENTICAL). Rebases per client
+    (`e10ab*_lane.judge`, session scratchpad; the band counts are reported,
+    not deciding):
+    - **Batch 1.** O1 all four (2960 / 2699 / 2683 / 2960, resyncs applied
+      2974 / 2717 / 2697 / 2973), N1 client 3 at 2702 (2716), O2 client 2 at
+      2692 (2706), N2 none. No zero broken (`unmatched` only in O1, each
+      right after its rebuild). N1's criteria equal pooled `e9ab2_lane_o2`.
+      **N2 equals no pooled O run (32): its nearest, `e5ab2_lane_o1`,
+      differs only in client 2's "own ball 0.0000 in A", which N2 PASSES**
+      (0.0000 m; client 2's phase-B error, 1.0759 m as in most runs, healed
+      by tick 1500, the earliest of the 68 lane runs on record, where the
+      O runs without a rebase of client 2 heal at 1730 to 3464 and keep
+      0.0001 to 1.12 m in A). No client of N2 rebased, no snapshot came past
+      the reach, the server's only late events were three BodyRevived of
+      2675 (a mechanism, applied at 2682-2683, as in O1 and O2) and the
+      window is before the teardown:
+      this is the phase-B leftover E5, E6 and E9 met in phase D (here in
+      phase A), **not traced to a §5.3 event**; the old binary reproduces
+      the run exactly from its captures (the cross-replay above). Band 34
+      of 304.
+    - **Batch 2: PASS.** O1 all four (2641 / 2646 / 2645 / 2681), N1 all four
+      (2293 / 2291 / 2372 / 2281), O2 all four (2681 / 2675 / 2675 / 2685),
+      N2 clients 0, 2 at 3469 / 3471 and 3 at 2711. N1 differs from its
+      nearest (`e10ab2_lane_o1`) only in client 1's "moved births 0": the
+      server applied client 1's own Physicalize late, 2639 -> 2654
+      (server.log "late=15"), and the client moved the birth inside the
+      history ("own physicalize stamped 2639 moved to 2654 ... rewound to
+      2638"). N2 differs from pooled `e3ab4_lane_o1` only in client 0's
+      "resyncs 0": client 0 rebased at 3469 in N2. Zero broken: N1 client 3
+      `unmatched` 4 = the snapshots of 2298-2307 after its resync rebuilt
+      from 2297 (the rebase at 2281). Band 91 of 304.
+- **The first round's status.** Every exact check (§5.2 (2) to (6)), the
+  row's report check and CPU parity passed, and every run of both batches
+  was reproduced exactly by the other binary from its captures. The second
+  lane batch passed the §5.3 rule as written; the first had one criterion
+  difference (`e10ab1_lane_n2` client 2's phase-A own error 0.0000 m) that
+  no §5.3 event traces - the class E9's review proposed admitting and left
+  for a decision of its own. §5.2 (1) not run: no forced-rollback path
+  moved.
+- **After the review.** Two reviews; their findings and what was done:
+  - Both: `e10ab1_lane_n2`'s phase-A own-ball criterion, untraced (above).
+    No code change and no rule change: as at E5, E6 and E9 the closing
+    round below runs the arm once more on the review's binary and is
+    judged by §5.3 as written. Review 2: the second batch is not a
+    substitute for the first, so the first round is not counted as a pass.
+  - Review 1 nit 2: `client_core_report.cpp` goes into the commit.
+  - Review 1 nit 3 / review 2 nit 2 (the counters read on every assigned
+    frame): fixed. `window_due(tick)` (const, public with the reports)
+    says whether `window_text(tick)` would close a window or set the first
+    base, from the same private `window_index_of(tick)` that `window_text`
+    now uses; step 31 is `if (assigned && window_due(T))`, so the platform's
+    `counters` is read on about one frame in 60. `window_text` returns ""
+    without touching any state exactly when `window_due` is false, so the
+    lines are the same (the closing round's checks below).
+    `WindowTextAtTheEdges` checks `window_due` at the first edge, inside a
+    window, at the next edge and on the shifted edges; the frame-order test
+    (tick 126 closes a window) is unchanged.
+  - Review 2 nit 1 (`window_text` public and not const): kept public for
+    the tests; its comment and §1.3's listing now say that step 31 is its
+    only caller and that a host takes the line from `hooks.window` (an
+    extra call moves the base and takes the window's counts out early).
+  - Refuted: none.
+- **The closing round.** The binary rebuilt with the review's change
+  (`bmmo-6c96154d4af5-dirty`, copied to `build-agent-E10/`), every check
+  run again on it, old = `build-agent-E9`:
+  - x64 BUILD-OK; x86 CLIENT-BUILD-OK (no data member added, so no
+    layout change); 410 tests pass on Windows and, built with GCC 16.2.1
+    on Arch, there too; `linux_test_syntax.sh` every line ok (25 sources);
+    the headless client syntax-only and the seven core sources with
+    `-Wall -Wextra`, rc 0 with no warning.
+  - §5.2 (5)/(6), `wire_check.sh E9 E10 e10y`: WIRE-CHECK: ALL SAME (16
+    clients), all 16 journals IDENTICAL and BYTE-IDENTICAL-EXCEPT-BUILD-ID
+    (the live reference's length, 12 bytes differing per file, inside the
+    build id); (4) printed formats 188 against 188, EQUAL, and the lines of
+    the 16 replays' client logs, old against new: 208 `status:` and 952
+    `window:` lines, 41407 in all, 0 differ; (3) all 16 client journals the
+    same rc and summary line on E9's and E10's replays, the four server
+    journals rc 0 with 0 mismatches on both; (2) `solo/e10_newy` IDENTICAL
+    to `old1` (2436 common ticks, 8-2443, LOCAL 1218/1218, other records
+    6126/6126, starved=0, host at most 13.7 %).
+  - The row's check, `e10_reparse.py` on `e9ab3_lane_o1` / `_n1` with a new
+    E10 replay of each run's captures (all 8 journals IDENTICAL to the live
+    ones): the report from the E10 logs IDENTICAL to the one from the E9
+    logs and to the live logs' (`E10-REPARSE: ALL IDENTICAL`), and each
+    `event_report.txt` byte-equal to the first round's.
+  - CPU parity (`cpu_parity.sh E9 E10`, three rounds): PASS, old 31.57 /
+    31.28 / 31.30 s, new 31.62 / 31.50 / 31.82 s, limit 33.44 s. The host
+    was slower than in the first round for both binaries alike (21.1 to
+    22.1 s then; a one-round probe after the batch: 32.43 / 33.03 s), with
+    the total under 25 % and no process above 7 %: the sampler does not
+    see it.
+  - §5.3, lane control, one batch (`e10ab3_lane`), O1 N1 O2 N2, every
+    client capturing its inbound. Host peak 23.4 % total, no other process
+    above 3.4 %: no void run. No crash: every client reached its time
+    limit with a status line, rc 0. Every server journal replays rc 0 with
+    0 checkpoint mismatches. The cross-replay: each N run's captures
+    replayed with E9 and each O run's with E10, 16 journals, all
+    IDENTICAL. Rebases (`e10ab3_lane.judge`, session scratchpad): every
+    client of every run - O1 2655 / 2671 / 2649 / 2648 (resyncs applied
+    2670 / 2688 / 2664 / 2663), N1 2286 / 2257 / 2354 / 2345 (2300 / 2277 /
+    2368 / 2359), O2 1222 / 1201 / 1197 / 1215 (1239 / 1217 / 1211 / 1231),
+    N2 1835 / 1532 / 1231 / 1526 (1849 / 1546 / 1250 / 1540), the slow
+    host's regime. No zero broken: every `unmatched` sits beside a
+    non-zero O value, each a snapshot after its client's resync rebuild.
+    Band 75 of 316 (reported).
+    - N1 differs from its nearest (`e10ab3_lane_o1`) only in "moved births
+      0" of clients 0, 1 and 3: the server applied their own Physicalize
+      late (2621 -> 2632, 2623 -> 2633, 2623 -> 2635; server.log `late=`
+      11 / 10 / 12), and each client moved its birth inside the history
+      ("own physicalize stamped 2621 moved to 2632 ... rewound to 2620").
+      Traced.
+    - **N2 equals no pooled O run (36: this batch's 2 and 34 earlier).** Its nearest, `e5ab1_lane_o2`,
+      differs only in client 0's "own ball 0.0000 in D": N2 FAILS it with
+      1.2620 m, the O run passes. Client 0's phase-B error (1.1470 m, the
+      same value as in O1, which healed before 1500) lasted through D and
+      healed at 3426. Client 0 rebased only at 1835, after D; its six
+      substituted frames in D were all the same input (`subst=6/0/6`); no
+      own lifecycle event of client 0 was late; no snapshot came past the
+      reach; D is long before the teardown. This is the phase-B leftover
+      E5, E6, E9 and the first round met (this time the other way round, a
+      failure where the nearest O run passes). Both outcomes occur for
+      client 0 in this batch's O runs (O1 0.0000 m, O2 0.0004 m), and the
+      old binary reproduces N2 exactly from its captures. **Not traced to
+      a §5.3 event.**
+- **The step's status: closed under the revised §5.3 rule.** Every exact
+  check (§5.2 (2) to (6)), the row's report check, CPU parity, and the
+  arm's crash, server and cross-replay items pass on the closing round's
+  binary. The criteria item did not pass as it was written then:
+  `e10ab3_lane_n2` differs from every O run in client 0's phase-D
+  own-ball criterion. That is the phase-B leftover, which no event names.
+  Both outcomes occur for that client in the batch's O runs, and the old
+  binary reproduces N2 exactly from its captures. §5.3 now lets the
+  cross-replay decide, and lists such a difference without failing the
+  step (revised at E10).
+
+  The whole closing round ran on a host about 45 % slower than the first
+  round: CPU parity took 31 to 33 s against 21 to 22 s, alike on both
+  binaries. The sampler does not register this. It likely explains why
+  every client of that batch rebased early.
 
 ### 6.2 R steps: the retail mod hosts the core
 

@@ -288,7 +288,8 @@ namespace bmmo::session {
         s.own_event_repeats_.clear();
         s.remote_last_physicalize_.clear();
         s.remote_last_unphysicalize_.clear();
-        legacy.report();
+        // The status line (E10: the core's text, the host prints it).
+        if (platform_.hooks.status) platform_.hooks.status(status_text(host_values()));
         s.phase_ = client_core_state::phase::idle;
         s.session_ = 0;
         s.assigned_ = false;

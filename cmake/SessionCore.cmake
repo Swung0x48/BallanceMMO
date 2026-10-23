@@ -17,4 +17,5 @@ set(BMMO_SESSION_CORE_SRC
         "${BMMO_SESSION_CORE_DIR}/client_core_held.cpp"
         "${BMMO_SESSION_CORE_DIR}/client_core_lifecycle.cpp"
         "${BMMO_SESSION_CORE_DIR}/client_core_messages.cpp"
+        "${BMMO_SESSION_CORE_DIR}/client_core_report.cpp"
         "${BMMO_SESSION_CORE_DIR}/client_journal.cpp")

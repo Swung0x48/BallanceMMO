@@ -35,6 +35,10 @@
 // input_rewind and own_corrections switches off: no replay, no own amend;
 // the pacer's rebase threshold and slew step) and takes the two back-calls
 // whose targets moved (recorded_input_at, own_ball) out of the call lists.
+// Step E10 adds the reports (design 5.1 "Status text": the host's counters
+// at their places in the status line, the window: line at its edges and its
+// phase, the window hook at post_step step 31 and the status hook at the
+// session's end) and takes the back-call `report` out of the call lists.
 
 #include <gtest/gtest.h>
 
@@ -383,12 +387,12 @@ namespace {
     // own lives' five (rebase_own_lives, set_aside_unanswered,
     // live_own_lives, own_lives_due, apply_own_lives).  E9 removes
     // recorded_input_at (the core's now) and own_ball (the platform's).
+    // E10 removes report (the status line is the core's text, hooks.status).
     TEST(SessionClientCore, LegacyCallsStartEmpty) {
         fake_platform fake;
         session_client_core core(fake.make(), session_capabilities{});
         const auto& l = core.legacy;
         EXPECT_FALSE(l.own_body_guard_off);
-        EXPECT_FALSE(l.report);
         EXPECT_FALSE(l.describe_movable_objects);
     }
 
@@ -757,6 +761,7 @@ namespace {
 
     struct flow_fake : journal_fake {
         std::vector<std::pair<std::string, send_mode>> sent;   // every send, in order, with its bytes
+        std::vector<std::string> statuses, windows;            // the reports' texts (hooks.status, hooks.window)
 
         session_platform make_flow(bool journalling = false) {
             session_platform p = journalling ? make_journal() : make();
@@ -768,13 +773,16 @@ namespace {
                 calls.push_back(std::string("hook:numbering_restarted:") + bmmo::session::clock_site_name(site));
             };
             p.hooks.ending = [this]() { calls.push_back("hook:ending"); };
+            p.hooks.status = [this](const std::string& text) {
+                calls.push_back("hook:status");
+                statuses.push_back(text);
+            };
             return p;
         }
 
         void fill_legacy(session_client_core& core) {
             auto& l = core.legacy;
             l.own_body_guard_off = [this]() { calls.push_back("legacy:own_body_guard_off"); };
-            l.report = [this]() { calls.push_back("legacy:report"); };
             l.describe_movable_objects = [this]() {
                 calls.push_back("legacy:describe_movable_objects");
                 return std::string("-");
@@ -1243,8 +1251,13 @@ namespace {
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
             "log:0:session 9 ended: ", "hook:ending", "legacy:own_body_guard_off",
-            "legacy:report"};
+            "hook:status"};
         EXPECT_EQ(since(fake.calls, from), expected);
+        ASSERT_EQ(fake.statuses.size(), 1u);
+        EXPECT_EQ(fake.statuses[0].rfind("status: phase=2 session=9 tick=120 assigned=1 ", 0), 0u)
+            << "printed before the core goes idle: " << fake.statuses[0];
+        EXPECT_NE(fake.statuses[0].find(" remotes=0 "), std::string::npos) << "after the mirrors are gone";
+        EXPECT_NE(fake.statuses[0].find(" rebases=0 resyncs="), std::string::npos) << "no counters: zeros";
         EXPECT_EQ(core.s.phase_, client_core_state::phase::idle);
         EXPECT_EQ(core.s.session_, 0u);
         EXPECT_FALSE(core.assigned());
@@ -2147,7 +2160,7 @@ namespace {
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
             "log:0:session 9 ended: ", "hook:ending", "legacy:own_body_guard_off",
-            "detach_mirror_navigation:Ball_0_BMMO_4", "unmake_mirror:Ball_0_BMMO_4", "legacy:report"};
+            "detach_mirror_navigation:Ball_0_BMMO_4", "unmake_mirror:Ball_0_BMMO_4", "hook:status"};
         EXPECT_EQ(since(fake.calls, from), expected);
         EXPECT_TRUE(core.s.remotes_.empty());
     }
@@ -3273,6 +3286,18 @@ namespace {
         platform.hooks.after_record = [&fake](uint32_t tick) { fake.calls.push_back("hook:after_record:" + std::to_string(tick)); };
         platform.hooks.after_amend = [&fake](uint32_t tick) { fake.calls.push_back("hook:after_amend:" + std::to_string(tick)); };
         platform.hooks.after_journal = [&fake](uint32_t tick) { fake.calls.push_back("hook:after_journal:" + std::to_string(tick)); };
+        platform.counters = [&fake]() {
+            fake.calls.push_back("counters");
+            bmmo::session::host_counters h;
+            h.rebases = 3;
+            h.activations_replayed = 4;
+            h.script_reset_skips = 5;
+            return h;
+        };
+        platform.hooks.window = [&fake](const std::string& text) {
+            fake.calls.push_back("hook:window");
+            fake.windows.push_back(text);
+        };
         return platform;
     }
 
@@ -3286,8 +3311,9 @@ namespace {
     // a mechanism's wakeup becomes a BodyRevived, sent), 21 (the input and
     // the camera rows), 23 (the record and its hook), 25 (the inputs and
     // the event's repeat), 26, 28 (the drive of T + 1), 30 (the amend), 30a,
-    // 32 (the TICK hash, a checkpoint, its hook); the next frame's events
-    // are drained in its pre_step, not on arrival.
+    // 31 (the window: line the tick closes, with the host's counters), 32
+    // (the TICK hash, a checkpoint, its hook); the next frame's events are
+    // drained in its pre_step, not on arrival.
     TEST(SessionClientCoreFrame, OneCycleMakesTheTablesCallsInOrder) {
         journal_dir dir("frame");
         flow_fake fake;
@@ -3324,6 +3350,8 @@ namespace {
         box_made.what = bmmo::session::body_event::kind::created;
         box_made.name = "P_Box";
         fake.body_events = {box_made, box_wakeup, box_wakeup};
+        // A window open since before 120 (the index of 60-119): 126 closes it.
+        core.s.window_index_ = 2;
 
         ASSERT_EQ(core.next_tick(), 126u);
         size_t from = fake.calls.size();
@@ -3344,9 +3372,14 @@ namespace {
                 "reportable_wakeup:P_Box", "send:1", "reportable_wakeup:P_Box", "observe_input", "own_camera_rows:1.000000", "own_driven_entity",
                 "movable_mechanisms", "note_script_resets:126", "bind_world", "hook:after_record:126", "send:2",
                 "send:2", "poll_sector:126", "drive:Ball_0_BMMO_4:6", "bind_world", "hook:after_amend:126",
-                "world_hash", "now:journal_ms", "own_ball", "list_bodies", "hook:after_journal:126"};
+                "counters", "hook:window", "world_hash", "now:journal_ms", "own_ball", "list_bodies",
+                "hook:after_journal:126"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
+        ASSERT_EQ(fake.windows.size(), 1u);
+        EXPECT_EQ(fake.windows[0].rfind("window: tick=126 inrew=0/0 ", 0), 0u) << fake.windows[0];
+        EXPECT_NE(fake.windows[0].find(" rebases=3 relay="), std::string::npos) << "the host's, from a zero base";
+        EXPECT_EQ(core.s.window_index_, 3u);
         EXPECT_EQ(core.current_tick(), 126u);
         EXPECT_EQ(core.next_tick(), 127u);
         EXPECT_EQ(fake.body_event_answers, std::vector<bool>({false, false, false})) << "none was the own ball's";
@@ -3514,4 +3547,82 @@ namespace {
         EXPECT_EQ(core.s.lead_offset_, 2);
         EXPECT_EQ(core.s.lead_slew_clock_, fake.clock);
     }
+
+
+    // ------------------------------------------------------------ reports
+    // Step E10 (design 5.1 "Status text"): the status line is one format with
+    // the host's counters at the places the headless client printed them
+    // (rebases=, activations=, scr='s last field), whole however long it is.
+    TEST(SessionClientCoreReport, StatusTextCarriesTheHostCounters) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        bmmo::session::host_counters h;
+        h.rebases = 7;
+        h.activations_replayed = 8;
+        h.script_reset_skips = 9;
+        core.s.relay_lag_max_ = 40;
+        core.s.relay_lag_hist_[5] = 98;
+        core.s.relay_lag_hist_[30] = 2;
+        core.s.input_reports_ = 4;
+        core.s.input_starved_ = 1;
+        const size_t from = fake.calls.size();
+        const std::string text = core.status_text(h);
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "a text, nothing printed";
+        EXPECT_EQ(text.rfind("status: phase=0 session=0 tick=0 assigned=0 held=0 frames=", 0), 0u) << text;
+        EXPECT_NE(text.find(" lag=40/30 "), std::string::npos) << "the 99th percentile: " << text;
+        EXPECT_NE(text.find(" amend_failures=0 rebases=7 resyncs=0/0 "), std::string::npos) << text;
+        EXPECT_NE(text.find(" deferred=0 activations=8 scr=0/0/0/0/9 t_rest="), std::string::npos) << text;
+        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0";
+        ASSERT_GE(text.size(), tail_text.size());
+        EXPECT_EQ(text.substr(text.size() - tail_text.size()), tail_text) << "the last field, not cut off";
+        EXPECT_GT(text.size(), 256u) << "past the first buffer, whole";
+        EXPECT_EQ(text.find('\n'), std::string::npos);
+    }
+
+    // The window: line (design 1.3 step 31): nothing on the first edge
+    // (the base is set), one line on each new window index with this
+    // window's deltas (the host's rebases among them), the lag and the
+    // input-rewind sources appended and cleared, nothing inside a window;
+    // --window-origin's phase moves the edges.
+    TEST(SessionClientCoreReport, WindowTextAtTheEdges) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        bmmo::session::host_counters h;
+        core.s.input_rewinds_ = 4;
+        core.s.input_rewind_depth_ = 10;
+        EXPECT_TRUE(core.window_due(59)) << "the first edge is due";
+        EXPECT_EQ(core.window_text(59, h), "") << "the first edge only sets the base";
+        EXPECT_FALSE(core.window_due(59)) << "the frame reads no counters inside a window";
+        EXPECT_EQ(core.window_text(59, h), "") << "the same window";
+        EXPECT_TRUE(core.window_due(60));
+        core.s.input_rewinds_ = 6;
+        core.s.input_rewind_depth_ = 15;
+        core.s.subst_recv_ = 3;
+        core.s.lead_offset_ = -2;
+        core.s.window_lag_[3][5] = 2;
+        core.s.window_lag_[3][7] = 1;
+        core.s.window_lag_[6][1] = 4;
+        core.s.window_inrew_src_[3] = 2;
+        h.rebases = 1;
+        EXPECT_EQ(core.window_text(60, h),
+                  "window: tick=60 inrew=2/5 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=0/0 rebases=1 relay=0 "
+                  "late=0 subst=3/0/0/0/0/0 substrew=0/0 substco=0/0/0/0 lead_adj=0 lead=-2 slew=0 moved=0 "
+                  "echo=0/0/0/0/0 ownlife=0/0/0 lag[3]=5*2,7*1 lag[6]=1*4 inrew[3]=2");
+        EXPECT_TRUE(core.s.window_lag_.empty());
+        EXPECT_TRUE(core.s.window_inrew_src_.empty());
+        EXPECT_FALSE(core.window_due(119));
+        EXPECT_EQ(core.window_text(119, h), "");
+        EXPECT_EQ(core.window_text(120, h).rfind("window: tick=120 inrew=0/0 ", 0), 0u);
+        EXPECT_NE(core.s.window_base_.rebases, 0) << "the base keeps the host's count";
+
+        session_client_core shifted(fake.make_flow(), session_capabilities{});
+        shifted.config.window_shift = 25;
+        EXPECT_EQ(shifted.window_text(84, h), "");
+        EXPECT_FALSE(shifted.window_due(84));
+        EXPECT_TRUE(shifted.window_due(85));
+        EXPECT_EQ(shifted.window_text(85, h).rfind("window: tick=85 ", 0), 0u) << "(85 - 25) % 60 == 0";
+        EXPECT_EQ(shifted.window_text(144, h), "");
+        EXPECT_EQ(shifted.window_text(145, h).rfind("window: tick=145 ", 0), 0u);
+    }
+
 }

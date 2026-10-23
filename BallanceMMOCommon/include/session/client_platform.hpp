@@ -25,7 +25,8 @@
 // unforce_own, arm_own_capture, movable_mechanisms, note_script_resets,
 // script_guards, record_pending_activation, the hooks after_rewinds,
 // after_record, after_amend and after_journal) and bind_world with the
-// core's hooks (core_world_hooks).
+// core's hooks (core_world_hooks); E10 the reports (counters, the hooks
+// window and status).
 //
 // CK-free and header-only.
 
@@ -86,14 +87,31 @@ namespace bmmo::session {
         // The frame's (design 1.3; E9), each with the tick T the frame steps:
         // after pre_step's rewinds (step 7: the headless --force-rollback),
         // after post_step's rollback record (step 23: --dump-savestate,
-        // --compare-scripts), after its amend (step 30a: the traces, and
-        // the headless window: line until E10 moves it) and inside its
-        // journal block, after the TICK record and checkpoint (step 32:
-        // the --trace impulse report).
+        // --compare-scripts), after its amend (step 30a: the traces) and
+        // inside its journal block, after the TICK record and checkpoint
+        // (step 32: the --trace impulse report).
         std::function<void(uint32_t tick)> after_rewinds;
         std::function<void(uint32_t tick)> after_record;
         std::function<void(uint32_t tick)> after_amend;
         std::function<void(uint32_t tick)> after_journal;
+        // The reports (design 2.2 hooks.window / hooks.status; E10): the
+        // window: line the frame closes (post_step step 31, after
+        // after_amend; only a line the window's edge produced), and the
+        // status line at the session's end (end, after the mirrors are
+        // gone).  The text is the core's (window_text, status_text); the
+        // host prints it (headless: one log line each, as logf wrote it).
+        std::function<void(const std::string& text)> window;
+        std::function<void(const std::string& text)> status;
+    };
+
+    // The host's own counters the status and window: lines print at their
+    // places (design 1.2 "counters", 1.3; E10): the pacer's rebases, the
+    // manager activations host support re-issued in replays, and the
+    // scripts a restore kept live for having been reset after its anchor.
+    struct host_counters {
+        int rebases = 0;
+        uint64_t activations_replayed = 0;
+        uint64_t script_reset_skips = 0;
     };
 
     // What the core hands bind_world (design 2.2 bind_world, 2.4
@@ -437,6 +455,12 @@ namespace bmmo::session {
         // journals.  Headless: --journal verbatim; retail (R1): its journal
         // directory and file name, after pruning old files.
         std::function<std::filesystem::path(const journal_header& header)> journal_path;
+
+        // ---- reports (E10), optional ----
+        // The host's counters for the text the core reports (host_counters):
+        // read at step 31's window: line and at end's status line.  Empty:
+        // a host without them, which prints zeros there.
+        std::function<host_counters()> counters;
 
         // ---- host hooks (design 2.2), all optional ----
         session_hooks hooks;

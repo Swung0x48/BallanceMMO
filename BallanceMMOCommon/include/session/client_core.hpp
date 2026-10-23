@@ -367,7 +367,7 @@ namespace bmmo::session {
         uint32_t relay_lag_max_ = 0;
         static constexpr uint32_t kRelayLagBuckets = 129;
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
-        // The window: line (report_window).  The status line's counters are
+        // The window: line (window_text).  The status line's counters are
         // cumulative and five seconds apart, which cannot say whether a
         // rollback or a late frame fell before, during or after a burst at
         // one player; these are reset every kWindowTicks.  The lag histogram
@@ -551,6 +551,10 @@ namespace bmmo::session {
         // them its behaviour is today's `rollback` alone.
         bool input_rewind = true;
         bool own_corrections = true;
+        // The window: line's phase (E10; design 1.2): a line closes the
+        // window on the ticks t with (t - window_shift) % kWindowTicks == 0
+        // (headless --window-origin; 0 = lines at multiples of 60).
+        uint32_t window_shift = 0;
     };
 
     // Transitional (design 6.1, "Linking while the core is incomplete"): one
@@ -570,8 +574,8 @@ namespace bmmo::session {
         // out too; end does that now (detach_mirror_navigation,
         // unmake_mirror).
         std::function<void()> own_body_guard_off;
-        // E3: end prints the status line (E10: status_text and hooks.status).
-        std::function<void()> report;
+        // (E3's report, end's status line, was removed at E10: the core
+        // writes the text, status_text, and end hands it to hooks.status.)
         // (E4's recorded_input_at and own_ball were removed at E9: the
         // first moved into the core over the platform's own_replica_name,
         // the second is the platform's own_ball.)
@@ -854,6 +858,21 @@ namespace bmmo::session {
         bool holding() const { return s.held_; }
         bool resync_pending() const { return s.resync_pending_; }
 
+        // ---- reports (E10, client_core_report.cpp; design 1.3) ----
+        // The status line (the headless 5 s report and the session's end;
+        // the retail F3 overlay), with the host's counters at their places.
+        std::string status_text(const host_counters& h) const;
+        // The window: line that `tick` closes (post_step step 31), "" when
+        // it closes none - and on the first window edge, which only sets the
+        // base.  Every call at a new window index moves the base, so the
+        // frame is its only caller: a host gets the line from hooks.window
+        // and never calls this (an extra call would take the window's counts
+        // out early).  Public for the tests.
+        std::string window_text(uint32_t tick, const host_counters& h);
+        // Whether window_text(tick) would close a window (or set the first
+        // base): the frame reads the host's counters only then.
+        bool window_due(uint32_t tick) const { return s.window_index_ != window_index_of(tick); }
+
         // The core's log line: printf-formatted into a growing buffer and
         // handed to platform().log as one line (design 6.1).  GCC and Clang
         // check the format against its arguments (argument 1 is this).
@@ -863,6 +882,23 @@ namespace bmmo::session {
         void logf(const char* format, ...);
 
     private:
+        // The reports' printf formatting into a growing buffer (logf without
+        // the log; E10).
+#if defined(__GNUC__)
+        __attribute__((format(printf, 1, 2)))
+#endif
+        static std::string textf(const char* format, ...);
+        // The host's counters (platform counters), zeros without them.
+        host_counters host_values() const;
+        // The window index of `tick`: a line closes the window on the first
+        // frame of the next index (the ticks t with (t - shift) % 60 == 0).
+        uint32_t window_index_of(uint32_t tick) const {
+            return (tick + client_core_state::kWindowTicks - config.window_shift) / client_core_state::kWindowTicks;
+        }
+        // The 99th percentile of the relayed frames' arrival lag (the status
+        // line's lag=).
+        uint32_t relay_lag_p99() const;
+
         // A sector this client enters, as an input: stamped for `due`, sent,
         // and handed to the union (E8).  Once per sector per session.
         void hold_sector(int sector, uint32_t due, const char* why);
