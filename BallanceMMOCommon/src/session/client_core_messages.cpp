@@ -42,7 +42,7 @@ namespace bmmo::session {
         // read from the relay header's `acked` now, every tick and with
         // snapshots off too: note_held_section.)
         std::string error;
-        const std::string ball_name = legacy.own_ball();
+        const std::string ball_name = platform_.own_ball().entity;
         if (s.resync_pending_) {
             if (!snapshot.full) return;
             s.have_snapshot_ = true;
@@ -137,10 +137,10 @@ namespace bmmo::session {
             // succeeds, and a frame from an earlier tick would replay a key
             // edge the tick did not have (findings/A5 section 3.1 item 5).
             auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
-                return legacy.recorded_input_at(entity, tick, out);
+                return recorded_input_at(entity, tick, out);
             };
             const scope_guard keep_cells = platform_.keep_live_cells(*this);
-            const bool rolled = s.rollback_.on_snapshot(platform_.bind_world(), snapshot, current_tick(), entity_of, input_at);
+            const bool rolled = s.rollback_.on_snapshot(world(), snapshot, current_tick(), entity_of, input_at);
             if (rolled) {
                 ++s.snapshot_rollbacks_;
                 s.snapshot_rollback_depth_ += current_tick() - snapshot.tick;
@@ -317,7 +317,11 @@ namespace bmmo::session {
     void session_client_core::note_input_correction(const client_core_state::remote_ball& remote, uint32_t tick,
                                                     const bmmo::session::input_frame& relayed) {
         const std::string& entity = remote.entity;
-        if (!config.rollback || entity.empty() || tick == 0) return;
+        // The input_rewind switch (design 1.2; E9): off, a relayed frame is
+        // stored (by the caller) and no replay is asked for; this returns
+        // before the checks below, so relay_late_, relay_bodiless_ and
+        // relay_birth_frozen_ are not counted either (they stay 0).
+        if (!config.rollback || !config.input_rewind || entity.empty() || tick == 0) return;
         if (static_cast<int32_t>(tick - current_tick()) > 0) return;   // not simulated yet
         // Deeper than the engine re-simulates (48 ticks), or past the
         // history: nothing to replay from.  Measured at the anchor the

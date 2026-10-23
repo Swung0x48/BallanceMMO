@@ -10,10 +10,19 @@
 // poll_sector): request_sector with the start sector pending until the
 // assignment (pre_step step 1), hold_sector, the sector union's pass
 // (step 9) and the own sector poll (post_step step 26).
+// Step E9 adds the frame (session_client.cpp at 0ea2e05), verbatim but for
+// the platform calls of design 2.2 (the step's operations and hooks) and the
+// configuration (config.rollback, config.correct, config.trace for the
+// headless args_): pre_step and post_step (design 1.3's tables, in SC's
+// order), recorded_input_at (over own_replica_name), the legacy blend's
+// step, and the pacer's slew_step.
 
 #include "session/client_core.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <map>
 #include <set>
 #include <string>
 
@@ -60,13 +69,13 @@ namespace bmmo::session {
         const uint32_t now = current_tick();
         if (static_cast<int32_t>(anchor - now) > 0) return;
         auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
-            return legacy.recorded_input_at(name, tick, out);
+            return recorded_input_at(name, tick, out);
         };
         const scope_guard keep_cells = platform_.keep_live_cells(*this);
         const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
                                        : entity + " input corrected at tick " + std::to_string(anchor);
         if (has_own) s.own_replay_pacer_.ran();
-        if (s.rollback_.rewind_to(platform_.bind_world(), anchor - 1, now, input_at, reason)) {
+        if (s.rollback_.rewind_to(world(), anchor - 1, now, input_at, reason)) {
             if (has_own) {
                 ++s.subst_rewinds_;
                 s.subst_rewind_depth_ += now - (anchor - 1);
@@ -109,11 +118,11 @@ namespace bmmo::session {
         const uint32_t now = current_tick();
         if (!config.rollback || now < depth + 2) return {};
         auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
-            return legacy.recorded_input_at(name, tick, out);
+            return recorded_input_at(name, tick, out);
         };
         const uint32_t anchor = now - depth;
         forced_rewind result{false, platform_.keep_live_cells(*this)};
-        if (s.rollback_.rewind_to(platform_.bind_world(), anchor, now, input_at, "forced")) {
+        if (s.rollback_.rewind_to(world(), anchor, now, input_at, "forced")) {
             ++s.forced_rollbacks_;
             s.forced_rollback_depth_ += now - anchor;
             drop_carried_own_replay(anchor, false);
@@ -221,6 +230,404 @@ namespace bmmo::session {
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------- the frame
+    // The input a navigated ball had at `tick`, for a re-simulation.  The
+    // own ball: only an exact hit.  A remote: the relayed frame, or for a
+    // hole between relayed frames the nearest earlier one (at most a
+    // window old, where the recorded prediction is a round trip old).
+    // The own ball is told by the name its replica last had
+    // (own_replica_name), whether or not the replica still exists.
+    bool session_client_core::recorded_input_at(const std::string& entity, uint32_t tick,
+                                                bmmo::session::input_frame& out) const {
+        const std::map<uint32_t, bmmo::session::input_frame>* inputs = nullptr;
+        if (entity == platform_.own_replica_name()) inputs = &s.own_inputs_;
+        else
+            for (const auto& [id, remote]: s.remotes_)
+                if (remote.entity == entity) inputs = &remote.inputs;
+        if (!inputs) return false;
+        if (inputs == &s.own_inputs_) {
+            auto it = inputs->find(tick);
+            if (it == inputs->end()) return false;
+            out = it->second;
+            return true;
+        }
+        // A remote: the relayed frame, or for a hole the window did not
+        // cover the nearest earlier one (session/input_relay.hpp); none for
+        // the tail the relay has not reached, where the recorded prediction
+        // stands.
+        const auto* frame = bmmo::session::relay_frame_or_earlier(*inputs, tick);
+        if (!frame) return false;
+        out = *frame;
+        return true;
+    }
+
+    // Design 1.3 pre_step: T = next_tick(), the tick the engine is about
+    // to simulate - the one current_tick() returns once
+    // frames_since_anchor_ is advanced in post_step, and so the tick
+    // report_physicalize sends for this very frame.  Where the server
+    // applies them: after this tick's inputs and before its physics step
+    // (session_runner::step).
+    void session_client_core::pre_step() {
+        frame_.f = s.frames_since_anchor_ + 1;
+        const uint32_t frame_tick = s.tick_base_ + static_cast<uint32_t>(std::max<int64_t>(frame_.f - 1, 0));
+        frame_.tick = frame_tick;
+        // A held --start-sector: on the first frame the session is assigned
+        // (tick base and lead known), stamp it `lead` ticks ahead like any
+        // other sector this client enters.
+        hold_pending_sector(frame_tick);
+        // This tick's events first - a relayed Sector event stamped for it
+        // among them - then the union's pass, then the step: the order the
+        // server's session_runner::step keeps.
+        drain_due_events(frame_tick);
+        // Our own events' echoes: a birth the server made later or never
+        // is moved inside the history now, with the rewinds below still
+        // to come in this frame.
+        process_own_echoes();
+        // The sector resets stay neutralized (the level-reset one once the
+        // sector is up: this client has resolved a mechanism of its own).
+        platform_.script_guards(frame_tick, s.mechanism_tracking_.resolved() > 0);
+        // After the late events, so a birth and an input correction in the
+        // same frame leave the world replayed from the earlier of the two - and
+        // BEFORE the union's pass below: the pass sets next-frame flags on
+        // Gameplay_SectorManager, which the restore (the manager travels
+        // with the records now) would write back to the anchor's and lose,
+        // and the replay ends one tick short of re-issuing it.  The retail
+        // client has this order already.
+        replay_corrected_inputs();
+        retry_owed_resync();
+        if (platform_.hooks.after_rewinds) platform_.hooks.after_rewinds(frame_tick);
+        // The body changes stamped for this very tick, the own beam among
+        // them: after the rewinds above, so none of them undoes one, and
+        // before the union's pass and the step, where the server applies
+        // them, in its order.
+        apply_held_lifecycle(frame_tick);
+        // The sector union (session/sector_union.hpp), the rule the server's
+        // update_sectors() runs: one count of the pacer per step, before
+        // it, from the manager's state after the previous step, and one
+        // pass per idle manager for the lowest sector owed.
+        sector_union_pass(frame_tick);
+        // A rewind above replayed up to the previous tick and left every
+        // mirror's navigation input at the frame it last fed there; this
+        // tick's step is driven by the frame recorded as applied for it
+        // (remote.applied, chosen at the end of the previous frame), or
+        // the record and the step disagree and the relayed frame for this
+        // tick compares equal to a prediction the step never ran on.
+        for (auto& [id, remote]: s.remotes_) {
+            if (!remote.physicalized || !remote.navigation) continue;
+            std::string drive_error;
+            if (!platform_.drive(remote.entity, remote.applied, drive_error))
+                logf("remote navigation input %s: %s", remote.entity.c_str(), drive_error.c_str());
+        }
+        // A tick a SessionLead forced (late-player design 2.4): the server
+        // applies `held` here and drops our frame as stale, so the own
+        // ball is driven with it the way a replay drives it - polling off,
+        // the frame through nav_input - and our keys wait until E.  After
+        // the rewinds above, whose replays switch the polling back on.
+        frame_.forced_frame = client_core_state::forced_own{};
+        frame_.forced = take_forced_own(frame_tick, frame_.forced_frame);
+        frame_.forced_entity.clear();
+        if (frame_.forced) {
+            bool ok = true;
+            std::string force_error;
+            frame_.forced_entity = platform_.force_own(frame_.forced_frame.frame, ok, force_error);
+            if (!frame_.forced_entity.empty() && !ok)
+                if (s.lead_force_logs_++ < 8)   // the ball may be unphysicalized for the whole range
+                    logf("lead: forced own input at tick %u: %s", frame_tick, force_error.c_str());
+        }
+        // The own ball's Physicalize is captured inside this tick's step,
+        // before the PSIs (the headless PreSimulate capture).  Armed here,
+        // after the rewinds above: a replayed step runs the PreSimulate
+        // pass too, and only the live tick may capture.
+        if (platform_.arm_own_capture) platform_.arm_own_capture(frame_tick);
+    }
+
+    // Design 1.3 post_step: the world has stepped T.
+    bool session_client_core::post_step(bool stepped) {
+        const uint32_t frame_tick = frame_.tick;
+        if (!frame_.forced_entity.empty()) {
+            std::string force_error;
+            if (!platform_.unforce_own(frame_.forced_entity, force_error))
+                if (s.lead_force_logs_++ < 8)
+                    logf("lead: own polling after the forced tick %u: %s", frame_tick, force_error.c_str());
+            frame_.forced_entity.clear();
+        }
+        if (!stepped) return false;
+        s.frames_since_anchor_ = frame_.f;
+        // An activation of Gameplay_SectorManager this frame's scripts asked
+        // for (Init Ingame's Execute Script at the level start, Event_handler):
+        // pending as next-frame flags now, consumed by the next frame.  A
+        // pass of ours never shows here - its flags were consumed by this
+        // frame.  Recorded for the replay like a pass (plan doc 10).
+        platform_.record_pending_activation(frame_tick + 1);
+        const uint32_t tick = current_tick();
+
+        if (platform_.discover_navigation(tick)) {
+            for (auto& [id, remote]: s.remotes_) {
+                const bool navigated = remote.navigation;
+                attach_remote_navigation(id, remote);
+                // The ticks before this one ran it undriven: a replay
+                // across them must not start driving it.
+                if (!navigated && remote.navigation && static_cast<int32_t>(tick - remote.driven_from) > 0)
+                    remote.driven_from = tick;
+            }
+        }
+
+        // Own ball state after this tick.
+        const own_ball_view own = platform_.own_ball();
+        const std::string& ball_name = own.entity;
+        const int ball_type = own.ball_type;
+        const bool physicalized = own.physicalized;
+        platform_.own_body_upkeep(own);
+        if (physicalized) {
+            bmmo::session::ball_pose pose;
+            pose.tick = tick;
+            for (int k = 0; k < 3; ++k) { pose.position[k] = own.state.position[k]; pose.linear[k] = own.state.linear[k]; pose.angular[k] = own.state.angular[k]; }
+            for (int k = 0; k < 4; ++k) pose.rotation[k] = own.state.rotation[k];
+            s.corrector_.record(pose);
+        }
+        s.own_physicalized_ = physicalized;
+        s.own_body_entity_ = physicalized ? ball_name : std::string();
+
+        // Mechanism states after this tick (the legacy blending path;
+        // with the rollback engine on, the engine keeps its own records).
+        for (const auto& name: s.mechanism_tracking_.tracked_entities()) {
+            bmmo_physics_body_state local{};
+            if (!platform_.body_state(name, local)) continue;
+            bmmo::session::ball_pose pose;
+            pose.tick = tick;
+            for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
+            for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
+            s.mechanism_correctors_[name].record(pose);
+        }
+        for (auto& [id, remote]: s.remotes_) {
+            if (!remote.physicalized || !remote.navigation) continue;
+            bmmo_physics_body_state local{};
+            if (!platform_.body_state(remote.entity, local)) continue;
+            bmmo::session::ball_pose pose;
+            pose.tick = tick;
+            for (int k = 0; k < 3; ++k) { pose.position[k] = local.position[k]; pose.linear[k] = local.linear[k]; pose.angular[k] = local.angular[k]; }
+            for (int k = 0; k < 4; ++k) pose.rotation[k] = local.rotation[k];
+            remote.corrector.record(pose);
+        }
+
+        // Lifecycle events from the bridge's object log, read before the
+        // rollback record below: a body created or deleted during this
+        // frame is already in the world that record describes, so the new
+        // lifetime generation belongs on THAT record (design 9.25).  The
+        // birth recipes are the host's (its local birth log).
+        std::set<std::string> revived_reported;
+        platform_.drain_body_events(tick, [&](const body_event& event) {
+            const std::string& name = event.name;
+            if (event.what == body_event::kind::created || event.what == body_event::kind::deleted) {
+                // The body behind a tracked name changed: a new lifetime for
+                // it, and the mechanism registry has to ask the world again.
+                if (!name.empty()) {
+                    ++s.generations_[name];
+                    s.mechanism_tracking_.mark_dirty();
+                }
+            }
+            if (event.what == body_event::kind::created && !ball_name.empty() && name == ball_name) {
+                // Sent and recorded by the core (E7), from the capture.
+                if (caps_.own_lifecycle == own_lifecycle_source::event_log) report_physicalize(ball_name, tick);
+                return true;
+            } else if (event.what == body_event::kind::deleted && !ball_name.empty() && name == ball_name) {
+                if (caps_.own_lifecycle == own_lifecycle_source::event_log) report_unphysicalize(tick);
+                return true;
+            } else if (event.what == body_event::kind::wakeup && !name.empty() && platform_.reportable_wakeup(name, ball_name)
+                       && !revived_reported.count(name)) {
+                revived_reported.insert(name);
+                bmmo::session_event_msg revived;
+                revived.tick = tick;
+                revived.type = bmmo::session::event_type::BodyRevived;
+                revived.name = name;
+                send_event(revived);
+            }
+            return false;
+        });
+        // The own body changes a host_hooks host reported in the behaviour
+        // pass, committed right after the drain's generation bump (design
+        // 1.3 step 19).
+        if (caps_.own_lifecycle == own_lifecycle_source::host_hooks) commit_own_reports();
+        // Which mechanism rows are about one of our bodies, before the
+        // record: the tracked set of a tick has to name bodies it contains.
+        if (s.mechanism_tracking_.due(tick))
+            s.mechanism_tracking_.resolve(tick, [this](const char* entity, bmmo_physics_body_state& out) {
+                return platform_.body_state(entity, out);
+            });
+
+        // Input for this tick.
+        const input_observation seen = platform_.observe_input();
+        bmmo::session::input_frame input{};
+        input.keys = seen.keys;
+        const float (*basis)[3] = s.previous_cam_valid_ ? s.previous_cam_ : seen.cam;
+        for (int k = 0; k < 3; ++k) { input.cam_right[k] = basis[0][k]; input.cam_up[k] = basis[1][k]; input.cam_dir[k] = basis[2][k]; }
+        if (seen.cam_valid) { std::memcpy(s.previous_cam_, seen.cam, sizeof(seen.cam)); s.previous_cam_valid_ = true; }
+        input.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);
+        const bool nav_active = seen.nav_active;
+        input.flags = static_cast<uint8_t>((physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
+                    | (nav_active ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));
+        // A forced tick plays the server's frame (design 2.4): recorded,
+        // journaled SUBSTITUTED and sent as such - the server drops it as
+        // stale, and the record holds what the server applied, so its
+        // notice, when it comes, changes nothing.
+        const bool forced = frame_.forced;
+        if (forced) play_forced_own(tick, frame_.forced_frame, input);
+        if (config.trace && (input.keys != s.last_keys_ || nav_active != s.last_nav_active_))
+            logf("input edge at tick %u keys=%u flags=%u", tick, input.keys, input.flags);
+        s.last_keys_ = input.keys;
+        s.last_nav_active_ = nav_active;
+        platform_.own_camera_rows(basis);
+        s.input_history_.emplace_back(tick, input);
+        // The frame is finished: journal it before it goes on the wire, so
+        // the box holds what this client played even when the send is lost.
+        if (journal_.journalling())
+            journal_.writer().input(tick, s.own_id_, input,
+                           forced ? bmmo::session::JOURNAL_INPUT_SUBSTITUTED : bmmo::session::JOURNAL_INPUT_FRESH);
+        if (config.rollback) {
+            s.own_inputs_[tick] = input;
+            while (s.own_inputs_.size() > 128) s.own_inputs_.erase(s.own_inputs_.begin());
+            bmmo::session::rollback_tracked tracked;
+            std::map<std::string, bmmo::session::input_frame> applied;
+            const std::string own_entity = platform_.own_driven_entity();
+            if (physicalized && !own_entity.empty()) {
+                tracked.own_entity = own_entity;
+                tracked.own_polls = true;
+                applied[own_entity] = input;
+            }
+            for (const auto& [id, remote]: s.remotes_)
+                if (remote.physicalized && remote.navigation) {
+                    tracked.remote_entities.push_back(remote.entity);
+                    applied[remote.entity] = remote.applied;
+                }
+            // Design 9.25: only the mechanism names this client has a body
+            // for - a tracked name with no body is dropped by every
+            // capture, which used to change the tracked set every tick.
+            // Every movable body this client has, not only the ones the
+            // server has named and the registry resolved.
+            //
+            // A body missing from the tracked set is not recorded and so
+            // not restored - but the replay's step() still steps it, so
+            // every rollback advances it by the replay's depth.  Measured
+            // solo with forced rewinds: a P_Modul_29 plate, which hangs
+            // from physics hinges and swings continuously, came out of a
+            // depth-12 rewind at exactly the pose the un-rewound run had
+            // 12 ticks LATER - not displaced, phase-shifted by the depth.
+            // `mechanisms=22/12` had been in every run all along: ten of
+            // the client's own bodies were being stepped by every replay
+            // and restored by none.
+            //
+            // So the tracked set is the client's own world, which is what
+            // the replay has to put back. A body the snapshot says nothing
+            // about is restored from our own record, which is right.
+            for (const auto& name: platform_.movable_mechanisms()) tracked.mechanisms.push_back(name);
+            tracked.generations = s.generations_;
+            platform_.note_script_resets(tick);
+            s.rollback_.record(world(), tick, tracked, applied);
+            if (platform_.hooks.after_record) platform_.hooks.after_record(tick);
+        }
+        // A notice that named this tick before it was simulated: the
+        // record just made holds what we played, the server applied
+        // something else (late-player design 1.3).
+        take_held_ahead(tick);
+        if (s.assigned_) {
+            while (s.input_history_.size() > bmmo::session::MAX_INPUT_FRAMES) s.input_history_.pop_front();
+            bmmo::session_input_msg msg;
+            msg.session = s.session_;
+            msg.first_tick = s.input_history_.front().first;
+            for (const auto& [t, fr]: s.input_history_) msg.frames.push_back(fr);
+            remember_sent(msg);
+            msg.serialize();
+            platform_.send(msg.raw.str(), send_mode::unreliable_no_delay);
+            ++s.inputs_sent_;
+            // The unreliable copies of our recent lifecycle events, one per
+            // frame (send_event; protocol 6).
+            s.own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
+                platform_.send(bytes, send_mode::unreliable_no_delay);
+            });
+        } else if (s.input_history_.size() > 660) {
+            s.input_history_.pop_front();
+        }
+
+        // Sector: the own sector poll (a crossing stamped ahead with the
+        // checkpoint chain held, else reported after the fact).
+        poll_own_sector(tick);
+
+        // Continue running blends.
+        if (config.correct) {
+            if (physicalized) apply_blend(ball_name, s.corrector_);
+            for (auto& [name, corrector]: s.mechanism_correctors_) apply_blend(name, corrector);
+            for (auto& [id, remote]: s.remotes_)
+                if (remote.physicalized && remote.navigation) apply_blend(remote.entity, remote.corrector);
+        }
+        // Next tick's input of every predicted remote ball: the frame the
+        // server applied at that tick when the relay has it already (a
+        // client running behind the relay), else the last relayed frame.
+        for (auto& [id, remote]: s.remotes_) {
+            if (!remote.physicalized || !remote.navigation) continue;
+            remote.applied = live_drive(remote, tick + 1);
+            std::string error;
+            if (!platform_.drive(remote.entity, remote.applied, error))
+                logf("remote navigation input %s: %s", remote.entity.c_str(), error.c_str());
+        }
+        // A requested beam (the headless --beam, the retail verb), stamped
+        // tick + 1.
+        apply_requested_beam(tick);
+        // The record for this tick was captured before the corrections
+        // above, so a rollback to it would restore the divergent pose and
+        // lose the correction on the first re-simulated tick.  Re-capture
+        // it now, exactly like the retail mod (design 9.25 item 4 of
+        // findings/A5 section 3.1: the headless client never did).
+        if (config.rollback && !s.rollback_.amend_record(world(), tick)) {
+            if (s.amend_failures_++ == 0)
+                logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
+        }
+        // The host's traces of the frame (and, until E10, its window: line).
+        if (platform_.hooks.after_amend) platform_.hooks.after_amend(tick);
+        // The box's own view of this frame, last: the fingerprint of the
+        // world the corrections above have finished with, and the bodies
+        // when a checkpoint is due.
+        if (journal_.journalling()) {
+            bmmo::physics::world_hash hash;
+            if (platform_.world_hash(hash))
+                journal_.writer().tick(tick, hash, journal_.ms());
+            if (journal_.checkpoint_due(tick)) journal_.local_checkpoint(tick, platform_.own_ball().entity);
+            if (platform_.hooks.after_journal) platform_.hooks.after_journal(tick);
+        }
+        return true;
+    }
+
+    // One step of a legacy blend in flight (the ladder's frame half): the
+    // body moved by the step's share of the correction, awake.
+    void session_client_core::apply_blend(const std::string& name, bmmo::session::body_corrector& corrector) {
+        if (!corrector.blending()) return;
+        const auto step = corrector.next_blend();
+        if (step.action != bmmo::session::correction_step::kind::blend) return;
+        std::string error;
+        bmmo_physics_body_state current{};
+        if (!platform_.body_state(name, current)) return;
+        double position[3];
+        float linear[3];
+        for (int k = 0; k < 3; ++k) {
+            position[k] = current.position[k] + step.delta_position[k];
+            linear[k] = current.linear[k] + step.delta_linear[k];
+        }
+        if (!platform_.write_body(name, position, current.rotation, linear, current.angular, true, error))
+            logf("blend %s: %s", name.c_str(), error.c_str());
+    }
+
+    // ----------------------------------------------------------- pacing
+    // One step of the slew: the tick periods since the previous step and
+    // how far the pacer is behind go to lead_slew::advance, and the host
+    // moves its origin by what it returns (+1: a tick earlier, the clock
+    // runs ahead).  The whole delta moved: acknowledged.
+    int session_client_core::slew_step(std::chrono::steady_clock::time_point now, double tick_rate, double behind_ticks) {
+        const double wall = std::chrono::duration<double>(now - s.lead_slew_clock_).count() * tick_rate;
+        s.lead_slew_clock_ = now;
+        const int moved = s.lead_slew_.advance(wall, behind_ticks);
+        if (s.lead_slew_.done()) finish_lead_slew("slew complete");
+        return moved;
     }
 
 }

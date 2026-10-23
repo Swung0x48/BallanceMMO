@@ -379,6 +379,9 @@ namespace bmmo::session {
     // own and remote; an own-only one may wait a few frames for the
     // notices still coming, own_replay_pacer).
     void session_client_core::correct_own_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
+        // The own_corrections switch (design 1.2; E9): off, the record of
+        // the tick keeps what we played and no own replay is asked for.
+        if (!config.own_corrections) return;
         const std::string entity = s.rollback_.recorded_own_entity(tick);
         if (entity.empty()) { ++s.subst_bodiless_; return; }
         bmmo::session::input_frame played{};

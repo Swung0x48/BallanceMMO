@@ -19,7 +19,13 @@
 // mute_event_log); E7 the own ball's (make_own, unmake_own,
 // own_birth_capture, ball_recipe_of) and the own_body_control check; E8 the
 // sectors' (sector_manager_active, run_sector, record_activation,
-// poll_sector).
+// poll_sector); E9 the frame's (world_hash, own_ball, own_body_upkeep,
+// own_replica_name, discover_navigation, drain_body_events,
+// reportable_wakeup, observe_input, own_camera_rows, drive, force_own,
+// unforce_own, arm_own_capture, movable_mechanisms, note_script_resets,
+// script_guards, record_pending_activation, the hooks after_rewinds,
+// after_record, after_amend and after_journal) and bind_world with the
+// core's hooks (core_world_hooks).
 //
 // CK-free and header-only.
 
@@ -27,11 +33,13 @@
 #include "rollback.hpp"
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
+#include "../physics/world_hash.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -75,6 +83,70 @@ namespace bmmo::session {
         // The session is ending (session_client_core::end), before anything
         // else: headless discards what --hold-event still holds.
         std::function<void()> ending;
+        // The frame's (design 1.3; E9), each with the tick T the frame steps:
+        // after pre_step's rewinds (step 7: the headless --force-rollback),
+        // after post_step's rollback record (step 23: --dump-savestate,
+        // --compare-scripts), after its amend (step 30a: the traces, and
+        // the headless window: line until E10 moves it) and inside its
+        // journal block, after the TICK record and checkpoint (step 32:
+        // the --trace impulse report).
+        std::function<void(uint32_t tick)> after_rewinds;
+        std::function<void(uint32_t tick)> after_record;
+        std::function<void(uint32_t tick)> after_amend;
+        std::function<void(uint32_t tick)> after_journal;
+    };
+
+    // What the core hands bind_world (design 2.2 bind_world, 2.4
+    // bind_session_world; E9): its half of the rollback binding.  The host
+    // binds its world through the shared bind_session_world, which puts
+    // these where design 2.4 says.
+    struct core_world_hooks {
+        // Before each replayed tick, first: the births deferred into the
+        // replay, made at their tick (drain_pending_births).
+        std::function<void(uint32_t tick)> before_replayed_tick;
+        // The mirrors a replayed tick drives, with their generation
+        // (rollback_world::replay_remotes).
+        std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
+        // Every decision the engine takes about a snapshot (the journal).
+        std::function<void(const rollback_correction& c)> on_correction;
+        // destroy_body's first half: a moved own birth the replay makes
+        // again at its applied tick.  True when `entity` at `birth_tick` is
+        // one (`destroyed`: taken out); false otherwise.
+        std::function<bool(const std::string& entity, uint32_t birth_tick, bool& destroyed)> destroy_own_birth;
+        // The entity is the own ball's body, or a mirror's: never a
+        // mechanism birth to destroy or insert.
+        std::function<bool(const std::string& entity)> own_body;
+        std::function<bool(const std::string& entity)> mirror;
+    };
+
+    // The own ball as the host sees it after a step (design 2.2 own_ball;
+    // E9): its entity ("" when the level has none), its row in the ball
+    // table (-1: none), whether it has a body, and the body's state.
+    struct own_ball_view {
+        std::string entity;
+        int ball_type = -1;
+        bool physicalized = false;
+        bmmo_physics_body_state state{};
+    };
+
+    // One entry of the body event log (design 2.2 drain_body_events; E9): a
+    // body created or deleted, or a mechanism script's Physics WakeUp.  The
+    // host keeps the other kinds (the birth recipes) itself.
+    struct body_event {
+        enum class kind : uint8_t { created, deleted, wakeup };
+        kind what = kind::created;
+        std::string name;
+    };
+
+    // What the own replica used for the step of T (design 2.2 observe_input;
+    // E9): the keys as the navigation polls them (0 before the graph is
+    // known), the camera reference's rows (`cam_valid` false without one),
+    // and whether the navigation's key events were active.
+    struct input_observation {
+        uint8_t keys = 0;
+        float cam[3][3] = {};
+        bool cam_valid = false;
+        bool nav_active = false;
     };
 
     // A mirror's body (design 2.2 make_mirror; E6): the entity the host named
@@ -212,6 +284,50 @@ namespace bmmo::session {
         // `tick` is the tick the core decides for, so a line the host writes
         // about the poll names the same tick.
         std::function<sector_poll(uint32_t tick)> poll_sector;
+        // The world's fingerprint (the journal's TICK record; E9).
+        std::function<bool(bmmo::physics::world_hash& out)> world_hash;
+        // The own ball after the step (own_ball_view; E9).  A read only:
+        // the core asks it whenever it needs the own ball's name.
+        std::function<own_ball_view()> own_ball;
+        // What the host keeps up for the own ball once a frame, after
+        // own_ball (E9; post_step step 17): the body guard, the own
+        // collision group and the own navigation replica's attach (headless:
+        // only with rollback, a host policy).
+        std::function<void(const own_ball_view& own)> own_body_upkeep;
+        // The entity the own navigation replica was last named by, kept
+        // after the replica is gone (a failed re-attach); "" when it never
+        // had one (E9: recorded_input_at tells the own ball's records by it,
+        // which own_driven_entity's gate on a live replica would not).
+        std::function<std::string()> own_replica_name;
+        // The navigation graph, until it is known (E9; post_step step 16):
+        // true exactly when it became known in this call (the host logs its
+        // line); the core then attaches every mirror's navigation.
+        std::function<bool(uint32_t tick)> discover_navigation;
+        // The body event log since the last call (E9; post_step step 19), in
+        // order: the host keeps the birth recipes (its local birth log) and
+        // hands every other entry to `each`, which answers true when it was
+        // the own ball's body created or deleted (the host forgets its own
+        // collision group then).
+        std::function<void(uint32_t tick, const std::function<bool(const body_event& event)>& each)> drain_body_events;
+        // A Physics WakeUp worth a BodyRevived event (not a ball, not a
+        // mirror; retail: not the own ball either).
+        std::function<bool(const std::string& name, const std::string& own_ball)> reportable_wakeup;
+        // What the own replica used for the step just taken (E9; step 21).
+        std::function<input_observation()> observe_input;
+        // The own replica's camera rows for the next step (`basis`: the
+        // frame's camera reference), and the retail forces zeroed (E9; step
+        // 21).  Nothing without an own replica.
+        std::function<void(const float (*basis)[3])> own_camera_rows;
+        // The movable bodies a record tracks as mechanisms (every movable
+        // body but the balls; E9; step 23).
+        std::function<std::vector<std::string>()> movable_mechanisms;
+        // The scripts told to reset in the frame of `tick` (E9; step 23: a
+        // rewind anchored earlier keeps them live).
+        std::function<void(uint32_t tick)> note_script_resets;
+        // The retail sector resets kept neutralized before the frame's
+        // rewinds (E9; pre_step step 4).  `resolved`: the client resolved a
+        // mechanism of its own (the sector is up).
+        std::function<void(uint32_t tick, bool resolved)> script_guards;
 
         // ---- writing the world (design 2.2; E4) ----
         // Beam a body to the pose and overwrite its speeds; `wake` wakes it, a
@@ -231,6 +347,9 @@ namespace bmmo::session {
         // frame, for the replay to re-issue (design 2.2 record_activation;
         // E8: the union's passes, `reset` true).
         std::function<void(uint32_t tick, bool reset)> record_activation;
+        // An activation the frame's own scripts asked for, pending for the
+        // frame of `tick` (E9; post_step step 15): recorded like a pass.
+        std::function<void(uint32_t tick)> record_pending_activation;
 
         // ---- mirrors (design 2.2; E6) ----
         // The entity that mirrors `player` with a ball of `ball_type`, made
@@ -261,6 +380,20 @@ namespace bmmo::session {
         // ---- driving (design 2.2; E4) ----
         // The entity the own navigation replica drives, "" when there is none.
         std::function<std::string()> own_driven_entity;
+        // A mirror driven with `frame` for the next step (E9; pre_step step
+        // 10, post_step step 28); false and `error` when the host refused.
+        std::function<bool(const std::string& entity, const bmmo::session::input_frame& frame, std::string& error)> drive;
+        // A tick a SessionLead forced (E9; pre_step step 11): the own
+        // replica's polling off and `frame` fed instead.  Answers the entity
+        // forced ("" when there is no own replica: nothing done), `ok`
+        // false and `error` when a call failed; unforce_own (post_step step
+        // 13) switches the polling back on for that entity.
+        std::function<std::string(const bmmo::session::input_frame& frame, bool& ok, std::string& error)> force_own;
+        std::function<bool(const std::string& entity, std::string& error)> unforce_own;
+        // Optional (E9; pre_step step 12): arm the capture of an own
+        // Physicalize inside the live step of `tick` (headless: the
+        // PreSimulate capture).
+        std::function<void(uint32_t tick)> arm_own_capture;
 
         // ---- own ball (design 2.2; E7) ----
         // The level's ball table row of `entity` (Physicalize_GameBall): its
@@ -286,9 +419,10 @@ namespace bmmo::session {
         // ---- rollback (design 2.2; E4) ----
         // The rollback engine's view of the host's world, bound anew on every
         // use, never cached (the options take the own key count by value).
-        // E4: the host's own binding (headless rollback_world()); the core's
-        // hooks and bind_session_world arrive with the frame (E9).
-        std::function<rollback_world()> bind_world;
+        // E9: with the core's half of the binding (core_world_hooks), which
+        // the host composes through the shared bind_session_world
+        // (session/session_host_world.hpp).
+        std::function<rollback_world(const core_world_hooks& hooks)> bind_world;
         // Around every rewind_to / on_snapshot: the host keeps the live cells
         // the replay rewinds (headless live_cells_guard) and re-issues what a
         // rollback lost when the returned guard goes out of scope.  The guard
@@ -357,6 +491,23 @@ namespace bmmo::session {
         if (!platform.run_sector) return "run_sector";
         if (!platform.record_activation) return "record_activation";
         if (!platform.poll_sector) return "poll_sector";
+        // The frame (E9): every host steps, records, drives and amends.
+        // arm_own_capture is optional (retail: empty).
+        if (!platform.record_pending_activation) return "record_pending_activation";
+        if (!platform.script_guards) return "script_guards";
+        if (!platform.drive) return "drive";
+        if (!platform.force_own) return "force_own";
+        if (!platform.unforce_own) return "unforce_own";
+        if (!platform.discover_navigation) return "discover_navigation";
+        if (!platform.own_ball) return "own_ball";
+        if (!platform.own_body_upkeep) return "own_body_upkeep";
+        if (!platform.own_replica_name) return "own_replica_name";
+        if (!platform.drain_body_events) return "drain_body_events";
+        if (!platform.reportable_wakeup) return "reportable_wakeup";
+        if (!platform.observe_input) return "observe_input";
+        if (!platform.own_camera_rows) return "own_camera_rows";
+        if (!platform.movable_mechanisms) return "movable_mechanisms";
+        if (!platform.note_script_resets) return "note_script_resets";
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
         if (caps.own_body_control) {
@@ -369,6 +520,7 @@ namespace bmmo::session {
         if (platform.journal_path) {
             if (!platform.utc_ms) return "utc_ms";
             if (!platform.list_bodies) return "list_bodies";
+            if (!platform.world_hash) return "world_hash";   // the TICK record (E9)
         }
         return nullptr;
     }

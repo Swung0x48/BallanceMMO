@@ -56,6 +56,17 @@
 // sector_cell_, in client_core_frame.cpp, over the platform's
 // sector_manager_active, run_sector, record_activation and poll_sector.
 //
+// Step E9 moves the frame (design 6.1 row E9): pre_step and post_step (the
+// tables of design 1.3) replace the body of the headless frame(), with the
+// input building, the rollback record and amend, the mirrors' drive, the
+// legacy blends, recorded_input_at and the pacer's slew_step /
+// rebase_threshold / schedule_rebased, in client_core_frame.cpp; the host
+// keeps the keys, the step and its hooks.  The rollback binding is the
+// host's through the shared bind_session_world, with the core's half
+// (core_world_hooks).  The steps' entry points E5-E8 made public (the
+// drain, the echoes, the sectors' passes, the forced own frames, ...) stay
+// public for the unit tests until E11.
+//
 // CK-free: compiled into the headless client, the retail mod and
 // BallanceMMOMessageTests (cmake/SessionCore.cmake).
 
@@ -484,6 +495,11 @@ namespace bmmo::session {
         // The event log's mute in force (session_client_core::event_log_mute;
         // moved from the headless client at E6).
         bool event_log_muted_ = false;
+        // The --trace input edge (post_step step 21): the keys and the
+        // navigation state of the last frame (moved from the headless client
+        // at E9).
+        uint8_t last_keys_ = 0;
+        bool last_nav_active_ = false;
         // The black box (design 9.15) and its bookkeeping moved into
         // core::client_journal at E2 (session_client_core::journal()).
 
@@ -525,6 +541,16 @@ namespace bmmo::session {
         // only.  Acting needs `rollback` too, as before; headless sets it
         // from --no-rollback, so the pair is today's `rollback` alone.
         bool own_echoes = true;
+        // Design 1.2 feature switches (E9).  `input_rewind`: a relayed frame
+        // that differs from the prediction asks for a replay (the remote
+        // half of note_input_correction; replay_corrected_inputs runs what
+        // was asked for).  `own_corrections`: a held notice of our own
+        // substituted tick amends the tick's record and asks for the own
+        // replay (correct_own_tick, late-player part one).  Each needs
+        // `rollback` too; headless sets both from --no-rollback, so with
+        // them its behaviour is today's `rollback` alone.
+        bool input_rewind = true;
+        bool own_corrections = true;
     };
 
     // Transitional (design 6.1, "Linking while the core is incomplete"): one
@@ -546,17 +572,9 @@ namespace bmmo::session {
         std::function<void()> own_body_guard_off;
         // E3: end prints the status line (E10: status_text and hooks.status).
         std::function<void()> report;
-        // E4: apply_snapshot; E5: replay_corrected_inputs and force_rewind.
-        // The input a navigated ball had at `tick`, for a re-simulation: the
-        // own ball's exact record, a remote's relayed frame.  It stays in the
-        // host past E5 (design 6.1 had it move with the relay): it tells the
-        // own ball by the own replica's entity as the host last named it,
-        // whether or not the replica still exists, which own_driven_entity
-        // does not say (E9: the own ball's platform half).
-        std::function<bool(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out)> recorded_input_at;
-        // E4: the own ball's entity name, "" when the level has none (E9: the
-        // platform's own_ball).  E7's beam reads it too.
-        std::function<std::string()> own_ball;
+        // (E4's recorded_input_at and own_ball were removed at E9: the
+        // first moved into the core over the platform's own_replica_name,
+        // the second is the platform's own_ball.)
         // E4: the movable objects' description, the --trace line after a
         // snapshot rollback (a headless diagnostic, design 2.4).
         std::function<std::string()> describe_movable_objects;
@@ -709,6 +727,42 @@ namespace bmmo::session {
         // always without own_body_control (design 2.3: the branch is inert).
         bool destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed);
 
+        // ---- the tick (E9, client_core_frame.cpp; design 1.3) ----
+        // The tick pre_step prepares: the tick base on the first frame
+        // after the anchor or an assignment.
+        uint32_t next_tick() const {
+            return s.tick_base_ + static_cast<uint32_t>(std::max<int64_t>(s.frames_since_anchor_, 0));
+        }
+        // Prepare T = next_tick() (design 1.3 steps 1-12): the frame's
+        // events, echoes and rewinds, the union's pass, the mirrors' and
+        // the forced own input of T.  The host then steps the world once.
+        void pre_step();
+        // The world has stepped T (steps 13-32): T becomes the current tick,
+        // and the own ball, the bodies, the input, the record, the sends,
+        // the sector poll, the drive of T + 1, the beam, the amend and the
+        // journal follow.  `stepped` false: the step failed - only the
+        // forced own polling is restored (step 13), and false is returned
+        // (the host ends the session).
+        bool post_step(bool stepped);
+
+        // ---- pacing (E9; the host owns the clock, design 1.3) ----
+        // How far behind its schedule the host's pacer may fall before it
+        // rebases: 33 frames plus what a slew still has to move.
+        double rebase_threshold() const { return bmmo::session::lead_rebase_threshold(s.lead_slew_.outstanding()); }
+        // The pacer rebased its schedule: a resync is asked for (the
+        // limiter applies).
+        void schedule_rebased(const char* why) { request_resync(why); }
+        // One step of a SessionLead's slew at `now`: the tick periods since
+        // the previous step (at `tick_rate`) and how far the pacer is behind
+        // go to lead_slew::advance; the whole delta moved is acknowledged.
+        // Returns the ticks the host moves its origin by (+1: a tick
+        // earlier, the clock runs ahead).
+        int slew_step(std::chrono::steady_clock::time_point now, double tick_rate, double behind_ticks);
+        bool slewing() const { return s.lead_slew_.active(); }
+        // The input basis (design 1.2): the last camera reference seen,
+        // nullptr until one was.
+        const float (*previous_cam() const)[3] { return s.previous_cam_valid_ ? s.previous_cam_ : nullptr; }
+
         // ---- sectors (E8, client_core_frame.cpp; design 1.3 steps 1, 9, 26) ----
         // A sector this client enters (the headless --start-sector, the
         // retail checkpoint hook and verb): before the assignment it waits
@@ -812,6 +866,27 @@ namespace bmmo::session {
         // A sector this client enters, as an input: stamped for `due`, sent,
         // and handed to the union (E8).  Once per sector per session.
         void hold_sector(int sector, uint32_t due, const char* why);
+
+        // The frame (E9, client_core_frame.cpp).  The input a navigated
+        // ball had at `tick`, for a re-simulation: the own ball's exact
+        // record (told by the own replica's name, platform
+        // own_replica_name), a remote's relayed frame.
+        bool recorded_input_at(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) const;
+        // The host's world with the core's half of the binding (bind_world).
+        rollback_world world() const { return platform_.bind_world(world_hooks_); }
+        // One step of a legacy blend in flight (post_step step 27).
+        void apply_blend(const std::string& name, bmmo::session::body_corrector& corrector);
+        // What pre_step leaves for post_step: the frame number and tick it
+        // prepared, and the forced own frame of that tick (step 11) with the
+        // entity the host forced.
+        struct frame_scratch {
+            int64_t f = 0;
+            uint32_t tick = 0;
+            bool forced = false;
+            client_core_state::forced_own forced_frame;
+            std::string forced_entity;
+        } frame_;
+        core_world_hooks world_hooks_;
 
         // The snapshot path (E4, client_core_messages.cpp): the resync
         // rebuild, the snapshot rollback, or the legacy ladder.

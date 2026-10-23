@@ -13,6 +13,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,6 +24,43 @@ namespace bmmo::session {
         : platform_(std::move(platform)), caps_(caps) {
         if (const char* missing = missing_platform_operation(platform_, caps_))
             throw std::invalid_argument(std::string("session_client_core: the platform has no ") + missing);
+        // The core's half of the rollback binding (design 2.4; E9: moved
+        // from the headless client's rollback_world()).  Before each
+        // replayed tick's scripts and step: the births deferred into this
+        // replay (apply_event), made at their tick in the world as it stands
+        // then, with the own beam stamped for it among them.
+        world_hooks_.before_replayed_tick = [this](uint32_t tick) { drain_pending_births(tick); };
+        // The mirrors a replayed tick drives: every predicted remote this
+        // world has stepped and driven by then (driven_from: the stamp of
+        // a birth made inside a replay, never a tick before a live make),
+        // with the generation it has now.  A late
+        // birth made by before_replayed_tick is not in the records of the
+        // window it lands in (they were captured while the player was
+        // dead); named here, it is fed its relayed frames from its stamp
+        // and recorded from there, instead of coasting on its spawn
+        // impulse to the live tick and being parked at that record by
+        // every later correction.
+        world_hooks_.replay_remotes = [this](uint32_t tick, std::map<std::string, uint32_t>& out) {
+            for (const auto& [id, remote]: s.remotes_) {
+                if (!remote.physicalized || !remote.navigation || static_cast<int32_t>(remote.driven_from - tick) > 0) continue;
+                const auto generation = s.generations_.find(remote.entity);
+                out[remote.entity] = generation == s.generations_.end() ? 0u : generation->second;
+            }
+        };
+        // Every decision the engine takes about a snapshot, straight into
+        // the box: no log parsing needed to know what this client did.
+        world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };
+        // A moved own birth (late-player design 3.3) is destroyed at the
+        // restore: its birth record is its applied tick's, where the replay
+        // makes it again the server's way (apply_own_lives).
+        world_hooks_.destroy_own_birth = [this](const std::string& entity, uint32_t birth_tick, bool& destroyed) {
+            return destroy_moved_own_birth(entity, birth_tick, destroyed);
+        };
+        world_hooks_.own_body = [this](const std::string& entity) { return entity == s.own_body_entity_; };
+        world_hooks_.mirror = [this](const std::string& entity) {
+            for (const auto& [id, remote]: s.remotes_) if (remote.entity == entity) return true;
+            return false;
+        };
     }
 
     // The headless client's logf wrote the formatted text and a newline; the

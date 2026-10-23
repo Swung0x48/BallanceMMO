@@ -5,16 +5,20 @@
 // so the tests can check what the binding asked of the world and what it
 // reported back.  Nothing here touches a CK type: the core binding compiles
 // without the engine, which is what lets the mod and the tools share it.
+// Step E9 adds the shared bind_session_world (session/session_host_world.hpp,
+// design 2.4 and 5.1): the core's hooks and the host's options in one order.
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #include <session/rollback_binding.hpp>
+#include <session/session_host_world.hpp>
 
 namespace {
     using bmmo::session::bind_rollback_world;
@@ -462,4 +466,170 @@ TEST(RollbackBinding, TheOptionsAreCopiedSoTheWorldOutlivesThem) {
     EXPECT_TRUE(world.nav_poll("ball", true));
     ASSERT_EQ(resumed.size(), 1u);
     EXPECT_EQ(resumed[0], "ball");
+}
+
+namespace {
+    // The binding's backend plus the methods bind_session_world calls (the
+    // mechanism destroy and the birth insert).
+    struct session_backend : fake_backend {
+        bool set_event_log_muted(bool muted, std::string&) {
+            calls.push_back(muted ? "mute" : "unmute");
+            return true;
+        }
+        bool unphysicalize(const char* entity, std::string& error) {
+            calls.push_back(std::string("unphysicalize ") + entity);
+            if (refuse_writes) {
+                error = "no body";
+                return false;
+            }
+            return true;
+        }
+        bool set_body_matrix(const char* entity, const float[16], bool simulated, std::string&) {
+            calls.push_back(std::string("set_body_matrix ") + entity + (simulated ? " simulated" : ""));
+            return true;
+        }
+    };
+
+    bmmo::session::local_birth birth_of(const char* name, float x) {
+        bmmo::session::local_birth b;
+        b.name = name;
+        b.matrix[12] = x;
+        return b;
+    }
+}
+
+// Design 2.4 / 5.1 (E9): bind_session_world composes the core's hooks with
+// the host's options in one order.  Before a replayed tick: the core's
+// births, then the manager activation, then the host's traces (and a
+// script binding's frame after them).  The replayed mirrors and the
+// corrections are the core's.  destroy_body: the core's moved own birth
+// first; the balls, the own body and the mirrors kept; a mechanism
+// destroyed muted, put back from its birth, unmuted, a failure reported.
+// insert_birth only when asked, from the tick's own birth; the birth log
+// behind birth_tick_of and birth_order; --park-births installs no destroy.
+TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
+    session_backend backend;
+    std::vector<std::string> order;
+    bmmo::session::core_world_hooks hooks;
+    hooks.before_replayed_tick = [&](uint32_t tick) { order.push_back("core births " + std::to_string(tick)); };
+    hooks.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) { out["Ball_Wood_BMMO_4"] = tick; };
+    hooks.on_correction = [&](const bmmo::session::rollback_correction& c) { order.push_back("correction " + c.entity); };
+    hooks.destroy_own_birth = [&](const std::string& entity, uint32_t, bool& destroyed) {
+        if (entity != "Own_Moved") return false;
+        destroyed = false;
+        return true;
+    };
+    hooks.own_body = [](const std::string& entity) { return entity == "Own_Body"; };
+    hooks.mirror = [](const std::string& entity) { return entity == "Mirror_Box"; };
+    bmmo::session::local_birth_log births;
+    births.add(120, birth_of("P_Box", 1.0f));
+    births.add(120, birth_of("P_Plank", 2.0f));
+    births.add(122, birth_of("P_Box", 3.0f));
+    bmmo::session::session_world_options w;
+    w.replay_activation = [&](uint32_t tick) { order.push_back("activation " + std::to_string(tick)); };
+    w.before_replayed_tick = [&](uint32_t tick) { order.push_back("host traces " + std::to_string(tick)); };
+    w.births = &births;
+    w.insert_births = true;
+    w.put_back = [&](const std::string& entity, const bmmo::session::local_birth& birth) {
+        order.push_back("put back " + entity + " " + std::to_string(static_cast<int>(birth.matrix[12])));
+    };
+    w.on_own_destroy_failed = [&](const std::string& entity) { order.push_back("own destroy failed " + entity); };
+    w.on_destroy_failed = [&](const std::string& entity, const std::string& error) {
+        order.push_back("destroy failed " + entity + ": " + error);
+    };
+    w.bind_scripts = [&](rollback_world& world) {
+        order.push_back("scripts bound");
+        const auto before = world.pre_step;
+        world.pre_step = [&order, before](uint32_t tick) {
+            before(tick);
+            order.push_back("scripts frame " + std::to_string(tick));
+        };
+    };
+    rollback_world world = bmmo::session::bind_session_world(backend, hooks, w);
+    ASSERT_EQ(order, std::vector<std::string>({"scripts bound"})) << "the scripts' part last, at the bind";
+    order.clear();
+    world.pre_step(121);
+    EXPECT_EQ(order, std::vector<std::string>({"core births 121", "activation 121", "host traces 121", "scripts frame 121"}));
+    std::map<std::string, uint32_t> remotes;
+    world.replay_remotes(121, remotes);
+    EXPECT_EQ(remotes.at("Ball_Wood_BMMO_4"), 121u);
+    order.clear();
+    bmmo::session::rollback_correction c;
+    c.entity = "Ball_Wood";
+    world.on_correction(c);
+    EXPECT_EQ(order, std::vector<std::string>({"correction Ball_Wood"}));
+
+    EXPECT_EQ(world.birth_tick_of("P_Box"), 122u);
+    EXPECT_EQ(world.birth_tick_of("P_None"), 0u);
+    EXPECT_EQ(world.birth_order(120), std::vector<std::string>({"P_Box", "P_Plank"}));
+
+    // destroy_body.
+    order.clear();
+    backend.calls.clear();
+    EXPECT_FALSE(world.destroy_body("Own_Moved", 120)) << "the core's branch: not destroyed";
+    EXPECT_FALSE(world.destroy_body("Ball_Wood", 120));
+    EXPECT_FALSE(world.destroy_body("Own_Body", 120));
+    EXPECT_FALSE(world.destroy_body("Mirror_Box", 120));
+    EXPECT_TRUE(backend.calls.empty()) << "nothing taken out";
+    EXPECT_EQ(order, std::vector<std::string>({"own destroy failed Own_Moved"}));
+    order.clear();
+    EXPECT_TRUE(world.destroy_body("P_Box", 120));
+    EXPECT_TRUE(world.destroy_body("P_Plank", 0)) << "tick 0: the latest birth";
+    EXPECT_TRUE(world.destroy_body("P_Box", 121)) << "no birth at 121: the latest";
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"mute", "unphysicalize P_Box", "unmute", "mute",
+                                                       "unphysicalize P_Plank", "unmute", "mute", "unphysicalize P_Box",
+                                                       "unmute"}));
+    EXPECT_EQ(order, std::vector<std::string>({"put back P_Box 1", "put back P_Plank 2", "put back P_Box 3"}));
+    order.clear();
+    backend.refuse_writes = true;
+    EXPECT_FALSE(world.destroy_body("P_Box", 120));
+    EXPECT_EQ(order, std::vector<std::string>({"destroy failed P_Box: no body"}));
+    backend.refuse_writes = false;
+
+    // insert_birth: the tick's own birth only; the balls and the own body never.
+    backend.calls.clear();
+    EXPECT_TRUE(world.insert_birth("P_Box", 122));
+    EXPECT_FALSE(world.insert_birth("P_Box", 121));
+    EXPECT_FALSE(world.insert_birth("Ball_Wood", 122));
+    EXPECT_FALSE(world.insert_birth("Own_Body", 122));
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"set_body_matrix P_Box simulated"}));
+
+    // --park-births: no destroy; without --insert-births: no insert.
+    bmmo::session::session_world_options parked;
+    parked.park_births = true;
+    rollback_world plain = bmmo::session::bind_session_world(backend, hooks, parked);
+    EXPECT_FALSE(plain.destroy_body);
+    EXPECT_FALSE(plain.insert_birth);
+    EXPECT_EQ(plain.birth_tick_of("P_Box"), 0u) << "no birth log";
+    order.clear();
+    plain.pre_step(130);
+    EXPECT_EQ(order, std::vector<std::string>({"core births 130"}));
+}
+
+// The event log's entries in order, the malformed ones skipped, and a
+// recipe line parsed into a birth (design 2.4 parse_event_log /
+// parse_recipe_event); the birth log keeps 4096 ticks.
+TEST(RollbackBinding, EventLogAndRecipeParse) {
+    std::vector<std::string> seen;
+    bmmo::session::parse_event_log("t=1 created P_Box;bad;t=2 deleted P_Box;t=3 recipe P_Box|m=2;t=4",
+                                   [&](const std::string& kind, const std::string& name) { seen.push_back(kind + ":" + name); });
+    EXPECT_EQ(seen, std::vector<std::string>({"created:P_Box", "deleted:P_Box", "recipe:P_Box|m=2"}));
+    bmmo::session::local_birth birth;
+    EXPECT_FALSE(bmmo::session::parse_recipe_event("P_Box|m=2", birth)) << "no matrix";
+    EXPECT_TRUE(bmmo::session::parse_recipe_event(
+        "P_Box|fixed=0|frozen=1|m=2.5|group=G|parent=1|mtx=1,0,0,0,0,1,0,0,0,0,1,0,4,5,6,1|lmtx=1,0,0,0,0,1,0,0,0,0,1,0,7,8,9,1",
+        birth));
+    EXPECT_EQ(birth.name, "P_Box");
+    EXPECT_TRUE(birth.recipe.start_frozen);
+    EXPECT_FLOAT_EQ(birth.recipe.mass, 2.5f);
+    EXPECT_EQ(birth.group, "G");
+    EXPECT_TRUE(birth.has_parent);
+    EXPECT_TRUE(birth.has_local);
+    EXPECT_FLOAT_EQ(birth.matrix[13], 5.0f);
+    EXPECT_FLOAT_EQ(birth.local_matrix[14], 9.0f);
+    bmmo::session::local_birth_log log;
+    log.add(10, std::move(birth));
+    log.add(5000, birth_of("P_Late", 0.0f));
+    EXPECT_EQ(log.find("P_Box", 0), nullptr) << "more than 4096 ticks behind: dropped";
+    ASSERT_NE(log.find("P_Late", 5000), nullptr);
 }

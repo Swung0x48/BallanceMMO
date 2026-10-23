@@ -188,12 +188,12 @@ namespace bmmo::session {
         const uint32_t now = current_tick();
         if (static_cast<int32_t>(event_tick - now) > 0) return;   // not late: nothing to replay
         auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
-            return legacy.recorded_input_at(entity, tick, out);
+            return recorded_input_at(entity, tick, out);
         };
         const std::string reason = "ball of " + std::to_string(player) + " born at tick "
                                  + std::to_string(event_tick);
         const scope_guard keep_cells = platform_.keep_live_cells(*this);
-        if (s.rollback_.rewind_to(platform_.bind_world(), event_tick - 1, now, input_at, reason)) {
+        if (s.rollback_.rewind_to(world(), event_tick - 1, now, input_at, reason)) {
             ++s.life_rewinds_;
             s.life_rewind_depth_ += now - (event_tick - 1);
             drop_carried_own_replay(event_tick - 1, false);
@@ -647,7 +647,7 @@ namespace bmmo::session {
     // every replay that crosses it, and the generation is bumped here, at
     // the request, as the in-place branch below does.
     void session_client_core::beam_own_ball(uint32_t tick) {
-        const std::string name = legacy.own_ball();
+        const std::string name = platform_.own_ball().entity;
         if (name.empty() || !s.own_physicalized_) {
             logf("--beam at tick %u: no own body to beam", tick);
             return;
@@ -1355,10 +1355,10 @@ namespace bmmo::session {
             s.own_body_entity_.clear();
         }
         auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
-            return legacy.recorded_input_at(entity, tick, out);
+            return recorded_input_at(entity, tick, out);
         };
         const scope_guard keep_cells = platform_.keep_live_cells(*this);
-        if (!s.rollback_.rewind_to(platform_.bind_world(), anchor, now, input_at, reason)) {
+        if (!s.rollback_.rewind_to(world(), anchor, now, input_at, reason)) {
             // The body set put back the way the server has it, then the
             // resync (a refusal leaves the world at the live tick).
             resync_own_life(life, made, applied, "the rewind to " + std::to_string(anchor) + " was refused");
