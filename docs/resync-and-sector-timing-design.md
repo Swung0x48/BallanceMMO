@@ -100,16 +100,17 @@ in the client's new numbering at all.
 
 | run | client | base | S | B at apply | B - S |
 |---|---|---|---|---|---|
-| core_ref_e0/resync_snapoff | c2 | 1572 | 1555 | 1572 | 17 |
-| core_ref_e0/resync_snapoff | c0 | 2821 | 2794 | 2821 | 27 |
-| core_ref_e0/a5u_lead (lead on) | c2 | 2737 | 2695 | 2737 | 42 |
+| core_ref_e0_pre_q/resync_snapoff | c2 | 1572 | 1555 | 1572 | 17 |
+| core_ref_e0_pre_q/resync_snapoff | c0 | 2821 | 2794 | 2821 | 27 |
+| core_ref_e0_pre_q/a5u_lead (lead on) | c2 | 2737 | 2695 | 2737 | 42 |
 | r1_c_on1 (retail, L11) | c2 | 1527 | 1499 | ~1527 | 28 |
 | r2_x_t1_b (retail, L11) | c1, c2 | 524 | 496 | ~524 | 28 |
 
 The snapshot arrives with the assignment, so B is about `base` and B - S is
 about L.
 
-**Measured Δ.** All six resyncs of the arena references are "tick schedule
+**Measured Δ.** All six resyncs of the arena references (the E0 set,
+`core_ref_e0_pre_q/`) are "tick schedule
 rebased" resyncs after a stall, and all have Δ < 0: about -18 to -49 (the
 last tick logged before `resynced: tick base`, an estimate;
 `scratchpad/design/track3/resync_delta.txt`). `r2_x_t1_b`'s old numbering
@@ -132,7 +133,8 @@ calls `sectors_.stamp()` for every remote Sector event, late or not.
 - No rewind is made. A late Physicalize or Unphysicalize, by contrast, gets
   one (client_core_lifecycle.cpp:183-207).
 
-**Measured, core_ref_e0/a5u_lead:**
+**Measured, core_ref_e0_pre_q/a5u_lead** (the E0 set; the REF set's
+numbers are in the As built (step REF) note under §7.5):
 
 - The server logs `sector +4 at tick 1714 (player 2518006732, stamped 1714)`
   (server.log:203).
@@ -143,7 +145,7 @@ calls `sectors_.stamp()` for every remote Sector event, late or not.
   the rest of the session. Audit #5 measured the result as Schaukel 2.873 m,
   P_Modul_03 1.36 m and PE_Balloon up to 6.8 m.
 
-**A late stamp that changes nothing.** In core_ref_e0/resync_snapoff,
+**A late stamp that changes nothing.** In core_ref_e0_pre_q/resync_snapoff,
 clients 0, 1 and 3 log a late stamp for sector 4 at 1813. Sector 4 was
 already requested from another player's stamp at 1810, so the union
 inserted nothing (sector_union.hpp:70-73). The rule in §2.7 keeps that case
@@ -1315,9 +1317,10 @@ The tooling comes first (step T0):
   with client 2 as control vs clients 0, 1 and 3, and with `--from 1714`).
   `--exclude PE_Balloon` removes exactly the 17 PE_Balloon rows.
 - **The capture used.** On 2026-10-24 the re-record moved the E0 set to
-  `maps/arena-test/core_ref_e0_pre_q/`. `core_ref_e0/` now holds the
-  partial re-record (`solo`, `swing_snapon`, `cov_e9`, `pins.json`). The a5u_lead journals there
-  match the README's sha256 (client0 `db6722d1…`, client2 `83bb3777…`).
+  `maps/arena-test/core_ref_e0_pre_q/`, and T0's numbers here are that
+  set's: its a5u_lead journals match its README's sha256 (client0
+  `db6722d1…`, client2 `83bb3777…`). `core_ref_e0/` was re-recorded
+  afterwards (As built (step REF) under §7.5).
 - **With the options** (`--from 1714 --prefix P --exclude PE_Balloon`):
   - clients 0, 1 and 3 first diverge at 1728, on P_Modul_08_Schaukel by
     0.25 m;
@@ -1808,16 +1811,21 @@ the evidence for each in §1.1 and §1.2:
 
 | capture | B1 result | why |
 |---|---|---|
-| swing_snapon/client0-3 | byte-identical | no late stamp, no resync (logs) |
-| a6m_snapoff/client0-3 | byte-identical | the same |
-| resync_snapoff/client0, client1, client3 | byte-identical | their late stamp for sector 4 at 1813 is redundant (1810 already); each one's resync is A3's business |
-| resync_snapoff/client2 | byte-identical | resync only |
-| a5u_lead/client2 | byte-identical | the stamping client; its two resyncs are A3's |
-| **a5u_lead/client0, client1, client3** | **change** | sector 4 at 1714 instead of 1723: one Sector rewind; the TICK records differ from 1714 on |
+| swing_snapon/client1-3 | byte-identical | no late stamp, no resync (logs) |
+| swing_snapon/client0 | byte-identical | no late stamp; its one resync (own beam pair moved 701 -> 704, at 724) is A3's business |
+| a6m_snapoff/client0-3 | byte-identical | no late stamp, no resync; c2's moved own Physicalize is not a Sector event |
+| resync_snapoff/client3 | byte-identical | its late stamp for sector 4 at 1813 is redundant (1800 already); its resync is A3's business |
+| resync_snapoff/client0, client1, client2 | byte-identical | no late stamp; resync only |
+| a5u_lead/client2 | byte-identical | the stamping client; its late stamp for sector 4 at 1798 is redundant (1713 already); its two resyncs are A3's |
+| **a5u_lead/client0, client1, client3** | **change** | sector 4 at 1713 instead of 1722: one Sector rewind; the TICK records differ from 1713 on |
+
+(Re-derived at step REF against the re-recorded set; the E0 set's version
+of this table had sector 4 at 1714/1723, the redundant resync_snapoff stamps
+on c0, c1 and c3 against 1810, and no resync in swing_snapon.)
 
 A capture with a MOVED own Sector echo would also change; the 16 have none
 (no `own Sector ... moved` line in their logs), which T0 confirms with a
-grep.
+grep (the REF set too).
 
 After A3 (protocol 10):
 
@@ -1830,6 +1838,66 @@ After A3 (protocol 10):
   resync_snapoff (each client resynced: c2 at 1500, c0 at 2781, c1 at 2779,
   c3 at 3003) and a5u_lead/client2 (two resyncs). The three a5u journals
   above are already changed by B1.
+- In the REF set (below) the same journals resync (resync_snapoff: c2 at
+  1500, c1 at 1815, c0 at 1833, c3 at 1835; a5u_lead/client2 at 2655 and
+  3083), and swing_snapon/client0 resyncs once (an own-birth resync at 724),
+  so A3 would change those six.
+
+**As built (step REF, 2026-10-24): the reference set was re-recorded.**
+
+- **Why.** Steps Q, RR and LB changed what a replay of the E0 captures
+  produces, so they no longer matched any current binary (the session-core
+  design's As built (step Q) note). The E0 set is kept unchanged in
+  `maps/arena-test/core_ref_e0_pre_q/`. **Every citation of `core_ref_e0/`
+  numbers dated before 2026-10-24 refers to that set** (here §1.1, §1.2 and
+  T0 now say so; the audits' too).
+- **What.** `maps/arena-test/core_ref_e0/` holds a fresh set recorded with
+  HEAD 765267c (A2): the four 4-client arms (swing_snapon, a6m_snapoff,
+  resync_snapoff, a5u_lead) with the E0 README's harness arguments,
+  `--capture-inbound` and `--trace-sends` on every client, under the cpu
+  sampler; the 4 server journals; the solo snapshots-off baseline `old1`
+  and its twin `old2`; `pins.json` (58 files, identical to the E0 pins).
+  `cov_e9/` stays (rollback-engine-gaps cites it).
+- **Binaries.** Client: the slim copy `build-agent-rA2` (A2's code; its
+  journal header carries the stale engine id
+  `ballanced-3e4289e95f25+bmmo-bf3fa76b43d4`). Server: the Arch WSL build of
+  765267c, `ballanced-3e4289e95f25+bmmo-765267c59e28-dirty`, map.hpp
+  unmodified; the Arch GCC syntax check passed 25/25.
+- **Verified.** old1 and old2 `RESULT: IDENTICAL` (2406 common ticks, 0
+  differ: the determinism precondition). The 16 captures replay to journals
+  byte-identical to the live ones except the build id
+  (`BYTE-IDENTICAL-EXCEPT-BUILD-ID: 16 pairs`); `wire_check.sh - rA2`
+  compares the replays' sends with the live send traces: 16/16 SAME, 16/16
+  journals IDENTICAL, `WIRE-CHECK: ALL SAME`. The 4 server journals and the
+  two solo server journals replay in SimTool with 0 checkpoint mismatches
+  (swing 3912/3912, a6m 3985/3985, resync 4160/4160, a5u 3904/3904 ticks).
+- **The facts a gate judges against** (the logs; the README has the table):
+  - swing_snapon: sectors +4 62, +2 1671, +3 2117 everywhere, no late
+    stamp. **New:** c0's own beam pair (stamped 701) reached the server late
+    at 10 % loss and was applied at 704; a moved own pair resyncs by design
+    (`client_core_lifecycle.cpp:1226`, `:1244`, plan step 22), at 724 from
+    the full snapshot of 725. The harness verdict is FAIL for that resync
+    (the E0 run drew no moved pair); the capture is exact and adds resync
+    coverage to the snapshots-on arm.
+  - a6m_snapoff: sectors 784, 1230, 1673 everywhere; c2's held Physicalize
+    moved 2482 -> 2501; no resync; verdict PASS.
+  - resync_snapoff: sector 4 at 1800 on the server and all four clients (E0:
+    1810); only c3 logs a late, redundant stamp (1813); one rebase and one
+    resync per client (above).
+  - a5u_lead: the server and c2 start sector 4 at 1713; c0, c1 and c3 get
+    the stamp late and start it at 1722 (E0: 1714 / 1723): the same 9-tick
+    phase shift §1.2 describes. c2: lead +15 acknowledged at 1784, two
+    resyncs, three rebases.
+  - First rewinds anchored at 220 (a6m) or 230 (the others) on every
+    client, as in the E0 set; the moved-own-Sector grep finds 0.
+- **The tools** live in `.local-tools/` (untracked): `e0_run.sh` and
+  `e0_solo.sh` default to `build-agent-rA2`; `wire_check.sh` points at
+  `core_ref_e0` again, creates `<label>/replay/` itself (a fresh set has
+  none), and its `-` form without OLDDIR compares against the live
+  `client<i>.send`; `e0_run.sh` refuses an empty label and an existing
+  capture unless `FORCE=1`. The set's README (`core_ref_e0/README.md`, also
+  untracked, as the data is) has the commands, the per-capture facts and
+  the 18 journals' sha256 (e.g. a5u_lead/client0 `d529ad28…`).
 
 ### 7.6 Server
 
@@ -1846,7 +1914,7 @@ reported as symptom, cause and options (principle d).
 
 | # | step | files | checks that close it |
 |---|---|---|---|
-| T0 | Tools | `scripts/first_divergence.py`, `scripts/worst_bodies.py` (`--from`, `--exclude`); after step P lands | both run on core_ref_e0/a5u_lead and give today's numbers with the options off; the moved-own-Sector grep of §7.5 |
+| T0 | Tools | `scripts/first_divergence.py`, `scripts/worst_bodies.py` (`--from`, `--exclude`); after step P lands | both run on core_ref_e0_pre_q/a5u_lead (then core_ref_e0/a5u_lead) and give today's numbers with the options off; the moved-own-Sector grep of §7.5 |
 | B1 | Union as rollback state; late Sector rewind; moved own Sector | `sector_union.hpp`; core (stamp log, `union_records_`, `pass_log_`, §2.7, §2.8, `last_rewind_rederived`, the cell re-read); `client_platform.hpp` (`set_union_pass`, `sector_cell_adopted`); `session_host_support.hpp` (two slots, `set_pass`, `forget_pass`, guard adopt mode); H and RC ops; `sim_tool.cpp --late-sector-check` | §7.1 union, core and host-support tests; §7.2 `--late-sector-check` exact; §7.5 B1 table; §7.3 a5u_lead ×3; regression arms in band; retail B1 check |
 | A1 | Portable script record | `script_replay.hpp` (`capture_portable`, `localize`, registry entries by name); keep-local scripts in `session_script_activations`; `sim_tool.cpp --portable-scripts-check` | §7.2 on L1-L12 and the arena, bytes identical, the unportable and registry lists explained; L11 size logged; the balloon activation check (Q8 settled) |
 | A2 | Resync fidelity offline | `sim_tool.cpp --resync-check` | arm E exact; arm A as specified; arms R and S ≤ 1 mm for Pusher001, the sack and the arm-S bodies (else Q1 is decided before A3) |

@@ -960,7 +960,9 @@ text above:
   same and the clock is the captured one. The captures, journals, drive
   records, a README with the commands and the tools (`e0_replay.py`,
   `e0_compare.py`, `e0_replay_all.sh`, `e0_logfmt.py`) are in
-  `maps/arena-test/core_ref_e0/`. "Old" for the later E steps is the E0
+  `maps/arena-test/core_ref_e0/` (since step REF, 2026-10-24, that set is in
+  `core_ref_e0_pre_q/`, with its tools; `core_ref_e0/` holds the re-record).
+  "Old" for the later E steps is the E0
   binary: it carries the capture. A moved clock read must keep its site
   and its place in the order.
 - **(2) cannot be byte-identical outside `build_id`, `utc_ms` and `ms`,
@@ -5454,7 +5456,10 @@ anchor.
     recorded on HEAD's phase: from this step on `wire_check.sh` reports
     DIFFERENCES for any binary that contains Q, so a new reference set must be
     recorded with the Q binaries (as `core_ref_e0/README.md` describes) before
-    a later step can use the wire check as a gate.
+    a later step can use the wire check as a gate. (Done at step REF,
+    2026-10-24, with HEAD 765267c: the E0 set moved to `core_ref_e0_pre_q/`,
+    the new one is in `core_ref_e0/`; see the As built (step REF) note in
+    resync-and-sector-timing-design.md §7.5.)
 
 **As built (step RR): a snapshot row applied at tick t is written again
 after t's step in every later replay that crosses t.** The gap step P's gate
