@@ -2801,6 +2801,137 @@ state: the pre-existing owner-only gap (audit #2), not a new one.
   well before it (above), and the margin samples move by a tick or two
   (11-15); revisit with step 12, which makes the reach per client.
 
+**As built (step T1, 2026-10-24).**
+
+- **What changed (SimTool only).** `--replay-session` of a client journal
+  restores every RESYNC record whose outcome is applied (or applied with the
+  scripts refused) at its tick S: after the replay has stepped S as before,
+  it compares its own world with the state ("before the restore": the blob
+  past its 16-byte header - magic, version and the capturing environment's
+  identity - and the rows of the RECEIVED|FULL|RESYNC checkpoint), then
+  makes the world S's - the balls (a rowed player not physicalized is made
+  from its last birth the replay applied, at the row, no spawn kick; one
+  with no row is unphysicalized), the server's portable record localized
+  against the replay's own v2 with no script kept local and restored with
+  `replay_activation` (restored-active scripts re-registered with the
+  behaviour manager), the server's blob as a travelling one (nothing
+  excluded; a clone renamed only where this world's CK name is not the
+  blob's), rows written only where the restored body differs (a body the
+  blob did not know; unknown unrowed bodies rechecked), and the world's
+  counters (tick S + 1, the RNG cursors as the blob left the generators, the
+  callback not pending, the server's union) - and goes on from S + 1 with
+  the journal's records. The RESYNC checkpoint is compared after the
+  restore (it checks the restore). A hole in the numbering within 256 ticks
+  before a state's S is that resync's renumbering and does not stop the
+  replay. `--list` prints the record (it stopped at it before: tag 8 was not
+  in its switch, "record N (tag 8) does not parse", the rest of the file
+  dropped). `--ignore-resync` is the pre-T1 replay for an A/B. Journals
+  with RESYNC records get one more line, `resync summary: ...`; the summary
+  line itself is unchanged, so it still compares across builds.
+- **Adapted: the reconcile is the server world's, and partly counted.** The
+  replay's world is a server world (`physics_world`), so the client's
+  reconcile (2.6.3: births destroyed, mirrors re-made, keep-local kept) does
+  not apply: nothing is keep-local and the blob carries everything. The
+  balls are reconciled as above; a mechanism body the server has at S and
+  the replay does not (a module the replay never physicalized), or the other
+  way round, is counted and named, and the replay then says it is not the
+  server's world after S - it cannot be made at S. Every journal below had
+  0 of both, the late joiner included.
+- **Adapted: what the record does not carry stays the replay's.** The
+  journal record (5) has the union, the scripts and the blob; the wire's
+  `SessionResyncState` also has every player's navigation (keys held, force
+  controllers made by the press camera), the clone names and the packed
+  sizes. The navigation stays the replay's own, which is the server's when
+  the replay had the inputs before S; no format change (the step names
+  none, and the wire check compares the clients' journals byte for byte).
+  The clone names are read from the blob (`object` lines with `_BMMO_`).
+  One accessor is added for the rows' ball entities,
+  `physics_world::player_ball_entity` (read only).
+- **Verified (quick tier).** `BallanceMMOMessageTests` 471/471; GCC syntax
+  26/26; the wire check `rB2 -> rT1` ALL SAME (24/24 sends, 24/24
+  journals identical). The step's check, `core_ref_r3/resync_snapoff`
+  client 2 (S 1571, Δ -50, D 12), `--continue-after-jump
+  --write-journal`, the written journal's TICK records against
+  `server.bmjr`'s: before the restore the replay differs only in the IVP
+  clock, one tick ahead (below), rows 27/27 equal; from S on the world hash
+  and pose equal the server's at every tick 1571..3553 (1983 ticks), the 13
+  received checkpoints after S 0 mismatches, rc 0. 3554..3570 differ: the
+  journal's last relayed frames are for 3544 (its horizon, the relay lag).
+  With `--ignore-resync` 0 of those 2000 ticks are identical (the clock
+  offset stays). A journal without a RESYNC record replays as before:
+  stdout of rB2 and rT1 identical on `a6m_snapoff` client 0 (with and
+  without `--continue-after-jump`, and `--list`), `swing_snapon` client 1
+  and `a6m_snapoff/server.bmjr` (4204/4204 matched). Further journals, hash
+  and pose equal to the server's from S: `a5u_lead` c2 2733..3560 (two
+  records; before the second, 3232, the replay's blob is IDENTICAL past the
+  header and 56/56 rows equal - the replay ran the server's world from the
+  first record), `resync_snapoff` c3 1884..3596 (to the end), c0 2229..3514,
+  c1 2226..3542, `resync_at150` c0 886..3542, `swing_snapon` c3 3249..3534
+  (snapshots on: 114 received snapshots after S, 0 mismatches), and the late
+  joiner `a5_join_1` c3 (S 1636, Δ -1636; before: 20 of 26 rows differ, up
+  to 685 m) 1636..3477, to the end.
+- **Review fix-up: a restore that is not S's is a divergence.** A restore
+  refused, or one that leaves the world not S's - a mechanism only one
+  side has, a rowed ball with no birth or whose (un)physicalize failed, the
+  scripts not restored (refused, not captured or empty), a clone with more
+  than one blob name it could be, an unmapped row, or a row written over a
+  body the blob restored (the blob did not make it the server's row; the
+  write would hide it from the RESYNC checkpoint, which is compared after
+  it) - is printed `RESYNC INCOMPLETE` / `NOT RESTORED`, makes rc 3 and
+  stops `--stop-on-divergence`, as a second record whose blob differs
+  already did. The RESYNC checkpoint of the restored tick is left out of
+  the "after the first restore" counts (it checks the row write). A refused
+  restore that excused a jump in the numbering stops the replay unless
+  `--continue-after-jump` (the jump's old rule). The clone rename is made
+  only with exactly one candidate and never while a rowed ball is unmade.
+  `timed_out` and `no_state` (an applied record without a blob) are counted
+  apart. The tick comparison is `scripts/replay_tick_compare.py SERVER
+  REPLAY --from S --to T` (exit 0 = identical). Re-run on the fix-up build:
+  every journal above restores with 0 of all of these, `resync_snapoff` c2
+  1571..3553 1983/1983 identical (12 received checkpoints after S plus S's
+  own, 0 mismatches, rc 0), `a5u_lead` c2, `resync_snapoff` c3,
+  `resync_at150` c0, `swing_snapon` c3 and `a5_join_1` c3 identical over
+  the ranges above (the last two rc 3 from received checkpoints before
+  their S, as before); the journals without a RESYNC record byte-identical
+  to rB2.
+- **Found, pre-existing, not T1's (queued: `docs/roadmap.md` §4 item 9).**
+  - *The client journal replay's clock is one tick ahead before its first
+    restore.* A client journal opened at the anchor has its founding
+    PLAYER records and start note in group 0; `run_replay_session` steps
+    the world once per group up to the last simulated one, and numbers the
+    world from the first simulated group (27), so group 0 steps an empty
+    tick 27 and group 27 is the world's 28. Positions are unaffected
+    (resync_snapoff c2's 6 received checkpoints before S all agree, with
+    and without T1), the IVP clock is
+    one step ahead, so no TICK hash of a client journal's replay equals the
+    server's before a restore. A restore sets the clock (and the tick) to
+    the server's. Not changed: a journal without a RESYNC record must replay
+    as before.
+  - *An own BodyRevived the server applies late is in the client journal at
+    its stamp.* `resync_at150_down` c0 (2 records, Δ +16 then -18) is exact
+    884..1097 and 1124..1447, then has 16-tick windows of differing hashes
+    (1448..1463, 1556..1571, 1635..1650, ...) and `P_Modul_34_Schiebestein`
+    0.637 mm off from 1917 (13 received checkpoints after S differ by it).
+    c0's own BodyRevived events (stamped 1422, 1556, 1622, 1822, 1923,
+    2022) were applied by the server 16-26 ticks later (1448, 1575, 1638,
+    1838, 1941, ...: its uplink in that recipe), and the server never
+    echoes a BodyRevived to its owner (server.cpp:2046-2050), so the client
+    journal knows only the stamp; the replay wakes the bodies early, they
+    settle on another tick, and the sliding stone settles 0.6 mm apart.
+    Options: (a) the server echoes a moved BodyRevived to its owner and the
+    core journals it without acting on it (a server and core change, the
+    owner's own world is unaffected); (b) SimTool takes those ticks from
+    the server journal when it is given (tool only, needs both files).
+    Before the second record, 1098..1123 differ too: the server substituted
+    c0's own frames 1098-1119 (keys 5; the client's FRESH frames say 1) and
+    the journal has no SUBSTITUTED record for them - the RESYNC record at
+    1124, whose state covers them, is what puts that right. (c0 had fallen
+    behind: the schedule rebased at 1067 and asked for that resync, its
+    FRESH records stop at 1106, its old tick at the apply, and its status
+    counts 0 stale-epoch and 3 base notices - the notices for 1098-1106
+    never reached its old epoch; whether the server sent them is queued
+    with the two above.)
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

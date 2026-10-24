@@ -127,7 +127,26 @@ left. Each design named here has its own document with its step table.
    frame's lifecycle set, or the rewinds' own cost).
 9. Record-format gaps (`record-format-gaps-design.md`): time factor and
    gravity per tick, Level 1 switches the tutorial off (main-branch exit,
-   10-frame delay, every world), the array-read census.
+   10-frame delay, every world), the array-read census. Also three found
+   at T1 (`resync-and-sector-timing-design.md`, As built (step T1)):
+   (a) an own BodyRevived the server applies late is in the client journal
+   only at its stamp - the server never echoes it to its owner
+   (server.cpp:2046-2050), so a client journal's replay wakes the body
+   early (`resync_at150_down` c0 not exact after S); fix: the server echoes
+   a moved BodyRevived to its owner and the core journals it without acting
+   on it; (b) SimTool's client-journal replay runs one IVP tick ahead before
+   its first restore (group 0, the founding PLAYER records, steps an empty
+   tick 27); fix in `run_replay_session` with its own A/B, since every
+   client-journal replay's output changes; (c) the same journal has no
+   SUBSTITUTED record for the owner frames the server substituted at
+   1098-1119 (masked there by the second RESYNC, whose state covers them).
+   Known: the client had fallen behind (the schedule rebased at 1067 and
+   asked for that resync; its FRESH records stop at 1106, its old tick at
+   the apply; SUBSTITUTED ones stop at 1097) and its status counts 0
+   stale-epoch notices and 3 base ones, so the server's notices for
+   1098-1106 never reached its old epoch. Not known: whether the server
+   sent them; establish that, then decide whether a client journal should
+   carry them (a replay is the server's world only from S either way).
 10. **Stage close-out:** four clients, 150 ms, 10 % loss, snapshots off: the
     spawn pile and every mechanism bit-identical to the server at every
     checkpoint. On pass: snapshots off in the deployed configuration and in

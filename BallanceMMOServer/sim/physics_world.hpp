@@ -195,6 +195,9 @@ namespace bmmo::sim {
         bool apply_event(uint32_t id, const lifecycle_event& event, std::string& error);
         bool player_physicalized(uint32_t id) const;
         uint8_t player_ball_type(uint32_t id) const;
+        // The entity of a physicalized player's ball clone ("" otherwise).
+        // Read only (SimTool's --replay-session maps a resync state's rows).
+        std::string player_ball_entity(uint32_t id) const;
         int player_sector(uint32_t id) const;
 
         bool tick(std::string& error);

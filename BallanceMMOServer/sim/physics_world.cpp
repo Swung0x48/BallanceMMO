@@ -796,6 +796,12 @@ namespace bmmo::sim {
         return it != players_.end() ? it->second.ball_type : 0;
     }
 
+    std::string physics_world::player_ball_entity(uint32_t id) const {
+        auto it = players_.find(id);
+        if (it == players_.end() || !it->second.physicalized || !it->second.ball || !it->second.ball->GetName()) return {};
+        return it->second.ball->GetName();
+    }
+
     int physics_world::player_sector(uint32_t id) const {
         auto it = players_.find(id);
         return it != players_.end() ? it->second.sector : 0;

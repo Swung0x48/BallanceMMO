@@ -109,10 +109,16 @@ namespace {
         // --continue-after-jump replays past a hole in the tick numbering
         // (which the replay would otherwise stop at: the world ticks once per
         // journal tick, so past a hole it is simply on the wrong tick).
+        // A client journal's RESYNC record (journal v4, resync design 4.5,
+        // step T1) is restored where it stands - the server's state of tick S
+        // put into the replayed world, which goes on from it - and a hole its
+        // renumbering left is no reason to stop; --ignore-resync replays past
+        // the record as if it were not there (the pre-T1 replay, for an A/B).
         std::string replay_session;
         bool list_journal = false;
         bool stop_on_divergence = false;
         bool continue_after_jump = false;
+        bool ignore_resync = false;
         bool journal_trace = false;
         std::string write_journal;
         int level = 0;
@@ -308,6 +314,7 @@ namespace {
             else if (arg == "--list") out.list_journal = true;
             else if (arg == "--stop-on-divergence") out.stop_on_divergence = true;
             else if (arg == "--continue-after-jump") out.continue_after_jump = true;
+            else if (arg == "--ignore-resync") out.ignore_resync = true;
             else if (arg == "--journal-trace") out.journal_trace = true;
             else if (arg == "--write-journal") { if (!(v = next())) return false; out.write_journal = v; }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
@@ -2424,6 +2431,16 @@ namespace {
         return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "?";
     }
 
+    // A RESYNC record's `outcome` (journal.hpp JOURNAL_RESYNC_*).
+    const char* resync_outcome_name(uint8_t outcome) {
+        switch (outcome) {
+            case bmmo::session::JOURNAL_RESYNC_APPLIED: return "applied";
+            case bmmo::session::JOURNAL_RESYNC_REFUSED_SCRIPTS: return "applied-scripts-refused";
+            case bmmo::session::JOURNAL_RESYNC_TIMED_OUT: return "timed-out";
+            default: return "?";
+        }
+    }
+
     // A header from a machine with a broken clock, or a corrupted one, carries
     // an utc_ms no calendar holds.  Unguarded that kills the whole listing:
     // MSVC's strftime calls the invalid parameter handler on the tm gmtime_s
@@ -2661,6 +2678,30 @@ namespace {
                     ++delivered;
                     return true;
                 }
+                case bmmo::session::journal_tag::resync: {
+                    // Version 4 (resync design 5): the state a client applied
+                    // as tick S.  Its byte strings are sized, not printed.
+                    const uint32_t tick = in.u32();
+                    const uint32_t base = in.u32();
+                    const int32_t delta = static_cast<int32_t>(in.u32());
+                    const uint32_t applied_at = in.u32();
+                    const uint8_t outcome = in.u8();
+                    uint32_t sizes[3] = {};
+                    for (uint32_t& size: sizes) {
+                        size = in.u32();
+                        std::string skipped;
+                        if (!in.ok || !in.bytes(skipped, size)) {
+                            in.ok = false;
+                            break;
+                        }
+                    }
+                    if (!in.ok) break;
+                    seen_tick(tick);
+                    std::printf("tick %-8u resync base=%u delta=%+d applied_at=%u %s union=%u scripts=%u savestate=%u bytes\n",
+                        tick, base, delta, applied_at, resync_outcome_name(outcome), sizes[0], sizes[1], sizes[2]);
+                    ++delivered;
+                    return true;
+                }
                 case bmmo::session::journal_tag::header:
                 default:
                     break;
@@ -2822,6 +2863,386 @@ namespace {
         return diff;
     }
 
+    // ------------------------------------------------------------------
+    // --replay-session through a resync (docs/resync-and-sector-timing-design.md
+    // 4.5 and 5, step T1).  A client journal replays the SERVER's view (its own
+    // frames as sent and substituted, the relayed ones, the events); at a
+    // resync the client renumbered and took the server's state of tick S, and
+    // its RESYNC record carries that state as it was received: the union, the
+    // portable script record and the server's IVP savestate, with the rows in
+    // the RECEIVED|FULL|RESYNC checkpoint of the same tick.  The replay steps
+    // tick S as it stepped every tick before, compares what it has with that
+    // state ("before the restore": the blob and the rows), then makes the
+    // world S's and goes on from S + 1 with the journal's records:
+    //
+    //   structure  the balls: a player the rows have and the world has not
+    //              physicalized is physicalized from its last birth the
+    //              replay applied (at the row's place, no spawn kick: the
+    //              blob sets its state); one the world has and the rows do
+    //              not is unphysicalized.  Mechanism bodies are only counted
+    //              (the server's and not the replay's, and the other way
+    //              round): a module the replay never physicalized cannot be
+    //              made at S, and the replay after S is then not the
+    //              server's world - said, never hidden.
+    //   scripts    the server's record localized against the replay's own v2
+    //              record with NO script kept local (the replay is the
+    //              server's world, the balloon and the trafo included) and
+    //              restored with replay_activation (every script, active or
+    //              not, and the three data cells), the restored-active ones
+    //              re-registered with the behaviour manager (whole world ticks
+    //              follow, not a replay's execute_frame);
+    //   blob       the server's savestate as a travelling one (another
+    //              process's environment), nothing excluded, a clone renamed
+    //              only where this world's CK name differs from the blob's
+    //              and exactly one blob name can be it;
+    //   rows       written only where the restored body differs from its row
+    //              (a body the blob did not know); a live body the blob did
+    //              not know and no row covers is rechecked back in;
+    //   counters   the world's tick := S + 1, its RNG cursors as the blob left
+    //              the generators, the PreSimulate callback not pending, the
+    //              sector union the server's (sector_union::deserialize).
+    //
+    // A restore that is refused, or leaves the world not S's (a body only one
+    // side has, a ball with no birth or whose event failed, the scripts not
+    // restored, an ambiguous clone, a row unmapped, or a row written over a
+    // body the blob restored - which the RESYNC checkpoint, compared after
+    // the write, could not see), is a divergence: rc 3, and
+    // --stop-on-divergence stops there.  A refused restore that excused a
+    // jump in the numbering stops the replay unless --continue-after-jump.
+    //
+    // What the record does not carry stays the replay's own: every player's
+    // navigation (the keys held and the force controllers their press made -
+    // the wire's SessionResyncState has it, the journal record does not), the
+    // players' sectors and the snapshot numbering.  A replay that had every
+    // input before S has those exactly; one that did not (a late joiner's
+    // journal, a relayed frame that never came) may not.
+    // ------------------------------------------------------------------
+    int rc_unregistered_scripts(CKContext* context, const bmmo::game::script_replay::selection& sel, bool fix,
+                                std::string* names);   // defined with --resync-check below
+
+    struct replay_resync_tools {
+        bool ready = false;
+        bmmo::game::script_replay::selection sel;
+        bmmo::game::script_replay_hooks hooks;
+        std::unique_ptr<bmmo::physics::physics_direct> backend;
+        bmmo::session::rollback_world binding;
+
+        void prepare(bmmo::sim::physics_world& world) {
+            if (ready) return;
+            ready = true;
+            CKContext* context = world.engine().context();
+            CKIpionManager* physics = world.physics();
+            sel = bmmo::game::session_script_selection(context);
+            hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
+                bmmo_physics_force_block state{};
+                std::string e;
+                if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
+                out.exists = state.exists != 0;
+                for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+                return true;
+            };
+            hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
+                bmmo_physics_force_block state{};
+                state.exists = in.exists ? 1 : 0;
+                for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+                std::string e;
+                return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
+            };
+            backend = std::make_unique<bmmo::physics::physics_direct>(physics);
+            bmmo::session::rollback_binding_options options;
+            options.delta_ms = bmmo::sim::kFixedDeltaMs;
+            options.savestate = false;   // the blob is restored directly, as a travelling one
+            binding = bmmo::session::bind_rollback_world(*backend, options);
+        }
+    };
+
+    struct replay_resync_result {
+        std::string before_blob;      // the replay's world at S vs the server's blob: "" identical, else the first differences
+        std::string before_blob_ov;   // ... with the overlap tree and the order bookkeeping aside
+        bool have_rows = false;
+        checkpoint_diff before_rows;  // the rows against the replay's world at S, before the restore
+        uint32_t made = 0, unmade = 0, unborn = 0;   // balls physicalized, unphysicalized, rowed with no birth to make
+        uint32_t events_failed = 0;   // a ball the reconcile could not make or unmake
+        std::vector<std::string> missing, extra;     // mechanism bodies: the server's only, the replay's only
+        std::string scripts;          // what became of the script record
+        bool scripts_restored = false;
+        int unregistered = 0;
+        std::string unregistered_names;
+        bmmo::physics::savestate_report blob;
+        std::vector<std::pair<std::string, std::string>> renames;
+        uint32_t renames_ambiguous = 0;   // a clone with more than one blob name it could be: not renamed
+        uint32_t rows_written = 0, rows_equal = 0, rows_unmapped = 0, unknown_rechecked = 0;
+        // Rows written over a body the blob restored: the blob did not make
+        // it the server's row, so the restore itself is wrong there (the
+        // write hides it from the RESYNC checkpoint, which then cannot fail).
+        uint32_t rows_restore_differ = 0;
+        std::string active;           // the union's active sectors after the restore
+
+        // The world after the restore is not the server's world of S.
+        bool incomplete() const {
+            return !missing.empty() || !extra.empty() || unborn != 0 || events_failed != 0 || !scripts_restored
+                || renames_ambiguous != 0 || rows_unmapped != 0 || rows_restore_differ != 0;
+        }
+    };
+
+    // The server's names of the ball clones in a blob: "object <name> ..."
+    // lines of describe_savestate whose name carries the clone tag.
+    std::set<std::string> blob_clone_names(const std::string& blob) {
+        std::set<std::string> out;
+        const std::string text = bmmo::physics::describe_savestate(reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
+        size_t pos = 0;
+        while (pos < text.size()) {
+            const size_t end = text.find('\n', pos);
+            const size_t stop = end == std::string::npos ? text.size() : end;
+            if (text.compare(pos, 7, "object ") == 0) {
+                const size_t space = text.find(' ', pos + 7);
+                const std::string name = text.substr(pos + 7, (space == std::string::npos || space > stop ? stop : space) - pos - 7);
+                if (name.find("_BMMO_") != std::string::npos) out.insert(name);
+            }
+            pos = stop + 1;
+        }
+        return out;
+    }
+
+    // Puts the server's state of tick r.tick into the replayed world (see the
+    // note above).  False when the world could not be made S's; `error` says
+    // why, and whether the world was touched at all (`touched`): a refused
+    // union or blob framing leaves it as it was, a failed script or blob
+    // restore does not.
+    bool restore_replay_resync(bmmo::sim::physics_world& world, replay_resync_tools& tools,
+                               const bmmo::session::journal_resync& r,
+                               const std::vector<bmmo::session::body_state>* rows,
+                               const std::map<uint32_t, bmmo::session::journal_event>& births,
+                               const std::function<void(uint32_t)>& ensure_player, replay_resync_result& result,
+                               bool& touched, std::string& error) {
+        using bmmo::game::script_replay;
+        using bmmo::session::body_kind;
+        touched = false;
+        CKContext* context = world.engine().context();
+        CKIpionManager* physics = world.physics();
+        if (!context || !physics) {
+            error = "no physics manager";
+            return false;
+        }
+        const uint32_t S = r.tick;
+        // Everything that can be refused without touching the world first.
+        bmmo::session::sector_union::state_type server_union;
+        if (r.union_state.empty()
+                || !bmmo::session::sector_union::deserialize(reinterpret_cast<const uint8_t*>(r.union_state.data()),
+                                                             r.union_state.size(), server_union)) {
+            error = "the union state does not read (" + std::to_string(r.union_state.size()) + " bytes)";
+            return false;
+        }
+        const auto* blob = reinterpret_cast<const uint8_t*>(r.savestate.data());
+        std::string e;
+        if (r.savestate.empty() || !bmmo::physics::check_savestate(blob, r.savestate.size(), e)) {
+            error = "the savestate does not read (" + std::to_string(r.savestate.size()) + " bytes" + (e.empty() ? "" : ": " + e) + ")";
+            return false;
+        }
+        tools.prepare(world);
+
+        // Before the restore: the replay's own world at S against the state.
+        std::vector<uint8_t> own;
+        if (bmmo::physics::get_savestate(physics, own, e)) {
+            // Identical past the 16-byte header (magic, format version and
+            // the capturing environment's identity, which is another
+            // process's by definition: x64 and x86 blobs of one world are
+            // identical past it too).
+            constexpr size_t kBlobHeader = 16;
+            const bool same = own.size() == r.savestate.size() && own.size() >= kBlobHeader
+                           && std::memcmp(own.data() + kBlobHeader, blob + kBlobHeader, own.size() - kBlobHeader) == 0;
+            if (!same)
+                result.before_blob = bmmo::physics::diff_savestate(blob, r.savestate.size(), own.data(), own.size(), false, 3, false);
+            if (!result.before_blob.empty())
+                result.before_blob_ov = bmmo::physics::diff_savestate(blob, r.savestate.size(), own.data(), own.size(), true, 3, true);
+        } else {
+            result.before_blob = "the replay's own savestate does not capture: " + e;
+        }
+        std::vector<bmmo::session::body_state> mine;
+        world.snapshot_for_journal(mine);
+        static const std::map<uint32_t, std::string> no_dictionary;
+        if (rows) {
+            result.have_rows = true;
+            result.before_rows = compare_checkpoint(*rows, mine, no_dictionary);
+        }
+
+        touched = true;
+        // The structure: the balls.
+        std::set<uint32_t> ball_rows;
+        std::set<std::string> mechanism_rows;
+        if (rows)
+            for (const auto& row: *rows) {
+                if (row.kind == body_kind::Ball) ball_rows.insert(row.owner);
+                else mechanism_rows.insert(row.name);
+            }
+        if (rows) {
+            for (uint32_t id: world.player_ids()) {
+                if (!world.player_physicalized(id) || ball_rows.count(id)) continue;
+                bmmo::sim::lifecycle_event death;
+                death.type = bmmo::session::event_type::Unphysicalize;
+                death.tick = S;
+                if (world.apply_event(id, death, e)) {
+                    ++result.unmade;
+                } else {
+                    ++result.events_failed;
+                    std::printf("tick %u: resync: unphysicalizing p%u failed: %s\n", S, id, e.c_str());
+                }
+            }
+            for (const auto& row: *rows) {
+                if (row.kind != body_kind::Ball) continue;
+                ensure_player(row.owner);
+                if (!world.has_player(row.owner) || world.player_physicalized(row.owner)) continue;
+                const auto birth = births.find(row.owner);
+                if (birth == births.end()) {
+                    ++result.unborn;
+                    continue;
+                }
+                bmmo::sim::lifecycle_event made = to_lifecycle_event(birth->second);
+                made.flags = static_cast<uint8_t>(made.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
+                for (int k = 0; k < 3; ++k) made.position[k] = static_cast<float>(row.position[k]);
+                made.tick = S;
+                if (world.apply_event(row.owner, made, e)) {
+                    ++result.made;
+                } else {
+                    ++result.events_failed;
+                    std::printf("tick %u: resync: physicalizing p%u failed: %s\n", S, row.owner, e.c_str());
+                }
+            }
+            // The mechanisms are counted, not made (see the note above).
+            std::set<std::string> mine_mechanisms;
+            for (const auto& body: mine)
+                if (body.kind == body_kind::Mechanism) mine_mechanisms.insert(body.name);
+            for (const auto& name: mechanism_rows)
+                if (!mine_mechanisms.count(name)) result.missing.push_back(name);
+            for (const auto& name: mine_mechanisms)
+                if (!mechanism_rows.count(name)) result.extra.push_back(name);
+        }
+
+        // The scripts: the server's record over the replay's own.
+        if (r.scripts.empty()) {
+            result.scripts = "EMPTY, the replay's own kept";
+        } else {
+            std::vector<uint8_t> v2, localized;
+            const std::vector<uint8_t> portable(r.scripts.begin(), r.scripts.end());
+            script_replay::portable_report report;
+            if (!script_replay::capture(context, tools.sel, tools.hooks, v2)) {
+                result.scripts = "the replay's own record does not capture: the replay's own kept";
+            } else if (!script_replay::localize(context, tools.sel, portable, &v2, script_replay::keep_local_fn(), localized, &e,
+                                                &report)) {
+                result.scripts = "REFUSED (" + e + "): the replay's own kept";
+            } else if (!script_replay::restore(context, tools.sel, tools.hooks, localized, &e, nullptr, nullptr, true)) {
+                error = "the script restore failed: " + e;
+                return false;
+            } else {
+                result.scripts_restored = true;
+                result.scripts = "restored (" + std::to_string(portable.size()) + " bytes, unportable "
+                               + std::to_string(report.unportable) + ", " + std::to_string(report.objects_resolved)
+                               + " objects resolved)";
+            }
+            result.unregistered = rc_unregistered_scripts(context, tools.sel, true, &result.unregistered_names);
+        }
+
+        // The blob, travelling.  The clones are named alike on every server
+        // world (CK's own name bump included); a rename only where this
+        // world's clone of a rowed player is not among the blob's.  The
+        // journal record has no clone list (the wire's `clones` is not
+        // recorded), so the pairing is a guess, made only where it cannot
+        // pair the wrong two: never with a rowed ball left unmade (its clone
+        // is no candidate's owner here, so its blob name would be free to be
+        // taken by another), and never between two candidates.
+        bmmo::physics::savestate_travel travel;
+        if (result.unborn == 0) {
+            const std::set<std::string> theirs = blob_clone_names(r.savestate);
+            std::set<std::string> ours, taken;
+            for (uint32_t id: ball_rows) {
+                const std::string name = world.player_ball_entity(id);
+                if (!name.empty()) ours.insert(name);
+            }
+            for (uint32_t id: ball_rows) {
+                const std::string name = world.player_ball_entity(id);
+                if (name.empty() || theirs.count(name)) continue;
+                // The same "<ball>_BMMO_" prefix, the lowest suffix at or
+                // above the id that no clone of this world has.
+                const size_t tag = name.rfind("_BMMO_");
+                if (tag == std::string::npos) continue;
+                const std::string prefix = name.substr(0, tag + 6);
+                std::string best;
+                size_t candidates = 0;
+                for (const auto& candidate: theirs) {
+                    if (candidate.compare(0, prefix.size(), prefix) != 0 || ours.count(candidate) || taken.count(candidate)) continue;
+                    const unsigned long long suffix = std::strtoull(candidate.c_str() + prefix.size(), nullptr, 10);
+                    if (suffix < id) continue;
+                    ++candidates;
+                    best = candidate;
+                }
+                if (candidates > 1) {
+                    ++result.renames_ambiguous;
+                    std::printf("tick %u: resync: the clone %s of p%u has %zu blob names it could be: not renamed\n", S,
+                        name.c_str(), id, candidates);
+                    continue;
+                }
+                if (best.empty()) continue;
+                taken.insert(best);
+                travel.renames.emplace_back(best, name);
+            }
+            result.renames = travel.renames;
+        }
+        if (!bmmo::physics::set_savestate(physics, blob, r.savestate.size(), 0u, e, &result.blob, travel)) {
+            error = "the server's savestate was refused: " + e;
+            return false;
+        }
+
+        // The rows: only where the restored body is not its row.
+        std::set<std::string> unknown(result.blob.unknown_bodies.begin(), result.blob.unknown_bodies.end());
+        std::set<std::string> rowed;
+        if (rows) {
+            for (const auto& row: *rows) {
+                const std::string entity = row.kind == body_kind::Ball ? world.player_ball_entity(row.owner) : row.name;
+                bmmo_physics_body_state live{};
+                if (entity.empty() || !tools.binding.get_body(entity, live)) {
+                    ++result.rows_unmapped;
+                    continue;
+                }
+                rowed.insert(entity);
+                bmmo_physics_body_state state{};
+                for (int k = 0; k < 3; ++k) {
+                    state.position[k] = row.position[k];
+                    state.linear[k] = row.linear[k];
+                    state.angular[k] = row.angular[k];
+                }
+                for (int k = 0; k < 4; ++k) state.rotation[k] = row.rotation[k];
+                state.simulated = (row.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
+                if (!unknown.count(entity) && std::memcmp(state.position, live.position, sizeof state.position) == 0
+                        && std::memcmp(state.rotation, live.rotation, sizeof state.rotation) == 0
+                        && std::memcmp(state.linear, live.linear, sizeof state.linear) == 0
+                        && std::memcmp(state.angular, live.angular, sizeof state.angular) == 0
+                        && state.simulated == live.simulated) {
+                    ++result.rows_equal;
+                    continue;
+                }
+                if (!unknown.count(entity)) ++result.rows_restore_differ;
+                if (tools.binding.set_body(entity, state, state.simulated ? bmmo::session::wake_mode::wake
+                                                                           : bmmo::session::wake_mode::freeze, true))
+                    ++result.rows_written;
+            }
+        }
+        for (const auto& name: unknown)
+            if (!rowed.count(name) && tools.binding.recheck_body(name)) ++result.unknown_rechecked;
+
+        // The world's counters: tick S done, the RNG as the blob left it.
+        auto counters = world.capture_step_state();
+        counters.tick = S + 1;
+        counters.rng_cursor = ivp_srand_read();
+        counters.random_cursor = bmmo::physics::random_get_state();
+        counters.callback_pending = false;
+        counters.sectors.restore(server_union);
+        world.restore_step_state(counters);
+        for (int sector: world.active_sectors()) result.active += (result.active.empty() ? "" : ",") + std::to_string(sector);
+        // The restore's own physics events are no tick's.
+        bmmo::physics::drain_event_log(physics);
+        return true;
+    }
+
     int run_replay_session(const arguments& args) {
         // --list streams the file and never builds the in-memory journal: it
         // is the pass that has to work on a 256 MB box fetched from a server.
@@ -2964,6 +3385,38 @@ namespace {
         uint32_t last_written_tick = journal.ticks.front().tick;
         bool have_previous_group = false;
         uint32_t previous_group = 0;
+        // The RESYNC records (step T1): the ticks S whose record carries a
+        // state to restore, the last birth of every player the replay applied
+        // (a ball the state has and the world lacks is made from it), and
+        // what the restores did.
+        std::vector<uint32_t> resync_states;
+        size_t resync_records = 0;
+        for (const auto& group: journal.ticks)
+            for (const auto& r: group.resyncs) {
+                ++resync_records;
+                if (r.outcome != bmmo::session::JOURNAL_RESYNC_TIMED_OUT && !r.savestate.empty()
+                        && (resync_states.empty() || resync_states.back() != group.tick))
+                    resync_states.push_back(group.tick);
+            }
+        const bool restore_resyncs = !args.ignore_resync && !resync_states.empty();
+        // A hole this close before a state's tick is that resync's
+        // renumbering: the state replaces whatever the world steps up to S.
+        constexpr uint32_t kResyncJumpReach = 256;
+        const auto resync_ahead = [&](uint32_t from) -> long long {
+            for (uint32_t s: resync_states)
+                if (s >= from && s - from <= kResyncJumpReach) return static_cast<long long>(s);
+            return -1;
+        };
+        std::map<uint32_t, bmmo::session::journal_event> last_births;
+        replay_resync_tools resync_tools;
+        size_t resyncs_restored = 0, resyncs_refused = 0, resyncs_incomplete = 0, resyncs_timed_out = 0,
+               resyncs_no_state = 0, resync_before_identical = 0, resync_before_differ = 0, checkpoints_after_resync = 0,
+               mismatches_after_resync = 0;
+        long long first_resync = -1, first_resync_failure = -1;
+        // The state tick S that excused a jump in the numbering without
+        // --continue-after-jump: if its restore is refused, the replay stops
+        // there as the jump itself used to stop it.
+        long long jump_excused_by = -1;
         // A player that has records but no PLAYER record of its own (a late
         // join the recording side was never told about).  The join order is a
         // guess - the world falls back to a free slot anyway - and the guess
@@ -3030,11 +3483,16 @@ namespace {
             // under the provisional base 0 and everything after the assignment
             // hundreds of ticks higher, with nothing in between.
             if (have_previous_group && group.tick != previous_group + 1) {
+                const long long resync_at = restore_resyncs && group.tick > previous_group ? resync_ahead(group.tick) : -1;
                 std::printf("warning: the journal jumps from tick %u to tick %u (a late join or a resync restarts the"
                             " numbering); everything after this point is compared against a world that is %lld ticks"
                             " behind\n", previous_group, group.tick,
                     static_cast<long long>(group.tick) - static_cast<long long>(world->tick_index()));
-                if (!args.continue_after_jump) {
+                if (resync_at >= 0) {
+                    std::printf("the jump is a resync's renumbering: the server's state of tick %lld (its RESYNC record)"
+                                " is restored there and the replay goes on from it\n", resync_at);
+                    if (!args.continue_after_jump) jump_excused_by = resync_at;
+                } else if (!args.continue_after_jump) {
                     std::printf("stopping at the jump (--continue-after-jump replays past it anyway)\n");
                     stopped_at_jump = true;
                     break;
@@ -3097,6 +3555,8 @@ namespace {
                     std::printf("tick %u: %s event from p%u failed: %s\n", e.tick, event_type_name(e.type), e.id,
                         error.c_str());
                     if (out.is_open()) out.note(e.tick, "event failed: " + error);
+                } else if (e.type == bmmo::session::event_type::Physicalize) {
+                    last_births[e.id] = e;
                 }
             }
             if (!args.dump_entity.empty()) dump_before = describe_entities(world->engine(), args.dump_entity);
@@ -3112,6 +3572,119 @@ namespace {
             }
             ++simulated;
             last_written_tick = group.tick;
+            // A client's RESYNC record of this tick (step T1): the server's
+            // state of S replaces the world the replay stepped to S, and the
+            // replay goes on from it.  The record's checkpoint (flag RESYNC)
+            // is compared below like every received one - after the restore,
+            // so it checks the restore; the replay's own world before it is
+            // compared here.
+            for (const auto& r: group.resyncs) {
+                if (r.outcome != bmmo::session::JOURNAL_RESYNC_TIMED_OUT && !r.savestate.empty()) continue;
+                if (r.outcome == bmmo::session::JOURNAL_RESYNC_TIMED_OUT) ++resyncs_timed_out;
+                else ++resyncs_no_state;
+                std::printf("tick %u: RESYNC (base %u, delta %+d, at %u) %s: no state to restore\n", group.tick, r.base,
+                    r.delta, r.applied_at, resync_outcome_name(r.outcome));
+            }
+            const bmmo::session::journal_resync* resync_state = nullptr;
+            if (restore_resyncs)
+                for (const auto& r: group.resyncs)
+                    if (r.outcome != bmmo::session::JOURNAL_RESYNC_TIMED_OUT && !r.savestate.empty()) resync_state = &r;
+            // A restore that failed, was left incomplete, or (at a second or
+            // later record) found the replay off the server's state: a
+            // divergence of the replay for the return code and for
+            // --stop-on-divergence.  restored_here: this tick's RESYNC
+            // checkpoint checks the restore that just wrote its rows, so it
+            // is not counted among the checkpoints after the restore.
+            bool resync_bad = false, restored_here = false, stop_at_refused_jump = false;
+            const auto resync_failed = [&](uint32_t tick) {
+                resync_bad = true;
+                if (first_resync_failure < 0) first_resync_failure = static_cast<long long>(tick);
+            };
+            if (resync_state) {
+                const auto& r = *resync_state;
+                const std::vector<bmmo::session::body_state>* rows = nullptr;
+                for (const auto& cp: group.checkpoints)
+                    if (cp.flags & bmmo::session::JOURNAL_CHECKPOINT_RESYNC) rows = &cp.bodies;
+                replay_resync_result rr;
+                bool touched = false;
+                std::string resync_error;
+                const bool ok = restore_replay_resync(*world, resync_tools, r, rows, last_births,
+                    [&](uint32_t id) { ensure_player(id, group.tick); }, rr, touched, resync_error);
+                std::string before = rr.before_blob.empty() ? "blob IDENTICAL (past the header's environment identity)"
+                                                            : "blob differs: " + rr.before_blob;
+                if (!rr.before_blob_ov.empty()) before += " (overlap tree and order aside: " + rr.before_blob_ov + ")";
+                if (rr.have_rows) {
+                    char text[200];
+                    std::snprintf(text, sizeof(text), "; rows: %zu compared, %zu differ, %zu only the server's, %zu only the"
+                                  " replay's", rr.before_rows.compared, rr.before_rows.differing, rr.before_rows.missing,
+                                  rr.before_rows.extra);
+                    before += text;
+                    if (!rr.before_rows.worst_name.empty())
+                        before += ", worst " + rr.before_rows.worst_name + " " + rr.before_rows.worst_detail;
+                } else {
+                    before += "; no rows (no RESYNC checkpoint at this tick)";
+                }
+                std::printf("tick %u: RESYNC (base %u, delta %+d, applied by the client at %u, %s): the replay's world"
+                            " before the restore against the server's state: %s\n", group.tick, r.base, r.delta,
+                    r.applied_at, resync_outcome_name(r.outcome), before.c_str());
+                // Once the replay runs from a restored state, the next state
+                // is a check of it: anything but an identical blob is a
+                // divergence of the replay after the RESYNC record.
+                if (rr.before_blob.empty()) ++resync_before_identical;
+                else ++resync_before_differ;
+                if (resyncs_restored != 0 && !rr.before_blob.empty()) {
+                    ++checkpoint_mismatches;
+                    ++mismatches_after_resync;
+                    if (first_checkpoint_divergence < 0) first_checkpoint_divergence = static_cast<long long>(group.tick);
+                    resync_bad = true;
+                }
+                if (!ok) {
+                    ++resyncs_refused;
+                    resync_failed(group.tick);
+                    std::printf("tick %u: RESYNC NOT RESTORED: %s%s\n", group.tick, resync_error.c_str(),
+                        touched ? "" : " (the replay's world is left as it was)");
+                    if (!touched && jump_excused_by == static_cast<long long>(group.tick)) stop_at_refused_jump = true;
+                    if (touched) {
+                        // Half restored: no tick after this one means anything.
+                        std::fprintf(stderr, "tick %u: the resync restore failed after it changed the world: %s\n",
+                            group.tick, resync_error.c_str());
+                        if (out.is_open()) {
+                            out.note(group.tick, "end: replay stopped: the resync restore of tick "
+                                   + std::to_string(group.tick) + " failed: " + resync_error);
+                            out.close();
+                        }
+                        return 1;
+                    }
+                } else {
+                    ++resyncs_restored;
+                    restored_here = true;
+                    if (first_resync < 0) first_resync = static_cast<long long>(group.tick);
+                    std::string missing, extra, renames;
+                    for (size_t i = 0; i < rr.missing.size() && i < 4; ++i) missing += " " + rr.missing[i];
+                    for (size_t i = 0; i < rr.extra.size() && i < 4; ++i) extra += " " + rr.extra[i];
+                    for (const auto& [from, to]: rr.renames) renames += " " + from + "->" + to;
+                    std::printf("tick %u: RESYNC restored: balls made %u, unmade %u, no birth to make %u; mechanisms only the"
+                                " server's %zu%s, only the replay's %zu%s; scripts %s, %d re-registered%s; blob objects %u"
+                                " cores %u skipped %u unknown %zu renamed %u%s, ambiguous %u; rows written %u (over a"
+                                " body the blob restored %u), equal %u, unmapped %u; unknown rechecked %u; ball events"
+                                " failed %u; union {%s}; world tick %u\n",
+                        group.tick, rr.made, rr.unmade, rr.unborn, rr.missing.size(), missing.c_str(), rr.extra.size(),
+                        extra.c_str(), rr.scripts.c_str(), rr.unregistered, rr.unregistered_names.c_str(), rr.blob.objects,
+                        rr.blob.cores, rr.blob.skipped, rr.blob.unknown_bodies.size(), rr.blob.renamed, renames.c_str(),
+                        rr.renames_ambiguous, rr.rows_written, rr.rows_restore_differ, rr.rows_equal, rr.rows_unmapped,
+                        rr.unknown_rechecked, rr.events_failed, rr.active.c_str(), world->tick_index());
+                    if (rr.incomplete()) {
+                        ++resyncs_incomplete;
+                        resync_failed(group.tick);
+                        std::printf("tick %u: RESYNC INCOMPLETE: the replay's world after the restore is not the server's"
+                                    " state of S (body set, scripts, clone names or restored rows above): the replay after"
+                                    " it is not the server's world\n", group.tick);
+                    }
+                    if (out.is_open())
+                        out.note(group.tick, "resync: the server's state of tick " + std::to_string(group.tick)
+                               + " restored from the client journal's RESYNC record");
+                }
+            }
             bmmo::physics::world_hash actual;
             if (!bmmo::physics::capture_world_hash(world->physics(), actual, error)) {
                 std::fprintf(stderr, "hash failed at tick %u: %s\n", group.tick, error.c_str());
@@ -3174,6 +3747,10 @@ namespace {
                 world->snapshot(true, bodies);
                 const checkpoint_diff diff = compare_checkpoint(cp.bodies, bodies, dictionary);
                 const bool bad = diff.differing != 0 || diff.missing != 0 || (full && diff.extra != 0);
+                if (resyncs_restored != 0 && !(restored_here && (cp.flags & bmmo::session::JOURNAL_CHECKPOINT_RESYNC))) {
+                    ++checkpoints_after_resync;
+                    if (bad) ++mismatches_after_resync;
+                }
                 if (bad) {
                     checkpoint_bad = true;
                     ++checkpoint_mismatches;
@@ -3227,9 +3804,16 @@ namespace {
             }
             // A client journal has no comparable hash at all: its checkpoints
             // are the only divergence there is, so the flag has to see them.
-            if ((!same || checkpoint_bad) && args.stop_on_divergence) {
+            if (stop_at_refused_jump) {
+                std::printf("stopping: the restore of tick %u, which the jump in the numbering was excused by, was refused"
+                            " (--continue-after-jump replays past it anyway)\n", group.tick);
+                stopped_at_jump = true;
+                break;
+            }
+            if ((!same || checkpoint_bad || resync_bad) && args.stop_on_divergence) {
                 std::printf("stopping at the first divergence (tick %u, %s)\n", group.tick,
-                    !same ? (checkpoint_bad ? "the hash and a checkpoint" : "the hash") : "a checkpoint");
+                    !same ? (checkpoint_bad ? "the hash and a checkpoint" : "the hash")
+                          : (checkpoint_bad ? "a checkpoint" : "the resync restore"));
                 break;
             }
             if (args.ticks_explicit && simulated >= static_cast<size_t>(std::max(args.ticks, 0))) {
@@ -3248,6 +3832,16 @@ namespace {
             simulated, matched, first_divergence, checkpoints, checkpoint_mismatches);
         if (stopped_at_jump)
             std::printf("note: the replay stopped at a tick jump; the summary covers only the ticks before it\n");
+        // Only a journal with RESYNC records gets this line: the summary line
+        // above is what tools compare across SimTool builds.
+        if (resync_records != 0)
+            std::printf("resync summary: records=%zu restored=%zu refused=%zu incomplete=%zu timed_out=%zu no_state=%zu%s"
+                        " first_restored=%lld first_failed=%lld before_restore_identical=%zu differ=%zu"
+                        " after_first_restore: checkpoints=%zu mismatches=%zu\n",
+                resync_records, resyncs_restored, resyncs_refused, resyncs_incomplete, resyncs_timed_out,
+                resyncs_no_state, args.ignore_resync ? " (--ignore-resync: none restored)" : "", first_resync,
+                first_resync_failure, resync_before_identical, resync_before_differ, checkpoints_after_resync,
+                mismatches_after_resync);
         if (client_journal)
             std::printf("note: a client journal's own TICK hashes are of its own world; the %zu received snapshots"
                         " are the server's word and are what was compared\n", checkpoints);
@@ -3255,7 +3849,8 @@ namespace {
             std::printf("note: %zu of %zu ticks had no TICK record and were simulated without comparing\n",
                 simulated - compared, simulated);
         std::fflush(stdout);
-        return first_divergence < 0 && first_checkpoint_divergence < 0 && !stopped_at_jump ? 0 : 3;
+        return first_divergence < 0 && first_checkpoint_divergence < 0 && first_resync_failure < 0 && !stopped_at_jump
+            ? 0 : 3;
     }
     // ------------------------------------------------------------------
     // --describe-script NAME: the level loaded, that root script's graph as
@@ -5782,7 +6377,9 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjr> [--list] [--ticks N]\n"
             "           [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]\n"
             "           [--write-journal <out.bmjr>] [--report-every N] [--continue-after-jump]\n"
+            "           [--ignore-resync]\n"
             "           (session black box: replays a room's journal and compares every tick and checkpoint;\n"
+            "            a client journal's RESYNC record puts the server's state of its tick into the replay;\n"
             "            --list prints the file without booting the engine)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
             "           [--drop-at X Y Z] [--drop-height F] [--drop-sector N] [--drop-second-sector N]\n"
