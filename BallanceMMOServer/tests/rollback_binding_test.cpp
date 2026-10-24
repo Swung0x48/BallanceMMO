@@ -736,3 +736,53 @@ TEST(RollbackBinding, EventLogAndRecipeParse) {
     EXPECT_EQ(log.find("P_Box", 0), nullptr) << "more than 4096 ticks behind: dropped";
     ASSERT_NE(log.find("P_Late", 5000), nullptr);
 }
+
+// Host support's two activation slots per tick (resync design 2.8, step B1,
+// session_host_world.hpp activation_slots): a frame's pending activation and
+// a union pass at one tick are both kept and re-issued pending first, then
+// the pass; forget_pass keeps the pending slot; set_pass overwrites the pass.
+TEST(ActivationSlots, PendingThenPassAndForgetKeepsPending) {
+    bmmo::session::activation_slots slots;
+    bmmo::session::manager_activation pending;
+    pending.reset = false;
+    pending.activate = 2;
+    pending.deactivate = 1;
+    bmmo::session::manager_activation pass;
+    pass.reset = true;
+    pass.activate = 4;
+    slots.record_pending(100, pending);
+    slots.set_pass(100, pass);
+    auto due = slots.at(100);
+    ASSERT_EQ(due.size(), 2u);
+    EXPECT_EQ(due[0]->activate, 2);
+    EXPECT_FALSE(due[0]->reset);
+    EXPECT_EQ(due[1]->activate, 4);
+    EXPECT_TRUE(due[1]->reset);
+    // A pass alone, re-set: one entry, the newer.
+    bmmo::session::manager_activation moved = pass;
+    moved.activate = 5;
+    slots.set_pass(101, pass);
+    slots.set_pass(101, moved);
+    due = slots.at(101);
+    ASSERT_EQ(due.size(), 1u);
+    EXPECT_EQ(due[0]->activate, 5);
+    // forget_pass keeps the pending slot; a tick with nothing left goes.
+    EXPECT_TRUE(slots.forget_pass(100));
+    EXPECT_FALSE(slots.forget_pass(100));
+    due = slots.at(100);
+    ASSERT_EQ(due.size(), 1u);
+    EXPECT_EQ(due[0]->activate, 2);
+    EXPECT_TRUE(slots.forget_pass(101));
+    EXPECT_EQ(slots.find(101), nullptr);
+    EXPECT_TRUE(slots.at(102).empty());
+    EXPECT_FALSE(slots.forget_pass(102));
+    // A pending activation alone re-issues as the one slot did.
+    slots.record_pending(103, pending);
+    ASSERT_EQ(slots.at(103).size(), 1u);
+    // The last 4096 ticks.
+    slots.set_pass(10000, pass);
+    EXPECT_TRUE(slots.at(100).empty());
+    EXPECT_EQ(slots.at(10000).size(), 1u);
+    slots.clear();
+    EXPECT_TRUE(slots.at(10000).empty());
+}

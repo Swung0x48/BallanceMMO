@@ -104,6 +104,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(held_header_current)
         BMMO_CORE_STEP(flush_inputs)
         BMMO_CORE_STEP(movable_mechanisms)
+        BMMO_CORE_STEP(rewind_for_sectors)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -324,8 +325,19 @@ namespace {
                 return mechanisms;
             };
             p.note_script_resets = [this](uint32_t tick) { calls.push_back("note_script_resets:" + std::to_string(tick)); };
+            // Step B1's.
+            p.set_union_pass = [this](uint32_t tick, int sector) {
+                calls.push_back("set_union_pass:" + std::to_string(tick) + ":" + std::to_string(sector));
+            };
+            p.sector_cell_adopted = [this](int& cell) {
+                calls.push_back("sector_cell_adopted");
+                cell = adopted_cell;
+                return adopted_read;
+            };
             return p;
         }
+        int adopted_cell = 0;        // what sector_cell_adopted answers (B1)
+        bool adopted_read = true;
     };
 
     TEST(SessionClientCore, ConstructsWithTheRequiredOperations) {
@@ -335,7 +347,7 @@ namespace {
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 35; ++missing) {
+        for (int missing = 0; missing < 37; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
@@ -373,6 +385,8 @@ namespace {
             if (missing == 32) p.own_camera_rows = nullptr;
             if (missing == 33) p.movable_bodies = nullptr;
             if (missing == 34) p.note_script_resets = nullptr;
+            if (missing == 35) p.set_union_pass = nullptr;
+            if (missing == 36) p.sector_cell_adopted = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         // E7: the capture only with the event log's own births; make_own and
@@ -1908,12 +1922,23 @@ namespace {
         size_t from = fake.calls.size();
         steps{core}.drain_due_events(126);
         {
+            // Step B1: the late stamps no record covers (none is recorded
+            // here) are stamped live as before and ask for a resync - sent
+            // once, the request in flight covering the others.
             const std::vector<std::string> expected = {
                 "log:0:remote player 4 entered sector 4, stamped for tick 123 (LATE: the server started it already)",
+                "log:0:late sector stamp for tick 123 is outside the rollback history at local tick 125: stamped live, resync",
+                "now:resync_limiter", "send:0",
+                "log:0:resync requested (a late Sector event beyond the reach) at tick 125",
                 "log:0:remote player 4 entered sector 3, stamped for tick 124 (LATE: the server started it already)",
-                "log:0:remote player 6 entered sector 2, stamped for tick 124 (LATE: the server started it already)"};
+                "log:0:late sector stamp for tick 124 is outside the rollback history at local tick 125: stamped live, resync",
+                "now:resync_limiter",
+                "log:0:remote player 6 entered sector 2, stamped for tick 124 (LATE: the server started it already)",
+                "log:0:late sector stamp for tick 124 is outside the rollback history at local tick 125: stamped live, resync",
+                "now:resync_limiter"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
+        EXPECT_EQ(state_of(core).sector_rewinds_missed_, 3u);
         ASSERT_EQ(state_of(core).pending_events_.size(), 1u);
         EXPECT_EQ(state_of(core).pending_events_[0].tick, 127u);
         ASSERT_EQ(state_of(core).held_lifecycle_.size(), 2u);
@@ -4271,6 +4296,374 @@ namespace {
         EXPECT_TRUE(core.is_ball("Ball_Paper")) << "the current own ball, bodiless";
         fake.mechanisms = {"Ball_Paper", "P_Box"};
         EXPECT_EQ(steps{core}.movable_mechanisms(), std::vector<std::string>({"P_Box"}));
+    }
+
+    // ------------------------------------------------ step B1: the union
+    // Resync design 2.5, 2.7, 2.8 and 7.1: the union as rollback state, a
+    // late remote Sector stamp or a moved own one re-derived inside one
+    // rewind to the lowest stamp - 1, and the cell re-read after it.
+
+    // A world the engine records, rewinds and replays: no tracked body,
+    // every step taken, each replayed tick named in the call list and run
+    // through the core's before_replayed_tick (the re-derivation), the
+    // core's birth_moved handed on; `frozen` stops its clock (a restore
+    // then replays nothing).
+    session_platform b1_platform(flow_fake& fake, std::shared_ptr<bool> frozen) {
+        session_platform platform = fake.make_flow();
+        platform.bind_world = [&fake, frozen](const bmmo::session::core_world_hooks& hooks) {
+            fake.calls.push_back("bind_world");
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.step = []() { return true; };
+            world.simulating = [frozen]() { return !*frozen; };
+            const auto before = hooks.before_replayed_tick;
+            world.pre_step = [&fake, before](uint32_t tick) {
+                fake.calls.push_back("replayed:" + std::to_string(tick));
+                if (before) before(tick);
+            };
+            world.birth_moved = hooks.birth_moved;
+            return world;
+        };
+        return platform;
+    }
+
+    // The live frames of ticks [from, to] as pre_step and post_step make
+    // them for the sectors: `before` (the messages before the frame), the
+    // drain, the own echoes, the Sector rewind, the union's pass, then the
+    // rollback record and the union record of the tick.
+    void b1_frames(session_client_core& core, uint32_t from, uint32_t to,
+                   const std::function<void(uint32_t tick)>& before = nullptr) {
+        auto& s = state_of(core);
+        for (uint32_t t = from; t <= to; ++t) {
+            s.frames_since_anchor_ = static_cast<int64_t>(t - s.tick_base_);   // current = t - 1
+            if (before) before(t);
+            steps{core}.drain_due_events(t);
+            steps{core}.process_own_echoes();
+            steps{core}.rewind_for_sectors();
+            steps{core}.sector_union_pass(t);
+            s.frames_since_anchor_ = static_cast<int64_t>(t - s.tick_base_ + 1);   // current = t
+            s.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), t,
+                               bmmo::session::rollback_tracked{}, {});
+            s.union_records_[t] = s.sectors_.state();
+        }
+    }
+
+    // Anchored, assigned at 120 (the own id 3, lead 7), frames 120..to.
+    void b1_session(session_client_core& core, flow_fake& fake, uint32_t to) {
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        b1_frames(core, 120, to);
+        ASSERT_EQ(core.current_tick(), to);
+    }
+
+    size_t b1_count(const std::vector<std::string>& calls, const std::string& prefix) {
+        return static_cast<size_t>(std::count_if(calls.begin(), calls.end(),
+                                                 [&](const std::string& c) { return c.rfind(prefix, 0) == 0; }));
+    }
+
+    // A late remote Sector inside the reach: nothing at the drain but the
+    // late set; the frame's rewind goes to stamp - 1 once, the replayed
+    // stamp tick records the re-derived pass before that tick's re-issue,
+    // the cells are adopted and the cell re-read, the line logged; no live
+    // pass at the arrival tick, the replayed pass's cell is no crossing of
+    // ours, and a real crossing afterwards is.
+    TEST(SessionClientCoreSectorRewind, ALateRemoteStampRewindsOnceAndReDerivesThePass) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_event(sector_message(4, 3, 122, 122));
+        fake.adopted_cell = 3;
+        size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "the late set only";
+        ASSERT_EQ(state_of(core).sector_late_.size(), 1u);
+        EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 0u) << "not stamped live";
+        steps{core}.rewind_for_sectors();
+        {
+            const std::vector<std::string> expected = {
+                "keep_live_cells:enter:125", "bind_world",
+                "replayed:122", "sector_manager_active:off", "set_union_pass:122:3",
+                "log:0:sector +3 at tick 122 (player 4, stamped 122), running: 1 3 (re-derived in a rewind at live tick 125)",
+                "replayed:123", "sector_manager_active:off",
+                "replayed:124", "sector_manager_active:off",
+                "replayed:125", "sector_manager_active:off",
+                "keep_live_cells:exit:rolled back", "sector_cell_adopted",
+                "log:0:remote player 4 entered sector 3, stamped for tick 122 (late by 4: rewound to 121)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(core.sector_rewinds(), 1u);
+        EXPECT_EQ(core.rollback_stats().rewinds, 1u);
+        EXPECT_FALSE(core.last_rewind_rederived()) << "only while the rewind's guard ends";
+        EXPECT_EQ(state_of(core).sectors_.active(), std::set<int>({1, 3}));
+        EXPECT_EQ(state_of(core).sector_cell_, 3);
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{122, 3}}));
+        EXPECT_EQ(state_of(core).union_records_.at(121).active, std::set<int>({1}));
+        EXPECT_EQ(state_of(core).union_records_.at(122).active, std::set<int>({1, 3}));
+        EXPECT_EQ(state_of(core).union_records_.at(125), state_of(core).sectors_.state());
+        EXPECT_EQ(state_of(core).sector_stamps_.at({4u, 3}).tick, 122u);
+        // No live pass at the arrival tick.
+        from = fake.calls.size();
+        steps{core}.sector_union_pass(126);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"sector_manager_active:off"});
+        // The replayed pass's cell: no crossing of ours.
+        fake.poll = cell_poll(3, true);
+        from = fake.calls.size();
+        steps{core}.poll_own_sector(126);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:126"});
+        EXPECT_FALSE(state_of(core).sectors_requested_.count(3));
+        // A real crossing afterwards: stamped ahead.
+        fake.poll = cell_poll(5, true);
+        from = fake.calls.size();
+        steps{core}.poll_own_sector(127);
+        {
+            const std::vector<std::string> expected = {
+                "poll_sector:127", "send:1",
+                "log:0:sector 5 stamped for tick 135 (checkpoint, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(state_of(core).sector_stamps_.at({3u, 5}).tick, 135u);
+    }
+
+    // Without the cell re-read the replayed pass's write would be taken for
+    // an own crossing (the a5u_lead clients' phantom sector 4): the re-read
+    // is what keeps it out.  An unread cell keeps the pass's own write.
+    TEST(SessionClientCoreSectorRewind, AnUnreadCellKeepsTheReDerivedPassWrite) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_event(sector_message(4, 3, 122, 122));
+        fake.adopted_read = false;
+        b1_frames(core, 126, 126);
+        EXPECT_EQ(core.sector_rewinds(), 1u);
+        EXPECT_EQ(state_of(core).sector_cell_, 3) << "the re-derived pass's write";
+        fake.poll = cell_poll(3, true);
+        const size_t sent = fake.sent.size();
+        steps{core}.poll_own_sector(126);
+        EXPECT_EQ(fake.sent.size(), sent);
+    }
+
+    // The reviews' scenario (resync design 10, R1.1): stamps that reached
+    // the live union after the anchor's record survive the re-derivation -
+    // an own stamp for a tick inside the window and an on-time remote stamp
+    // drained inside it pass at their ticks, the live passes are re-set
+    // there and nothing is forgotten.
+    TEST(SessionClientCoreSectorRewind, StampsInsideTheWindowSurvive) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        b1_frames(core, 120, 140, [&](uint32_t t) {
+            if (t == 125) core.request_sector(4, "checkpoint");                    // current 124: stamped 132
+            if (t == 130) core.on_session_event(sector_message(5, 5, 135, 135));   // on time
+        });
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{132, 4}, {135, 5}}));
+        core.on_session_event(sector_message(4, 3, 122, 122));   // arrives at 141
+        size_t from = fake.calls.size();
+        b1_frames(core, 141, 141);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(b1_count(calls, "keep_live_cells:enter"), 1u);
+        EXPECT_EQ(b1_count(calls, "replayed:"), 19u) << "122..140";
+        EXPECT_EQ(b1_count(calls, "set_union_pass:"), 3u);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:122:3"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:132:4"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:135:5"), calls.end());
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{122, 3}, {132, 4}, {135, 5}}));
+        EXPECT_EQ(state_of(core).sector_passes_forgotten_, 0u);
+        EXPECT_EQ(state_of(core).sectors_.active(), std::set<int>({1, 3, 4, 5}));
+        EXPECT_EQ(b1_count(calls, "run_sector:"), 0u) << "no live pass at 141";
+    }
+
+    // A late stamp that moves a later live pass (the manager is busy with
+    // the earlier sector): the live pass is forgotten at its tick and made
+    // at the re-derived one; its bodies' birth tick is no missing birth.
+    TEST(SessionClientCoreSectorRewind, ALivePassTheReDerivationMovesIsForgotten) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        b1_frames(core, 120, 135, [&](uint32_t t) {
+            if (t == 121) core.on_session_event(sector_message(5, 4, 124, 124));
+        });
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{124, 4}}));
+        core.on_session_event(sector_message(4, 3, 123, 123));
+        size_t from = fake.calls.size();
+        b1_frames(core, 136, 136);
+        const auto calls = since(fake.calls, from);
+        // 3 at 123; the pacer idles 124, 125, 126: 4 at 126.
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:123:3"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:124:0"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:126:4"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:sector +4 at tick 124 of the live frames is not re-derived there: forgotten"),
+                  calls.end());
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{123, 3}, {126, 4}}));
+        EXPECT_EQ(state_of(core).sector_passes_forgotten_, 1u);
+        // The birth attribution the engine asks during such a replay.
+        EXPECT_TRUE(bmmo::session::sector_union::birth_moved({{124, 4}}, {{123, 3}}, 129));
+        EXPECT_FALSE(bmmo::session::sector_union::birth_moved({{124, 4}}, {{124, 4}}, 129));
+    }
+
+    // Two late stamps in one drain, the later one first: one rewind, to the
+    // lower stamp - 1, both re-derived and both logged.
+    TEST(SessionClientCoreSectorRewind, TwoLateStampsInOneDrainMakeOneRewindToTheLowerOne) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_event(sector_message(4, 3, 124, 124));   // join order 0: drained first
+        core.on_session_event(sector_message(5, 2, 122, 122));
+        bmmo::session::player_entry five;
+        five.id = 5;
+        five.join_order = 1;
+        state_of(core).players_.push_back(five);
+        size_t from = fake.calls.size();
+        b1_frames(core, 126, 126);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(b1_count(calls, "keep_live_cells:enter"), 1u);
+        EXPECT_EQ(core.rollback_stats().rewinds, 1u);
+        EXPECT_EQ(b1_count(calls, "replayed:"), 4u) << "122..125";
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{122, 2}, {125, 3}}));
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:remote player 4 entered sector 3, stamped for tick 124 (late by 2: rewound to 121)"),
+                  calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:remote player 5 entered sector 2, stamped for tick 122 (late by 4: rewound to 121)"),
+                  calls.end());
+    }
+
+    // A late stamp that changes nothing (requested at or before its tick
+    // already) is stamped as before, with no rewind.
+    TEST(SessionClientCoreSectorRewind, ARedundantLateStampIsStampedAsBefore) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        b1_frames(core, 120, 125, [&](uint32_t t) {
+            if (t == 121) core.on_session_event(sector_message(5, 3, 122, 122));
+        });
+        core.on_session_event(sector_message(4, 3, 124, 124));
+        size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        {
+            const std::vector<std::string> expected = {
+                "log:0:remote player 4 entered sector 3, stamped for tick 124 (LATE: the server started it already)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(state_of(core).sector_late_.empty());
+    }
+
+    // The rewind refused (a frozen world replays nothing): every stamp of
+    // the set live, as before B1, and one resync.  Beyond the reach: the
+    // same at the drain; while a resync is pending, nothing is requested.
+    TEST(SessionClientCoreSectorRewind, RefusedOrBeyondTheReachStampsLiveAndResyncs) {
+        {
+            flow_fake fake;
+            auto frozen = std::make_shared<bool>(false);
+            session_client_core core(b1_platform(fake, frozen), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.on_session_event(sector_message(4, 3, 122, 122));
+            *frozen = true;
+            size_t from = fake.calls.size();
+            steps{core}.drain_due_events(126);
+            steps{core}.rewind_for_sectors();
+            const std::vector<std::string> expected = {
+                "keep_live_cells:enter:125", "bind_world", "keep_live_cells:exit",
+                "log:0:remote player 4 entered sector 3, stamped for tick 122 (LATE: the server started it already)",
+                "log:0:late sector stamp for tick 122 is outside the rollback history at local tick 125: stamped live, resync",
+                "now:resync_limiter", "send:0",
+                "log:0:resync requested (a late Sector event beyond the reach) at tick 125"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+            EXPECT_EQ(state_of(core).sector_rewinds_missed_, 1u);
+            EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 1u);
+            EXPECT_EQ(state_of(core).pass_log_.size(), 0u);
+        }
+        {
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            b1_session(core, fake, 125);
+            state_of(core).rollback_.thresholds().max_resim_ticks = 2;
+            core.on_session_event(sector_message(4, 3, 122, 122));
+            size_t from = fake.calls.size();
+            steps{core}.drain_due_events(126);
+            {
+                const std::vector<std::string> expected = {
+                    "log:0:remote player 4 entered sector 3, stamped for tick 122 (LATE: the server started it already)",
+                    "log:0:late sector stamp for tick 122 is outside the rollback history at local tick 125: stamped live, resync",
+                    "now:resync_limiter", "send:0",
+                    "log:0:resync requested (a late Sector event beyond the reach) at tick 125"};
+                EXPECT_EQ(since(fake.calls, from), expected);
+            }
+            EXPECT_TRUE(state_of(core).sector_late_.empty());
+            EXPECT_EQ(state_of(core).sector_rewinds_missed_, 1u);
+            // While a resync is pending: live, nothing else.
+            state_of(core).resync_pending_ = true;
+            core.on_session_event(sector_message(4, 2, 123, 123));
+            from = fake.calls.size();
+            steps{core}.drain_due_events(126);
+            {
+                const std::vector<std::string> expected = {
+                    "log:0:remote player 4 entered sector 2, stamped for tick 123 (LATE: the server started it already)"};
+                EXPECT_EQ(since(fake.calls, from), expected);
+            }
+            EXPECT_EQ(state_of(core).sector_rewinds_missed_, 1u);
+            // Before this numbering's first tick (a late joiner's catch-up):
+            // live, nothing else.
+            state_of(core).resync_pending_ = false;
+            core.on_session_event(sector_message(4, 4, 100, 100));
+            from = fake.calls.size();
+            steps{core}.drain_due_events(126);
+            {
+                const std::vector<std::string> expected = {
+                    "log:0:remote player 4 entered sector 4, stamped for tick 100 (LATE: the server started it already)"};
+                EXPECT_EQ(since(fake.calls, from), expected);
+            }
+        }
+    }
+
+    // A MOVED own Sector echo (plan step 23): the own pass whose tick has
+    // run moves from T to T' in one rewind to T - 1 (the live pass at T
+    // forgotten); one whose tick is ahead is stamped again at T' live.
+    TEST(SessionClientCoreSectorRewind, AMovedOwnSectorMovesTheOwnPass) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        b1_frames(core, 120, 135, [&](uint32_t t) {
+            if (t == 122) core.request_sector(4, "checkpoint");   // current 121: stamped 129
+        });
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{129, 4}}));
+        bmmo::session_event_msg echo = sector_message(3, 4, 133, 129);
+        core.on_session_event(std::move(echo));
+        size_t from = fake.calls.size();
+        b1_frames(core, 136, 136);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(calls.front(),
+                  "log:0:own sector stamped tick 129 echoed moved by the server (applied 133, state 00) at local tick 135; "
+                  "the own pass moves to the server's tick");
+        EXPECT_EQ(b1_count(calls, "keep_live_cells:enter"), 1u);
+        EXPECT_EQ(b1_count(calls, "replayed:"), 7u) << "129..135";
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:129:0"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:133:4"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:own sector 4 moved 129 -> 133 by the server: the own pass moved (rewound to 128)"),
+                  calls.end());
+        EXPECT_EQ(state_of(core).pass_log_, (std::map<uint32_t, int>{{133, 4}}));
+        EXPECT_EQ(state_of(core).sector_passes_forgotten_, 1u);
+        EXPECT_EQ(state_of(core).sector_stamps_.at({3u, 4}).tick, 133u);
+        EXPECT_EQ(state_of(core).own_moves_other_, 0u) << "moved, not kept";
+        // The own pass still ahead: stamped again live, no rewind.
+        b1_frames(core, 137, 137, [&](uint32_t) { core.request_sector(5, "checkpoint"); });   // current 136: 144
+        core.on_session_event(sector_message(3, 5, 147, 144));
+        from = fake.calls.size();
+        b1_frames(core, 138, 138);
+        const auto ahead = since(fake.calls, from);
+        EXPECT_EQ(b1_count(ahead, "keep_live_cells:enter"), 0u);
+        EXPECT_NE(std::find(ahead.begin(), ahead.end(),
+                            "log:0:own sector 5 moved 144 -> 147 by the server before its pass: stamped again at 147"),
+                  ahead.end());
+        EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 1u);
+        EXPECT_FALSE(state_of(core).sectors_.covers(5, 146));
+        EXPECT_TRUE(state_of(core).sectors_.covers(5, 147));
     }
 
 }

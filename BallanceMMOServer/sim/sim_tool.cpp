@@ -263,6 +263,22 @@ namespace {
         std::vector<std::pair<std::string, std::string>> resync_blob_rename;   // --resync-blob-rename OLD NEW
         bool resync_blob_adopt_env = false;   // --resync-blob-adopt-environment: the foreign blob's environment id := ours
         bool resync_perturb_scripts = false;  // --resync-perturb-scripts: arm R as 7.2 words it (scripts of S-N restored at S-N)
+        // --late-sector-check K T A (resync design 7.2, step B1): sector K
+        // stamped at T, delivered at A (see run_late_sector_check).
+        bool late_sector_check = false;
+        int late_sector = 0, late_t = 0, late_a = 0;
+        int late_moved = -1;              // --late-moved T2: K an own stamp at T the server moved to T2 (echo at A)
+        std::vector<std::pair<int, int>> late_also;   // --late-also SECTOR TICK: other stamps, on time
+        int late_after = 600;             // --late-after N: compared A..A+N
+        int late_root = 240;              // --late-root N: world ticks before the root
+        int late_expect_forgotten = -1;   // --late-expect-forgotten N: the live passes the re-derivation must forget
+        bool late_keep = false;           // --late-keep: keep the runs' capture files
+        bool late_ordinary = false;       // --late-ordinary: the arm's K on time, an ordinary rewind at A (the reference)
+        bool late_reference = false;      // --late-reference: the check runs that reference too and names what it shares
+        std::string late_run;             // --late-run control|arm: one run (a child of the check)
+        std::string late_out;             // --late-out PATH: the run's capture file, the check's prefix
+        std::string self;                 // this program, absolute (the check runs itself)
+        std::vector<std::string> raw;     // the arguments as given
         bool ignore_ov = false;           // --ignore-ov: --savestate-diff leaves the overlap tree out
         bool ignore_order = false;        // --ignore-order: ...and the cache ring and unit numbering
         int max_diff = 1;                 // --max-diff N: --savestate-diff lists up to N differing fields
@@ -277,6 +293,11 @@ namespace {
     };
 
     bool parse(int argc, char** argv, arguments& out) {
+        if (argc > 0) {
+            std::error_code ignored;
+            out.self = std::filesystem::absolute(argv[0], ignored).make_preferred().string();
+        }
+        for (int i = 1; i < argc; ++i) out.raw.emplace_back(argv[i]);
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -434,6 +455,26 @@ namespace {
                 if (!(v = next())) return false; from = v;
                 if (!(v = next())) return false; out.resync_blob_rename.emplace_back(from, v);
             }
+            else if (arg == "--late-sector-check") {
+                out.late_sector_check = true;
+                if (!(v = next())) return false; out.late_sector = std::atoi(v);
+                if (!(v = next())) return false; out.late_t = std::atoi(v);
+                if (!(v = next())) return false; out.late_a = std::atoi(v);
+            }
+            else if (arg == "--late-moved") { if (!(v = next())) return false; out.late_moved = std::atoi(v); }
+            else if (arg == "--late-also") {
+                int sector = 0;
+                if (!(v = next())) return false; sector = std::atoi(v);
+                if (!(v = next())) return false; out.late_also.emplace_back(sector, std::atoi(v));
+            }
+            else if (arg == "--late-after") { if (!(v = next())) return false; out.late_after = std::atoi(v); }
+            else if (arg == "--late-root") { if (!(v = next())) return false; out.late_root = std::atoi(v); }
+            else if (arg == "--late-expect-forgotten") { if (!(v = next())) return false; out.late_expect_forgotten = std::atoi(v); }
+            else if (arg == "--late-keep") out.late_keep = true;
+            else if (arg == "--late-ordinary") out.late_ordinary = true;
+            else if (arg == "--late-reference") out.late_reference = true;
+            else if (arg == "--late-run") { if (!(v = next())) return false; out.late_run = v; }
+            else if (arg == "--late-out") { if (!(v = next())) return false; out.late_out = v; }
             else if (arg == "--ignore-ov") out.ignore_ov = true;
             else if (arg == "--ignore-order") out.ignore_order = true;
             else if (arg == "--max-diff") { if (!(v = next())) return false; out.max_diff = std::atoi(v); }
@@ -5070,6 +5111,631 @@ namespace {
         return failed == 0 ? 0 : 3;
     }
 
+    // ------------------------------------------------ --late-sector-check
+    //
+    // Resync design 7.2 (step B1): a late Sector stamp re-derived inside a
+    // rewind gives the world an on-time stamp gives.  Two runs of the same
+    // scene, each in a process of its own from a fresh load (a load is
+    // deterministic: the A2 cross-process test found two processes' blobs
+    // byte-identical), with the client's live and replay recipes on the
+    // SimTool world:
+    //
+    //   root      player 1 joins, --late-root whole world ticks (the retail
+    //             ball parked), as --resync-check's root.
+    //   live      whole world ticks.  A Sector stamp is handed to the world's
+    //             union at its tick (the server's request, which is what a
+    //             client's stamp applied at its tick is); every pass the union
+    //             starts is recorded in the tick's pass slot of host
+    //             support's manager_activations (run_sector's cells), the
+    //             frame's pending activations after it (record_pending), and
+    //             every tick into the client's rollback engine (savestate,
+    //             session script selection, the movable bodies but the balls)
+    //             with the union's state beside it.  The own poll's cell rule
+    //             runs after each tick: a cell change no pass of this world
+    //             explains is a Sector event the client would send.
+    //   control   sector K stamped at T (with --late-moved T2: at T2), the
+    //             --late-also stamps at their ticks.
+    //   arm       the same, but K is not handed over at T: it arrives at A
+    //             (its frame's drain), and the core's rule runs - one rewind
+    //             to T-1 (the rollback engine's rewind_to over the binding
+    //             bind_session_world makes), the union re-derived inside the
+    //             replay from the union record of T-1 with the stamp log's
+    //             stamps (sector_union::with_pending), each replayed tick's
+    //             pass in the pass slot (manager_activations::set_pass, or
+    //             forget_pass for a live pass not re-derived), births of a
+    //             moved pass attributed (sector_union::birth_moved); then the
+    //             cells adopted (no write-back), the activation of the frame
+    //             about to run re-issued, the cell re-read, the world's union
+    //             and RNG cursors taken from the replay.  With --late-moved
+    //             T2, K is an own stamp handed over at T (its live pass runs)
+    //             and the server's echo moving it to T2 arrives at A.
+    //   compare   every boundary A..A+N (--late-after, 600): the savestate
+    //             byte for byte and with the order bookkeeping left out
+    //             (diff_savestate ignore_order), the session script record
+    //             byte for byte without the keep-local scripts (the
+    //             balloon's, exception (c): never compared), the union
+    //             (sets, origins, pacer).
+    //   pass      the blobs equal ignoring the order bookkeeping and the
+    //             scripts identical at every boundary, births_missing 0, the
+    //             forgotten passes as --late-expect-forgotten says (when
+    //             given), no Sector event from the cell, the rewind made.
+    //   reference (--late-reference) a third run: the arm with K on time
+    //             and an ordinary rewind to T-1 at A (no re-derivation, the
+    //             live cells written back) - what any replay across the pass
+    //             leaves.  A script difference of the arm at a boundary where
+    //             the reference has the same one is the replay's, not this
+    //             rule's: the verdict is then PASS-EXCEPT-REFERENCE (exit 4).
+    //
+    // The driver (--late-sector-check K T A) runs both as child processes
+    // (--late-run control|arm --late-out FILE) and compares their files.
+    // Ticks count from the root.  This is the core's rule on the core's
+    // pieces (the re-derivation itself - sector_rederivation, the code the
+    // core's rewind_for_sectors / rederive_union_tick run -, the union, its
+    // state, the activation slots, the engine, the binding); the frame
+    // around it is the SimTool world's, which cannot host the session core
+    // itself.  The rewound line's coincident= counts the window's ticks
+    // whose two activation slots are both filled (none: the replay
+    // re-issues what the one-slot map before B1 did).
+    // ------------------------------------------------------------------
+    bool ls_put(FILE* f, const std::vector<uint8_t>& bytes) {
+        const uint32_t n = static_cast<uint32_t>(bytes.size());
+        return std::fwrite(&n, 4, 1, f) == 1 && (n == 0 || std::fwrite(bytes.data(), 1, n, f) == n);
+    }
+    bool ls_get(FILE* f, std::vector<uint8_t>& bytes) {
+        uint32_t n = 0;
+        if (std::fread(&n, 4, 1, f) != 1) return false;
+        bytes.resize(n);
+        return n == 0 || std::fread(bytes.data(), 1, n, f) == n;
+    }
+
+    int run_late_sector_run(const arguments& args) {
+        using bmmo::game::script_replay;
+        using bmmo::session::sector_union;
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        const bool arm = args.late_run == "arm";
+        if (!arm && args.late_run != "control") {
+            std::fprintf(stderr, "--late-run takes control or arm\n");
+            return 2;
+        }
+        const int k = args.late_sector;
+        const bool moved = args.late_moved >= 0;
+        const uint32_t pid = 1;
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        std::string error;
+        if (!world->add_player(pid, 0, error)) {
+            std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
+            return 1;
+        }
+        CKContext* context = world->engine().context();
+        CKIpionManager* physics = world->physics();
+        if (!physics || !physics->GetEnvironment()) {
+            std::fprintf(stderr, "late-sector: no physics environment\n");
+            return 1;
+        }
+        if (!settle_world(*world, std::max(0, args.late_root))) return 1;
+        const uint32_t root = world->tick_index();
+        const uint32_t t_stamp = root + static_cast<uint32_t>(args.late_t);
+        const uint32_t t_arrive = root + static_cast<uint32_t>(args.late_a);
+        const uint32_t t_applied = moved ? root + static_cast<uint32_t>(args.late_moved) : t_stamp;
+        const uint32_t end = t_arrive + static_cast<uint32_t>(args.late_after);
+        // The stamps this run hands the world's union, by tick; and the stamp
+        // log the arm has at A (every stamp with the server's tick).
+        std::map<uint32_t, std::vector<int>> stamps;
+        // --late-ordinary: the arm gets K on time like the control and makes
+        // an ordinary rewind at A (no re-derivation, the live cells written
+        // back): the replay's own fidelity, the reference the B1 arm is
+        // judged beside.
+        const bool ordinary = arm && args.late_ordinary;
+        if (!arm || ordinary) stamps[t_applied].push_back(k);
+        else if (moved) stamps[t_stamp].push_back(k);
+        std::vector<sector_union::stamped> log;
+        log.push_back({t_applied, pid, k});
+        for (const auto& [sector, tick]: args.late_also) {
+            stamps[root + static_cast<uint32_t>(tick)].push_back(sector);
+            log.push_back({root + static_cast<uint32_t>(tick), pid, sector});
+        }
+        std::set<int> own = {1};
+        if (moved) own.insert(k);
+
+        const script_replay::selection sel = bmmo::game::session_script_selection(context);
+        const std::vector<CK_ID> script_activations = bmmo::game::session_script_activations(context, sel);
+        bmmo::game::script_replay_hooks hooks;
+        hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
+            bmmo_physics_force_block state{};
+            std::string e;
+            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
+            out.exists = state.exists != 0;
+            for (int i = 0; i < 3; ++i) { out.position[i] = state.position[i]; out.force[i] = state.force[i]; }
+            return true;
+        };
+        hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
+            bmmo_physics_force_block state{};
+            state.exists = in.exists ? 1 : 0;
+            for (int i = 0; i < 3; ++i) { state.position[i] = in.position[i]; state.force[i] = in.force[i]; }
+            std::string e;
+            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
+        };
+        CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
+        const CK_ID manager_id = manager ? manager->GetID() : 0;
+        if (!manager) {
+            std::fprintf(stderr, "late-sector: no Gameplay_SectorManager\n");
+            return 1;
+        }
+        bmmo::game::manager_activations activations;
+        bmmo::session::local_birth_log births;
+        std::map<std::string, uint32_t> generations;
+        std::set<std::string> ball_names;
+        for (const auto& row: world->ball_rows()) ball_names.insert(row.name);
+        const auto is_ball = [&](const std::string& name) {
+            return name.find("_BMMO_") != std::string::npos || ball_names.count(name) != 0;
+        };
+        const auto mechanisms = [&]() {
+            std::vector<std::string> out;
+            for (auto& name: bmmo::physics::movable_body_names(physics))
+                if (!is_ball(name)) out.push_back(std::move(name));
+            return out;
+        };
+        const auto read_cell = [&]() {
+            int cell = 0;
+            if (CKDataArray* parameters = bmmo::game::session_data_array(context, "IngameParameter"))
+                parameters->GetElementValue(0, 1, &cell);
+            return cell;
+        };
+
+        // The re-derivation: the core's own rule (sector_rederivation, which
+        // client_core_frame.cpp rewind_for_sectors / rederive_union_tick
+        // drive the same way); this run does the host's side of each tick
+        // (the activation's pass slot) and the logs.
+        bool rd_active = false;
+        bmmo::session::sector_rederivation rd;
+        std::map<uint32_t, int> pass_log;
+        std::map<uint32_t, sector_union::state_type> union_records;
+        bmmo::session::core_world_hooks core_hooks;
+        core_hooks.before_replayed_tick = [&](uint32_t t) {
+            if (!rd_active) return;
+            const auto step = rd.tick(t, manager->IsActive() != FALSE);
+            if (step.made) {
+                activations.set_pass(t, step.made.sector);
+                pass_log[t] = step.made.sector;
+                std::printf("  re-derived: sector +%d at tick %u (root+%u)\n", step.made.sector, t, t - root);
+            } else if (step.clear_slot) {
+                activations.forget_pass(t);
+            }
+            if (step.forgotten)
+                std::printf("  forgotten: the live pass of sector %d at tick %u (root+%u)\n", step.forgotten, t, t - root);
+            union_records[t] = rd.u().state();
+        };
+        core_hooks.replay_mechanisms = mechanisms;
+        core_hooks.ball = is_ball;
+        core_hooks.birth_moved = [&](const std::string&, uint32_t b) { return rd_active && rd.birth_moved(b); };
+        bmmo::physics::physics_direct backend(physics);
+        bmmo::session::session_world_options w;
+        w.binding.delta_ms = bmmo::sim::kFixedDeltaMs;
+        w.binding.savestate = true;
+        w.binding.savestate_flags = 0u;   // lenient, as the clients run it
+        w.binding.log = [&](const std::string& text) { std::printf("  engine: %s\n", text.c_str()); };
+        uint64_t reissued = 0;
+        w.replay_activation = [&](uint32_t t) {
+            if (activations.replay(context, manager_id, t, true)) ++reissued;
+        };
+        w.births = &births;
+        w.put_back = [context](const std::string& entity, const bmmo::session::local_birth& birth) {
+            bmmo::game::put_back_birth(context, entity, birth);
+        };
+        std::vector<CK_ID> scripts_replayed;
+        w.bind_scripts = [&](bmmo::session::rollback_world& bound) {
+            bmmo::session::script_binding_options so;
+            so.context = context;
+            so.scripts = &sel;
+            so.hooks = &hooks;
+            so.scripts_replayed = &scripts_replayed;
+            so.delta_ms = bmmo::sim::kFixedDeltaMs;
+            so.replay_activation = true;
+            bmmo::session::bind_script_replay(bound, backend, so);
+        };
+        bmmo::session::rollback_world binding = bmmo::session::bind_session_world(backend, core_hooks, w);
+        {
+            // The world's own PreSimulate pass before the physics step, as a
+            // whole world tick has it (--savestate-check's recipe).
+            const auto inner = binding.step;
+            binding.step = [&world, inner]() {
+                world->pre_simulate();
+                return inner();
+            };
+        }
+        bmmo::session::rollback_engine engine;   // the client's thresholds: history 96, reach 48
+        engine.set_recheck_on_restore(true);
+        engine.set_restore_impulses(true);
+        engine.set_restore_quaternions(true);
+        engine.set_restore_clock(false);
+        engine.set_restore_calm(true);
+        engine.set_restore_unit(true);
+        engine.set_restore_contacts(true);
+        engine.set_contact_flags(BMMO_PHYSICS_CONTACT_DEFAULT);
+        engine.set_sleep_as_recorded(true);
+        engine.set_replay_scripts(true);
+        engine.set_exact_restore(true);
+        const auto no_input = [](const std::string&, uint32_t, bmmo::session::input_frame&) { return false; };
+
+        FILE* out = std::fopen(args.late_out.c_str(), "wb");
+        if (!out) {
+            std::fprintf(stderr, "cannot write %s\n", args.late_out.c_str());
+            return 1;
+        }
+        std::printf("late-sector run=%s level=%d root=%u K=%d T=%u A=%u%s end=%u selected=%zu\n", args.late_run.c_str(),
+                    world->level(), root, k, t_stamp, t_arrive,
+                    moved ? (" moved->" + std::to_string(t_applied)).c_str() : "", end, sel.scripts.size());
+        std::set<int> active_before = world->active_sectors();
+        int sector_cell = read_cell();
+        uint32_t phantom = 0;
+        bool rewound = !arm;
+        bmmo::physics::drain_event_log(physics);
+        for (;;) {
+            const uint32_t t = world->tick_index();
+            if (arm && t == t_arrive) {
+                // The frame of A: the late stamp in its drain (or the moved
+                // echo), one rewind to the stamp - 1 with the union
+                // re-derived, the cells adopted.
+                const uint32_t anchor = t_stamp - 1, now = t - 1;
+                const auto record = union_records.find(anchor);
+                if (record == union_records.end()) {
+                    std::fprintf(stderr, "late-sector: no union record of %u\n", anchor);
+                    return 3;
+                }
+                rd.start(record->second, log, pass_log, t_stamp);
+                // The three live cells (live_cells_guard), for an ordinary rewind.
+                int cells[3] = {};
+                const char* cell_array[3] = {"CurrentLevel", "IngameParameter", "IngameParameter"};
+                const int cell_column[3] = {4, 1, 2};
+                for (int i = 0; i < 3; ++i)
+                    if (CKDataArray* a = bmmo::game::session_data_array(context, cell_array[i]))
+                        a->GetElementValue(0, cell_column[i], &cells[i]);
+                if (ordinary) rd.abandon(pass_log);
+                // Ticks of the window where the frame's pending activation
+                // and a union pass share the tick (the two slots): where none
+                // does, the replay re-issues what the one-slot map before B1
+                // did.
+                uint32_t coincident = 0;
+                for (uint32_t x = t_stamp; x != t + 1; ++x)
+                    if (const auto* e = activations.slots().find(x); e && e->have_pending && e->have_pass) ++coincident;
+                rd_active = !ordinary;
+                const bool rolled = engine.rewind_to(binding, anchor, now, no_input, ordinary ? "ordinary" : "late sector");
+                rd_active = false;
+                const auto u = ordinary ? world->capture_step_state().sectors.state() : rd.u().state();
+                rewound = rolled && (ordinary || rd.through(now));
+                if (!rewound) {
+                    std::printf("late-sector: the rewind to %u was refused or replayed nothing\n", anchor);
+                    break;
+                }
+                // Adopt mode: the replayed cells stay (an ordinary rewind:
+                // the live ones written back); the activation of the frame
+                // about to run re-issued (live_cells_guard), the cell re-read
+                // (sector_cell_adopted).
+                activations.end_override(context);
+                if (ordinary)
+                    for (int i = 0; i < 3; ++i)
+                        if (CKDataArray* a = bmmo::game::session_data_array(context, cell_array[i]))
+                            a->SetElementValue(0, cell_column[i], &cells[i], sizeof(int));
+                activations.replay(context, manager_id, t, false);
+                if (!ordinary) sector_cell = read_cell();
+                // The world's counters as the replay left the engine: its
+                // union, its RNG cursors.
+                auto st = world->capture_step_state();
+                st.rng_cursor = ivp_srand_read();
+                st.random_cursor = bmmo::physics::random_get_state();
+                st.sectors.reset();
+                st.sectors.restore(u);
+                world->restore_step_state(st);
+                active_before = world->active_sectors();
+                std::printf("late-sector: rewound to %u at A=%u (%u ticks), forgotten=%u births_missing=%llu "
+                            "births_moved=%llu recreated=%llu/%llu reissued=%llu cell=%d coincident=%u\n", anchor, t,
+                            now - anchor, rd.forgotten(), static_cast<unsigned long long>(engine.stats().births_missing),
+                            static_cast<unsigned long long>(engine.stats().births_moved),
+                            static_cast<unsigned long long>(engine.stats().births_recreated_exact),
+                            static_cast<unsigned long long>(engine.stats().births_recreated),
+                            static_cast<unsigned long long>(reissued), sector_cell, coincident);
+            }
+            if (t >= t_arrive) {
+                std::vector<uint8_t> blob, scripts;
+                if (!bmmo::physics::get_savestate(physics, blob, error) || !script_replay::capture(context, sel, hooks, scripts)) {
+                    std::fprintf(stderr, "late-sector: capture at %u failed: %s\n", t, error.c_str());
+                    return 1;
+                }
+                auto u = world->capture_step_state().sectors.state();
+                u.pending.clear();   // the server's union requests at the tick; a client's holds stamps ahead
+                // The record without the keep-local scripts (the balloon's,
+                // exception (c): never compared; resync_rules.hpp).
+                std::vector<uint8_t> compared;
+                script_replay::record_index index;
+                if (script_replay::index_record(scripts, index)) {
+                    size_t from = 0;
+                    for (const auto& s: index.scripts) {
+                        auto* beh = CKBehavior::Cast(context->GetObject(s.id));
+                        CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+                        if (!beh || !bmmo::session::keep_local_script(owner && owner->GetName() ? owner->GetName() : "",
+                                                                      beh->GetName() ? beh->GetName() : ""))
+                            continue;
+                        compared.insert(compared.end(), scripts.begin() + static_cast<std::ptrdiff_t>(from),
+                                        scripts.begin() + static_cast<std::ptrdiff_t>(s.begin));
+                        from = s.end;
+                    }
+                    compared.insert(compared.end(), scripts.begin() + static_cast<std::ptrdiff_t>(from), scripts.end());
+                } else {
+                    compared = scripts;
+                }
+                const uint32_t tick = t - root;
+                if (std::fwrite(&tick, 4, 1, out) != 1 || !ls_put(out, blob) || !ls_put(out, scripts) || !ls_put(out, compared)
+                        || !ls_put(out, sector_union::serialize(u))) {
+                    std::fprintf(stderr, "late-sector: write failed\n");
+                    return 1;
+                }
+            }
+            if (t >= end) break;
+            if (const auto due = stamps.find(t); due != stamps.end())
+                for (int sector: due->second) {
+                    bmmo::sim::lifecycle_event where;
+                    where.type = bmmo::session::event_type::Sector;
+                    where.sector = sector;
+                    where.tick = t;
+                    if (!world->apply_event(pid, where, error)) {
+                        std::fprintf(stderr, "sector event failed: %s\n", error.c_str());
+                        return 1;
+                    }
+                }
+            if (!world->tick(error)) {
+                std::fprintf(stderr, "tick %u failed: %s\n", t, error.c_str());
+                return 1;
+            }
+            bmmo::session::parse_event_log(bmmo::physics::drain_event_log(physics),
+                                           [&](const std::string& kind, const std::string& text) {
+                if (kind == "recipe") {
+                    bmmo::session::local_birth birth;
+                    if (bmmo::session::parse_recipe_event(text, birth) && !is_ball(birth.name)) births.add(t, std::move(birth));
+                } else if ((kind == "created" || kind == "deleted") && !text.empty()) {
+                    ++generations[text];
+                }
+            });
+            for (int s: world->active_sectors())
+                if (!active_before.count(s)) {
+                    pass_log[t] = s;
+                    activations.set_pass(t, s);
+                    sector_cell = s;
+                    std::printf("  live: sector +%d at tick %u (root+%u)\n", s, t, t - root);
+                }
+            active_before = world->active_sectors();
+            activations.record_pending(context, manager_id, script_activations, t + 1);
+            bmmo::session::rollback_tracked tracked;
+            tracked.mechanisms = mechanisms();
+            tracked.generations = generations;
+            engine.record(binding, t, tracked, {});
+            union_records[t] = world->capture_step_state().sectors.state();
+            // The own poll's rule (poll_own_sector): a cell no pass of this
+            // world wrote is a crossing the client would report.
+            if (const int cell = read_cell(); cell != sector_cell) {
+                if (cell > 0 && !own.count(cell)) {
+                    ++phantom;
+                    std::printf("  own Sector event from the cell: %d at tick %u (root+%u)\n", cell, t, t - root);
+                }
+                sector_cell = cell;
+            }
+        }
+        std::fclose(out);
+        std::string passes;
+        for (const auto& [t, s]: pass_log) passes += " " + std::to_string(s) + "@" + std::to_string(t - root);
+        std::printf("late-sector run=%s done: rewound=%s passes:%s forgotten=%u births_missing=%llu births_moved=%llu "
+                    "phantom=%u\n", args.late_run.c_str(), !arm ? "-" : rewound ? "1" : "0", passes.c_str(), rd.forgotten(),
+                    static_cast<unsigned long long>(engine.stats().births_missing),
+                    static_cast<unsigned long long>(engine.stats().births_moved), phantom);
+        return rewound ? 0 : 3;
+    }
+
+    // Two runs' capture files compared boundary by boundary (the driver of
+    // --late-sector-check): the blobs byte for byte and with the order
+    // bookkeeping left out, the script records byte for byte (each
+    // difference named against a freshly loaded scene's selection: the
+    // records' CK_IDs agree between processes that load the same way), the
+    // unions.
+    struct ls_compare {
+        bool ok = false;
+        int boundaries = 0, bytes_equal = 0, order_equal = 0, scripts_equal = 0, scripts_whole_equal = 0, union_equal = 0;
+        std::string first_blob, first_strict, first_union, error;
+        std::set<std::pair<uint32_t, std::string>> script_diffs;   // (boundary, what)
+    };
+    ls_compare ls_compare_runs(const arguments& args, const std::string& file_a, const std::string& file_b,
+                               std::unique_ptr<bmmo::sim::physics_world>& diff_world,
+                               bmmo::game::script_replay::selection& diff_sel) {
+        ls_compare c;
+        FILE* a = std::fopen(file_a.c_str(), "rb");
+        FILE* b = std::fopen(file_b.c_str(), "rb");
+        if (!a || !b) {
+            if (a) std::fclose(a);
+            if (b) std::fclose(b);
+            c.error = "a capture file is missing";
+            return c;
+        }
+        for (;;) {
+            uint32_t ta = 0, tb = 0;
+            const bool more_a = std::fread(&ta, 4, 1, a) == 1, more_b = std::fread(&tb, 4, 1, b) == 1;
+            if (!more_a || !more_b) {
+                if (more_a != more_b) c.error = "the runs end at different boundaries";
+                break;
+            }
+            std::vector<uint8_t> blob_a, blob_b, scr_a, scr_b, cmp_a, cmp_b, uni_a, uni_b;
+            if (ta != tb || !ls_get(a, blob_a) || !ls_get(a, scr_a) || !ls_get(a, cmp_a) || !ls_get(a, uni_a)
+                    || !ls_get(b, blob_b) || !ls_get(b, scr_b) || !ls_get(b, cmp_b) || !ls_get(b, uni_b)) {
+                c.error = "unreadable or misaligned files";
+                break;
+            }
+            ++c.boundaries;
+            if (blob_a == blob_b) {
+                ++c.bytes_equal;
+                ++c.order_equal;
+            } else {
+                const std::string where = bmmo::physics::diff_savestate(blob_a.data(), blob_a.size(), blob_b.data(),
+                                                                         blob_b.size(), false, 3, true);
+                if (where.rfind("no difference", 0) == 0) ++c.order_equal;
+                else if (c.first_blob.empty()) c.first_blob = "root+" + std::to_string(ta) + ": " + where;
+                if (c.first_strict.empty())
+                    c.first_strict = "root+" + std::to_string(ta) + ": "
+                                   + bmmo::physics::diff_savestate(blob_a.data(), blob_a.size(), blob_b.data(), blob_b.size(),
+                                                                   false, 3, false);
+            }
+            if (scr_a == scr_b) ++c.scripts_whole_equal;
+            if (cmp_a == cmp_b) {
+                ++c.scripts_equal;
+            } else {
+                if (!diff_world) {
+                    diff_world = create_session_world(args, 0.0f);
+                    if (diff_world) diff_sel = bmmo::game::session_script_selection(diff_world->engine().context());
+                }
+                std::string what = std::to_string(cmp_a.size()) + " vs " + std::to_string(cmp_b.size()) + " bytes";
+                if (diff_world) {
+                    // Named on the whole records with the keep-local scripts'
+                    // entries of the second spliced into the first, so the
+                    // names are the compared scripts' only.
+                    CKContext* context = diff_world->engine().context();
+                    std::vector<uint8_t> spliced;
+                    bmmo::game::script_replay::record_index ia, ib;
+                    if (bmmo::game::script_replay::index_record(scr_a, ia) && bmmo::game::script_replay::index_record(scr_b, ib)
+                            && ia.scripts.size() == ib.scripts.size()) {
+                        size_t from = 0;
+                        for (size_t i = 0; i < ia.scripts.size(); ++i) {
+                            auto* beh = CKBehavior::Cast(context->GetObject(ia.scripts[i].id));
+                            CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+                            if (!beh || !bmmo::session::keep_local_script(owner && owner->GetName() ? owner->GetName() : "",
+                                                                          beh->GetName() ? beh->GetName() : ""))
+                                continue;
+                            spliced.insert(spliced.end(), scr_a.begin() + static_cast<std::ptrdiff_t>(from),
+                                           scr_a.begin() + static_cast<std::ptrdiff_t>(ia.scripts[i].begin));
+                            spliced.insert(spliced.end(), scr_b.begin() + static_cast<std::ptrdiff_t>(ib.scripts[i].begin),
+                                           scr_b.begin() + static_cast<std::ptrdiff_t>(ib.scripts[i].end));
+                            from = ia.scripts[i].end;
+                        }
+                        spliced.insert(spliced.end(), scr_a.begin() + static_cast<std::ptrdiff_t>(from), scr_a.end());
+                    } else {
+                        spliced = scr_a;
+                    }
+                    const auto d = bmmo::game::script_replay::diff(context, diff_sel, spliced, scr_b);
+                    what = d.where + " | " + d.detail;
+                }
+                c.script_diffs.emplace(ta, what);
+            }
+            if (uni_a == uni_b) ++c.union_equal;
+            else if (c.first_union.empty()) c.first_union = "root+" + std::to_string(ta);
+        }
+        std::fclose(a);
+        std::fclose(b);
+        c.ok = c.error.empty();
+        return c;
+    }
+
+    void ls_print(const char* label, const ls_compare& c) {
+        std::printf("  %s: boundaries=%d blobs identical=%d equal-ignoring-order=%d scripts identical=%d (with the keep-local "
+                    "ones %d) union identical=%d%s%s\n",
+                    label, c.boundaries, c.bytes_equal, c.order_equal, c.scripts_equal, c.scripts_whole_equal, c.union_equal,
+                    c.error.empty() ? "" : " ERROR: ", c.error.c_str());
+        if (!c.first_blob.empty()) std::printf("    first blob difference: %s\n", c.first_blob.c_str());
+        if (!c.first_strict.empty()) std::printf("    first byte difference (order bookkeeping included): %s\n", c.first_strict.c_str());
+        if (!c.first_union.empty()) std::printf("    first union difference: %s\n", c.first_union.c_str());
+        std::map<std::string, std::pair<int, std::pair<uint32_t, uint32_t>>> kinds;
+        for (const auto& [t, what]: c.script_diffs) {
+            auto& k = kinds[what];
+            if (!k.first++) k.second.first = t;
+            k.second.second = t;
+        }
+        for (const auto& [what, k]: kinds)
+            std::printf("    script difference at %d boundaries, root+%u..root+%u: %s\n", k.first, k.second.first,
+                        k.second.second, what.c_str());
+    }
+
+    int run_late_sector_check(const arguments& args) {
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        if (args.late_t < 1 || args.late_a < args.late_t || args.late_after < 1 || args.late_sector < 2) {
+            std::fprintf(stderr, "--late-sector-check K T A needs K >= 2, 1 <= T <= A and --late-after >= 1\n");
+            return 2;
+        }
+        if (args.late_moved >= 0 && args.late_moved <= args.late_t) {
+            std::fprintf(stderr, "--late-moved T2 needs T2 > T\n");
+            return 2;
+        }
+        const std::string prefix = args.late_out.empty() ? std::string("late_sector") : args.late_out;
+        // The children: this program with the same arguments and the run's.
+        // The reference (--late-reference) is the arm with K on time and an
+        // ordinary rewind at A: what any replay across the pass leaves.
+        std::string base = "\"" + args.self + "\"";
+        for (const auto& a: args.raw)
+            base += " \"" + a + "\"";
+        std::vector<std::pair<std::string, std::string>> runs = {{"control", "control"}, {"arm", "arm"}};
+        if (args.late_reference) runs.emplace_back("reference", "arm --late-ordinary");
+        std::map<std::string, int> codes;
+        std::map<std::string, std::string> summaries;
+        for (const auto& [name, run]: runs) {
+            const std::string file = prefix + "." + name + ".bin";
+            const std::string command = "\"" + base + " --late-run " + run + " --late-out \"" + file + "\" > \"" + prefix
+                                      + "." + name + ".log\" 2>&1\"";
+            codes[name] = std::system(command.c_str());
+            FILE* f = std::fopen((prefix + "." + name + ".log").c_str(), "rb");
+            char line[4096];
+            while (f && std::fgets(line, sizeof(line), f))
+                if (std::strstr(line, "done: rewound") || std::strncmp(line, "late-sector: rewound", 20) == 0
+                        || std::strncmp(line, "  re-derived", 12) == 0 || std::strncmp(line, "  forgotten", 11) == 0
+                        || std::strncmp(line, "  live:", 7) == 0 || std::strncmp(line, "  own Sector event", 18) == 0)
+                    summaries[name] += line;
+            if (f) std::fclose(f);
+            std::printf("late-sector-check: %s run exit %d (log %s.%s.log)\n%s", name.c_str(), codes[name], prefix.c_str(),
+                        name.c_str(), summaries[name].c_str());
+        }
+        for (const auto& [name, code]: codes)
+            if (code != 0) {
+                std::printf("FAIL late-sector-check: the %s run failed\n", name.c_str());
+                return 3;
+            }
+        std::unique_ptr<bmmo::sim::physics_world> diff_world;
+        bmmo::game::script_replay::selection diff_sel;
+        const ls_compare arm = ls_compare_runs(args, prefix + ".control.bin", prefix + ".arm.bin", diff_world, diff_sel);
+        ls_compare reference;
+        if (args.late_reference)
+            reference = ls_compare_runs(args, prefix + ".control.bin", prefix + ".reference.bin", diff_world, diff_sel);
+        // The arm's counters from its summary line.
+        const std::string& summary = summaries["arm"];
+        const auto counter = [&](const char* key) -> long long {
+            const size_t at = summary.rfind(key);
+            return at == std::string::npos ? -1 : std::atoll(summary.c_str() + at + std::strlen(key));
+        };
+        const long long missing = counter("births_missing="), forgotten = counter("forgotten="),
+                        phantom = counter("phantom="), rewound = counter("rewound=");
+        const int expected = args.late_after + 1;
+        // Script differences the reference has too, at the same boundary and
+        // of the same kind: what an ordinary replay across the pass leaves,
+        // not this rule's.
+        int arm_only = 0;
+        for (const auto& d: arm.script_diffs)
+            if (!args.late_reference || !reference.script_diffs.count(d)) ++arm_only;
+        const bool exact = arm.ok && arm.boundaries == expected && arm.order_equal == arm.boundaries
+                        && arm.scripts_equal == arm.boundaries && missing == 0 && phantom == 0 && rewound == 1
+                        && (args.late_expect_forgotten < 0 || forgotten == args.late_expect_forgotten);
+        const bool covered = arm.ok && arm.boundaries == expected && arm.order_equal == arm.boundaries && arm_only == 0
+                          && missing == 0 && phantom == 0 && rewound == 1
+                          && (args.late_expect_forgotten < 0 || forgotten == args.late_expect_forgotten);
+        std::printf("late-sector-check K=%d T=%d A=%d%s: boundaries=%d/%d births_missing=%lld forgotten=%lld%s phantom=%lld\n",
+                    args.late_sector, args.late_t, args.late_a,
+                    args.late_moved >= 0 ? (" moved->" + std::to_string(args.late_moved)).c_str() : "", arm.boundaries,
+                    expected, missing, forgotten,
+                    args.late_expect_forgotten >= 0 ? (" (expected " + std::to_string(args.late_expect_forgotten) + ")").c_str() : "",
+                    phantom);
+        ls_print("control vs arm", arm);
+        if (args.late_reference) {
+            ls_print("control vs reference (ordinary rewind)", reference);
+            std::printf("  script differences of the arm the reference does not have: %d\n", arm_only);
+        }
+        if (!args.late_keep)
+            for (const auto& [name, run]: runs) std::remove((prefix + "." + name + ".bin").c_str());
+        const char* verdict = exact ? "PASS" : covered && args.late_reference ? "PASS-EXCEPT-REFERENCE" : "FAIL";
+        std::printf("%s\n", verdict);
+        return exact ? 0 : covered && args.late_reference ? 4 : 3;
+    }
+
     int run_describe_script(const arguments& args) {
         auto world = create_session_world(args, 0.0f);
         if (!world) return 1;
@@ -5149,7 +5815,14 @@ int main(int argc, char** argv) {
             "           (the resync apply offline: the server's rows, portable scripts and union at S over a client anchor's\n"
             "            blob, re-stepped to B+N against the straight run; exit 0 PASS, 3 FAIL, 2 bad arguments; the\n"
             "            harness line (warm-up run vs the run from the restored root) is informational: every arm and\n"
-            "            the straight run start from the same restored root)\n");
+            "            the straight run start from the same restored root)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --late-sector-check K T A [--late-moved T2]\n"
+            "           [--late-also SECTOR TICK]... [--late-after N] [--late-root N] [--late-expect-forgotten N]\n"
+            "           [--late-out PREFIX] [--late-keep] [--late-reference]\n"
+            "           (step B1: sector K stamped at T and delivered at A - the late rewind with the union re-derived -\n"
+            "            against an on-time control, each run a child process; every boundary A..A+N compared; exit 0\n"
+            "            PASS, 3 FAIL, 4 PASS-EXCEPT-REFERENCE (every difference is one an ordinary rewind across the\n"
+            "            pass leaves too, --late-reference), 2 bad arguments)\n");
         return 2;
     }
     if (!args.replay_session.empty()) return run_replay_session(args);
@@ -5167,6 +5840,8 @@ int main(int argc, char** argv) {
         return run_replay_nav(args);
     }
     // Before --drop and --spawn-test: it composes with their scenes.
+    if (!args.late_run.empty()) return run_late_sector_run(args);
+    if (args.late_sector_check) return run_late_sector_check(args);
     if (args.resync_check) return run_resync_check(args);
     if (args.savestate_check) return run_savestate_check(args);
     if (args.portable_scripts_check) return run_portable_scripts_check(args);

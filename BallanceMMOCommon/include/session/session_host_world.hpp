@@ -36,6 +36,75 @@
 
 namespace bmmo::session {
 
+    // One activation of Gameplay_SectorManager for the replay to re-issue
+    // (game/session_host_support.hpp manager_activations): whether it was
+    // told to reset, and the two IngameParameter cells it was issued with
+    // ([0][1] activate, [0][2] deactivate).
+    struct manager_activation {
+        bool reset = false;
+        int activate = 0, deactivate = 0;   // IngameParameter[0][1], [0][2]
+    };
+
+    // The manager activations of each tick, in two slots (resync design 2.8,
+    // step B1): `pending`, the activation the scripts of the frame before
+    // asked for (seen as next-frame flags after it, recorded for the frame
+    // that consumes it), and `pass`, a union pass before that tick's step
+    // (the live run's, or the one a replay re-derived).  Both can fall on one
+    // tick: one slot lost one of them.  The replay re-issues `pending` first,
+    // then `pass` - the live order: frame T's scripts set the flags, and the
+    // pass of T+1 writes the cells over them before frame T+1 consumes them.
+    // CK-free: the CK half re-issues what this keeps.
+    class activation_slots {
+    public:
+        struct entry {
+            bool have_pending = false, have_pass = false;
+            manager_activation pending, pass;
+        };
+        void clear() { by_tick_.clear(); }
+        void record_pending(uint32_t tick, const manager_activation& a) {
+            entry& e = by_tick_[tick];
+            e.pending = a;
+            e.have_pending = true;
+            trim(tick);
+        }
+        void set_pass(uint32_t tick, const manager_activation& a) {
+            entry& e = by_tick_[tick];
+            e.pass = a;
+            e.have_pass = true;
+            trim(tick);
+        }
+        // The pass slot of `tick` emptied; the pending slot stays.  True when
+        // there was a pass.
+        bool forget_pass(uint32_t tick) {
+            const auto it = by_tick_.find(tick);
+            if (it == by_tick_.end() || !it->second.have_pass) return false;
+            it->second.have_pass = false;
+            it->second.pass = {};
+            if (!it->second.have_pending) by_tick_.erase(it);
+            return true;
+        }
+        // What `tick` re-issues, in order (pending, then pass); empty when
+        // nothing was recorded for it.
+        std::vector<const manager_activation*> at(uint32_t tick) const {
+            std::vector<const manager_activation*> out;
+            const auto it = by_tick_.find(tick);
+            if (it == by_tick_.end()) return out;
+            if (it->second.have_pending) out.push_back(&it->second.pending);
+            if (it->second.have_pass) out.push_back(&it->second.pass);
+            return out;
+        }
+        const entry* find(uint32_t tick) const {
+            const auto it = by_tick_.find(tick);
+            return it == by_tick_.end() ? nullptr : &it->second;
+        }
+
+    private:
+        void trim(uint32_t tick) {
+            while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
+        }
+        std::map<uint32_t, entry> by_tick_;
+    };
+
     // A body this world made (the event log's "recipe" line): the
     // Physicalize recipe, collision group and the entity's matrix at that
     // moment.  A rewind anchored before its tick re-creates or re-poses it
@@ -280,6 +349,9 @@ namespace bmmo::session {
         binding.replay_mechanisms = hooks.replay_mechanisms;
         binding.on_correction = hooks.on_correction;
         rollback_world world = bind_rollback_world(backend, binding);
+        // Step B1: a window-born body whose sector pass the replay's union
+        // re-derivation moved or forgot is no missing birth.
+        world.birth_moved = hooks.birth_moved;
         // Step RR: a snapshot row is written again after its tick's step in
         // every later replay that crosses it (rollback_world::replay_rows).
         world.replay_rows = true;

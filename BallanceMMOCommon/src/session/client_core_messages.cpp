@@ -74,6 +74,7 @@ namespace bmmo::session {
             // A hard world overwrite: the records collected while we waited
             // for this snapshot describe the world it is about to replace.
             s.rollback_.invalidate_history();
+            s.union_records_.clear();   // step B1: beside the records
             // ...and so does a replay a correction of this poll asked
             // for: its anchor is gone with the history, and a refused own
             // replay would answer this resync with another.

@@ -30,7 +30,18 @@ namespace bmmo::session {
         // replayed tick's scripts and step: the births deferred into this
         // replay (apply_event), made at their tick in the world as it stands
         // then, with the own beam stamped for it among them.
-        world_hooks_.before_replayed_tick = [this](uint32_t tick) { drain_pending_births(tick); };
+        // Step B1: then, in a Sector rewind, the union's tick re-derived
+        // (resync design 2.8: events, then the union, then the step - the
+        // server's order), before the host re-issues the tick's activations.
+        world_hooks_.before_replayed_tick = [this](uint32_t tick) {
+            drain_pending_births(tick);
+            rederive_union_tick(tick);
+        };
+        // Step B1: a window-born body of a live pass the re-derivation moved
+        // or forgot is not made at its live birth tick: no missing birth.
+        world_hooks_.birth_moved = [this](const std::string&, uint32_t birth_tick) {
+            return s.rederive_.active && s.rederive_.r.birth_moved(birth_tick);
+        };
         // The mirrors a replayed tick drives: every predicted remote this
         // world has stepped and driven by then (driven_from: the stamp of
         // a birth made inside a replay, never a tick before a live make),
@@ -222,6 +233,16 @@ namespace bmmo::session {
         s.sector_cell_ = 0;
         for (auto& pass: s.recent_passes_) pass = {};
         s.phase_misses_ = 0;
+        // Step B1: the union's rollback state and its counters.
+        s.sector_stamps_.clear();
+        s.sector_stamp_seq_ = 0;
+        s.union_records_.clear();
+        s.pass_log_.clear();
+        s.sector_late_.clear();
+        s.rederive_ = client_core_state::union_rederivation{};
+        s.last_rewind_rederived_ = false;
+        s.sector_rewinds_ = s.sector_rewinds_missed_ = s.sector_rewind_depth_ = 0;
+        s.sector_passes_forgotten_ = 0;
         // R1: the retail policies' and readers' state, and no frame
         // prepared (post_step refuses one no pre_step of this session made).
         s.ball_rows_.clear();
@@ -404,6 +425,7 @@ namespace bmmo::session {
             // the retail mod does this in rebase_tick).  The registry
             // goes with it: its rows are keyed by the old numbers.
             s.rollback_.invalidate_history();
+            s.union_records_.clear();   // step B1: beside the records
             // An own beam the new numbering has not reached yet is the
             // server's to apply at its stamp, and so ours: live once
             // more, rather than retired with the history.  The births
@@ -434,6 +456,7 @@ namespace bmmo::session {
             // anchor-relative numbering name ticks the server never
             // asked us for, and nothing can match them again.
             s.rollback_.invalidate_history();
+            s.union_records_.clear();   // step B1: beside the records
             s.own_inputs_.clear();
             // ...and our own body changes, numbered the same way
             // (an unanswered birth is set aside for its echo).

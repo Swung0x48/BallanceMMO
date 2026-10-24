@@ -975,6 +975,238 @@ manager also re-issues it, the flags are set twice, which is idempotent
 activates `PE_Balloon Script` through next-frame flags is checked in step A1
 (§9 Q8 has the fallback).
 
+**As built (step B1, 2026-10-24).**
+
+- **Where.**
+  - `session/sector_union.hpp`: `state_type`, `state()`, `restore()`,
+    `unstamp()`, `covers()` (case 2), `with_pending()` (the merge of §2.5 and
+    the start of §2.8: one function), `serialize`/`deserialize` (§5's bytes,
+    `kStateVersion` 1; a state the format cannot hold - more than 255
+    sectors or origins, more than 65535 stamps - serializes to nothing,
+    which `deserialize` refuses, never to a truncated other state),
+    `birth_moved()` (the attribution below); `sector_pacer::restore`.
+  - `session/sector_union.hpp` `sector_rederivation`: the re-derivation
+    rule itself, CK-free and the one implementation - `start` (the record
+    with `with_pending`, the window's live passes moved out of the pass
+    log), `tick` (the pass to put in the slot, the slot to empty, the live
+    pass forgotten), `abandon` (a refused rewind: the live passes back),
+    `through(now)`, `birth_moved`. The core's `rewind_for_sectors` /
+    `rederive_union_tick` and SimTool's `--late-sector-check` both drive
+    it, so the offline check runs the clients' code; each does only its own
+    side effects (the platform's or the activations' pass slot, logs,
+    records). A3's resync re-step, which §2.8 says also re-derives, reuses
+    it.
+  - The core: the stamp log `sector_stamps_`, `union_records_` (recorded in
+    post_step beside the rollback record, cleared at every
+    `invalidate_history`, trimmed to `history_ticks`), `pass_log_` (live and
+    re-derived passes, `history_ticks + 128`), the frame's late set
+    (`sector_late_`), `rewind_for_sectors` (pre_step, after the drain, the
+    echoes and the script guards, before `replay_corrected_inputs`),
+    `rederive_union_tick` (in `before_replayed_tick`, after the births),
+    `move_own_sector`, `last_rewind_rederived()`, the cell re-read; counters
+    on the status line before `input:` (`sectors: rew=made/missed depth=
+    forgot= births_moved= phase_misses=`).
+  - `client_platform.hpp`: `set_union_pass`, `sector_cell_adopted` (both
+    required); `core_world_hooks::birth_moved`.
+  - Host support: `activation_slots` (CK-free, `session_host_world.hpp`) and
+    `manager_activations` on it (`record` = the live pass slot,
+    `record_pending` = the pending slot, `set_pass`, `forget_pass`, re-issue
+    pending then pass); `live_cells_guard` adopt mode
+    (`core.last_rewind_rederived()`); `bind_session_world` hands
+    `birth_moved` on.
+  - `rollback.hpp`: `rollback_world::birth_moved`, `rollback_stats::births_moved`.
+  - Hosts: one line each (H: `manager_activations_`; RC: `host.activations`,
+    and `sector_cell_adopted` clears `sector_cell_is_own_` for a cell that is
+    not `current_sector_`, run_sector's bookkeeping).
+  - `sim_tool.cpp --late-sector-check K T A` (§7.2).
+- **Adaptations** (no principle touched):
+  - The value type is `sector_union::state_type`: `state` is the accessor.
+  - **An after-the-fact own crossing is not in the stamp log.** §2.5 lists
+    the unheld crossing report (client_core_frame.cpp poll_own_sector
+    without the hold; the retail hook's report) among the log's stamps. It
+    never entered the live union (the level's chain ran the manager), so a
+    re-derivation that took it would run a manager pass the live world never
+    ran. Only stamps handed to the union are logged; a MOVED echo of an
+    unlogged own Sector is kept where stamped, as before.
+  - **Case 4's "late joiner's catch-up"** is a stamp at or before this
+    numbering's first tick (`event.tick <= tick_base_`): stamped live, no
+    resync (it never has a record). A stamp beyond the history otherwise
+    resyncs once (the request in flight covers the rest).
+  - **`sector_cell_adopted(int& cell)` returns the cell**: the core cannot
+    read CK. The host reads `IngameParameter[0][1]` after the guard has
+    ended (the guard's re-issue of the next frame's activation included) and
+    the core takes it as `sector_cell_`.
+  - **`births_moved` (engine, not in the design).** A window-born body of a
+    live pass the re-derivation moved or forgot is destroyed at the restore
+    like any window birth and is not made at its live birth tick; without
+    the hook the engine counted it in `births_missing`, which §7.2 requires
+    to be 0. The core's hook attributes the birth to the window's live pass
+    at M with M+5 = b ONLY (its physicalize frame) and asks whether the
+    re-derivation has that pass at M; a body born at any other tick belongs
+    to no pass and, missing, stays a missing birth (the fix-up round
+    dropped the first version's fallback "else the newest pass with
+    M+5 <= b", which could have counted a real missing birth - a trafo
+    piece of a later tick - as moved). The engine logs the first ones
+    (`birth: X is not back after its birth tick T: its sector pass was
+    moved or forgotten by the replay`). The body made later by the moved
+    pass is recorded from then on by the existing `replay_mechanisms` rule.
+    Measured with the strict rule: the moved own Sector case, 11 bodies,
+    every one born at 305 = 300+5 (P_Modul_19_Flaps, P_Modul_03_*); the
+    forgotten-pass case, 29.
+  - **A moved own Sector is acted on with the own echoes only**
+    (`acting_on_echoes`). The retail core runs `own_echoes` off until R4, so
+    a retail client keeps its own moved Sector at its stamp, as before B1.
+    The late remote stamp needs `rollback` only and runs on retail.
+  - Re-derivation runs only in the frame's Sector rewind; every other replay
+    re-issues the recorded slots (Q4 stays open).
+  - **The balloon of a forgotten pass.** A1 records `PE_Balloon Script`'s
+    pending activation (a keep-local script, §2.8) at the tick the live pass
+    had it, and every replay re-issues it from that record. When a B1
+    re-derivation moves the pass (the moved own Sector case), the balloon is
+    therefore activated at the old pass's tick from the record and again by
+    the moved pass's walk; its proximity countdown then runs a different
+    phase from the on-time world (`Last Check` 9 vs 60 at A, for the rest of
+    the run). It is exception (c), never compared (I3), and the balloon
+    bodies stay equal in the check; left as it is.
+- **Checks** (rB1, the working tree on fcb4d37):
+  - Unit tests 446/446 (new: `SectorUnionState` ×4, `ActivationSlots`,
+    `SessionClientCoreSectorRewind` ×8; `DrainsInTheServersOrder...` now
+    expects the B1 rule for its late stamps, none of which has a record:
+    stamped live and one resync). Arch GCC 16.2 and MSYS GCC 13.3 syntax
+    checks: every file ok.
+  - **`--late-sector-check`, the arena** (each case with `--late-reference`;
+    T = root+60, 601 boundaries A..A+600): K ∈ {2, 3, 4} × A−T ∈ {3, 9, 40};
+    a later live pass forgotten (K 3 late at 60 → 100, sector 4 on time at
+    62: forgotten 1); an own stamp inside the window (sector 4 at 80:
+    forgotten 0); a moved own stamp (4 at 60 moved to 69, echo at 75:
+    forgotten 1, births_moved 11). Every case: blobs equal ignoring the order
+    bookkeeping at 601/601 boundaries (byte-identical 0: unit numbering only,
+    PE_Balloon's in the B1 arm, A_Floor's in the ordinary-rewind reference),
+    union identical 601/601, births_missing 0, no Sector event from the cell,
+    and every script difference one the ordinary-rewind reference has at the
+    same boundary (verdict PASS-EXCEPT-REFERENCE). The one difference: the
+    pre-existing residual below.
+  - **Wire check** `wire_check.sh rA2 rB1 rB1w` on the REF set: §7.5's B1
+    table exactly. 13 captures byte-identical in sends and journals;
+    a5u_lead c0, c1, c3 change: sector +4 at 1713, re-derived in a rewind at
+    live tick 1721 (`rollback to tick 1712 ... re-simulated 9 ticks`), the
+    own crossings stamped at their own ticks (1790, 1807, 1798); their TICK
+    records differ from 1722 on (the TICKs of 1713..1721 are the live
+    frames' as written before the stamp arrived) and their sends from 1728.
+  - **a5u_lead live** (`b1_a5u_lead`, snapshots off, patience and lead on,
+    captures): the server and every client log `sector +4 at tick 1713`
+    (c0 re-derived at live 1719, c1 and c3 at 1718; one Sector rewind each,
+    depth 6-7); no client sent a Sector 4 before its own crossing (c0 1790,
+    c3 1798, c1 1807); `phase_misses` 0; server journal replay 3292/3292,
+    0 checkpoint mismatches; harness verdict as the REF capture's (the arm's
+    starvation and c2's resyncs). `first_divergence --from 1713 --exclude
+    PE_Balloon`: sector-4 bodies against the server over 1713-1837:
+    P_Modul_03_*, P_Modul_08, PE_Box_slide exact in every client; one LOCAL
+    checkpoint (1718) per rewinding client lacks the P_Modul_03 bodies (it
+    was written live before the stamp arrived); then the leader-only wakes
+    below (P_Modul_19_Flaps 1.79 mm from 1728, P_Modul_03_Floor 0.066 m at
+    1838) in c0, c1 and c3 alike.
+  - **Lane control** (snapshots off, rA2 then rB1 in one batch): passes
+    +2@824 +3@1270 +4@1713 on the server and every client in both; resyncs
+    1/1 per client in both; rewinds 396-518 vs 407-532, t_max 45-63 vs
+    46-52 ms; sector rewinds 0, forgotten 0, phase misses 0; first
+    divergence identical in pattern (non-leaders P_Modul_01_Pusher 0.0895 m
+    at 614, c2 after its resync).
+  - **Solo snapshots off** (`e0_solo.sh rB1`): `e0_compare --live` against
+    old1 IDENTICAL (2406 ticks, 0 differ).
+  - **Retail** (`scripts/retail/b1_retail_1`, Level 11, core on, Arch
+    server snapshots off): client 1 `net lag 300 up`, then `sector 2`
+    (stamped 437, lead 9); the server ran +2 at 437 (applied = origin);
+    client 2 got the relay late and logged `sector +2 at tick 437 ...
+    re-derived in a rewind at live tick 448` (one rewind, 12 ticks); one
+    Sector event in the session (client 1's), none from client 2.
+- **Residuals, pre-existing and root-caused** (each its own item):
+  - **P_Modul_18_Particle Script's `CKBEHAVIOR_DEACTIVATENEXTFRAME`.** The
+    on-time world keeps the bit (0x400000) on the inactive script for the
+    rest of the run; any world that replayed the tick it was set in has it
+    cleared. Cause: `script_replay::execute_frame` consumes the next-frame
+    flags of every selected script, while the live CK frame consumes them
+    only for scripts whose owner is in the behaviour manager's object list,
+    which this inactive script's owner has left (A2's G1 mechanism). Shown
+    by the ordinary-rewind reference of every `--late-sector-check` case at
+    the same 601 boundaries, so not B1's; it is the "engine script check"
+    line the sector-activation replay notes recorded on 2026-10-22. Why
+    the reference stands for the build before B1: the code it runs is
+    rA2's - `script_replay::execute_frame` (script_replay.hpp:503-511, where
+    the flags are consumed) is unchanged by B1, the reference arm's
+    re-derivation is off (the `birth_moved` hook answers false), and B1's
+    only change on that path, the two activation slots, re-issues what the
+    one-slot map did on every tick where the frame's pending activation and
+    a union pass do not share the tick; the rewound line's `coincident=`
+    counts those ticks and is 0 in all 12 references (and arms). rA2's own
+    SimTool has no mode that replays the session selection with
+    `execute_frame` and compares it (`--savestate-check --frames` replays
+    the 16 mechanism scripts only; run on rA2 with the arena drop scene it
+    shows the balloon's proximity float, not this script), so the
+    equivalence is the evidence. Queued as **F** in
+    `rollback-engine-gaps-design.md` (roadmap §4 item 8): `execute_frame`
+    takes a script's next-frame flags only where the live frame would
+    (shared script replay, both hosts); `--late-sector-check` then exits 0.
+  - **Leader-only wakes (G-c, §1.3; Q6, decision §11).** A mechanism woken
+    by a proximity sensor or a Physics WakeUp of the leading ball wakes in
+    the server's world (the client's BodyRevived, or the server's own
+    rewired sensor) and in the leader's, never in the other clients'
+    (BodyRevived goes client to server only; their sensors watch their own
+    ball). In `b1_a5u_lead` the leader c2's BodyRevived for
+    P_Modul_19_Flaps at 1728 and P_Modul_03_Floor at 1838 are exactly where
+    c0, c1 and c3 depart, all three by the same amount; the pre-B1 REF
+    a6m_snapoff shows the same (P_Modul_19_Flaps 1.0 mm in the three
+    non-leaders from the leader's BodyRevived at 1703, and every REF
+    capture's non-leaders on P_Modul_01_Pusher at ~600). Its size over
+    1713-2700 (`sector_body_max.py`, both B1 runs alike): the P_Modul_03
+    gate and walls up to 1.35-1.37 m in c0, c1 and c3 (1936-1970, the
+    module the leader woke at 1838 moving on the server and in c2 only),
+    P_Modul_19_Flaps 1.79 mm; c2 within 0.064 mm. So §7.3's "no sector-4
+    body beyond client 2's own maximum + 1 mm" fails on G-c alone; the fix
+    is world-agreement (roadmap §4 item 7: client sensors rewired to the
+    nearest ball, own or mirror).
+- **Review fix-up** (two reviews): the re-derivation moved into
+  `sector_rederivation` (above) and SimTool's copy of it deleted; the
+  strict birth attribution; `serialize` refuses what it cannot hold;
+  the engine logs moved births; `--late-sector-check` prints
+  `coincident=`; the drain's Sector comment says a reachable late stamp
+  rewinds even while a resync is pending (§2.7 case 3). Not changed, with
+  the reason: (a) `move_own_sector` still rewinds for a moved own stamp
+  whose sector another member's earlier stamp already requested - the
+  re-derivation gives the same passes, so it costs a rewind, never a
+  difference, and a moved own Sector is acted on only with the own echoes
+  on (headless, rare); (b) a late joiner's catch-up stamp that arrives in
+  the same drain as a reachable late stamp is re-derived from the anchor
+  tick + 1 instead of the live tick + 1 - the server ran that pass before
+  this numbering began, so neither tick is the server's, and dropping it
+  from the merge would lose the stamp when the union is restored from the
+  re-derivation. Rerun (rB1 rebuilt, the same working tree plus the
+  fix-up): unit tests 448/448 (new: `RederivationMovesForgetsAndAbandons`,
+  `SerializeRefusesWhatTheFormatCannotHold`; `BirthAttributionToAMovedPass`
+  to the strict rule); Arch GCC 16.2 and MSYS GCC 13.3 every file ok; x64
+  BUILD-OK, x86 CLIENT-BUILD-OK (client objects deleted first); wire check
+  `rA2 rB1 rB1f`: its whole output identical to the first round's (13
+  captures byte-identical, a5u_lead c0/c1/c3 the same differences);
+  `--late-sector-check` all 12 cases as before (601/601 equal ignoring
+  order, union 601/601, births_missing 0, forgotten 1/0/1 where expected,
+  births_moved 11 and 29, PASS-EXCEPT-REFERENCE with no script difference
+  the reference lacks, `coincident=0` everywhere); a5u_lead live
+  (`b1f_a5u_lead`, snapshots off): server and every client `sector +4 at
+  tick 1713`, c0/c1/c3 one Sector rewind each (live 1721, depth 9),
+  own crossings stamped 1790/1807/1799, `phase_misses` 0, server replay
+  3594/3594, first divergence of c0/c1/c3 P_Modul_03_Floor 0.0656 m at
+  1838 (G-c), the LOCAL checkpoints 1718 and 1720 written before the stamp
+  arrived lack the P_Modul_03 bodies, c2 at 2800 after its resync of 2760
+  (A3's); solo snapshots off (`rB1f`) IDENTICAL to old1 and old2; retail
+  (`scripts/retail/b1f_retail_1`, Level 11, core on): client 2 `sector +2
+  at tick 446` = the server's, one 12-tick rewind, one Sector event in the
+  session (client 1's). The lane-control arm was not rerun: it makes no
+  Sector rewind (0 in both first-round runs), the only code the fix-up
+  changed on a live path.
+- **Not run at this step** (quick tier: one run of each check the change
+  can reach): the a5u_lead recipe's second and third runs and the swing and
+  a6m regression arms of §8's row.
+
 ### 2.9 Late joiner (A5)
 
 **The flow.** The joiner's first SessionAssign carries
@@ -1718,11 +1950,12 @@ bit-exact (§7.6).
 --keep-lane --event 2:1500:step=300:dir=up`, server `arch_server_lp.sh wsl
 26700 100000 100000 4.2 true true`. Three runs. Pass:
 
-- every client logs `sector +4 at tick 1714` (the server's tick);
+- every client logs `sector +4 at tick 1713` (the server's tick in the REF
+  set; 1714 was the E0 set's);
 - clients 0, 1 and 3 each log one Sector rewind, and none of them sends an
   own Sector 4 before its own crossing (1798/1807 in the reference);
 - `first_divergence.py server.bmjr client*.bmjr --prefix P_ --exclude
-  PE_Balloon --from 1714` gives no sector-4 body beyond the stamping client
+  PE_Balloon --from 1713` gives no sector-4 body beyond the stamping client
   2's own maximum + 1 mm;
 - `phase_misses` = 0;
 - the server journal replays exactly.
@@ -1817,7 +2050,7 @@ the evidence for each in §1.1 and §1.2:
 | resync_snapoff/client3 | byte-identical | its late stamp for sector 4 at 1813 is redundant (1800 already); its resync is A3's business |
 | resync_snapoff/client0, client1, client2 | byte-identical | no late stamp; resync only |
 | a5u_lead/client2 | byte-identical | the stamping client; its late stamp for sector 4 at 1798 is redundant (1713 already); its two resyncs are A3's |
-| **a5u_lead/client0, client1, client3** | **change** | sector 4 at 1713 instead of 1722: one Sector rewind; the TICK records differ from 1713 on |
+| **a5u_lead/client0, client1, client3** | **change** | sector 4 at 1713 instead of 1722: one Sector rewind; the TICK records differ from 1722 on (those of 1713-1721 were written live before the stamp arrived; as built, step B1) |
 
 (Re-derived at step REF against the re-recorded set; the E0 set's version
 of this table had sector 4 at 1714/1723, the redundant resync_snapoff stamps

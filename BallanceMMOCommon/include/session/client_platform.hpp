@@ -165,6 +165,11 @@ namespace bmmo::session {
         // (kind, owner) belongs to at a replayed tick (rollback_world::
         // row_entity): a mirror driven by then, or the resolved mechanism.
         std::function<std::string(body_kind kind, uint32_t owner, uint32_t tick)> row_entity;
+        // Step B1 (resync design 2.8): a body destroyed at the restore and
+        // not made again at its live birth tick because the union's
+        // re-derivation moved or forgot the sector pass that made it live
+        // (rollback_world::birth_moved).
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> birth_moved;
     };
 
     // The own ball as the host sees it after a step (design 2.2 own_ball;
@@ -412,6 +417,20 @@ namespace bmmo::session {
         // An activation the frame's own scripts asked for, pending for the
         // frame of `tick` (E9; post_step step 15): recorded like a pass.
         std::function<void(uint32_t tick)> record_pending_activation;
+        // Step B1 (resync design 2.8): the union pass a replay re-derived
+        // for `tick` - recorded as run_sector's pass would be (cells
+        // `sector`, 0, reset) in the tick's pass slot, which the host's
+        // replay_activation of that tick re-issues right after; `sector` 0
+        // forgets a pass the live frames made at `tick` (the pending slot
+        // stays).  Host support's manager_activations::set_pass/forget_pass.
+        std::function<void(uint32_t tick, int sector)> set_union_pass;
+        // Step B1 (resync design 4.6): after a rewind that re-derived the
+        // union, the live cells were not written back (adopt mode); the host
+        // reads IngameParameter[0][1] as the replay left it, does the
+        // bookkeeping run_sector does for it (retail: the cell is no longer
+        // the own ball's sector), and returns it in `cell` (false: unread).
+        // The core takes it as the cell its own sector poll compares with.
+        std::function<bool(int& cell)> sector_cell_adopted;
 
         // ---- mirrors (design 2.2; E6) ----
         // The entity that mirrors `player` with a ball of `ball_type`, made
@@ -576,6 +595,9 @@ namespace bmmo::session {
         if (!platform.own_camera_rows) return "own_camera_rows";
         if (!platform.movable_bodies) return "movable_bodies";
         if (!platform.note_script_resets) return "note_script_resets";
+        // The union inside a replay (step B1): every host re-derives it.
+        if (!platform.set_union_pass) return "set_union_pass";
+        if (!platform.sector_cell_adopted) return "sector_cell_adopted";
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
         if (caps.own_body_control) {

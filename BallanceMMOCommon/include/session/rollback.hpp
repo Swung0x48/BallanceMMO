@@ -224,6 +224,13 @@ namespace bmmo::session {
         // body still missing after that tick's step is counted (births_missing).
         std::function<bool(const std::string& entity, uint32_t birth_tick)> destroy_body;
         std::function<bool(const std::string& entity, uint32_t birth_tick)> recreate_body;
+        // Optional (step B1, resync design 2.8): a body destroy_body took out
+        // that the replay is not to make at its live birth tick - the replay
+        // re-derives the sector union and moved or forgot the pass that made
+        // it live.  Missing after that tick's step it is counted as moved
+        // (births_moved), not missing; made later by the moved pass, it is
+        // recorded from then on (replay_mechanisms).
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> birth_moved;
         // Optional, with destroy_body (step LB of the session-core design): a
         // body destroy_body took out that the caller makes again at its
         // birth tick from the session's inputs - a mirror, made from its
@@ -414,6 +421,7 @@ namespace bmmo::session {
         uint64_t birth_recreate_mismatches = 0;     // ...or not: re-posed from the record as a parked body would be
         uint64_t birth_recreate_failures = 0;       // destroy or recreate refused: the body was parked / is missing
         uint64_t births_missing = 0;                // destroyed at a restore and not made again by its birth tick's replayed scripts
+        uint64_t births_moved = 0;                  // ...because the replay's union re-derivation moved or forgot their pass (step B1)
         uint64_t replay_mechanisms_added = 0;       // replayed ticks' records that name a mechanism body the live record did not (replay_mechanisms)
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
@@ -1371,7 +1379,12 @@ namespace bmmo::session {
                         // Destroyed at the restore and not made again by this
                         // tick's replayed scripts: the activation the live
                         // frame had is missing from the replay.
-                        if (item.recreate) {
+                        if (item.recreate && world.birth_moved && world.birth_moved(entity, t)) {
+                            ++stats_.births_moved;
+                            if (world.log && recreate_logs_++ < 8)
+                                world.log("birth: " + entity + " is not back after its birth tick " + std::to_string(t)
+                                          + ": its sector pass was moved or forgotten by the replay");
+                        } else if (item.recreate) {
                             ++stats_.births_missing;
                             if (world.log && recreate_logs_++ < 8)
                                 world.log("birth: " + entity + " was destroyed at the restore and is not back after its birth tick "

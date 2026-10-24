@@ -165,10 +165,12 @@ namespace bmmo::game {
     // after their frame.  The replay re-issues them at that tick, before
     // the tick's scripts, with the two IngameParameter cells as they were
     // (plan doc 10).
-    struct manager_activation {
-        bool reset = false;
-        int activate = 0, deactivate = 0;   // IngameParameter[0][1], [0][2]
-    };
+    //
+    // Two slots per tick (step B1, session_host_world.hpp activation_slots):
+    // the frame's pending activation (record_pending) and the union's pass
+    // (record, from the live pass; set_pass / forget_pass, from a replay
+    // that re-derives the union), re-issued pending first, then the pass.
+    using manager_activation = bmmo::session::manager_activation;
     //
     // The same rule for the selected scripts that only scripts outside the
     // selection activate (script_replay::trafo_activations: the trafo
@@ -205,23 +207,30 @@ namespace bmmo::game {
     class manager_activations {
     public:
         void clear() {
-            by_tick_.clear();
+            slots_.clear();
             scripts_by_tick_.clear();
             referential_by_tick_.clear();
             scripts_reissued_ = 0;
             referentials_placed_ = 0;
             override_ = {};
         }
-        void record(CKContext* context, uint32_t tick, bool reset) {
+        // The union's live pass of `tick` (platform record_activation), with
+        // the cells as run_sector left them: the tick's pass slot.
+        void record(CKContext* context, uint32_t tick, bool reset) { slots_.set_pass(tick, read(context, reset)); }
+        // A pass a replay re-derived for `tick` (platform set_union_pass):
+        // what run_sector writes - activate `sector`, deactivate nothing,
+        // reset - in the pass slot, bit for bit the live record of that pass.
+        void set_pass(uint32_t tick, int sector) {
             manager_activation a;
-            a.reset = reset;
-            if (CKDataArray* parameters = session_data_array(context, "IngameParameter")) {
-                parameters->GetElementValue(0, 1, &a.activate);
-                parameters->GetElementValue(0, 2, &a.deactivate);
-            }
-            by_tick_[tick] = a;
-            while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
+            a.reset = true;
+            a.activate = sector;
+            a.deactivate = 0;
+            slots_.set_pass(tick, a);
         }
+        // A live pass the re-derivation did not make at `tick`; the pending
+        // slot stays.  True when there was one.
+        bool forget_pass(uint32_t tick) { return slots_.forget_pass(tick); }
+        const bmmo::session::activation_slots& slots() const { return slots_; }
         // After a live frame (platform record_pending_activation, for the
         // frame of `tick` that consumes it): the manager's pending activation
         // (a script outside the replay asked for it) and every pending
@@ -230,7 +239,7 @@ namespace bmmo::game {
             if (!context) return;
             if (auto* manager = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
                     manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
-                record(context, tick, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
+                slots_.record_pending(tick, read(context, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0));
             std::vector<script_activation> pending;
             for (CK_ID id: scripts) {
                 auto* script = CKBehavior::Cast(context->GetObject(id));
@@ -250,12 +259,13 @@ namespace bmmo::game {
             while (!referential_by_tick_.empty() && referential_by_tick_.begin()->first + 4096 < tick)
                 referential_by_tick_.erase(referential_by_tick_.begin());
         }
-        // The activations recorded for `tick` re-issued: the manager's (the
-        // cells, then the manager activated, reset as recorded) and the
-        // scripts'.  `inside`: a replayed tick (not the live frame a rewind's
-        // end re-issues for), where an explosion's referential is put where
-        // the live one was (above).  Returns the manager's, nullptr when none
-        // was recorded or the array or the manager is missing.
+        // The activations recorded for `tick` re-issued: the manager's (each
+        // slot's cells, then the manager activated, reset as recorded:
+        // pending first, then the pass) and the scripts'.  `inside`: a
+        // replayed tick (not the live frame a rewind's end re-issues for),
+        // where an explosion's referential is put where the live one was
+        // (above).  Returns the manager's last one re-issued, nullptr when
+        // none was recorded or the array or the manager is missing.
         const manager_activation* replay(CKContext* context, CK_ID manager_id, uint32_t tick, bool inside = false) {
             end_override(context);
             CKScene* scene = context ? context->GetCurrentScene() : nullptr;
@@ -277,15 +287,18 @@ namespace bmmo::game {
                         ++scripts_reissued_;
                     }
             }
-            const auto it = by_tick_.find(tick);
-            if (it == by_tick_.end()) return nullptr;
+            const std::vector<const manager_activation*> due = slots_.at(tick);
+            if (due.empty()) return nullptr;
             CKDataArray* parameters = session_data_array(context, "IngameParameter");
             CKBehavior* manager = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
             if (!parameters || !manager) return nullptr;
-            parameters->SetElementValue(0, 1, &it->second.activate, sizeof(int));
-            parameters->SetElementValue(0, 2, &it->second.deactivate, sizeof(int));
-            if (scene) scene->Activate(manager, it->second.reset ? TRUE : FALSE);
-            return &it->second;
+            for (const manager_activation* a: due) {
+                int activate = a->activate, deactivate = a->deactivate;
+                parameters->SetElementValue(0, 1, &activate, sizeof(int));
+                parameters->SetElementValue(0, 2, &deactivate, sizeof(int));
+                if (scene) scene->Activate(manager, a->reset ? TRUE : FALSE);
+            }
+            return due.back();
         }
         // Ball_Pos_Frame back on the parent it had, with the local matrix
         // it had, after a replayed explosion's tick (above).  Idempotent.
@@ -308,7 +321,17 @@ namespace bmmo::game {
             return CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>("Ball_Pos_Frame"),
                                                                            CKCID_3DENTITY, nullptr));
         }
-        std::map<uint32_t, manager_activation> by_tick_;
+        // The manager's activation as the cells stand now.
+        static manager_activation read(CKContext* context, bool reset) {
+            manager_activation a;
+            a.reset = reset;
+            if (CKDataArray* parameters = session_data_array(context, "IngameParameter")) {
+                parameters->GetElementValue(0, 1, &a.activate);
+                parameters->GetElementValue(0, 2, &a.deactivate);
+            }
+            return a;
+        }
+        bmmo::session::activation_slots slots_;
         std::map<uint32_t, std::vector<script_activation>> scripts_by_tick_;
         std::map<uint32_t, VxMatrix> referential_by_tick_;
         uint64_t scripts_reissued_ = 0, referentials_placed_ = 0;
@@ -375,7 +398,16 @@ namespace bmmo::game {
             // A replayed explosion's referential, if the window ended on its
             // tick (manager_activations::end_override).
             if (activations_) activations_->end_override(context_);
-            for (int i = 0; i < 3; ++i) if (have_[i]) write_cell(i, values_[i]);
+            // Adopt mode (resync design 4.6, step B1): a rewind that
+            // re-derived the union replayed the passes at the ticks they now
+            // have, so the cells it ended with are the right ones - the phase
+            // a module branches on, the sector the pass wrote (the live
+            // chain's own crossing is a stamp already: the frame that saw it
+            // polled it), the deactivate the pass cleared.  The live values
+            // are the passes' of the other history: not written back.  The
+            // core re-reads the activate cell afterwards (sector_cell_adopted).
+            if (!core_.last_rewind_rederived())
+                for (int i = 0; i < 3; ++i) if (have_[i]) write_cell(i, values_[i]);
             // A rewind that ended at `now` replaced the live world with the
             // replayed one, which never saw an activation a script outside
             // the replay asked for during the live frame `now` (Init Ingame

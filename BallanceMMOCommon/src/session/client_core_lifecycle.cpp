@@ -332,9 +332,46 @@ namespace bmmo::session {
             // step of the stamped tick - this very frame when the relay was
             // on time (drain_due_events runs before the union's tick), the
             // next one when it was late, which the union counts.
-            s.sectors_.stamp(event.player, event.sector, event.tick);
-            logf("remote player %u entered sector %d, stamped for tick %u%s", event.player, event.sector, event.tick,
-                 static_cast<int32_t>(event.tick - current_tick()) <= 0 ? " (LATE: the server started it already)" : "");
+            //
+            // Step B1 (resync design 2.7): the stamp log first; then a late
+            // stamp that changes the union (not covered by a request or
+            // stamp at or before its tick) is re-derived where it belongs:
+            // inside the reach it joins the frame's late set (one rewind to
+            // the lowest tick - 1, rewind_for_sectors), beyond it the sector
+            // starts live and a resync brings it to the server's tick.  A
+            // stamp before this numbering's first tick (a late joiner's
+            // catch-up: never reachable) and one beyond the reach while a
+            // resync is pending start live and nothing else: the joiner's
+            // owed passes, the resync state.  A reachable late stamp rewinds
+            // even while a resync is pending (2.7 case 3); the resync's state
+            // overwrites the world and the union records after it.  Without
+            // the rollback, as before.
+            {
+                note_sector_stamp(event.player, event.sector, event.tick);
+                const bool late = static_cast<int32_t>(event.tick - current_tick()) <= 0;
+                if (late && config.rollback && event.sector > 0 && !s.sectors_.covers(event.sector, event.tick)) {
+                    if (sector_rewind_reachable(event.tick)) {
+                        client_core_state::late_sector entry;
+                        entry.tick = event.tick;
+                        entry.player = event.player;
+                        entry.sector = event.sector;
+                        s.sector_late_.push_back(entry);
+                        break;
+                    }
+                    s.sectors_.stamp(event.player, event.sector, event.tick);
+                    logf("remote player %u entered sector %d, stamped for tick %u (LATE: the server started it already)",
+                         event.player, event.sector, event.tick);
+                    if (s.resync_pending_ || static_cast<int32_t>(event.tick - s.tick_base_) <= 0) break;
+                    ++s.sector_rewinds_missed_;
+                    logf("late sector stamp for tick %u is outside the rollback history at local tick %u: stamped live, resync",
+                         event.tick, current_tick());
+                    request_resync("a late Sector event beyond the reach", true);
+                    break;
+                }
+                s.sectors_.stamp(event.player, event.sector, event.tick);
+                logf("remote player %u entered sector %d, stamped for tick %u%s", event.player, event.sector, event.tick,
+                     late ? " (LATE: the server started it already)" : "");
+            }
             break;
         case bmmo::session::event_type::Unphysicalize: {
             // A death stamped at or before the player's last applied birth
@@ -1209,6 +1246,22 @@ namespace bmmo::session {
         journal_.note(std::string("own echo: ") + event_type_name(static_cast<int>(msg.type)) + " stamped "
                       + std::to_string(msg.origin_tick) + " " + verdict + " (applied " + std::to_string(msg.tick) + ")");
         if (!birth) {
+            // Step B1 (resync design 2.7, plan step 23): a moved own Sector
+            // moves the own pass to the server's tick, like a late remote
+            // stamp - when this world handed that stamp to its union.
+            // (One reported after the fact never was: the level's chain ran
+            // the manager, and it is kept where stamped as before.)
+            if (msg.type == bmmo::session::event_type::Sector && moved && acting && !stale && config.rollback) {
+                const auto own = s.sector_stamps_.find({s.own_id_, msg.sector});
+                if (own != s.sector_stamps_.end() && own->second.tick == msg.origin_tick) {
+                    logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u; "
+                         "the own pass moves to the server's tick",
+                         event_type_name(static_cast<int>(msg.type)), msg.origin_tick, verdict, msg.tick,
+                         static_cast<unsigned>(msg.state), current_tick());
+                    move_own_sector(msg.sector, msg.origin_tick, msg.tick);
+                    return;
+                }
+            }
             if (moved) ++s.own_moves_other_;
             logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u; "
                  "kept where we stamped it (only an own Physicalize is moved here)",

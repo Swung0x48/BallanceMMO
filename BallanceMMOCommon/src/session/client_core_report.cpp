@@ -172,6 +172,7 @@ namespace bmmo::session {
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                      "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
+                     "sectors: rew=%llu/%llu depth=%llu forgot=%llu births_moved=%llu phase_misses=%llu "
                      "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
@@ -279,6 +280,16 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(st.compared), static_cast<unsigned long long>(st.ignored),
                      static_cast<unsigned long long>(st.blended), static_cast<unsigned long long>(st.hard),
                      static_cast<unsigned long long>(st.unmatched), st.last_error, st.max_error,
+                     // sectors: rew=made/missed (step B1: late or moved Sector
+                     // stamps re-derived by a rewind; missed resynced), depth
+                     // (their re-simulated ticks), forgot (live passes the
+                     // re-derivation did not reproduce at their tick),
+                     // births_moved (bodies of those passes not made at their
+                     // live birth tick), and the phase check's misses.
+                     static_cast<unsigned long long>(s.sector_rewinds_), static_cast<unsigned long long>(s.sector_rewinds_missed_),
+                     static_cast<unsigned long long>(s.sector_rewind_depth_),
+                     static_cast<unsigned long long>(s.sector_passes_forgotten_),
+                     static_cast<unsigned long long>(rs.births_moved), static_cast<unsigned long long>(s.phase_misses_),
                      static_cast<unsigned long long>(s.input_reports_), static_cast<unsigned long long>(s.input_starved_),
                      s.input_reports_ ? 100.0 * static_cast<double>(s.input_starved_) / static_cast<double>(s.input_reports_) : 0.0,
                      s.worst_starved_,

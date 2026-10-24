@@ -147,6 +147,7 @@ namespace bmmo::session {
         event.type = bmmo::session::event_type::Sector;
         event.sector = sector;
         send_event(event);
+        note_sector_stamp(s.own_id_, sector, due);
         s.sectors_.stamp(s.own_id_, sector, due);
         logf("sector %d stamped for tick %u (%s, lead %u, input_delay %u), event sent ahead", sector, due, why,
              sector_lead_ticks(), static_cast<unsigned>(s.input_delay_));
@@ -193,10 +194,206 @@ namespace bmmo::session {
             s.sector_cell_ = pass.sector;   // the detect block below must not take our own write for a crossing
             platform_.run_sector(pass.sector);
             platform_.record_activation(tick, true);
+            log_pass(tick, pass.sector);
             logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s", pass.sector, tick,
                  pass.player, pass.stamped_tick, tick > pass.stamped_tick ? ", held by the pacer" : "",
                  [this] { std::string text; for (int x: s.sectors_.active()) text += std::to_string(x) + " "; return text; }().c_str());
         }
+    }
+
+    // ------------------------------------------- the union as rollback state
+    // Step B1 (resync design 2.5, 2.7, 2.8).  The union's passes depend on
+    // its stamps and on the manager's activity per tick, nothing else, so a
+    // stamp that arrives late - a remote Sector event relayed past its tick,
+    // an own one the server applied later - is applied where it belongs by
+    // rewinding to the tick before it and re-deriving the passes inside the
+    // replay from the union record of that tick and the stamp log.  Every
+    // world then starts the sector at the tick the server did (I2).
+
+    void session_client_core::log_pass(uint32_t tick, int sector) {
+        s.pass_log_[tick] = sector;
+        const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks) + 128u;
+        while (!s.pass_log_.empty() && static_cast<int32_t>(s.pass_log_.begin()->first + keep - tick) < 0)
+            s.pass_log_.erase(s.pass_log_.begin());
+    }
+
+    void session_client_core::note_sector_stamp(uint32_t player, int sector, uint32_t tick, bool rewrite) {
+        if (sector <= 0) return;
+        auto [it, fresh] = s.sector_stamps_.try_emplace({player, sector});
+        if (fresh) {
+            it->second.tick = tick;
+            it->second.seq = ++s.sector_stamp_seq_;
+        } else if (rewrite) {
+            it->second.tick = tick;
+        }
+    }
+
+    std::vector<bmmo::session::sector_union::stamped> session_client_core::stamp_log() const {
+        std::vector<bmmo::session::sector_union::stamped> out;
+        out.reserve(s.sector_stamps_.size());
+        for (const auto& [key, stamp]: s.sector_stamps_) out.push_back({stamp.tick, key.first, key.second});
+        return out;
+    }
+
+    bool session_client_core::sector_rewind_reachable(uint32_t tick) const {
+        if (tick == 0) return false;
+        const uint32_t now = current_tick();
+        return s.rollback_.knows_tick(tick - 1) && s.union_records_.count(tick - 1)
+            && static_cast<int32_t>(now - (tick - 1)) >= 0
+            && now - (tick - 1) <= s.rollback_.thresholds().max_resim_ticks;
+    }
+
+    // A MOVED own Sector echo (resync design 2.7): the stamp log takes the
+    // server's tick; an own pass that has not run yet is stamped again at
+    // it, one that has is moved by the frame's Sector rewind (anchor: the
+    // origin).  Past the reach the live pass stands and the client resyncs.
+    bool session_client_core::move_own_sector(int sector, uint32_t origin, uint32_t applied) {
+        const auto it = s.sector_stamps_.find({s.own_id_, sector});
+        if (it == s.sector_stamps_.end() || it->second.tick != origin) return false;
+        note_sector_stamp(s.own_id_, sector, applied, true);
+        if (static_cast<int32_t>(origin - current_tick()) > 0) {
+            s.sectors_.unstamp(s.own_id_, sector);
+            s.sectors_.stamp(s.own_id_, sector, applied);
+            logf("own sector %d moved %u -> %u by the server before its pass: stamped again at %u", sector, origin, applied,
+                 applied);
+            return true;
+        }
+        if (sector_rewind_reachable(origin)) {
+            client_core_state::late_sector late;
+            late.tick = origin;
+            late.player = s.own_id_;
+            late.sector = sector;
+            late.moved = true;
+            late.applied = applied;
+            s.sector_late_.push_back(late);
+            return true;
+        }
+        ++s.sector_rewinds_missed_;
+        logf("own sector %d moved %u -> %u by the server at local tick %u: outside the rollback history, resync", sector,
+             origin, applied, current_tick());
+        if (!s.resync_pending_) request_resync("an own Sector moved beyond the reach", true);
+        return true;
+    }
+
+    // The frame's Sector rewind: one rewind to the lowest anchor of the
+    // frame's late set, minus one, with the union re-derived inside the
+    // replay (rederive_union_tick).  Before the input replay and the live
+    // union pass, after the drain's lifecycle rewinds (which re-issued the
+    // recorded passes) - the order a late Physicalize uses.
+    void session_client_core::rewind_for_sectors() {
+        if (s.sector_late_.empty()) return;
+        std::vector<client_core_state::late_sector> late;
+        late.swap(s.sector_late_);
+        const uint32_t now = current_tick();
+        uint32_t anchor_tick = late.front().tick;
+        for (const auto& l: late)
+            if (static_cast<int32_t>(l.tick - anchor_tick) < 0) anchor_tick = l.tick;
+        const uint32_t anchor = anchor_tick - 1;
+        bool ok = false;
+        auto& rd = s.rederive_;
+        if (sector_rewind_reachable(anchor_tick)) {
+            rd.active = false;
+            rd.live_tick = now;
+            // The live passes of the window: replaced by the re-derived ones.
+            rd.r.start(s.union_records_.at(anchor), stamp_log(), s.pass_log_, anchor_tick);
+            auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
+                return recorded_input_at(name, tick, out);
+            };
+            std::string reason = "sector";
+            for (const auto& l: late)
+                reason += " " + std::to_string(l.sector) + (l.moved ? " moved " + std::to_string(l.tick) + "->" + std::to_string(l.applied)
+                                                                    : " stamped " + std::to_string(l.tick) + " (late)");
+            {
+                const scope_guard keep_cells = platform_.keep_live_cells(*this);
+                rd.active = true;
+                const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason);
+                rd.active = false;
+                // Re-derived through the live tick (a frozen world rewinds
+                // nothing and drops the history instead).
+                ok = rolled && rd.r.through(now);
+                // Adopt mode for the guard's end, only when the replay
+                // re-derived the union (resync design 4.6).
+                s.last_rewind_rederived_ = ok;
+            }
+            s.last_rewind_rederived_ = false;
+            if (!ok) rd.r.abandon(s.pass_log_);
+        }
+        if (ok) {
+            s.sectors_.restore(rd.r.u().state());
+            // The cell as the replay left it is the one the own poll
+            // compares with: the replayed pass's write is no crossing of ours.
+            int cell = 0;
+            if (platform_.sector_cell_adopted(cell)) s.sector_cell_ = cell;
+            s.recent_passes_[0] = s.recent_passes_[1] = {};
+            for (auto it = s.pass_log_.rbegin(); it != s.pass_log_.rend(); ++it) {
+                if (!s.recent_passes_[0].first) s.recent_passes_[0] = *it;
+                else if (!s.recent_passes_[1].first) { s.recent_passes_[1] = *it; break; }
+            }
+            ++s.sector_rewinds_;
+            s.sector_rewind_depth_ += now - anchor;
+            drop_carried_own_replay(anchor, false);
+            for (const auto& l: late) {
+                if (l.moved) {
+                    logf("own sector %d moved %u -> %u by the server: the own pass moved (rewound to %u)", l.sector, l.tick,
+                         l.applied, anchor);
+                    journal_.note("sector " + std::to_string(l.sector) + " own stamp moved " + std::to_string(l.tick) + " -> "
+                                  + std::to_string(l.applied) + ": rewound to " + std::to_string(anchor));
+                } else {
+                    logf("remote player %u entered sector %d, stamped for tick %u (late by %u: rewound to %u)", l.player,
+                         l.sector, l.tick, now + 1 - l.tick, anchor);
+                    journal_.note("sector " + std::to_string(l.sector) + " stamped " + std::to_string(l.tick)
+                                  + ": rewound to " + std::to_string(anchor));
+                }
+            }
+            return;
+        }
+        // Refused (outside the history, deeper than the reach, a frozen
+        // world): every stamp of the set live, as before B1, and a resync -
+        // its state brings the sector to the server's tick.
+        for (const auto& l: late) {
+            if (!l.moved) {
+                s.sectors_.stamp(l.player, l.sector, l.tick);
+                logf("remote player %u entered sector %d, stamped for tick %u (LATE: the server started it already)",
+                     l.player, l.sector, l.tick);
+            }
+        }
+        ++s.sector_rewinds_missed_;
+        logf("late sector stamp for tick %u is outside the rollback history at local tick %u: stamped live, resync",
+             anchor_tick, now);
+        if (!s.resync_pending_) request_resync("a late Sector event beyond the reach", true);
+    }
+
+    // Before each tick a re-deriving replay steps (core_world_hooks::
+    // before_replayed_tick, after the births): the union's tick with the
+    // manager's state after the replayed step before, as the live frame's
+    // pass (sector_union_pass) and the server's update_sectors take it; its
+    // pass recorded in the tick's pass slot, which the host's
+    // replay_activation re-issues next, or the live pass of that tick
+    // forgotten.  Nothing outside a Sector rewind.
+    void session_client_core::rederive_union_tick(uint32_t tick) {
+        auto& rd = s.rederive_;
+        if (!rd.active) return;
+        // The decision is sector_rederivation's (shared with SimTool's
+        // --late-sector-check); the platform's slot, the logs and the
+        // records are this core's.
+        const auto step = rd.r.tick(tick, platform_.sector_manager_active());
+        const auto& pass = step.made;
+        if (pass) {
+            platform_.set_union_pass(tick, pass.sector);
+            log_pass(tick, pass.sector);
+            s.sector_cell_ = pass.sector;
+            logf("sector +%d at tick %u (player %u, stamped %u%s), running: %s(re-derived in a rewind at live tick %u)",
+                 pass.sector, tick, pass.player, pass.stamped_tick, tick > pass.stamped_tick ? ", held by the pacer" : "",
+                 [&rd] { std::string text; for (int x: rd.r.u().active()) text += std::to_string(x) + " "; return text; }().c_str(),
+                 rd.live_tick);
+        } else if (step.clear_slot) {
+            platform_.set_union_pass(tick, 0);
+        }
+        if (step.forgotten) {
+            ++s.sector_passes_forgotten_;
+            logf("sector +%d at tick %u of the live frames is not re-derived there: forgotten", step.forgotten, tick);
+        }
+        s.union_records_[tick] = rd.r.u().state();
     }
 
     // Sector: the sector the level's scripts last wrote.  With the
@@ -308,6 +505,11 @@ namespace bmmo::session {
         // The sector resets stay neutralized (the level-reset one once the
         // sector is up: this client has resolved a mechanism of its own).
         platform_.script_guards(frame_tick, s.mechanism_tracking_.resolved() > 0);
+        // Step B1: the Sector stamps that arrived late inside the reach, and
+        // the own ones the server moved, re-derived from the tick before the
+        // lowest of them - after the drain's lifecycle rewinds, before the
+        // input replay and the union's live pass below.
+        rewind_for_sectors();
         // After the late events, so a birth and an input correction in the
         // same frame leave the world replayed from the earlier of the two - and
         // BEFORE the union's pass below: the pass sets next-frame flags on
@@ -564,6 +766,16 @@ namespace bmmo::session {
             tracked.generations = s.generations_;
             platform_.note_script_resets(tick);
             s.rollback_.record(world(), tick, tracked, applied);
+            // Step B1: the union after this tick's tick(), beside its record.
+            while (!s.union_records_.empty() && static_cast<int32_t>(s.union_records_.rbegin()->first - tick) >= 0)
+                s.union_records_.erase(std::prev(s.union_records_.end()));
+            s.union_records_[tick] = s.sectors_.state();
+            {
+                const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks);
+                while (!s.union_records_.empty()
+                       && static_cast<int32_t>(s.union_records_.begin()->first + keep - tick) < 0)
+                    s.union_records_.erase(s.union_records_.begin());
+            }
             if (platform_.hooks.after_record) platform_.hooks.after_record(tick);
         }
         // A notice that named this tick before it was simulated: the

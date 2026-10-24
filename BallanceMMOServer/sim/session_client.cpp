@@ -974,6 +974,17 @@ namespace {
             p.run_sector = [this](int sector) { start_sector(sector); };
             p.record_activation = [this](uint32_t tick, bool reset) { record_manager_activation(tick, reset); };
             p.poll_sector = [this](uint32_t tick) { return poll_sector(tick); };
+            // Step B1: a pass a re-deriving replay made (or a live one it
+            // forgot) in the tick's pass slot (host support), and the
+            // activate cell as the replay left it (no bookkeeping here).
+            p.set_union_pass = [this](uint32_t tick, int sector) {
+                if (sector > 0) manager_activations_.set_pass(tick, sector);
+                else manager_activations_.forget_pass(tick);
+            };
+            p.sector_cell_adopted = [this](int& cell) {
+                CKDataArray* parameters = engine_->data_array("IngameParameter");
+                return parameters && parameters->GetElementValue(0, 1, &cell);
+            };
             // The host hooks (E3): the pacer's origin restarts with the
             // numbering, --hold-event, and its discards at the session's end.
             p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) { origin_ = wall_now(site); };

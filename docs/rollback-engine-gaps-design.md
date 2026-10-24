@@ -11,6 +11,24 @@ Scope: three gaps of the rollback coverage audit
 | #6 | F5 | **Q**: the PreSimulate callback queue is never rewound |
 | #7 | F6 | **L**: a body whose life ends inside the window is missing from the replay |
 | #8 | F7 | **B**: the retail own beam bumps the generation when it is requested |
+| — (found at resync step B1, 2026-10-24) | — | **F**: the script replay consumes next-frame flags of scripts the live frame skips |
+
+**F (queued, not designed yet).** Symptom: after any rewind across the
+tick a sector's walk sets it, `P_Modul_18_Particle Script` (arena) has lost
+its `CKBEHAVIOR_DEACTIVATENEXTFRAME` bit (0x400000), which the world that
+never rewound keeps for the rest of the run; every `--late-sector-check`
+case and its ordinary-rewind reference differ in that bit at all 601
+boundaries (the check's verdict is PASS-EXCEPT-REFERENCE, exit 4, until
+this is fixed). Cause: `script_replay::execute_frame`
+(`BallanceMMOCommon/include/game/script_replay.hpp:503-511`) applies and
+clears the next-frame flags of every selected script, while the live CK
+frame does so only for scripts whose owner is in the behaviour manager's
+object list - the inactive Particle script's owner has left it (A2's G1
+mechanism). Pre-existing: the reference arm runs the code the build before
+B1 runs (`resync-and-sector-timing-design.md`, As built (step B1),
+"Residuals"). Fix: `execute_frame` consumes a script's next-frame flags
+only where the live frame would (shared script replay, every host); check:
+`--late-sector-check` exits 0 on the arena cases of that note.
 
 This design fits the three designs already written: the sector placement
 design (SPD, `docs/sector-placement-design.md`), the trafo replication design

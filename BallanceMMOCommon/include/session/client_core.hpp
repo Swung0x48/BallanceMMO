@@ -264,6 +264,49 @@ namespace bmmo::session {
         // (poll_own_sector: the checkpoint chain's race, or any writer like it).
         std::pair<uint32_t, int> recent_passes_[2] = {};
         uint64_t phase_misses_ = 0;
+        // Step B1 (resync design 2.5, 2.7, 2.8): the union as rollback state.
+        // The stamp log: one entry per (player, sector), the tick the server
+        // applies it at (a MOVED own echo rewrites it) and its arrival order;
+        // every stamp this world was given goes in - the own ones handed to
+        // the union, the relayed ones - and it lives for the session (its
+        // ticks are shared ticks).  A re-derivation takes its stamps from it.
+        struct sector_stamp {
+            uint32_t tick = 0;
+            uint64_t seq = 0;
+        };
+        std::map<std::pair<uint32_t, int>, sector_stamp> sector_stamps_;
+        uint64_t sector_stamp_seq_ = 0;
+        // The union's state after tick(t), beside the rollback record of t.
+        std::map<uint32_t, bmmo::session::sector_union::state_type> union_records_;
+        // Every union pass this world ran (tick -> sector), live or
+        // re-derived, the last history_ticks + 128 ticks.
+        std::map<uint32_t, int> pass_log_;
+        // This frame's late Sector stamps inside the reach and moved own
+        // stamps (the frame's Sector rewind, pre_step), with the tick each
+        // needs re-derived from.
+        struct late_sector {
+            uint32_t tick = 0;      // the anchor tick: the stamp (a moved own one: its origin)
+            uint32_t player = 0;
+            int sector = 0;
+            bool moved = false;     // an own stamp the server applied at `applied`
+            uint32_t applied = 0;
+        };
+        std::vector<late_sector> sector_late_;
+        // A re-derivation in progress (the frame's Sector rewind): the rule
+        // (sector_rederivation: the union as the replay re-derives it, the
+        // live passes of the window it replaces, the passes it made), active
+        // only inside the rewind, and the live tick it rewound from.
+        struct union_rederivation {
+            bool active = false;
+            uint32_t live_tick = 0;
+            bmmo::session::sector_rederivation r;
+        };
+        union_rederivation rederive_;
+        bool last_rewind_rederived_ = false;   // read by the host's live-cells guard (adopt mode)
+        // Sector rewinds made and missed (a resync each), and the live passes
+        // a re-derivation did not reproduce at their tick (moved or forgotten).
+        uint64_t sector_rewinds_ = 0, sector_rewinds_missed_ = 0, sector_rewind_depth_ = 0;
+        uint64_t sector_passes_forgotten_ = 0;
         // The sectors start_sector_pending_ stands for, each with why it was
         // asked for, in the order requested (request_sector before the
         // assignment; E8: the headless --start-sector, which was
@@ -886,6 +929,11 @@ namespace bmmo::session {
         // = 0 on their first frame (poll_own_sector's check; 1 is the only
         // right answer there).
         uint64_t phase_misses() const { return s.phase_misses_; }
+        // Step B1 (resync design 4.6): the rewind in progress re-derived the
+        // union inside its replay - the host's live-cells guard adopts the
+        // replayed cells instead of writing the live ones back.
+        bool last_rewind_rederived() const { return s.last_rewind_rederived_; }
+        uint64_t sector_rewinds() const { return s.sector_rewinds_; }
 
         // ---- rewinds asked for by the host (E5; design 1.3) ----
         // A forced rollback `depth` ticks deep from the current tick (the
@@ -1060,6 +1108,29 @@ namespace bmmo::session {
         // a crossing stamped ahead (the checkpoint chain held) or reported
         // after the fact.
         void poll_own_sector(uint32_t tick);
+        // Step B1 (resync design 2.5, 2.7, 2.8).  A stamp into the stamp log
+        // (`rewrite`: a MOVED own echo's applied tick over the entry).
+        void note_sector_stamp(uint32_t player, int sector, uint32_t tick, bool rewrite = false);
+        // The stamp log as the union's stamps.
+        std::vector<bmmo::session::sector_union::stamped> stamp_log() const;
+        // A Sector stamp for `tick` can be re-derived: the record and the
+        // union record of tick - 1 exist and the rewind is inside the reach.
+        bool sector_rewind_reachable(uint32_t tick) const;
+        // A MOVED own Sector echo: the own pass moved to the server's tick.
+        // False when this world has no stamp of it at `origin` (kept where
+        // stamped, as before B1).
+        bool move_own_sector(int sector, uint32_t origin, uint32_t applied);
+        // pre_step: the frame's late set, one rewind to the lowest tick - 1
+        // with the union re-derived inside the replay (or, refused, every
+        // stamp live and a resync).
+        void rewind_for_sectors();
+        // The core's before_replayed_tick half of the re-derivation: the
+        // union's tick for the replayed `tick`, its pass recorded for the
+        // host's re-issue (set_union_pass) or a live pass forgotten.
+        void rederive_union_tick(uint32_t tick);
+        // A union pass this world ran at `tick` (live or re-derived) into
+        // pass_log_, trimmed.
+        void log_pass(uint32_t tick, int sector);
 
         // The frame's rewinds (E5; pre_step steps 5 and 6).
         // One replay for every input correction the frame collected (the

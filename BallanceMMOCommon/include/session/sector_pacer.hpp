@@ -44,6 +44,9 @@ namespace bmmo::session {
         void started() { idle_ = 0; }
 
         int idle_ticks() const { return idle_; }
+        // The count as a saved union state has it (sector_union::restore;
+        // resync design 2.5).
+        void restore(int idle) { idle_ = std::max(0, std::min(idle, kIdleTicks)); }
 
     private:
         int idle_ = 0;

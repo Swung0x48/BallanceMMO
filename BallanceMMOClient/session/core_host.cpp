@@ -1426,6 +1426,20 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.record_activation = [this](uint32_t tick, bool reset) {
         host.activations.record(m_bml->GetCKContext(), tick, reset);
     };
+    // Step B1: a pass a re-deriving replay made (or a live one it forgot) in
+    // the tick's pass slot (host support); after that rewind, the activate
+    // cell as the replay left it, with run_sector's bookkeeping: a sector
+    // that is not this ball's is a peer's in the cell.
+    p.set_union_pass = [this](uint32_t tick, int sector) {
+        if (sector > 0) host.activations.set_pass(tick, sector);
+        else host.activations.forget_pass(tick);
+    };
+    p.sector_cell_adopted = [this](int& cell) {
+        CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
+        if (!parameters || !parameters->GetElementValue(0, 1, &cell)) return false;
+        if (cell != current_sector_) sector_cell_is_own_ = false;
+        return true;
+    };
     // The manager's and the trafo scripts' (step P: host support's
     // record_pending, the selection's `activations`).
     p.record_pending_activation = [this](uint32_t tick) {
