@@ -900,7 +900,8 @@ namespace {
             p.bind_world = [this](const bmmo::session::core_world_hooks& hooks) { return rollback_world(hooks); };
             p.keep_live_cells = [this](const bmmo::session::session_client_core&) {
                 auto guard = std::make_shared<bmmo::game::live_cells_guard>(
-                        engine_->context(), core_, !args_.park_births, [this](uint32_t tick) { replay_manager_activation(tick); });
+                        engine_->context(), core_, !args_.park_births, [this](uint32_t tick) { replay_manager_activation(tick); },
+                        &manager_activations_);
                 return bmmo::session::scope_guard([guard]() mutable { guard.reset(); });
             };
             p.journal_path = [this](const bmmo::session::journal_header&) { return std::filesystem::path(args_.journal); };
@@ -1017,12 +1018,10 @@ namespace {
             // the record's mechanisms and script resets, the hash, and the
             // hooks of the record (--dump-savestate), the amend (the traces)
             // and the journal (--trace impulses).
+            // The manager's and the trafo scripts' (step P: host support's
+            // record_pending, the selection's `activations`).
             p.record_pending_activation = [this](uint32_t tick) {
-                if (sector_manager_id_) {
-                    if (auto* manager = CKBehavior::Cast(engine_->context()->GetObject(sector_manager_id_));
-                            manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
-                        record_manager_activation(tick, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
-                }
+                manager_activations_.record_pending(engine_->context(), sector_manager_id_, script_activations_, tick);
             };
             p.discover_navigation = [this](uint32_t tick) {
                 if (navigation_known_) return false;
@@ -1050,8 +1049,13 @@ namespace {
             p.drain_body_events = [this](uint32_t tick, const std::function<bool(const bmmo::session::body_event&)>& each) {
                 drain_body_events(tick, each);
             };
-            p.reportable_wakeup = [](const std::string& name, const std::string&) {
-                return name.rfind("Ball_", 0) != 0 && name.find("_BMMO_") == std::string::npos;
+            // Not a ball (step P: the core's is_ball, not the "Ball_" prefix),
+            // not a mirror, and not a trafo explosion piece: no other world
+            // has the pieces, so their Physicalize's wake-up is nobody's
+            // BodyRevived (game/session_host_support.hpp explosion_pieces).
+            p.reportable_wakeup = [this](const std::string& name, const std::string& own_ball) {
+                return !core_.is_ball(name) && name != own_ball && name.find("_BMMO_") == std::string::npos
+                    && !explosion_pieces_.count(name);
             };
             p.observe_input = [this]() { return observe_input(); };
             p.own_camera_rows = [this](const float (*basis)[3]) {
@@ -1062,7 +1066,7 @@ namespace {
                     logf("own navigation rows: %s", error.c_str());
                 zero_retail_forces();
             };
-            p.movable_mechanisms = [this]() { return movable_body_names(); };
+            p.movable_bodies = [this]() { return movable_body_names(); };
             p.note_script_resets = [this](uint32_t tick) {
                 for (CK_ID id: bmmo::game::script_replay::resets_pending(engine_->context(), scripts_)) {
                     script_reset_ticks_[id] = tick;
@@ -1384,6 +1388,7 @@ namespace {
             own_group_set_ = false;
             own_capture_.valid = false;
             scripts_.clear();
+            script_activations_.clear();
             script_reset_ticks_.clear();
             reset_guard_.restore(engine_->context());
             checkpoint_held_ = false;
@@ -1465,7 +1470,13 @@ namespace {
             // The script replay (game/script_replay.hpp): the mechanism scripts
             // whose state travels with the rollback records, and the hooks
             // that carry the force blocks' controllers through the bridge.
-            scripts_ = args_.script_replay ? bmmo::game::script_replay::select(engine_->context()) : bmmo::game::script_replay::selection{};
+            // The session core's selection (step P): the trafo scripts with
+            // the mechanism scripts and the sector manager.
+            scripts_ = args_.script_replay ? bmmo::game::session_script_selection(engine_->context())
+                                           : bmmo::game::script_replay::selection{};
+            script_activations_ = bmmo::game::session_script_activations(engine_->context(), scripts_);
+            // The trafo explosion pieces (step P): never a BodyRevived.
+            explosion_pieces_ = bmmo::game::explosion_pieces(engine_->context());
             {
                 CKIpionManager* physics = engine_->physics();
                 script_hooks_.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
@@ -2393,11 +2404,11 @@ namespace {
             }
         }
 
-        // Every movable body in this client's world except the balls, which
-        // the tracked set carries separately as own/remote entities.
+        // Every movable body in this client's world (platform movable_bodies):
+        // the core leaves the balls out by what they are (step P), not by
+        // the "Ball_" prefix, which the trafo explosion pieces share.
         std::vector<std::string> movable_body_names() {
-            // Own and remote balls are tracked by entity, not as mechanisms.
-            return bmmo::physics::movable_body_names(engine_->physics(), "Ball_");
+            return bmmo::physics::movable_body_names(engine_->physics());
         }
 
         // How many bodies have an impulse queued for the next PSI at the moment
@@ -2576,7 +2587,7 @@ namespace {
             // Before each replayed tick's scripts and step, after the core's
             // births (the own beam stamped for it among them): the sector
             // manager's activation recorded for it, and the traces.
-            w.replay_activation = [this](uint32_t tick) { replay_manager_activation(tick); };
+            w.replay_activation = [this](uint32_t tick) { replay_manager_activation(tick, true); };
             w.before_replayed_tick = [this](uint32_t tick) {
                 if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
                     logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
@@ -2649,6 +2660,9 @@ namespace {
             // parked through the gap instead.)  bind_session_world installs
             // them over this client's birth log.
             w.births = &local_births_;
+            // Step P: only the trafo explosion pieces are made again at a
+            // restore (the replayed reset takes them away again).
+            w.revivable = [this](const std::string& entity) { return explosion_pieces_.count(entity) != 0; };
             w.park_births = args_.park_births;
             w.insert_births = args_.insert_births;
             w.put_back = [this](const std::string& entity, const bmmo::session::local_birth& birth) {
@@ -2740,7 +2754,7 @@ namespace {
                     bmmo::session::parse_event_log(recipes, [&](const std::string& kind, const std::string& text) {
                         bmmo::session::local_birth birth;
                         if (kind != "recipe" || !bmmo::session::parse_recipe_event(text, birth)) return;
-                        if (birth.name.rfind("Ball_", 0) == 0 || local_births_.find(birth.name, tick)) return;
+                        if (core_.is_ball(birth.name) || local_births_.find(birth.name, tick)) return;
                         if (replay_birth_logs_++ < 8) logf("birth log: %s made by the replayed tick %u", birth.name.c_str(), tick);
                         local_births_.add(tick, std::move(birth));
                     });
@@ -2809,6 +2823,8 @@ namespace {
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
         CK_ID sector_manager_id_ = 0;
         bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)
+        std::vector<CK_ID> script_activations_;              // the selected scripts whose activations are recorded (step P)
+        std::set<std::string> explosion_pieces_;             // the trafo explosion pieces' entities (step P; session_host_support.hpp)
         std::vector<CK_ID> scripts_replayed_;                // the scripts the last restore wrote: active at its anchor
         bmmo::game::script_replay_hooks script_hooks_;
         bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
@@ -2837,9 +2853,15 @@ namespace {
         void record_manager_activation(uint32_t tick, bool reset) {
             manager_activations_.record(engine_->context(), tick, reset);
         }
-        void replay_manager_activation(uint32_t tick) {
+        // `inside`: a replayed tick (an explosion's referential is placed;
+        // host support's manager_activations), not the live frame a rewind's
+        // end re-issues for.
+        void replay_manager_activation(uint32_t tick, bool inside = false) {
             if (args_.park_births) return;
-            const bmmo::game::manager_activation* a = manager_activations_.replay(engine_->context(), sector_manager_id_, tick);
+            const uint64_t placed = manager_activations_.referentials_placed();
+            const bmmo::game::manager_activation* a = manager_activations_.replay(engine_->context(), sector_manager_id_, tick, inside);
+            if (manager_activations_.referentials_placed() != placed && manager_activations_.referentials_placed() <= 8)
+                logf("replay: an explosion's referential placed where the live frame had it at tick %u", tick);
             if (!a) return;
             ++activations_replayed_;
             if (args_.trace_restore && recreate_logs_ < 24)

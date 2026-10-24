@@ -336,8 +336,10 @@ def exact_difference(control, arm):
     except Exception as e:  # a reader that does not import must not hide the worst_bodies.py verdict
         print(f'  (no unrounded comparison: {e})')
         return None
-    a = fd.worlds(jt.read_journal(str(control)), want_local=True)
-    b = fd.worlds(jt.read_journal(str(arm)), want_local=True)
+    # Every body, an ownerless "Ball_" one (a trafo explosion piece in a
+    # journal from before step P) by its name, as worst_bodies.py compares.
+    a = fd.worlds(jt.read_journal(str(control)), want_local=True, ownerless_by_name=True)
+    b = fd.worlds(jt.read_journal(str(arm)), want_local=True, ownerless_by_name=True)
     worst, name, at, compared = 0.0, '-', -1, 0
     missing, extra, first_missing = 0, 0, None
     for tick in sorted(set(a) & set(b)):

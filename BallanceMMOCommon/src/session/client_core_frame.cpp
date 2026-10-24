@@ -411,6 +411,7 @@ namespace bmmo::session {
         const std::string& ball_name = own.entity;
         const int ball_type = own.ball_type;
         const bool physicalized = own.physicalized;
+        if (!ball_name.empty()) s.own_ball_entities_.insert(ball_name);   // is_ball (step P)
         platform_.own_body_upkeep(own);
         if (physicalized) {
             bmmo::session::ball_pose pose;
@@ -554,7 +555,9 @@ namespace bmmo::session {
             // So the tracked set is the client's own world, which is what
             // the replay has to put back. A body the snapshot says nothing
             // about is restored from our own record, which is right.
-            for (const auto& name: platform_.movable_mechanisms()) tracked.mechanisms.push_back(name);
+            // Every movable body but the balls (step P: is_ball, not the
+            // "Ball_" prefix the trafo explosion pieces share).
+            tracked.mechanisms = movable_mechanisms();
             tracked.generations = s.generations_;
             platform_.note_script_resets(tick);
             s.rollback_.record(world(), tick, tracked, applied);

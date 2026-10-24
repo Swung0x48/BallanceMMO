@@ -100,6 +100,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(drop_carried_own_replay)
         BMMO_CORE_STEP(held_header_current)
         BMMO_CORE_STEP(flush_inputs)
+        BMMO_CORE_STEP(movable_mechanisms)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -313,8 +314,8 @@ namespace {
             p.own_camera_rows = [this](const float (*basis)[3]) {
                 calls.push_back("own_camera_rows:" + std::to_string(basis[2][2]));
             };
-            p.movable_mechanisms = [this]() {
-                calls.push_back("movable_mechanisms");
+            p.movable_bodies = [this]() {
+                calls.push_back("movable_bodies");
                 return mechanisms;
             };
             p.note_script_resets = [this](uint32_t tick) { calls.push_back("note_script_resets:" + std::to_string(tick)); };
@@ -365,7 +366,7 @@ namespace {
             if (missing == 30) p.reportable_wakeup = nullptr;
             if (missing == 31) p.observe_input = nullptr;
             if (missing == 32) p.own_camera_rows = nullptr;
-            if (missing == 33) p.movable_mechanisms = nullptr;
+            if (missing == 33) p.movable_bodies = nullptr;
             if (missing == 34) p.note_script_resets = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
@@ -690,7 +691,7 @@ namespace {
         remote.physicalized = true;
         fake.bodies = {make_body("Ball_Paper", true, 1.0), make_body("Ball_Wood_BMMO_4", true, 2.0),
                        make_body("Ball_Stone_BMMO_9", true, 3.0), make_body("Mech_A", true, 4.0),
-                       make_body("Floor", false, 5.0)};
+                       make_body("Floor", false, 5.0), make_body("Ball_Stone_piece01", true, 6.0)};
         EXPECT_TRUE(core.journal().checkpoint_due(102));
         core.journal().local_checkpoint(102, "Ball_Paper");
 
@@ -743,12 +744,21 @@ namespace {
         ASSERT_EQ(t102->checkpoints.size(), 1u);
         const auto& cp = t102->checkpoints[0];
         EXPECT_EQ(cp.flags, bmmo::session::JOURNAL_CHECKPOINT_LOCAL);
-        ASSERT_EQ(cp.bodies.size(), 4u);   // the immovable floor is left out
+        ASSERT_EQ(cp.bodies.size(), 5u);   // the immovable floor is left out
         EXPECT_EQ(cp.bodies[0].owner, 3u);
+        EXPECT_EQ(cp.bodies[0].kind, bmmo::session::body_kind::Ball);
         EXPECT_EQ(cp.bodies[1].owner, 4u);
-        EXPECT_EQ(cp.bodies[2].owner, 0u);   // a ball no mirror owns
+        EXPECT_EQ(cp.bodies[1].kind, bmmo::session::body_kind::Ball);
+        // Step P: a body is a ball by what it is (the own ball, a mirror),
+        // not by its "Ball_" name: one no player owns is a mechanism, by name.
+        EXPECT_EQ(cp.bodies[2].owner, 0u);
+        EXPECT_EQ(cp.bodies[2].kind, bmmo::session::body_kind::Mechanism);
+        EXPECT_EQ(cp.bodies[2].name, "Ball_Stone_BMMO_9");
         EXPECT_EQ(cp.bodies[3].kind, bmmo::session::body_kind::Mechanism);
         EXPECT_EQ(cp.bodies[3].position[0], 4.0);
+        EXPECT_EQ(cp.bodies[4].kind, bmmo::session::body_kind::Mechanism) << "a trafo explosion piece";
+        EXPECT_EQ(cp.bodies[4].owner, 0u);
+        EXPECT_EQ(cp.bodies[4].name, "Ball_Stone_piece01");
         ASSERT_EQ(t102->events.size(), 1u);
         EXPECT_EQ(t102->events[0].id, 7u);
         EXPECT_EQ(t102->events[0].origin_tick, 101u);
@@ -3511,7 +3521,7 @@ namespace {
                 "unforce_own:Ball_Wood", "record_pending_activation:127", "discover_navigation:126", "own_ball",
                 "own_body_upkeep:Ball_Wood:body", "body_state:Ball_0_BMMO_4", "drain_body_events:126",
                 "reportable_wakeup:P_Box", "send:1", "reportable_wakeup:P_Box", "observe_input", "own_camera_rows:1.000000", "own_driven_entity",
-                "movable_mechanisms", "note_script_resets:126", "bind_world", "hook:after_record:126", "send:2",
+                "movable_bodies", "note_script_resets:126", "bind_world", "hook:after_record:126", "send:2",
                 "send:2", "poll_sector:126", "drive:Ball_0_BMMO_4:6", "bind_world", "hook:after_amend:126",
                 "counters", "hook:window", "world_hash", "now:journal_ms", "own_ball", "list_bodies",
                 "hook:after_journal:126"};
@@ -4061,6 +4071,53 @@ namespace {
             EXPECT_EQ((input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0, !paused);
             EXPECT_NE(input.flags & bmmo::session::INPUT_FLAG_PHYSICALIZED, 0);
         }
+    }
+
+    // Step P: the balls are known by what they are - every entity the own
+    // ball has been this session (a trafo makes another one current; the old
+    // one is still a ball) and the mirrors - not by the "Ball_" prefix the
+    // trafo explosion pieces share.  The mechanisms a record tracks (and a
+    // replayed tick's, world_hooks replay_mechanisms) are every movable body
+    // the platform lists but those, in its order; begin forgets the own
+    // ball's entities.  Every live frame records the current own entity
+    // whether or not it has a body yet, before the frame's record: a body a
+    // replay makes for the own ball (a moved own birth, a replayed own
+    // lifecycle) is of an entity some earlier live frame already had as its
+    // current ball, so the identity never waits for a body.
+    TEST(SessionClientCoreP, MechanismsAreEveryMovableBodyButTheBalls) {
+        flow_fake fake;
+        session_client_core core(frame_platform(fake, false), session_capabilities{});
+        run_to_tick_125(core, fake);
+        state_of(core).remotes_[4].entity = "Ball_Wood_BMMO_4";
+        fake.own_physical = true;
+        fake.own_ball_name = "Ball_Stone";
+        core.pre_step();
+        ASSERT_TRUE(core.post_step(true));
+        fake.own_ball_name = "Ball_Wood";   // a trafo
+        core.pre_step();
+        ASSERT_TRUE(core.post_step(true));
+        EXPECT_TRUE(core.is_ball("Ball_Wood"));
+        EXPECT_TRUE(core.is_ball("Ball_Stone")) << "an entity the own ball has been";
+        EXPECT_TRUE(core.is_ball("Ball_Wood_BMMO_4")) << "a mirror";
+        EXPECT_FALSE(core.is_ball("Ball_Paper")) << "never the own ball";
+        EXPECT_FALSE(core.is_ball("Ball_Stone_piece01")) << "a trafo explosion piece";
+        EXPECT_FALSE(core.is_ball("P_Box"));
+        EXPECT_FALSE(core.is_ball(""));
+        fake.mechanisms = {"P_Box", "Ball_Wood", "Ball_Stone_piece01", "Ball_Wood_BMMO_4", "Ball_Stone", "Ball_Stone_piece02"};
+        EXPECT_EQ(steps{core}.movable_mechanisms(),
+                  std::vector<std::string>({"P_Box", "Ball_Stone_piece01", "Ball_Stone_piece02"}));
+        // A new session: the own ball's entities are forgotten.
+        run_to_tick_125(core, fake);
+        EXPECT_FALSE(core.is_ball("Ball_Stone"));
+        // A frame without a body (before the own Physicalize): the current
+        // own entity is a ball from that frame on.
+        fake.own_physical = false;
+        fake.own_ball_name = "Ball_Paper";
+        core.pre_step();
+        ASSERT_TRUE(core.post_step(true));
+        EXPECT_TRUE(core.is_ball("Ball_Paper")) << "the current own ball, bodiless";
+        fake.mechanisms = {"Ball_Paper", "P_Box"};
+        EXPECT_EQ(steps{core}.movable_mechanisms(), std::vector<std::string>({"P_Box"}));
     }
 
 }

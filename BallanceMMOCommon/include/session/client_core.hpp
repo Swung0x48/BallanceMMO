@@ -272,6 +272,11 @@ namespace bmmo::session {
         float spawn_impulse_ = 0.0f;             // SessionStart::spawn_impulse (design 9.10)
         float spawn_spacing_ = 0.0f;             // SessionStart::spawn_spacing (session/spawn_impulse.hpp)
         std::string own_body_entity_;            // the own ball entity that had a body after the last frame
+        // Every entity the own ball has been this session (own_ball's entity
+        // after each frame: the ball table's rows a trafo made current), with
+        // or without a body: with the mirrors, what is_ball calls a ball
+        // (step P).  Reset by begin.
+        std::set<std::string> own_ball_entities_;
         std::string own_group_;
         bool own_physicalized_ = false;
         bool assigned_ = false;
@@ -914,6 +919,18 @@ namespace bmmo::session {
         int64_t frames_since_anchor() const { return s.frames_since_anchor_; }
         bool own_physicalized() const { return s.own_physicalized_; }
         const std::string& own_body_entity() const { return s.own_body_entity_; }
+        // A ball, known by what it is (step P): an entity the own ball has
+        // been this session, or a remote player's mirror.  Not a "Ball_"
+        // name: the trafo explosion pieces (Ball_*Pieces_Frame's children)
+        // share the prefix and are tracked, restored and journaled as the
+        // mechanisms they are.
+        bool is_ball(const std::string& name) const {
+            if (name.empty()) return false;
+            if (s.own_ball_entities_.count(name)) return true;
+            for (const auto& [id, remote]: s.remotes_)
+                if (remote.entity == name) return true;
+            return false;
+        }
         const std::map<uint32_t, client_core_state::remote_ball>& remotes() const { return s.remotes_; }
         const bmmo::session::correction_stats& own_correction_stats() const { return s.corrector_.stats(); }
         const std::vector<uint8_t>* recorded_savestate(uint32_t tick) const { return s.rollback_.recorded_savestate(tick); }
@@ -1138,6 +1155,9 @@ namespace bmmo::session {
         bool physicalize_remote_from_row(const bmmo::session_event_msg& event);
         // The snapshot path's retail policy (R1): own_body_backstop.
         void check_own_body(const bmmo::session_snapshot_msg& snapshot);
+        // The mechanisms a record tracks (step P): the platform's movable
+        // bodies but the balls (is_ball), in the platform's order.
+        std::vector<std::string> movable_mechanisms() const;
 
         // The event log muted for a scope, nesting (platform mute_event_log;
         // the flag in force is client_core_state::event_log_muted_).  Private

@@ -789,7 +789,7 @@ private:
 	void core_host_feed_replay_keys(unsigned char* state);
 	bmmo::session::session_platform core_host_platform();
 	void core_host_dispatch(int code, const std::string& bytes);
-	void core_host_replay_activation(uint32_t tick);
+	void core_host_replay_activation(uint32_t tick, bool inside = false);
 	void core_host_zero_retail_forces();
 	CKDataArray* current_level_array() {
 		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;

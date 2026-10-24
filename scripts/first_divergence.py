@@ -48,11 +48,17 @@ def key_of(body):
     return ('body', body['name'])
 
 
-def worlds(journal, want_local, prefix=''):
+def worlds(journal, want_local, prefix='', ownerless_by_name=False):
     """tick -> {key: position}, from the checkpoints of the kind asked for.
 
     `prefix` keeps only map bodies whose name starts with it (and drops the
     balls), for when you want the shared world alone.
+
+    `ownerless_by_name` keys a kind-0 body with no owner by its name instead
+    of dropping it: a journal written before step P recorded every "Ball_"
+    body as a ball, the trafo explosion pieces (Ball_*_piece*) among them,
+    and a legacy retail journal records even its balls with owner 0; their
+    names are what identifies them within one client's runs.
     """
     out = {}
     for cp in journal.checkpoints():
@@ -69,7 +75,10 @@ def worlds(journal, want_local, prefix=''):
             if key[0] == 'body' and not b['name']:
                 continue
             if key[0] == 'ball' and not b['owner']:
-                continue   # a client that did not know the owner: not comparable
+                if ownerless_by_name and b['name']:
+                    key = ('body', b['name'])
+                else:
+                    continue   # a client that did not know the owner: not comparable
             row[key] = b['position']
     return out
 

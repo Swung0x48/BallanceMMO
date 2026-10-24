@@ -494,6 +494,14 @@ namespace {
             calls.push_back(std::string("set_body_matrix ") + entity + (simulated ? " simulated" : ""));
             return true;
         }
+        bool physicalize(const char* entity, const bmmo_physics_ball_recipe&, const char*, std::string& error) {
+            calls.push_back(std::string("physicalize ") + entity);
+            if (refuse_writes) {
+                error = "refused";
+                return false;
+            }
+            return true;
+        }
     };
 
     bmmo::session::local_birth birth_of(const char* name, float x) {
@@ -509,10 +517,16 @@ namespace {
 // births, then the manager activation, then the host's traces (and a
 // script binding's frame after them).  The replayed mirrors and the
 // corrections are the core's.  destroy_body: the core's moved own birth
-// first; the balls, the own body and the mirrors kept; a mechanism
-// destroyed muted, put back from its birth, unmuted, a failure reported.
+// first; the balls (the core's is_ball, not a "Ball_" name: step P), the own
+// body and the mirrors kept; a mechanism - a trafo explosion piece too (step
+// P) - destroyed muted, put back from its birth, unmuted, a failure reported.
+// revive_body (step P): a mechanism the window destroyed made again, muted,
+// from the birth of the lifetime it had at the anchor, never a ball, only
+// one the host calls revivable (none without the predicate).
 // insert_birth only when asked, from the tick's own birth; the birth log
-// behind birth_tick_of and birth_order; --park-births installs no destroy.
+// behind birth_tick_of and birth_order; --park-births installs no destroy
+// and no revive.  The host's savestate flags pass unchanged (step P: the
+// Random cursor is restored with the blob).
 TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     session_backend backend;
     std::vector<std::string> order;
@@ -528,15 +542,22 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     };
     hooks.own_body = [](const std::string& entity) { return entity == "Own_Body"; };
     hooks.mirror = [](const std::string& entity) { return entity == "Mirror_Box"; };
+    hooks.ball = [](const std::string& entity) { return entity == "Ball_Wood"; };
     bmmo::session::local_birth_log births;
+    births.add(119, birth_of("P_Gate", 6.0f));
     births.add(120, birth_of("P_Box", 1.0f));
     births.add(120, birth_of("P_Plank", 2.0f));
     births.add(122, birth_of("P_Box", 3.0f));
+    births.add(122, birth_of("Ball_Stone_piece01", 4.0f));
+    births.add(122, birth_of("Ball_Stray", 5.0f));
     bmmo::session::session_world_options w;
     w.replay_activation = [&](uint32_t tick) { order.push_back("activation " + std::to_string(tick)); };
     w.before_replayed_tick = [&](uint32_t tick) { order.push_back("host traces " + std::to_string(tick)); };
     w.births = &births;
+    w.revivable = [](const std::string& entity) { return entity != "P_Gate"; };
     w.insert_births = true;
+    w.binding.savestate = true;
+    w.binding.savestate_flags = BMMO_PHYSICS_SAVESTATE_STRICT;
     w.put_back = [&](const std::string& entity, const bmmo::session::local_birth& birth) {
         order.push_back("put back " + entity + " " + std::to_string(static_cast<int>(birth.matrix[12])));
     };
@@ -568,6 +589,11 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     world.on_correction(c);
     EXPECT_EQ(order, std::vector<std::string>({"correction Ball_Wood"}));
 
+    ASSERT_TRUE(world.set_savestate);
+    savestate_outcome restored;
+    EXPECT_TRUE(world.set_savestate({1, 2, 3}, restored));
+    EXPECT_EQ(backend.last_flags, BMMO_PHYSICS_SAVESTATE_STRICT) << "the host's flags, nothing added";
+
     EXPECT_EQ(world.birth_tick_of("P_Box"), 122u);
     EXPECT_EQ(world.birth_tick_of("P_None"), 0u);
     EXPECT_EQ(world.birth_order(120), std::vector<std::string>({"P_Box", "P_Plank"}));
@@ -590,6 +616,32 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
                                                        "unmute"}));
     EXPECT_EQ(order, std::vector<std::string>({"put back P_Box 1", "put back P_Plank 2", "put back P_Box 3"}));
     order.clear();
+    backend.calls.clear();
+    EXPECT_TRUE(world.destroy_body("Ball_Stray", 122)) << "a \"Ball_\" name that is no ball is a mechanism (step P)";
+    EXPECT_TRUE(world.destroy_body("Ball_Stone_piece01", 122)) << "a piece: the replayed explosion makes it again";
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"mute", "unphysicalize Ball_Stray", "unmute", "mute",
+                                                       "unphysicalize Ball_Stone_piece01", "unmute"}));
+    order.clear();
+
+    // revive_body (step P): the lifetime alive at the anchor, made again.
+    backend.calls.clear();
+    ASSERT_TRUE(world.revive_body);
+    EXPECT_TRUE(world.revive_body("P_Box", 121)) << "alive at 121: the birth of 120";
+    EXPECT_TRUE(world.revive_body("Ball_Stone_piece01", 130));
+    EXPECT_FALSE(world.revive_body("Ball_Stone_piece01", 121)) << "no lifetime at 121";
+    EXPECT_FALSE(world.revive_body("Ball_Wood", 130)) << "a ball's lifetime is the core's";
+    EXPECT_FALSE(world.revive_body("Own_Body", 130));
+    EXPECT_FALSE(world.revive_body("Mirror_Box", 130));
+    EXPECT_FALSE(world.revive_body("P_Gate", 130)) << "alive at 130, but not revivable";
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"mute", "physicalize P_Box", "unmute", "mute",
+                                                       "physicalize Ball_Stone_piece01", "unmute"}));
+    EXPECT_EQ(order, std::vector<std::string>({"put back P_Box 1", "put back Ball_Stone_piece01 4"}));
+    backend.calls.clear();
+    backend.refuse_writes = true;
+    EXPECT_FALSE(world.revive_body("P_Plank", 130)) << "the make refused";
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"mute", "physicalize P_Plank", "unmute"}));
+    backend.refuse_writes = false;
+    order.clear();
     backend.refuse_writes = true;
     EXPECT_FALSE(world.destroy_body("P_Box", 120));
     EXPECT_EQ(order, std::vector<std::string>({"destroy failed P_Box: no body"}));
@@ -601,15 +653,21 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     EXPECT_FALSE(world.insert_birth("P_Box", 121));
     EXPECT_FALSE(world.insert_birth("Ball_Wood", 122));
     EXPECT_FALSE(world.insert_birth("Own_Body", 122));
-    EXPECT_EQ(backend.calls, std::vector<std::string>({"set_body_matrix P_Box simulated"}));
+    EXPECT_TRUE(world.insert_birth("Ball_Stone_piece01", 122)) << "a piece is a mechanism birth (step P)";
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"set_body_matrix P_Box simulated",
+                                                       "set_body_matrix Ball_Stone_piece01 simulated"}));
 
     // --park-births: no destroy; without --insert-births: no insert.
     bmmo::session::session_world_options parked;
     parked.park_births = true;
     rollback_world plain = bmmo::session::bind_session_world(backend, hooks, parked);
     EXPECT_FALSE(plain.destroy_body);
+    EXPECT_FALSE(plain.revive_body);
     EXPECT_FALSE(plain.insert_birth);
     EXPECT_EQ(plain.birth_tick_of("P_Box"), 0u) << "no birth log";
+    bmmo::session::session_world_options unrevivable;
+    unrevivable.births = &births;
+    EXPECT_FALSE(bmmo::session::bind_session_world(backend, hooks, unrevivable).revive_body) << "no revivable: no revive";
     order.clear();
     plain.pre_step(130);
     EXPECT_EQ(order, std::vector<std::string>({"core births 130"}));

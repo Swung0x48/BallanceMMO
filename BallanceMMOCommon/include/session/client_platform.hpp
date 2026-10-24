@@ -22,7 +22,8 @@
 // poll_sector); E9 the frame's (world_hash, own_ball, own_body_upkeep,
 // own_replica_name, discover_navigation, drain_body_events,
 // reportable_wakeup, observe_input, own_camera_rows, drive, force_own,
-// unforce_own, arm_own_capture, movable_mechanisms, note_script_resets,
+// unforce_own, arm_own_capture, movable_mechanisms (movable_bodies since
+// step P), note_script_resets,
 // script_guards, record_pending_activation, the hooks after_rewinds,
 // after_record, after_amend and after_journal) and bind_world with the
 // core's hooks (core_world_hooks); E10 the reports (counters, the hooks
@@ -149,6 +150,12 @@ namespace bmmo::session {
         // mechanism birth to destroy or insert.
         std::function<bool(const std::string& entity)> own_body;
         std::function<bool(const std::string& entity)> mirror;
+        // The entity is a ball (session_client_core::is_ball: an entity the
+        // own ball has been this session, or a mirror's), whether or not it
+        // has a body now: the replica's controllers are on it, so it keeps
+        // the parking path (step P: the identity the "Ball_" prefix stood
+        // in for, which the trafo explosion pieces share).
+        std::function<bool(const std::string& entity)> ball;
     };
 
     // The own ball as the host sees it after a step (design 2.2 own_ball;
@@ -360,9 +367,13 @@ namespace bmmo::session {
         // frame's camera reference), and the retail forces zeroed (E9; step
         // 21).  Nothing without an own replica.
         std::function<void(const float (*basis)[3])> own_camera_rows;
-        // The movable bodies a record tracks as mechanisms (every movable
-        // body but the balls; E9; step 23).
-        std::function<std::vector<std::string>()> movable_mechanisms;
+        // Every movable body this world has, in the engine's table order (E9;
+        // step 23).  The core tracks all of them as mechanisms but the balls,
+        // which it knows by what they are (session_client_core::is_ball: the
+        // own ball's entities and the mirrors), not by a name prefix: the
+        // trafo explosion pieces share the balls' "Ball_" prefix and are
+        // rigid bodies like any mechanism (step P).
+        std::function<std::vector<std::string>()> movable_bodies;
         // The scripts told to reset in the frame of `tick` (E9; step 23: a
         // rewind anchored earlier keeps them live).
         std::function<void(uint32_t tick)> note_script_resets;
@@ -554,7 +565,7 @@ namespace bmmo::session {
         if (!platform.reportable_wakeup) return "reportable_wakeup";
         if (!platform.observe_input) return "observe_input";
         if (!platform.own_camera_rows) return "own_camera_rows";
-        if (!platform.movable_mechanisms) return "movable_mechanisms";
+        if (!platform.movable_bodies) return "movable_bodies";
         if (!platform.note_script_resets) return "note_script_resets";
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";

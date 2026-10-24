@@ -14,11 +14,15 @@
 //     shared navigation for a mirror, and the own ball's replica (design
 //     9.6);
 //   * manager_activations: every activation of Gameplay_SectorManager the
-//     live frames made, recorded for the replay to re-issue (plan doc 10);
+//     live frames made, recorded for the replay to re-issue (plan doc 10),
+//     and of the trafo scripts (step P); session_script_selection, the
+//     script replay's selection of the session core's world;
 //   * live_cells_guard: the three data-array cells kept across a rollback
 //     (platform keep_live_cells);
 //   * put_back_birth: a destroyed mechanism body's entity put back where
-//     its live Physicalize found it (bind_session_world's put_back).
+//     its live Physicalize found it (bind_session_world's put_back);
+//   * explosion_pieces: the trafo explosion pieces' entity names (step P:
+//     what reportable_wakeup leaves out).
 //
 // Moved from the headless client (session_client.cpp at 0ea2e05) at E9,
 // verbatim but for the backend's methods in place of the free calls; used
@@ -30,14 +34,18 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "CKAll.h"
 
 #include "navigation_graph.hpp"
+#include "script_replay.hpp"
 
 namespace bmmo::game {
 
@@ -159,9 +167,49 @@ namespace bmmo::game {
         bool reset = false;
         int activate = 0, deactivate = 0;   // IngameParameter[0][1], [0][2]
     };
+    //
+    // The same rule for the selected scripts that only scripts outside the
+    // selection activate (script_replay::trafo_activations: the trafo
+    // scripts, step P - Gameplay_Ingame's Trafo Manager activates
+    // Ball_Explosion_<type> and Ball_ResetPieces_<type>, with Reset): every
+    // pending activation of one of them after a live frame is recorded for
+    // the frame that consumes it, reset flag included, and re-issued with the
+    // manager's (replay), before that tick's scripts.  A re-issue the
+    // replayed scripts make themselves as well (the explosion activating the
+    // wind) sets the same flags twice: idempotent.
+    //
+    // The explosion's placement.  Ball_Explosion_<type> opens with "Set
+    // Position (0,0,0, Referential = Ball_Pos_Frame)" on its pieces frame
+    // (wrapped by the bridge: restore_explosion_pieces first, which puts
+    // Ball_Pos_Frame's local matrix back to identity under its parent), so
+    // the pieces start from Ball_Pos_Frame's parent - the ball entity the
+    // trafo unphysicalized, where Gameplay_Ingame's Trafo Manager left it.
+    // Neither that entity's matrix nor Ball_Pos_Frame's parent is replayed
+    // state: by the time a rewind runs, the Trafo Manager has made the new
+    // ball current and moved Ball_Pos_Frame onto it (measured, headless
+    // 1183:24: every wood piece of a replayed explosion 1.16 m off its birth
+    // record in y, the new ball's Physicalize height against the old ball's
+    // in the trafo).  So the referential's world matrix is recorded with the
+    // explosion's activation (record_pending: the parent's, the one the
+    // wrapped Set Position reads, or the frame's own without a parent), and
+    // inside a replay (replay's `inside`) Ball_Pos_Frame is taken off its
+    // parent and put there for that tick's scripts; it goes back - parent and
+    // local matrix as they were - at the next replayed tick's re-issue or when
+    // the rewinds end (end_override, from live_cells_guard).
+    struct script_activation {
+        CK_ID script = 0;
+        bool reset = false;
+    };
     class manager_activations {
     public:
-        void clear() { by_tick_.clear(); }
+        void clear() {
+            by_tick_.clear();
+            scripts_by_tick_.clear();
+            referential_by_tick_.clear();
+            scripts_reissued_ = 0;
+            referentials_placed_ = 0;
+            override_ = {};
+        }
         void record(CKContext* context, uint32_t tick, bool reset) {
             manager_activation a;
             a.reset = reset;
@@ -172,10 +220,61 @@ namespace bmmo::game {
             by_tick_[tick] = a;
             while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
         }
-        // The activation recorded for `tick` re-issued (the cells, then the
-        // manager activated, reset as recorded); nullptr when none was
-        // recorded or the array or the manager is missing.
-        const manager_activation* replay(CKContext* context, CK_ID manager_id, uint32_t tick) {
+        // After a live frame (platform record_pending_activation, for the
+        // frame of `tick` that consumes it): the manager's pending activation
+        // (a script outside the replay asked for it) and every pending
+        // activation of `scripts` (session_script_activations).
+        void record_pending(CKContext* context, CK_ID manager_id, const std::vector<CK_ID>& scripts, uint32_t tick) {
+            if (!context) return;
+            if (auto* manager = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
+                    manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
+                record(context, tick, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
+            std::vector<script_activation> pending;
+            for (CK_ID id: scripts) {
+                auto* script = CKBehavior::Cast(context->GetObject(id));
+                if (!script || !(script->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME)) continue;
+                pending.push_back({id, (script->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0});
+                // An explosion: where its pieces start (see above).
+                if (script->GetName() && std::strncmp(script->GetName(), "Ball_Explosion_", 15) == 0)
+                    if (CK3dEntity* frame = pos_frame(context)) {
+                        CK3dEntity* parent = frame->GetParent();
+                        referential_by_tick_[tick] = parent ? parent->GetWorldMatrix() : frame->GetWorldMatrix();
+                    }
+            }
+            if (pending.empty()) return;
+            scripts_by_tick_[tick] = std::move(pending);
+            while (!scripts_by_tick_.empty() && scripts_by_tick_.begin()->first + 4096 < tick)
+                scripts_by_tick_.erase(scripts_by_tick_.begin());
+            while (!referential_by_tick_.empty() && referential_by_tick_.begin()->first + 4096 < tick)
+                referential_by_tick_.erase(referential_by_tick_.begin());
+        }
+        // The activations recorded for `tick` re-issued: the manager's (the
+        // cells, then the manager activated, reset as recorded) and the
+        // scripts'.  `inside`: a replayed tick (not the live frame a rewind's
+        // end re-issues for), where an explosion's referential is put where
+        // the live one was (above).  Returns the manager's, nullptr when none
+        // was recorded or the array or the manager is missing.
+        const manager_activation* replay(CKContext* context, CK_ID manager_id, uint32_t tick, bool inside = false) {
+            end_override(context);
+            CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+            if (const auto r = referential_by_tick_.find(tick); inside && r != referential_by_tick_.end())
+                if (CK3dEntity* frame = pos_frame(context)) {
+                    override_.frame = frame->GetID();
+                    CK3dEntity* parent = frame->GetParent();
+                    override_.parent = parent ? parent->GetID() : 0;
+                    override_.local = frame->GetLocalMatrix();
+                    override_.active = true;
+                    if (parent) frame->SetParent(nullptr, TRUE);
+                    frame->SetWorldMatrix(r->second);
+                    ++referentials_placed_;
+                }
+            if (const auto s = scripts_by_tick_.find(tick); s != scripts_by_tick_.end() && scene) {
+                for (const script_activation& a: s->second)
+                    if (auto* script = CKBehavior::Cast(context->GetObject(a.script))) {
+                        scene->Activate(script, a.reset ? TRUE : FALSE);
+                        ++scripts_reissued_;
+                    }
+            }
             const auto it = by_tick_.find(tick);
             if (it == by_tick_.end()) return nullptr;
             CKDataArray* parameters = session_data_array(context, "IngameParameter");
@@ -183,13 +282,54 @@ namespace bmmo::game {
             if (!parameters || !manager) return nullptr;
             parameters->SetElementValue(0, 1, &it->second.activate, sizeof(int));
             parameters->SetElementValue(0, 2, &it->second.deactivate, sizeof(int));
-            if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, it->second.reset ? TRUE : FALSE);
+            if (scene) scene->Activate(manager, it->second.reset ? TRUE : FALSE);
             return &it->second;
         }
+        // Ball_Pos_Frame back on the parent it had, with the local matrix
+        // it had, after a replayed explosion's tick (above).  Idempotent.
+        void end_override(CKContext* context) {
+            if (!override_.active) return;
+            override_.active = false;
+            auto* frame = context ? CK3dEntity::Cast(context->GetObject(override_.frame)) : nullptr;
+            if (!frame) return;
+            auto* parent = override_.parent ? CK3dEntity::Cast(context->GetObject(override_.parent)) : nullptr;
+            if (parent) frame->SetParent(parent, TRUE);
+            frame->SetLocalMatrix(override_.local);
+        }
+        // How many script activations replay() re-issued, and explosion
+        // referentials it placed (diagnostics).
+        uint64_t scripts_reissued() const { return scripts_reissued_; }
+        uint64_t referentials_placed() const { return referentials_placed_; }
 
     private:
+        static CK3dEntity* pos_frame(CKContext* context) {
+            return CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>("Ball_Pos_Frame"),
+                                                                           CKCID_3DENTITY, nullptr));
+        }
         std::map<uint32_t, manager_activation> by_tick_;
+        std::map<uint32_t, std::vector<script_activation>> scripts_by_tick_;
+        std::map<uint32_t, VxMatrix> referential_by_tick_;
+        uint64_t scripts_reissued_ = 0, referentials_placed_ = 0;
+        struct {
+            bool active = false;
+            CK_ID frame = 0, parent = 0;
+            VxMatrix local;
+        } override_;
     };
+
+    // The script replay's selection of the session core's world, both hosts
+    // (step P): the mechanism scripts, the sector manager and the trafo
+    // scripts.  The legacy retail rollback calls script_replay::select
+    // without the trafo scripts.
+    inline script_replay::selection session_script_selection(CKContext* context) {
+        return script_replay::select(context, true);
+    }
+    // The scripts of that selection whose pending activations the host
+    // records and the replay re-issues (manager_activations::record_pending):
+    // kept by the host beside the selection (script_replay::trafo_activations).
+    inline std::vector<CK_ID> session_script_activations(CKContext* context, const script_replay::selection& sel) {
+        return script_replay::trafo_activations(context, sel);
+    }
 
     // The three data-array cells the replay rewinds and re-writes (the
     // record's, then the replayed activations') while the LIVE chains that
@@ -204,12 +344,16 @@ namespace bmmo::game {
     class live_cells_guard {
     public:
         live_cells_guard(CKContext* context, const bmmo::session::session_client_core& core, bool keep,
-                         std::function<void(uint32_t tick)> reissue)
-            : context_(context), core_(core), rollbacks_before_(core.rollback_stats().rollbacks), reissue_(std::move(reissue)) {
+                         std::function<void(uint32_t tick)> reissue, manager_activations* activations = nullptr)
+            : context_(context), core_(core), rollbacks_before_(core.rollback_stats().rollbacks), reissue_(std::move(reissue)),
+              activations_(activations) {
             if (!keep) return;
             for (int i = 0; i < 3; ++i) have_[i] = read_cell(i, values_[i]);
         }
         ~live_cells_guard() {
+            // A replayed explosion's referential, if the window ended on its
+            // tick (manager_activations::end_override).
+            if (activations_) activations_->end_override(context_);
             for (int i = 0; i < 3; ++i) if (have_[i]) write_cell(i, values_[i]);
             // A rewind that ended at `now` replaced the live world with the
             // replayed one, which never saw an activation a script outside
@@ -238,6 +382,7 @@ namespace bmmo::game {
         const bmmo::session::session_client_core& core_;
         uint64_t rollbacks_before_ = 0;
         std::function<void(uint32_t tick)> reissue_;
+        manager_activations* activations_ = nullptr;
         int values_[3] = {};
         bool have_[3] = {};
     };
@@ -260,6 +405,32 @@ namespace bmmo::game {
             if (local) ck->SetLocalMatrix(matrix);
             else ck->SetWorldMatrix(matrix);
         }
+    }
+
+    // The trafo explosion pieces (step P): every entity under the three
+    // Ball_*Pieces_Frame hierarchies of Balls.nmo, the bodies
+    // Ball_Explosion_<type> physicalizes and pushes and Ball_ResetPieces_<type>
+    // gives back (physics_state.cpp restore_explosion_pieces walks the same
+    // frames).  They share the "Ball_" prefix with the balls but are rigid
+    // bodies like any mechanism, so both hosts track them, and the replay
+    // re-runs the scripts that make, push and take them (session_script_
+    // selection), so a rollback destroys and re-makes them like any
+    // mechanism born inside its window.  What they are told apart for: no
+    // other world has them (the server and the other clients run no
+    // explosion of this client's trafo), so their Physicalize's wake-up is
+    // not a BodyRevived (reportable_wakeup).
+    inline std::set<std::string> explosion_pieces(CKContext* context) {
+        std::set<std::string> names;
+        if (!context) return names;
+        static const char* const kFrames[] = {"Ball_WoodPieces_Frame", "Ball_StonePieces_Frame", "Ball_PaperPieces_Frame"};
+        for (const char* frame_name: kFrames) {
+            auto* frame = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(frame_name),
+                                                                                 CKCID_3DENTITY, nullptr));
+            if (!frame) continue;
+            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child))
+                if (child->GetName()) names.insert(child->GetName());
+        }
+        return names;
     }
 
 }

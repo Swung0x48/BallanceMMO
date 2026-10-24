@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -74,6 +75,15 @@ namespace bmmo::session {
             }
             for (auto it = by_tick_.rbegin(); it != by_tick_.rend(); ++it)
                 for (const auto& b: it->second) if (b.name == entity) return &b;
+            return nullptr;
+        }
+        // The birth of the lifetime `entity` had at `tick`: its latest birth
+        // at or before that tick (step P, revive_body), or nullptr.
+        const local_birth* lifetime_at(const std::string& entity, uint32_t tick) const {
+            for (auto it = by_tick_.rbegin(); it != by_tick_.rend(); ++it) {
+                if (it->first > tick) continue;
+                for (const auto& b: it->second) if (b.name == entity) return &b;
+            }
             return nullptr;
         }
         // The tick a body was created at (its latest birth); 0 when unknown.
@@ -231,6 +241,12 @@ namespace bmmo::session {
         std::function<void(const std::string& entity)> on_own_destroy_failed;
         std::function<void(const std::string& entity, const std::string& error)> on_destroy_failed;
         std::function<void(const std::string& entity, uint32_t birth_tick, const std::string& error)> on_insert_failed;
+        // The mechanisms revive_body may make again (step P: the trafo
+        // explosion pieces, the bodies a replayed script - the pieces' reset -
+        // takes away again inside the replay).  Unset: none.  A body some
+        // other way destroyed (a script outside the selection, the host) would
+        // survive the replay that never destroys it.
+        std::function<bool(const std::string& entity)> revivable;
         // The mechanism scripts' part of the binding (CK:
         // bind_script_replay), last.
         std::function<void(rollback_world& world)> bind_scripts;
@@ -248,6 +264,10 @@ namespace bmmo::session {
     rollback_world bind_session_world(Backend& backend, const core_world_hooks& hooks, const session_world_options& o) {
         Backend* b = &backend;
         rollback_binding_options binding = o.binding;
+        // (Step P: no savestate flag of the core's own.  The deterministic
+        // Random block's cursor is restored with the blob: the trafo
+        // explosion scripts that draw from it are in the replay's selection,
+        // so the replayed explosion draws what the live one drew.)
         const auto core_births = hooks.before_replayed_tick;
         const auto activation = o.replay_activation;
         const auto host_before = o.before_replayed_tick;
@@ -267,9 +287,10 @@ namespace bmmo::session {
         // parking path, the replica's controllers are on them).
         if (o.insert_births) {
             const auto own_body = hooks.own_body;
+            const auto ball = hooks.ball;
             const auto failed = o.on_insert_failed;
-            world.insert_birth = [b, own_body, births, failed](const std::string& entity, uint32_t birth_tick) {
-                if (entity.rfind("Ball_", 0) == 0 || (own_body && own_body(entity))) return false;
+            world.insert_birth = [b, own_body, ball, births, failed](const std::string& entity, uint32_t birth_tick) {
+                if ((ball && ball(entity)) || (own_body && own_body(entity))) return false;
                 const local_birth* birth = births ? births->find(entity, birth_tick) : nullptr;
                 if (!birth) return false;
                 std::string error;
@@ -299,17 +320,19 @@ namespace bmmo::session {
             const auto own_birth = hooks.destroy_own_birth;
             const auto own_body = hooks.own_body;
             const auto mirror = hooks.mirror;
+            const auto ball = hooks.ball;
             const auto put_back = o.put_back;
             const auto own_failed = o.on_own_destroy_failed;
             const auto failed = o.on_destroy_failed;
-            world.destroy_body = [b, own_birth, own_body, mirror, births, put_back, own_failed, failed](
+            world.destroy_body = [b, own_birth, own_body, mirror, ball, births, put_back, own_failed, failed](
                                          const std::string& entity, uint32_t birth_tick) {
                 bool destroyed = false;
                 if (own_birth && own_birth(entity, birth_tick, destroyed)) {
                     if (!destroyed && own_failed) own_failed(entity);
                     return destroyed;
                 }
-                if (entity.rfind("Ball_", 0) == 0 || (own_body && own_body(entity))) return false;
+                // The balls by what they are (step P), not by a name.
+                if ((ball && ball(entity)) || (own_body && own_body(entity))) return false;
                 if (mirror && mirror(entity)) return false;
                 const local_birth* birth = births ? births->find(entity, birth_tick) : nullptr;
                 if (!birth && births) birth = births->find(entity, 0);
@@ -321,6 +344,42 @@ namespace bmmo::session {
                 if (!ok && failed) failed(entity, error);
                 return ok;
             };
+            // Step P: a mechanism alive at the anchor that the window
+            // destroyed (the trafo explosion pieces' reset, a script the
+            // replay re-runs) is made again at the restore from the birth of
+            // that lifetime - entity put back where its Physicalize found it,
+            // the recipe and group it was made with, the event log muted (not
+            // a lifetime change the records describe) - and the savestate then
+            // puts its whole state back.  The balls are not: their lifetimes
+            // are the core's.
+            // Counted and logged here (the first 8 of each), not by the engine
+            // (rollback_world::revive_body).
+            const auto revivable = o.revivable;
+            const auto log = world.log;
+            auto made = std::make_shared<uint64_t>(0), failed_revives = std::make_shared<uint64_t>(0);
+            if (revivable)
+                world.revive_body = [b, own_body, mirror, ball, births, put_back, revivable, log, made, failed_revives](
+                                            const std::string& entity, uint32_t anchor) {
+                    if (!revivable(entity)) return false;
+                    if ((ball && ball(entity)) || (own_body && own_body(entity)) || (mirror && mirror(entity))) return false;
+                    const local_birth* birth = births ? births->lifetime_at(entity, anchor) : nullptr;
+                    std::string error = "no birth known", mute_error;
+                    bool ok = false;
+                    if (birth) {
+                        error.clear();
+                        b->set_event_log_muted(true, mute_error);
+                        if (put_back) put_back(entity, *birth);
+                        ok = b->physicalize(entity.c_str(), birth->recipe, birth->group.c_str(), error);
+                        b->set_event_log_muted(false, mute_error);
+                    }
+                    if (ok && log && ++*made <= 8)
+                        log("revive: " + entity + " (destroyed inside the window) made again at the restore of tick "
+                            + std::to_string(anchor) + " (" + std::to_string(*made) + " so far)");
+                    if (!ok && log && ++*failed_revives <= 8)
+                        log("revive: " + entity + " not made again at the restore of tick " + std::to_string(anchor) + ": "
+                            + error + " (" + std::to_string(*failed_revives) + " so far)");
+                    return ok;
+                };
         }
         if (o.bind_scripts) o.bind_scripts(world);
         return world;

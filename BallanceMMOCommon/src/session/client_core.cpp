@@ -52,7 +52,7 @@ namespace bmmo::session {
         // record takes (tracked.mechanisms in the frame), so a body the
         // replay made before the live frames did is recorded from the
         // replayed tick that has it.
-        world_hooks_.replay_mechanisms = [this]() { return platform_.movable_mechanisms(); };
+        world_hooks_.replay_mechanisms = [this]() { return movable_mechanisms(); };
         // Every decision the engine takes about a snapshot, straight into
         // the box: no log parsing needed to know what this client did.
         world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };
@@ -67,6 +67,19 @@ namespace bmmo::session {
             for (const auto& [id, remote]: s.remotes_) if (remote.entity == entity) return true;
             return false;
         };
+        world_hooks_.ball = [this](const std::string& entity) { return is_ball(entity); };
+    }
+
+    // Every movable body but the balls (step P): the balls are the own
+    // ball's entities and the mirrors (is_ball), each tracked by entity as
+    // own and remote; everything else - the trafo explosion pieces included,
+    // which share the balls' "Ball_" prefix - is a mechanism the records
+    // carry and a rollback restores.
+    std::vector<std::string> session_client_core::movable_mechanisms() const {
+        std::vector<std::string> names;
+        for (auto& name: platform_.movable_bodies())
+            if (!is_ball(name)) names.push_back(std::move(name));
+        return names;
     }
 
     // The headless client's logf wrote the formatted text and a newline; the
@@ -179,6 +192,7 @@ namespace bmmo::session {
         s.remote_last_unphysicalize_.clear();
         s.own_physicalized_ = false;
         s.own_body_entity_.clear();
+        s.own_ball_entities_.clear();
         s.start_sector_pending_ = false;
         s.start_sectors_.clear();
         s.sectors_.reset();

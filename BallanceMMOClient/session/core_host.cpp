@@ -193,6 +193,13 @@ namespace {
         bmmo::game::manager_activations activations;
         uint64_t activations_replayed = 0;
         bmmo::game::script_replay::selection script_ids;
+        // The selected scripts whose pending activations are recorded and
+        // re-issued (step P: the trafo scripts; host support's
+        // session_script_activations).
+        std::vector<CK_ID> script_activations;
+        // The trafo explosion pieces' entities (step P; made at the anchor):
+        // tracked by the core like any mechanism, never a BodyRevived.
+        std::set<std::string> explosion_pieces;
         std::vector<CK_ID> scripts_replayed;
         bmmo::game::script_replay_hooks script_hooks;
         std::map<CK_ID, uint32_t> script_reset_ticks;
@@ -419,6 +426,8 @@ namespace {
         host.activations.clear();
         host.activations_replayed = 0;
         host.script_ids = {};
+        host.script_activations.clear();
+        host.explosion_pieces.clear();
         host.scripts_replayed.clear();
         host.script_hooks = {};
         host.script_reset_ticks.clear();
@@ -870,7 +879,10 @@ void BallanceMMOClient::core_host_anchor() {
     read_ball_forces(m_bml);
     // The script replay (game/script_replay.hpp): the mechanism scripts a
     // replayed tick re-runs, and the force blocks they drive.
-    host.script_ids = bmmo::game::script_replay::select(m_bml->GetCKContext());
+    // The session core's selection (step P: the trafo scripts too).
+    host.script_ids = bmmo::game::session_script_selection(m_bml->GetCKContext());
+    host.script_activations = bmmo::game::session_script_activations(m_bml->GetCKContext(), host.script_ids);
+    host.explosion_pieces = bmmo::game::explosion_pieces(m_bml->GetCKContext());
     host.script_hooks.capture_force = [this](CKBehavior* block, bmmo::game::force_block_state& out) {
         bmmo_physics_force_block state{};
         std::string e;
@@ -1113,12 +1125,17 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
 }
 
 // A manager activation recorded for `tick`, re-issued (inside a replay, and
-// for the frame about to run after one).
-void BallanceMMOClient::core_host_replay_activation(uint32_t tick) {
+// for the frame about to run after one).  `inside`: a replayed tick, where an
+// explosion's referential is placed (step P; host support's
+// manager_activations), not the live frame a rewind's end re-issues for.
+void BallanceMMOClient::core_host_replay_activation(uint32_t tick, bool inside) {
     CKContext* context = m_bml->GetCKContext();
     CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
-    if (!manager) return;
-    if (host.activations.replay(context, manager->GetID(), tick)) ++host.activations_replayed;
+    // The trafo scripts' activations are re-issued with or without a manager.
+    const uint64_t placed = host.activations.referentials_placed();
+    if (host.activations.replay(context, manager ? manager->GetID() : 0, tick, inside)) ++host.activations_replayed;
+    if (host.activations.referentials_placed() != placed && host.activations.referentials_placed() <= 8)
+        logger_->Info("Physics session: replay: an explosion's referential placed where the live frame had it at tick %u", tick);
 }
 
 // The retail SetPhysicsForce leaves push zero while the own replica drives the
@@ -1284,8 +1301,13 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             if (each(event)) host.own_group_set = false;
         });
     };
+    // Not a ball (step P: the core's is_ball, not the "Ball_" prefix), not
+    // the own ball, not a mirror, and not a trafo explosion piece: no other
+    // world has the pieces, so their Physicalize's wake-up is nobody's
+    // BodyRevived.
     p.reportable_wakeup = [](const std::string& name, const std::string& own_ball) {
-        return name.rfind("Ball_", 0) != 0 && name != own_ball && name.find("_Peer_") == std::string::npos;
+        return !(host.core && host.core->is_ball(name)) && name != own_ball && name.find("_Peer_") == std::string::npos
+            && !host.explosion_pieces.count(name);
     };
     // What the own replica stepped T with (design 2.2 observe_input, 4.2
     // R2), which every replay drives the own ball from: the mute in force
@@ -1340,11 +1362,12 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             logger_->Warn("Physics session: own navigation rows: %s", error.c_str());
         core_host_zero_retail_forces();
     };
-    p.movable_mechanisms = [this]() {
+    // Every movable body (step P): the core leaves the balls out by what they
+    // are, not by the "Ball_" prefix the trafo explosion pieces share.
+    p.movable_bodies = [this]() {
         std::vector<std::string> names;
         for (const auto& body: physics_view_.list_bodies()) {
             if (!body.movable || !body.name[0]) continue;
-            if (std::strncmp(body.name, "Ball_", 5) == 0) continue;
             names.emplace_back(body.name);
         }
         return names;
@@ -1392,10 +1415,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.record_activation = [this](uint32_t tick, bool reset) {
         host.activations.record(m_bml->GetCKContext(), tick, reset);
     };
+    // The manager's and the trafo scripts' (step P: host support's
+    // record_pending, the selection's `activations`).
     p.record_pending_activation = [this](uint32_t tick) {
-        if (CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
-                manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
-            host.activations.record(m_bml->GetCKContext(), tick, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
+        CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
+        host.activations.record_pending(m_bml->GetCKContext(), manager ? manager->GetID() : 0, host.script_activations, tick);
     };
 
     // ---- mirrors: the game_objects spirit balls ----
@@ -1515,8 +1539,13 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         o.log = [this](const std::string& text) {
             if (host.line_logs++ < 200) logger_->Info("Physics session: %s", text.c_str());
         };
-        w.replay_activation = [this](uint32_t tick) { core_host_replay_activation(tick); };
+        // Inside the replay (an explosion's referential is placed); the
+        // rewinds' end re-issues with inside = false (keep_live_cells).
+        w.replay_activation = [this](uint32_t tick) { core_host_replay_activation(tick, true); };
         w.births = &host.births;
+        // Step P: only the trafo explosion pieces are made again at a restore
+        // (the replayed reset takes them away again).
+        w.revivable = [](const std::string& entity) { return host.explosion_pieces.count(entity) != 0; };
         w.park_births = false;
         w.insert_births = false;
         w.put_back = [this](const std::string& entity, const bs::local_birth& birth) {
@@ -1549,7 +1578,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     p.keep_live_cells = [this](const bs::session_client_core& core) {
         auto guard = std::make_shared<bmmo::game::live_cells_guard>(
-                m_bml->GetCKContext(), core, true, [this](uint32_t tick) { core_host_replay_activation(tick); });
+                m_bml->GetCKContext(), core, true, [this](uint32_t tick) { core_host_replay_activation(tick); },
+                &host.activations);
         return bs::scope_guard([guard]() mutable { guard.reset(); });
     };
 

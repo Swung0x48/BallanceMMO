@@ -108,8 +108,10 @@ namespace bmmo::session {
 
             bool checkpoint_due(uint32_t tick) const;
             // This client's own world, from the platform's body list: the
-            // balls (every entity named Ball_*) and the mechanisms it is
-            // running.  `own_ball` is the own ball's entity name (empty: none).
+            // balls (session_client_core::is_ball, step P: the own ball and
+            // the mirrors; a body no player owns, the trafo explosion pieces
+            // among them, is a mechanism) and the mechanisms it is running.
+            // `own_ball` is the own ball's entity name (empty: none).
             void local_checkpoint(uint32_t tick, const std::string& own_ball);
 
             // The records the flow writes itself (INPUT, TICK, RECEIVED

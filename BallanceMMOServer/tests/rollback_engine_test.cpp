@@ -1225,6 +1225,81 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
     EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 }
 
+// Step P of the session-core design: with revive_body installed and the
+// savestate applied, a mechanism the anchor's record has that the window
+// destroyed (a replayed script's De Physicalize: the trafo pieces' reset) is
+// made again at the restore - before the blob, which then puts its state of
+// T back - so the replayed ticks before its death have it, and the replayed
+// script takes it away again where the live one did.  A refused blob takes
+// the made body out again.
+TEST(RollbackEngine, AMechanismTheWindowDestroyedIsMadeAgainAtTheRestoreForTheReplay) {
+    for (const bool refuse: {false, true}) {
+        SCOPED_TRACE(refuse ? "blob refused" : "blob applied");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Remote"] = {};
+        world.bodies["Prop"].position[0] = 10.0;
+        world.bodies["Prop"].linear[0] = 3.0f;
+        rollback_engine engine;
+        auto w = world.adapter();
+        // The script that destroys the prop at the start of tick 4, live and
+        // replayed alike; what the replay finds of it just before.
+        double replayed_before_death = -1.0;
+        bool replaying = false;
+        w.pre_step = [&](uint32_t tick) {
+            if (tick != 4) return;
+            if (replaying && world.bodies.contains("Prop")) replayed_before_death = world.bodies["Prop"].position[0];
+            world.bodies.erase("Prop");
+        };
+        w.revive_body = [&](const std::string& entity, uint32_t anchor) {
+            world.calls.push_back("revive " + entity + "@" + std::to_string(anchor));
+            world.bodies[entity] = fake_body{};   // made from its birth: the blob puts its state back
+            return true;
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        world.refuse_savestate = refuse;
+
+        rollback_tracked alive;
+        alive.remote_entities = {"Remote"};
+        alive.mechanisms = {"Prop"};
+        alive.generations = {{"Prop", 1}};
+        rollback_tracked dead = alive;
+        dead.mechanisms.clear();
+        dead.generations["Prop"] = 2;   // the delete moved the lifetime on
+        double live_before_death = 0.0;
+        for (uint32_t tick = 1; tick <= 6; ++tick) {
+            if (tick == 4) live_before_death = world.bodies["Prop"].position[0];
+            w.pre_step(tick);
+            w.step();
+            engine.record(w, tick, tick >= 4 ? dead : alive, {{"Remote", input_frame{}}});
+        }
+        world.calls.clear();
+        ASSERT_FALSE(world.bodies.contains("Prop"));
+
+        fake_body server_remote = world.bodies["Remote"];
+        server_remote.position[0] += 1.0;
+        const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+        auto entity_now = [](const body_state& body) -> std::string {
+            return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+        };
+        replaying = true;
+        EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+        ASSERT_EQ(world.count("revive Prop@2"), 1);
+        EXPECT_LT(world.first("revive Prop"), world.first("set_savestate")) << "made before the blob goes back";
+        EXPECT_FALSE(world.bodies.contains("Prop")) << "taken away again by the replayed script (or the refusal)";
+        if (!refuse) {
+            EXPECT_EQ(world.count("destroy Prop"), 0);
+            EXPECT_EQ(replayed_before_death, live_before_death) << "the blob's state of tick 2, replayed to the death";
+        } else {
+            EXPECT_EQ(world.count("destroy Prop@0"), 1) << "the per-body path has no record of that lifetime";
+        }
+    }
+}
+
 // The default path: insert_birth puts the parked body where its Physicalize
 // made it before its birth tick's step; after the step it is on its record and
 // nothing is written for it.

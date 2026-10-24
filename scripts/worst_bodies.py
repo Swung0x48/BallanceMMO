@@ -9,6 +9,13 @@ usage: python scripts/worst_bodies.py <control.bmjr> <arm.bmjr> [--from TICK] [-
 --from / --until restrict the comparison to a tick window, for a session whose
 runs stop being comparable at some point (a death whose sector reset the two
 runs take at different ticks, a ball that leaves the map in one of them).
+
+Every body is compared, the trafo explosion pieces included (step P): a
+journal written since then records them as mechanisms, by name; an older one
+(and a legacy retail one) recorded every "Ball_" body as a ball, a piece with
+owner 0, which is compared by its name too (first_divergence.worlds
+ownerless_by_name).  --balls-by-owner-only restores the old rule (an ownerless
+ball is skipped).
 """
 import argparse
 import pathlib
@@ -23,10 +30,12 @@ ap.add_argument('control')
 ap.add_argument('arm')
 ap.add_argument('--from', dest='tick_from', type=int, default=0)
 ap.add_argument('--until', dest='tick_until', type=int, default=1 << 31)
+ap.add_argument('--balls-by-owner-only', dest='by_name', action='store_false',
+                help='skip a kind-0 body with no owner (the rule before step P)')
 args = ap.parse_args()
 
-control = fd.worlds(jt.read_journal(args.control), want_local=True)
-arm = fd.worlds(jt.read_journal(args.arm), want_local=True)
+control = fd.worlds(jt.read_journal(args.control), want_local=True, ownerless_by_name=args.by_name)
+arm = fd.worlds(jt.read_journal(args.arm), want_local=True, ownerless_by_name=args.by_name)
 
 
 def pair_balls(row_a, row_b):

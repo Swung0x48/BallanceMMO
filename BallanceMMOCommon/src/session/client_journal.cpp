@@ -201,8 +201,11 @@ namespace bmmo::session::core {
         for (const auto& body: bodies) {
             if (!body.movable) continue;
             bmmo::session::body_state state;
-            state.kind = std::strncmp(body.name, "Ball_", 5) == 0 ? bmmo::session::body_kind::Ball
-                                                                 : bmmo::session::body_kind::Mechanism;
+            // A ball by what it is (step P: the own ball, an entity it has
+            // been, a mirror), not by the "Ball_" prefix: the trafo
+            // explosion pieces share it and are mechanisms, journaled by name.
+            const bool ball = (!own_name.empty() && own_name == body.name) || core_.is_ball(body.name);
+            state.kind = ball ? bmmo::session::body_kind::Ball : bmmo::session::body_kind::Mechanism;
             state.owner = 0;
             if (state.kind == bmmo::session::body_kind::Ball) {
                 if (!own_name.empty() && own_name == body.name) state.owner = s.own_id_;

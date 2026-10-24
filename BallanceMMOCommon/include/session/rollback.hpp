@@ -224,6 +224,26 @@ namespace bmmo::session {
         // body still missing after that tick's step is counted (births_missing).
         std::function<bool(const std::string& entity, uint32_t birth_tick)> destroy_body;
         std::function<bool(const std::string& entity, uint32_t birth_tick)> recreate_body;
+        // Optional, the other end of a lifetime (step P of the session-core
+        // design): a mechanism the anchor's record has and the world no
+        // longer has - destroyed inside the window by a script the replay
+        // re-runs (Ball_ResetPieces_<type>'s De Physicalize of the trafo
+        // explosion pieces) - is made again at the restore, before the
+        // scripts' state goes back (a force block restored then needs its
+        // body) and before the savestate, which then puts its whole state
+        // back from the blob; the replayed script takes it away again at the
+        // tick the live one did.  `anchor` is the restore's tick: the caller
+        // makes the lifetime alive then (its latest birth up to that tick),
+        // muted.  false: not made (no birth known); the replay then runs
+        // without it, as before.  Only on the savestate path; a refused blob
+        // takes the made bodies out again (destroy_body).  Not for a body a
+        // new lifetime of which is born inside the window (it has a birth
+        // plan item: destroyed and made again at that birth instead; the
+        // replay runs without it from the anchor to its death, logged).  The
+        // caller counts and logs what it made (no engine counter: the
+        // engine is held by the legacy retail state, whose layout stays as it
+        // is until R7, session-core design 3.2).
+        std::function<bool(const std::string& entity, uint32_t anchor)> revive_body;
         // Optional, the default way for a body born inside the window when the
         // caller has its Physicalize matrix: the parked body is put where and
         // how its Physicalize made it at the START of its birth tick, before
@@ -832,6 +852,33 @@ namespace bmmo::session {
                 calm_shift = 0.0;
             };
             if (replay_follows && !try_savestate) rewind_clock();
+            // The mechanisms alive at T that the window destroyed (step P,
+            // rollback_world::revive_body): made again first, so the scripts'
+            // state (a force block's controller on them) and the blob find
+            // them.  Not one a new lifetime of which is born in the window
+            // (a plan item: destroyed and made again at that birth; such a
+            // lifetime is missing from the replay between the anchor and its
+            // death - logged, the known gap).  The world's hook counts and
+            // logs what it made.
+            std::vector<std::string> revived;
+            if (try_savestate && world.revive_body) {
+                size_t reborn = 0;
+                std::string first_reborn;
+                for (const auto& entity: at->tracked.mechanisms) {
+                    if (at->bodies.find(entity) == at->bodies.end()) continue;
+                    if (const auto p = plan.find(entity); p != plan.end()) {
+                        if (p->second.repose_tick != 0 && !reborn++) first_reborn = entity;
+                        continue;
+                    }
+                    bmmo_physics_body_state live{};
+                    if (world.get_body(entity, live)) continue;
+                    if (world.revive_body(entity, anchor)) revived.push_back(entity);
+                }
+                if (reborn && world.log)
+                    world.log("revive: " + std::to_string(reborn) + " mechanism(s) alive at tick " + std::to_string(anchor)
+                              + " are born again inside the window (" + first_reborn
+                              + " first): not made at the restore, the replay runs without them until their death");
+            }
             // The mechanism scripts' state at T, before the bodies: a force
             // block restored here re-creates or deletes its IVP controller,
             // and the replayed frames then toggle it from the right phase.
@@ -921,6 +968,10 @@ namespace bmmo::session {
                     }
                 } else {
                     ++stats_.savestate_failures;
+                    // The bodies made again for the blob go: the per-body
+                    // path has no record of their lifetime to restore.
+                    if (world.destroy_body)
+                        for (const auto& entity: revived) world.destroy_body(entity, 0);
                     if (world.log && stats_.savestate_failures % 8 == 1)
                         world.log("savestate: the blob of tick " + std::to_string(anchor) + " ("
                                   + std::to_string(at->savestate.size()) + " bytes) was refused, per-body restore instead ("

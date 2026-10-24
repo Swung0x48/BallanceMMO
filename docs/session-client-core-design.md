@@ -8,7 +8,9 @@ built (step R0)", "As built (step R1)"). R2 is implemented but OPEN, not
 closed ("As built (step R2)"): its check (a) fails on the trafo's explosion
 pieces in a window that crosses their birth, and its check (b) fails on the
 mirror p99 (above the headless lane O runs, which have lifecycle rewind on:
-R3's switch). R3-R7 are not built.
+R3's switch). Step P (the pieces tracked as mechanisms in both hosts, "As
+built (step P)") is implemented but OPEN: R2 (a) now passes on retail, the
+headless trafo run does not. R3-R7 are not built.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -460,11 +462,11 @@ value, as the free functions do today.
 | body_state | `bool(const std::string& entity, body_state&)` | `get_body_state(physics, …)` | `physics_view_.get_body_state` |
 | world_hash | `bool(world_hash&)`: the journal's TICK record; as built (E9): required with `journal_path` | `capture_world_hash` | `physics_view_.capture` |
 | list_bodies | `std::vector<bmmo_physics_body_state>()` | `list_bodies` via the `physics_direct` adapter (`physics_direct::list_bodies`, added at E1) | `physics_view_.list_bodies()` |
-| movable_mechanisms | `std::vector<std::string>()` | `movable_body_names(physics, "Ball_")` (SC:3842-3845) | the `list_bodies` filter of PSC:1956-1960 |
+| movable_bodies (`movable_mechanisms` until step P) | `std::vector<std::string>()`: every movable body, in the engine's order; the core leaves the balls out (`is_ball`, step P; before P the host's list already skipped `Ball_*`) | `movable_body_names(physics, "Ball_")` (SC:3842-3845); P: without the skip | the `list_bodies` filter of PSC:1956-1960; P: `list_bodies` movable |
 | own_ball | `own_ball_view()`: `{entity, ball_type, physicalized, state}` | `current_ball`, `ball_type_of`, `get_body_state` (SC:2209-2220) | `get_current_ball`, `db_.get_ball_id`, `get_body_state` (PSC:1656-1759) |
 | own_body_upkeep | `void(const own_ball_view&)`: body guard, own group, own navigation attach; as built (E9): called after `own_ball` (SC set the guard before reading the body: a flag write and a read, order-free) | SC:2212-2227 (navigation only with rollback: a host policy) | PSC:1749-1775 |
 | drain_body_events | `std::vector<body_event>()`: `{created, deleted, wakeup}` + name; as built (E9): `void(uint32_t tick, const std::function<bool(const body_event&)>& each)`, every entry handed over in the log's order (the host keeps the recipes in between), `each` true for the own ball's created / deleted; recipe entries are kept by the host (the local birth log); an own `deleted` clears the host's `own_group_set_` (SC:2309) | `drain_event_log` + the shared parser (§2.4) | `physics_view_.drain_event_log` + the same parser |
-| reportable_wakeup | `bool(const std::string& name, const std::string& own_ball)` | not `Ball_*`, not `*_BMMO_*` (SC:2311-2312) | not `Ball_*`, not the own ball, not `*_Peer_*` (PSC:1846-1847) |
+| reportable_wakeup | `bool(const std::string& name, const std::string& own_ball)` | not `Ball_*`, not `*_BMMO_*` (SC:2311-2312); P: not `is_ball`, not the own ball, not `*_BMMO_*`, not a trafo explosion piece | not `Ball_*`, not the own ball, not `*_Peer_*` (PSC:1846-1847); P: not `is_ball`, not the own ball, not `*_Peer_*`, not a piece |
 | observe_input | `input_observation()`: `{keys, cam[3][3], cam_valid, nav_active, paused, ball_type, physicalized}` (as built, E9: `{keys, cam, cam_valid, nav_active}`; the ball type and the body from `own_ball`, `paused` at R2): **what the own replica used for step T** (every replay drives the own ball from this record) | the record's keys through `keys_from_state`, `Cam_OrientRef`, `navigation_active()` (the leaves' Key Event `IsActive`, SC:1912-1918) | `frame_keys_` through `keys_from_state`; `Cam_OrientRef`; **nav_active from the leaves' Key Event `IsActive`**, the source the replica polls (ball_navigation.cpp:469-481), not `ball_nav_active_` (the BML hook); **paused = the mute in force during step T** (the previous frame's decision), not the one decided now (PSC:1874-1883 applies a new mute from T+1 on, so today the edge tick is recorded keys 0 + PAUSED while the replica polled live keys). Changed at R2 (§4.2) |
 | poll_sector | `sector_poll()`: `{cell, resetpoint_moved, checkpoint_held}`; as built (E8): `sector_poll(uint32_t tick)` → `{cell_read, cell, resetpoint_moved, checkpoint_held}`, `cell_read` false (the cell could not be read) counting for nothing, as SC's failed `GetElementValue` did; `tick` is the T the core decides for, so a host line about the poll names it (the headless `resetpoint now ...` line) | `IngameParameter[0][1]`, `level_resetpoint` (SC:2459-2470) | `IngameParameter[0][1]` **only while the hold is in force** (`sector_activate_.block && !sector_activate_failed_`, as the cell poll of PSC:1692-1701 reads it today), so `checkpoint_held` is true whenever `cell_read` is; with the hold not in force `cell_read = false`: the hook (`physics_session_on_sector`, PSC:2912-2924) has already reported that crossing after the fact, and a cell read would make the core report it a second time (review of E8); the resetpoint is not used (the `OnPostCheckpointReached` hook reports through `request_sector`) |
 | sector_manager_active | `bool()` | `Gameplay_SectorManager->IsActive()` (SC:2100-2104), the manager found once by name (`sector_manager_id_`, host state: the activation record and its replay use it) | `physics_session_sector_manager_active` |
@@ -3024,7 +3026,7 @@ and the row above:
   - `reportable_wakeup(name, own_ball)`, `observe_input() ->
     input_observation {keys, cam, cam_valid, nav_active}` (the ball type
     and the physicalized flag come from `own_ball`, read once; `paused`
-    arrives with R2), `own_camera_rows(basis)`, `movable_mechanisms()`,
+    arrives with R2), `own_camera_rows(basis)`, `movable_mechanisms()` (`movable_bodies()` since step P),
     `note_script_resets(tick)`, `script_guards(tick, resolved)`,
     `record_pending_activation(tick)`;
   - `drive(entity, frame, error) -> bool` (the core logs the failure, SC's
@@ -4709,6 +4711,609 @@ IDENTICAL, the sends SAME).
   pooled **18.35 m and 19.18 m** (client 1 sees 2: 18.36 / 19.20; client 2
   sees 1: 13.89 / 13.45) against the O runs' 6.56 / 13.94 / 18.04 / 6.10:
   **open (R3's births).**
+
+**As built (step P): the trafo explosion pieces are mechanisms in both
+hosts (implemented, OPEN).** The user's decision after R2 (a): the pieces
+(`Ball_StonePieces_Frame` / `Ball_WoodPieces_Frame` / `Ball_PaperPieces_Frame`
+children: 17 stone, 16 wood, 18 paper) are rigid bodies a rollback must
+restore like any mechanism, tracked in both hosts by one rule; the `Ball_`
+prefix excludes the players' balls only.
+
+The facts, measured or read before the rule:
+
+- **Which worlds have them.** Only the trafoing player's own client world.
+  There the trafo sequence runs `Ball_Explosion_<type>` (physicalizes and pushes
+  the pieces of the type the ball WAS) and, later, `Ball_ResetPieces_<type>`
+  (fade, De Physicalize, Restore IC). Retail R2 scenario (`p_a_ctl`): stone
+  ball unphysicalized 652, stone pieces 808-1434 (not "about 2 s": about 9.5
+  s, the reset came 65 ticks after the death beam's unphysicalize at 1369).
+  Headless drive run with `--beam 0 4 43 650`: three explosions, stone pieces
+  810-2102, wood 1172-end, paper 1878-end. **The server world has none:** its
+  retail ball is parked and its Trafo Manager never sees it trafo; a player's
+  trafo reaches it as Unphysicalize + Physicalize of the clone with a new
+  type. Every server journal of these runs (checkpoints every 2 ticks,
+  14-2242 and 14-2420) carries no piece, so the Mechanism rows of
+  physics_world.cpp:1132-1140 never carry one: the server's "one set" is the
+  level's entity set, never physicalized there. **A remote player's trafo
+  in another client's world runs no explosion:** the core re-makes the mirror
+  with the new type (client_core_lifecycle.cpp:456-459) and the retail host
+  swaps the spirit balls (game_objects.h:96 `on_trafo`); nothing activates
+  `Ball_Explosion_<type>`. So the owner's world has 16-18 bodies that the
+  server's and every other client's world do not have: a ball or a mechanism
+  that touches them in the owner's world is not touched anywhere else, and
+  only snapshots (where they are on) or nothing (where they are off) bring the
+  owner back. This divergence is a property of the game's trafo, not of P,
+  and P does not change it.
+- **Two players trafoing within the pieces' lifetime.** Nothing shared: the
+  server has no pieces, and each client explodes only its own trafo. The
+  "one set" constraint is per client world: one hierarchy per type, so the
+  same client trafoing out of the same type again before the reset re-uses
+  the bodies (engine change #13 keeps the reset's De Physicalize working
+  under the body guard).
+- **The reset inside a window.** `Ball_ResetPieces_<type>`'s De Physicalize is
+  a `deleted` event: the generation moves on, the records after it do not
+  carry the pieces. A rewind anchored before it with the live tick after it
+  finds no record of the current lifetime (no opinion), the savestate skips
+  the bodies the world no longer has, and nothing makes them again: the
+  replayed ticks from the anchor to the reset run WITHOUT the pieces. Not
+  measurable on the R2 scenario (the stone pieces lie untouched in the trafo
+  bay; the 13:24 arm crosses 1434 and stays exact); a gap of the same class
+  as any body a non-replayed script destroys inside a window. Not fixed.
+
+The rule, applied where the prefix stood for "the balls":
+
+- **The core decides what a ball is** (`session_client_core::is_ball`,
+  client_core.hpp): an entity the own ball has been this session
+  (`own_ball_entities_`, filled from `own_ball()` every post_step, reset by
+  `begin`) or a remote's mirror entity. The platform operation
+  `movable_mechanisms` became **`movable_bodies`** (every movable body, in the
+  engine's order) and the core leaves the balls out
+  (`session_client_core::movable_mechanisms`, client_core.cpp), for the live
+  record (client_core_frame.cpp) and `replay_mechanisms` alike: one
+  implementation instead of two host filters. Headless:
+  `bmmo::physics::movable_body_names(physics)` without the `"Ball_"` skip;
+  retail: `list_bodies` movable.
+- **The core's journal** classifies a body as a ball by the same identity
+  (client_journal.cpp `local_checkpoint`); a body no player owns - the pieces
+  - is a Mechanism, by name. The legacy retail journal
+  (session_journal_client.cpp) is unchanged with the legacy path.
+- **`bind_session_world`** (session_host_world.hpp): `destroy_body` and
+  `insert_birth` keep the balls by `core_world_hooks::ball` (the core's
+  `is_ball`), not by the prefix. The pieces are window-born bodies that NO
+  replayed script makes again (the explosion is not a mechanism script, so
+  it is not in either host's script replay selection), so destroying them
+  for a re-creation would lose them: a new host option
+  `session_world_options::parked` (both hosts: the piece set, from the shared
+  `bmmo::game::explosion_pieces`, game/session_host_support.hpp, made at the
+  anchor) keeps them on the parking path - parked at the birth record,
+  re-posed after the birth tick. `insert_birth` treats them as any mechanism
+  birth (off in both hosts). *(Superseded by the user's option (i), below:
+  `parked` is gone; the pieces are destroyed and re-made like any
+  window-born mechanism.)*
+- **The headless replayed-tick birth feed** (SC `bind_world`'s `pre_step`
+  wrapper): `core_.is_ball` instead of the prefix.
+- **`reportable_wakeup`** (both hosts): not a ball (`is_ball`), not the own
+  ball, not a mirror (the host's `_BMMO_` / `_Peer_` names, as before) and
+  **not a piece**. Decided: no BodyRevived for the pieces. A BodyRevived names
+  a body every world shares so that the server wakes its copy; no other world
+  has a piece (above), and each explosion's Physicalize alone is 16-18 script
+  wake-ups. Unchanged on the wire: the control runs send the same events as
+  R2's (`events=13/77/66`, `echo=11/0/0/0/0` in `r2f_a_ctl` and `p_a_ctl`).
+- **The legacy retail path is NOT changed** (the BAR): PSC's
+  `movable_mechanism_names` (PSC:43), its `destroy_body` / `insert_birth`
+  prefix checks (PSC:3150, 3186) and its wake-up filter keep the prefix. The
+  step's text named them, but they run only with `session core off`, whose
+  behaviour must not change; R7 deletes them. The one shared physics_RT
+  change (the Random cursor) is behind a flag PSC does not pass (above).
+  Also left for R7: the world-hash probe (physics_state.cpp:226-227) still
+  picks its "game ball" by the `Ball_` prefix, so with pieces alive it may
+  probe a piece; diagnostic only, and changing it would change every
+  journal's TICK record (the wire check's byte-identical journals).
+- **`worst_bodies.py`** compares every body: a new journal carries the
+  pieces as mechanisms; an older one (and a legacy retail one) carries every
+  `Ball_` body as kind 0 owner 0, now compared by name
+  (`first_divergence.worlds(ownerless_by_name)`, default on in worst_bodies,
+  `--balls-by-owner-only` for the old rule); `savestate_check.py`'s
+  unrounded comparison does the same. On R2's journals it now shows the
+  13:24 failure that only `r2_allbodies.py` saw (17 pieces up to 7.32 m in
+  position, from 820). SimTool's checkpoint compare matches by name first
+  and needed nothing.
+- **Found on the way (a fidelity gap, fixed in the core's world only, for
+  the user to confirm): the deterministic Random cursor.** Its only consumers
+  are the five hooked Random blocks of the explosion scripts, which no replay
+  re-executes; restored, a rewind anchored before an explosion took that
+  explosion's draws back and the NEXT explosion flew apart from another point
+  of the sequence (headless 13:24: the second trafo's 16 wood pieces off by
+  0.12-0.27 m at their first record, up to 4.99 m). The first version of P
+  stopped restoring it for every caller, which also changed the legacy retail
+  rollback and SimTool (review round 1). As built now it is a restore flag,
+  `SAVESTATE_KEEP_RANDOM` = 4 (physics_savestate.hpp, and
+  `BMMO_PHYSICS_SAVESTATE_KEEP_RANDOM` in physics_rt_api.h; bridge code, no
+  engine change, no API version change - an older physics_RT.dll ignores the
+  bit and restores the cursor): with it the cursor is recorded, compared (a
+  note when it differs) and kept live, like the time factor; without it the
+  restore puts it back exactly as before. Only `bind_session_world` sets it
+  (ORed into the host's flags: the core's rule, not a host switch), so the
+  headless client and the core-on retail host keep it live, while PSC's
+  `savestate_set(..., 0)` and SimTool's `--savestate-check` (flags
+  STRICT) restore it as at HEAD. Binding test: the host's STRICT arrives as
+  STRICT | KEEP_RANDOM. *(Superseded by option (i), below: the flag is
+  removed and the cursor is restored by the blob again.)*
+
+Measured (x86 mod and x64 build of 4882ec2 + P; the Arch server of R0;
+`build-agent-rP` without the slot-13 hack for the wire check,
+`build-agent-rPh` with it for live headless runs, `build-agent-rR2h` = HEAD
+with the hack, for the old arm):
+
+- Builds: x86 CLIENT-BUILD-OK (client objects deleted first: client_core.hpp
+  and client_platform.hpp changed layout); x64 BUILD-OK; 423 tests pass (new:
+  `SessionClientCoreP.MechanismsAreEveryMovableBodyButTheBalls`, the piece
+  and the ownerless `Ball_` body in the journal test, `parked` / a
+  `Ball_`-named mechanism in the binding test); `linux_test_syntax.sh` 25
+  lines ok. **Headless unchanged:** `wire_check.sh rR2 rP pw` WIRE-CHECK: ALL
+  SAME (16 journals IDENTICAL, 16 sends SAME), before and after the Random
+  change. (A first build carried the slot-13 hack: its `current_map_msg`,
+  send #1, differed in every capture by the md5 alone.)
+- **(1) retail, R2 (a)** (`r2_run.py`, snapshots off, R2's record and beams):
+  control `p_a_ctl`, arms `p_a_f50` (44 forced), `p_a_f97` (22), `p_a_f131`
+  (17), `p_a_f13` (170): **every one of the 21 bodies exact by name**
+  (`r2_allbodies.py`: position, rotation, velocity; 1104 common checkpoints
+  to 2220), the 17 `Ball_Stone_piece*` included, and `worst_bodies.py` 0.0000
+  on all 21; resyncs 0. Again on the final mod (Random change): `p_af_ctl` /
+  `p_af_f13` (170 forced), all 21 exact.
+- **(2) headless: OPEN.** `savestate_check.py --journals` default pairs
+  (snapshots on): 50:12 (48 forced), 97:24 (25), 131:47 (18) EXACT on 53
+  bodies. The trafo run (`--client-arg --beam 0 4 43 650`, drive record,
+  checkpoints every 2 ticks) **against a snapshots-off server**, 13:24 (185
+  forced): the own ball, the stone pieces, 15 of 16 wood pieces and every
+  mechanism but one exact; off: (a) `Ball_Wood_piece07` 0.011 m from 1220 -
+  a single rewind across the wood pieces' birth (1183:24) gives exactly this
+  and nothing else: the parking path re-poses a window-born body, it does not
+  re-create it, and the re-posed piece's later contact is not bit-exact (the
+  known parking residual, design plan doc 10); (b) 11 of 18 paper pieces,
+  0.07-4.43 m from 2328 - a single rewind 2327:24 gives exactly this: the
+  paper pieces fly under `rt:force/<id>` controllers (SetPhysicsForce blocks
+  of a script outside the selection, engine change #18 names) that the live
+  frames remove at ~2319; the restore at 2327 logs "no live controller
+  'rt:force/41354'" for every paper piece (skipped=38) and the replay runs
+  2304-2318 without the force; (c) `P_Ball_Wood_MF` 0.085 m from 1730: the
+  OLD binary (`rR2h`) gives the same 0.0848 m at the same tick - not P (it
+  jumps 0.1 m between 1720 and 1724, with the paper ball's death at 1720;
+  not analysed further), recorded here only. The old
+  binary's same arm has the pieces off by up to 2436 m. With snapshots on the
+  trafo control itself took 33 snapshot rollbacks (79 starved input frames
+  on the host that run), so that form does not compare.
+- **(3)** the wire check: ALL SAME (above); the 16 captures have no trafo.
+- **(4) and (5)**: (5) above. (4), the snapshots-on A/B, was NOT run in this
+  round: the step stopped at (2) (it was run after review round 1, below).
+
+Open, for the user: (2) (a) and (b) are both "a non-replayed script owns the
+pieces": the explosion makes and pushes them, its force blocks keep pushing
+the paper pieces, the reset takes them away. Options: (i) put
+`Ball_Explosion_<type>` and `Ball_ResetPieces_<type>` in the script replay's
+selection AND record their activations for the replay to re-issue (as
+`manager_activations` does for the sector manager), then destroy the pieces
+at a restore for the replay to re-make (the sector births' path, bit-exact
+there); (ii) keep parking and accept (a), and for (b) carry the force blocks'
+controllers of those two scripts through the script replay's force hooks
+without re-executing the scripts; (iii) accept both as the step's residual.
+Under (i) the Random cursor would be restored again (the replay re-draws), so
+`SAVESTATE_KEEP_RANDOM` belongs to the same decision.
+
+Review round 1 (two reviews), as built:
+
+- **Blocker, the Random cursor changed core-off behaviour: confirmed and
+  fixed** - the restore flag above; the legacy path and SimTool restore the
+  cursor as at HEAD.
+- **Should-fix, `is_ball` depends on history: refuted, with a test.** The
+  scenario was a replayed tick making an own-ball body for an entity the
+  session never had. `post_step` records the current own entity
+  (`own_ball().entity`, `get_current_ball()` / `current_ball()`, set from the
+  level's CurrentLevel row, non-empty with or without a body) in EVERY live
+  frame, before that frame's record (client_core_frame.cpp:414 before 560),
+  and `begin` is the only reset. A replay only re-runs ticks the live frames
+  already ran: a moved own birth (late-player 3.3) re-makes the body a live
+  Physicalize made, after live frames in which that entity was current; a
+  replayed own lifecycle re-does a trafo the live frames saw. So by the time
+  any rewind runs, every entity a replay can make for the own ball is in the
+  set. Querying the platform's own ball from `is_ball` instead would add an
+  `own_ball()` (a CK read and a body-state read) per movable body per record
+  and per journal checkpoint, and change the core's platform call order the
+  E9 tests pin, for no case that can occur. Test:
+  `SessionClientCoreP.MechanismsAreEveryMovableBodyButTheBalls` now also
+  checks a bodiless frame's entity.
+- **Remote entities (nit):** a mirror is known by its current entity only.
+  At a remote trafo the old mirror's body is unphysicalized live
+  (client_core_lifecycle.cpp:456-459) and no replay re-makes a past remote
+  trafo, so no old mirror body exists to misclassify; the two-client trafo
+  A/B below (check 4) had both remotes trafo with no new far or resync.
+- `host.core` null in retail `reportable_wakeup` (nit): only while the
+  platform is unbound, when nothing calls it. Kept.
+- Re-run on the final binaries (should-fix): all of (1), (2), (3) below.
+
+Measured after review round 1 (x86 mod + physics_RT.dll and x64 build of
+4882ec2 + P + the round's changes; `build-agent-rP` without the slot-13 hack,
+`build-agent-rPh` with it, `build-agent-rR2h` = HEAD with it; the mod of HEAD
+saved as `mod_rR2`):
+
+- (5) x86 CLIENT-BUILD-OK, x64 BUILD-OK, 423 tests pass,
+  `linux_test_syntax.sh` 25 lines ok.
+- (3) `wire_check.sh rR2 rP pw`: ALL SAME (16 journals IDENTICAL, 16 sends
+  SAME).
+- (1) retail R2 (a) on the final mod, the installed physics_RT.dll checked by
+  md5 against the build: control `p3_a_ctl`, arms `p3_a_f50` (44 forced),
+  `p3_a_f97` (22), `p3_a_f131` (16), `p3_a_f13` (169): every one of the 21
+  bodies within 1e-6 by name to 2220 (`r2_allbodies.py`, R2's window: the
+  runs end on the command channel's wall clock, the control's mark at 2221).
+  Bit for bit (a stricter look, `p3_first_nonzero.py`: position, rotation,
+  linear and angular velocity): 20 of 21 bit-equal in every arm, the own
+  ball's rotation off by 8e-17 / 2e-16 from 818 (the ball the wood trafo made
+  at ~808, re-posed by the parking path) - present the same in R2's arms
+  (`r2f_a_*`), so not P. **A second trafo** (review 2, `r2t_run.py`: the same
+  scenario plus a beam onto P_Trafo_Stone at 1000, so the wood pieces explode
+  at 1158 after rewinds across the stone explosion's draws): control
+  `p3_t_ctl`, 13:24 arm `p3_t_f13` (169 forced): 36 of 37 bodies bit-equal,
+  all 33 pieces included; the own ball 1.9e-6 m from 1212 (the 8e-17 of 818
+  carried into the stone ball and grown while it rolls). HEAD's mod on the
+  same two runs (`p3_tR2_ctl` / `p3_tR2_f13`): the own ball identical (first
+  nonzero 818 at 8.048e-17, max 1.907e-6), and all 33 pieces off by 0.2-49.6
+  m from 820 / 1158. So the second explosion is exact on retail with the
+  cursor kept live, and the own ball's residual is HEAD's.
+- (2) headless: `savestate_check.py --journals` (snapshots on) 50:12 (49
+  forced), 97:24 (25), 131:47 (18): EXACT, 53 bodies. The trafo run
+  (snapshots off, `--beam 0 4 43 650`, checkpoints every 2 ticks): 13:24 (186
+  forced) and 1183:24 (2 forced) give exactly the numbers above - 13 bodies
+  off: 11 paper pieces 0.07-4.43 m from 2328, `P_Ball_Wood_MF` 0.0848 m from
+  1730 (HEAD's), `Ball_Wood_piece07` 0.0111 m from 1220. **Still failing**;
+  2327:24 ended before its first forced rewind (the run reached 2233).
+- (4) snapshots-on A/B, retail: two clients (`retail_two_client_test.py`,
+  level 11, snapshots 2 / 66, spacing 4.2, both `replay session` of
+  `r0_keys.bmrc`, session core on) plus a trafo per client: each beamed onto
+  sector 1's P_Trafo_Stone (60.951, 5.095, -12.578) at 300 and 340, so each
+  world explodes its own 16 wood pieces from ~505-590 (`p3_two.py`).
+  HEAD's mod (`p3_b_R2_1..5`) against P's (`p3_b_P_1..4`), per client
+  mism: HEAD c1 7, 7, 7, 6, 11 / c2 14, 10, 13, 16, 13; P c1 11, 9, 13, 8 /
+  c2 12, 12, 12, 17. The mismatches are the same ticks and bodies in both
+  arms (the spawn at 214-218, the Stone peer, the pusher, the bridge); none is
+  a piece (the server has no piece rows; the pieces are journaled kind 1
+  Mechanism under P, kind 0 owner 0 under HEAD). The P arm's extra spawn
+  mismatches (the own ball 0.171 m at 214, the peer at 216 / 218) occur in
+  HEAD's `p3_b_R2_4` c2 as well, with the same numbers: timing, not P.
+  far 0, frozen 0, resyncs 0/0 and rebases 0 in every run of both arms;
+  unmatched 0 except `p3_b_P_3`: 13 on BOTH clients, the snapshots of
+  1456-1480 arriving while both clients were at local tick 1454 (ahead of
+  the history: both game processes stalled together, 7 ticks in 0.68 s by
+  the log clock; no piece was alive in either world after ~700). A fourth P
+  run had 0. Reported as measured: P's c1 13 and c2 17 lie one or two above
+  HEAD's five-run band (c1 6-11, c2 10-16).
+- (4) headless: 4 clients, snapshots on, `--drive --beam-bays 0,0,0,0
+  --beam-dx 0 --beam-spread 2.5 --beam-tick 650` (all four onto P_Trafo_Wood:
+  every client explodes its stone pieces at 810-866, its wood ones at
+  1168-1228, two of them paper ones too; `p3_h4.sh`), HEAD `old1-3`
+  (`build-agent-rR2h`) against P `new1-3` (`build-agent-rPh`): mism HEAD c0
+  55, 53, 52 / c1 72, 73, 74 / c2 57, 60, 59 / c3 65, 63, 61; P c0 46, 54,
+  55 / c1 69, 68, 70 / c2 54, 55, 56 / c3 58, 63, 64 (at or below HEAD's
+  band). unmatched, far, starved, resyncs, rebases, hard 0 in all 24 client
+  runs; every server journal replays exact in the SimTool (0 checkpoint
+  mismatches). Pieces kind 1 under P, kind 0 owner 0 under HEAD.
+- Core off (the BAR), retail solo, the R2 scenario with `session core off`
+  (`r2off_run.py`; the legacy path has no forced rollback): HEAD's mod twice
+  (`p3_off_R2`, `p3_off_R2b`) and P's (`p3_off_P`): the own ball,
+  `P_Ball_Wood_MF` and `P_Modul_41` bit-equal in all three; the pusher
+  differs from 1306-1310 between HEAD's own two runs as much as against P
+  (R0's non-repeatable pusher wake).
+
+**As built (step P), option (i): the trafo scripts are replayed (OPEN: one
+residual, not P's - check 2 - and the retail snapshots-on A/B's c1 shift -
+check 4, review round 2).** The user's decision after the gate stop: put the
+explosion, the reset and the paper wind into the script replay of both
+hosts, record their activations as the sector manager's are, and destroy
+and re-make the pieces a replayed explosion makes, so nothing is parked.
+
+- **The selection** (game/script_replay.hpp): `script_replay::select(context,
+  bool trafo = false)`; `trafo` adds every root script `is_trafo_script`
+  names - `Ball_Explosion_<type>`, `Ball_ResetPieces_<type>`,
+  `Ball_PaperWind` (Balls.nmo, owner `All_Balls`) - sorted with the rest by
+  owner priority and id. Both hosts take
+  `bmmo::game::session_script_selection(context)` (= `select(context,
+  true)`, game/session_host_support.hpp): 16 scripts become 23. Their
+  activations' list is `session_script_activations(context, sel)` (=
+  `script_replay::trafo_activations`), which each host keeps BESIDE the
+  selection (retail: the `host` static's `script_activations`; headless:
+  `script_activations_`), not in it - `selection` is held by value in the
+  legacy `physics_session_state::script_ids` (PSH:298), which keeps its
+  layout until R7 (3.2; review round 2). **Adaptation:
+  the legacy retail path also calls `select` (PSC:1525), so the trafo
+  scripts are an argument, not a change of `select`'s rule; the legacy path
+  keeps its 16 scripts (measured in `pi_off_P`'s log).**
+  `Ball_CollSound_Pieces`, which the explosion also activates (with Reset),
+  is not selected: its `PhysicsCollDetection` listeners only read IVP
+  (physics_RT/Behaviors/PhysicsCollisionDetection.cpp, no write into the
+  simulation). A replayed explosion's Activate Script leaves that
+  unselected script's next-frame flags set for the next live frame (it then
+  resets and re-creates its listeners on the current pieces): sound only,
+  the same class as the sector manager's activations of unselected scripts
+  (PC_, PR_, P_Extra_) inside its replays.
+- **The activations** (`manager_activations`, game/session_host_support.hpp,
+  audit fix F8's rule extended): `record_pending(context, manager_id,
+  scripts, tick)` replaces both hosts' `record_pending_activation` bodies
+  (the manager's pending activation as before, then every script of the
+  host's activations list with `ACTIVATENEXTFRAME`, with its
+  `RESETNEXTFRAME`);
+  `replay` re-issues them (`CKScene::Activate(script, reset)`) with the
+  manager's, inside the replay (`replay_activation`) and for the frame after
+  the rewinds (`live_cells_guard`'s reissue). The wind is activated only by
+  the explosion and the reset (selected), so its re-issue is redundant and
+  idempotent (the same flags twice).
+- **The explosion's referential (found on the way; the root cause of the
+  first measurement below).** The replayed explosions made the pieces at the
+  right tick with the right draws (dv = 0) but 1.16 m off their birth
+  records in y (`birth: Ball_Wood_piece01 re-created at tick 1171 is not at
+  its birth record after the step: dp=(0,-1.16,0) dv=(0,0,0)`, every piece,
+  headless 1183:24; the engine then re-posed them from the record, and the
+  re-pose left `Ball_Wood_piece07` 0.0111 m off from 1220 - the same number
+  as the parked path). The explosion's first block is "Set Position (0,0,0,
+  Referential = Ball_Pos_Frame)" on the pieces frame, wrapped by the bridge
+  so that `restore_explosion_pieces` first puts Ball_Pos_Frame's local
+  matrix back to identity under its parent (physics_state.cpp
+  `explosion_set_position`): the pieces start at Ball_Pos_Frame's PARENT,
+  the ball entity the trafo unphysicalized, where Gameplay_Ingame's Trafo
+  Manager left it in the trafo. Neither that parent nor its matrix is
+  replayed: by the rewind (1183), the Trafo Manager had made the new ball
+  current (Physicalize at 1180) and moved Ball_Pos_Frame onto it, so the
+  replayed explosion placed the pieces at the new ball (y 3.095) instead of
+  the old one in the trafo. Fixed in host support: `record_pending` keeps,
+  with an explosion's activation, the world matrix of Ball_Pos_Frame's
+  parent (or its own without one) at the end of the live frame before the
+  explosion; `replay(..., inside = true)` takes Ball_Pos_Frame off its
+  parent and puts it there for that replayed tick's scripts, and
+  `end_override` puts parent and local matrix back at the next replayed
+  tick's re-issue or in `live_cells_guard`'s destructor (the rewinds'
+  end). Both hosts pass `inside` from `replay_activation` only, and their
+  guard gets the activations object. A log line per placement (the first 8).
+- **Born inside the window: destroyed and re-made.** `session_world_options::
+  parked` is removed; `destroy_body` takes the pieces like any mechanism
+  (not a ball, not the own body, not a mirror), and the replayed explosion
+  makes them again (the records-from-the-replayed-birth path of cf08f11).
+- **Died inside the window: made again at the restore (new: the engine's
+  `revive_body`, session/rollback.hpp, bound in `bind_session_world`).** A
+  mechanism of the anchor's record (`tracked.mechanisms` with a body record)
+  that the world no longer has and that has no birth plan item is made
+  again before the scripts' state goes back (a force block restored then
+  needs its body - the paper wind's) and before the blob, which then puts
+  its whole state back; the replayed `Ball_ResetPieces_<type>` De
+  Physicalize takes it away again at the live tick. `bind_session_world`'s
+  revive: not a ball, own body or mirror; the birth of the lifetime alive at
+  the anchor (`local_birth_log::lifetime_at`: the latest birth at or before
+  it - the pieces' masses and frictions are drawn anew per explosion), entity
+  put back, `physicalize(recipe, group)`, event log muted. Only on the
+  savestate path; a refused blob destroys the made bodies again
+  (`destroy_body(entity, 0)`). Only a body the host calls revivable
+  (`session_world_options::revivable`, review round 2: both hosts pass
+  their `explosion_pieces` set; unset, no `revive_body` at all), so a body
+  some other way destroyed - a script outside the selection, the host -
+  is never made again for a replay that would not destroy it again (it
+  would survive into the live world). Counted and logged in the hook, the
+  first 8 makes and the first 8 failures (`revive: ... made again ... (n so
+  far)`), not by the engine: `rollback_engine` is held by value in the
+  legacy `physics_session_state` (PSH:173) and keeps its layout (review
+  round 2; the engine's `bodies_revived` / `revive_failures` /
+  `revive_logs_` of round 1 are removed). Not covered: a piece set that dies
+  AND is born again inside one window (a second explosion of the same type
+  within it): it has a birth plan item and is not revived, so the replay
+  runs without it from the anchor to its death, as before - the engine
+  now logs it at the restore (`revive: N mechanism(s) alive at tick T are
+  born again inside the window (... first): not made at the restore`), the
+  plan items with a `repose_tick` only.
+- **The Random cursor** is restored by the blob again:
+  `SAVESTATE_KEEP_RANDOM`, `BMMO_PHYSICS_SAVESTATE_KEEP_RANDOM`, the restore's
+  branch and their docs (engine-changes.md, ivp-savestate-design.md) are
+  removed, not left unused - physics_savestate*.{hpp,cpp} and
+  physics_rt_api.h are HEAD's; the replayed explosion draws from the
+  restored cursor.
+- **The retail legacy path (core off) stays untracked by decision**: its
+  selection, `movable_mechanism_names`, prefix checks and journal are HEAD's.
+- **Tests:** `RollbackEngine.AMechanismTheWindowDestroyedIsMadeAgainAtTheRestoreForTheReplay`
+  (revive before the blob, the replayed death, the refused blob);
+  `SessionWorldComposesTheCoresHooksInTheDesignsOrder` (no `parked`, a piece
+  destroyed, revive: the lifetime at the anchor, never a ball, the refused
+  make; the host's savestate flags unchanged); 424 tests.
+
+Measured (x86 mod + physics_RT.dll and x64 of 4882ec2 + P + option (i);
+`build-agent-rPh` with the slot-13 hack for live runs, `build-agent-rP`
+without it for the wire check):
+
+- (5) x86 CLIENT-BUILD-OK (client objects deleted first), x64 BUILD-OK, 424
+  tests pass, `linux_test_syntax.sh` 25 lines ok.
+- (3) `wire_check.sh rR2 rP pi`: WIRE-CHECK: ALL SAME (16 journals
+  IDENTICAL, 16 sends SAME). No difference to explain: the selection's 7 new
+  scripts are not in a journal record, and none of the 16 captures has a
+  trafo or a revive.
+- (1) retail R2 (a), final mod (`r2_run.py`, snapshots off): control
+  `pi_a_ctl`, arms `pi_a_f50` (44 forced), `pi_a_f97` (23), `pi_a_f131`
+  (17), `pi_a_f13` (170) and the NEW death/reset arm `pi_a_f1440` (force
+  1440:40: one rewind at 1440 anchored at 1400 - after the death at 1369,
+  inside the stone pieces' fade, before their De Physicalize at 1434): all
+  21 bodies within 1e-6 by name to 2220 (`r2_allbodies.py`), all 17 stone
+  pieces included; bit for bit (`p3_first_nonzero.py`) 21 of 21 in f97,
+  f131 and f1440, 20 of 21 in f50 and f13 (the own ball's HEAD residual
+  from 818, 1.95e-16 / 8.05e-17). f13 re-made the 17 pieces from the
+  replayed explosion (`births=...+17/17/0/11`: 17 re-created, 17 exact at
+  their birth records; the 11 refused destroys are R2's own, `r2f_a_f13`
+  11 - the balls' births, which stay on the parking path; P's parked
+  version had 28 = 11 + 17)
+  and revived them across the reset (8 revive lines logged, the cap);
+  f1440 revived all 17 at the restore of 1400 and the replayed reset took
+  them away: the journal has no piece after 1434, as the control. resyncs 0
+  everywhere. Two trafos (`r2t_run.py`): control `pi_t_ctl`, 13:24 arm
+  `pi_t_f13` (171 forced, `births=...+33/33/0/14`; the parked version's
+  `p3_t_f13` had 47 = 14 + 33 refused): 36 of 37 bodies
+  bit-equal, all 33 pieces; the own ball HEAD's (8.05e-17 at 818, max
+  1.9e-6).
+- (2) headless, the trafo run (`--beam 0 4 43 650`, snapshots-off server,
+  checkpoints every 2 ticks; the scenario's third trafo is the paper one,
+  so no extra paper arm): 1183:24 (2 forced) EXACT on 55 bodies (before the
+  referential fix: `Ball_Wood_piece07` 0.0111 m, the re-pose above);
+  2110:24 (1 forced, anchored at 2086 across the stone pieces' reset at
+  2102: 17 revived) EXACT; 2328:24 (1 forced, across the paper wind's
+  shutdown) EXACT; **13:24 (186 forced): 54 of 55 bodies exact - all 51
+  pieces, the 11 paper pieces of the gate stop included - and
+  `P_Ball_Wood_MF` 0.0848 m from 1730: NOT EXACT** (cause below).
+  `savestate_check.py --journals` default pairs (snapshots on): 50:12 (48
+  forced), 97:24 (25), 131:47 (18) EXACT on 53 bodies.
+- (4) snapshots-on A/B, retail (`p3_two.py`, two clients, a trafo each), 3
+  more runs of the final mod `pi_b_1..3`: mism c1 10, 9, 10 / c2 12, 13,
+  13 - inside HEAD's five-run band (c1 6-11, c2 10-16); unmatched, far,
+  frozen, resyncs, rebases 0 in all six client runs; the pieces kind 1
+  owner 0. The earlier marks above the band (c1 13 in `p3_b_P_3`, with its
+  13 unmatched from the stall; c2 17 in `p3_b_P_4`) are not repeated in
+  these three: settled as run-to-run spread, not a P effect. Headless (4
+  clients, a trafo each, `p3_h4.sh`), final `build-agent-rPh` `pi1..3`:
+  mism c0 47, 53, 52 / c1 65, 69, 72 / c2 53, 52, 56 / c3 58, 63, 61
+  against HEAD's c0 55, 53, 52 / c1 72, 73, 74 / c2 57, 60, 59 / c3 65,
+  63, 61: at or below; unmatched, starved, rebases, resyncs, hard 0; every
+  server journal replays exact in the SimTool (0 checkpoint mismatches).
+- Core off (the BAR): `pi_off_P` (`r2off_run.py`, final mod, legacy path,
+  16 scripts) against HEAD's `p3_off_R2` / `p3_off_R2b`: 3 of 4 bodies
+  bit-equal, the pusher off from 1306 / 1308 - as HEAD's two runs against
+  each other (from 1306, R0's non-repeatable pusher wake).
+
+**The residual (check 2, 13:24): `P_Ball_Wood_MF` 0.0848 m from 1730 - not
+P, and the same number at HEAD.** Symptom: the arm's prop ball leaves the
+control's track between the checkpoints 1728 and 1730 and continues on a
+track 0.0842-0.0848 m away to the end; HEAD's binary (`rR2h`) on the same
+arm gives the same 0.0848 m at the same tick (round 1). Cause, from the
+logs: the client's `P_Ball_Wood_MF` sits on `P_Modul_41` at (120, 2.02,
+43); the server's starts moving at 1310 (0.06 m apart then, 0.084 at 1720)
+- a client/server divergence of that module, not a piece (no piece is
+within 3 m of it). The own ball's Unphysicalize at 1722 (the paper ->
+stone trafo) brings a lifecycle snapshot, whose row corrects the prop
+ball: control `mismatch at tick 1722 (local 1722): P_Ball_Wood_MF dp=0.1036
+... rollback to tick 1722, re-simulated 0 ticks`; the arm the same at
+local 1723 (re-simulated 1). The row is written into the world and into
+the record of 1722 (rollback.hpp restore_and_replay: `existing->second =
+item.state` and the blob re-captured), but the arm's next forced rewind,
+at 1729 anchored at 1705, replays 1706-1729 from the records and re-records
+every tick of it, 1722 included: nothing re-applies an authoritative row at
+its tick inside a replay, so the replay puts the prop ball back on its
+uncorrected track (arm 1730: 122.3904 against the uncorrected 1722 value
+122.3895 + 4 ticks at 0.004 m/s; the control's corrected 122.3299) - and
+with snapshots off no later snapshot corrects it again. Isolated: a
+single forced rewind at 1729 (anchored at 1705, `pi_trafo3`
+forced-1729x24) gives this body alone, 0.0847 m from 1730; the 13:24 arm
+re-run on an idle machine (184 forced, starved 0) gives the same single
+body. A forced rewind is
+the measuring tool, but a real one anchored before a row-corrected tick
+(a late remote input, a later snapshot's deeper anchor) loses the row the
+same way. Options for the user: (a) the engine keeps the authoritative rows
+it applied, by tick, and writes them again after that tick's step inside
+every replay that crosses it (an engine change on the snapshot path: the
+wire check's snapshots-on captures would change, and it needs its own A/B);
+(b) a forced rewind never anchors before the last row-corrected tick (the
+harness only; the gap stays for real rewinds); (c) accept it as a
+pre-existing residual of the snapshot path, outside P, and judge 13:24
+on the pieces and every other body (all exact).
+
+Review round 2 (two reviews), as built:
+
+- **Layout (should-fix, both reviews): `physics_session_state` keeps HEAD's
+  layout again.** Round 1 had grown it: `script_replay::selection` (held by
+  value in PSH:298 `script_ids`) by an `activations` vector, and
+  `rollback_engine` (PSH:173 `rollback`) by `bodies_revived`,
+  `revive_failures` and `revive_logs_` - against 3.2 ("keeps its layout
+  until R7"). Now `selection` is HEAD's (the trafo activations are the
+  hosts' own list, above) and `rollback_engine`'s members are HEAD's (the
+  revive counting and logging moved into `bind_session_world`'s hook,
+  above); `rollback_world` gains `revive_body`, but it is built per call
+  (`physics_session_rollback_world()`), not a member. Checked: no type held
+  by `physics_session_state` changes a member against 4882ec2
+  (`git diff` of rollback.hpp / script_replay.hpp: functions, comments and
+  the `rollback_world` hook only; physics_session.hpp, correction.hpp,
+  mechanism_tracking.hpp, sector_union.hpp unchanged). The x86 client
+  objects were deleted before the build anyway (the round-1 build had the
+  grown layout). `BallanceMMOClient.h` changes one member function's
+  signature (`core_host_replay_activation(uint32_t tick, bool inside =
+  false)`), no data member. 19 game launches of the final mod in this
+  round's checks (and 8 of the diagnostic mod below), none hung.
+- **Revive only what a replayed script removes again (nit, round 1):**
+  `session_world_options::revivable` (both hosts: their `explosion_pieces`);
+  unset, `bind_session_world` installs no `revive_body`.
+- **The reborn gap logged (nit, round 2):** see the revive bullet above;
+  no counter (layout).
+- **One replay-activation path in the retail host (nit):** `w.replay_activation`
+  calls `core_host_replay_activation(tick, true)`; the referential log line
+  lives there once.
+- **Cost of the 7 extra scripts (nit, round 2), retail arena, HEAD
+  (`r2f_a_*`) -> P (`pr2_a_*`), the harness's units:** control t_cap 977 ->
+  1049; 13:24 arm t_cap 936 -> 1034, t_rep 1503 -> 1666, t_rest 65 -> 75
+  (+7-11 %, on the x86 game thread). On level 11 the selection is 45 scripts
+  (3 of them active at the anchor) against 38.
+- Refuted: none.
+
+Measured after review round 2 (x86 mod rebuilt from deleted client objects,
+x64 `build-agent-rP` without the slot-13 hack, `build-agent-rPh` with it):
+
+- (5) x86 CLIENT-BUILD-OK, x64 BUILD-OK, 424 tests pass,
+  `linux_test_syntax.sh` 25 lines ok.
+- (3) `wire_check.sh rR2 rP rPw`: WIRE-CHECK: ALL SAME (16 journals
+  IDENTICAL, 16 sends SAME).
+- (1) retail R2 (a) (`pr2_a_*`): control + 50:12 (44 forced), 97:24 (22),
+  131:47 (17), 13:24 (168; `births=...+17/17/0/11`) and 1440:40 (1): 21 of 21
+  bodies within 1e-6 to 2220 in every arm, all 17 stone pieces; bit for bit
+  21/21 in f97, f131, f1440, 20/21 in f50 and f13 (the own ball's HEAD
+  residual from 818, 1.95e-16 / 8.05e-17); resyncs 0. Two trafos
+  (`pr2_t_*`, 13:24, 168 forced, `births=...+33/33/0/14`): 36/37 bit-equal,
+  all 33 pieces, the own ball HEAD's (max 1.9e-6 from 1212).
+- (2) headless trafo run (`pr2_trafo`): 1183:24, 2110:24 (17 revived:
+  `revive: Ball_Stone_piece01 ... made again at the restore of tick 2086`),
+  2328:24 EXACT on 55 bodies; **13:24: 54 of 55 - `P_Ball_Wood_MF` 0.0848 m
+  from 1730, unchanged** (the residual below, not P's, waiting on (a)/(b)/(c)).
+  `savestate_check --journals` 50:12 (49 forced), 97:24 (25), 131:47 (18)
+  EXACT on 53 bodies.
+- Core off (`pr2_off_P`, 16 scripts): 4 of 4 bodies bit-equal with HEAD's
+  `p3_off_R2` to 2220 (the end of the record), 3 of 4 with `p3_off_R2b`
+  (the pusher from 1306, as HEAD's two runs against each other).
+- (4) headless, 4 clients (`p3_h4` `pr2h1..3`): mism c0 48, 52, 53 / c1 65,
+  73, 73 / c2 55, 55, 57 / c3 61, 60, 60 against HEAD's 55, 53, 52 / 72, 73,
+  74 / 57, 60, 59 / 65, 63, 61: at or below; unmatched, starved, rebases,
+  resyncs, hard 0; every server journal replays exact.
+- **(4) retail, two clients (`pr2_b_1..3`, then interleaved with HEAD's mod
+  `xh_1/xp_1/xh_2/xp_2`): NOT settled as noise.** c1 mism 8, 11, 13 (13 is
+  above HEAD's band again) and 13, 8 interleaved, against HEAD's 7, 8
+  interleaved; c2 13, 13, 14 / 14, 13 against 13, 15 (no shift). All c1
+  values so far: HEAD 7, 7, 7, 6, 11, 7, 8; P 11, 9, 13, 8 (parked), 10, 9,
+  10, 8, 11, 13, 13, 8 (option (i)). Unmatched, far, resyncs, rebases 0;
+  never a piece (`pr2_mism.py`: own ball, mirrors, and the pusher's
+  non-repeatable 588/590 once in HEAD and once in P). **Symptom:** the excess
+  is one spawn-window outcome. Every run reaches the tick-214 snapshot in one
+  of two states (`pr2_spawn.py`): A - the peer's tick-212 Physicalize drained
+  29-31 ms after the own spawn frame, first mismatch "own 0.0980 + mirror
+  0.1400" (c1) / "mirror 0.1034 + own 0.0981" (c2), no mismatch at 216/218;
+  B - the peer's Physicalize drained 43-47 ms after (one game frame later),
+  first mismatch "own 0.1709 dv 3.03" alone, then 1-2 more mirror mismatches
+  at 216/218 - the 1-3 extra counts. B in HEAD: 2 of 14 client-runs (both
+  c2); parked P 4 of 8 (c1 3 of 4); option (i) 9 of 16 (c1 5 of 8); the
+  no-trafo-scripts diagnostic mod below 3 of 8 (c1 2 of 4). **Cause, as far as isolated:** a frame-timing
+  race, not a simulation difference - the server receives both clients'
+  tick-212 Physicalize within ~1 ms in every run (server.log `delay_us`
+  25-1525, order uncorrelated with A/B, `pr2_order.py`), and whether a
+  client drains its peer's in the frame of tick 214 or of 215 decides A or
+  B; B's own-ball 0.1709 / dv 3.03 against A's 0.0980 / 0.81 at 214 is the
+  same in HEAD's two B cases. What makes P land in B more often is NOT
+  identified. Measured and excluded or partial: (i) the selection's extra
+  scripts - a diagnostic mod with P but `select(context, false)`
+  (`mod_diagNT`, 38 scripts) gives B in c1 2 of 4; (ii) the tick-base
+  receipt - the two clients' tick schedules are phased by the moment each
+  drains the tick base (fixed_tick.cpp:37, core_host.cpp:921-939); HEAD's,
+  the parked P's and the diagnostic's two clients drain it within 0-1 ms of
+  each other in every run (`pr2_base.py`), option (i)'s differ by 2-9 ms in
+  6 of 8 runs (only builds that select 45 scripts, 3 active at the anchor),
+  but the parked P reaches B with 0 ms; (iii) the per-tick capture cost
+  (t_cap, level 11: HEAD 1617-1704, P 1666-1769, diagnostic 1695-1707) -
+  small, and the body events are sent before the record's capture in the
+  frame (client_core_frame.cpp:454 before :563). The step that would decide
+  it is an instrumented pair of builds (network-thread receive time and the
+  frame's drain time of the peer's Physicalize, HEAD and P).
 
 ## 7. Open questions
 

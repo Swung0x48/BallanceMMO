@@ -194,11 +194,33 @@ namespace bmmo::game {
             return std::strncmp(name, "P_Extra", 7) != 0;
         }
 
+        // The trafo scripts of Balls.nmo (session-core design, step P): the
+        // explosion that physicalizes, randomizes and pushes the pieces of the
+        // type the ball was (Ball_Explosion_<type>), the reset that fades,
+        // de-physicalizes and restores them (Ball_ResetPieces_<type>), and the
+        // wind the paper explosion and its reset switch on and off over the
+        // paper pieces' force blocks (Ball_PaperWind).  Gameplay_Ingame's
+        // Trafo Manager activates the first two; the explosion and the reset
+        // activate the wind.  Ball_CollSound_Pieces, which the explosion also
+        // activates, plays sounds only (its collision listeners read IVP and
+        // write nothing): not selected.
+        static bool is_trafo_script(CKBehavior* beh) {
+            if (!beh || beh->GetParent() || !beh->GetName()) return false;
+            const char* name = beh->GetName();
+            return std::strncmp(name, "Ball_Explosion_", 15) == 0 || std::strncmp(name, "Ball_ResetPieces_", 17) == 0
+                || std::strcmp(name, "Ball_PaperWind") == 0;
+        }
+
         // The scripts that travel with the records, in the order the behaviour
         // manager runs their owners: priority first (highest first), then by
         // id, which is the same on every call.  Mechanism scripts do not read
-        // each other's state, so the order only has to be stable.
-        static selection select(CKContext* context) {
+        // each other's state, so the order only has to be stable.  `trafo`
+        // (the session core's selection, step P): the trafo scripts too, so a
+        // rollback destroys the explosion pieces born inside its window and
+        // the replayed explosion makes them again, draws included; their
+        // activations are recorded and re-issued (trafo_activations).  The
+        // legacy retail rollback selects without them.
+        static selection select(CKContext* context, bool trafo = false) {
             selection out;
             std::vector<std::pair<int, CK_ID>> picked;
             if (!context) return out;
@@ -222,12 +244,32 @@ namespace bmmo::game {
                     picked.emplace_back(beh->GetOwner() ? -beh->GetOwner()->GetPriority() : 0, beh->GetID());
                     continue;
                 }
+                if (trafo && is_trafo_script(beh)) {
+                    picked.emplace_back(beh->GetOwner() ? -beh->GetOwner()->GetPriority() : 0, beh->GetID());
+                    continue;
+                }
                 // No satellites (see the top of the file).
             }
             std::sort(picked.begin(), picked.end());
             std::sort(out.satellites.begin(), out.satellites.end());
             out.scripts.reserve(picked.size());
             for (const auto& [priority, id]: picked) out.scripts.push_back(id);
+            return out;
+        }
+
+        // The scripts among a selection's that only scripts outside the
+        // selection activate (step P: the trafo scripts, select's `trafo`):
+        // the host records each pending activation of these after a live
+        // frame and the replay re-issues it, as it does the sector manager's
+        // (game/session_host_support.hpp manager_activations).  A list the
+        // host keeps beside the selection, not in it: `selection` is held by
+        // the legacy retail state (physics_session_state::script_ids), whose
+        // layout stays as it is until R7 (design 3.2).
+        static std::vector<CK_ID> trafo_activations(CKContext* context, const selection& sel) {
+            std::vector<CK_ID> out;
+            if (!context) return out;
+            for (CK_ID id: sel.scripts)
+                if (is_trafo_script(CKBehavior::Cast(context->GetObject(id)))) out.push_back(id);
             return out;
         }
 
