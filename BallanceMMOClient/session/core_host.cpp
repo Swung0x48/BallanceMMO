@@ -194,8 +194,8 @@ namespace {
         uint64_t activations_replayed = 0;
         bmmo::game::script_replay::selection script_ids;
         // The selected scripts whose pending activations are recorded and
-        // re-issued (step P: the trafo scripts; host support's
-        // session_script_activations).
+        // re-issued (the trafo scripts, step P, and the keep-local ones, A1;
+        // host support's session_script_activations).
         std::vector<CK_ID> script_activations;
         // The trafo explosion pieces' entities (step P; made at the anchor):
         // tracked by the core like any mechanism, never a BodyRevived.

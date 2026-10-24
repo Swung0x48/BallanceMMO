@@ -4,6 +4,7 @@
 // deactivated.
 #include <gtest/gtest.h>
 
+#include <session/resync_rules.hpp>
 #include <session/sector_union.hpp>
 
 using bmmo::session::sector_pacer;
@@ -144,4 +145,23 @@ TEST(SectorUnion, ResetGoesBackToTheLevelsOwnSector) {
     EXPECT_EQ(u.stamps_pending(), 0u);
     EXPECT_EQ(u.passes(), 0u);
     EXPECT_FALSE(u.pass_pending());
+}
+
+// The resync's keep-local rule (session/resync_rules.hpp, resync design 2.4,
+// step A1): the balloon's scripts always, the trafo scripts until step T2,
+// nothing else - a module script, the manager, a name that only contains
+// "PE_Balloon" further in.
+TEST(ResyncRules, KeepLocalScripts) {
+    using bmmo::session::keep_local_script;
+    EXPECT_TRUE(keep_local_script("PE_Balloon_01", "PE_Balloon Script"));
+    EXPECT_TRUE(keep_local_script("PE_Balloon", "anything"));
+    EXPECT_TRUE(keep_local_script("", "Ball_Explosion_Wood"));
+    EXPECT_TRUE(keep_local_script("Balls", "Ball_ResetPieces_Paper"));
+    EXPECT_TRUE(keep_local_script("Balls", "Ball_PaperWind"));
+    EXPECT_FALSE(keep_local_script("Balls", "Ball_PaperWind2"));
+    EXPECT_FALSE(keep_local_script("Balls", "Ball_CollSound_Pieces"));
+    EXPECT_FALSE(keep_local_script("P_Modul_01_01", "P_Modul_01_MF Script"));
+    EXPECT_FALSE(keep_local_script("Gameplay", "Gameplay_SectorManager"));
+    EXPECT_FALSE(keep_local_script("P_PE_Balloon", "x"));
+    EXPECT_FALSE(keep_local_script("PE_Ballo", "x"));
 }

@@ -51,6 +51,7 @@
 #include "physics_world.hpp"
 #include <entity/session.hpp>
 #include <game/script_replay.hpp>
+#include <game/session_host_support.hpp>
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_state.hpp>
 #include <session/journal.hpp>
@@ -228,6 +229,11 @@ namespace {
         std::string savestate_diff[2];
         std::string savestate_describe;
         std::string describe_script;      // --describe-script NAME: print that root script's graph
+        // --portable-scripts-check (resync design 7.2, step A1): the portable
+        // script record against the v2 record, at anchor+30 and after each
+        // sector 2..N of the level (--drop-settle ticks apart); see
+        // run_portable_scripts_check.
+        bool portable_scripts_check = false;
         bool ignore_ov = false;           // --ignore-ov: --savestate-diff leaves the overlap tree out
         bool ignore_order = false;        // --ignore-order: ...and the cache ring and unit numbering
         int max_diff = 1;                 // --max-diff N: --savestate-diff lists up to N differing fields
@@ -365,6 +371,7 @@ namespace {
             }
             else if (arg == "--savestate-describe") { if (!(v = next())) return false; out.savestate_describe = v; }
             else if (arg == "--describe-script") { if (!(v = next())) return false; out.describe_script = v; }
+            else if (arg == "--portable-scripts-check") out.portable_scripts_check = true;
             else if (arg == "--ignore-ov") out.ignore_ov = true;
             else if (arg == "--ignore-order") out.ignore_order = true;
             else if (arg == "--max-diff") { if (!(v = next())) return false; out.max_diff = std::atoi(v); }
@@ -3242,6 +3249,325 @@ namespace {
         }
     }
 
+    // ------------------------------------------------------------------
+    // --portable-scripts-check (docs/resync-and-sector-timing-design.md 7.2,
+    // step A1).  The server's world (physics_world) of --level, one player
+    // in sector 1; at anchor+30 and after each sector 2..N (stamped by the
+    // player, --drop-settle ticks apart), with the session selection
+    // (game/session_host_support.hpp session_script_selection):
+    //
+    //   v2       the local record (script_replay::capture)
+    //   portable the portable record (capture_portable), its size and what
+    //            it met (values, object references, registry entries)
+    //   names    localize(portable) with no keep-local script == v2 byte
+    //            for byte (the anchor is v2 itself)
+    //   rule     the same with the core's keep_local_script rule, anchored
+    //            on the PREVIOUS checkpoint's v2 record: == v2 with the
+    //            keep-local scripts' entries taken from that anchor
+    //            (kept_changed = how many of them differ from now)
+    //   scrubbed every object reference of the selected scripts zeroed and
+    //            every registry entry set to -1 in the live world first, so
+    //            each one is found again by its name alone (the world a
+    //            server's names meet: the local values say nothing), then
+    //            localize == v2
+    //   restored the scrubbed localization restored (replay_activation, as
+    //            the resync does) and captured again == v2
+    //
+    // And the balloon's activation (design 2.8, 9 Q8): after every frame,
+    // each keep-local script that is not a trafo script (the PE_Balloon*
+    // scripts) is checked for a pending activation (next-frame flags).
+    //
+    // In one process every name exists, so localize's `unportable` is 0 by
+    // construction; what a client's world would lack is listed from the
+    // capture instead: references with no name, names a lookup does not
+    // find again as the same object (ambiguous), and the server's private
+    // objects (a name containing "BMMO").  Every registry-typed parameter
+    // is listed, and every value copied as bytes whose type is index-like
+    // (a class id, a parameter type, an ID, a structure): one process
+    // cannot tell those from portable bytes, so the list is the check.
+    // localize must also meet no name of several objects (ambiguous).
+    // PASS: every comparison identical at every checkpoint.
+    // ------------------------------------------------------------------
+    int run_portable_scripts_check(const arguments& args) {
+        using bmmo::game::script_replay;
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        std::string error;
+        if (!world->add_player(1, 0, error)) {
+            std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
+            return 1;
+        }
+        report_sector(*world, 1, 1);
+        CKContext* context = world->engine().context();
+        CKIpionManager* physics = world->physics();
+        const script_replay::selection sel = bmmo::game::session_script_selection(context);
+        const std::vector<CK_ID> activations = bmmo::game::session_script_activations(context, sel);
+        bmmo::game::script_replay_hooks hooks;
+        hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
+            bmmo_physics_force_block state{};
+            std::string e;
+            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
+            out.exists = state.exists != 0;
+            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+            return true;
+        };
+        hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
+            bmmo_physics_force_block state{};
+            state.exists = in.exists ? 1 : 0;
+            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+            std::string e;
+            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
+        };
+        const auto owner_of = [](CKBehavior* beh) {
+            CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+            return std::string(owner && owner->GetName() ? owner->GetName() : "");
+        };
+        const auto name_of = [](CKBehavior* beh) { return std::string(beh && beh->GetName() ? beh->GetName() : ""); };
+        const script_replay::keep_local_fn keep_rule = [](const std::string& owner, const std::string& script) {
+            return bmmo::session::keep_local_script(owner, script);
+        };
+
+        // The selection, the keep-local scripts and the recorded activations.
+        std::vector<CK_ID> balloon;   // keep-local, not trafo: the Q8 watch
+        std::string keep_text, activation_text;
+        for (CK_ID id: sel.scripts) {
+            auto* beh = CKBehavior::Cast(context->GetObject(id));
+            if (!beh || !keep_rule(owner_of(beh), name_of(beh))) continue;
+            keep_text += (keep_text.empty() ? "" : ", ") + owner_of(beh) + "/" + name_of(beh);
+            if (!script_replay::is_trafo_script(beh)) balloon.push_back(id);
+        }
+        for (CK_ID id: activations) {
+            auto* beh = CKBehavior::Cast(context->GetObject(id));
+            activation_text += (activation_text.empty() ? "" : ", ") + owner_of(beh) + "/" + name_of(beh);
+        }
+        // The level's sectors: the highest Sector of the PH table (the
+        // placement rows the manager walks; the Sector_NN groups are gone
+        // once Levelinit has read them).
+        int sectors = 0;
+        if (auto* ph = CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>("PH"), CKCID_DATAARRAY, nullptr))) {
+            int column = -1;
+            for (int c = 0; c < ph->GetColumnCount(); ++c)
+                if (ph->GetColumnName(c) && std::strcmp(ph->GetColumnName(c), "Sector") == 0) column = c;
+            for (int r = 0; column >= 0 && r < ph->GetRowCount(); ++r) {
+                int sector = 0;
+                if (ph->GetElementValue(r, column, &sector)) sectors = std::max(sectors, sector);
+            }
+        }
+        std::printf("portable-scripts-check level=%d sectors=%d selected=%zu keep_local=%s\n", world->level(), sectors,
+                    sel.scripts.size(), keep_text.empty() ? "-" : keep_text.c_str());
+        std::printf("  recorded activations (session_script_activations): %zu: %s\n", activations.size(),
+                    activation_text.empty() ? "-" : activation_text.c_str());
+
+        // The balloon's pending activations, per frame (Q8).
+        std::vector<std::string> balloon_seen;
+        uint32_t stamped_at = world->tick_index();
+        int stamped_sector = 1;
+        const auto run_ticks = [&](int n) {
+            for (int i = 0; i < n; ++i) {
+                std::string tick_error;
+                if (!world->tick(tick_error)) {
+                    std::fprintf(stderr, "tick failed: %s\n", tick_error.c_str());
+                    return false;
+                }
+                for (CK_ID id: balloon) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(id));
+                    if (!beh) continue;
+                    const CKDWORD flags = beh->GetFlags();
+                    if (!(flags & CKBEHAVIOR_ACTIVATENEXTFRAME)) continue;
+                    char line[400];
+                    std::snprintf(line, sizeof(line), "%s/%s pending activation (next-frame flags, reset=%d, active=%d) after"
+                                  " the frame of tick %u; sector %d stamped at tick %u", owner_of(beh).c_str(),
+                                  name_of(beh).c_str(), (flags & CKBEHAVIOR_RESETNEXTFRAME) ? 1 : 0, beh->IsActive() ? 1 : 0,
+                                  world->tick_index() - 1u, stamped_sector, stamped_at);
+                    balloon_seen.emplace_back(line);
+                    std::printf("  balloon: %s\n", line);
+                }
+            }
+            return true;
+        };
+
+        // Every object reference zeroed, every registry entry -1, in the
+        // live world (the restore of the localized record puts them back).
+        const auto scrub = [&]() {
+            int scrubbed = 0;
+            std::function<void(CKBehavior*)> walk = [&](CKBehavior* beh) {
+                const auto one = [&](CKParameter* p) {
+                    if (!p) return;
+                    const CKGUID guid = p->GetGUID();
+                    if (guid == CKPGUID_POINTER || guid == CKPGUID_OBJECTARRAY || guid == CKPGUID_VOIDBUF || guid == CKPGUID_2DCURVE)
+                        return;
+                    if (p->GetDataSize() != 4) return;
+                    const bool object = p->GetParameterClassID() != 0;
+                    const bool registry = guid == CKPGUID_MESSAGE || guid == CKPGUID_ATTRIBUTE;
+                    if (!object && !registry) return;
+                    if (void* buffer = p->GetWriteDataPtr()) {
+                        const int32_t value = object ? 0 : -1;
+                        std::memcpy(buffer, &value, 4);
+                        ++scrubbed;
+                    }
+                };
+                for (int i = 0; i < beh->GetLocalParameterCount(); ++i) one(beh->GetLocalParameter(i));
+                for (int i = 0; i < beh->GetOutputParameterCount(); ++i) one(beh->GetOutputParameter(i));
+                if (beh->IsUsingFunction()) return;
+                for (int i = 0; i < beh->GetSubBehaviorCount(); ++i)
+                    if (CKBehavior* child = beh->GetSubBehavior(i)) walk(child);
+            };
+            for (CK_ID id: sel.scripts)
+                if (auto* beh = CKBehavior::Cast(context->GetObject(id))) walk(beh);
+            return scrubbed;
+        };
+
+        std::set<std::string> registry_all, unnamed_all, ambiguous_all, private_all, unportable_all, index_like_all,
+            ambiguous_local_all;
+        int checkpoints = 0, failures = 0;
+        std::vector<uint8_t> previous_v2;   // the anchor of the keep-local arm: the last checkpoint's record
+        // The record `v2` with the keep-local scripts' entries taken from
+        // `anchor` (what localize with that anchor must produce); `changed`
+        // gets how many of those entries differ between the two.
+        const auto splice = [&](const std::vector<uint8_t>& v2, const std::vector<uint8_t>& anchor,
+                                std::vector<uint8_t>& out, int& changed) {
+            script_replay::record_index current, old;
+            if (!script_replay::index_record(v2, current) || !script_replay::index_record(anchor, old)) return false;
+            out.assign(v2.begin(), v2.begin() + 12);
+            changed = 0;
+            for (const auto& s: current.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(s.id));
+                const bool keep = beh && keep_rule(owner_of(beh), name_of(beh));
+                const auto o = std::find_if(old.scripts.begin(), old.scripts.end(),
+                                            [&](const script_replay::record_index::script& x) { return x.id == s.id; });
+                if (keep && o == old.scripts.end()) return false;
+                if (keep) {
+                    const std::vector<uint8_t> a(anchor.begin() + o->begin, anchor.begin() + o->end);
+                    const std::vector<uint8_t> b(v2.begin() + s.begin, v2.begin() + s.end);
+                    if (a != b) ++changed;
+                    out.insert(out.end(), a.begin(), a.end());
+                } else {
+                    out.insert(out.end(), v2.begin() + s.begin, v2.begin() + s.end);
+                }
+            }
+            out.insert(out.end(), v2.begin() + current.tail, v2.end());
+            return true;
+        };
+        size_t portable_max = 0, v2_max = 0;
+        const auto compare = [&](const std::vector<uint8_t>& expected, const std::vector<uint8_t>& got) -> std::string {
+            if (expected == got) return "SAME";
+            const auto d = script_replay::diff(context, sel, expected, got);
+            return "DIFF(" + (d.where.empty() ? std::to_string(expected.size()) + " vs " + std::to_string(got.size()) + " bytes"
+                              : d.where) + ")";
+        };
+        const auto checkpoint = [&](const std::string& label) {
+            ++checkpoints;
+            std::vector<uint8_t> v2, portable, names, rule, scrubbed, again;
+            script_replay::portable_report captured;
+            captured.lists = true;
+            std::string e;
+            if (!script_replay::capture(context, sel, hooks, v2)) {
+                std::printf("FAIL %s: v2 capture failed\n", label.c_str());
+                ++failures;
+                return;
+            }
+            if (!script_replay::capture_portable(context, sel, hooks, portable, &e, &captured)) {
+                std::printf("FAIL %s: portable capture failed: %s\n", label.c_str(), e.c_str());
+                ++failures;
+                return;
+            }
+            portable_max = std::max(portable_max, portable.size());
+            v2_max = std::max(v2_max, v2.size());
+            if (args.verbose)
+                for (const auto& x: captured.registry_list) std::printf("  %s registry: %s\n", label.c_str(), x.c_str());
+            for (auto& x: captured.registry_list) registry_all.insert(x);
+            for (auto& x: captured.unnamed_list) unnamed_all.insert(x);
+            for (auto& x: captured.ambiguous_list) ambiguous_all.insert(x);
+            for (auto& x: captured.server_private_list) private_all.insert(x);
+            for (auto& x: captured.index_like_list) index_like_all.insert(x);
+            bool ok = true;
+            const auto run = [&](const script_replay::keep_local_fn& keep, const std::vector<uint8_t>& anchor,
+                                 const std::vector<uint8_t>& expected, std::vector<uint8_t>& out,
+                                 script_replay::portable_report& report) {
+                report.lists = true;
+                std::string why;
+                if (!script_replay::localize(context, sel, portable, &anchor, keep, out, &why, &report)) return "REFUSED(" + why + ")";
+                for (auto& x: report.unportable_list) unportable_all.insert(x);
+                for (auto& x: report.ambiguous_list) ambiguous_local_all.insert(x);
+                return compare(expected, out);
+            };
+            // The keep-local arm anchors on the previous checkpoint's record:
+            // its keep-local entries must come from there, the rest from the
+            // portable record (`kept_changed` of them differ from now).
+            const std::vector<uint8_t>& anchor = previous_v2.empty() ? v2 : previous_v2;
+            std::vector<uint8_t> rule_expected;
+            int kept_changed = 0;
+            const bool spliced = splice(v2, anchor, rule_expected, kept_changed);
+            script_replay::portable_report r_names, r_rule, r_scrub;
+            const std::string s_names = run(nullptr, v2, v2, names, r_names);
+            const std::string s_rule = spliced ? run(keep_rule, anchor, rule_expected, rule, r_rule) : std::string("NO-SPLICE");
+            const int zeroed = scrub();
+            const std::string s_scrub = run(nullptr, v2, v2, scrubbed, r_scrub);
+            // Put the world back: the localized record when it is the v2
+            // record, else v2 itself (so the run goes on unharmed).
+            std::vector<CK_ID> replayed;
+            const std::vector<uint8_t>& back = s_scrub == "SAME" ? scrubbed : v2;
+            std::string s_restored;
+            if (!script_replay::restore(context, sel, hooks, back, &e, &replayed, nullptr, true)) {
+                s_restored = "REFUSED(" + e + ")";
+            } else if (!script_replay::capture(context, sel, hooks, again)) {
+                s_restored = "CAPTURE-FAILED";
+            } else {
+                s_restored = compare(v2, again);
+            }
+            const auto& lr = script_replay::last_restore();
+            ok = s_names == "SAME" && s_rule == "SAME" && s_scrub == "SAME" && s_restored == "SAME"
+              && r_names.unportable == 0 && r_rule.unportable == 0 && r_scrub.unportable == 0
+              && r_names.ambiguous == 0 && r_rule.ambiguous == 0 && r_scrub.ambiguous == 0;
+            if (!ok) ++failures;
+            std::printf("%s %s tick=%u v2=%zu portable=%zu scripts=%u blocks=%u values=%u objects=%u registry=%u opaque=%u"
+                        " unnamed=%u ambiguous=%u server_private=%u index_like=%u | names=%s rule=%s (kept_local=%u"
+                        " anchor=%s kept_changed=%d) scrubbed=%s"
+                        " (zeroed=%d kept=%u resolved=%u unportable=%u) restored=%s (cells=%u links_rearmed=%u"
+                        " joints_reset=%u)\n", ok ? "ok  " : "FAIL", label.c_str(), world->tick_index(), v2.size(),
+                        portable.size(), captured.scripts, captured.blocks, captured.values, captured.objects,
+                        captured.registry, captured.opaque, captured.unnamed, captured.ambiguous, captured.server_private,
+                        captured.index_like, s_names.c_str(), s_rule.c_str(), r_rule.kept_local,
+                        previous_v2.empty() ? "now" : "previous", kept_changed, s_scrub.c_str(), zeroed, r_scrub.objects_kept,
+                        r_scrub.objects_resolved, r_scrub.unportable, s_restored.c_str(), lr.cells_written,
+                        lr.links_rearmed, lr.joints_reset);
+            std::fflush(stdout);
+            previous_v2 = v2;
+        };
+
+        if (!run_ticks(30)) return 1;
+        checkpoint("anchor+30");
+        for (int k = 2; k <= sectors; ++k) {
+            stamped_at = world->tick_index();
+            stamped_sector = k;
+            report_sector(*world, 1, k);
+            if (!run_ticks(std::max(1, args.drop_settle))) return 1;
+            checkpoint("sector" + std::to_string(k));
+        }
+        const auto print_list = [](const char* what, const std::set<std::string>& list) {
+            std::printf("%s: %zu\n", what, list.size());
+            for (const auto& x: list) std::printf("  %s\n", x.c_str());
+        };
+        print_list("registry-typed parameters", registry_all);
+        print_list("object references without a name", unnamed_all);
+        print_list("ambiguous object references (a name lookup finds another object)", ambiguous_all);
+        print_list("server-private object references (BMMO)", private_all);
+        print_list("unportable at localize", unportable_all);
+        print_list("ambiguous at localize (a name of several objects here)", ambiguous_local_all);
+        print_list("index-like values copied as bytes (class id, parameter type, ID, structure)", index_like_all);
+        std::printf("balloon activations seen: %zu%s\n", balloon_seen.size(),
+                    balloon.empty() ? " (the level has no keep-local balloon script)" : "");
+        std::printf("summary: portable-scripts-check level=%d checkpoints=%d failed=%d portable_max=%zu v2_max=%zu"
+                    " registry=%zu unnamed=%zu ambiguous=%zu server_private=%zu unportable=%zu ambiguous_local=%zu"
+                    " index_like=%zu balloon_pending=%zu\n",
+                    world->level(), checkpoints, failures, portable_max, v2_max, registry_all.size(), unnamed_all.size(),
+                    ambiguous_all.size(), private_all.size(), unportable_all.size(), ambiguous_local_all.size(),
+                    index_like_all.size(), balloon_seen.size());
+        std::printf("%s checkpoints=%d failed=%d\n", failures == 0 ? "PASS" : "FAIL", checkpoints, failures);
+        std::fflush(stdout);
+        return failures == 0 ? 0 : 3;
+    }
+
     int run_describe_script(const arguments& args) {
         auto world = create_session_world(args, 0.0f);
         if (!world) return 1;
@@ -3305,7 +3631,10 @@ int main(int argc, char** argv) {
             "           [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]\n"
             "           [--savestate-trace PATH] [--stop-on-divergence] [--verbose]\n"
             "           (IVP savestate robustness check: chained seeded rollbacks must reproduce the straight run's\n"
-            "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n");
+            "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --portable-scripts-check [--drop-settle N] [--verbose]\n"
+            "           (the portable script record localized back must equal the v2 record byte for byte at anchor+30\n"
+            "            and after each sector; lists the registry and unportable references; exit 0 PASS, 3 FAIL)\n");
         return 2;
     }
     if (!args.replay_session.empty()) return run_replay_session(args);
@@ -3324,6 +3653,7 @@ int main(int argc, char** argv) {
     }
     // Before --drop and --spawn-test: it composes with their scenes.
     if (args.savestate_check) return run_savestate_check(args);
+    if (args.portable_scripts_check) return run_portable_scripts_check(args);
     if (!args.drop_entity.empty()) return run_drop(args);
     if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;

@@ -15,8 +15,9 @@
 //     9.6);
 //   * manager_activations: every activation of Gameplay_SectorManager the
 //     live frames made, recorded for the replay to re-issue (plan doc 10),
-//     and of the trafo scripts (step P); session_script_selection, the
-//     script replay's selection of the session core's world;
+//     and of the trafo and keep-local scripts (steps P, A1);
+//     session_script_selection, the script replay's selection of the
+//     session core's world;
 //   * live_cells_guard: the three data-array cells kept across a rollback
 //     (platform keep_live_cells);
 //   * put_back_birth: a destroyed mechanism body's entity put back where
@@ -29,6 +30,7 @@
 // by the headless client only until the retail host (R steps).
 
 #include <session/client_core.hpp>
+#include <session/resync_rules.hpp>
 #include <session/session_host_world.hpp>
 #include <session/spawn_impulse.hpp>
 
@@ -326,9 +328,28 @@ namespace bmmo::game {
     }
     // The scripts of that selection whose pending activations the host
     // records and the replay re-issues (manager_activations::record_pending):
-    // kept by the host beside the selection (script_replay::trafo_activations).
+    // kept by the host beside the selection.  The trafo scripts
+    // (script_replay::trafo_activations, step P), and the keep-local scripts
+    // (session/resync_rules.hpp keep_local_script; resync design 2.8, step
+    // A1): a resync re-derivation that forgets a live sector pass (the
+    // server's union already had the sector at S) would otherwise never
+    // activate the balloon's scripts, which the resync keeps from the
+    // client's own anchor, where they never ran.  The manager's own replayed
+    // walk activates them through the same next-frame flags (Activate Script,
+    // CKScene::Activate), so where both re-issue it the flags are set twice:
+    // idempotent.
     inline std::vector<CK_ID> session_script_activations(CKContext* context, const script_replay::selection& sel) {
-        return script_replay::trafo_activations(context, sel);
+        std::vector<CK_ID> out = script_replay::trafo_activations(context, sel);
+        if (!context) return out;
+        for (CK_ID id: sel.scripts) {
+            auto* script = CKBehavior::Cast(context->GetObject(id));
+            if (!script || std::find(out.begin(), out.end(), id) != out.end()) continue;
+            CKBeObject* owner = script->GetOwner();
+            if (bmmo::session::keep_local_script(owner && owner->GetName() ? owner->GetName() : "",
+                                                 script->GetName() ? script->GetName() : ""))
+                out.push_back(id);
+        }
+        return out;
     }
 
     // The three data-array cells the replay rewinds and re-writes (the

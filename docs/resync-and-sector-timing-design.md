@@ -458,6 +458,137 @@ re-arm.
 - A reliable GNS message may carry 512 KB
   (`k_cbMaxSteamNetworkingSocketsMessageSizeSend`).
 
+**As built (step A1, 2026-10-24).**
+
+- **Where.** `game/script_replay.hpp`: `capture_portable`, `localize`,
+  `portable_report`, `kPortableMagic`/`kPortableVersion`, `index_record`
+  (a v2 record's per-script spans: localize's anchor, the check's splice); the v2 capture's
+  flag, force/joint and delayed-link writers are factored out
+  (`put_activation`, `put_force_and_joint`, `put_delayed_links`) and shared
+  by both walks, so v2's bytes are unchanged (the wire check below).
+  `session/resync_rules.hpp` (new, CK-free): `keep_local_script(owner,
+  script)` and `is_trafo_script_name`, which `script_replay::is_trafo_script`
+  now calls (one place for the trafo names). `game/session_host_support.hpp`:
+  `session_script_activations` is the trafo scripts plus every keep-local
+  script of the selection, so both hosts record and re-issue
+  `PE_Balloon Script`'s pending activations (§2.8). SimTool
+  `--portable-scripts-check`. Test `ResyncRules.KeepLocalScripts`.
+- **Adaptations** (no principle touched):
+  - `resync_rules.hpp` is created here, with `keep_local_script` only: A1's
+    `localize` and activation list need the predicate; §2.10 lists the file
+    under A3, which adds the classification and attribution to it.
+  - Kind 2 records the object's **own** class, not the parameter's. The
+    lookup is `GetObjectByNameAndParentClass(name, <the local parameter's
+    class>)`: the objects of the recorded class if there are any, else the
+    others, and only a unique match resolves. Several matches keep the local
+    value and count as `ambiguous` in the localize report (never a
+    creation-order pick); an object outside the parameter's class is never
+    a candidate. Class 0 with "" is no object and localizes to 0 (never a
+    stale local id); a class with "" is an object without a name
+    (unportable: the local value is kept). The local value is also kept
+    when it already holds an object of the recorded name (every constant
+    target): a name names one object (capture counts the exceptions as
+    ambiguous) or its copies are interchangeable.
+  - `localize` refuses a local selection in which two scripts share a key,
+    as `capture_portable` refuses it on the capturing side; kind 4 also
+    resolves only a unique (owner, script).
+  - **Kind 4, `u8 4, str owner, str script`: a reference to a root script,
+    by the record's own key.** Module copies share script names, so a name
+    alone finds the first copy. The first run, with names only, failed the
+    perturbed localize on L1-L12 (the arena passed): L2 had 24 ambiguous
+    references (`P_Modul_18_MF Script` locals 9, 11 and 12 on all 8
+    copies; L2 `P_Modul_18_MF Script` local 9 resolved to 45881 instead of
+    53524), L11 14 (also `P_Modul_08_MF Script / Physicalize and Swing`
+    local 41 and the manager's `Op` res), L1 1 (the manager's `Op` res).
+    With kind 4, ambiguous = 0 on every level.
+  - `localize` takes `local_anchor` as a pointer (null: no keep-local
+    copies) and `keep_local` as a `std::function` (empty: nothing kept
+    local).
+  - **The perturbation.** Restoring an older record would tear down the
+    joints and forces made since (the restore's joint-presence rule) and
+    damage the world for the later checkpoints. The check therefore zeroes
+    every object reference and sets every registry entry to -1 in the live
+    world, so `localize` has to find every one by name alone. It also
+    localizes unperturbed, with and without the keep-local rule; the
+    keep-local arm is anchored on the PREVIOUS checkpoint's v2 record and
+    must equal the current v2 record with the keep-local entries spliced in
+    from that anchor.
+  - **What one process cannot see.** Capture and localize run in one
+    process, so every CK_ID, class id and registry index agrees and a
+    process-local value copied as kind-1 bytes would still compare equal.
+    The check therefore lists every kind-1 value whose type is index-like
+    (`CKPGUID_CLASSID`, `CKPGUID_PARAMETERTYPE`, `CKPGUID_ID`, or a
+    structure type, whose data is its members' CK_IDs): the list is empty on
+    every level. Values of other types (an Integer that happens to carry an
+    id) are not detected; cross-world use is first exercised by A3's
+    resync checks.
+  - The level's sector count is read from the PH table's `Sector` column.
+    The `Sector_NN` groups are gone once Levelinit has read them.
+- **The check, L1-L12 and the arena** (`--portable-scripts-check
+  --drop-settle 150`; anchor+30, then one checkpoint per sector 2..N, 150
+  ticks apart). At every checkpoint of every level, each of these is
+  byte-identical to its expectation: `localize` without the keep-local
+  rule, after the scrub, and the restore of the scrubbed localization
+  re-captured, each equal to the direct v2 record; with the rule (8 scripts
+  copied from the previous checkpoint's anchor on every level), equal to v2
+  with those 8 entries spliced from the anchor. At the last sector's
+  checkpoint one of the 8 differs between anchor and now on every level
+  (the balloon's activation), so the copy is the anchor's, not the live
+  bytes. 0 unportable, 0 ambiguous (capture and localize), 0 without a
+  name, 0 server-private (BMMO), 0 index-like: the server's private objects
+  (`BMMO_Prox_*`, the ball arrays, the clones) are in no local or output
+  parameter of a selected script. (Numbers after the review fix-up, which
+  made the lookups unique-only and added the anchor arm and the index-like
+  list: the same sizes and counts as the first run.)
+
+  | level | sectors | selected | checkpoints | blocks | object refs | registry | v2 max (B) | portable max (B) | balloon pending after the frame of |
+  |---|---|---|---|---|---|---|---|---|---|
+  | 1 | 4 | 12 | 4 | 267 | 277 | 2 | 20,083 | 23,540 | 334 (sector 4 stamped 330) |
+  | 2 | 5 | 31 | 5 | 620 | 509 | 20 | 50,213 | 56,665 | 484 (sector 5 stamped 480) |
+  | 3 | 5 | 22 | 5 | 425 | 404 | 8 | 33,415 | 38,635 | 484 (480) |
+  | 4 | 5 | 17 | 5 | 387 | 364 | 8 | 30,637 | 35,125 | 484 (480) |
+  | 5 | 5 | 21 | 5 | 381 | 359 | 6 | 29,888 | 34,580 | 484 (480) |
+  | 6 | 5 | 28 | 5 | 598 | 519 | 18 | 49,214 | 55,993 | 484 (480) |
+  | 7 | 5 | 35 | 5 | 578 | 566 | 10 | 48,046 | 56,112 | 484 (480) |
+  | 8 | 5 | 31 | 5 | 517 | 485 | 6 | 39,459 | 45,959 | 484 (480) |
+  | 9 | 5 | 43 | 5 | 711 | 674 | 12 | 58,386 | 67,848 | 484 (480) |
+  | 10 | 5 | 45 | 5 | 714 | 673 | 12 | 58,099 | 67,816 | 484 (480) |
+  | 11 | 6 | 45 | 6 | 697 | 627 | 12 | 55,056 | **64,091** | 634 (sector 6 stamped 630) |
+  | 12 | 8 | 45 | 8 | 852 | 708 | 24 | 70,440 | 79,927 | 934 (sector 8 stamped 930) |
+  | 13 (arena) | 4 | 23 | 4 | 432 | 445 | 4 | 34,341 | 40,252 | 334 (sector 4 stamped 330) |
+
+  The selected counts are §2.4's. The portable record is 15-17 % larger
+  than v2. L11's is 64 KB, inside §2.4's 60-90 KB estimate and far under
+  the 512 KB message limit.
+- **The registry list, explained.** Only two kinds occur, both Message
+  types; no attribute-typed parameter is in any selection:
+  - `P_Modul_18_Particle Script / PlanarParticleSystem` local 11 ("Message
+    To Deflectors") = 51 (NULL), on every P_Modul_18 copy (two blocks per
+    copy). It is a file constant.
+  - `PE_Balloon Script` locals 25 and 26 ("Message") = 38 (Level_Finish).
+    The script is keep-local.
+
+  Both travel by name all the same.
+- **Q8 settled: as designed.** On all 13 levels `PE_Balloon Script` shows
+  `CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME` (inactive until
+  then) after the frame of T+4, for the last sector stamped at T. The
+  manager's `Activate Sector / activate Type 1` runs `Activate Script`
+  (Reset? TRUE). That block calls `CKScene::Activate(script, reset)`, which
+  only sets the next-frame flags. `--describe-script Gameplay_SectorManager`
+  on the arena shows the block (id 31122). `manager_activations::replay`
+  re-issues through the same call, so a re-issue on top of the replayed
+  manager's own is idempotent.
+- **The headless client is unchanged.** The wire check ran with build rT0
+  against rA1, on the reference set in `core_ref_e0_pre_q/`, where the four
+  labels have lived since the REF re-record: 16 of 16 send traces SAME,
+  16 of 16 journals IDENTICAL, `WIRE-CHECK: ALL SAME`. So the factored v2
+  capture leaves v2's bytes as they were. The captures reach the arena's
+  sector 4, so the balloon's activation is recorded in them; whether a
+  replay window in them re-issued it is not observed (`scripts_reissued`
+  is neither logged nor journaled). The re-issue is idempotent by
+  construction (`CKScene::Activate` only sets the flags the replayed
+  manager sets too), and its live effect is A5's check.
+
 ### 2.5 The union as state, and the stamp log
 
 **`sector_union::state`** (`sector_union.hpp`, pure) is a value type:
@@ -1594,6 +1725,9 @@ flags?** §2.8 relies on it to re-issue a forgotten pass's balloon.
   the forgotten pass's tick for the `keep_local` scripts of that sector,
   with reset, as the manager's block does; the A5 last-sector variant is
   its check.
+- **Settled (step A1): as designed.** The manager's Activate Script sets the
+  next-frame flags (reset included) on every level; §2.4, "As built (step
+  A1)".
 
 **Q9. How often is Δ > 0 in practice, and how large?**
 

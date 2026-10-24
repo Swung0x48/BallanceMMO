@@ -54,6 +54,8 @@
 #include <string>
 #include <vector>
 
+#include <session/resync_rules.hpp>
+
 #include "CKAll.h"
 
 namespace bmmo::game {
@@ -206,9 +208,7 @@ namespace bmmo::game {
         // write nothing): not selected.
         static bool is_trafo_script(CKBehavior* beh) {
             if (!beh || beh->GetParent() || !beh->GetName()) return false;
-            const char* name = beh->GetName();
-            return std::strncmp(name, "Ball_Explosion_", 15) == 0 || std::strncmp(name, "Ball_ResetPieces_", 17) == 0
-                || std::strcmp(name, "Ball_PaperWind") == 0;
+            return bmmo::session::is_trafo_script_name(beh->GetName());   // session/resync_rules.hpp
         }
 
         // The scripts that travel with the records, in the order the behaviour
@@ -584,6 +584,265 @@ namespace bmmo::game {
             return d;
         }
 
+        // ---- The portable record (docs/resync-and-sector-timing-design.md
+        // 2.4, step A1).  The v2 record above keys every script and every
+        // block by CK_ID, and an object-typed parameter's bytes are a CK_ID,
+        // a Message- or attribute-typed one's an index into a registry the
+        // process filled in its own order: none of it means anything in
+        // another engine (the server's, the headless client's, retail
+        // CK2.dll).  The portable record carries the same payload keyed by
+        // names:
+        //
+        //   u32 magic 'BMSP', u32 version
+        //   u32 script_count
+        //     per script: str owner_name, str script_name, u8 present
+        //       block (pre-order, sub-behaviour index order), recursively:
+        //         u32 runtime_flags & kRuntimeFlags, u32 in_mask, u32 out_mask
+        //         u16 locals, then per parameter one of
+        //             u8 0                       opaque or empty: not written
+        //             u8 1, u32 size, bytes      a value
+        //             u8 2, u32 class_id, str name   an object reference: the
+        //                                        object's own class; 0 and "" =
+        //                                        no object, a class and "" = an
+        //                                        object without a name
+        //             u8 3, u8 kind, str name    a registry index by name: kind 1
+        //                                        a message type, 2 an attribute type
+        //             u8 4, str owner, str name  a root script (a Script-typed
+        //                                        reference), by the record's own
+        //                                        key: module copies share script
+        //                                        names (step A1, as built)
+        //         u16 outputs, the same
+        //         u8 has_force [u8 exists, 6 x f64]    as v2 (object space)
+        //         u8 has_joint [u8 handle_present]     as v2
+        //         u16 children, per child u8 present + block
+        //         u16 delayed links, u16 countdown each as v2
+        //   3 x (u8 present, u32 value)    the three cells, as v2
+        //
+        // (str: u16 length, bytes.)  A script is keyed by (owner name, script
+        // name) - unique in every level's selection (design 2.4) and checked
+        // at capture; a block by its walk position, validated by every count
+        // the walk meets.  localize() turns a portable record into a LOCAL v2
+        // record for the selection of this world, which the existing restore
+        // takes unchanged.
+        static constexpr uint32_t kPortableMagic = 0x50534d42u;   // "BMSP"
+        static constexpr uint32_t kPortableVersion = 1;
+
+        // What capture_portable and localize met.  The lists are filled only
+        // when `lists` is set (the SimTool check); each entry names the
+        // script, the block path and the parameter.
+        struct portable_report {
+            bool lists = false;
+            uint32_t scripts = 0, blocks = 0, values = 0, objects = 0, registry = 0, opaque = 0;
+            // capture: object references a name alone does not find again in
+            // this world - no name, or the name (within the parameter's class,
+            // the recorded class first) does not name exactly this one object;
+            // and references to the server's private objects (a name
+            // containing "BMMO"), which a client's world does not have.
+            // localize: `ambiguous` counts the references whose name names
+            // more than one object (or script) here - the local value is kept
+            // rather than a creation-order pick.
+            uint32_t unnamed = 0, ambiguous = 0, server_private = 0;
+            // capture: values copied as bytes whose type is an index into a
+            // process-local table or carries ids (a class id, a parameter
+            // type, an ID, a structure - whose data is its members' CK_IDs):
+            // the same-world byte check cannot see them, so they are listed.
+            uint32_t index_like = 0;
+            // localize: references kept because the local parameter already
+            // holds an object of the recorded name, resolved by name, and
+            // unportable (the name or registry entry is not in this world: the
+            // local value is kept); keep-local scripts copied from the anchor.
+            uint32_t objects_kept = 0, objects_resolved = 0, unportable = 0, kept_local = 0;
+            std::vector<std::string> registry_list, unnamed_list, ambiguous_list, server_private_list, unportable_list,
+                index_like_list;
+        };
+        using keep_local_fn = std::function<bool(const std::string& owner, const std::string& script)>;
+
+        // Where each script's entry of a v2 record starts (its id) and ends,
+        // and where the part after the scripts (satellites, cells) starts.
+        struct record_index {
+            struct script { CK_ID id = 0; size_t begin = 0, end = 0; };
+            std::vector<script> scripts;
+            size_t tail = 0;
+        };
+        static bool index_record(const std::vector<uint8_t>& record, record_index& index) {
+            index = {};
+            size_t a = 0;
+            uint32_t magic = 0, version = 0, count = 0;
+            if (!get_u32(record, a, magic) || magic != kMagic || !get_u32(record, a, version) || version != kVersion
+                    || !get_u32(record, a, count))
+                return false;
+            for (uint32_t i = 0; i < count; ++i) {
+                record_index::script s;
+                s.begin = a;
+                uint32_t id = 0;
+                uint8_t present = 0;
+                if (!get_u32(record, a, id) || !get_u8(record, a, present)) return false;
+                if (present && !skip_v2_block(record, a)) return false;
+                s.id = static_cast<CK_ID>(id);
+                s.end = a;
+                index.scripts.push_back(s);
+            }
+            index.tail = a;
+            return true;
+        }
+
+        static bool capture_portable(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
+                                     std::vector<uint8_t>& out, std::string* error = nullptr,
+                                     portable_report* report = nullptr) {
+            out.clear();
+            if (error) error->clear();
+            if (!context) return fail(error, "no context");
+            if (!sel.satellites.empty()) return fail(error, "satellite blocks are not portable");
+            portable_report scratch;
+            portable_report& r = report ? *report : scratch;
+            put_u32(out, kPortableMagic);
+            put_u32(out, kPortableVersion);
+            put_u32(out, static_cast<uint32_t>(sel.scripts.size()));
+            std::vector<std::pair<std::string, std::string>> keys;
+            for (CK_ID id: sel.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                const std::string owner = owner_name(beh), name = beh && beh->GetName() ? beh->GetName() : "";
+                put_str(out, owner);
+                put_str(out, name);
+                put_u8(out, beh ? 1 : 0);
+                if (!beh) continue;
+                if (std::find(keys.begin(), keys.end(), std::make_pair(owner, name)) != keys.end()) {
+                    out.clear();
+                    if (error) *error = "two selected scripts share the key " + owner + "/" + name;
+                    return false;
+                }
+                keys.emplace_back(owner, name);
+                ++r.scripts;
+                capture_portable_behavior(context, beh, hooks, out, r, name, owner + "/" + name);
+            }
+            for (int c = 0; c < kCellCount; ++c) {
+                int value = 0;
+                const bool present = read_cell(context, c, value);
+                put_u8(out, present ? 1 : 0);
+                put_u32(out, static_cast<uint32_t>(value));
+            }
+            return true;
+        }
+
+        // A portable record as a local v2 record of `sel` (this world's
+        // selection), touching no world state.  A value is copied; an object
+        // reference keeps the local bytes when the local parameter already
+        // holds an object of the recorded name (every constant target), and
+        // is otherwise found by name (the recorded class first, never outside
+        // the parameter's class); "no object" is 0; a registry entry is found
+        // by name.  What this world lacks keeps the local value and counts as
+        // unportable; a name of more than one object (or script) here keeps
+        // the local value and counts as ambiguous.  The scripts `keep_local`
+        // names are copied from `local_anchor` (a v2 record of this world's
+        // `sel`) instead.  A key in one selection and not the other, or any
+        // count that differs, fails the whole call with the place named:
+        // half a record never runs.
+        static bool localize(CKContext* context, const selection& sel, const std::vector<uint8_t>& portable,
+                             const std::vector<uint8_t>* local_anchor, const keep_local_fn& keep_local,
+                             std::vector<uint8_t>& out, std::string* error = nullptr, portable_report* report = nullptr) {
+            out.clear();
+            if (error) error->clear();
+            if (!context) return fail(error, "no context");
+            if (!sel.satellites.empty()) return fail(error, "satellite blocks are not portable");
+            portable_report scratch;
+            portable_report& r = report ? *report : scratch;
+            // The portable scripts by key: where each one's block starts.
+            size_t pos = 0;
+            uint32_t magic = 0, version = 0, count = 0;
+            if (!get_u32(portable, pos, magic) || magic != kPortableMagic) return fail(error, "not a portable script record");
+            if (!get_u32(portable, pos, version) || version != kPortableVersion) return fail(error, "portable record version");
+            if (!get_u32(portable, pos, count)) return fail(error, "truncated portable record");
+            struct entry { std::string owner, name; size_t at = 0; bool used = false; };
+            std::vector<entry> entries;
+            for (uint32_t i = 0; i < count; ++i) {
+                entry e;
+                uint8_t present = 0;
+                if (!get_str(portable, pos, e.owner) || !get_str(portable, pos, e.name) || !get_u8(portable, pos, present))
+                    return fail(error, "truncated portable script");
+                if (!present) continue;
+                e.at = pos;
+                if (!skip_portable_block(portable, pos)) {
+                    if (error) *error = "truncated portable block of " + e.owner + "/" + e.name;
+                    return false;
+                }
+                entries.push_back(std::move(e));
+            }
+            const size_t cells_at = pos;
+            // The local anchor's scripts by id: where each one's entry starts
+            // (the id) and ends.
+            record_index anchored;
+            if (local_anchor && !local_anchor->empty() && !index_record(*local_anchor, anchored))
+                return fail(error, "the local anchor is not a script record");
+            // The local keys must be unique too: two local scripts of one key
+            // would take the portable entries in this world's order.
+            std::vector<std::pair<std::string, std::string>> local_keys;
+            for (CK_ID id: sel.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                if (!beh) continue;
+                auto key = std::make_pair(owner_name(beh), std::string(beh->GetName() ? beh->GetName() : ""));
+                if (std::find(local_keys.begin(), local_keys.end(), key) != local_keys.end()) {
+                    if (error) *error = "two local scripts share the key " + key.first + "/" + key.second;
+                    return false;
+                }
+                local_keys.push_back(std::move(key));
+            }
+            put_u32(out, kMagic);
+            put_u32(out, kVersion);
+            put_u32(out, static_cast<uint32_t>(sel.scripts.size()));
+            for (CK_ID id: sel.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                if (!beh) {                      // as capture() writes a missing script
+                    put_u32(out, static_cast<uint32_t>(id));
+                    put_u8(out, 0);
+                    continue;
+                }
+                const std::string owner = owner_name(beh), name = beh->GetName() ? beh->GetName() : "";
+                auto e = std::find_if(entries.begin(), entries.end(),
+                                      [&](const entry& x) { return !x.used && x.owner == owner && x.name == name; });
+                if (e == entries.end()) {
+                    out.clear();
+                    if (error) *error = "the portable record has no script " + owner + "/" + name;
+                    return false;
+                }
+                e->used = true;
+                if (keep_local && keep_local(owner, name)) {
+                    const auto k = std::find_if(anchored.scripts.begin(), anchored.scripts.end(),
+                                                [id](const record_index::script& x) { return x.id == id; });
+                    if (k == anchored.scripts.end()) {
+                        out.clear();
+                        if (error) *error = "keep-local script " + owner + "/" + name + " is not in the local anchor";
+                        return false;
+                    }
+                    out.insert(out.end(), local_anchor->begin() + static_cast<std::ptrdiff_t>(k->begin),
+                               local_anchor->begin() + static_cast<std::ptrdiff_t>(k->end));
+                    ++r.kept_local;
+                    continue;
+                }
+                put_u32(out, static_cast<uint32_t>(id));
+                put_u8(out, 1);
+                ++r.scripts;
+                size_t at = e->at;
+                const std::string place = owner + "/" + name;
+                if (!localize_behavior(context, beh, portable, at, out, error, r, name, place)) {
+                    out.clear();
+                    if (error) *error = place + ": " + *error;
+                    return false;
+                }
+            }
+            for (const entry& e: entries)
+                if (!e.used) {
+                    out.clear();
+                    if (error) *error = "the local selection has no script " + e.owner + "/" + e.name;
+                    return false;
+                }
+            put_u32(out, 0);                     // satellites: none (checked above)
+            pos = cells_at;
+            for (int c = 0; c < kCellCount; ++c)
+                if (!copy_bytes(portable, pos, 5, out)) { out.clear(); return fail(error, "truncated portable cells"); }
+            if (pos != portable.size()) { out.clear(); return fail(error, "trailing bytes in the portable record"); }
+            return true;
+        }
+
     private:
         // A parameter whose value is arithmetic on the world - a distance, a
         // time, a pose - rather than a decision: a replay that differs from
@@ -780,6 +1039,28 @@ namespace bmmo::game {
 
         static void capture_behavior(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
             put_u32(out, static_cast<uint32_t>(beh->GetID()));
+            put_activation(beh, out);
+            const int locals = beh->GetLocalParameterCount();
+            put_u16(out, static_cast<uint16_t>(locals));
+            for (int i = 0; i < locals; ++i) capture_parameter(beh->GetLocalParameter(i), out);
+            const int outs = beh->GetOutputParameterCount();
+            put_u16(out, static_cast<uint16_t>(outs));
+            for (int i = 0; i < outs; ++i) capture_parameter(beh->GetOutputParameter(i), out);
+            put_force_and_joint(beh, hooks, out);
+            if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
+            const int children = beh->GetSubBehaviorCount();
+            put_u16(out, static_cast<uint16_t>(children));
+            for (int i = 0; i < children; ++i) {
+                CKBehavior* child = beh->GetSubBehavior(i);
+                put_u8(out, child ? 1 : 0);
+                if (child) capture_behavior(child, hooks, out);
+            }
+            put_delayed_links(beh, out);
+        }
+
+        // The runtime flags and the active inputs and outputs (v2 and the
+        // portable record alike).
+        static void put_activation(CKBehavior* beh, std::vector<uint8_t>& out) {
             put_u32(out, static_cast<uint32_t>(beh->GetFlags()) & kRuntimeFlags);
             const int inputs = beh->GetInputCount(), outputs = beh->GetOutputCount();
             uint32_t in_mask = 0, out_mask = 0;
@@ -791,12 +1072,10 @@ namespace bmmo::game {
                 if (beh->IsOutputActive(i)) out_mask |= 1u << i;
             put_u32(out, in_mask);
             put_u32(out, out_mask);
-            const int locals = beh->GetLocalParameterCount();
-            put_u16(out, static_cast<uint16_t>(locals));
-            for (int i = 0; i < locals; ++i) capture_parameter(beh->GetLocalParameter(i), out);
-            const int outs = beh->GetOutputParameterCount();
-            put_u16(out, static_cast<uint16_t>(outs));
-            for (int i = 0; i < outs; ++i) capture_parameter(beh->GetOutputParameter(i), out);
+        }
+
+        // The force block's controller and the joint block's handle presence.
+        static void put_force_and_joint(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
             force_block_state force;
             if (is_force_block(beh) && hooks.capture_force && hooks.capture_force(beh, force)) {
                 put_u8(out, 1);
@@ -812,30 +1091,436 @@ namespace bmmo::game {
             } else {
                 put_u8(out, 0);
             }
+        }
+
+        // The graph's delayed links (initial delay above one frame): a link in
+        // flight between frames lives in the graph's own list with a
+        // countdown, which the SDK does not expose - but the countdown is on
+        // the link, and a link is in flight exactly when its delay is between
+        // zero and its initial value (queued: set to the initial and counted
+        // down each frame; fired or reset: zero or initial).
+        static uint16_t delayed_link_count(CKBehavior* beh) {
+            uint16_t delayed = 0;
+            const int links = beh->IsUsingFunction() ? 0 : beh->GetSubBehaviorLinkCount();
+            for (int i = 0; i < links; ++i)
+                if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1) ++delayed;
+            return delayed;
+        }
+        static void put_delayed_links(CKBehavior* beh, std::vector<uint8_t>& out) {
+            put_u16(out, delayed_link_count(beh));
+            const int links = beh->GetSubBehaviorLinkCount();
+            for (int i = 0; i < links; ++i) {
+                CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
+                if (!link || link->GetInitialActivationDelay() <= 1) continue;
+                put_u16(out, static_cast<uint16_t>(std::max(0, std::min(65535, link->GetActivationDelay()))));
+            }
+        }
+
+        // ---- the portable record's walk (see capture_portable)
+
+        static std::string owner_name(CKBehavior* beh) {
+            CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+            return owner && owner->GetName() ? owner->GetName() : "";
+        }
+        // Registry-typed parameters: 1 a message type, 2 an attribute type.
+        static int registry_kind(CKParameter* parameter) {
+            const CKGUID guid = parameter->GetGUID();
+            if (guid == CKPGUID_MESSAGE) return 1;
+            if (guid == CKPGUID_ATTRIBUTE) return 2;
+            return 0;
+        }
+        static const char* registry_name(CKContext* context, int kind, int index) {
+            if (index < 0) return nullptr;
+            if (kind == 1) {
+                CKMessageManager* messages = context->GetMessageManager();
+                return messages && index < messages->GetMessageTypeCount() ? messages->GetMessageTypeName(index) : nullptr;
+            }
+            CKAttributeManager* attributes = context->GetAttributeManager();
+            return attributes && index < attributes->GetAttributeCount() ? attributes->GetAttributeNameByType(index) : nullptr;
+        }
+        static bool registry_index(CKContext* context, int kind, const std::string& name, int& index) {
+            if (kind == 1) {
+                CKMessageManager* messages = context->GetMessageManager();
+                const int count = messages ? messages->GetMessageTypeCount() : 0;
+                for (int i = 0; i < count; ++i)
+                    if (const char* n = messages->GetMessageTypeName(i); n && name == n) { index = i; return true; }
+                return false;
+            }
+            if (kind != 2) return false;
+            CKAttributeManager* attributes = context->GetAttributeManager();
+            if (!attributes) return false;
+            index = attributes->GetAttributeTypeByName(const_cast<CKSTRING>(name.c_str()));
+            return index >= 0;
+        }
+        // The object of that name a portable reference means here, among the
+        // objects of the parameter's class (derived classes included): the
+        // one of the recorded class, else the one of another class.
+        // `matches` gets how many candidates the tier used has; anything but
+        // 1 returns null - the first of several is this world's creation
+        // order, not the reference.  An object outside the parameter's class
+        // is never a candidate.
+        static CKObject* find_by_name(CKContext* context, const std::string& name, CK_CLASSID parameter_class,
+                                      CK_CLASSID recorded_class, int* matches = nullptr) {
+            CKSTRING n = const_cast<CKSTRING>(name.c_str());
+            CKObject* same = nullptr;
+            CKObject* other = nullptr;
+            int same_count = 0, other_count = 0;
+            for (CKObject* o = context->GetObjectByNameAndParentClass(n, parameter_class, nullptr); o;
+                 o = context->GetObjectByNameAndParentClass(n, parameter_class, o)) {
+                if (o->GetClassID() == recorded_class) { if (!same) same = o; ++same_count; }
+                else { if (!other) other = o; ++other_count; }
+            }
+            const int count = same_count ? same_count : other_count;
+            if (matches) *matches = count;
+            return count == 1 ? (same ? same : other) : nullptr;
+        }
+        // The root script of that key (owner name, script name); `matches`
+        // gets how many there are (the key is unique in every level's
+        // selection, but a reference may name any script).
+        static CKBehavior* find_script(CKContext* context, const std::string& owner, const std::string& name, int* matches = nullptr) {
+            CKSTRING n = const_cast<CKSTRING>(name.c_str());
+            CKBehavior* found = nullptr;
+            int count = 0;
+            for (CKObject* o = context->GetObjectByNameAndParentClass(n, CKCID_BEHAVIOR, nullptr); o;
+                 o = context->GetObjectByNameAndParentClass(n, CKCID_BEHAVIOR, o)) {
+                auto* beh = CKBehavior::Cast(o);
+                if (!beh || beh->GetParent() || owner_name(beh) != owner) continue;
+                if (!found) found = beh;
+                ++count;
+            }
+            if (matches) *matches = count;
+            return found;
+        }
+        static std::string parameter_place(const std::string& block, bool output, int index, CKParameter* parameter) {
+            return block + ": " + (output ? "output " : "local ") + std::to_string(index)
+                 + (parameter && parameter->GetName() ? std::string(" (") + parameter->GetName() + ")" : std::string());
+        }
+        static void note(portable_report& r, std::vector<std::string>& list, const std::string& what) {
+            if (r.lists) list.push_back(what);
+        }
+
+        static void capture_portable_parameter(CKContext* context, CKParameter* parameter, std::vector<uint8_t>& out,
+                                               portable_report& r, const std::string& block, bool output, int index) {
+            if (is_opaque(parameter)) { put_u8(out, 0); ++r.opaque; return; }
+            const int size = parameter->GetDataSize();
+            const void* data = size > 0 ? parameter->GetReadDataPtr(FALSE) : nullptr;
+            if (size <= 0 || !data) { put_u8(out, 0); return; }
+            const CK_CLASSID parameter_class = parameter->GetParameterClassID();
+            if (parameter_class != 0 && size == static_cast<int>(sizeof(CK_ID))) {
+                CK_ID id = 0;
+                std::memcpy(&id, data, sizeof(id));
+                CKObject* object = id ? context->GetObject(id) : nullptr;
+                const std::string name = object && object->GetName() ? object->GetName() : "";
+                if (auto* script = object && !name.empty() ? CKBehavior::Cast(object) : nullptr; script && !script->GetParent()) {
+                    const std::string owner = owner_name(script);
+                    put_u8(out, 4);
+                    put_str(out, owner);
+                    put_str(out, name);
+                    ++r.objects;
+                    if (owner.find("BMMO") != std::string::npos || name.find("BMMO") != std::string::npos) {
+                        ++r.server_private;
+                        note(r, r.server_private_list, parameter_place(block, output, index, parameter) + " -> " + owner + "/" + name);
+                    }
+                    int matches = 0;
+                    if (find_script(context, owner, name, &matches) != script || matches != 1) {
+                        ++r.ambiguous;
+                        note(r, r.ambiguous_list, parameter_place(block, output, index, parameter) + " -> script " + owner + "/" + name);
+                    }
+                    return;
+                }
+                put_u8(out, 2);
+                put_u32(out, object ? static_cast<uint32_t>(object->GetClassID()) : 0u);
+                put_str(out, name);
+                ++r.objects;
+                if (object && name.empty()) {
+                    ++r.unnamed;
+                    note(r, r.unnamed_list, parameter_place(block, output, index, parameter));
+                } else if (object) {
+                    if (name.find("BMMO") != std::string::npos) {
+                        ++r.server_private;
+                        note(r, r.server_private_list, parameter_place(block, output, index, parameter) + " -> " + name);
+                    }
+                    if (find_by_name(context, name, parameter_class, object->GetClassID()) != object) {   // null unless unique
+                        ++r.ambiguous;
+                        note(r, r.ambiguous_list, parameter_place(block, output, index, parameter) + " -> " + name);
+                    }
+                }
+                return;
+            }
+            if (const int kind = registry_kind(parameter); kind && size == 4) {
+                int value = 0;
+                std::memcpy(&value, data, sizeof(value));
+                if (const char* name = registry_name(context, kind, value); name && *name) {
+                    put_u8(out, 3);
+                    put_u8(out, static_cast<uint8_t>(kind));
+                    put_str(out, name);
+                    ++r.registry;
+                    if (r.lists)
+                        note(r, r.registry_list, parameter_place(block, output, index, parameter) + (kind == 1 ? " message " : " attribute ")
+                                                 + std::to_string(value) + " (" + name + ")");
+                    return;
+                }
+            }
+            if (const char* what = index_like_type(context, parameter)) {
+                ++r.index_like;
+                note(r, r.index_like_list, parameter_place(block, output, index, parameter) + " " + what);
+            }
+            put_u8(out, 1);
+            put_u32(out, static_cast<uint32_t>(size));
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            out.insert(out.end(), bytes, bytes + size);
+            ++r.values;
+        }
+        // A value type whose bytes mean something only in this process: a
+        // class id or a parameter type (registered in plugin load order), an
+        // ID, a structure (its data is its member parameters' CK_IDs).
+        static const char* index_like_type(CKContext* context, CKParameter* parameter) {
+            const CKGUID guid = parameter->GetGUID();
+            if (guid == CKPGUID_CLASSID) return "class id";
+            if (guid == CKPGUID_PARAMETERTYPE) return "parameter type";
+            if (guid == CKPGUID_ID) return "ID";
+            CKParameterManager* pm = context->GetParameterManager();
+            CKParameterTypeDesc* desc = pm ? pm->GetParameterTypeDescription(parameter->GetType()) : nullptr;
+            if (desc && (desc->dwFlags & CKPARAMETERTYPE_STRUCT)) return "structure";
+            return nullptr;
+        }
+
+        static std::string child_place(const portable_report& r, const std::string& block, int index, CKBehavior* child) {
+            if (!r.lists) return std::string();
+            return block + "/" + std::to_string(index) + ":" + (child->GetName() ? child->GetName() : "?");
+        }
+
+        static void capture_portable_behavior(CKContext* context, CKBehavior* beh, const script_replay_hooks& hooks,
+                                              std::vector<uint8_t>& out, portable_report& r, const std::string& script,
+                                              const std::string& block) {
+            ++r.blocks;
+            put_activation(beh, out);
+            const int locals = beh->GetLocalParameterCount();
+            put_u16(out, static_cast<uint16_t>(locals));
+            for (int i = 0; i < locals; ++i) capture_portable_parameter(context, beh->GetLocalParameter(i), out, r, block, false, i);
+            const int outs = beh->GetOutputParameterCount();
+            put_u16(out, static_cast<uint16_t>(outs));
+            for (int i = 0; i < outs; ++i) capture_portable_parameter(context, beh->GetOutputParameter(i), out, r, block, true, i);
+            put_force_and_joint(beh, hooks, out);
             if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
             const int children = beh->GetSubBehaviorCount();
             put_u16(out, static_cast<uint16_t>(children));
             for (int i = 0; i < children; ++i) {
                 CKBehavior* child = beh->GetSubBehavior(i);
                 put_u8(out, child ? 1 : 0);
-                if (child) capture_behavior(child, hooks, out);
+                if (child) capture_portable_behavior(context, child, hooks, out, r, script, child_place(r, block, i, child));
             }
-            // The graph's delayed links (initial delay above one frame): a
-            // link in flight between frames lives in the graph's own list with
-            // a countdown, which the SDK does not expose - but the countdown is
-            // on the link, and a link is in flight exactly when its delay is
-            // between zero and its initial value (queued: set to the initial
-            // and counted down each frame; fired or reset: zero or initial).
-            uint16_t delayed = 0;
-            const int links = beh->GetSubBehaviorLinkCount();
-            for (int i = 0; i < links; ++i)
-                if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1) ++delayed;
+            put_delayed_links(beh, out);
+        }
+
+        // One portable parameter as the local v2 parameter (localize).
+        static bool localize_parameter(CKContext* context, CKParameter* local, const std::vector<uint8_t>& in, size_t& pos,
+                                       std::vector<uint8_t>& out, std::string* error, portable_report& r,
+                                       const std::string& block, bool output, int index) {
+            uint8_t kind = 0;
+            if (!get_u8(in, pos, kind)) return fail(error, "truncated parameter");
+            if (kind == 0) { put_u8(out, 0); return true; }
+            if (kind == 1) {
+                uint32_t size = 0;
+                if (!get_u32(in, pos, size) || pos + size > in.size()) return fail(error, "truncated parameter bytes");
+                put_u8(out, 1);
+                put_u32(out, size);
+                out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(pos), in.begin() + static_cast<std::ptrdiff_t>(pos + size));
+                pos += size;
+                ++r.values;
+                return true;
+            }
+            // A reference: the local parameter has to be one that holds it.
+            const int size = local && !is_opaque(local) ? local->GetDataSize() : 0;
+            const void* data = size == 4 ? local->GetReadDataPtr(FALSE) : nullptr;
+            uint32_t local_value = 0;
+            if (data) std::memcpy(&local_value, data, sizeof(local_value));
+            const auto emit = [&out](uint32_t value) { put_u8(out, 1); put_u32(out, 4); put_u32(out, value); };
+            if (kind == 2) {
+                uint32_t recorded_class = 0;
+                std::string name;
+                if (!get_u32(in, pos, recorded_class) || !get_str(in, pos, name)) return fail(error, "truncated object reference");
+                if (!data || local->GetParameterClassID() == 0) return fail(error, ("an object reference on a parameter that holds none at " + parameter_place(block, output, index, local)).c_str());
+                ++r.objects;
+                CKObject* current = local_value ? context->GetObject(static_cast<CK_ID>(local_value)) : nullptr;
+                if (recorded_class == 0 && name.empty()) {          // no object: 0, never a stale local id
+                    emit(0);
+                    if (local_value) ++r.objects_resolved; else ++r.objects_kept;
+                    return true;
+                }
+                // The local value is kept when it already holds an object of
+                // the recorded name: a name names one object (capture counts
+                // the exceptions as ambiguous), or the copies of one name are
+                // interchangeable (every constant target).
+                if (current && current->GetName() && name == current->GetName()) {
+                    emit(local_value);
+                    ++r.objects_kept;
+                    return true;
+                }
+                int matches = 0;
+                CKObject* found = name.empty() ? nullptr
+                    : find_by_name(context, name, local->GetParameterClassID(), static_cast<CK_CLASSID>(recorded_class), &matches);
+                if (found) {
+                    emit(static_cast<uint32_t>(found->GetID()));
+                    ++r.objects_resolved;
+                } else if (matches > 1) {
+                    emit(local_value);
+                    ++r.ambiguous;
+                    note(r, r.ambiguous_list, parameter_place(block, output, index, local) + " -> " + name + " ("
+                                              + std::to_string(matches) + " objects)");
+                } else {
+                    emit(local_value);
+                    ++r.unportable;
+                    note(r, r.unportable_list, parameter_place(block, output, index, local) + " -> "
+                                               + (name.empty() ? std::string("an object without a name") : name));
+                }
+                return true;
+            }
+            if (kind == 4) {
+                std::string owner, name;
+                if (!get_str(in, pos, owner) || !get_str(in, pos, name)) return fail(error, "truncated script reference");
+                if (!data || local->GetParameterClassID() == 0) return fail(error, ("a script reference on a parameter that holds none at " + parameter_place(block, output, index, local)).c_str());
+                ++r.objects;
+                auto* current = local_value ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(local_value))) : nullptr;
+                int matches = 0;
+                if (current && !current->GetParent() && current->GetName() && name == current->GetName() && owner_name(current) == owner) {
+                    emit(local_value);
+                    ++r.objects_kept;
+                } else if (CKBehavior* found = find_script(context, owner, name, &matches); found && matches == 1) {
+                    emit(static_cast<uint32_t>(found->GetID()));
+                    ++r.objects_resolved;
+                } else if (matches > 1) {
+                    emit(local_value);
+                    ++r.ambiguous;
+                    note(r, r.ambiguous_list, parameter_place(block, output, index, local) + " -> script " + owner + "/" + name
+                                              + " (" + std::to_string(matches) + " scripts)");
+                } else {
+                    emit(local_value);
+                    ++r.unportable;
+                    note(r, r.unportable_list, parameter_place(block, output, index, local) + " -> script " + owner + "/" + name);
+                }
+                return true;
+            }
+            if (kind == 3) {
+                uint8_t registry = 0;
+                std::string name;
+                if (!get_u8(in, pos, registry) || !get_str(in, pos, name)) return fail(error, "truncated registry entry");
+                if (!data) return fail(error, ("a registry entry on a parameter that holds none at " + parameter_place(block, output, index, local)).c_str());
+                ++r.registry;
+                int value = 0;
+                if (registry_index(context, registry, name, value)) {
+                    emit(static_cast<uint32_t>(value));
+                } else {
+                    emit(local_value);
+                    ++r.unportable;
+                    note(r, r.unportable_list, parameter_place(block, output, index, local) + (registry == 1 ? " -> message " : " -> attribute ") + name);
+                }
+                return true;
+            }
+            return fail(error, "parameter kind");
+        }
+
+        // One portable block as the local v2 block (localize): the local id,
+        // every count checked against the local graph.
+        static bool localize_behavior(CKContext* context, CKBehavior* beh, const std::vector<uint8_t>& in, size_t& pos,
+                                      std::vector<uint8_t>& out, std::string* error, portable_report& r,
+                                      const std::string& script, const std::string& block) {
+            const auto failed = [&](const char* why) {
+                if (error) *error = std::string(why) + (r.lists ? " at " + block : std::string(" in block ") + (beh->GetName() ? beh->GetName() : "?"));
+                return false;
+            };
+            put_u32(out, static_cast<uint32_t>(beh->GetID()));
+            if (!copy_bytes(in, pos, 12, out)) return failed("truncated block");
+            uint16_t locals = 0, outs = 0, children = 0, delayed = 0;
+            if (!get_u16(in, pos, locals) || locals != beh->GetLocalParameterCount()) return failed("local parameter count");
+            put_u16(out, locals);
+            for (int i = 0; i < locals; ++i)
+                if (!localize_parameter(context, beh->GetLocalParameter(i), in, pos, out, error, r, block, false, i)) return false;
+            if (!get_u16(in, pos, outs) || outs != beh->GetOutputParameterCount()) return failed("output parameter count");
+            put_u16(out, outs);
+            for (int i = 0; i < outs; ++i)
+                if (!localize_parameter(context, beh->GetOutputParameter(i), in, pos, out, error, r, block, true, i)) return false;
+            uint8_t has_force = 0, has_joint = 0;
+            if (!get_u8(in, pos, has_force)) return failed("truncated force");
+            put_u8(out, has_force);
+            if (has_force && !copy_bytes(in, pos, 49, out)) return failed("truncated force");
+            if (!get_u8(in, pos, has_joint)) return failed("truncated joint");
+            put_u8(out, has_joint);
+            if (has_joint && !copy_bytes(in, pos, 1, out)) return failed("truncated joint");
+            if (!get_u16(in, pos, children) || children != (beh->IsUsingFunction() ? 0 : beh->GetSubBehaviorCount()))
+                return failed("sub-behaviour count");
+            put_u16(out, children);
+            for (int i = 0; i < children; ++i) {
+                uint8_t present = 0;
+                CKBehavior* child = beh->GetSubBehavior(i);
+                if (!get_u8(in, pos, present) || present != (child ? 1 : 0)) return failed("sub-behaviour presence");
+                put_u8(out, present);
+                if (child && !localize_behavior(context, child, in, pos, out, error, r, script, child_place(r, block, i, child)))
+                    return false;
+            }
+            if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh)) return failed("delayed link count");
             put_u16(out, delayed);
-            for (int i = 0; i < links; ++i) {
-                CKBehaviorLink* link = beh->GetSubBehaviorLink(i);
-                if (!link || link->GetInitialActivationDelay() <= 1) continue;
-                put_u16(out, static_cast<uint16_t>(std::max(0, std::min(65535, link->GetActivationDelay()))));
+            if (!copy_bytes(in, pos, 2u * delayed, out)) return failed("truncated links");
+            ++r.blocks;
+            return true;
+        }
+
+        // Past one block of a v2 record / of a portable record.
+        static bool skip_parameters_v2(const std::vector<uint8_t>& in, size_t& pos) {
+            uint16_t n = 0;
+            if (!get_u16(in, pos, n)) return false;
+            for (int i = 0; i < n; ++i) {
+                uint8_t kind = 0;
+                uint32_t size = 0;
+                if (!get_u8(in, pos, kind)) return false;
+                if (!kind) continue;
+                if (!get_u32(in, pos, size) || pos + size > in.size()) return false;
+                pos += size;
             }
+            return true;
+        }
+        static bool skip_tail(const std::vector<uint8_t>& in, size_t& pos, bool portable) {
+            uint8_t has = 0;
+            if (!get_u8(in, pos, has) || (has && !skip(in, pos, 49))) return false;
+            if (!get_u8(in, pos, has) || (has && !skip(in, pos, 1))) return false;
+            uint16_t children = 0, delayed = 0;
+            if (!get_u16(in, pos, children)) return false;
+            for (int i = 0; i < children; ++i) {
+                uint8_t present = 0;
+                if (!get_u8(in, pos, present)) return false;
+                if (present && !(portable ? skip_portable_block(in, pos) : skip_v2_block(in, pos))) return false;
+            }
+            return get_u16(in, pos, delayed) && skip(in, pos, 2u * delayed);
+        }
+        static bool skip_v2_block(const std::vector<uint8_t>& in, size_t& pos) {
+            return skip(in, pos, 16) && skip_parameters_v2(in, pos) && skip_parameters_v2(in, pos) && skip_tail(in, pos, false);
+        }
+        static bool skip_parameters_portable(const std::vector<uint8_t>& in, size_t& pos) {
+            uint16_t n = 0;
+            if (!get_u16(in, pos, n)) return false;
+            for (int i = 0; i < n; ++i) {
+                uint8_t kind = 0;
+                uint32_t size = 0;
+                std::string name;
+                if (!get_u8(in, pos, kind)) return false;
+                if (kind == 0) continue;
+                if (kind == 1) {
+                    if (!get_u32(in, pos, size) || !skip(in, pos, size)) return false;
+                } else if (kind == 2) {
+                    if (!get_u32(in, pos, size) || !get_str(in, pos, name)) return false;
+                } else if (kind == 3) {
+                    if (!skip(in, pos, 1) || !get_str(in, pos, name)) return false;
+                } else if (kind == 4) {
+                    if (!get_str(in, pos, name) || !get_str(in, pos, name)) return false;
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+        static bool skip_portable_block(const std::vector<uint8_t>& in, size_t& pos) {
+            return skip(in, pos, 12) && skip_parameters_portable(in, pos) && skip_parameters_portable(in, pos)
+                && skip_tail(in, pos, true);
         }
 
         // The output IO a sub-link starts from, as (owner, output index).
@@ -994,6 +1679,30 @@ namespace bmmo::game {
             if (pos + 8 > in.size()) return false;
             std::memcpy(&v, in.data() + pos, 8);
             pos += 8;
+            return true;
+        }
+        // The portable record's strings: u16 length, bytes.
+        static void put_str(std::vector<uint8_t>& out, const std::string& s) {
+            const size_t n = std::min<size_t>(s.size(), 0xffff);
+            put_u16(out, static_cast<uint16_t>(n));
+            out.insert(out.end(), s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n));
+        }
+        static bool get_str(const std::vector<uint8_t>& in, size_t& pos, std::string& s) {
+            uint16_t n = 0;
+            if (!get_u16(in, pos, n) || pos + n > in.size()) return false;
+            s.assign(reinterpret_cast<const char*>(in.data() + pos), n);
+            pos += n;
+            return true;
+        }
+        static bool skip(const std::vector<uint8_t>& in, size_t& pos, size_t n) {
+            if (pos + n > in.size()) return false;
+            pos += n;
+            return true;
+        }
+        static bool copy_bytes(const std::vector<uint8_t>& in, size_t& pos, size_t n, std::vector<uint8_t>& out) {
+            if (pos + n > in.size()) return false;
+            out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(pos), in.begin() + static_cast<std::ptrdiff_t>(pos + n));
+            pos += n;
             return true;
         }
     };

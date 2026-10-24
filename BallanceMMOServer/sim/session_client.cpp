@@ -2841,7 +2841,7 @@ namespace {
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
         CK_ID sector_manager_id_ = 0;
         bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)
-        std::vector<CK_ID> script_activations_;              // the selected scripts whose activations are recorded (step P)
+        std::vector<CK_ID> script_activations_;              // the selected scripts whose activations are recorded (steps P, A1)
         std::set<std::string> explosion_pieces_;             // the trafo explosion pieces' entities (step P; session_host_support.hpp)
         std::vector<CK_ID> scripts_replayed_;                // the scripts the last restore wrote: active at its anchor
         bmmo::game::script_replay_hooks script_hooks_;
