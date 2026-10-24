@@ -620,6 +620,55 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::savestate_set_travelling(const uint8_t* data, size_t size, uint32_t flags,
+                                                const std::vector<std::pair<std::string, std::string>>& renames,
+                                                const std::vector<std::string>& excluded_prefixes, std::string& error,
+                                                std::vector<std::string>* contacts_dropped,
+                                                std::vector<std::string>* unknown_bodies, std::string* summary) const {
+        error.clear();
+        if (contacts_dropped) contacts_dropped->clear();
+        if (unknown_bodies) unknown_bodies->clear();
+        if (summary) summary->clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->savestate_set_travelling) {
+            error = "the physics_RT bridge lacks savestate_set_travelling";
+            return false;
+        }
+        if (!data || size == 0 || size > 0xFFFFFFFFull) {
+            error = "no savestate to restore";
+            return false;
+        }
+        std::string rename_text, excluded_text;
+        for (const auto& [from, to]: renames) rename_text += (rename_text.empty() ? "" : ";") + from + "=" + to;
+        for (const auto& prefix: excluded_prefixes) excluded_text += (excluded_text.empty() ? "" : ";") + prefix;
+        char text[512] = {};
+        char summary_text[1024] = {};
+        static thread_local std::vector<char> dropped(16384), unknown(32768);
+        dropped[0] = unknown[0] = '\0';
+        const int32_t ok = api_->savestate_set_travelling(manager_, data, static_cast<uint32_t>(size), flags, rename_text.c_str(),
+                                                          excluded_text.c_str(), text, sizeof(text), dropped.data(),
+                                                          static_cast<uint32_t>(dropped.size()), unknown.data(),
+                                                          static_cast<uint32_t>(unknown.size()), summary_text,
+                                                          sizeof(summary_text));
+        const auto split_into = [](const char* joined, std::vector<std::string>* out) {
+            if (!out) return;
+            std::string name;
+            for (const char* p = joined; *p; ++p) {
+                if (*p == ';') { if (!name.empty()) out->push_back(name); name.clear(); }
+                else name += *p;
+            }
+            if (!name.empty()) out->push_back(name);
+        };
+        split_into(dropped.data(), contacts_dropped);
+        split_into(unknown.data(), unknown_bodies);
+        if (summary) *summary = summary_text;
+        if (!ok) {
+            error = text[0] ? text : "savestate_set_travelling failed";
+            return false;
+        }
+        return true;
+    }
+
     bool physics_view::set_event_log_muted(bool muted, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

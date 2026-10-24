@@ -83,6 +83,27 @@ namespace bmmo::physics {
             if (unknown_bodies) *unknown_bodies = last_report.unknown_bodies;
             return ok;
         }
+        // v20: a travelling blob (the resync state's server blob,
+        // bmmo::physics::savestate_travel); `summary` gets the report's
+        // counts and first warnings, as the bridge writes them.
+        bool savestate_set_travelling(const uint8_t* data, size_t size, uint32_t flags,
+                                      const std::vector<std::pair<std::string, std::string>>& renames,
+                                      const std::vector<std::string>& excluded_prefixes, std::string& error,
+                                      std::vector<std::string>* contacts_dropped, std::vector<std::string>* unknown_bodies,
+                                      std::string* summary) {
+            savestate_travel travel;
+            travel.renames = renames;
+            travel.excluded_prefixes = excluded_prefixes;
+            const bool ok = bmmo::physics::set_savestate(manager, data, size, flags, error, &last_report, travel);
+            if (contacts_dropped) *contacts_dropped = last_report.contacts_dropped;
+            if (unknown_bodies) *unknown_bodies = last_report.unknown_bodies;
+            if (summary) {
+                *summary = "skipped=" + std::to_string(last_report.skipped) + " excluded=" + std::to_string(last_report.excluded)
+                         + " renamed=" + std::to_string(last_report.renamed);
+                for (size_t i = 0; i < last_report.warnings.size() && i < 16; ++i) *summary += " | " + last_report.warnings[i];
+            }
+            return ok;
+        }
         bool step_physics(float delta_ms, std::string& error) const { return bmmo::physics::step_physics(manager, delta_ms, error); }
         bool set_event_log_muted(bool muted, std::string&) const {
             bmmo::physics::set_event_log_muted(muted);

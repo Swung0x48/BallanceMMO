@@ -114,6 +114,16 @@ namespace bmmo::sim {
         std::vector<std::pair<uint32_t, uint32_t>> acked_inputs;
     };
 
+    // The resync state of tick base - 1 for one player (resync design 2.3,
+    // step A3; physics_world::resync_state), emitted by the simulation thread
+    // after the step of that tick, for the server to send to that member
+    // alone.  `emit_us`: what capturing it cost the step.
+    struct resync_state_out {
+        uint32_t session = 0, player = 0, tick = 0, base = 0;
+        physics_world::resync_state state;
+        uint64_t emit_us = 0;
+    };
+
     // Outcome of a world boot.  On success anchor_hash/surfaces are what
     // SessionReady must match and spawn_* is the level's retail spawn pose.
     struct world_ready_info {
@@ -141,6 +151,12 @@ namespace bmmo::sim {
     struct session_callbacks {
         std::function<void(const world_ready_info&)> on_world_ready;
         std::function<void(const session_snapshot&)> on_snapshot;
+        // Simulation thread (step A3): a requested resync state, after the
+        // step of its tick; and a request whose base - 1 the world had
+        // already stepped when the command ran (the server answers the
+        // member again with a newer base).
+        std::function<void(const resync_state_out&)> on_resync_state;
+        std::function<void(uint32_t session, uint32_t player, uint32_t base)> on_resync_base_missed;
         // Every simulated tick, a solo session's too: the input frame the
         // world applied for each player, fresh or substituted, and for a
         // substitute the tick it came from.  The server relays them to the
@@ -247,6 +263,13 @@ namespace bmmo::sim {
         void submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event,
                           uint64_t token = 0);
         void request_full_snapshot(uint32_t session);
+        // Step A3 (resync design 2.3): the state of tick base - 1 for
+        // `player`, emitted after that tick's step (on_resync_state).  A
+        // newer request for the same player replaces it.  When the world has
+        // stepped base - 1 already by the time the command runs (the base is
+        // computed on the network thread from the published tick), nothing is
+        // emitted and on_resync_base_missed says so.
+        void request_resync_state(uint32_t session, uint32_t player, uint32_t base);
         // Diagnostics through the log callback.
         void describe(uint32_t session);
 
@@ -375,6 +398,9 @@ namespace bmmo::sim {
             uint32_t start_base = 0;
             bmmo::session::tick_scheduler scheduler;
             bmmo::session::snapshot_cadence cadence;
+            // Step A3: the resync states owed, player -> base (emitted after
+            // the step of base - 1).
+            std::map<uint32_t, uint32_t> resync_requests;
             bool running = false;
             bool failed = false;
             // S4 (late-player design 3.2): the runs of ticks a member's frame
@@ -422,6 +448,7 @@ namespace bmmo::sim {
         void post(std::function<void()> command);
         void step(session_state& s);
         void emit_snapshot(session_state& s, bool full);
+        void emit_resync_states(session_state& s, uint32_t tick, bool recording);
         void log(const std::string& text);
         void publish_state(const session_state& s);
 

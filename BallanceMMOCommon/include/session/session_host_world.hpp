@@ -24,6 +24,7 @@
 #include "rollback_binding.hpp"
 #include "../physics/physics_rt_api.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -97,6 +98,13 @@ namespace bmmo::session {
             const auto it = by_tick_.find(tick);
             return it == by_tick_.end() ? nullptr : &it->second;
         }
+        // Every slot at a tick >= `tick` dropped (a resync's re-assign, step
+        // A3: the old numbering's frames).  Returns the ticks dropped.
+        size_t forget_from(uint32_t tick) {
+            size_t n = 0;
+            for (auto it = by_tick_.lower_bound(tick); it != by_tick_.end(); it = by_tick_.erase(it)) ++n;
+            return n;
+        }
 
     private:
         void trim(uint32_t tick) {
@@ -160,6 +168,28 @@ namespace bmmo::session {
             for (auto it = by_tick_.rbegin(); it != by_tick_.rend(); ++it)
                 for (const auto& b: it->second) if (b.name == entity) return it->first;
             return 0;
+        }
+        // Every birth at a tick > `tick` dropped (a resync, step A3: the old
+        // numbering's births after S, once the restore has used them; the
+        // replay logs the births it makes).  Returns the births dropped.
+        size_t forget_after(uint32_t tick) {
+            size_t n = 0;
+            for (auto it = by_tick_.upper_bound(tick); it != by_tick_.end(); it = by_tick_.erase(it)) n += it->second.size();
+            return n;
+        }
+        // ...of the named entities only.
+        size_t forget_after(uint32_t tick, const std::vector<std::string>& entities) {
+            size_t n = 0;
+            for (auto it = by_tick_.upper_bound(tick); it != by_tick_.end();) {
+                auto& births = it->second;
+                const size_t before = births.size();
+                births.erase(std::remove_if(births.begin(), births.end(), [&](const local_birth& b) {
+                    return std::find(entities.begin(), entities.end(), b.name) != entities.end();
+                }), births.end());
+                n += before - births.size();
+                it = births.empty() ? by_tick_.erase(it) : std::next(it);
+            }
+            return n;
         }
         // The order the live frame created a tick's bodies in: the event
         // log's order, which is the scripts' order.

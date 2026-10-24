@@ -251,6 +251,20 @@ namespace {
         int anchor_timeout = 3000;
         int64_t pause_at = -1;        // test knob: stop ticking at this tick ...
         int pause_ms = 0;             // ... for this long (design 9.2 resync path)
+        // --resync-at TICK | s<K>+<D> (resync design 7.3, step A3): a resync
+        // asked for while the client keeps stepping (the delta > 0 case), at
+        // TICK, or D ticks after the tick this client stamped its own entry
+        // into sector K for.
+        int64_t resync_at = -1;
+        int resync_at_sector = 0;
+        uint32_t resync_at_offset = 0;
+        // --record-by-tick (resync design 7.6): the record's frame of a tick
+        // is its offset from the first assigned base, not the frames since
+        // the last numbering - a run with a resync then plays the same keys
+        // at the same ticks as one without (the server's world must be the
+        // same from the same inputs).  Without a resync it is the frame
+        // index exactly.
+        bool record_by_tick = false;
         // --stall-ms T:MS is the same knob in the late-player harness's
         // spelling (docs/late-player-design.md 5.1 C7): a CPU stall at tick T,
         // nothing polled or stepped while it lasts.
@@ -322,6 +336,7 @@ namespace {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
+                  "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
@@ -439,6 +454,20 @@ namespace {
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
             else if (arg == "--pause-at") { if (!(v = next())) return false; out.pause_at = std::atoll(v); }
             else if (arg == "--pause-ms") { if (!(v = next())) return false; out.pause_ms = std::atoi(v); }
+            else if (arg == "--record-by-tick") out.record_by_tick = true;
+            else if (arg == "--resync-at") {
+                if (!(v = next())) return false;
+                const std::string spec = v;
+                if (!spec.empty() && spec[0] == 's') {
+                    const size_t plus = spec.find('+');
+                    if (plus == std::string::npos) return false;
+                    out.resync_at_sector = std::atoi(spec.substr(1, plus - 1).c_str());
+                    out.resync_at_offset = static_cast<uint32_t>(std::atoi(spec.substr(plus + 1).c_str()));
+                    if (out.resync_at_sector <= 0) return false;
+                } else {
+                    out.resync_at = std::atoll(v);
+                }
+            }
             else if (arg == "--stall-ms") {
                 if (!(v = next())) return false;
                 const std::string spec = v;
@@ -821,6 +850,12 @@ namespace {
                 core_.on_session_snapshot(msg);
                 break;
             }
+            case bmmo::SessionResyncState: {
+                bmmo::session_resync_state_msg msg;
+                if (!fill(msg)) return;
+                core_.on_session_resync_state(std::move(msg));
+                break;
+            }
             case bmmo::SessionEvent: {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
@@ -985,9 +1020,43 @@ namespace {
                 CKDataArray* parameters = engine_->data_array("IngameParameter");
                 return parameters && parameters->GetElementValue(0, 1, &cell);
             };
+            // Step A3: the exact resync's - the server's script record
+            // localized (host support), the old numbering's activations and
+            // script resets forgotten at the re-assign, the births of the
+            // bodies the server's state has at S forgotten after the restore,
+            // the birth log for the reconcile, the trafo pieces as this
+            // world's own.
+            p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
+                                        std::vector<uint8_t>& out, std::string& error,
+                                        bmmo::session::resync_script_report& report) {
+                return bmmo::game::localize_session_scripts(engine_->context(), scripts_, portable, anchor, out, error, report);
+            };
+            p.forget_activations_from = [this](uint32_t tick) {
+                const size_t activations = manager_activations_.forget_from(tick);
+                const size_t resets = bmmo::game::forget_reset_ticks_from(script_reset_ticks_, tick);
+                if (activations || resets)
+                    logf("resync: %zu activation tick(s) and %zu script reset(s) of the old numbering from tick %u forgotten",
+                         activations, resets, tick);
+            };
+            p.forget_births_after = [this](uint32_t tick, const std::vector<std::string>& entities) {
+                const size_t n = local_births_.forget_after(tick, entities);
+                if (n) logf("resync: %zu birth(s) after tick %u of bodies the server's state has at it forgotten", n, tick);
+            };
+            p.birth_tick_of = [this](const std::string& entity) { return local_births_.birth_tick_of(entity); };
+            p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
+                char* bytes = CKUnPackData(static_cast<int>(size), reinterpret_cast<const char*>(packed.data()),
+                                           static_cast<int>(packed.size()));
+                if (!bytes) return false;
+                out.assign(reinterpret_cast<const uint8_t*>(bytes), reinterpret_cast<const uint8_t*>(bytes) + size);
+                CKDeletePointer(bytes);
+                return true;
+            };
+            p.local_only_body = [this](const std::string& entity) { return explosion_pieces_.count(entity) != 0; };
             // The host hooks (E3): the pacer's origin restarts with the
             // numbering, --hold-event, and its discards at the session's end.
             p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) { origin_ = wall_now(site); };
+            // Step A3: the frames a resync hold did not run are not owed.
+            p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) { origin_ += held; };
             p.hooks.filter_event = [this](const bmmo::session_event_msg& event) {
                 if (!hold_event(event)) return bmmo::session::event_send_verdict::send;
                 return args_.hold_event_drop ? bmmo::session::event_send_verdict::drop
@@ -1873,6 +1942,13 @@ namespace {
                 wall_sleep(std::chrono::milliseconds(1));
                 return;   // poll the network, step nothing
             }
+            // Step A3 (resync design 2.6.6): a pending exact resync whose
+            // anchor would leave the history with the next step holds the
+            // world the same way, until its state is applied (or 2 s).
+            if (core_.poll_resync_hold().held) {
+                wall_sleep(std::chrono::milliseconds(1));
+                return;
+            }
             // Frames run from the assignment, and the server's world starts at
             // the same tick: a client that stepped between its anchor and the
             // assignment would be that many steps ahead of the world for good.
@@ -1972,7 +2048,14 @@ namespace {
 
         void frame() {
             std::string error;
-            const int64_t f = core_.frames_since_anchor() + 1;
+            int64_t f = core_.frames_since_anchor() + 1;
+            if (args_.record_by_tick && core_.assigned()) {
+                if (!have_first_base_) {
+                    have_first_base_ = true;
+                    first_base_ = core_.next_tick() - static_cast<uint32_t>(std::max<int64_t>(core_.frames_since_anchor(), 0));
+                }
+                f = static_cast<int64_t>(core_.next_tick() - first_base_) + 1;
+            }
             // Keys of this frame come from the recording (frame f of the record).
             const unsigned char* keyboard = nullptr;
             if (!record_.frames.empty() && f >= 0 && static_cast<size_t>(f) < record_.frames.size()) {
@@ -2000,6 +2083,24 @@ namespace {
             const bool ticked = engine_->tick(error);
             live_tick_serial_ = 0;
             if (!core_.post_step(ticked)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
+            // --resync-at (step A3): a resync asked for while this client
+            // keeps stepping, once.
+            if (!resync_at_done_ && core_.assigned()) {
+                uint32_t due = 0;
+                bool armed = false;
+                if (args_.resync_at >= 0) {
+                    due = static_cast<uint32_t>(args_.resync_at);
+                    armed = true;
+                } else if (args_.resync_at_sector > 0 && core_.own_sector_stamp(args_.resync_at_sector, due)) {
+                    due += args_.resync_at_offset;
+                    armed = true;
+                }
+                if (armed && static_cast<int32_t>(current_tick() - due) >= 0) {
+                    resync_at_done_ = true;
+                    logf("test resync: requested at tick %u (--resync-at, due %u)", current_tick(), due);
+                    core_.request_resync("test (--resync-at)");
+                }
+            }
         }
 
         // post_step step 17's upkeep (platform own_body_upkeep): the body
@@ -2949,6 +3050,9 @@ namespace {
         uint32_t hold_event_seen_ = 0;
         std::vector<held_event> held_events_;
         bool paused_once_ = false;
+        bool resync_at_done_ = false;   // --resync-at fired
+        bool have_first_base_ = false;  // --record-by-tick: the first assigned base
+        uint32_t first_base_ = 0;
         // The own ball's navigation replica (design 9.6; host support's
         // own_replica since E9): whether it drives the own ball, the entity
         // it was last attached to, and the keys it polls.

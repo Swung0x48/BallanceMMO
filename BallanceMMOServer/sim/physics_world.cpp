@@ -4,6 +4,8 @@
 #include "CKIpionManager.h"
 #include "PhysicsCallback.h"
 
+#include <game/session_host_support.hpp>
+#include <physics/physics_savestate.hpp>
 #include <physics/physics_state.hpp>
 #include <session/spawn_impulse.hpp>
 
@@ -251,6 +253,20 @@ namespace bmmo::sim {
         if (!ensure_collision_filter(error)) return false;
         rewire_proximity_probes();
         rewire_ball_identity_reads();
+        // Step A3 (resync design 2.3): the selection the clients make at
+        // their anchor (trafo scripts included, so the three have the same
+        // keys) and the force hook over this world, for the resync state's
+        // portable record.  Selecting reads the graphs; it changes nothing.
+        script_selection_ = bmmo::game::session_script_selection(context);
+        script_hooks_ = {};
+        script_hooks_.capture_force = [manager](CKBehavior* block, bmmo::game::force_block_state& out) {
+            bmmo_physics_force_block state{};
+            std::string e;
+            if (!bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, e)) return false;
+            out.exists = state.exists != 0;
+            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+            return true;
+        };
         // The level's own checkpoint activation, held (game/sector_activation.hpp):
         // update_sectors() is the only path that runs Gameplay_SectorManager in
         // this world.  The rewired proximity probes let any player's clone fire
@@ -1090,7 +1106,57 @@ namespace bmmo::sim {
         collect_bodies(true, false, out);
     }
 
-    void physics_world::collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out) {
+    void physics_world::capture_resync_state(uint32_t player, resync_state& out) {
+        out = resync_state{};
+        // The rows a full snapshot of this tick carries, numbered as the
+        // snapshots number them (a body new to the numbering gets its number
+        // now, the one the next full snapshot would give it), without the
+        // body-set bookkeeping: the snapshot cadence is the runner's.
+        collect_bodies(true, false, out.rows, true);
+        // Every player's ball entity: the client maps each to its own entity
+        // of that player (the resynced member's own ball, a mirror).
+        (void)player;
+        for (const auto& [id, p]: players_) {
+            if (p.physicalized && p.ball && p.ball->GetName()) out.clones.emplace_back(id, p.ball->GetName());
+            // ...and its navigation: the keys down and each live force
+            // controller's force, which the camera at the key's press made.
+            if (p.navigation) {
+                bmmo_physics_nav_state nav{};
+                p.navigation->get_state(nav);
+                out.navs.emplace_back(id, nav);
+            }
+        }
+        out.union_state = bmmo::session::sector_union::serialize(sectors_.state());
+        if (out.union_state.empty()) out.error = "the sector union does not serialize";
+        std::string e;
+        if (!bmmo::game::script_replay::capture_portable(engine_->context(), script_selection_, script_hooks_, out.scripts, &e)) {
+            out.scripts.clear();
+            if (out.error.empty()) out.error = "portable script record: " + e;
+        }
+        e.clear();
+        if (!bmmo::physics::get_savestate(physics(), out.savestate, e)) {
+            out.savestate.clear();
+            if (out.error.empty()) out.error = "savestate: " + e;
+        }
+        // Packed for the wire (CKPackData: zlib, the CK file format's own):
+        // the client unpacks with its CK's CKUnPackData.  A section that does
+        // not pack is carried as it is (size 0).
+        const auto pack = [](std::vector<uint8_t>& bytes, uint32_t& size) {
+            if (bytes.empty()) return;
+            int packed_size = 0;
+            char* packed = CKPackData(reinterpret_cast<const char*>(bytes.data()), static_cast<int>(bytes.size()), packed_size, 6);
+            if (!packed) return;
+            if (packed_size > 0 && static_cast<size_t>(packed_size) < bytes.size()) {
+                size = static_cast<uint32_t>(bytes.size());
+                bytes.assign(reinterpret_cast<const uint8_t*>(packed), reinterpret_cast<const uint8_t*>(packed) + packed_size);
+            }
+            CKDeletePointer(packed);
+        };
+        pack(out.scripts, out.scripts_size);
+        pack(out.savestate, out.savestate_size);
+    }
+
+    void physics_world::collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out, bool number) {
         using bmmo::session::body_kind;
         using bmmo::session::body_state;
         out.clear();
@@ -1144,7 +1210,7 @@ namespace bmmo::sim {
                 if (previous == last_simulated_.end() || !previous->second) continue;
             }
             auto index = body_index_.find(name);
-            if (index == body_index_.end() && bookkeeping)
+            if (index == body_index_.end() && (bookkeeping || number))
                 index = body_index_.emplace(name, static_cast<uint16_t>(body_index_.size())).first;
             state.kind = body_kind::Mechanism;
             state.owner = index != body_index_.end()

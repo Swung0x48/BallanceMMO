@@ -841,6 +841,159 @@ not step: D would leave the history.
   `schedule_rebased` (:969-972) and so ask for another resync. The state
   lives in the file-scope host state, not in `BallanceMMOClient`.
 
+**As built (step A3, 2026-10-24).**
+
+- **Wire (§5 adapted).** Protocol 10. The state is not a `full = 2`
+  snapshot but its own message, `SessionResyncState`
+  (`message/session_resync_state_msg.hpp`, opcode appended): session, tick
+  S, base, the rows (the full-snapshot row format, names included), every
+  player's server clone name, every player's navigation state
+  (`bmmo_physics_nav_state`), the union bytes, the portable script record
+  and the server's savestate blob as u32-length sections, plus the two
+  sections' unpacked sizes. The server packs the record and the blob with
+  `CKPackData` (zlib, level 6) and the client unpacks with its CK's
+  `CKUnPackData` (`client_platform::unpack_bytes`, both hosts). Unpacked,
+  the state was 150-250 KB, which GameNetworkingSockets' default 256 KB/s
+  send rate delivered in 40-65 ticks: D reached 72 and every relayed frame
+  of the window left the reach. Packed it is 29-50 KB on the arena
+  (blob 108-145 KB -> 20-38 KB, record 40 KB -> 5 KB) and D is 12-53.
+  `SessionAssign` carries `u8 flags` on every copy.
+- **Capability.** `SessionReady.caps` gains `CAP_RESYNC_STATE`, set by a
+  core with rollback on (the apply is a re-step; `unpack_bytes` is a
+  required platform operation). A resync of a member without it - the
+  legacy retail path, a core with rollback off - is answered as before
+  protocol 10: no flag, `request_full_snapshot` to everyone (server.cpp
+  `resync_member`). The server's "resynced at tick"
+  log line keeps its format (the harness reads it); "the state of tick S
+  follows" is a second line.
+- **Server.** `physics_world::capture_resync_state` (rows numbered without
+  touching the body-set bookkeeping, clones, navs, union, the portable
+  record over the selection the world makes at `anchor()`, the savestate),
+  `session_runner::request_resync_state` / `emit_resync_states` after the
+  step that runs base-1 (journal NOTE per state and per missed base, which
+  answers again; the miss test is `tick_index() >= base`, the index being
+  the next tick to step). Emitting costs 3.9-5.5 ms. A state larger than
+  the message's caps (rows, 4 MB sections) is logged as cut. The server never reads it back
+  and is independent of snapshots.
+- **The travelling savestate (bridge note, no engine change).** physics_RT
+  API v20 `savestate_set_travelling`, behind a `savestate_travel` struct
+  (renames, excluded prefixes) on a `set_savestate` overload instead of a
+  flag bit: the environment-id check is waived, objects are matched by
+  name after renames and by occurrence order for shared names
+  (`live_world::find_by_occurrence`), keep-local prefixes are skipped and
+  counted, a callback list that differs in length is a note, not a
+  refusal; the PreSimulate queue is not compared (the live one is kept).
+  Restore flags stay 0 (unknown bodies dropped as before). Every clone is
+  renamed, mirrors included: the server names a player's clone
+  `Ball_*_BMMO_<id+1>`, a client's mirror can be `<id+2>` (the CK name
+  bump), and the own clone becomes the own ball (`resync_renames`). x64
+  and x86 blobs are identical past the 16-byte header; the x86 SimTool
+  restores an x64 blob byte-identically (§9 Q1 decided: the server's blob
+  travels).
+- **Navigation travels.** The anchor's own navigation (keys held, the
+  `bmmo:force/<leaf>` controllers made with the camera of the key press)
+  is not the server's; restoring the server's ball with the client's
+  controllers put the own ball 0.88 m off. The message carries every
+  player's nav state and the apply installs them (mapped to local
+  entities) in the anchor record.
+- **Keep-local.** `PE_Balloon` and `PE_Box_slide` (`resync_rules.hpp`):
+  the slide is jointed to the keep-local balloon platform by the
+  `PE_Balloon Script` slider and spring, and restoring it alone moved it
+  10 mm -> 44 m.
+- **Client core.** `client_core_resync.cpp` (new): `anchor_resync`,
+  `on_session_resync_state`, `try_apply_resync`, `poll_resync_hold`.
+  Rows map through the registry, with a name fallback when the body
+  exists (the registry's 20 m identity guard refused a far-diverged sack
+  forever). A missing body defers (`resync_deferred`) and the apply is
+  retried from `pre_step`. Fixed parts are rechecked, not destroyed;
+  `forget_births_after` is limited to the rowed entities. Lifecycle events
+  stamped before the pending anchor are skipped (the state covers them);
+  snapshots are dropped while the exact resync is pending. The apply runs
+  `rollback_.resync` inside the live-cells guard with the union
+  re-derivation of §2.8, then restores the union and adopts the cells.
+- **Resync hold.** Spent once timed out (`resync_hold_spent_`): re-engaging
+  after a timeout stalled a client for 14 s and its next base came back
+  946 ticks early. The timeout asks for a new resync at once (every other
+  trigger waits while one is pending), and a refused state's request that
+  the 2 s limiter holds back stays owed while the exact resync is pending
+  with nothing in flight (`retry_owed_resync`). In the final runs D never
+  came near the reach (max 50 of 95): holds 0 everywhere; the hold is
+  covered by unit tests only.
+- **Δ > 0.** `--resync-at` cannot make it: the server's base is its tick
+  plus the member's lead, and a running client is that lead ahead minus the
+  downlink trip it started with, so Δ is about the change of the downlink
+  trip since the start (-5/-6 at a steady 150 ms). The running-client arm
+  with Δ > 0 is therefore `--event 0:600:step=300:dir=down` beside
+  `--client-arg-for '0:--resync-at s2+3'` (`core_ref_r3/resync_at150_down`,
+  Δ +14). It showed a gap the design had not named: the old numbering had
+  sent its frames for base..R, the server's buffer keeps a frame it has at
+  or after the base (`input_buffer::reset`) and takes the first copy of a
+  tick (`submit`), so it applied those while the client played new ones
+  (14 own frames keys 1 vs 0, the own ball 0.77 m off after the apply).
+  The re-assign now takes those frames from the sent ring and plays them
+  again at their ticks as forced own frames (`resync_resent_`); the inputs
+  then agree (0 of 74 differ) and the own ball is bit-exact from B+2. The
+  pass undo itself (a pass inside (S, R]) is covered by a unit test only.
+- **Review fix-up (two reviews).**
+  - The apply runs after the drain the state arrived in (`poll_resync_hold`,
+    which both hosts call before `pre_step`), not on arrival.
+  - A held notice for a tick of the pending exact resync's epoch amends the
+    own RECORD (the re-step feeds the own ball from the record, not from
+    `own_inputs_`), with no rewind of its own; one for a tick not simulated
+    yet is amended when its live frame is recorded (`resync_amends`). Stored
+    in `own_inputs_` alone it left a5u_lead's own ticks 2779-2788 at keys 0
+    where the server applied 5, and the own ball 0.17 m off for good.
+  - After the apply `held_floor_` is S, not base: the history reaches S,
+    so a notice for base itself is replayed like any later one (§2.6.4's
+    rule, which `held_floor_ = base` excluded).
+  - Inside the re-step window (S, applied tick] a correction - a held
+    notice, a relayed frame - rewinds as deep as the re-step
+    (`window_rewind_reach`, `rewind_to`'s `reach`), not max_resim_ticks:
+    with D 51-53 the server's substitutions of the new epoch's first ticks
+    each asked for the next resync (a5u_lead: 6 resyncs vs B1's 2).
+  - A correction noted before the apply is subsumed by its re-step
+    (dropped, counted `subsumed`).
+  - A mirror dead after S is made from its row before the renames and the
+    navigation are built, and its death is queued whatever its tick and
+    drained live by `pre_step` when it lies past the apply.
+  - The bridge reports a name list that overflows the caller's buffer in
+    the summary, not as a failed restore.
+  - Refuted: `restore_and_replay` cannot refuse after it changed the anchor
+    record (its only `false` is before), so the anchor never keeps the
+    server's scripts for a re-step that did not run.
+- **Test hooks.** SimTool `--resync-at TICK | s<K>+<D>`, and
+  `--record-by-tick` for §7.6's recorded-frame comparison.
+- **Measured (final binaries, fix-up included; snapshots off, 150 ms,
+  arena, 4 clients; `core_ref_r3/`).** Every apply: unportable,
+  unmapped, refused, unexplained, unattributed 0; P_Modul_01/08 within
+  0.000003 m to the end; phase_misses 0; every client's snapshot count
+  equal (no broadcast for a resync). The own ball is bit-exact from B+2..B+4
+  in every apply but one and stays so 20-160 ticks (the one: c0's second
+  resync in resync_at150_down, Δ +4, whose mirrors were off from the
+  relayed frames its +300 ms downlink brought past the reach, 81 in that
+  minute, in the lane pile the own ball shares); what follows is (a) the own
+  frames the server substitutes while the notices are on their way (the
+  lead client of a5u_lead), (b) G-c (leader-only wakes, roadmap §4 item 7):
+  P_Modul_03 1.35 m and P_Modul_19 1.8 mm in every non-leader, resynced or
+  not, from the leader's BodyRevived, and the non-leaders' own balls after
+  it, and (c) mirror prediction in the lane pile where relayed frames come
+  past the 48-tick reach. resync_snapoff: 4 resyncs (E0 4), each exact from
+  B+2..B+4 for 120-160 ticks, c2 exact again at the end. resync_at150
+  (Δ -5): c0 716/850 bit-exact after the apply, [B+60, B+600] 228/271
+  (before the fix-up: 38/263 within 1 mm, max 6.5 m). a5u_lead: c2 1 resync
+  (B1 2), D 50, exact 2946-3094 and at the end. resync_at150_down (Δ +14):
+  exact 924-942, then the lane pile with the recipe's late relayed frames.
+  Server replays exact; the 16 new captures replay byte-identical with
+  identical sends. Solo (§7.6): the server's
+  checkpoints, pre-A3 vs A3, 0/1434 differ; a solo resync at tick 1500
+  (Δ -7, D 56) leaves the server identical through tick 2407 and the
+  client bit-exact to it after the apply (34 bodies); the first server
+  difference, at 2408, is an applied input frame (the client's NAV_ACTIVE
+  flag phase after its renumbering), not the server's world.
+- **Open.** The resync hold has not run live (D at most 50 of 95). The pass
+  undo of Δ > 0 needs a pass inside (S, R], which the live recipe does not
+  place; a unit test covers it.
+
 ### 2.7 Client core: the late Sector stamp and the moved own Sector (B1)
 
 **Records.** `post_step` records `s.union_records_[T] = s.sectors_.state()`

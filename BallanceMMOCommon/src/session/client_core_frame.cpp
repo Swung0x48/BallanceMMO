@@ -45,9 +45,11 @@ namespace bmmo::session {
         // Only while the server still substitutes our ticks: once its
         // header says it has our frames again no notice will join the
         // waiting replay, which then runs at once.
+        // Step A3: a correction inside the last exact resync's re-step
+        // reaches as deep as that re-step did (window_rewind_reach).
+        const uint32_t reach = window_rewind_reach(s.input_rewind_tick_);
         if (s.input_rewind_own_ && s.input_rewind_entities_.empty()
-                && !s.own_replay_pacer_.due(current_tick(), s.input_rewind_tick_, s.rollback_.thresholds().max_resim_ticks,
-                                          own_notices_coming())) {
+                && !s.own_replay_pacer_.due(current_tick(), s.input_rewind_tick_, reach, own_notices_coming())) {
             ++s.subst_deferred_;
             return;
         }
@@ -75,7 +77,9 @@ namespace bmmo::session {
         const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
                                        : entity + " input corrected at tick " + std::to_string(anchor);
         if (has_own) s.own_replay_pacer_.ran();
-        if (s.rollback_.rewind_to(world(), anchor - 1, now, input_at, reason)) {
+        const uint32_t standard = s.rollback_.thresholds().max_resim_ticks;
+        if (s.rollback_.rewind_to(world(), anchor - 1, now, input_at, reason, reach > standard ? reach : 0)) {
+            if (reach > standard && now - (anchor - 1) > standard) ++s.resync_window_rewinds_;
             if (has_own) {
                 ++s.subst_rewinds_;
                 s.subst_rewind_depth_ += now - (anchor - 1);
@@ -498,6 +502,10 @@ namespace bmmo::session {
         // among them - then the union's pass, then the step: the order the
         // server's session_runner::step keeps.
         drain_due_events(frame_tick);
+        // Step A3: a mirror an exact resync made from its row at S whose
+        // death the old numbering applied past the re-step (Delta > 0) dies
+        // again at its tick here, live (the replay drains the others).
+        drain_pending_deaths(frame_tick);
         // Our own events' echoes: a birth the server made later or never
         // is moved inside the history now, with the rewinds below still
         // to come in this frame.
@@ -505,6 +513,11 @@ namespace bmmo::session {
         // The sector resets stay neutralized (the level-reset one once the
         // sector is up: this client has resolved a mechanism of its own).
         platform_.script_guards(frame_tick, s.mechanism_tracking_.resolved() > 0);
+        // Step A3: a resync state waiting for its bodies (resync design
+        // 2.6.4 step 2), tried again now that the drain made what was due -
+        // before this frame's own rewinds, which then run on the re-stepped
+        // history.
+        if (s.have_resync_state_) try_apply_resync("retry");
         // Step B1: the Sector stamps that arrived late inside the reach, and
         // the own ones the server moved, re-derived from the tick before the
         // lowest of them - after the drain's lifecycle rewinds, before the

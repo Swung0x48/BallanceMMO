@@ -48,13 +48,32 @@ namespace bmmo::session {
     //      never earlier than the stamp) and state bits (EVENT_STATE_*); it
     //      is relayed to every member, the owner included, and every
     //      receiver keys, orders and guards a player's events on the origin.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 9;   // 4: SessionStart carries spawn_spacing
+    //  10  a resync anchors at base-1 (resync design 2.3, step A3):
+    //      SessionAssign carries flags (ASSIGN_FLAG_STATE_FOLLOWS, on the
+    //      reliable copy and every unreliable repeat), and the resynced member
+    //      alone gets SessionResyncState - the server's state at the end of
+    //      tick base-1: the rows, the sector union, the portable script
+    //      record, every ball's navigation and the server's IVP savestate -
+    //      instead of a full snapshot broadcast to every member; a member
+    //      declares it can (SessionReady caps CAP_RESYNC_STATE).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 10;   // 4: SessionStart carries spawn_spacing
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
     // clock, amends and forces the held range) and acknowledges it; the
     // server sends SessionLead to nobody else (late-player design 2.2).
     constexpr uint32_t CAP_LEAD = 1u << 0;
+    // Protocol 10 (resync design 2.3, step A3): the client applies a
+    // SessionResyncState (the session core).  A resync of a member without it
+    // (the legacy retail path) is answered as before protocol 10: an
+    // assignment without flags and a full snapshot broadcast to every member.
+    constexpr uint32_t CAP_RESYNC_STATE = 1u << 1;
+
+    // session_assign_msg::flags (protocol 10).  STATE_FOLLOWS: a
+    // SessionResyncState of tick first_tick - 1 follows on the reliable
+    // channel, to this member only; the client anchors its history there
+    // and applies it as that tick (resync design 2.6).
+    constexpr uint8_t ASSIGN_FLAG_STATE_FOLLOWS = 1u << 0;
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.

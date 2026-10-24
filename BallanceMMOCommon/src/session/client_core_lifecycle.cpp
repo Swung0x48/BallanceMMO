@@ -189,6 +189,15 @@ namespace bmmo::session {
         if (!config.rollback || !config.lifecycle_rewind || event_tick == 0) return;
         const uint32_t now = current_tick();
         if (static_cast<int32_t>(event_tick - now) > 0) return;   // not late: nothing to replay
+        // Step A3 (resync design 2.6.2): a late change before the synthetic
+        // anchor of a pending exact resync - the ticks (R, base - 1] the
+        // stall never ran, drained at base - is covered by the server's
+        // state of base - 1: applied live, no rewind, no miss.
+        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(event_tick - s.resync_base_) < 0) {
+            logf("lifecycle event of %u stamped tick %u precedes the resync's anchor %u: the server's state covers it", player,
+                 event_tick, s.resync_base_ - 1);
+            return;
+        }
         auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
             return recorded_input_at(entity, tick, out);
         };
@@ -285,6 +294,9 @@ namespace bmmo::session {
     void session_client_core::apply_event(const bmmo::session_event_msg& event) {
         if (event.player == 0 || event.player == s.own_id_) return;
         journal_.lifecycle_event(event.player, event);
+        // Step A3: the remote lifecycle by applied tick (life_log_).
+        if (event.type == bmmo::session::event_type::Physicalize || event.type == bmmo::session::event_type::Unphysicalize)
+            log_life(event);
         switch (event.type) {
         case bmmo::session::event_type::Physicalize: {
             // A birth older by origin than a death of the same player this

@@ -173,6 +173,9 @@ namespace bmmo::session {
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                      "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                      "sectors: rew=%llu/%llu depth=%llu forgot=%llu births_moved=%llu phase_misses=%llu "
+                     "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
+                     "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
+                     "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu "
                      "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
@@ -290,6 +293,34 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(s.sector_rewind_depth_),
                      static_cast<unsigned long long>(s.sector_passes_forgotten_),
                      static_cast<unsigned long long>(rs.births_moved), static_cast<unsigned long long>(s.phase_misses_),
+                     // resync: (step A3) the exact resyncs re-stepped / done
+                     // in all, their re-stepped ticks, the states received,
+                     // stale and refused, the applies put off for the body set
+                     // (and their frames), the snapshots dropped while one was
+                     // pending, the server scripts and blobs refused, the
+                     // reconcile's destroys, unexplained and unattributed
+                     // bodies, rows with no body, unportable references, and
+                     // the resync holds (timed out) with the longest in ms, and
+                     // the correction rewinds deeper than max_resim_ticks
+                     // inside a re-step window (window_rewind_reach), and the
+                     // pending corrections an apply's re-step subsumed, and the
+                     // own records amended while an exact resync was pending,
+                     // and the old numbering's own frames played again.
+                     static_cast<unsigned long long>(s.resyncs_restepped_), static_cast<unsigned long long>(s.resyncs_done_),
+                     static_cast<unsigned long long>(s.resync_restep_depth_), static_cast<unsigned long long>(s.resync_states_),
+                     static_cast<unsigned long long>(s.resync_states_stale_),
+                     static_cast<unsigned long long>(s.resync_states_refused_),
+                     static_cast<unsigned long long>(s.resync_deferred_), static_cast<unsigned long long>(s.resync_deferred_ticks_),
+                     static_cast<unsigned long long>(s.snapshots_while_resync_),
+                     static_cast<unsigned long long>(s.resync_scripts_refused_),
+                     static_cast<unsigned long long>(s.resync_blobs_refused_), static_cast<unsigned long long>(s.resync_destroyed_),
+                     static_cast<unsigned long long>(s.resync_unexplained_), static_cast<unsigned long long>(s.resync_unattributed_),
+                     static_cast<unsigned long long>(s.resync_rows_unmapped_), static_cast<unsigned long long>(s.resync_unportable_),
+                     static_cast<unsigned long long>(s.resync_holds_), static_cast<unsigned long long>(s.resync_hold_timeouts_),
+                     s.resync_hold_ms_max_, static_cast<unsigned long long>(s.resync_window_rewinds_),
+                     static_cast<unsigned long long>(s.resync_rewinds_subsumed_),
+                     static_cast<unsigned long long>(s.resync_amends_),
+                     static_cast<unsigned long long>(s.resync_resent_),
                      static_cast<unsigned long long>(s.input_reports_), static_cast<unsigned long long>(s.input_starved_),
                      s.input_reports_ ? 100.0 * static_cast<double>(s.input_starved_) / static_cast<double>(s.input_reports_) : 0.0,
                      s.worst_starved_,

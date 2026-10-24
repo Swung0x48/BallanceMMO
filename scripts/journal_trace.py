@@ -48,7 +48,7 @@ import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 3   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9)
+VERSION = 4   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10)
 OLDEST_READABLE = 2   # a version 2 file has no event origin: its stamp is the origin
 
 TAG_HEADER = 0
@@ -59,8 +59,10 @@ TAG_TICK = 4
 TAG_CHECKPOINT = 5
 TAG_NOTE = 6
 TAG_CORRECTION = 7
+TAG_RESYNC = 8      # version 4: a client's resync state applied as tick S (resync design 5, step A3)
 TAG_NAMES = {TAG_HEADER: "HEADER", TAG_PLAYER: "PLAYER", TAG_INPUT: "INPUT", TAG_EVENT: "EVENT",
-             TAG_TICK: "TICK", TAG_CHECKPOINT: "CHECKPOINT", TAG_NOTE: "NOTE", TAG_CORRECTION: "CORRECTION"}
+             TAG_TICK: "TICK", TAG_CHECKPOINT: "CHECKPOINT", TAG_NOTE: "NOTE", TAG_CORRECTION: "CORRECTION",
+             TAG_RESYNC: "RESYNC"}
 
 KIND_SERVER = 0
 KIND_CLIENT = 1
@@ -83,6 +85,8 @@ INPUT_SUBSTITUTED = 4
 CHECKPOINT_FULL = 1
 CHECKPOINT_LOCAL = 2
 CHECKPOINT_RECEIVED = 4
+CHECKPOINT_RESYNC = 8   # version 4: the rows of a resync state
+RESYNC_OUTCOMES = {0: "applied", 1: "refused_scripts", 2: "timed_out"}
 
 EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived"}
 CORRECTION_KINDS = {0: "mismatch", 1: "rollback", 2: "hard", 3: "blend", 4: "resync",
@@ -425,7 +429,7 @@ class JournalTick(object):
     """Every record of one tick; a group exists when the tick has any record."""
 
     __slots__ = ("tick", "players", "inputs", "events", "has_tick", "record",
-                 "checkpoints", "notes", "corrections")
+                 "checkpoints", "notes", "corrections", "resyncs")
 
     def __init__(self, tick):
         self.tick = tick
@@ -437,11 +441,12 @@ class JournalTick(object):
         self.checkpoints = []
         self.notes = []
         self.corrections = []
+        self.resyncs = []
 
     def bare(self):
         """Only a TICK record: nothing a triage pass wants to look at."""
         return not (self.players or self.inputs or self.events or self.checkpoints
-                    or self.notes or self.corrections)
+                    or self.notes or self.corrections or self.resyncs)
 
 
 class Journal(object):
@@ -702,6 +707,9 @@ class JournalReader(object):
         elif tag == TAG_CORRECTION:
             record = self._correction(cursor)
             journal.group(record["tick"]).corrections.append(record)
+        elif tag == TAG_RESYNC:
+            record = self._resync(cursor)
+            journal.group(record["tick"]).resyncs.append(record)
         journal.trailing_bytes += cursor.remaining()
 
     @staticmethod
@@ -838,6 +846,16 @@ class JournalReader(object):
     @staticmethod
     def _note(cursor):
         return {"tick": cursor.u32(), "text": cursor.string()}
+
+    @staticmethod
+    def _resync(cursor):
+        record = {"tick": cursor.u32(), "base": cursor.u32(), "delta": cursor.i32(), "applied_at": cursor.u32(),
+                  "outcome": cursor.u8()}
+        for name in ("union", "scripts", "savestate"):
+            size = cursor.u32()
+            start = cursor._take(size)
+            record[name] = bytes(cursor.data[start:start + size])
+        return record
 
     @staticmethod
     def _correction(cursor):
@@ -1126,7 +1144,7 @@ def _fmt_tick(record):
 
 def _checkpoint_flags(flags):
     return _flag_names(flags, ((CHECKPOINT_FULL, "FULL"), (CHECKPOINT_LOCAL, "LOCAL"),
-                               (CHECKPOINT_RECEIVED, "RECEIVED")))
+                               (CHECKPOINT_RECEIVED, "RECEIVED"), (CHECKPOINT_RESYNC, "RESYNC")))
 
 
 def _fmt_checkpoint(record):

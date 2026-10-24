@@ -136,6 +136,10 @@ if (BMMO_BUILD_SIM)
         target_compile_definitions(BallanceMMOSim PRIVATE IVP_PORTABLE_BMMO)
     endif ()
     target_compile_features(BallanceMMOSim PUBLIC cxx_std_20)
+    # The world's resync state (step A3) uses the session core's rules and
+    # host support, whose message headers carry GameNetworkingSockets'
+    # typedefs: headers only, the library links no transport.
+    target_include_directories(BallanceMMOSim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets/include)
     # The same build id the client's physics_RT plugin reports, so the server
     # can tell a client running another engine revision from its own.
     include(${CMAKE_CURRENT_LIST_DIR}/../cmake/BuildId.cmake)

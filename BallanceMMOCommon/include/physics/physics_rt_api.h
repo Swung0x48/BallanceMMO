@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 19u  /* v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 20u  /* v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -570,6 +570,23 @@ typedef struct bmmo_physics_api_v2 {
      * with the collision recheck.  Returns 1, or -1 with a message. */
     int32_t (*set_body_matrix)(void* ipion_manager, const char* entity, const float matrix[16], int32_t simulated,
                                char* error, uint32_t error_size);
+
+    /* ---- v20: a TRAVELLING savestate (docs/resync-and-sector-timing-design.md
+     * 2.3, step A3) ----
+     * The server's blob of one tick, restored once into this world: as
+     * savestate_set, but the capturing environment's identity is not checked,
+     * `renames` ("old=new;old=new", may be NULL) maps a blob object's name to
+     * the live one's (the resynced member's own clone to its own ball), a
+     * name several objects share is matched by occurrence, objects whose
+     * (renamed) name starts with one of `excluded_prefixes` (";"-joined, may
+     * be NULL) are left out on both sides (the keep-local bodies), and the
+     * PreSimulate queue is not compared (bmmo::physics::savestate_travel).
+     * `summary` (may be NULL) receives "skipped=N excluded=N renamed=N" and
+     * the restore's first warnings, truncated to `summary_size`. */
+    int32_t (*savestate_set_travelling)(void* ipion_manager, const uint8_t* data, uint32_t size, uint32_t flags,
+                                        const char* renames, const char* excluded_prefixes, char* error,
+                                        uint32_t error_size, char* dropped, uint32_t dropped_size, char* unknown,
+                                        uint32_t unknown_size, char* summary, uint32_t summary_size);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

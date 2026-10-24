@@ -68,6 +68,7 @@
 #include <message/session_ready_msg.hpp>
 #include <message/session_remote_input_msg.hpp>
 #include <message/session_resync_msg.hpp>
+#include <message/session_resync_state_msg.hpp>
 
 // The core's state and its frame's steps are private (step E11); the tests
 // reach them through this friend.  steps{core}.<step>(...) calls a private
@@ -105,6 +106,11 @@ namespace bmmo::session {
         BMMO_CORE_STEP(flush_inputs)
         BMMO_CORE_STEP(movable_mechanisms)
         BMMO_CORE_STEP(rewind_for_sectors)
+        BMMO_CORE_STEP(try_apply_resync)
+        BMMO_CORE_STEP(rewind_for_lifecycle)
+        BMMO_CORE_STEP(window_rewind_reach)
+        BMMO_CORE_STEP(drain_pending_deaths)
+        BMMO_CORE_STEP(settle_held_tick)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -334,10 +340,44 @@ namespace {
                 cell = adopted_cell;
                 return adopted_read;
             };
+            // Step A3's.
+            p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
+                                        std::vector<uint8_t>& out, std::string& error,
+                                        bmmo::session::resync_script_report& report) {
+                calls.push_back("localize_scripts:" + std::to_string(portable.size()) + ":"
+                                + (anchor ? std::to_string(anchor->size()) : std::string("none")));
+                report.unportable = localize_unportable;
+                if (!localize_ok) {
+                    error = "no such script";
+                    return false;
+                }
+                out = portable;
+                return true;
+            };
+            // The state's packed sections: carried unpacked in these tests.
+            p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
+                out = packed;
+                return out.size() == size;
+            };
+            p.forget_activations_from = [this](uint32_t tick) {
+                calls.push_back("forget_activations_from:" + std::to_string(tick));
+            };
+            p.forget_births_after = [this](uint32_t tick, const std::vector<std::string>& entities) {
+                calls.push_back("forget_births_after:" + std::to_string(tick) + ":" + std::to_string(entities.size()));
+            };
+            p.birth_tick_of = [this](const std::string& entity) {
+                const auto it = birth_ticks.find(entity);
+                return it == birth_ticks.end() ? 0u : it->second;
+            };
+            p.local_only_body = [this](const std::string& entity) { return local_only.count(entity) != 0; };
             return p;
         }
         int adopted_cell = 0;        // what sector_cell_adopted answers (B1)
         bool adopted_read = true;
+        bool localize_ok = true;     // what localize_scripts answers (A3)
+        uint32_t localize_unportable = 0;
+        std::map<std::string, uint32_t> birth_ticks;   // what birth_tick_of answers (A3)
+        std::set<std::string> local_only;               // what local_only_body answers (A3)
     };
 
     TEST(SessionClientCore, ConstructsWithTheRequiredOperations) {
@@ -347,7 +387,7 @@ namespace {
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 37; ++missing) {
+        for (int missing = 0; missing < 41; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
@@ -387,6 +427,10 @@ namespace {
             if (missing == 34) p.note_script_resets = nullptr;
             if (missing == 35) p.set_union_pass = nullptr;
             if (missing == 36) p.sector_cell_adopted = nullptr;
+            if (missing == 37) p.localize_scripts = nullptr;
+            if (missing == 38) p.forget_activations_from = nullptr;
+            if (missing == 39) p.forget_births_after = nullptr;
+            if (missing == 40) p.unpack_bytes = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         // E7: the capture only with the event log's own births; make_own and
@@ -1033,7 +1077,7 @@ namespace {
             EXPECT_EQ(ready.anchor_surfaces, 0x52u);
             EXPECT_EQ(ready.physics_sha256, "headless-64");
             EXPECT_EQ(ready.build_id, "build-x");
-            EXPECT_EQ(ready.caps, slew ? bmmo::session::CAP_LEAD : 0u);
+            EXPECT_EQ(ready.caps, (slew ? bmmo::session::CAP_LEAD : 0u) | bmmo::session::CAP_RESYNC_STATE);
         }
     }
 
@@ -1649,7 +1693,8 @@ namespace {
     }
 
     // Design 5.1 "SessionLead", without it (design 2.3): SessionReady's caps
-    // are 0, and a SessionLead that comes anyway is counted and journaled,
+    // have no CAP_LEAD (CAP_RESYNC_STATE only, protocol 10), and a SessionLead
+    // that comes anyway is counted and journaled,
     // never applied (nothing amended, forced or slewed) and never
     // acknowledged.
     TEST(SessionClientCoreLead, WithoutSlewNothingAppliedNothingAcked) {
@@ -1659,7 +1704,7 @@ namespace {
         session_client_core core(fake.make_flow(true), session_capabilities{});
         run_to_tick_125(core, fake);
         ASSERT_FALSE(fake.sent.empty());
-        EXPECT_EQ(decode<bmmo::session_ready_msg>(fake.sent[0].first).caps, 0u);
+        EXPECT_EQ(decode<bmmo::session_ready_msg>(fake.sent[0].first).caps, bmmo::session::CAP_RESYNC_STATE);
         const size_t sent_before = fake.sent.size();
         const size_t from = fake.calls.size();
         core.on_session_lead(lead_message(1, 4, 121, 130, 120));
@@ -4664,6 +4709,413 @@ namespace {
         EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 1u);
         EXPECT_FALSE(state_of(core).sectors_.covers(5, 146));
         EXPECT_TRUE(state_of(core).sectors_.covers(5, 147));
+    }
+
+
+    // ------------------------------------------------ step A3: the exact resync
+    // Resync design 2.6 and 7.1: a re-assign with STATE_FOLLOWS anchors the
+    // history at base - 1; snapshots meanwhile are dropped; the state is
+    // applied as that tick and re-stepped (D = 0, 20); it waits for its
+    // bodies; a stale one is dropped; the resync hold holds and times out;
+    // a late change before the anchor is the state's.
+
+    bmmo::session_assign_msg exact_assign(uint32_t session, uint32_t first_tick) {
+        bmmo::session_assign_msg msg = assign_message(session, first_tick);
+        msg.flags = bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS;
+        return msg;
+    }
+
+    bmmo::session_resync_state_msg resync_state(uint32_t base, const std::set<int>& active) {
+        bmmo::session_resync_state_msg msg;
+        msg.session = 9;
+        msg.tick = base - 1;
+        msg.base = base;
+        bmmo::session::sector_union u;
+        for (int sector: active) if (sector != 1) u.request(4, sector, base - 30);
+        while (u.pass_pending()) u.tick(base - 20, false);
+        msg.union_state = bmmo::session::sector_union::serialize(u.state());
+        msg.scripts = {1, 2, 3, 4};
+        return msg;
+    }
+
+    // The state as a host delivers it: received in the drain, applied by the
+    // resync poll every host runs before pre_step (A3 fix-up: after the whole
+    // drain, so the notices queued behind it amend the re-step's records).
+    void deliver(session_client_core& core, bmmo::session_resync_state_msg msg) {
+        core.on_session_resync_state(std::move(msg));
+        core.poll_resync_hold();
+    }
+
+    TEST(SessionClientCoreResync, AReassignWithTheStateFollowingAnchorsAtBaseMinusOne) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        const size_t from = fake.calls.size();
+        core.on_session_assign(exact_assign(9, 140));
+        const auto calls = since(fake.calls, from);
+        auto& s = state_of(core);
+        EXPECT_TRUE(s.resync_pending_);
+        EXPECT_TRUE(s.resync_exact_);
+        EXPECT_EQ(s.resync_base_, 140u);
+        EXPECT_EQ(s.resync_old_tick_, 125u);
+        EXPECT_EQ(s.resync_delta_, -14);
+        EXPECT_EQ(s.held_floor_, 140u) << "notices for base.. amend records that exist";
+        EXPECT_TRUE(s.rollback_.knows_tick(139)) << "the synthetic anchor";
+        EXPECT_EQ(s.rollback_.history_size(), 1u);
+        EXPECT_EQ(s.union_records_.count(139), 1u);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "note_script_resets:139"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "forget_activations_from:140"), calls.end());
+        EXPECT_EQ(b1_count(calls, "forget_births_after"), 0u) << "the birth log is kept";
+        EXPECT_EQ(b1_count(calls, "hook:numbering_restarted:assign_resync"), 1u);
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:resynced: tick base 140 (old tick 125, delta -14): anchored at 139, the server's state of it follows"),
+                  calls.end());
+        // A snapshot meanwhile is dropped and counted.
+        bmmo::session_snapshot_msg snapshot;
+        snapshot.session = 9;
+        snapshot.tick = 139;
+        snapshot.full = 1;
+        core.on_session_snapshot(snapshot);
+        EXPECT_EQ(s.snapshots_while_resync_, 1u);
+        EXPECT_TRUE(s.resync_pending_);
+        // A state for another base is stale.
+        core.on_session_resync_state(resync_state(150, {1}));
+        EXPECT_EQ(s.resync_states_stale_, 1u);
+        EXPECT_FALSE(s.have_resync_state_);
+    }
+
+    TEST(SessionClientCoreResync, TheStateAppliedBeforeAnyFrameAndAfterTwenty) {
+        for (const uint32_t depth: {0u, 20u}) {
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.on_session_assign(exact_assign(9, 140));
+            if (depth) b1_frames(core, 140, 139 + depth);
+            auto& s = state_of(core);
+            const size_t from = fake.calls.size();
+            core.on_session_resync_state(resync_state(140, {1, 2}));
+            EXPECT_TRUE(s.resync_pending_) << "kept until the drain is over";
+            EXPECT_TRUE(s.have_resync_state_);
+            EXPECT_FALSE(core.poll_resync_hold().held);
+            const auto calls = since(fake.calls, from);
+            EXPECT_FALSE(s.resync_pending_) << depth;
+            EXPECT_FALSE(s.have_resync_state_);
+            EXPECT_EQ(s.resyncs_restepped_, 1u);
+            EXPECT_EQ(core.rollback_stats().resyncs, 1u);
+            EXPECT_EQ(b1_count(calls, "replayed:"), depth) << "one replayed tick per tick of the window";
+            EXPECT_NE(std::find(calls.begin(), calls.end(), "localize_scripts:4:none"), calls.end());
+            EXPECT_EQ(b1_count(calls, "forget_births_after:139"), 1u);
+            EXPECT_EQ(s.sectors_.active(), std::set<int>({1, 2})) << "the server's union";
+            EXPECT_EQ(s.union_records_.at(139).active, std::set<int>({1, 2}));
+            const auto line = std::find_if(calls.begin(), calls.end(), [](const std::string& c) {
+                return c.rfind("log:0:resync: re-stepped from the server's tick 139 to ", 0) == 0;
+            });
+            ASSERT_NE(line, calls.end()) << depth;
+            EXPECT_NE(line->find("(" + std::to_string(depth) + " ticks, delta -14"), std::string::npos) << *line;
+            // The re-step window (139, 139 + depth]: an own correction of a
+            // tick in it reaches as deep as the re-step; outside it, 48.
+            EXPECT_TRUE(s.resync_window_);
+            EXPECT_EQ(s.held_floor_, 139u) << "the history reaches S: a notice for base itself is replayed";
+            EXPECT_EQ(steps{core}.window_rewind_reach(140u), depth ? 95u : 48u) << "S + 1";
+            EXPECT_EQ(steps{core}.window_rewind_reach(139u + depth), depth ? 95u : 48u) << "the apply's tick";
+            EXPECT_EQ(steps{core}.window_rewind_reach(140u + depth), 48u) << "after the apply";
+            EXPECT_EQ(steps{core}.window_rewind_reach(139u), 48u) << "its anchor would be before S";
+            core.on_session_assign(exact_assign(9, 200));
+            EXPECT_FALSE(s.resync_window_) << "a new numbering ends it";
+        }
+    }
+
+    TEST(SessionClientCoreResync, TheStateWaitsForItsBodies) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_assign(exact_assign(9, 140));
+        b1_frames(core, 140, 145);
+        auto msg = resync_state(140, {1});
+        bmmo::session::body_state row;
+        row.kind = bmmo::session::body_kind::Mechanism;
+        row.owner = 7;
+        row.name = "P_Modul_03_Floor";
+        row.position[1] = 100.0;   // far from this world's body (the registry's guard): the name decides
+        msg.rows.push_back(row);
+        deliver(core, std::move(msg));
+        auto& s = state_of(core);
+        EXPECT_TRUE(s.resync_pending_) << "its body is not here yet";
+        EXPECT_TRUE(s.have_resync_state_);
+        EXPECT_EQ(s.resync_deferred_, 1u);
+        EXPECT_FALSE(steps{core}.try_apply_resync("retry"));
+        EXPECT_EQ(s.resync_deferred_, 1u) << "one wait, counted once";
+        EXPECT_EQ(s.resync_deferred_ticks_, 2u);
+        fake.bodies_there.push_back("P_Modul_03_Floor");
+        EXPECT_TRUE(steps{core}.try_apply_resync("retry"));
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resyncs_restepped_, 1u);
+    }
+
+    TEST(SessionClientCoreResync, TheHoldHoldsAtTheReachAndTimesOut) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_assign(exact_assign(9, 140));
+        b1_frames(core, 140, 233);   // D = 94
+        EXPECT_FALSE(core.poll_resync_hold().held);
+        b1_frames(core, 234, 234);   // D = 95: the next step would leave the anchor outside the history
+        auto& s = state_of(core);
+        s.resync_in_flight_ = true;
+        EXPECT_TRUE(core.poll_resync_hold().held);
+        EXPECT_TRUE(core.resync_held());
+        fake.advance(std::chrono::milliseconds(1500));
+        EXPECT_TRUE(core.poll_resync_hold().held);
+        fake.advance(std::chrono::milliseconds(600));
+        const uint64_t sent = s.resyncs_sent_;
+        const auto out = core.poll_resync_hold();
+        EXPECT_FALSE(out.held);
+        EXPECT_TRUE(out.timed_out);
+        EXPECT_EQ(s.resyncs_sent_, sent + 1) << "asked again at once: every other trigger waits while one is pending";
+        EXPECT_TRUE(s.resync_in_flight_);
+        EXPECT_TRUE(s.resync_pending_);
+        EXPECT_EQ(s.resync_holds_, 1u);
+        EXPECT_EQ(s.resync_hold_timeouts_, 1u);
+        EXPECT_FALSE(core.poll_resync_hold().held) << "a timed-out hold is spent: the world runs on";
+        EXPECT_EQ(s.resync_holds_, 1u);
+        // The state of an anchor that left the history is refused, and the
+        // client asks again: held back by the 2 s limiter, the request is
+        // owed, and the owed request survives the pending resync (nothing
+        // else would ask for it) until the limiter lets it go.
+        b1_frames(core, 235, 236);
+        deliver(core, resync_state(140, {1}));
+        EXPECT_EQ(s.resync_states_refused_, 1u);
+        EXPECT_EQ(s.resyncs_restepped_, 0u);
+        EXPECT_TRUE(s.resync_owed_);
+        EXPECT_FALSE(s.resync_in_flight_);
+        steps{core}.retry_owed_resync();
+        EXPECT_TRUE(s.resync_owed_) << "kept, not dropped for the pending resync";
+        EXPECT_EQ(s.resyncs_sent_, sent + 1);
+        fake.advance(std::chrono::milliseconds(2100));
+        steps{core}.retry_owed_resync();
+        EXPECT_FALSE(s.resync_owed_);
+        EXPECT_EQ(s.resyncs_sent_, sent + 2);
+        EXPECT_TRUE(s.resync_in_flight_);
+    }
+
+    // A mirror dead after S (resync design 2.6.3, Delta > 0): made from its
+    // row before the renames and the navigation are built (so its server
+    // clone is renamed to it), and its death applied again at its tick -
+    // live when the tick lies past the apply's.
+    TEST(SessionClientCoreResync, AMirrorDeadAfterSIsMadeAndDiesAgainAtItsTick) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 110));
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 112, 112));
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 124, 124));
+        // An on-time event is held for apply_held_lifecycle (after the
+        // frame's rewinds): applied here before the next frame.
+        b1_frames(core, 110, 125, [&](uint32_t t) { steps{core}.apply_held_lifecycle(t - 1); });
+        auto& s = state_of(core);
+        ASSERT_EQ(s.remotes_.count(4), 1u);
+        ASSERT_FALSE(s.remotes_.at(4).physicalized) << "born at 112, dead at 124";
+        core.on_session_assign(exact_assign(9, 121));
+        EXPECT_EQ(s.resync_delta_, 5) << "R 125, S 120";
+        b1_frames(core, 121, 122);
+        auto msg = resync_state(121, {1});
+        bmmo::session::body_state ball;
+        ball.kind = bmmo::session::body_kind::Ball;
+        ball.owner = 4;
+        msg.rows.push_back(ball);
+        msg.clones = {{4u, std::string("Ball_Stone_BMMO_4")}};
+        const size_t from = fake.calls.size();
+        deliver(core, std::move(msg));
+        const auto calls = since(fake.calls, from);
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_TRUE(s.remotes_.at(4).physicalized) << "made from its row";
+        ASSERT_EQ(s.pending_deaths_.size(), 1u) << "its death past the apply's tick 122 is kept for the live frame";
+        EXPECT_EQ(s.pending_deaths_[0].tick, 124u);
+        const auto line = std::find_if(calls.begin(), calls.end(), [](const std::string& c) {
+            return c.rfind("log:0:resync: re-stepped from the server's tick 120 to 122", 0) == 0;
+        });
+        ASSERT_NE(line, calls.end());
+        EXPECT_NE(line->find("Ball_Stone_BMMO_4->" + s.remotes_.at(4).entity), std::string::npos) << *line;
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:resync: mirror of 4 made from its row at S 120, its death at 124 applied again live"),
+                  calls.end());
+        steps{core}.drain_pending_deaths(123);
+        EXPECT_TRUE(s.remotes_.at(4).physicalized);
+        steps{core}.drain_pending_deaths(124);
+        EXPECT_FALSE(s.remotes_.at(4).physicalized) << "dead again at its tick";
+        EXPECT_TRUE(s.pending_deaths_.empty());
+    }
+
+    // A held notice for a tick of a pending exact resync's epoch amends the
+    // own record the apply's re-step feeds the ball from (resync design 2.2),
+    // without a rewind of its own; one for a tick not simulated yet is
+    // amended when its live frame is recorded.  After the apply the floor is
+    // S: a notice for base itself is replayed like any later one.
+    TEST(SessionClientCoreResync, NoticesWhilePendingAmendTheRecordsTheReStepReplays) {
+        flow_fake fake;
+        // The b1 world, able to drive a navigated own ball in the replay.
+        session_platform platform = b1_platform(fake, std::make_shared<bool>(false));
+        const auto bind = platform.bind_world;
+        platform.bind_world = [bind](const bmmo::session::core_world_hooks& hooks) {
+            bmmo::session::rollback_world world = bind(hooks);
+            world.nav_input = [](const std::string&, const bmmo::session::input_frame&) { return true; };
+            world.nav_poll = [](const std::string&, bool) { return true; };
+            world.set_nav = [](const std::string&, const bmmo_physics_nav_state&) { return true; };
+            return world;
+        };
+        session_client_core core(platform, session_capabilities{});
+        b1_session(core, fake, 125);
+        core.config.own_corrections = true;
+        core.on_session_assign(exact_assign(9, 140));
+        auto& s = state_of(core);
+        bmmo::session::input_frame played{}, held{};
+        played.keys = 0;
+        held.keys = 5;
+        bmmo::session::rollback_tracked tracked;
+        tracked.own_entity = "Ball_Me";
+        const auto world = core.platform().bind_world(bmmo::session::core_world_hooks{});
+        for (uint32_t t = 140; t <= 145; ++t) {
+            s.frames_since_anchor_ = static_cast<int64_t>(t - s.tick_base_ + 1);   // current = t
+            s.rollback_.record(world, t, tracked, {{"Ball_Me", played}});
+        }
+        ASSERT_EQ(core.current_tick(), 145u);
+        steps{core}.settle_held_tick(140u, held);
+        steps{core}.settle_held_tick(143u, held);
+        steps{core}.settle_held_tick(147u, held);   // not simulated yet
+        bmmo::session::input_frame got{};
+        ASSERT_TRUE(s.rollback_.recorded_input("Ball_Me", 140, got));
+        EXPECT_EQ(got.keys, 5u) << "base itself";
+        ASSERT_TRUE(s.rollback_.recorded_input("Ball_Me", 143, got));
+        EXPECT_EQ(got.keys, 5u);
+        ASSERT_TRUE(s.rollback_.recorded_input("Ball_Me", 141, got));
+        EXPECT_EQ(got.keys, 0u) << "no notice: kept";
+        EXPECT_FALSE(s.input_rewind_pending_) << "the apply's re-step is the replay";
+        EXPECT_EQ(s.resync_amends_, 2u);
+        // The tick ahead: amended once its live frame is recorded.
+        for (uint32_t t = 146; t <= 147; ++t) {
+            s.frames_since_anchor_ = static_cast<int64_t>(t - s.tick_base_ + 1);
+            s.rollback_.record(world, t, tracked, {{"Ball_Me", played}});
+        }
+        steps{core}.take_held_ahead(147u);
+        ASSERT_TRUE(s.rollback_.recorded_input("Ball_Me", 147, got));
+        EXPECT_EQ(got.keys, 5u);
+        EXPECT_EQ(s.resync_amends_, 3u);
+        EXPECT_FALSE(s.input_rewind_pending_);
+        // Applied: the floor is S, so a notice for base that comes now is
+        // replayed (a rewind from S), not stored as base.
+        deliver(core, resync_state(140, {1}));
+        ASSERT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.held_floor_, 139u);
+        ASSERT_TRUE(s.rollback_.recorded_input("Ball_Me", 140, got));
+        EXPECT_EQ(got.keys, 5u) << "the re-step re-records what it fed";
+    }
+
+    // Delta > 0: the frames the old numbering sent for base .. R are the ones
+    // the server applies (its buffer keeps what it has at or after the base
+    // and takes the first copy of a tick); they are played again at those
+    // ticks as forced own frames.  Delta <= 0 sent nothing at or after the
+    // base, and the legacy re-assign forces nothing.
+    TEST(SessionClientCoreResync, ADeltaAboveZeroPlaysTheOldNumberingsSentFramesAgain) {
+        for (const bool exact: {true, false}) {
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            b1_session(core, fake, 125);
+            auto& s = state_of(core);
+            for (uint32_t t = 116; t <= 125; ++t) {
+                bmmo::session::input_frame sent{};
+                sent.keys = static_cast<uint8_t>(t - 110);
+                s.sent_inputs_[t] = sent;
+            }
+            core.on_session_assign(exact ? exact_assign(9, 121) : assign_message(9, 121));
+            if (!exact) {
+                EXPECT_TRUE(s.forced_own_.empty());
+                continue;
+            }
+            EXPECT_EQ(s.resync_delta_, 5) << "R 125, S 120";
+            ASSERT_EQ(s.forced_own_.size(), 5u) << "121..125";
+            EXPECT_EQ(s.forced_own_.begin()->first, 121u);
+            EXPECT_EQ(s.forced_own_.rbegin()->first, 125u);
+            EXPECT_EQ(s.forced_own_.at(123).frame.keys, 13u);
+            EXPECT_FALSE(s.forced_own_.at(123).count);
+            EXPECT_EQ(s.resync_resent_, 5u);
+            EXPECT_TRUE(s.sent_inputs_.empty()) << "the epoch's ring starts over";
+        }
+    }
+
+    // A core with rollback off cannot re-step: it does not declare
+    // CAP_RESYNC_STATE, and the server answers it with a full snapshot.
+    TEST(SessionClientCoreResync, NoCapabilityWithoutRollback) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        state_of(core).own_id_ = 3;
+        bmmo::session::core_config config;
+        config.rollback = false;
+        ASSERT_FALSE(core.begin(start_message(9, 3), config).refused);
+        core.level_requested();
+        bmmo::session::anchor_report report;
+        report.own_name = "Me";
+        core.anchor(report);
+        ASSERT_FALSE(fake.sent.empty());
+        EXPECT_EQ(decode<bmmo::session_ready_msg>(fake.sent[0].first).caps & bmmo::session::CAP_RESYNC_STATE, 0u);
+    }
+
+    // The reconcile under delta > 0 (resync design 2.6.3): the anchor world
+    // ran a pass at 122 after S = 120 that the server's union does not have
+    // at S; its body (born at 127 = 122 + 5) is destroyed at the restore, and
+    // the replay re-derives the pass at its stamp from the server's union.
+    TEST(SessionClientCoreResync, ADeltaAboveZeroPassIsUndoneAndReDerived) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 110));
+        core.on_session_event(sector_message(4, 3, 122, 122));
+        b1_frames(core, 110, 125);
+        auto& s = state_of(core);
+        ASSERT_EQ(s.pass_log_, (std::map<uint32_t, int>{{122, 3}})) << "the live pass at the stamp";
+        fake.mechanisms = {"P_Modul_03_Floor", "PE_Balloon_Platte01", "Ball_Wood_Piece01"};
+        fake.birth_ticks["P_Modul_03_Floor"] = 127;
+        fake.local_only.insert("Ball_Wood_Piece01");
+        core.on_session_assign(exact_assign(9, 121));
+        EXPECT_EQ(s.resync_delta_, 5) << "R 125, S 120";
+        b1_frames(core, 121, 128);
+        auto msg = resync_state(121, {1});
+        {
+            bmmo::session::sector_union u;   // the server's union at S: sector 1, the pacer idle
+            for (uint32_t t = 118; t <= 120; ++t) u.tick(t, false);
+            msg.union_state = bmmo::session::sector_union::serialize(u.state());
+        }
+        const size_t from = fake.calls.size();
+        deliver(core, std::move(msg));
+        const auto calls = since(fake.calls, from);
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resync_destroyed_, 1u) << "the pass's body";
+        EXPECT_EQ(s.resync_unexplained_, 0u) << "the balloon is keep-local, the piece local-only";
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "set_union_pass:122:3"), calls.end())
+            << "the pass re-derived at its stamp";
+        EXPECT_EQ(s.sector_passes_forgotten_, 0u);
+        EXPECT_EQ(s.sectors_.active(), std::set<int>({1, 3}));
+        const auto line = std::find_if(calls.begin(), calls.end(), [](const std::string& c) {
+            return c.rfind("log:0:resync: re-stepped from the server's tick 120 to 128 (8 ticks, delta +5", 0) == 0;
+        });
+        ASSERT_NE(line, calls.end());
+        EXPECT_NE(line->find("keep-local 1, local-only 1"), std::string::npos) << *line;
+    }
+
+    TEST(SessionClientCoreResync, ALateChangeBeforeTheAnchorIsTheStates) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_assign(exact_assign(9, 140));
+        b1_frames(core, 140, 142);
+        const uint64_t missed = state_of(core).life_rewinds_missed_;
+        const size_t from = fake.calls.size();
+        steps{core}.rewind_for_sectors();
+        steps{core}.rewind_for_lifecycle(4u, 135u);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(state_of(core).life_rewinds_missed_, missed) << "no miss: the server's state covers it";
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:lifecycle event of 4 stamped tick 135 precedes the resync's anchor 139: the server's state covers it"),
+                  calls.end());
     }
 
 }

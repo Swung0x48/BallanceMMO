@@ -43,6 +43,9 @@ namespace bmmo::session {
         journal_start,        // core::client_journal::open: the origin of journal_ms
         journal_utc,          // core::client_journal::open: the header's utc_ms (system clock, in ms)
         own_backstop,         // the retail own_body_backstop: the 2 s re-report limiter (R1)
+        resync_hold,          // poll_resync_hold: the hold engaged, its deadline (step A3)
+        resync_release,       // poll_resync_hold: the hold released, its length
+        resync_hold_timeout,  // poll_resync_hold: the deadline check
         count_
     };
 
@@ -51,7 +54,8 @@ namespace bmmo::session {
             "?", "run_start", "run_limit", "run_report", "report_init", "room_ready", "assign_resync",
             "assign_renumber", "assign_release", "anchor_origin", "anchor_hold", "hold_poll", "hold_timeout",
             "pace_expected", "pace_rebase", "pace_due", "slew_step", "slew_start", "hold_event_stamp",
-            "hold_event_release", "resync_limiter", "journal_ms", "journal_start", "journal_utc", "own_backstop"};
+            "hold_event_release", "resync_limiter", "journal_ms", "journal_start", "journal_utc", "own_backstop",
+            "resync_hold", "resync_release", "resync_hold_timeout"};
         static_assert(sizeof(names) / sizeof(names[0]) == static_cast<size_t>(clock_site::count_),
                       "a name for every clock site");
         const auto i = static_cast<size_t>(site);

@@ -627,6 +627,71 @@ namespace {
         return 1;
     }
 
+    // v20: a travelling savestate (the resync state's server blob).  The
+    // rename list is "old=new;old=new", the excluded prefixes ";"-joined.
+    int32_t api_savestate_set_travelling(void* manager, const uint8_t* data, uint32_t size, uint32_t flags,
+                                         const char* renames, const char* excluded_prefixes, char* error,
+                                         uint32_t error_size, char* dropped, uint32_t dropped_size, char* unknown,
+                                         uint32_t unknown_size, char* summary, uint32_t summary_size) {
+        if (dropped && dropped_size) dropped[0] = '\0';
+        if (unknown && unknown_size) unknown[0] = '\0';
+        if (summary && summary_size) summary[0] = '\0';
+        if (!manager || (!data && size)) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        const auto split = [](const char* joined) {
+            std::vector<std::string> out;
+            std::string item;
+            for (const char* p = joined ? joined : ""; *p; ++p) {
+                if (*p == ';') { if (!item.empty()) out.push_back(item); item.clear(); }
+                else item += *p;
+            }
+            if (!item.empty()) out.push_back(item);
+            return out;
+        };
+        bmmo::physics::savestate_travel travel;
+        for (const std::string& pair: split(renames)) {
+            const size_t eq = pair.find('=');
+            if (eq == std::string::npos || eq == 0) continue;
+            travel.renames.emplace_back(pair.substr(0, eq), pair.substr(eq + 1));
+        }
+        travel.excluded_prefixes = split(excluded_prefixes);
+        std::string text;
+        bmmo::physics::savestate_report report;
+        const bool ok = bmmo::physics::set_savestate(static_cast<CKIpionManager*>(manager), data, size, flags, text, &report,
+                                                     travel);
+        const auto join_into = [](char* out, uint32_t out_size, const std::vector<std::string>& names, std::string& overflow) {
+            if (!out || !out_size) return;
+            std::string joined;
+            for (const std::string& name: names) joined += (joined.empty() ? "" : ";") + name;
+            if (joined.size() >= out_size) {
+                overflow = "the names of " + std::to_string(names.size()) + " bodies (" + std::to_string(joined.size())
+                         + " bytes) exceed the caller's buffer of " + std::to_string(out_size);
+                out[0] = '\0';
+                return;
+            }
+            std::snprintf(out, out_size, "%s", joined.c_str());
+        };
+        std::string overflow;
+        join_into(dropped, dropped_size, report.contacts_dropped, overflow);
+        join_into(unknown, unknown_size, report.unknown_bodies, overflow);
+        if (summary && summary_size) {
+            std::string line = "skipped=" + std::to_string(report.skipped) + " excluded=" + std::to_string(report.excluded)
+                             + " renamed=" + std::to_string(report.renamed);
+            // A name list that does not fit the caller's buffer is a
+            // reporting limit, not a failed restore: the world is restored.
+            if (!overflow.empty()) line += " | " + overflow;
+            for (size_t i = 0; i < report.warnings.size() && i < 4; ++i) line += " | " + report.warnings[i];
+            std::snprintf(summary, summary_size, "%s", line.c_str());
+        }
+        if (!ok) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -684,6 +749,7 @@ namespace {
         api_savestate_get,
         api_savestate_set,
         api_set_body_matrix,
+        api_savestate_set_travelling,
     };
 }
 

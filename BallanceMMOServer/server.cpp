@@ -635,6 +635,9 @@ public:
             uint32_t first_tick;
             int remaining;
             std::chrono::steady_clock::time_point next_due;
+            // Protocol 10: every copy carries the reliable one's flags
+            // (ASSIGN_FLAG_STATE_FOLLOWS), whichever arrives first.
+            uint8_t flags = 0;
         };
         std::vector<assign_repeat> assign_repeats;
         // Late-player design 2.2-2.5 (physics.lead_adjust): per member, what
@@ -762,6 +765,10 @@ public:
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
         callbacks.on_snapshot = [this](const bmmo::sim::session_snapshot& snapshot) { on_session_snapshot(snapshot); };
+        callbacks.on_resync_state = [this](const bmmo::sim::resync_state_out& out) { on_session_resync_state(out); };
+        callbacks.on_resync_base_missed = [this](uint32_t session, uint32_t player, uint32_t base) {
+            on_resync_base_missed(session, player, base);
+        };
         callbacks.on_inputs = [this](uint32_t session, uint32_t tick,
                                      const std::vector<bmmo::session::applied_input>& applied) {
             on_session_inputs(session, tick, applied);
@@ -1189,6 +1196,76 @@ public:
         }
     }
 
+    // Step A3 (resync design 2.3): the server's state of tick base - 1, to
+    // the resynced member alone, reliable (GameNetworkingSockets fragments
+    // it).  The server never reads it back.
+    void on_session_resync_state(const bmmo::sim::resync_state_out& out) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(out.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        const auto c = static_cast<HSteamNetConnection>(out.player);
+        if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
+        bmmo::session_resync_state_msg msg;
+        msg.session = out.session;
+        msg.tick = out.tick;
+        msg.base = out.base;
+        msg.rows = out.state.rows;
+        msg.clones = out.state.clones;
+        msg.navs = out.state.navs;
+        msg.union_state = out.state.union_state;
+        msg.scripts = out.state.scripts;
+        msg.savestate = out.state.savestate;
+        msg.scripts_size = out.state.scripts_size;
+        msg.savestate_size = out.state.savestate_size;
+        // serialize() caps the rows at MAX_BODIES_PER_SNAPSHOT and each byte
+        // section at kMaxBytesField: a state that large is sent cut, and the
+        // client's restore of a cut blob refuses it - said here, not silently.
+        std::string cut;
+        if (msg.rows.size() > bmmo::session::MAX_BODIES_PER_SNAPSHOT)
+            cut += " rows " + std::to_string(msg.rows.size()) + " > " + std::to_string(bmmo::session::MAX_BODIES_PER_SNAPSHOT);
+        for (const auto& [bytes, what]: {std::pair<const std::vector<uint8_t>*, const char*>{&msg.union_state, "union"},
+                                         {&msg.scripts, "scripts"}, {&msg.savestate, "savestate"}})
+            if (bytes->size() > bmmo::session_resync_state_msg::kMaxBytesField)
+                cut += std::string(" ") + what + " " + std::to_string(bytes->size()) + " bytes";
+        if (!cut.empty())
+            Printf("Physics session %u: the resync state for %s is cut on the wire (%s): the client will refuse what is cut.",
+                   s.id, get_client_name(c), cut.c_str());
+        msg.serialize();
+        const EResult sent = send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        bmmo::session::sector_union::state_type u;
+        std::string active;
+        if (bmmo::session::sector_union::deserialize(out.state.union_state.data(), out.state.union_state.size(), u))
+            for (int sector: u.active) active += (active.empty() ? "" : ",") + std::to_string(sector);
+        std::string own_clone = "-";
+        for (const auto& [player, name]: out.state.clones)
+            if (player == out.player) own_clone = name;
+        Printf("Physics session %u: resync state for %s: tick %u (base %u), %zu bodies, %u script bytes (%zu packed), %u "
+               "savestate bytes (%zu packed), own clone %s, union {%s}, %zu bytes on the wire (result %d), emitted in %llu us%s%s.",
+               s.id, get_client_name(c), out.tick, out.base, out.state.rows.size(),
+               out.state.scripts_size ? out.state.scripts_size : static_cast<uint32_t>(out.state.scripts.size()),
+               out.state.scripts.size(),
+               out.state.savestate_size ? out.state.savestate_size : static_cast<uint32_t>(out.state.savestate.size()),
+               out.state.savestate.size(), own_clone.c_str(), active.c_str(),
+               static_cast<size_t>(msg.size()), static_cast<int>(sent), static_cast<unsigned long long>(out.emit_us),
+               out.state.error.empty() ? "" : ": ", out.state.error.c_str());
+    }
+
+    // The runner had stepped the base's tick before the request reached it:
+    // the member is answered again from the runner's current tick (a new base
+    // and a new assignment with the flag; the client takes the newer one).
+    void on_resync_base_missed(uint32_t session, uint32_t player, uint32_t base) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        const auto c = static_cast<HSteamNetConnection>(player);
+        if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
+        const uint32_t again = resync_member(s, c, 0);
+        Printf("Physics session %u: resync base %u for %s was stepped before the request reached the runner: re-assigned at %u.",
+               s.id, base, get_client_name(c), again);
+    }
+
     void physics_session_member_joined(uint32_t room, HSteamNetConnection c) {
         auto rs = room_session_.find(room);
         if (rs == room_session_.end() || !runner_) return;
@@ -1406,10 +1483,11 @@ public:
     // the reliable one's packet and its loss, and the session's first tick -
     // start_base periods after the barrier - comes too late to carry them.
     // The clients apply the first to arrive and ignore the rest.
-    void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick) {
+    void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
         bmmo::session_assign_msg assign;
         assign.session = s.id;
         assign.first_tick = first_tick;
+        assign.flags = flags;
         assign.serialize();
         send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_Reliable);
         // A newer assignment retires the copies of the previous one still due.
@@ -1417,7 +1495,7 @@ public:
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
                                s.assign_repeats.end());
         s.assign_repeats.push_back(physics_session_state::assign_repeat{
-            c, first_tick, kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing});
+            c, first_tick, kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing, flags});
         s.assigned.insert(c);
         // A SessionLead of the previous base is void (the client drops it by
         // its epoch), so its copies stop and nothing waits for its ack.
@@ -1475,6 +1553,7 @@ public:
                 bmmo::session_assign_msg assign;
                 assign.session = s.id;
                 assign.first_tick = r->first_tick;
+                assign.flags = r->flags;
                 assign.serialize();
                 send(r->to, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
                 r->next_due = now + kAssignRepeatSpacing;
@@ -1616,7 +1695,11 @@ public:
 
     // Resync (design 9.2): the client's tick numbering broke (pause, long
     // stall, repeated hard corrections).  Same path as a late join: current
-    // tick as the new base, everyone's ball, then a full snapshot.
+    // tick as the new base, everyone's ball, the sector history - and, since
+    // protocol 10 (resync design 2.3, step A3), the server's state of tick
+    // base - 1 to that member alone (SessionResyncState), announced by the
+    // assignment's ASSIGN_FLAG_STATE_FOLLOWS, instead of a full snapshot
+    // broadcast to every member.
     void handle_session_resync(HSteamNetConnection c, const bmmo::session_resync_msg& msg) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
@@ -1624,6 +1707,12 @@ public:
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
         if (!runner_->running(s.id)) return;
+        resync_member(s, c, msg.last_full_tick);
+    }
+
+    // The resync answer (handle_session_resync, and again for a base the
+    // runner stepped before the request reached it): returns the base.
+    uint32_t resync_member(physics_session_state& s, HSteamNetConnection c, uint32_t last_full_tick) {
         // On the per-player path (lead_adjust on, the member declared
         // CAP_LEAD), at L_eff (late-player design 2.5, 2.8): the lead of the
         // member's first assignment plus its acknowledged offset, the lead
@@ -1644,16 +1733,28 @@ public:
         // applied held under no numbering the client has (its notices never
         // carry them).  Logged for the harness's per-epoch count.
         const uint32_t counted_through = s.relay.newest_tick();
+        // A member that applies the resync state (CAP_RESYNC_STATE, the
+        // session core) gets it; one that does not (the legacy retail path)
+        // the pre-protocol-10 answer: no flag, a full snapshot to everyone.
+        const auto lead = s.leads.find(c);
+        const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
         s.late.insert(c);
         s.ready.insert(c);
         runner_->player_ready(s.id, c, assigned);
-        send_session_assign(s, c, assigned);
+        send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         for (const auto& [member, last]: s.last_physicalize)
             if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
         for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
-        runner_->request_full_snapshot(s.id);
+        // The state of base - 1, after the runner steps it (posted after
+        // player_ready, on the same queue).
+        if (state) runner_->request_resync_state(s.id, c, assigned);
+        else runner_->request_full_snapshot(s.id);
         Printf("Physics session %u: %s resynced at tick %u (last full snapshot it had: %u; held counted through tick %u).",
-               s.id, get_client_name(c), assigned, msg.last_full_tick, counted_through);
+               s.id, get_client_name(c), assigned, last_full_tick, counted_through);
+        if (state)
+            Printf("Physics session %u: the state of tick %u follows to %s alone (protocol 10).", s.id, assigned - 1,
+                   get_client_name(c));
+        return assigned;
     }
 
     // `received` is GameNetworkingSockets' own receive timestamp, taken on its

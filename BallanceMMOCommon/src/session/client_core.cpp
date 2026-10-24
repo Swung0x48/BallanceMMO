@@ -33,8 +33,11 @@ namespace bmmo::session {
         // Step B1: then, in a Sector rewind, the union's tick re-derived
         // (resync design 2.8: events, then the union, then the step - the
         // server's order), before the host re-issues the tick's activations.
+        // Step A3: the deaths a resync re-applies come after the births (the
+        // remote lifecycle's order), before the union.
         world_hooks_.before_replayed_tick = [this](uint32_t tick) {
             drain_pending_births(tick);
+            drain_pending_deaths(tick);
             rederive_union_tick(tick);
         };
         // Step B1: a window-born body of a live pass the re-derivation moved
@@ -213,6 +216,7 @@ namespace bmmo::session {
         s.held_header_known_ = false;
         s.acked_header_known_ = false;
         s.held_floor_ = 0;
+        s.resync_window_ = false;
         reset_held_epoch("a new session");
         // Decision ids are unique per player for a session's life; the
         // offset is this session's.
@@ -243,6 +247,14 @@ namespace bmmo::session {
         s.last_rewind_rederived_ = false;
         s.sector_rewinds_ = s.sector_rewinds_missed_ = s.sector_rewind_depth_ = 0;
         s.sector_passes_forgotten_ = 0;
+        // Step A3: no exact resync pending, no state, no hold, no logs.
+        s.resync_exact_ = false;
+        s.resync_base_ = 0;
+        s.have_resync_state_ = false;
+        s.resync_state_ = bmmo::session_resync_state_msg{};
+        s.resync_held_ = false;
+        s.life_log_.clear();
+        s.pending_deaths_.clear();
         // R1: the retail policies' and readers' state, and no frame
         // prepared (post_step refuses one no pre_step of this session made).
         s.ball_rows_.clear();
@@ -304,7 +316,13 @@ namespace bmmo::session {
         // amend, force, slew, acknowledge) says so, and the server may send
         // it one and anchor its late join and resyncs at its own lead
         // (design 2.3: CAP_LEAD iff the host can slew).
-        ready.caps = caps_.slew ? bmmo::session::CAP_LEAD : 0u;
+        // Protocol 10 (step A3): a core that can apply the resync state says
+        // so - with rollback on, since the apply is a re-step of the history
+        // (on_session_assign takes the exact path only then).  A core with
+        // rollback off gets the legacy answer, a full snapshot, which the
+        // server sends only to a member without the cap.
+        const bool resync_state = config.rollback;
+        ready.caps = (caps_.slew ? bmmo::session::CAP_LEAD : 0u) | (resync_state ? bmmo::session::CAP_RESYNC_STATE : 0u);
         ready.serialize();
         platform_.send(ready.raw.str(), send_mode::reliable);
         logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", report.load_ticks,
@@ -412,8 +430,26 @@ namespace bmmo::session {
         if (s.assigned_) {
             // Resync (design 9.2): numbering restarts from the server's
             // current tick; the next full snapshot rebuilds every body.
+            // Protocol 10 (resync design 2.6.1, step A3): with
+            // ASSIGN_FLAG_STATE_FOLLOWS the server's state of base - 1
+            // follows instead, and the history is anchored there.
+            const uint32_t old_tick = current_tick();
+            const bool exact = (msg.flags & bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS) != 0 && config.rollback;
+            // Delta > 0 (step A3): the old numbering already sent its frames
+            // for base .. old_tick, and the server's buffer keeps a frame it
+            // has for a tick at or after the base (input_buffer::reset) and
+            // takes the first copy of a tick (submit) - it applies those, not
+            // what the new numbering plays for the same ticks.  Taken from
+            // the sent ring before the epoch reset clears it, and played
+            // again below (forced own frames, as a SessionLead's range).
+            std::map<uint32_t, bmmo::session::input_frame> resent;
+            if (exact)
+                for (auto it = s.sent_inputs_.lower_bound(msg.first_tick);
+                     it != s.sent_inputs_.end() && static_cast<int32_t>(it->first - old_tick) <= 0; ++it)
+                    resent.emplace(it->first, it->second);
             s.tick_base_ = msg.first_tick;
             s.held_floor_ = s.tick_base_;
+            s.resync_window_ = false;   // the old numbering's
             reset_held_epoch("the new base");
             s.frames_since_anchor_ = 0;
             s.input_history_.clear();
@@ -435,6 +471,23 @@ namespace bmmo::session {
             s.mechanism_tracking_.clear();
             s.resync_pending_ = true;
             s.have_snapshot_ = false;
+            s.resync_exact_ = exact;
+            if (s.resync_held_) {
+                // A newer base answers the held resync: the hold ends here.
+                s.resync_held_ = false;
+                logf("resync hold ended by a newer assignment");
+            }
+            if (exact) {
+                anchor_resync(msg.first_tick, old_tick);
+                for (const auto& [tick, frame]: resent) s.forced_own_[tick] = client_core_state::forced_own{frame, false};
+                s.resync_resent_ += resent.size();
+                if (!resent.empty())
+                    logf("resync: the old numbering sent own frames for %u..%u (%zu): played again at those ticks, "
+                         "as the server applies them", resent.begin()->first, resent.rbegin()->first, resent.size());
+                if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_resync);
+                return;
+            }
+            s.have_resync_state_ = false;
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_resync);
             logf("resynced: tick base %u", s.tick_base_);
             journal_.note("resync: tick base " + std::to_string(s.tick_base_));
@@ -538,10 +591,17 @@ namespace bmmo::session {
 
     // A resync request_resync held back for the own correction: asked
     // now if the limiter allows (it keeps the debt otherwise).  A resync
-    // waiting for its snapshot already is the answer.
+    // waiting for its snapshot already is the answer - but not a pending
+    // exact resync whose state was refused or never came (step A3: the
+    // apply's refusals and the hold's timeout clear resync_in_flight_ and
+    // ask again; every other trigger waits while a resync is pending, so the
+    // debt is the only way that request goes out).
     void session_client_core::retry_owed_resync() {
         if (!s.resync_owed_) return;
-        if (s.resync_pending_) { s.resync_owed_ = false; return; }
+        if (s.resync_pending_ && !(s.resync_exact_ && !s.resync_in_flight_ && !s.have_resync_state_)) {
+            s.resync_owed_ = false;
+            return;
+        }
         const std::string reason = s.resync_owed_reason_ + " (owed)";
         request_resync(reason.c_str(), true);
     }

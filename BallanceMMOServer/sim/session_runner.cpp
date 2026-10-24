@@ -686,6 +686,60 @@ namespace bmmo::sim {
         });
     }
 
+    void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base) {
+        post([this, session, player, base] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end() || !it->second->world) return;
+            auto& s = *it->second;
+            const uint32_t next = s.world->tick_index();
+            // base - 1 stepped already (next = tick_index(), the tick the
+            // runner steps next, is past it: next >= base): nothing is sent
+            // for a base the runner has passed - the client's check
+            // tick == base-1 never refuses a valid answer - and the server
+            // re-answers.  (next == base is a miss too: emit_resync_states
+            // runs after the step of base - 1, which has already happened.)
+            if (static_cast<int32_t>(next - base) >= 0) {
+                s.resync_requests.erase(player);
+                log("[session " + std::to_string(s.id) + "] resync base " + std::to_string(base) + " for player "
+                    + std::to_string(player) + " was stepped before the request reached the runner (next tick "
+                    + std::to_string(next) + ")");
+                if (s.journal.is_open() && !s.journal.capped())
+                    s.journal.note(next, "resync: base " + std::to_string(base) + " for player " + std::to_string(player)
+                                         + " missed (stepped before the request)");
+                if (callbacks_.on_resync_base_missed) callbacks_.on_resync_base_missed(s.id, player, base);
+                return;
+            }
+            s.resync_requests[player] = base;
+        });
+    }
+
+    void session_runner::emit_resync_states(session_state& s, uint32_t tick, bool recording) {
+        for (auto r = s.resync_requests.begin(); r != s.resync_requests.end();) {
+            if (r->second - 1 != tick) {
+                ++r;
+                continue;
+            }
+            const auto started = clock::now();
+            resync_state_out out;
+            out.session = s.id;
+            out.player = r->first;
+            out.tick = tick;
+            out.base = r->second;
+            s.world->capture_resync_state(out.player, out.state);
+            out.emit_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
+            if (recording)
+                s.journal.note(tick, "resync state for player " + std::to_string(out.player) + ": tick "
+                                     + std::to_string(tick) + " base " + std::to_string(out.base) + ", "
+                                     + std::to_string(out.state.rows.size()) + " rows, "
+                                     + std::to_string(out.state.scripts.size()) + " script bytes, "
+                                     + std::to_string(out.state.savestate.size()) + " savestate bytes (packed)"
+                                     + (out.state.error.empty() ? std::string() : " (" + out.state.error + ")"));
+            r = s.resync_requests.erase(r);
+            if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);
+        }
+    }
+
     void session_runner::describe(uint32_t session) {
         post([this, session] {
             auto it = sessions_.find(session);
@@ -930,6 +984,9 @@ namespace bmmo::sim {
         const bool changed = s.world->body_set_changed();
         const int decision = s.cadence.decide(tick, changed);
         if (decision != 0) emit_snapshot(s, decision == 2);
+        // Step A3: the resync states due after this step (base - 1 == tick),
+        // after the snapshot so its numbering of new bodies comes first.
+        if (!s.resync_requests.empty()) emit_resync_states(s, tick, recording);
         // The box's own checkpoint, last and through the read-only path:
         // snapshot() would recompute body_set_changed_ against its own call and
         // number mechanisms the server has not numbered yet, and the journal

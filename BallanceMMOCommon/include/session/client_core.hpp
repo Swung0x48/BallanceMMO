@@ -97,6 +97,7 @@
 #include "../message/session_input_msg.hpp"
 #include "../message/session_lead_msg.hpp"
 #include "../message/session_remote_input_msg.hpp"
+#include "../message/session_resync_state_msg.hpp"
 #include "../message/session_start_msg.hpp"
 #include "../physics/world_hash.hpp"
 
@@ -560,6 +561,66 @@ namespace bmmo::session {
         uint64_t mirror_remakes_ = 0, mirror_remakes_lost_ = 0;
         uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
         bool resync_pending_ = false;
+        // ---- step A3: the exact resync (resync design 2.6) ----
+        // The pending resync is answered by a SessionResyncState of tick
+        // resync_base_ - 1 (the assignment carried ASSIGN_FLAG_STATE_FOLLOWS):
+        // the history is anchored there (the synthetic anchor), and the
+        // state is applied as that tick and re-stepped to the live one.
+        bool resync_exact_ = false;
+        uint32_t resync_base_ = 0;
+        uint32_t resync_old_tick_ = 0;      // R: the old numbering's tick at the re-assign
+        int64_t resync_delta_ = 0;          // delta = R - (base - 1)
+        // The state, kept while the apply waits for the body set (2.6.4
+        // step 2), and when it arrived.
+        bool have_resync_state_ = false;
+        bmmo::session_resync_state_msg resync_state_;
+        uint32_t resync_state_arrived_ = 0;
+        uint32_t resync_wait_frames_ = 0;
+        uint64_t resync_states_ = 0, resync_states_stale_ = 0, resync_states_refused_ = 0;
+        uint64_t resyncs_restepped_ = 0, resync_restep_depth_ = 0;
+        uint64_t resync_deferred_ = 0, resync_deferred_ticks_ = 0;   // applies put off for the body set, and their frames
+        uint64_t snapshots_while_resync_ = 0;
+        uint64_t resync_scripts_refused_ = 0, resync_blobs_refused_ = 0;
+        uint64_t resync_unexplained_ = 0, resync_unattributed_ = 0, resync_rows_unmapped_ = 0, resync_unportable_ = 0;
+        uint64_t resync_destroyed_ = 0;
+        // The resync hold (2.6.6): the world steps nothing while a pending
+        // resync's history would lose its anchor.
+        bool resync_held_ = false;
+        // A hold that timed out is spent for that resync: the world runs on
+        // (a new assignment, after the next trigger, holds again).
+        bool resync_hold_spent_ = false;
+        clock_type::time_point resync_hold_deadline_{}, resync_hold_started_{};
+        uint64_t resync_holds_ = 0, resync_hold_timeouts_ = 0;
+        double resync_hold_ms_max_ = 0.0;
+        // Every remote lifecycle event this world applied, by applied tick
+        // (a shared tick), the last history_ticks + 128 ticks: the
+        // reconcile's evidence for a mirror born or dead after S (2.6.3).
+        struct life_entry {
+            uint32_t applied = 0, origin = 0, player = 0;
+            bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
+        };
+        std::deque<life_entry> life_log_;
+        // Deaths re-applied inside a resync's replay at their tick (a mirror
+        // made from its row at S whose Unphysicalize came after S).
+        struct pending_death {
+            uint32_t player = 0, tick = 0;
+        };
+        std::vector<pending_death> pending_deaths_;
+        // The re-step window (S, applied_at] of the last exact resync applied
+        // (step A3 fix-up): a correction of a tick in it - a held notice for
+        // an own tick, a relayed frame of a remote - amends a record that
+        // re-step made, and its rewind may go as deep as the re-step itself
+        // (resync_reach, not max_resim_ticks).  The server's substitutions
+        // of the new epoch's first ticks come after the state, D = 51-53
+        // ticks deep (a5u_lead), and each asked for the next resync; the
+        // relayed frames of the window that come after it were dropped as
+        // late and left the mirrors on their prediction.
+        bool resync_window_ = false;
+        uint32_t resync_window_anchor_ = 0, resync_window_end_ = 0;
+        uint64_t resync_window_rewinds_ = 0;
+        uint64_t resync_rewinds_subsumed_ = 0;   // pending corrections the apply's re-step covered
+        uint64_t resync_amends_ = 0;   // own records amended while an exact resync was pending
+        uint64_t resync_resent_ = 0;   // own frames of the old numbering played again (Delta > 0)
         // A resync request sent and not answered yet (no assignment with a
         // newer base): its full snapshot covers every reason found meanwhile.
         bool resync_in_flight_ = false;
@@ -860,6 +921,18 @@ namespace bmmo::session {
         // its first arrival, an echo of our own event is queued for the
         // frame's echoes, another member's for its due tick.
         void on_session_event(bmmo::session_event_msg&& msg);
+        // SessionResyncState (step A3, resync design 2.6.4): the server's
+        // state of tick base - 1 for the pending exact resync; applied as
+        // that tick and re-stepped to the live one now, or - its bodies not
+        // all here yet - kept and tried again every frame.
+        void on_session_resync_state(bmmo::session_resync_state_msg&& msg);
+        // The resync hold (2.6.6), once per host loop pass before a step:
+        // while a pending exact resync's history would lose its anchor with
+        // the next step, the world must not step (`held`).  Bounded (2 s):
+        // `timed_out` on the poll it gives up (logged, journaled).
+        hold_state poll_resync_hold();
+        bool resync_held() const { return s.resync_held_; }
+        uint64_t resyncs_restepped() const { return s.resyncs_restepped_; }
 
         // ---- own reports from a host_hooks host (E7; design 1.3) ----
         // The own ball's Physicalize and Unphysicalize from a host_hooks
@@ -934,6 +1007,14 @@ namespace bmmo::session {
         // replayed cells instead of writing the live ones back.
         bool last_rewind_rederived() const { return s.last_rewind_rederived_; }
         uint64_t sector_rewinds() const { return s.sector_rewinds_; }
+        // The tick this client stamped its own entry into `sector` for (the
+        // stamp log), false when it has not (the headless --resync-at s<K>+D).
+        bool own_sector_stamp(int sector, uint32_t& tick) const {
+            const auto it = s.sector_stamps_.find({s.own_id_, sector});
+            if (it == s.sector_stamps_.end()) return false;
+            tick = it->second.tick;
+            return true;
+        }
 
         // ---- rewinds asked for by the host (E5; design 1.3) ----
         // A forced rollback `depth` ticks deep from the current tick (the
@@ -1242,6 +1323,28 @@ namespace bmmo::session {
         void reset_held_epoch(const char* why = "the new base");
         void drop_pending_rewind();
         bool own_notices_coming() const;
+
+        // The exact resync (step A3, client_core_resync.cpp).
+        // At the re-assign: the synthetic anchor of base - 1 (2.6.1).
+        void anchor_resync(uint32_t base, uint32_t old_tick);
+        // The apply (2.6.4), from on_session_resync_state and every pre_step
+        // while a state waits; true when it ran (applied or refused for good).
+        bool try_apply_resync(const char* why);
+        // The tracked set of a record made now (post_step's, for the
+        // synthetic anchor).
+        bmmo::session::rollback_tracked tracked_now(bool physicalized) const;
+        // A remote lifecycle event applied (life_log_).
+        void log_life(const bmmo::session_event_msg& event);
+        // Before a replayed tick: the deaths a resync re-applies there.
+        void drain_pending_deaths(uint32_t tick);
+        // How deep the correction rewind of `tick` (its anchor tick - 1) may
+        // go: max_resim_ticks, or the resync reach inside the last exact
+        // resync's re-step window.
+        uint32_t window_rewind_reach(uint32_t tick) const;
+        // A held notice's tick whose record a pending exact resync's
+        // re-step replays (client_core_held.cpp), and its amendment.
+        bool resync_amends(uint32_t tick) const;
+        void amend_for_resync(uint32_t tick, const bmmo::session::input_frame& frame);
 
         // The remote lifecycle (E6, client_core_lifecycle.cpp).
         uint32_t join_rank(uint32_t player) const;

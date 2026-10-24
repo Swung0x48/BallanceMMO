@@ -412,6 +412,48 @@ TEST(SessionJournal, RoundTripOfEveryRecordType) {
     EXPECT_EQ("end: session over", out.notes[1].text);
 }
 
+// Step A3: the RESYNC record (version 4) round trip, its byte strings whole.
+TEST(SessionJournal, ResyncRecordRoundTrip) {
+    const temp_dir dir("resync");
+    const auto path = dir.file("session.bmjr");
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        journal_resync r;
+        r.tick = 139;
+        r.base = 140;
+        r.delta = -14;
+        r.applied_at = 159;
+        r.outcome = JOURNAL_RESYNC_REFUSED_SCRIPTS;
+        r.union_state = std::string("\x01\x02", 2);
+        r.scripts = std::string(300, 's');
+        r.savestate = std::string(70000, '\0') + "end";
+        writer.resync(r);
+        writer.note(140, "after");
+        writer.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_TRUE(out.warning.empty()) << out.warning;
+    EXPECT_EQ(0u, out.unknown_records);
+    ASSERT_EQ(2u, out.ticks.size());
+    ASSERT_EQ(1u, out.ticks[0].resyncs.size());
+    const journal_resync& r = out.ticks[0].resyncs[0];
+    EXPECT_EQ(139u, out.ticks[0].tick);
+    EXPECT_EQ(140u, r.base);
+    EXPECT_EQ(-14, r.delta);
+    EXPECT_EQ(159u, r.applied_at);
+    EXPECT_EQ(JOURNAL_RESYNC_REFUSED_SCRIPTS, r.outcome);
+    EXPECT_EQ(std::string("\x01\x02", 2), r.union_state);
+    EXPECT_EQ(300u, r.scripts.size());
+    EXPECT_EQ(70003u, r.savestate.size());
+    EXPECT_EQ("end", r.savestate.substr(70000));
+    EXPECT_EQ(4u, kJournalVersion);
+    EXPECT_EQ(2u, kJournalOldestReadable) << "version 2 and 3 files still read";
+}
+
 TEST(SessionJournal, TruncatedTailKeepsTheTicksBeforeIt) {
     const temp_dir dir("truncated");
     const auto path = dir.file("session.bmjr");

@@ -153,9 +153,10 @@ namespace bmmo::physics::savestate {
         class restorer {
         public:
             restorer(CKIpionManager* physics, const world_record& world, uint32_t flags, std::string& error,
-                     savestate_report* report)
+                     savestate_report* report, const savestate_travel* travel = nullptr)
                 : physics_(physics), world_(world), error_(error), report_(report),
-                  strict_((flags & SAVESTATE_STRICT) != 0u), keep_unknown_((flags & SAVESTATE_KEEP_UNKNOWN) != 0u) {}
+                  strict_((flags & SAVESTATE_STRICT) != 0u), keep_unknown_((flags & SAVESTATE_KEEP_UNKNOWN) != 0u),
+                  travel_(travel) {}
 
             bool run();
             bool rebuild();
@@ -172,6 +173,10 @@ namespace bmmo::physics::savestate {
             savestate_report* report_;
             const bool strict_;
             const bool keep_unknown_;
+            // A travelling blob (savestate_travel, resync step A3): null for
+            // the ordinary, in-process restore.
+            const savestate_travel* travel_;
+            uint32_t excluded_ = 0, renamed_ = 0;
 
             // ---- progress and diagnostics ----
             int step_ = 0;
@@ -502,14 +507,43 @@ namespace bmmo::physics::savestate {
             return true;
         }
 
-        // Every record object to its live twin by name.
+        // Every record object to its live twin by name.  A travelling blob
+        // (savestate_travel): the name renamed first, a name several objects
+        // share matched by occurrence, and an excluded name left out on both
+        // sides (its live body stays unknown to the blob).
         bool restorer::map_objects() {
             set_step(0, "objects");
             live_of_.assign(world_.objects.size(), -1);
             unknown_.assign(live_.objects.size(), 1);
+            std::map<std::string, size_t> occurrences;   // travelling: records of each (renamed) name so far
             for (size_t i = 0; i < world_.objects.size(); ++i) {
                 const object_record& o = world_.objects[i];
-                const int32_t li = live_.find_by_name(o.name, o.entity_id);
+                int32_t li = -1;
+                if (travel_) {
+                    std::string name = o.name;
+                    for (const auto& [from, to]: travel_->renames)
+                        if (name == from) {
+                            name = to;
+                            ++renamed_;
+                            break;
+                        }
+                    bool excluded = false;
+                    for (const std::string& prefix: travel_->excluded_prefixes)
+                        if (!prefix.empty() && name.compare(0, prefix.size(), prefix) == 0) excluded = true;
+                    if (excluded) {
+                        ++excluded_;
+                        continue;   // its records are skipped below (an object is missing)
+                    }
+                    li = live_.find_by_occurrence(name, occurrences[name]++);
+                    if (li < 0) {
+                        if (!problem("object '" + o.name + "'" + (name != o.name ? " (here '" + name + "')" : std::string())
+                                     + " is in the travelling savestate but not in the world"))
+                            return false;
+                        continue;
+                    }
+                } else {
+                    li = live_.find_by_name(o.name, o.entity_id);
+                }
                 if (li < 0) {
                     if (!problem("object '" + o.name + "' is in the savestate but not in the world")) return false;
                     continue;
@@ -1771,6 +1805,25 @@ namespace bmmo::physics::savestate {
         // and its script, since the id alone says nothing.
         bool restorer::check_callbacks() {
             set_step(0, "PreSimulate queue");
+            // A travelling blob names the blocks by the capturing process's
+            // CK ids, and the queue is never rebuilt - the live world keeps
+            // its own (savestate_travel): only a length difference is noted.
+            if (travel_) {
+                size_t live = 0;
+                if (PhysicsCallbackContainer* queue = physics_->m_PreSimulateCallbacks)
+                    for (int slot = 0; slot < 3; ++slot)
+                        for (int i = 0; i < queue->m_Callbacks[slot].len(); ++i) {
+                            PhysicsCallback* cb = queue->m_Callbacks[slot].element_at(i);
+                            if (cb && cb->m_BehaviorID != 0 && !is_bmmo_callback(cb)) ++live;
+                        }
+                size_t recorded = 0;
+                for (const callback_record& cb : world_.callbacks)
+                    if (cb.behavior != 0) ++recorded;
+                if (live != recorded)
+                    note("travelling savestate: the PreSimulate queue has " + std::to_string(live) + " retail entries here, "
+                         + std::to_string(recorded) + " (BallanceMMO's included) in the capturing world; the live queue is kept");
+                return true;
+            }
             std::vector<callback_record> live_queue;
             std::set<uint32_t> bmmo_behaviors;
             if (PhysicsCallbackContainer* queue = physics_->m_PreSimulateCallbacks) {
@@ -1878,7 +1931,9 @@ namespace bmmo::physics::savestate {
             }
             env_ = live_.env;
             if (!env_) return fail("physics environment is unavailable");
-            if (world_.environment_id != static_cast<uint64_t>(reinterpret_cast<uintptr_t>(env_)))
+            // A travelling blob is another process's by definition (resync
+            // step A3): its identity is not this environment's.
+            if (!travel_ && world_.environment_id != static_cast<uint64_t>(reinterpret_cast<uintptr_t>(env_)))
                 return fail("the savestate was captured in another environment");
             if (!IVP_BMMO_State::time_manager(*env_) || !IVP_BMMO_State::time_manager(*env_)->min_hash
                 || !IVP_BMMO_State::time_manager(*env_)->psi_event || !IVP_BMMO_State::ov_tree(*env_)
@@ -1986,18 +2041,20 @@ namespace bmmo::physics::savestate {
             report_->events = counts_.events;
             report_->hull_entries = counts_.hull_entries;
             report_->skipped = counts_.skipped;
+            report_->excluded = excluded_;
+            report_->renamed = renamed_;
         }
     }
 
     bool restore_world(CKIpionManager* physics, const world_record& world, uint32_t flags, std::string& error,
-                       savestate_report* report) {
+                       savestate_report* report, const savestate_travel* travel) {
         error.clear();
         if (report) *report = savestate_report{};
         bool ok = false;
         {
             // The guard inside puts listeners, flags and the event log back
             // when the restorer goes, on every path.
-            restorer r(physics, world, flags, error, report);
+            restorer r(physics, world, flags, error, report, travel);
             ok = r.run();
             r.fill_report();
         }
@@ -2026,5 +2083,26 @@ namespace bmmo::physics {
             return false;
         }
         return savestate::restore_world(physics, world, flags, error, report);
+    }
+
+    bool set_savestate(CKIpionManager* physics, const uint8_t* data, size_t size, uint32_t flags, std::string& error,
+                       savestate_report* report, const savestate_travel& travel) {
+        error.clear();
+        if (report) *report = savestate_report{};
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        if (!data || size == 0) {
+            error = "empty savestate";
+            return false;
+        }
+        savestate::reader r(data, size);
+        savestate::world_record world;
+        if (!savestate::read_world(r, world, error)) {
+            if (error.empty()) error = "the savestate does not parse";
+            return false;
+        }
+        return savestate::restore_world(physics, world, flags, error, report, &travel);
     }
 }

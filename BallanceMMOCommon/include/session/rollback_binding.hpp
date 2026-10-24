@@ -190,6 +190,27 @@ namespace bmmo::session {
                 if (o.on_savestate_restored) o.on_savestate_restored(ok, error, outcome);
                 return ok;
             };
+            // Step A3: the resync state's server blob, a travelling one
+            // (bridge v20), with the same flags.  A backend without the entry
+            // (a test's) leaves the hook empty: the engine then restores the
+            // anchor's own blob under the server's rows.
+            if constexpr (requires(Backend& x, std::string& s, std::vector<std::string>* v) {
+                              x.savestate_set_travelling(static_cast<const uint8_t*>(nullptr), size_t{0}, uint32_t{0},
+                                                         std::vector<std::pair<std::string, std::string>>{},
+                                                         std::vector<std::string>{}, s, v, v, &s);
+                          }) {
+                world.set_travelling_savestate = [b, o](const travelling_blob& blob, savestate_outcome& outcome) {
+                    std::string error;
+                    if (!blob.blob || blob.blob->empty()) return false;
+                    const bool ok = b->savestate_set_travelling(blob.blob->data(), blob.blob->size(), o.savestate_flags,
+                                                                blob.renames, blob.excluded_prefixes, error,
+                                                                &outcome.contacts_dropped, &outcome.unknown_bodies,
+                                                                &outcome.summary);
+                    if (!ok && !error.empty()) outcome.summary += (outcome.summary.empty() ? "" : " | ") + error;
+                    if (o.on_savestate_restored) o.on_savestate_restored(ok, error, outcome);
+                    return ok;
+                };
+            }
         }
         world.nav_input = [b](const std::string& entity, const input_frame& frame) {
             std::string error;

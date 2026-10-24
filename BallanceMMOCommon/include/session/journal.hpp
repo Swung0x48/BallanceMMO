@@ -32,6 +32,11 @@
 //   tag 5 CHECKPOINT  body poses (server FULL, client LOCAL / RECEIVED)
 //   tag 6 NOTE        free text, and the structured milestones (start:, end:, ...)
 //   tag 7 CORRECTION  a client's disagreement with an authoritative snapshot
+//   tag 8 RESYNC      a client's resync state applied (or refused) as tick S
+//                     (version 4, resync design 5): u32 S, u32 base, i32 delta,
+//                     u32 applied_at, u8 outcome, then the union, the portable
+//                     script record and the server's savestate as u32-sized byte
+//                     strings - enough for an offline re-step (step T1)
 //
 // Every record but the header carries a tick as its first field, so a reader
 // groups the file by tick without understanding a single tag.  The length
@@ -67,15 +72,16 @@
 namespace bmmo::session {
     enum class journal_tag : uint8_t {
         header = 0, player = 1, input = 2, event = 3, tick = 4,
-        checkpoint = 5, note = 6, correction = 7
+        checkpoint = 5, note = 6, correction = 7, resync = 8
     };
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
-    constexpr uint32_t kJournalVersion = 3;
+    // 4: the RESYNC record (protocol 10, resync design 5, step A3).
+    constexpr uint32_t kJournalVersion = 4;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
-    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::correction);
+    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::resync);
     // A str never exceeds this; a longer one makes the record invalid.
     constexpr size_t kJournalMaxString = 4096;
     // A checkpoint never carries more bodies than this (about 600 KB of
@@ -98,6 +104,11 @@ namespace bmmo::session {
     constexpr uint8_t JOURNAL_CHECKPOINT_FULL = 1;       // server: every movable body, names present
     constexpr uint8_t JOURNAL_CHECKPOINT_LOCAL = 2;      // client: its own world
     constexpr uint8_t JOURNAL_CHECKPOINT_RECEIVED = 4;   // client: a snapshot as received
+    constexpr uint8_t JOURNAL_CHECKPOINT_RESYNC = 8;     // client: the rows of a resync state (version 4)
+    // RESYNC `outcome`
+    constexpr uint8_t JOURNAL_RESYNC_APPLIED = 0;          // applied as tick S and re-stepped
+    constexpr uint8_t JOURNAL_RESYNC_REFUSED_SCRIPTS = 1;  // applied, the server's scripts refused (the client's own kept)
+    constexpr uint8_t JOURNAL_RESYNC_TIMED_OUT = 2;        // never applied (the anchor left the history)
 
     struct journal_header {
         journal_kind kind = journal_kind::server;
@@ -357,6 +368,14 @@ namespace bmmo::session {
             void f64_array(double* out, size_t count) {
                 for (size_t i = 0; i < count; ++i) out[i] = f64();
             }
+
+            // `n` raw bytes (the RESYNC record's byte strings).
+            bool bytes(std::string& out, size_t n) {
+                const size_t at = pos;
+                if (!take(n)) return false;
+                out.assign(data + at, n);
+                return true;
+            }
         };
 
         // The bridge recipe in declaration order.  Counts are clamped on write
@@ -492,6 +511,16 @@ namespace bmmo::session {
     // Writes the file as the session runs.  Every method is a no-op when the
     // file could not be opened or the size cap was reached, so a caller never
     // has to check: capture code must never be able to break a session.
+    // tag 8 RESYNC (version 4): the state a client applied as tick S, and how.
+    struct journal_resync {
+        uint32_t tick = 0;          // S
+        uint32_t base = 0;
+        int32_t delta = 0;          // R - (base - 1)
+        uint32_t applied_at = 0;    // the client's tick when it was applied (B)
+        uint8_t outcome = 0;        // JOURNAL_RESYNC_*
+        std::string union_state, scripts, savestate;   // the state's bytes, as received
+    };
+
     class journal_writer {
     public:
         journal_writer() = default;
@@ -648,6 +677,22 @@ namespace bmmo::session {
             record(journal_tag::correction, payload);
         }
 
+        void resync(const journal_resync& r) {
+            if (!writable()) return;
+            last_tick_ = r.tick;
+            std::string payload;
+            journal_detail::write_u32(payload, r.tick);
+            journal_detail::write_u32(payload, r.base);
+            journal_detail::write_u32(payload, static_cast<uint32_t>(r.delta));
+            journal_detail::write_u32(payload, r.applied_at);
+            journal_detail::write_u8(payload, r.outcome);
+            for (const std::string* bytes: {&r.union_state, &r.scripts, &r.savestate}) {
+                journal_detail::write_u32(payload, static_cast<uint32_t>(bytes->size()));
+                payload += *bytes;
+            }
+            record(journal_tag::resync, payload);
+        }
+
         void flush() {
             if (stream_.is_open()) stream_.flush();
         }
@@ -698,6 +743,7 @@ namespace bmmo::session {
                 case journal_tag::checkpoint:
                 case journal_tag::note:
                 case journal_tag::correction:
+                case journal_tag::resync:
                     stream_.flush();
                     break;
                 default:
@@ -729,6 +775,7 @@ namespace bmmo::session {
         std::vector<journal_checkpoint> checkpoints;
         std::vector<journal_note> notes;
         std::vector<journal_correction> corrections;
+        std::vector<journal_resync> resyncs;   // version 4
     };
 
     struct journal {
@@ -993,6 +1040,27 @@ namespace bmmo::session {
                     auto& group = groups[c.tick];
                     group.tick = c.tick;
                     group.corrections.push_back(std::move(c));
+                    ++delivered;
+                    return true;
+                }
+                case journal_tag::resync: {
+                    journal_resync r;
+                    r.tick = in.u32();
+                    r.base = in.u32();
+                    r.delta = static_cast<int32_t>(in.u32());
+                    r.applied_at = in.u32();
+                    r.outcome = in.u8();
+                    for (std::string* bytes: {&r.union_state, &r.scripts, &r.savestate}) {
+                        const uint32_t size = in.u32();
+                        if (!in.ok || !in.bytes(*bytes, size)) {
+                            in.ok = false;
+                            break;
+                        }
+                    }
+                    if (!in.ok) break;
+                    auto& group = groups[r.tick];
+                    group.tick = r.tick;
+                    group.resyncs.push_back(std::move(r));
                     ++delivered;
                     return true;
                 }

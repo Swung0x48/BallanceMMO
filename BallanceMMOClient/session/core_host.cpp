@@ -281,6 +281,7 @@ namespace {
         case bmmo::SessionEvent: return "SessionEvent";
         case bmmo::SessionEnd: return "SessionEnd";
         case bmmo::SessionLead: return "SessionLead";
+        case bmmo::SessionResyncState: return "SessionResyncState";
         default: return "?";
         }
     }
@@ -304,6 +305,7 @@ namespace {
         case bmmo::SessionEvent: { bmmo::session_event_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionLead: { bmmo::session_lead_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionEnd: { bmmo::session_end_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionResyncState: { bmmo::session_resync_state_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -520,6 +522,7 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionRemoteInput:
     case bmmo::SessionEvent:
     case bmmo::SessionLead:
+    case bmmo::SessionResyncState:   // step A3 (protocol 10): the core path alone; the legacy one ignores it
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     default:
@@ -765,7 +768,8 @@ void BallanceMMOClient::core_host_drain() {
     // a late frame asks for its own replay, and arrival order stands.
     if (host.core && !host.core->config.input_rewind && entries.size() > 1) {
         const auto rank = [](int code) {
-            return code == bmmo::SessionRemoteInput ? 0 : code == bmmo::SessionSnapshot ? 2 : 1;
+            return code == bmmo::SessionRemoteInput ? 0
+                 : code == bmmo::SessionSnapshot || code == bmmo::SessionResyncState ? 2 : 1;
         };
         const auto fence = [](int code) {
             return code == bmmo::SessionStart || code == bmmo::SessionAssign || code == bmmo::SessionEnd;
@@ -1052,7 +1056,24 @@ void BallanceMMOClient::core_host_frame() {
             }
         }
     }
-    core.pre_step();
+    // Step A3 (resync design 2.6.6): the resync hold.  While a pending exact
+    // resync's anchor would leave the history with the next step, nothing
+    // steps: the mailbox is drained (its state applies the resync and ends
+    // the hold) under the tick driver's hold, so the wait is no lag and
+    // `rebases` does not move (a rebase would ask for another resync).
+    if (core.poll_resync_hold().held) {
+        fixed_tick_.set_hold(true);
+        while (core_session_running() && host.core->resync_held()) {
+            core_host_drain();
+            if (!core_session_running()) break;
+            if (!host.core->poll_resync_hold().held) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        fixed_tick_.set_hold(false);
+        host.last_rebases = fixed_tick_.rebases();
+        if (!core_session_running()) return;
+    }
+    host.core->pre_step();
 }
 
 // The host's session ends (the legacy physics_session_end_local): the script
@@ -1123,6 +1144,11 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
     case bmmo::SessionLead: {
         bmmo::session_lead_msg msg{};
         if (decode(msg)) core.on_session_lead(msg);
+        break;
+    }
+    case bmmo::SessionResyncState: {
+        bmmo::session_resync_state_msg msg{};
+        if (decode(msg)) core.on_session_resync_state(std::move(msg));
         break;
     }
     case bmmo::SessionEnd: {
@@ -1440,6 +1466,37 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (cell != current_sector_) sector_cell_is_own_ = false;
         return true;
     };
+    // Step A3: the exact resync's, over the file-scope host state (host
+    // support): the server's script record localized, the old numbering's
+    // activations and script resets forgotten at the re-assign, the births
+    // of the bodies the server's state has at S forgotten after the
+    // restore, the birth log for the reconcile, the trafo pieces as this
+    // world's own.
+    p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
+                                std::vector<uint8_t>& out, std::string& error, bs::resync_script_report& report) {
+        return bmmo::game::localize_session_scripts(m_bml->GetCKContext(), host.script_ids, portable, anchor, out, error,
+                                                    report);
+    };
+    p.forget_activations_from = [this](uint32_t tick) {
+        const size_t activations = host.activations.forget_from(tick);
+        const size_t resets = bmmo::game::forget_reset_ticks_from(host.script_reset_ticks, tick);
+        if (activations || resets)
+            logger_->Info("Physics session: resync: %zu activation tick(s) and %zu script reset(s) of the old numbering "
+                          "from tick %u forgotten", activations, resets, tick);
+    };
+    p.forget_births_after = [](uint32_t tick, const std::vector<std::string>& entities) {
+        host.births.forget_after(tick, entities);
+    };
+    p.birth_tick_of = [](const std::string& entity) { return host.births.birth_tick_of(entity); };
+    p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
+        auto* bytes = CKUnPackData(static_cast<int>(size), reinterpret_cast<char*>(const_cast<uint8_t*>(packed.data())),
+                                   static_cast<int>(packed.size()));
+        if (!bytes) return false;
+        out.assign(reinterpret_cast<const uint8_t*>(bytes), reinterpret_cast<const uint8_t*>(bytes) + size);
+        CKDeletePointer(bytes);
+        return true;
+    };
+    p.local_only_body = [](const std::string& entity) { return host.explosion_pieces.count(entity) != 0; };
     // The manager's and the trafo scripts' (step P: host support's
     // record_pending, the selection's `activations`).
     p.record_pending_activation = [this](uint32_t tick) {

@@ -31,6 +31,7 @@
 
 #include <entity/session.hpp>
 #include <game/navigation_graph.hpp>
+#include <game/script_replay.hpp>
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
@@ -210,6 +211,31 @@ namespace bmmo::sim {
         // snapshot() call (a full snapshot is then due).
         bool body_set_changed() const { return body_set_changed_; }
 
+        // The resync state of the tick just stepped, for `player` (resync
+        // design 2.3, step A3): the rows of a full snapshot (numbered as the
+        // snapshots number them, the body-set bookkeeping of snapshot()
+        // untouched), the player's own clone's name, the sector union, the
+        // portable script record of the session's selection and the IVP
+        // savestate.  Nothing the world computes, its hash or its journal
+        // changes (the record reads every parameter with
+        // GetReadDataPtr(FALSE), the force hook reads the controller, the
+        // savestate capture reads); the one write is the mechanism numbering
+        // (body_index_): a body new to it is numbered now, with the number the
+        // next full snapshot would have given it, so the numbering a later
+        // snapshot carries may depend on whether a resync came first (never
+        // the simulation or the hash).  The server never reads it back.
+        struct resync_state {
+            std::vector<bmmo::session::body_state> rows;
+            std::vector<std::pair<uint32_t, std::string>> clones;   // every physicalized player's ball entity
+            std::vector<std::pair<uint32_t, bmmo_physics_nav_state>> navs;   // every player's ball navigation
+            std::vector<uint8_t> union_state, scripts, savestate;
+            // The scripts and the savestate are packed (CKPackData, zlib):
+            // their unpacked sizes (0 when a section is carried as it is).
+            uint32_t scripts_size = 0, savestate_size = 0;
+            std::string error;   // what could not be captured ("" when all of it was)
+        };
+        void capture_resync_state(uint32_t player, resync_state& out);
+
         // The sectors the world is running: every sector any member has
         // entered (session/sector_union.hpp), each started by update_sectors()
         // before the step of the tick the shared rule picks.
@@ -265,7 +291,9 @@ namespace bmmo::sim {
         physics_world() = default;
         // Shared by snapshot() and snapshot_for_journal(); `bookkeeping` says
         // whether the call owns the body-set flag and the mechanism numbering.
-        void collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out);
+        // `number`: a body without a number gets one (the snapshots' and the
+        // resync state's), never with `bookkeeping` off otherwise.
+        void collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out, bool number = false);
         bool boot(std::string& error);
         bool anchor(std::string& error);
         bool ensure_collision_filter(std::string& error);
@@ -334,6 +362,13 @@ namespace bmmo::sim {
         std::vector<identity_probe> identities_;
         CK_ID current_level_ = 0;
         CK_ID ball_pos_frame_ = 0;
+        // The session's script selection (game/session_host_support.hpp
+        // session_script_selection: the selection both clients make at their
+        // anchor, so the three have the same keys) and the force hook over
+        // this world's controllers, made at anchor() for the resync state's
+        // portable record (step A3).
+        bmmo::game::script_replay::selection script_selection_;
+        bmmo::game::script_replay_hooks script_hooks_;
         std::unordered_map<std::string, uint16_t> body_index_;
         std::set<std::string> last_body_set_;
         // Whether each mechanism was simulated when the last snapshot was

@@ -67,6 +67,14 @@ namespace bmmo::session {
         std::string error;
         const std::string ball_name = platform_.own_ball().entity;
         if (s.resync_pending_) {
+            // Step A3: the pending resync is answered by its own state
+            // (SessionResyncState); every snapshot meanwhile describes a
+            // tick of another world - a broadcast full snapshot of a body-set
+            // change, the legacy copy of the state's rows - and is dropped.
+            if (s.resync_exact_) {
+                ++s.snapshots_while_resync_;
+                return;
+            }
             if (!snapshot.full) return;
             s.have_snapshot_ = true;
             s.last_snapshot_tick_ = snapshot.tick;
@@ -405,8 +413,11 @@ namespace bmmo::session {
         // rewind will use, the tick before the corrected one
         // (replay_corrected_inputs rewinds to tick - 1).  Counted - the
         // relay's pass criterion is that this never happens.
+        // Inside the last exact resync's re-step window as deep as that
+        // re-step (step A3: window_rewind_reach): the re-step ran on the
+        // relayed frames it had, and these are the ones it lacked.
         const uint32_t anchor = tick - 1;
-        if (current_tick() - anchor > s.rollback_.thresholds().max_resim_ticks || !s.rollback_.knows_tick(anchor)) {
+        if (current_tick() - anchor > window_rewind_reach(tick) || !s.rollback_.knows_tick(anchor)) {
             ++s.relay_late_;
             return;
         }

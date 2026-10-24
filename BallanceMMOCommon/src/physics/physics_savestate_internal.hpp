@@ -501,6 +501,16 @@ namespace bmmo::physics::savestate {
         // Level 8 has two P_Modul_30_Wippe), so a name shared by several
         // bodies is resolved by the entity id the record carries; a blob
         // never leaves the process that captured it, so the id is stable.
+        // The `occurrence`-th live object named `name` (0-based, entity-id
+        // order: index_live_world sorts same-named objects by id), or -1 - a
+        // travelling blob's lookup (savestate_travel), which cannot use the
+        // capturing process's ids.
+        int32_t find_by_occurrence(const std::string& name, size_t occurrence) const {
+            auto range = by_name.equal_range(name);
+            for (auto it = range.first; it != range.second; ++it, --occurrence)
+                if (occurrence == 0) return it->second;
+            return -1;
+        }
         int32_t find_by_name(const std::string& name, uint32_t entity_id) const {
             auto range = by_name.equal_range(name);
             if (range.first == range.second) return -1;
@@ -535,7 +545,7 @@ namespace bmmo::physics::savestate {
 
     // physics_savestate_restore.cpp
     bool restore_world(CKIpionManager* physics, const world_record& world, uint32_t flags, std::string& error,
-                       savestate_report* report);
+                       savestate_report* report, const savestate_travel* travel = nullptr);
 
     // Append a capped warning.
     void warn(savestate_report* report, const std::string& line);

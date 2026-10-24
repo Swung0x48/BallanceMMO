@@ -19,9 +19,11 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "../entity/session.hpp"
@@ -69,6 +71,57 @@ namespace bmmo::session {
     struct savestate_outcome {
         std::vector<std::string> contacts_dropped;   // covered bodies whose contacts the blob could not carry
         std::vector<std::string> unknown_bodies;     // live bodies the blob does not know, out of collision detection
+        // A travelling blob (step A3): the restore's counts and first
+        // warnings ("skipped=N excluded=N renamed=N | ...").
+        std::string summary;
+    };
+
+    // The server's IVP savestate as a resync carries it (resync design 2.3,
+    // 9 Q1; step A3): restored once into this world as a TRAVELLING blob
+    // (physics/physics_savestate.hpp savestate_travel) - another process's,
+    // the resynced member's own clone renamed to its own ball, the
+    // keep-local bodies left out on both sides.
+    struct travelling_blob {
+        const std::vector<uint8_t>* blob = nullptr;
+        std::vector<std::pair<std::string, std::string>> renames;
+        std::vector<std::string> excluded_prefixes;
+    };
+
+    // What a resync re-step restores at its anchor S (resync design 2.6.4,
+    // 4.1; rollback_engine::resync), decided by the session core:
+    //   scripts  the server's script record, localized to this world (v2
+    //            bytes): the anchor's own record is replaced by it before the
+    //            restore (empty: the anchor's own stays);
+    //   blob     the server's savestate (blob null or empty: the anchor's own);
+    //   rows     the server's row of every body it has at S, by local entity:
+    //            authoritative, the bodies the anchor's records show born in
+    //            the window included (a row outranks a birth); a row the body
+    //            already has bit for bit after the blob is not written (the
+    //            write is a beam: A2's rule);
+    //   destroy  bodies of the anchor world the server's state at S does not
+    //            have, by the tick they were born at (a pass this world ran
+    //            after S, a mirror born after S): destroyed at the restore and
+    //            made again by the replay at their tick, never re-posed.
+    //   navs     the server's navigation of each ball at S, by local entity:
+    //            set in place of the anchor's before the blob (its keys down
+    //            and the forces their controllers were made with).
+    struct resync_spec {
+        std::vector<uint8_t> scripts;
+        travelling_blob blob;
+        std::map<std::string, bmmo_physics_nav_state> navs;
+        std::map<std::string, const body_state*> rows;
+        std::map<std::string, uint32_t> destroy;
+    };
+    // What the restore of a resync did (the core's log line and counters).
+    struct resync_outcome {
+        bool blob_applied = false;        // the server's blob was restored
+        bool anchor_blob = false;         // ...refused, and the anchor's own restored instead
+        std::string blob_summary, blob_error;
+        uint32_t rows_written = 0, rows_equal = 0;   // rows beamed / already the body's state after the blob
+        uint32_t from_record = 0;         // bodies the blob did not know, from the anchor's record (keep-local, local-only)
+        uint32_t destroyed = 0, destroy_failed = 0, remade = 0;
+        uint32_t rechecked = 0;           // live bodies the blob did not know and no plan covers, rechecked at the restore
+        uint32_t deferred = 0;            // ...or at their birth tick
     };
 
     struct rollback_world {
@@ -126,6 +179,10 @@ namespace bmmo::session {
         // birth tick inert until then and rechecks the rest back in).
         std::function<bool(std::vector<uint8_t>& out)> get_savestate;
         std::function<bool(const std::vector<uint8_t>& blob, savestate_outcome& outcome)> set_savestate;
+        // Optional (step A3): a travelling blob - another process's, the
+        // resync state's server savestate - restored as set_savestate
+        // restores this world's own (travelling_blob; bridge v20).
+        std::function<bool(const travelling_blob& blob, savestate_outcome& outcome)> set_travelling_savestate;
         std::function<bool(const std::string& entity, bmmo_physics_nav_state& out)> get_nav;
         std::function<bool(const std::string& entity, const bmmo_physics_nav_state& state)> set_nav;
         // A body's friction contacts (bmmo_physics_contact, bridge v15).
@@ -445,6 +502,7 @@ namespace bmmo::session {
         uint64_t restore_us = 0, replay_us = 0, rewind_us_max = 0, capture_us = 0, capture_us_max = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
+        uint64_t resyncs = 0;          // resync re-steps (resync(): the server's state of S restored, S+1..now replayed)
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
         double last_error = 0.0, max_error = 0.0;
         std::string last_mismatch;     // entity of the last mismatch
@@ -713,9 +771,25 @@ namespace bmmo::session {
         bool restore_and_replay(const rollback_world& world, uint32_t anchor, uint32_t current_tick,
                                 const std::map<std::string, row_ref>& rows,
                                 const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
-                                const std::function<void(uint8_t)>& report, const std::string& reason) {
+                                const std::function<void(uint8_t)>& report, const std::string& reason,
+                                const resync_spec* rs = nullptr, resync_outcome* ro = nullptr, uint32_t deep = 0) {
             tick_state* at = find(anchor);
             if (!at) return false;
+            // A resync re-steps as deep as the history (resync()), and so does
+            // a correction inside its re-step (rewind_to's `reach`, passed as
+            // `deep`); every other restore stops at max_resim_ticks.  Never
+            // false past this point: the anchor record changed below (the
+            // server's scripts and navigation) is that of a re-step that runs.
+            const uint32_t reach = rs ? resync_reach() : deep ? deep : thresholds_.max_resim_ticks;
+            // A resync: the server's scripts replace the anchor's before the
+            // restore (resync design 4.5 "anchor scripts"), and the server's
+            // navigation state of each ball replaces the anchor's.
+            if (rs && !rs->scripts.empty()) {
+                at->scripts = rs->scripts;
+                at->have_scripts = true;
+            }
+            if (rs)
+                for (const auto& [entity, nav]: rs->navs) at->navs[entity] = nav;
             // Times the two stages for the stats: everything up to the replay
             // loop is the restore, the rest is the replay.
             struct rewind_timer {
@@ -768,6 +842,29 @@ namespace bmmo::session {
             for (const auto& entity: restore_candidates(anchor, rows)) {
                 const auto row = rows.find(entity);
                 const bmmo_physics_body_state* recorded = record_at(entity);
+                // A resync (resync design 4.1): a body the reconcile destroys
+                // comes back only by the replay, at its birth tick; a row is
+                // authoritative whatever the records say - it outranks a
+                // birth, the server says the body exists at S.
+                if (rs) {
+                    if (const auto d = rs->destroy.find(entity); d != rs->destroy.end()) {
+                        restore item;
+                        if (recorded) item.state = *recorded;
+                        item.repose_tick = d->second;
+                        item.rebirth = true;
+                        item.force_recheck = true;
+                        plan[entity] = item;
+                        continue;
+                    }
+                    if (row != rows.end() && row->second.authoritative) {
+                        restore item;
+                        item.state = state_of(*row->second.row);
+                        item.mode = row->second.simulated ? wake_mode::wake : wake_mode::freeze;
+                        item.from_row = true;
+                        plan[entity] = item;
+                        continue;
+                    }
+                }
                 // A body born after T outranks its row: the row describes the
                 // body this one replaced (or one the server does not have yet).
                 const tick_state* birth = recorded ? nullptr
@@ -867,11 +964,15 @@ namespace bmmo::session {
             const uint32_t window = current_tick > anchor ? current_tick - anchor : 0;
             // Whether a replay follows this restore (the clock, the scripts and
             // the savestate are put back only then).
-            const bool replay_follows = !frozen && window <= thresholds_.max_resim_ticks;
+            const bool replay_follows = !frozen && window <= reach;
             // The savestate path (rollback_world::set_savestate): decided here,
             // before the clock, because the blob carries the clock and the
             // separate clock write is skipped when the blob is applied.
-            const bool try_savestate = exact_restore_ && at->have_savestate && world.set_savestate && replay_follows;
+            // A resync restores the server's blob (a travelling one) in place
+            // of the anchor's own.
+            const bool travelling = rs && rs->blob.blob && !rs->blob.blob->empty() && world.set_travelling_savestate;
+            const bool try_savestate = exact_restore_ && replay_follows
+                                    && (travelling || (at->have_savestate && world.set_savestate));
             // The clock offset the restored calm references have to carry
             // when the clock itself stays live (the rewind is opt-in: IVP
             // keeps other time-anchored state a rewound clock turns into
@@ -928,7 +1029,7 @@ namespace bmmo::session {
             // Only when a replay will follow - a frozen clock or a too-far
             // window sets the bodies and drops the history.
             const bool scripts_replayed = replay_scripts_ && at->have_scripts && world.restore_scripts && !frozen
-                                        && window <= thresholds_.max_resim_ticks;
+                                        && window <= reach;
             // The live record of `current_tick`, kept aside before the replay
             // overwrites it: what the re-executed scripts must arrive at.
             std::vector<uint8_t> live_scripts, live_savestate;
@@ -971,23 +1072,79 @@ namespace bmmo::session {
                             item.recreate = true;
                             item.from_inputs = world.birth_from_inputs && world.birth_from_inputs(entity);
                             ++stats_.births_recreated;
+                            if (item.rebirth && ro) ++ro->destroyed;
                         } else {
                             ++stats_.birth_recreate_failures;
+                            if (item.rebirth) {
+                                // Not destroyed: it stays, from the anchor's
+                                // record (counted; the reconcile could not
+                                // undo it).
+                                item.rebirth = false;
+                                item.repose_tick = 0;
+                                if (ro) ++ro->destroy_failed;
+                            }
                         }
                     }
                 }
                 for (const auto& [entity, nav]: at->navs) world.set_nav(entity, nav);
                 savestate_outcome outcome;
-                if (world.set_savestate(at->savestate, outcome)) {
+                bool blob_ok = false;
+                if (travelling) {
+                    blob_ok = world.set_travelling_savestate(rs->blob, outcome);
+                    if (ro) {
+                        ro->blob_applied = blob_ok;
+                        ro->blob_summary = outcome.summary;
+                    }
+                    // Refused: the anchor's own blob, as before A3 (the rows
+                    // then carry the server's bodies; the IVP state under them
+                    // is the anchor's).
+                    if (!blob_ok && at->have_savestate && world.set_savestate) {
+                        if (world.log) world.log("resync: the server's savestate was refused (" + outcome.summary
+                                                 + "): the anchor's own restored instead");
+                        outcome = {};
+                        blob_ok = world.set_savestate(at->savestate, outcome);
+                        if (ro) ro->anchor_blob = blob_ok;
+                    }
+                } else {
+                    blob_ok = world.set_savestate(at->savestate, outcome);
+                }
+                if (blob_ok) {
                     savestate_applied = true;
                     ++stats_.savestates_restored;
-                    stats_.savestate_bytes = at->savestate.size();
+                    stats_.savestate_bytes = travelling && ro && ro->blob_applied ? rs->blob.blob->size() : at->savestate.size();
                     // The blob carries the clock: no separate write, but the
                     // clock did go back.
                     ++stats_.clock_rewinds;
                     calm_shift = 0.0;
-                    for (auto& [entity, item]: plan)
-                        if (!item.from_row && !item.repose_tick) item.covered = true;
+                    if (!rs) {
+                        for (auto& [entity, item]: plan)
+                            if (!item.from_row && !item.repose_tick) item.covered = true;
+                    } else {
+                        // A resync: the blob put back every body it knows (the
+                        // server's state at S); a row the body has now bit for
+                        // bit is not written (a beam loses what no row
+                        // carries: A2's rule).  A body it does not know - a
+                        // keep-local or local-only body - comes from the
+                        // anchor's record and is rechecked into the tree.
+                        const std::set<std::string> unknown(outcome.unknown_bodies.begin(), outcome.unknown_bodies.end());
+                        for (auto& [entity, item]: plan) {
+                            if (item.repose_tick) continue;
+                            if (unknown.count(entity)) {
+                                item.force_recheck = true;
+                                if (!item.from_row && ro) ++ro->from_record;
+                                continue;
+                            }
+                            if (!item.from_row) {
+                                item.covered = true;
+                                continue;
+                            }
+                            bmmo_physics_body_state live{};
+                            if (world.get_body(entity, live) && same_body_state(live, item.state)) {
+                                item.covered = true;
+                                if (ro) ++ro->rows_equal;
+                            }
+                        }
+                    }
                     // A covered body whose contacts the blob could not carry
                     // (its friction system had a body the world lost) gets
                     // them from our own record below, like an uncovered one.
@@ -1006,8 +1163,10 @@ namespace bmmo::session {
                         if (born > anchor && born <= current_tick) {
                             deferred_rechecks[born].push_back(name);   // in at its birth tick (below)
                             ++stats_.unknown_rechecks_deferred;
+                            if (ro) ++ro->deferred;
                         } else {
                             world.recheck_body(name);
+                            if (ro) ++ro->rechecked;
                         }
                     }
                 } else {
@@ -1084,6 +1243,7 @@ namespace bmmo::session {
                 world.set_body(entity, item.state, item.mode, recheck && !deferred);
                 if (deferred) rechecks.push_back(entity);
                 if (item.from_row) rows_written = true;
+                if (item.from_row && ro) ++ro->rows_written;
                 // After the pose write, which zeroed the queue.  A body born in
                 // the window is parked here and gets its record's extra at the
                 // re-pose instead.
@@ -1096,7 +1256,9 @@ namespace bmmo::session {
                 if (existing != at->bodies.end()) existing->second = item.state;
                 // ...and stays so in every later replay that crosses T (step
                 // RR): kept with T's record, written again after T's step.
-                if (world.replay_rows) {
+                // (Not a resync's: S is the history's oldest tick, and its
+                // record is captured anew below.)
+                if (world.replay_rows && !rs) {
                     applied_row kept{};
                     kept.state = item.state;
                     kept.mode = item.mode;
@@ -1167,7 +1329,29 @@ namespace bmmo::session {
             // window parked in it, which that rewind parks again anyway); on the
             // per-body path the blob no longer describes the anchor and is
             // dropped.
-            if (rows_written && at->have_savestate) {
+            if (rs) {
+                // A resync: the anchor's record becomes the server's state at
+                // S as this world now holds it - the mechanisms it has (but
+                // the ones parked or destroyed for a birth in the window), the
+                // blob, the scripts, every body's state - so a later rewind to
+                // S restores that, not the anchor world the resync replaced.
+                if (world.replay_mechanisms) {
+                    std::vector<std::string> mechanisms;
+                    for (std::string& name: world.replay_mechanisms()) {
+                        if (const auto p = plan.find(name); p != plan.end() && p->second.repose_tick != 0) continue;
+                        if (!at->tracked.generations.count(name)) at->tracked.generations[name] = generation_now(name);
+                        mechanisms.push_back(std::move(name));
+                    }
+                    at->tracked.mechanisms = std::move(mechanisms);
+                }
+                auto& remotes = at->tracked.remote_entities;
+                remotes.erase(std::remove_if(remotes.begin(), remotes.end(), [&](const std::string& name) {
+                    const auto p = plan.find(name);
+                    return p != plan.end() && p->second.rebirth;
+                }), remotes.end());
+                at->rows.clear();
+                capture(world, *at);
+            } else if (rows_written && at->have_savestate) {
                 at->savestate.clear();
                 at->have_savestate = savestate_applied && world.get_savestate && world.get_savestate(at->savestate)
                                    && !at->savestate.empty();
@@ -1191,7 +1375,7 @@ namespace bmmo::session {
                 return true;
             }
             ++stats_.rollbacks;
-            if (lag > thresholds_.max_resim_ticks) {
+            if (lag > reach) {
                 // Unreachable since both callers refuse a window this deep
                 // before restoring (on_snapshot, rewind_to); kept as the guard
                 // it was, with its old behaviour.
@@ -1392,10 +1576,18 @@ namespace bmmo::session {
                         }
                         continue;
                     }
+                    // A resync's destroy, made again by the replay: there is no
+                    // birth record of this history to land on (its record is
+                    // the anchor world's), so the step is the state.
+                    if (item.rebirth && !item.from_inputs) {
+                        if (ro) ++ro->remade;
+                        continue;
+                    }
                     // Made again from the inputs (birth_from_inputs): the step
                     // is the state, whatever the record of the earlier inputs
                     // says.
                     if (item.from_inputs) {
+                        if (item.rebirth && ro) ++ro->remade;
                         if (same_body_state(live, item.state)) {
                             ++stats_.births_recreated_exact;
                         } else if (world.log && recreate_logs_++ < 8) {
@@ -1542,7 +1734,7 @@ namespace bmmo::session {
                         }
                     }
                 }
-                if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts
+                if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts && !rs
                         && state.scripts != live_scripts) {
                     bool logical = true;
                     std::string where;
@@ -1606,6 +1798,12 @@ namespace bmmo::session {
             return at && at->have_scripts ? &at->scripts : nullptr;
         }
         rollback_thresholds& thresholds() { return thresholds_; }
+        // The tracked set the record of `tick` carries, or null (step A3:
+        // the reconcile reads the synthetic anchor's).
+        const rollback_tracked* recorded_tracked(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at ? &at->tracked : nullptr;
+        }
 
         // Diagnostic only (see the recheck comment in restore_and_replay).
         void set_recheck_on_restore(bool enable) { recheck_on_restore_ = enable; }
@@ -1760,20 +1958,25 @@ namespace bmmo::session {
         // `anchor` must still be in the history; too late and there is nothing
         // to rewind to, which is the point at which a snapshot or a resync has
         // to take over.  Returns false then, and the caller must re-anchor.
+        // `reach` (step A3): a deeper limit than max_resim_ticks, at most the
+        // resync reach, for a correction inside an exact resync's re-step
+        // (the client core's window_rewind_reach); 0 = max_resim_ticks.
         bool rewind_to(const rollback_world& world, uint32_t anchor, uint32_t current_tick,
                        const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
-                       const std::string& reason) {
+                       const std::string& reason, uint32_t reach = 0) {
             if (!find(anchor)) {
                 ++stats_.unmatched;
                 return false;
             }
+            const uint32_t limit = reach ? std::min(std::max(reach, thresholds_.max_resim_ticks), resync_reach())
+                                         : thresholds_.max_resim_ticks;
             // Deeper than the engine re-simulates is never right without a
             // snapshot's rows: the too_far branch would write every tracked
             // body back to a record up to the whole history old, re-simulate
             // nothing and drop the history.  A caller's own rewind that deep
             // (an input corrected 49-96 ticks late, a lifecycle event that
             // late) is refused and counted as too far instead.
-            if (current_tick - anchor > thresholds_.max_resim_ticks) {
+            if (current_tick - anchor > limit) {
                 ++stats_.too_far;
                 return false;
             }
@@ -1784,7 +1987,47 @@ namespace bmmo::session {
             ++stats_.rewinds;
             const std::map<std::string, row_ref> no_rows;
             auto no_report = [](uint8_t) {};
-            return restore_and_replay(world, anchor, current_tick, no_rows, input_at, no_report, reason);
+            return restore_and_replay(world, anchor, current_tick, no_rows, input_at, no_report, reason, nullptr, nullptr,
+                                      limit);
+        }
+
+        // The resync re-step (resync design 2.6.4, 4.1; step A3): the
+        // server's state of `anchor` = S restored over the client's anchor
+        // record there - the localized scripts, the server's blob, its rows,
+        // the reconcile's destroys (resync_spec) - and S+1 .. current_tick
+        // re-simulated from the recorded inputs, as every rewind does.  The
+        // reach is the history (history_ticks - 1), not max_resim_ticks: a
+        // resync is the one replay allowed that deep (9 Q2).  False when S is
+        // not recorded or deeper than the history; `out` says what the restore
+        // did.
+        bool resync(const rollback_world& world, uint32_t anchor, uint32_t current_tick, const resync_spec& spec,
+                    const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
+                    resync_outcome& out, const std::string& reason) {
+            out = {};
+            if (!find(anchor)) {
+                ++stats_.unmatched;
+                return false;
+            }
+            if (static_cast<int32_t>(current_tick - anchor) < 0 || current_tick - anchor > resync_reach()) {
+                ++stats_.too_far;
+                return false;
+            }
+            ++stats_.resyncs;
+            std::map<std::string, row_ref> rows;
+            for (const auto& [entity, row]: spec.rows) {
+                if (!row || entity.empty()) continue;
+                row_ref ref;
+                ref.row = row;
+                ref.simulated = (row->flags & BODY_FLAG_SIMULATED) != 0;
+                ref.authoritative = true;
+                rows[entity] = ref;
+            }
+            auto no_report = [](uint8_t) {};
+            return restore_and_replay(world, anchor, current_tick, rows, input_at, no_report, reason, &spec, &out);
+        }
+        // The deepest resync re-step: the history less its anchor.
+        uint32_t resync_reach() const {
+            return thresholds_.history_ticks > 0 ? static_cast<uint32_t>(thresholds_.history_ticks - 1) : 0u;
         }
 
     private:
@@ -1863,6 +2106,10 @@ namespace bmmo::session {
             bool recontact = false;
             uint32_t repose_tick = 0;    // 0: none - re-pose at this replayed tick
             bool from_inputs = false;    // destroyed and made again from the inputs: kept as stepped (birth_from_inputs)
+            // A resync's destroy (resync_spec::destroy): a body of the anchor
+            // world the server's state at S lacks, made again by the replay at
+            // repose_tick with no birth record to land on (never re-posed).
+            bool rebirth = false;
             // Only set when the state came from our OWN record (the recorded
             // branch of the planning loop) or from the birth record of a body
             // born inside the window (written at its re-pose, not at the

@@ -108,6 +108,11 @@ namespace bmmo::session {
         // navigation and body are taken out.  Headless: the own body guard
         // lifted (host state).
         std::function<void()> ended;
+        // Step A3 (resync design 2.6.6): the resync hold ended after `held`
+        // of wall time in which the world stepped nothing.  Headless: the
+        // pacer's origin moves by it (a hold is no stall to rebase for);
+        // retail: nothing (its loop holds the tick driver itself).
+        std::function<void(std::chrono::steady_clock::duration held)> resync_hold_ended;
         // A --trace diagnostic (E11; legacy_calls::describe_movable_objects
         // until then): the movable objects' description, the text of the
         // `after rollback: movable=` line for each of the first 16 snapshot
@@ -124,6 +129,14 @@ namespace bmmo::session {
         int rebases = 0;
         uint64_t activations_replayed = 0;
         uint64_t script_reset_skips = 0;
+    };
+
+    // What a host's localize_scripts met (step A3; game/script_replay.hpp
+    // portable_report, the counts the core logs and the gate reads).
+    struct resync_script_report {
+        uint32_t scripts = 0, kept_local = 0;
+        uint32_t objects_kept = 0, objects_resolved = 0, unportable = 0, ambiguous = 0;
+        std::string first_unportable;   // where the first unportable reference was ("" none)
     };
 
     // What the core hands bind_world (design 2.2 bind_world, 2.4
@@ -432,6 +445,40 @@ namespace bmmo::session {
         // The core takes it as the cell its own sector poll compares with.
         std::function<bool(int& cell)> sector_cell_adopted;
 
+        // ---- the exact resync (step A3; resync design 2.6, 2.10) ----
+        // The server's portable script record made a local v2 record of
+        // this world's selection (game/script_replay.hpp localize), with the
+        // core's keep-local rule (session/resync_rules.hpp keep_local_script)
+        // taking those scripts from `anchor_scripts` (the synthetic anchor's
+        // own record; null: none).  False and `error`: refused, `out` not to
+        // be used.
+        std::function<bool(const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor_scripts,
+                           std::vector<uint8_t>& out, std::string& error, resync_script_report& report)> localize_scripts;
+        // At a resync's re-assign: the host's manager and script activation
+        // records and its script reset ticks at ticks >= `tick` dropped -
+        // the old numbering's frames, which the new numbering re-runs or
+        // never runs (G-a).  The birth log is kept: its ticks are shared.
+        std::function<void(uint32_t tick)> forget_activations_from;
+        // After a resync's restore: the host's birth log entries at ticks >
+        // `tick` of `entities` dropped - the bodies the server's state has at
+        // S, which the live frames of either numbering made after it (their
+        // births are no births of this history any more).  Births of the
+        // bodies the replay made again at their tick stay.
+        std::function<void(uint32_t tick, const std::vector<std::string>& entities)> forget_births_after;
+        // Optional: the tick the host's birth log has `entity` born at (its
+        // latest birth; 0 unknown) - the reconcile's attribution of an
+        // anchor body the server has no row for (resync design 2.6.3).
+        // Empty: every such body counts as unexplained.
+        std::function<uint32_t(const std::string& entity)> birth_tick_of;
+        // Optional: the resync state's packed sections back to `size` bytes
+        // (the server packs them with CKPackData: zlib; the host unpacks with
+        // its CK's CKUnPackData).  Empty: a packed state is refused.
+        std::function<bool(const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out)> unpack_bytes;
+        // Optional: a body only this client's world has (the trafo explosion
+        // pieces until the trafo replication): the reconcile keeps it from
+        // the anchor.  Empty: none.
+        std::function<bool(const std::string& entity)> local_only_body;
+
         // ---- mirrors (design 2.2; E6) ----
         // The entity that mirrors `player` with a ball of `ball_type`, made
         // when it does not exist yet; "" with `error` when there is none.
@@ -598,6 +645,11 @@ namespace bmmo::session {
         // The union inside a replay (step B1): every host re-derives it.
         if (!platform.set_union_pass) return "set_union_pass";
         if (!platform.sector_cell_adopted) return "sector_cell_adopted";
+        // The exact resync (step A3): every host applies the resync state.
+        if (!platform.localize_scripts) return "localize_scripts";
+        if (!platform.forget_activations_from) return "forget_activations_from";
+        if (!platform.forget_births_after) return "forget_births_after";
+        if (!platform.unpack_bytes) return "unpack_bytes";   // the state's packed sections
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
         if (caps.own_body_control) {

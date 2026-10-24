@@ -100,6 +100,15 @@ namespace bmmo::physics {
         bool savestate_set(const uint8_t* data, size_t size, uint32_t flags, std::string& error,
                            std::vector<std::string>* contacts_dropped = nullptr,
                            std::vector<std::string>* unknown_bodies = nullptr) const;
+        // v20: a travelling blob, the resync state's server blob (renames:
+        // the own clone to the own ball; excluded: the keep-local prefixes);
+        // `summary` gets "skipped=N excluded=N renamed=N" and the first
+        // warnings.
+        bool savestate_set_travelling(const uint8_t* data, size_t size, uint32_t flags,
+                                      const std::vector<std::pair<std::string, std::string>>& renames,
+                                      const std::vector<std::string>& excluded_prefixes, std::string& error,
+                                      std::vector<std::string>* contacts_dropped, std::vector<std::string>* unknown_bodies,
+                                      std::string* summary) const;
 
         // The retail Physicalize recipe, applied without a behavior graph.
         bool physicalize(const char* entity_name, const bmmo_physics_ball_recipe& recipe,

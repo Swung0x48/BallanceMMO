@@ -741,6 +741,35 @@ TEST(RollbackBinding, EventLogAndRecipeParse) {
 // session_host_world.hpp activation_slots): a frame's pending activation and
 // a union pass at one tick are both kept and re-issued pending first, then
 // the pass; forget_pass keeps the pending slot; set_pass overwrites the pass.
+// Step A3: a resync's re-assign forgets the old numbering's slots from its
+// base on; the restore forgets the births after S of the named bodies.
+TEST(ActivationSlots, ForgetFromAndBirthsForgetAfter) {
+    bmmo::session::activation_slots slots;
+    bmmo::session::manager_activation a;
+    a.activate = 2;
+    slots.record_pending(100, a);
+    slots.set_pass(139, a);
+    slots.set_pass(140, a);
+    slots.record_pending(150, a);
+    EXPECT_EQ(slots.forget_from(140), 2u);
+    EXPECT_NE(slots.find(139), nullptr);
+    EXPECT_EQ(slots.find(140), nullptr);
+    EXPECT_EQ(slots.find(150), nullptr);
+    bmmo::session::local_birth_log births;
+    bmmo::session::local_birth b;
+    b.name = "P_Modul_03_Floor";
+    births.add(130, bmmo::session::local_birth(b));
+    b.name = "P_Modul_08_Schaukel";
+    births.add(145, bmmo::session::local_birth(b));
+    b.name = "P_Modul_03_Floor";
+    births.add(146, bmmo::session::local_birth(b));
+    EXPECT_EQ(births.forget_after(139, {"P_Modul_03_Floor"}), 1u);
+    EXPECT_EQ(births.birth_tick_of("P_Modul_03_Floor"), 130u);
+    EXPECT_EQ(births.birth_tick_of("P_Modul_08_Schaukel"), 145u) << "not named: kept";
+    EXPECT_EQ(births.forget_after(139), 1u);
+    EXPECT_EQ(births.birth_tick_of("P_Modul_08_Schaukel"), 0u);
+}
+
 TEST(ActivationSlots, PendingThenPassAndForgetKeepsPending) {
     bmmo::session::activation_slots slots;
     bmmo::session::manager_activation pending;

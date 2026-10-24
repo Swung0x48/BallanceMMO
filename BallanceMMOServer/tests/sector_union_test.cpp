@@ -412,6 +412,48 @@ TEST(SectorUnionState, SerializeRefusesWhatTheFormatCannotHold) {
 // step A1): the balloon's scripts always, the trafo scripts until step T2,
 // nothing else - a module script, the manager, a name that only contains
 // "PE_Balloon" further in.
+// Step A3 (resync design 2.3, 2.6.3): the keep-local bodies, the travelling
+// blob's renames, a window birth's pass and the reconcile's classes.
+TEST(ResyncRules, KeepLocalBodiesRenamesAndTheReconcile) {
+    using namespace bmmo::session;
+    EXPECT_TRUE(keep_local_body("PE_Balloon_Platte01"));
+    EXPECT_TRUE(keep_local_body("PE_Balloon_Ballon02"));
+    EXPECT_TRUE(keep_local_body("PE_Box_slide")) << "the airship's slide box, joined to the platform";
+    EXPECT_FALSE(keep_local_body("PE_Levelende"));
+    EXPECT_FALSE(keep_local_body("P_Modul_08_Schaukel"));
+    EXPECT_EQ(keep_local_body_prefixes(), (std::vector<std::string>{"PE_Balloon", "PE_Box_slide"}));
+    // Renames: every player's server clone to this world's entity of that
+    // player, nothing where the names agree or this world has none.
+    const std::vector<std::pair<uint32_t, std::string>> clones = {
+        {3, "Ball_Stone_BMMO_3"}, {4, "Ball_Wood_BMMO_4"}, {5, "Ball_Paper_BMMO_5"}};
+    const std::map<uint32_t, std::string> local = {{3, "Ball_Stone"}, {4, "Ball_Wood_BMMO_4"}, {5, ""}};
+    EXPECT_EQ(resync_renames(clones, local),
+              (std::vector<std::pair<std::string, std::string>>{{"Ball_Stone_BMMO_3", "Ball_Stone"}}));
+    // A birth's pass: M + 5 == birth first, else the newest before it.
+    const std::map<uint32_t, int> passes = {{100, 2}, {130, 3}};
+    uint32_t at = 0;
+    EXPECT_EQ(attribute_birth(passes, 135, &at), 3);
+    EXPECT_EQ(at, 130u);
+    EXPECT_EQ(attribute_birth(passes, 120, &at), 2);
+    EXPECT_EQ(at, 100u);
+    EXPECT_EQ(attribute_birth(passes, 104), 0);
+    // The classes, S = 125, the server's union {1, 2}.
+    const std::set<int> server = {1, 2};
+    EXPECT_EQ(classify_unrowed("PE_Balloon_Platte01", false, 135, 125, passes, server), resync_unrowed::keep_local);
+    EXPECT_EQ(classify_unrowed("Ball_Wood_Piece01", true, 135, 125, passes, server), resync_unrowed::local_only);
+    int sector = 0;
+    EXPECT_EQ(classify_unrowed("P_Modul_03_Floor", false, 135, 125, passes, server, &sector), resync_unrowed::destroy)
+        << "born after S by a pass the server's union lacks at S";
+    EXPECT_EQ(sector, 3);
+    EXPECT_EQ(classify_unrowed("P_Modul_01_Pusher", false, 120, 125, passes, server), resync_unrowed::unexplained)
+        << "born before S, no row";
+    EXPECT_EQ(classify_unrowed("P_X", false, 0, 125, passes, server), resync_unrowed::unexplained) << "no birth known";
+    const std::map<uint32_t, int> early = {{130, 2}};
+    EXPECT_EQ(classify_unrowed("P_Y", false, 135, 125, early, server), resync_unrowed::unexplained)
+        << "its pass's sector the server has active: it should have a row";
+    EXPECT_EQ(classify_unrowed("P_Z", false, 128, 125, std::map<uint32_t, int>{}, server), resync_unrowed::unattributed);
+}
+
 TEST(ResyncRules, KeepLocalScripts) {
     using bmmo::session::keep_local_script;
     EXPECT_TRUE(keep_local_script("PE_Balloon_01", "PE_Balloon Script"));

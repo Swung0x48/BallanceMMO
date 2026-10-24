@@ -231,6 +231,15 @@ namespace bmmo::game {
         // slot stays.  True when there was one.
         bool forget_pass(uint32_t tick) { return slots_.forget_pass(tick); }
         const bmmo::session::activation_slots& slots() const { return slots_; }
+        // Every record at a tick >= `tick` dropped - both slots, the script
+        // activations and the explosion referentials (a resync's re-assign,
+        // step A3, G-a).  Returns the ticks the manager's slots dropped.
+        size_t forget_from(uint32_t tick) {
+            const size_t n = slots_.forget_from(tick);
+            scripts_by_tick_.erase(scripts_by_tick_.lower_bound(tick), scripts_by_tick_.end());
+            referential_by_tick_.erase(referential_by_tick_.lower_bound(tick), referential_by_tick_.end());
+            return n;
+        }
         // After a live frame (platform record_pending_activation, for the
         // frame of `tick` that consumes it): the manager's pending activation
         // (a script outside the replay asked for it) and every pending
@@ -348,6 +357,45 @@ namespace bmmo::game {
     // without the trafo scripts.
     inline script_replay::selection session_script_selection(CKContext* context) {
         return script_replay::select(context, true);
+    }
+
+    // The platform's localize_scripts (step A3, resync design 2.6.4 step 4),
+    // one implementation for both hosts: the server's portable record as a
+    // local v2 record of `sel`, the core's keep-local rule taking those
+    // scripts from `anchor` (the synthetic anchor's own record).
+    inline bool localize_session_scripts(CKContext* context, const script_replay::selection& sel,
+                                         const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
+                                         std::vector<uint8_t>& out, std::string& error,
+                                         bmmo::session::resync_script_report& report) {
+        script_replay::portable_report r;
+        r.lists = true;
+        const script_replay::keep_local_fn keep = [](const std::string& owner, const std::string& script) {
+            return bmmo::session::keep_local_script(owner, script);
+        };
+        const bool ok = script_replay::localize(context, sel, portable, anchor, keep, out, &error, &r);
+        report.scripts = r.scripts;
+        report.kept_local = r.kept_local;
+        report.objects_kept = r.objects_kept;
+        report.objects_resolved = r.objects_resolved;
+        report.unportable = r.unportable;
+        report.ambiguous = r.ambiguous;
+        report.first_unportable = r.unportable_list.empty() ? std::string() : r.unportable_list.front();
+        return ok;
+    }
+
+    // The tick each script a resync's re-assign forgets was told to reset
+    // at (a host's script_reset_ticks): ticks >= `tick` dropped (step A3).
+    inline size_t forget_reset_ticks_from(std::map<CK_ID, uint32_t>& reset_ticks, uint32_t tick) {
+        size_t n = 0;
+        for (auto it = reset_ticks.begin(); it != reset_ticks.end();) {
+            if (static_cast<int32_t>(it->second - tick) >= 0) {
+                it = reset_ticks.erase(it);
+                ++n;
+            } else {
+                ++it;
+            }
+        }
+        return n;
     }
     // The scripts of that selection whose pending activations the host
     // records and the replay re-issues (manager_activations::record_pending):

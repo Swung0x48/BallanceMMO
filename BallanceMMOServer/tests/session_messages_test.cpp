@@ -691,6 +691,96 @@ TEST(SessionEventMsg, DeserializeRejectsBallCountAboveCap) {
 // session_snapshot_msg
 // ---------------------------------------------------------------------
 
+// Protocol 10 (resync design 5, step A3): SessionAssign's flags, on every
+// copy, and SessionResyncState with its rows, clones and byte sections.
+TEST(SessionAssignMsg, FlagsRoundTripAndTheProtocolIs10) {
+    EXPECT_EQ(10u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    bmmo::session_assign_msg msg;
+    msg.session = 9;
+    msg.first_tick = 1572;
+    msg.flags = bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS;
+    ASSERT_TRUE(msg.serialize());
+    bmmo::session_assign_msg parsed;
+    parsed.raw.str(msg.raw.str());
+    ASSERT_TRUE(parsed.deserialize());
+    EXPECT_EQ(9u, parsed.session);
+    EXPECT_EQ(1572u, parsed.first_tick);
+    EXPECT_EQ(bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS, parsed.flags);
+    // A protocol 9 assignment (no flags byte) is refused, never read short.
+    const std::string bytes = msg.raw.str();
+    bmmo::session_assign_msg old;
+    old.raw.str(bytes.substr(0, bytes.size() - 1));
+    EXPECT_FALSE(old.deserialize());
+}
+
+TEST(SessionResyncStateMsg, RoundTripWithEveryTrailingSection) {
+    bmmo::session_resync_state_msg msg;
+    msg.session = 9;
+    msg.tick = 1571;
+    msg.base = 1572;
+    bmmo::session::body_state ball, mech;
+    ball.kind = bmmo::session::body_kind::Ball;
+    ball.owner = 3;
+    ball.position[0] = 1.5;
+    ball.flags = bmmo::session::BODY_FLAG_SIMULATED;
+    mech.kind = bmmo::session::body_kind::Mechanism;
+    mech.owner = 17;
+    mech.name = "P_Modul_08_Schaukel";
+    mech.rotation[3] = 1.0;
+    mech.linear[1] = -0.25f;
+    msg.rows = {ball, mech};
+    msg.clones = {{3, "Ball_Stone_BMMO_3"}, {4, "Ball_Wood_BMMO_4"}};
+    bmmo_physics_nav_state nav{};
+    nav.active = 1;
+    nav.key_mask = 0x05;
+    nav.controller_mask = 0x04;
+    nav.force[2][0] = 0.75f;
+    nav.force[2][2] = -0.5f;
+    msg.navs = {{3, nav}};
+    msg.union_state = {1, 2, 3};
+    msg.scripts.assign(4000, 0x5a);
+    msg.savestate.assign(150000, 0x11);
+    msg.savestate.back() = 0x22;
+    msg.scripts_size = 40125;      // as the server packs them: the unpacked sizes ride along
+    msg.savestate_size = 108289;
+    ASSERT_TRUE(msg.serialize());
+    const std::string bytes = msg.raw.str();
+    EXPECT_GT(bytes.size(), 154000u);
+    bmmo::session_resync_state_msg parsed;
+    parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));   // as a receiver fills it
+    ASSERT_TRUE(parsed.deserialize());
+    EXPECT_EQ(1571u, parsed.tick);
+    EXPECT_EQ(1572u, parsed.base);
+    ASSERT_EQ(2u, parsed.rows.size());
+    EXPECT_EQ(bmmo::session::body_kind::Ball, parsed.rows[0].kind);
+    EXPECT_EQ(3u, parsed.rows[0].owner);
+    EXPECT_EQ(1.5, parsed.rows[0].position[0]);
+    EXPECT_EQ("P_Modul_08_Schaukel", parsed.rows[1].name) << "a mechanism row carries its name, as a full snapshot's";
+    EXPECT_EQ(-0.25f, parsed.rows[1].linear[1]);
+    ASSERT_EQ(2u, parsed.clones.size());
+    EXPECT_EQ(4u, parsed.clones[1].first);
+    EXPECT_EQ("Ball_Wood_BMMO_4", parsed.clones[1].second);
+    ASSERT_EQ(1u, parsed.navs.size());
+    EXPECT_EQ(3u, parsed.navs[0].first);
+    EXPECT_EQ(1, parsed.navs[0].second.active);
+    EXPECT_EQ(0x05, parsed.navs[0].second.key_mask);
+    EXPECT_EQ(0x04, parsed.navs[0].second.controller_mask);
+    EXPECT_EQ(0.75f, parsed.navs[0].second.force[2][0]);
+    EXPECT_EQ(-0.5f, parsed.navs[0].second.force[2][2]);
+    EXPECT_EQ(msg.union_state, parsed.union_state);
+    EXPECT_EQ(msg.scripts, parsed.scripts);
+    EXPECT_EQ(msg.savestate, parsed.savestate);
+    EXPECT_EQ(40125u, parsed.scripts_size);
+    EXPECT_EQ(108289u, parsed.savestate_size);
+    // Every truncation is refused.
+    for (size_t cut: {bytes.size() - 1, bytes.size() - 150000, static_cast<size_t>(20)}) {
+        bmmo::session_resync_state_msg shorter;
+        const std::string part = bytes.substr(0, cut);
+        shorter.raw.write(part.data(), static_cast<std::streamsize>(part.size()));
+        EXPECT_FALSE(shorter.deserialize()) << cut;
+    }
+}
+
 TEST(SessionSnapshotMsg, SerializeDeserializeRoundTrip) {
     bmmo::session_snapshot_msg msg{};
     msg.session = 5;

@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 class CKIpionManager;
@@ -40,6 +41,33 @@ namespace bmmo::physics {
     // tick, where the pairs come back).
     constexpr uint32_t SAVESTATE_KEEP_UNKNOWN = 2u;
 
+    // A TRAVELLING blob (resync design 2.3, step A3): the server's savestate
+    // of one tick, restored once into a client's world.  The blob is
+    // otherwise local (see the note above); a travelling one is restored
+    // under three rules of its own:
+    //  - the capturing environment's identity in the header is not checked
+    //    (it is another process's by definition);
+    //  - `renames` maps a blob object's name to the live one's before the
+    //    lookup (the resynced member's own clone, Ball_<type>_BMMO_<id> on the
+    //    server, is the client's own ball); a name several objects share is
+    //    matched by occurrence (the k-th such record to the k-th live object
+    //    of that name in entity-id order), never by the capturing world's
+    //    entity ids, which are another process's;
+    //  - an object whose (renamed) name starts with one of `excluded_prefixes`
+    //    is left out on both sides: its records are skipped and the live body
+    //    stays unknown to the blob (the keep-local bodies, I3: the level-end
+    //    balloon is each player's own), counted as `excluded`;
+    //  - the PreSimulate queue is not compared: its entries name the blocks
+    //    by the capturing process's CK ids, and the queue a restore keeps is
+    //    the live world's own anyway (it is never rebuilt).  A difference in
+    //    length is noted in the report's warnings.
+    // Every other check (record framing, surfaces, edges, movability) is the
+    // ordinary restore's.
+    struct savestate_travel {
+        std::vector<std::pair<std::string, std::string>> renames;
+        std::vector<std::string> excluded_prefixes;
+    };
+
     // What a capture or a restore did, for logs and tests.
     struct savestate_report {
         uint32_t objects = 0;       // objects in the blob (movable and static)
@@ -51,6 +79,9 @@ namespace bmmo::physics {
         uint32_t events = 0;        // queued time events (PSI event included)
         uint32_t hull_entries = 0;  // hull-manager listener entries over all objects
         uint32_t skipped = 0;       // records the restore could not apply (lenient mode)
+        // A travelling blob (savestate_travel): records left out by an
+        // excluded prefix, and blob objects found under a renamed name.
+        uint32_t excluded = 0, renamed = 0;
         // Live bodies the blob does not know (born after the anchor, a sector
         // physicalized inside the window).  They keep their place in the
         // movable list and the revive list but are left OUT of collision
@@ -79,6 +110,9 @@ namespace bmmo::physics {
     // the caller treats it like a failed anchor and re-anchors.
     bool set_savestate(CKIpionManager* physics, const uint8_t* data, size_t size, uint32_t flags, std::string& error,
                        savestate_report* report = nullptr);
+    // The same for a travelling blob (savestate_travel above).
+    bool set_savestate(CKIpionManager* physics, const uint8_t* data, size_t size, uint32_t flags, std::string& error,
+                       savestate_report* report, const savestate_travel& travel);
 
     // Validate a blob's framing without touching any world.
     bool check_savestate(const uint8_t* data, size_t size, std::string& error);

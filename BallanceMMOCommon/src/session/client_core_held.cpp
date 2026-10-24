@@ -123,11 +123,18 @@ namespace bmmo::session {
     void session_client_core::settle_held_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
         if (held_tick_is_base(tick)) {
             ++s.subst_base_;
+            // Step A3: a tick of a pending exact resync's epoch has a record
+            // the apply's re-step replays from S: amended now, replayed by it.
+            const bool exact = resync_amends(tick);
             // Kept all the same (design 1.3: stored with or without a
             // way to replay it) - a tick not simulated yet when its live
-            // frame is.
-            if (static_cast<int32_t>(tick - current_tick()) > 0) hold_ahead(tick, frame, false);
-            else store_held_frame(tick, frame);
+            // frame is (an exact resync's corrected once its live frame is
+            // recorded: amended while the resync is pending, replayed after).
+            if (static_cast<int32_t>(tick - current_tick()) > 0) hold_ahead(tick, frame, exact);
+            else {
+                store_held_frame(tick, frame);
+                if (exact) amend_for_resync(tick, frame);
+            }
             return;
         }
         if (static_cast<int32_t>(tick - current_tick()) > 0) {   // not simulated yet
@@ -137,15 +144,18 @@ namespace bmmo::session {
         }
         store_held_frame(tick, frame);
         // The gate note_input_correction applies: the anchor of the
-        // rewind, tick - 1, still re-simulable and in the history.
+        // rewind, tick - 1, still re-simulable and in the history - as deep
+        // as the re-step of an exact resync for a tick inside it (step A3:
+        // window_rewind_reach; resync design 2.6.4, a notice for a tick >= base
+        // finds its record and amends it).
         const uint32_t anchor = tick - 1;
-        const bool reachable = current_tick() - anchor <= s.rollback_.thresholds().max_resim_ticks
-                            && s.rollback_.knows_tick(anchor);
+        const uint32_t reach = window_rewind_reach(tick);
+        const bool reachable = current_tick() - anchor <= reach && s.rollback_.knows_tick(anchor);
         if (!reachable) {
             ++s.subst_late_;
             if (s.subst_late_logs_++ < 8)
                 logf("held notice for own tick %u arrived at tick %u, past the reach of %u ticks", tick,
-                     current_tick(), s.rollback_.thresholds().max_resim_ticks);
+                     current_tick(), reach);
             request_resync("a substituted own frame arrived past the reach", true);
             return;
         }
@@ -361,10 +371,39 @@ namespace bmmo::session {
         const bool correct = it->second.second;
         s.held_ahead_.erase(it);
         store_held_frame(tick, frame);
+        // Step A3: a pending exact resync re-steps this record from S.
+        if (correct && resync_amends(tick)) {
+            amend_for_resync(tick, frame);
+            return;
+        }
         // A resync since the notice arrived: its snapshot is the server's
         // world, our record of this tick is not.
         if (!correct || !config.rollback || s.resync_pending_ || static_cast<int32_t>(tick - s.held_floor_) <= 0) return;
         correct_own_tick(tick, frame);
+    }
+
+    // Step A3 (resync design 2.2: "the server's held notices name every
+    // substituted tick, so the records are amended before or after the apply
+    // as usual"): while an exact resync is pending, a tick of its epoch
+    // (base and after) has a record - the live frames record from base on -
+    // and the apply's re-step feeds the own ball from the RECORD of each
+    // tick.  A notice stored in own_inputs_ alone (the base rule) left the
+    // record with the frame we played: a5u_lead, own ticks 2779-2788 played
+    // with keys 0 where the server applied 5, 0.17 m on the own ball for
+    // good after the apply.
+    bool session_client_core::resync_amends(uint32_t tick) const {
+        return config.rollback && s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(tick - s.resync_base_) >= 0;
+    }
+
+    // The record takes the server's frame; no rewind of its own (the apply's
+    // re-step is the replay).  The own_corrections switch holds here too.
+    void session_client_core::amend_for_resync(uint32_t tick, const bmmo::session::input_frame& frame) {
+        if (!config.own_corrections) return;
+        const std::string entity = s.rollback_.recorded_own_entity(tick);
+        if (entity.empty()) return;
+        bmmo::session::input_frame played{};
+        if (s.rollback_.recorded_input(entity, tick, played) && same_frame(played, frame)) return;
+        if (s.rollback_.amend_recorded_input(entity, tick, frame)) ++s.resync_amends_;
     }
 
     // The own branch for a substituted tick inside the reach (design
