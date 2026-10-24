@@ -730,7 +730,11 @@ A15) are kept as they were.
   G-T's hold of the tutorial's writes is not needed. Gameplay_Refresh's
   `Tutorial freeze/unfreeze` then sees `freeze?` false and writes 2.0 (A14),
   which is the in-play value. The texts and arrows of Level 1 are not shown
-  in sessions.
+  in sessions. The main branch activates the exit from a 10-frame timer
+  after the level start (`m_bml->AddTimer(CKDWORD(10), ...)`, line 484
+  there); the user says that delay is necessary. In a session the exit is
+  therefore activated 10 frames after the level start in every world,
+  counted in frames (not wall time), the same frame everywhere.
 - **Q2.** G-T lands right after C3, in the F14 slot.
 - **Q3.** The `world_options` field is the sector-placement design's.
 - **Q4.** The fan's sound-slot array is not physics; the written cells are
