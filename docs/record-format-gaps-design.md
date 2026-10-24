@@ -714,3 +714,13 @@ Nothing in either review was refuted. Revision 1's other claims that the
 reviews checked and found correct (A4's output mapping, PW:386-413 and
 :529-558, the cell section at the record's tail, the clock guard's sampling,
 A15) are kept as they were.
+
+## 11. Decisions (user, 2026-10-24)
+
+- **Q1.** Option (a): the tutorial's time-factor writes are held at Init
+  Ingame's value; the tutorial is shown as usual.
+- **Q2.** G-T lands right after C3, in the F14 slot.
+- **Q3.** The `world_options` field is the sector-placement design's.
+- **Q4.** The fan's sound-slot array is not physics; the written cells are
+  recorded with the other cells (no filtering), so a replay plays the same
+  sounds; no check compares it.

@@ -1326,3 +1326,14 @@ reason is given.
 | R1.11 136 vs 290 | confirmed | §1.1.2 says what was read; V1 asserts on all 290 |
 | (own work) J-h, the late base | found while revising | clamp to `leaving_horizon`; Q3 closed |
 | (own work) add failure | found while revising | `on_player_add_failed` → SessionEnd (§2.7) |
+
+## 11. Decisions (user, 2026-10-24)
+
+- **Q7.** Several balls on one fan or cork bridge: every player gets their
+  own force and their own test. The fan pushes every paper ball on it, and
+  the bridge tests every stone ball that steps on it, the same in every
+  world.
+- **Q8.** The legacy retail path gets nothing new; a late join ends its
+  session locally. It is deleted at R7.
+- **Q6.** The narrowing of G-c stands: checkpoint flames, extra balls, the
+  balloon and the tutorial stay on the own ball in a client world.

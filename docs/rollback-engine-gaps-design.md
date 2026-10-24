@@ -1347,3 +1347,12 @@ Every point of the two reviews was checked against the WT. Disposition:
 No point was refuted. Line references the reviews confirmed are kept; the
 ones found wrong while checking (RB:720 for the plan; the proximity block 46429 measures 52384 against 46336 in the audit dump; the r2_a_f13 log lines) are
 fixed.
+
+## 11. Decisions (user, 2026-10-24)
+
+- **9.1.** Option (b): the retail legacy path is retired at R7 as planned;
+  gap #7 stays open on it until then and is recorded.
+- Step P is committed with its two pre-existing residuals recorded as their
+  own items: the snapshot row not re-applied inside a later replay (a new
+  gap, fixed as its own step), and the spawn frame-timing race (measured
+  again after R3).
