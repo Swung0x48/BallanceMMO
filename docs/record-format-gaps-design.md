@@ -717,8 +717,20 @@ A15) are kept as they were.
 
 ## 11. Decisions (user, 2026-10-24)
 
-- **Q1.** Option (a): the tutorial's time-factor writes are held at Init
-  Ingame's value; the tutorial is shown as usual.
+- **Q1.** Option (c), superseding an earlier (a): on Level 1 a session
+  switches the tutorial off, the way the main branch's multiplayer restart
+  does (BallanceMMOClient.cpp at 22530b5, lines 489-492: `edit_Gameplay_Tutorial`
+  finds, inside `Kapitel Aktion` / `Tut continue/exit`, the block before its
+  `Set Physics Globals` and keeps its output 0 as `tutorial_exit_event_`;
+  at level start it activates that IO, which runs the tutorial's exit path,
+  including the 2.0 unfreeze). In a physics session every world does the
+  same at its anchor, from shared host support (the structural find is CK
+  code; the server, the headless client and the retail host call it before
+  the anchor reads the factor), so the tutorial never freezes any world and
+  G-T's hold of the tutorial's writes is not needed. Gameplay_Refresh's
+  `Tutorial freeze/unfreeze` then sees `freeze?` false and writes 2.0 (A14),
+  which is the in-play value. The texts and arrows of Level 1 are not shown
+  in sessions.
 - **Q2.** G-T lands right after C3, in the F14 slot.
 - **Q3.** The `world_options` field is the sector-placement design's.
 - **Q4.** The fan's sound-slot array is not physics; the written cells are
