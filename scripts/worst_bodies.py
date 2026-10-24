@@ -5,10 +5,17 @@ body per tick: this names them all, so a treatment that helps one kind of
 body and hurts another cannot hide behind a single number.
 
 usage: python scripts/worst_bodies.py <control.bmjr> <arm.bmjr> [--from TICK] [--until TICK]
+                                      [--exclude PREFIX ...]
 
 --from / --until restrict the comparison to a tick window, for a session whose
 runs stop being comparable at some point (a death whose sector reset the two
 runs take at different ticks, a ball that leaves the map in one of them).
+
+--exclude PREFIX (repeatable) drops every body whose name starts with PREFIX
+from both journals, so it is neither compared nor reported MISSING:
+PE_Balloon in the resync track's checks, the trafo pieces' prefixes until they
+are replicated (resync-and-sector-timing-design 7, 8 T0).  Names only: a ball
+keyed by its owner is never excluded (first_divergence.worlds).
 
 Every body is compared, the trafo explosion pieces included (step P): a
 journal written since then records them as mechanisms, by name; an older one
@@ -32,10 +39,14 @@ ap.add_argument('--from', dest='tick_from', type=int, default=0)
 ap.add_argument('--until', dest='tick_until', type=int, default=1 << 31)
 ap.add_argument('--balls-by-owner-only', dest='by_name', action='store_false',
                 help='skip a kind-0 body with no owner (the rule before step P)')
+ap.add_argument('--exclude', action='append', default=[], metavar='PREFIX',
+                help='drop the bodies whose name starts with PREFIX (repeatable), e.g. PE_Balloon')
 args = ap.parse_args()
 
-control = fd.worlds(jt.read_journal(args.control), want_local=True, ownerless_by_name=args.by_name)
-arm = fd.worlds(jt.read_journal(args.arm), want_local=True, ownerless_by_name=args.by_name)
+control = fd.worlds(jt.read_journal(args.control), want_local=True, ownerless_by_name=args.by_name,
+                    exclude=args.exclude)
+arm = fd.worlds(jt.read_journal(args.arm), want_local=True, ownerless_by_name=args.by_name,
+                exclude=args.exclude)
 
 
 def pair_balls(row_a, row_b):

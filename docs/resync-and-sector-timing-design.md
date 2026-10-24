@@ -1170,6 +1170,55 @@ The tooling comes first (step T0):
   the trafo pieces' prefixes until T2).
 - Step P is editing both files in the working tree, so T0 lands after P.
 
+**As built (step T0, 2026-10-24).**
+
+- `first_divergence.py` gains `--from TICK` (the drift and the body set
+  are both compared from TICK on) and `--exclude PREFIX` (repeatable).
+  `worst_bodies.py` already had `--from`/`--until` and gains `--exclude`.
+  An excluded body is neither compared nor reported MISSING. The match is
+  on names only, applied after the ownerless-by-name keying, so it reaches
+  map bodies and trafo pieces keyed by name. A ball keyed by its owner is
+  never excluded.
+- **Options off, a5u_lead:** the output is byte-identical to the old
+  scripts' (`first_divergence` server vs the four clients; `worst_bodies`
+  with client 2 as control vs clients 0, 1 and 3, and with `--from 1714`).
+  `--exclude PE_Balloon` removes exactly the 17 PE_Balloon rows.
+- **The capture used.** On 2026-10-24 the re-record moved the E0 set to
+  `maps/arena-test/core_ref_e0_pre_q/`. `core_ref_e0/` now holds the
+  partial re-record (`solo`, `swing_snapon`, `cov_e9`, `pins.json`). The a5u_lead journals there
+  match the README's sha256 (client0 `db6722d1…`, client2 `83bb3777…`).
+- **With the options** (`--from 1714 --prefix P --exclude PE_Balloon`):
+  - clients 0, 1 and 3 first diverge at 1728, on P_Modul_08_Schaukel by
+    0.25 m;
+  - their body set differs from 1720 on (P_Modul_03_*, PE_Box_slide,
+    P_Modul_19_Flaps): sector 4 started at 1723, not 1714 (§1.2);
+  - client 2, which stamped sector 4, first diverges at 2214, on
+    PE_Box_slide by 0.0604 m.
+- **The grep is `scripts/moved_own_sector.py`.** The core prints a moved
+  own Sector as `own sector stamped tick T echoed moved by the server
+  (applied A, …)`:
+  - the type name is lowercase (`event_type_name`, lifecycle.hpp:41);
+  - the line is `logf` at client_core_lifecycle.cpp:1213.
+
+  The legacy retail path prints no echo line. The script therefore also
+  reads the server's S5 line (server.cpp:1946), where `type=Sector` with
+  `origin != applied` is a moved own Sector for every client build. The
+  last line it prints is `MOVED-OWN-SECTOR: NONE | FOUND n`.
+- **The grep's result:**
+  - The 16 captures have no moved own Sector. Every Sector S5 line is on
+    time: a5u_lead 10, a6m_snapoff 12, resync_snapoff 10, swing_snapon 6.
+  - All 2987 logs under `maps/arena-test` give NONE: 1132 Sector relays,
+    all on time.
+  - The other types show that both patterns match. The clients log 40
+    unphysicalize and 1 physicalize `echoed moved` lines. The server logs
+    41 Unphysicalize, 54 Physicalize and 898 BodyRevived moved relays. An
+    own Physicalize moved inside the history logs `own birth moved`
+    instead.
+- **Pre-existing, unchanged:** between two clients of a four-player
+  session, `worst_bodies` reports every ball MISSING. A single tick where
+  the arm lacks a ball (start spawn, death) marks it `inf` for the whole
+  run.
+
 ### 7.1 Unit tests (`BallanceMMOMessageTests`)
 
 - **`sector_union_test`:**

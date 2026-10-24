@@ -18,7 +18,19 @@ identity on both sides. A body only one side has is reported separately - that
 is a body-set disagreement, which is a different fault from drift.
 
 usage: python scripts/first_divergence.py <server.bmjr> <client.bmjr> [...]
-                                          [--tolerance 0.05]
+                                          [--tolerance 0.05] [--from TICK]
+                                          [--exclude PREFIX ...]
+
+--from TICK compares only the ticks from TICK on (both the drift and the body
+set), for a question about one event's effect (a late Sector stamp at its
+tick, a resync's apply) without what went before it.
+
+--exclude PREFIX (repeatable) drops every body whose name starts with PREFIX
+from both sides, the drift and the body set alike: PE_Balloon in the resync
+track's checks (the balloon is not to be fixed), the trafo pieces' prefixes
+until they are replicated (resync-and-sector-timing-design 7, 8 T0).  It
+matches names, so it reaches map bodies (and, through worst_bodies, the
+ownerless pieces keyed by name); a ball keyed by its owner is never excluded.
 """
 import argparse
 import glob
@@ -48,11 +60,20 @@ def key_of(body):
     return ('body', body['name'])
 
 
-def worlds(journal, want_local, prefix='', ownerless_by_name=False):
+def excluded(key, exclude):
+    """A body keyed by a name starting with one of the `exclude` prefixes."""
+    return key[0] == 'body' and any(str(key[1]).startswith(p) for p in exclude)
+
+
+def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=()):
     """tick -> {key: position}, from the checkpoints of the kind asked for.
 
     `prefix` keeps only map bodies whose name starts with it (and drops the
     balls), for when you want the shared world alone.
+
+    `exclude` drops every body keyed by a name starting with one of its
+    prefixes (after the ownerless-by-name keying below, so a trafo piece
+    recorded as an ownerless ball is reached too).
 
     `ownerless_by_name` keys a kind-0 body with no owner by its name instead
     of dropping it: a journal written before step P recorded every "Ball_"
@@ -79,6 +100,8 @@ def worlds(journal, want_local, prefix='', ownerless_by_name=False):
                     key = ('body', b['name'])
                 else:
                     continue   # a client that did not know the owner: not comparable
+            if exclude and excluded(key, exclude):
+                continue
             row[key] = b['position']
     return out
 
@@ -87,8 +110,8 @@ def show(key):
     return 'ball of %u' % key[1] if key[0] == 'ball' else str(key[1])
 
 
-def compare(server, client, tolerance):
-    shared = sorted(set(server) & set(client))
+def compare(server, client, tolerance, tick_from=0):
+    shared = sorted(t for t in set(server) & set(client) if t >= tick_from)
     if not shared:
         return None, 0, []
     first = None
@@ -117,9 +140,13 @@ def main():
     ap.add_argument('--prefix', default='',
                     help="only MAP bodies whose name starts with this, dropping the balls; "
                          "use P_ to look at the shared world on its own")
+    ap.add_argument('--from', dest='tick_from', type=int, default=0,
+                    help='compare only the ticks from this one on')
+    ap.add_argument('--exclude', action='append', default=[], metavar='PREFIX',
+                    help='drop the bodies whose name starts with PREFIX (repeatable), e.g. PE_Balloon')
     args = ap.parse_args()
 
-    server = worlds(jt.read_journal(args.server), want_local=False, prefix=args.prefix)
+    server = worlds(jt.read_journal(args.server), want_local=False, prefix=args.prefix, exclude=args.exclude)
     print('server %s: %d full checkpoints' % (pathlib.Path(args.server).name, len(server)))
     if not server:
         print('  no FULL checkpoints - is this a server journal?')
@@ -129,11 +156,14 @@ def main():
     for pattern in args.clients:
         paths.extend(sorted(pathlib.Path(p) for p in glob.glob(pattern)) or [pathlib.Path(pattern)])
     for path in paths:
-        client = worlds(jt.read_journal(str(path)), want_local=True, prefix=args.prefix)
-        first, shared, missing = compare(server, client, args.tolerance)
+        client = worlds(jt.read_journal(str(path)), want_local=True, prefix=args.prefix, exclude=args.exclude)
+        first, shared, missing = compare(server, client, args.tolerance, args.tick_from)
         print('%s: %d local checkpoints, %d ticks comparable' % (path.name, len(client), shared))
         if not shared:
-            print('    nothing to compare - run with --checkpoint-ticks 2')
+            if args.tick_from:
+                print('    no shared tick at or after --from %d' % args.tick_from)
+            else:
+                print('    nothing to compare - run with --checkpoint-ticks 2')
             continue
         if first is None:
             print('    agrees with the server within %.3f m throughout' % args.tolerance)
