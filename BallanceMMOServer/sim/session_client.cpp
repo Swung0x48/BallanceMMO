@@ -1410,6 +1410,7 @@ namespace {
             engine_->request_level(core_.level());
             load_waited_ = 0;
             level_sequencers_.clear();
+            level_proximities_.clear();
             core_.level_requested();
         }
 
@@ -1429,6 +1430,10 @@ namespace {
             if (const int recorded = level_sequencers_.capture_new(engine_->context()); recorded > 0)
                 logf("%d mechanism Sequencer counter(s) recorded from the level file (%s)", recorded,
                      level_sequencers_.describe().c_str());
+            // Step Q: the proximity countdowns, recorded the same way.
+            if (const int proximities = level_proximities_.capture_new(engine_->context()); proximities > 0)
+                logf("%d proximity countdown(s) recorded from the level file (%s)", proximities,
+                     level_proximities_.describe().c_str());
             if (++load_waited_ > args_.anchor_timeout) {
                 logf("Gameplay_Ingame never activated");
                 ended_ = true;
@@ -1447,6 +1452,14 @@ namespace {
                 const int restored = level_sequencers_.restore(engine_->context());
                 logf("%d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)", restored,
                      level_sequencers_.size(), level_sequencers_.describe().c_str());
+            }
+            {
+                // Step Q: the proximity blocks' countdown phase is the level
+                // file's on every side.
+                int differed = 0;
+                const int restored = level_proximities_.restore(engine_->context(), &differed);
+                logf("%d of %zu proximity countdown(s) restored to the level file's (%d differed)", restored,
+                     level_proximities_.size(), differed);
             }
             bmmo::physics::world_hash hash;
             if (!bmmo::physics::capture_world_hash(physics, hash, error)) { logf("hash: %s", error.c_str()); ended_ = true; return; }
@@ -2892,6 +2905,7 @@ namespace {
         bool own_group_set_ = false;
         int load_waited_ = 0;
         bmmo::game::sequencer_state level_sequencers_;
+        bmmo::game::proximity_countdown_state level_proximities_;   // step Q, as the server's
         clock_type::time_point origin_;
         int rebases_ = 0;
         unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added

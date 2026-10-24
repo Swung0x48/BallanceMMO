@@ -10,7 +10,9 @@ pieces in a window that crosses their birth, and its check (b) fails on the
 mirror p99 (above the headless lane O runs, which have lifecycle rewind on:
 R3's switch). Step P (the pieces tracked as mechanisms in both hosts, "As
 built (step P)") is implemented but OPEN: R2 (a) now passes on retail, the
-headless trafo run does not. R3-R7 are not built.
+headless trafo run does not. Step Q (the anchor restores the proximity
+blocks' countdown, "As built (step Q)") is built: R0's baseline check holds.
+R3-R7 are not built.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -5314,6 +5316,145 @@ x64 `build-agent-rP` without the slot-13 hack, `build-agent-rPh` with it):
   frame (client_core_frame.cpp:454 before :563). The step that would decide
   it is an instrumented pair of builds (network-thread receive time and the
   frame's drain time of the peer's Physicalize, HEAD and P).
+
+**As built (step Q): the anchor restores the proximity blocks' countdown.**
+R0's baseline finding (two legacy retail runs of one key record woke
+`P_Modul_01_Pusher` at different ticks) closed: every world now starts the
+`TT Scaleable Proximity` countdowns from the level file's values at the
+anchor.
+
+- **Why each client journal equalled its own server's in R0 although the
+  wake tick differed between runs.** Nothing restored, seeded or synced the
+  two locals before Q: no code wrote them, and the server's
+  `rewire_proximity_probes` (physics_world.cpp:364-393) changes only the
+  block's ObjectA source. The server and the headless client agree with each
+  other because they share the pre-anchor frame count: both load the level
+  fresh and run the same 122 load ticks to the anchor (`anchor reached after
+  122 ticks (engine tick 522)` / `anchored after 122 load ticks`), during
+  which 13 of the arena's 24 level blocks run. A retail client agreed with
+  its server only because the server applies the client's `BodyRevived` at
+  the event's tick (`ensure_in_simulation`, physics_world.cpp:903-915): in
+  the R0/R1 runs the retail check woke the pusher at 604-612, never after the
+  server's own check (612), so the server took the client's tick.
+  The one R1 run whose client woke at 613 is the counter-example: the server
+  woke it itself at 612 and the two journals differed in 612-667.
+- **The rule** (`game/script_state.hpp` `proximity_countdown_state`, beside
+  `sequencer_state`): every `TT Scaleable Proximity` whose owner is a level
+  object (`P_`, `PC_`, `PS_`, `PE_`, `PR_` ...; base.cmo's thirteen -
+  `Gameplay_Tutorial`'s twelve probes, owned by `All_Gameplay`, and one of
+  `All_Sound`'s - have no level-file value and are left alone) has
+  locals 0 (last in/out state) and 1 (`Last Check`) recorded at first sight
+  while the level loads, where each host already records the Sequencers
+  (physics_world.cpp:146-149, session_client.cpp:1433-1436, the retail
+  `capture_level_sequencers` frames, BallanceMMOClient.cpp:359-364), and
+  written back at each anchor right after the Sequencer counters
+  (physics_world.cpp:168-177, session_client.cpp:1456-1463, the retail
+  legacy anchor physics_session_client.cpp:1458-1460 and the core host's
+  `core_host_anchor` core_host.cpp:879, both through
+  `proximity_countdowns_restore`, BallanceMMOClient.cpp:367-388). It is about
+  the countdown phase only: the probe target (ObjectA, rewired on the server,
+  and later on the clients by `docs/world-agreement-gaps-design.md`) is not
+  touched, so the rewiring stays compatible. Every side records the same 24
+  values on the arena (22 at the prototype defaults 2/1, `P_Extra_Life_MF`
+  1/1 twice, `PE_Balloon_MF` 1/1 and 1/10); the anchor writes back 13
+  differing blocks on the server and the headless client, 14 on a retail
+  client.
+- **What the retail anchor logs** (after the review): the recorded values,
+  the values the differing blocks held just before the restore, and a census
+  (`proximity_countdown_state::census`) of the `TT Scaleable Proximity`
+  blocks the record does not cover: those owned by no level object, by owner
+  name (the arena: `All_Gameplay x12, All_Sound x1`), and level ones that
+  appeared after the retail record window, with a warning. The retail client
+  records only the 30 frames after the map-load hook (the Sequencers'
+  window), the engine on every load tick up to its anchor; on the arena both
+  see the same 24 blocks, and the warning makes a level where they would not
+  (8 and 11 are not verified) visible instead of a silent split. The server's
+  and the headless client's logs are unchanged.
+- **Known limit: a late joiner.** The rule makes the phase equal at a
+  session-start anchor (tick 0). A player whose anchor is a late-join base
+  (tick N > 0, PSC:241-253) writes the level file's values while the
+  server's blocks stand at the file's values plus N ticks of their own
+  countdowns, so its checks run on other frames until the ball is close
+  enough for a block to check every frame. Not a regression (before Q its
+  phase was arbitrary too). Options, not chosen here: leave it (the
+  snapshot path corrects the world; the server takes a client's earlier
+  `BodyRevived`); or carry the countdowns in the late-join state (a protocol
+  change this row does not name). The user decides.
+- **Adaptations.** (i) The rule changes the legacy retail path (the bar's
+  "core off behaves exactly as before" yields to the row: R0's baseline check
+  cannot pass otherwise), and the server's and the headless client's worlds
+  (their own countdown phase moves from "after 122 load ticks" to the level
+  file's). (ii) The retail record lives in a file-scope static of
+  `core_host.cpp` (`retail::level_proximities()`), cleared in
+  `OnLoadObject` beside `level_sequencers_`; `BallanceMMOClient` gained one
+  non-virtual method, no data member. (iii) No protocol, IVP or physics_RT
+  change.
+- **Other countdowns that survive the anchor** (the arena's 61 level scripts,
+  every block type): the `Sequencer`s are `sequencer_state`'s
+  (`P_Modul_26`) and the balloon's (`PE_Balloon` x2, out of scope by the
+  user's decision). `Delayer` (x6), `Bezier Progression` (x3) and `Counter`
+  (x1, `P_Modul_18_Init`) restart their elapsed time / count on "In"
+  (TimerMini.cpp:66-70, BezierProgression.cpp:126-139, Counter.cpp:86-94):
+  their state matters only while they run across the anchor, not as a
+  phase. `Per Second`, `Interpolator`, `Rotate`, `Ray Intersection`, `Box Box
+  Intersection` keep no state. `Binary Memory` (x1, `P_Extra_Life_MF
+  Script`) is a picked-up flag (score / lives, open). `TT
+  ProximityVolumeControl`, `Wave Player`, `Particle Systems`,
+  `TT_TextureSine` reach sound and visuals only. So `TT Scaleable Proximity`
+  is the only countdown left (other levels' scripts not surveyed). A
+  `Delayer` or `Bezier Progression` still running across the anchor would
+  carry its elapsed time; that none does on the arena is shown only by check
+  (1) holding, not by inspecting them at the anchor. None of the existing
+  script edits covered the countdown: N1 (death / level reset), N2
+  (deactivate pin), N3 (activate hold) and N4 (the checkpoint chain's phase
+  cell) edit the BallManager, sector and checkpoint chains, and
+  `sequencer_state` the Sequencer counters only.
+- **Measured** (quick tier; x64 build, x86 mod and Arch server with the slot-13
+  hack, build id `ballanced-3e4289e95f25+bmmo-4ac6ba0a87d1-dirty`; solo,
+  arena, snapshots off, `replay session` of `r0_keys_p0.bmrc`):
+  - (1) two legacy runs (`q_a_off1`, `q_a_off2`): 2495 common TICK hashes
+    (8-2502), 0 differ; the pusher's `BodyRevived` at 612 in both.
+  - (2) core on (`q_a_on1`) against them: 2532 (8-2539) and 2495 common
+    ticks, 0 differ; pusher 612.
+  - (3) each client journal equal to its own server's at every tick (2532,
+    2495, 2560); the core-on run's server journal equal to `q_a_off1`'s at
+    all 2532 common ticks; the SimTool replays the three server journals
+    exactly (2532 / 2495 / 2560 ticks, 0 checkpoint mismatches).
+  - (4) `wire_check.sh rP rQ qw`: DIFFERENCES, every one of the 16 journals,
+    each explained by the rule: before its first difference the replay is
+    identical, and the first difference is the client's own `BodyRevived` of
+    a proximity-woken mechanism moved by the new phase - `P_Modul_01_Pusher`
+    in 13 (old -> new tick: swing c0 631->633, c1 622->624, c3 661->652;
+    a6m c0 611->602, c1 652->653, c2 592->593, c3 641->642; resync c0
+    628->629, c1 655->656, c2 620->611; a5u c0 628->629, c1 654->655, c2
+    611->612), `P_Modul_19_Flaps` in swing c2 (780->777) and
+    `P_Modul_25_Bridge` in resync c3 and a5u c3 (958->959). The SimTool on
+    the four reference server journals: HEAD's (rP) exact (3986 / 4257 /
+    4176 / 4212 ticks), the new one diverges where the server's own check
+    now wakes a mechanism at another tick (the simulated-core count rises one
+    tick apart): swing 2148 and a6m 1245 `P_Modul_34_Schiebestein` (no
+    client `BodyRevived` for it in the reference), resync 611 the pusher (the
+    reference's earliest client wake 620), a5u 914 `P_Modul_25_Bridge` (the
+    reference's 918). The references were recorded on HEAD's phase; new
+    captures are needed for the wire check from here on.
+  - 424 tests pass; `linux_test_syntax.sh` 25 lines ok.
+  - After the review's logging change (x86 mod and Arch server rebuilt, same
+    build id): two more legacy runs (`q_g_off1`, `q_g_off2`), each client
+    journal equal to `q_a_off1`'s (2516 and 2532 common ticks, 0 differ) and
+    to its own server's (2516, 2533), pusher at 612. Their logs show the
+    pre-anchor phases differed between the runs (`P_Modul_01_MF` 0/13 and
+    0/39, `P_Modul_18_MF` 0/40 and 0/6, `PC_TwoFlames_MF` 0/23 and 0/69) and
+    still give identical worlds, census `13 not a level object's (All_Sound
+    x1, All_Gameplay x12)`, no unrecorded block.
+  - Why (4) is explained by each journal's first difference: the diff's only
+    write into the world is the anchor restore (`capture_new` only reads the
+    locals during the load ticks), so everything after a replay's first
+    difference follows from a different world state, not from another code
+    change. The 16 captures and the four `core_ref_e0/*/server.bmjr` were
+    recorded on HEAD's phase: from this step on `wire_check.sh` reports
+    DIFFERENCES for any binary that contains Q, so a new reference set must be
+    recorded with the Q binaries (as `core_ref_e0/README.md` describes) before
+    a later step can use the wire check as a gate.
 
 ## 7. Open questions
 

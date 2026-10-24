@@ -300,6 +300,9 @@ namespace bmmo::sim {
         // The mechanism Sequencer counters as the level file has them (design
         // 9.26): recorded while the level loads, written back at the anchor.
         bmmo::game::sequencer_state level_sequencers_;
+        // The TT Scaleable Proximity countdowns as the level file has them
+        // (session-client-core design 6.2, step Q): the same rule.
+        bmmo::game::proximity_countdown_state level_proximities_;
         std::vector<ball_row> ball_rows_;             // Physicalize_GameBall rows
         VxMatrix spawn_matrix_{};
         std::vector<VxVector> resetpoints_;

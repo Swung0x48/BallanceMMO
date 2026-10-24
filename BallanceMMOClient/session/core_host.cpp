@@ -474,10 +474,20 @@ namespace {
         CKBehavior* script = bml->GetScriptByName("Gameplay_Ingame");
         return script ? script->GetID() : 0;
     }
+
+    // Step Q: the level's TT Scaleable Proximity countdowns as the level file
+    // has them, recorded beside the Sequencer counters after the map load and
+    // written back at both paths' anchors (game/script_state.hpp).  Here, not
+    // beside level_sequencers_, because BallanceMMOClient takes no new member.
+    bmmo::game::proximity_countdown_state level_proximity_state;
 }
 
 bool bmmo::session::retail::core_enabled() {
     return core_on.load();
+}
+
+bmmo::game::proximity_countdown_state& bmmo::session::retail::level_proximities() {
+    return level_proximity_state;
 }
 
 // ---------------------------------------------------------------- network thread
@@ -866,6 +876,7 @@ void BallanceMMOClient::core_host_anchor() {
         logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
                       restored, level_sequencers_.size(), level_sequencers_.describe().c_str());
     }
+    proximity_countdowns_restore();
     bmmo::physics::world_hash hash;
     if (!physics_view_.capture(hash, error)) {
         core_host_end_local("world hash failed: " + error);

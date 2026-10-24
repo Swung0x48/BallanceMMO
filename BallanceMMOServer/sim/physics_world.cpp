@@ -143,6 +143,10 @@ namespace bmmo::sim {
             if (recorded > 0)
                 log("world: " + std::to_string(recorded) + " mechanism Sequencer counter(s) recorded from the level file ("
                     + level_sequencers_.describe() + ")");
+            // Step Q: the proximity countdowns, recorded the same way.
+            if (const int proximities = level_proximities_.capture_new(engine_->context()); proximities > 0)
+                log("world: " + std::to_string(proximities) + " proximity countdown(s) recorded from the level file ("
+                    + level_proximities_.describe() + ")");
             if (!engine_->tick(error)) return false;
         }
         log("world: anchor reached after " + std::to_string(waited) + " ticks (engine tick "
@@ -160,6 +164,15 @@ namespace bmmo::sim {
             const int restored = level_sequencers_.restore(context);
             log("world: " + std::to_string(restored) + " of " + std::to_string(level_sequencers_.size())
                 + " mechanism Sequencer counter(s) restored to the level file's (" + level_sequencers_.describe() + ")");
+        }
+        // Step Q: the proximity blocks' countdown phase is the level file's on
+        // every side (the load ticks before the anchor run some of them: 13 of
+        // the arena's 24 differ here).
+        {
+            int differed = 0;
+            const int restored = level_proximities_.restore(context, &differed);
+            log("world: " + std::to_string(restored) + " of " + std::to_string(level_proximities_.size())
+                + " proximity countdown(s) restored to the level file's (" + std::to_string(differed) + " differed)");
         }
         bmmo::physics::world_hash hash;
         if (!bmmo::physics::capture_world_hash(manager, hash, error)) return false;

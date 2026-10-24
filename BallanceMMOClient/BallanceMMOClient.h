@@ -707,6 +707,9 @@ private:
 	bmmo::game::sequencer_state level_sequencers_;
 	int level_sequencers_frames_ = 0;
 	void capture_level_sequencers();
+	// Step Q: the level's proximity countdowns (session/core_host.hpp
+	// level_proximities, recorded in capture_level_sequencers) written back.
+	void proximity_countdowns_restore();
 	// The session black box: session/session_journal_client.hpp.
 	void physics_session_journal_begin();
 	// Design 9.26 phase alignment: the world stands at the anchor until the

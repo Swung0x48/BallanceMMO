@@ -240,6 +240,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         // behaviours are not enumerable from this hook yet, so the next
         // frames record them (capture_level_sequencers).
         level_sequencers_.clear();
+        bmmo::session::retail::level_proximities().clear();   // step Q
         level_sequencers_frames_ = 30;
         boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).[cn]mo$", boost::regex::icase);
         std::string path(filename);
@@ -355,6 +356,35 @@ void BallanceMMOClient::capture_level_sequencers() {
     } else if (level_sequencers_frames_ == 0 && level_sequencers_.size() == 0) {
         logger_->Info("Physics session: no mechanism Sequencer in this level");
     }
+    // Step Q: the TT Scaleable Proximity countdowns, the same way (the
+    // values are logged once, at the anchor).
+    auto& proximities = bmmo::session::retail::level_proximities();
+    if (const int added = proximities.capture_new(m_bml->GetCKContext()); added > 0)
+        logger_->Info("Physics session: %d proximity countdown(s) recorded from the level file (%zu in all)",
+                      added, proximities.size());
+}
+
+// Step Q: both paths' anchors, right after the Sequencer counters.  The
+// record covers only the frames above, the engine's every load tick: a level
+// proximity born later is not restored here but is on the server, so it is
+// counted and warned about rather than left silent.
+void BallanceMMOClient::proximity_countdowns_restore() {
+    const auto& proximities = bmmo::session::retail::level_proximities();
+    CKContext* context = m_bml->GetCKContext();
+    int differed = 0;
+    std::string before;
+    const int restored = proximities.restore(context, &differed, &before);
+    int unrecorded = 0, other_owner = 0;
+    std::string other_names;
+    proximities.census(context, unrecorded, other_owner, &other_names);
+    logger_->Info("Physics session: %d of %zu proximity countdown(s) restored to the level file's (%s); "
+                  "%d differed (%s); %d not a level object's, left alone (%s)",
+                  restored, proximities.size(), proximities.describe().c_str(), differed, before.c_str(),
+                  other_owner, other_names.c_str());
+    if (unrecorded > 0)
+        logger_->Warn("Physics session: %d level proximity countdown(s) appeared after the record window and keep "
+                      "this client's phase (the engine records on every load tick): this level needs a longer window",
+                      unrecorded);
 }
 
 void BallanceMMOClient::OnPostExitLevel() {

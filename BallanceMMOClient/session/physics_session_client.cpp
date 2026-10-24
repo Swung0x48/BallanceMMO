@@ -1455,6 +1455,9 @@ void BallanceMMOClient::physics_session_anchor() {
         logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
                       restored, level_sequencers_.size(), level_sequencers_.describe().c_str());
     }
+    // Step Q: the proximity blocks' countdown phase too (the pusher woke at a
+    // tick set by the play before the restart).
+    proximity_countdowns_restore();
     bmmo::physics::world_hash hash;
     if (!physics_view_.capture(hash, error)) {
         physics_session_end_local("world hash failed: " + error);
