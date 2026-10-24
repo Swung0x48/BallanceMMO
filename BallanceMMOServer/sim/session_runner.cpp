@@ -499,6 +499,10 @@ namespace bmmo::sim {
             if (it == sessions_.end()) return;
             auto& lead = it->second->leads[player];
             lead.cap_lead = (caps & bmmo::session::CAP_LEAD) != 0;
+            // Resync step B2: a client that applies the resync state is a
+            // session core with the rollback on, which rewinds a late remote
+            // Sector (step B1); its raises are bounded by its reach.
+            lead.rewinds_sectors = (caps & bmmo::session::CAP_RESYNC_STATE) != 0;
             lead.assigned_lead = assigned_lead;
         });
     }
@@ -662,8 +666,9 @@ namespace bmmo::sim {
             // Every other member's Sector margin (design 2.9): the server
             // relays the event the moment it takes it, so it reaches member
             // q at about q's c_est, and the stamp less that is how far ahead
-            // of q's clock it lands.  A raise of q must leave that positive
-            // until a late remote Sector is rewound for (plan step 14).  An
+            // of q's clock it lands.  A raise of q must leave that positive,
+            // or, for a q that rewinds a late remote Sector (resync step B2),
+            // within its rewind reach (lead_sector_bound).  An
             // event already late at the server is the sender's lateness, not
             // q's path, and is no sample (lead_sector_sample).
             if (config_.lead_adjust && type == bmmo::session::event_type::Sector) {
@@ -1090,6 +1095,7 @@ namespace bmmo::sim {
                 if (l != s.leads.end()) {
                     const auto& lead = l->second;
                     text += std::string(" lead: caps=") + (lead.cap_lead ? "lead" : "none")
+                          + (lead.rewinds_sectors ? "+sector-rewind" : "")
                           + " assigned=" + std::to_string(lead.assigned_lead)
                           + " rtt=" + (lead.have_rtt ? std::to_string(lead.rtt_ms) : std::string("?"))
                           + " sent=" + std::to_string(lead.sent) + " acked=" + std::to_string(lead.acked)

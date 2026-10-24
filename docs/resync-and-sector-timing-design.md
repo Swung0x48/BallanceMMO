@@ -2679,7 +2679,7 @@ reported as symptom, cause and options (principle d).
 | A3 | Exact resync, wire to world | `entity/session.hpp` (10), `session_assign_msg` and the repeats, `session_snapshot_msg`, `physics_world`, `session_runner` (missed base), `server.cpp`, core (§2.6, `resync_rules.hpp`, `life_log_`, `pending_deaths_`), `rollback.hpp` (`resync`), `client_platform.hpp` (`localize_scripts`, `forget_activations_from`, `forget_births_after`, clock sites), `session_host_world.hpp` (`forget_after`), journal, H and RC ops, both resync holds, `--resync-at` | §7.1 all; §7.6; §7.3 resync_snapoff ×3, running-client resync ×3 at 0 and 150 ms, a5u_lead; regression arms; re-captured `core_ref_r3/` |
 | A4 | Retail gate | none (runs); fixes found go back to A3's files | §7.4 |
 | A5 | Late joiner via the state | `server.cpp` (late ready), core first-assign branch | needs audit #16 (and #9 option B for pooled levels); §7.3 late join, its last-sector variant and its 10% loss run; A3's arms unchanged |
-| B2 | Lift the Sector-margin cap on raises | `session/lead.hpp:209-213` (the `sector_bound` term) and its test | late-player-design step 14: A5u with sectors 4, client 2's and the others' mechanism error ≤ control; `lead_test` updated. After A3, under protocol 10, because a pre-B1 client would suffer from a raise past its margin |
+| B2 | Lift the Sector-margin cap on raises | `session/lead.hpp:209-213` at 72108fd (the `sector_bound` term; `lead_sector_bound` as built) and its test | late-player-design step 14: A5u with sectors 4, client 2's and the others' mechanism error ≤ control; `lead_test` updated. After A3, under protocol 10, because a pre-B1 client would suffer from a raise past its margin |
 | T1 | Client journals replay through a resync | `sim_tool.cpp --replay-session` reads RESYNC (rows, scripts and union at S, the reconcile, then continues) | a resynced client's journal replays exact against itself after the RESYNC record |
 | T2 | Trafo scripts out of `keep_local` | `session/resync_rules.hpp`; after `docs/trafo-replication-design.md` lands with its `trafo_live` join/resync state (its §4.7, which itself waits for this track's A3) | the trafo design's H1 arm with a forced resync of the trafoing client during its pieces' life: pieces bit-equal to the server's after the apply; A3's arms unchanged |
 
@@ -2687,6 +2687,119 @@ reported as symptom, cause and options (principle d).
 replication's T3 (that design's §8 T0 lists F3, which is this track's A3).
 Until T2, a resync inside a trafo's 19.6 s keeps the owner's own trafo
 state: the pre-existing owner-only gap (audit #2), not a new one.
+
+**As built (step B2, 2026-10-24).**
+
+- **What changed.** `lead_decide`'s Sector term is `lead_sector_bound`
+  (`session/lead.hpp`): the worst margin less a tick, plus
+  `kLeadSectorReachTicks` (48) for a player whose SessionReady declared
+  `CAP_RESYNC_STATE`; never below 0; no sample, no bound, as before. The
+  runner sets `lead_player::rewinds_sectors` from the caps
+  (`session_runner.cpp` `set_player_lead`), and the S1 line prints
+  `caps=lead+sector-rewind`. Nothing else moves: the total cap, the
+  pooled samples, the shift on an acknowledgment, the deferral and the
+  log labels (`cap=sector`) are as they were.
+- **Adapted: a reach bound, not a removal.** Late-player §2.9 says the
+  bound "stays at lead.hpp:211-212 as a reach bound that costs p only";
+  this row says "lift". A late remote Sector inside the reach rewinds
+  (`sector_rewind_reachable`: a rewind to stamp - 1 of at most
+  `max_resim_ticks`); past it the client starts the sector live and
+  resyncs - exact since A3, but a state transfer that a raise should not
+  make routine. So the margin's cap is lifted by exactly the reach. The
+  48 is `rollback_thresholds{}.max_resim_ticks`, which both hosts use
+  unchanged; `lead_test` asserts the two agree. With the arena's margins
+  (11-15) the bound is 58-62, above every total-cap room (80 less a
+  start lead of about 27-35), so in practice only the total cap binds.
+- **Adapted: gated on `CAP_RESYNC_STATE`.** The row's reason ("a pre-B1
+  client would suffer from a raise past its margin") is met by the
+  capability rather than the protocol number: the cap means a session core
+  with the rollback on, which is exactly the client that has B1's rewind.
+  A core with the rollback off (which may still declare `CAP_LEAD`) and the
+  legacy retail path (which declares neither) keep the margin bound. No
+  protocol change.
+- **Verified (quick tier).** `BallanceMMOMessageTests` 471/471, three new
+  (`LeadDecide.ASectorRewindingClientIsNotCappedByTheMargin`,
+  `LeadDecide.TheRewindReachBoundsARaise`,
+  `LeadSector.TheBoundIsTheMarginPlusTheClientsRewindReach`); GCC syntax
+  26/26; the wire check `rA5 -> rB2` ALL SAME (24/24 sends, 24/24
+  journals identical; `lead.hpp` is compiled into the server and the tests
+  only). Live, A5u with `--sectors 4` (the a5u_lead recipe with sector 4
+  as the start), snapshots off, one run each: `b2_a5u_lead` (patience and
+  lead on) against `b2_a5u_ctl` (both off). Client 2 was raised once,
+  `k=16` decided and sent uncapped at 1685 with its margin at 15 (the old
+  bound would have sent 14); the server journal replays exactly in both.
+  Phase A (from 1548), PE_Balloon excluded (I3) and each resync's own
+  window excluded - from the request S + 1 to the end of its re-step
+  (B + 47..53; late-player §5.2 A5u: "outside a resync's own 48 ticks",
+  and a resync of client 2 is its own cost; the re-stepped rows run on
+  predicted remote inputs past the newest relayed frame, B + 2, and are
+  corrected from the first live tick on) - the worst mechanism per
+  client, lead / control:
+  c0 1.3661 / 1.3661, c1 1.3662 / 1.3602, c3 1.3602 / 1.3662 (the same
+  `P_Modul_03_Gate` excursion from 1850 in both runs, on every client but
+  the leader c2, the 6 mm between runs only the tick it is sampled at:
+  G-c of `world-agreement-gaps-design.md`. On the server the elevator's
+  proximity block (`P_Modul_03_MF`, one of the countdowns the world
+  records) fires for client 2's ball, the nearest at 34.6 m at 1850, and
+  the gate drops from y 4.17 to 3.00 by 1950; the other clients' blocks
+  watch their own balls only, which arrive about 100 ticks later. Queued
+  as its own step, roadmap §4 item 7), c2 0.0525 / 0.0542
+  (`PE_Box_slide` at 2214), and after client 2's resyncs 0.0003 / 0.0034.
+  The harness's raw phase-A `mech` (no exclusions) reads c2 6.97 against
+  4.54: `P_Modul_08_Schaukel` at 2748, inside client 2's resync window
+  2662-2790. That window is longer by the raise: client 2's schedule
+  rebased at 2661 in both runs (the frame loop 33 ticks behind wall time
+  under 38-39-tick rewinds per frame for the three respawns at 2596-2612),
+  and Δ is -38 with its +16 offset against -22 without. In the control all
+  four clients rebased and resynced there; with the flags on only client 2
+  did. The rebase itself is pre-existing and flag-independent (the CPU
+  cliff, queued under roadmap §4 item 8).
+- **That run does not reach B2's path: A5u's client 2 crosses first.** The
+  harness's staggered drive brings client 2 to every sector first (824,
+  1270; the others 856-872, 1324-1341), so no remote Sector stamp ever adds
+  a sector to client 2's union: `!covers` fails, nothing rewinds, whatever
+  the raise. Moving the step to 500 (`b2_early_lead`, raise `k=16` effective
+  746, before every crossing) shows it: client 2's three late stamps for
+  sector 2 print "(LATE: the server started it already)" from the covered
+  branch (`client_core_lifecycle.cpp:384-385`), `sectors: rew=0/0`. So the
+  path is checked with the step on the last crosser, client 1 (`--event
+  1:500:step=300:dir=up`, otherwise the same recipe, snapshots off):
+  `b2_c1_lead` against `b2_c1_ctl`. Client 1 was raised `k=17` at 685
+  (effective 748) with its margin at 14 - the old bound would have sent 13
+  - and client 2's first crossings then reached it late and were rewound:
+  "stamped for tick 824 (late by 3: rewound to 823)" and "1270 (late by 6:
+  rewound to 1269)", `sectors: rew=2/0 depth=9`, nothing missed; both
+  server journals replay exactly (3580 and 3560 ticks). The worst
+  mechanism per client over phase A (from 548), PE_Balloon and each
+  resync's own window excluded as above, lead / control: c0 2.7374 /
+  2.7374, c1 2.7374 / 2.7374, c2 0.0058 / 0.0802, c3 2.7374 / 2.7374.
+  The 2.7374 is `P_Modul_34_Schiebestein` at 1294, identical in both runs
+  on every client but the first crosser c2 (0.0024): the signature of the
+  gate's G-c above, attributed to it and not traced further; next the
+  gate itself, 1.36. Client 1 after its last resync 0.0813 / 0.0802, both
+  `PE_Box_slide` (a pushed box's pre-existing 8 cm, 0.0807 on control c3
+  too).
+- **What the raise costs the raised client (reported, not failed).** The
+  four extra ticks of lead put client 1's relay lag at p99 47 / max 52
+  against the reach of 48: 435 relayed frames past the reach (control 81,
+  where every member lagged 43 waiting for client 1), and two "held notice
+  ... arrived past the reach of 48 ticks" resyncs (1300, 2883) besides the
+  rebase's (2682). Its re-step after the rebase is 53 ticks on predicted
+  remote inputs (Δ -36, control -19), so the transient inside that window
+  is larger: raw phase-A `mech` c1 23.18 (the balloon) and, balloon
+  excluded, `P_Modul_08_Schaukel` 6.72 at 2810 inside 2683-2813 (control
+  3.99 at 2736 inside its 2665-2757); 0.000 from the first live tick. This
+  is late-player open question 8 - a raise past the reach before plan
+  step 12 (the per-client reach, roadmap §4 item 11) - and, like A5u's
+  relay_late there, p's own cost; the others' worlds are untouched (c0, c2,
+  c3 at or below control). B2 makes it reachable at a smaller step than
+  before (the old margin cap, 13 here, held the lag at about 43).
+- **No slack at the reach.** At `k = worst + 47` a stamp one tick worse
+  than the worst of the eight samples rewinds 49 ticks, which
+  `sector_rewind_reachable` refuses: that one event then costs a resync
+  (exact) instead of a rewind. Left so: on the arena the total cap binds
+  well before it (above), and the margin samples move by a tick or two
+  (11-15); revisit with step 12, which makes the reach per client.
 
 ## 9. Open questions
 

@@ -1185,7 +1185,10 @@ the senders q that bind (below).
   rewinds the client to the stamp minus 1 and re-stamps the union. The bound
   then becomes p's own reach, `k - (margin_pq - 1) ≤` p's rewind depth (step
   12: `max_resim` up to 120, history 128), and it stays at lead.hpp:211-212
-  as a reach bound that costs p only. Raising S instead would move every
+  as a reach bound that costs p only. (As built: resync design step B2,
+  `lead_sector_bound`, gated on `CAP_RESYNC_STATE`, with the reach at 48 =
+  `max_resim_ticks` until step 12; `resync-and-sector-timing-design.md`,
+  "As built (step B2)".) Raising S instead would move every
   member's activation, so the principles rule it out.
 - **What the bound costs until then.** Only while a sector is still unentered,
   and only p. A member raised as far as the bound allows stays at `L ≈ k -

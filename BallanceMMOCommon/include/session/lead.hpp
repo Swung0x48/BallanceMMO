@@ -16,13 +16,15 @@
 //   - p's input buffer is reset over [N, E) (input_buffer::reset_hold): every
 //     tick of it gets the substitute the buffer holds now, frozen, so the
 //     message can carry that frame as final.
-//   - k is capped by the total lead cap and, until plan step 14, by p's
-//     Sector margin.  A capped raise is sent as far as the cap allows.  When
-//     the total cap binds, the meter takes no further raise this assignment
-//     (one capped to nothing is declined); when the Sector margin binds it
-//     does not latch, since the margin moves with the path and the other
-//     members' crossings: one capped to nothing is deferred for
-//     kSectorRetryTicks, and the next raise is capped anew.
+//   - k is capped by the total lead cap and by p's Sector bound: p's Sector
+//     margin less a tick, plus - for a client that rewinds a late remote
+//     Sector (plan step 14, resync design step B2) - its rewind reach.  A
+//     capped raise is sent as far as the cap allows.  When the total cap
+//     binds, the meter takes no further raise this assignment (one capped
+//     to nothing is declined); when the Sector bound binds it does not
+//     latch, since the margin moves with the path and the other members'
+//     crossings: one capped to nothing is deferred for kSectorRetryTicks,
+//     and the next raise is capped anew.
 // A lower moves no range: held_from 0, E = N.
 //
 // Nothing is sent to a client that did not declare CAP_LEAD, or with the
@@ -63,11 +65,14 @@ namespace bmmo::session {
     // before its stamp another member's Sector event reaches p.  The server
     // relays a Sector event the moment it takes it, so at that moment the
     // event reaches p at about c_est; the margin is the stamp less that.  A
-    // raise of k takes k off it, and with the late remote Sector not yet
-    // rewound for (plan steps 13-14) an event must still arrive at least a
-    // tick ahead, so k <= margin - 1.  The smallest of the last kSamples is
-    // what binds: the margin is a property of the path, and the worst recent
-    // one is the one a raise must not break.
+    // raise of k takes k off it.  A client that does not rewind a late
+    // remote Sector needs the event at least a tick ahead, so k <= margin -
+    // 1; one that does (lead_player::rewinds_sectors) re-derives the pass at
+    // its stamp as long as the rewind, to stamp - 1, stays within its reach,
+    // so k <= margin - 1 + kLeadSectorReachTicks (lead_sector_bound).  The
+    // smallest of the last kSamples is what binds: the margin is a property
+    // of the path, and the worst recent one is the one a raise must not
+    // break.
     class lead_sector_margin {
     public:
         static constexpr size_t kSamples = 8;
@@ -95,9 +100,28 @@ namespace bmmo::session {
     // faster, and a retry every streak would only repeat the same log line.
     inline constexpr uint32_t kSectorRetryTicks = 660;
 
+    // The depth to which a session-core client rewinds for a late remote
+    // Sector stamp (late-player design 2.9 and plan step 14, resync design
+    // 2.7 case 3 and step B2): rollback.hpp's max_resim_ticks, which
+    // client_core's sector_rewind_reachable compares the rewind to stamp - 1
+    // against (lead_test checks the two agree).  A stamp that reaches p
+    // d ticks late rewinds d + 1 ticks.  Past this the client starts the
+    // sector live and resyncs: still exact (protocol 10), but a state
+    // transfer, which a raise must not make routine; so the bound stays,
+    // as a reach bound that costs p only (the others' worlds are not
+    // touched by p's late arrival of their events).
+    inline constexpr int64_t kLeadSectorReachTicks = 48;
+
     // What the server knows of one player for the lead decision.
     struct lead_player {
         bool cap_lead = false;          // its SessionReady declared CAP_LEAD
+        // Its SessionReady declared CAP_RESYNC_STATE: a session core with the
+        // rollback on, which since resync step B1 rewinds a late remote Sector
+        // to its stamp - 1 and re-derives the pass there (a resync beyond its
+        // reach).  Its raises are bounded by the reach, not by the margin
+        // alone (step B2); a client without it (a core with the rollback
+        // off) starts a late sector late, and keeps the margin bound.
+        bool rewinds_sectors = false;
         // The lead of the player's first assignment (the start base, or the
         // late join's lead): with the meter's offset, its total lead.
         uint32_t assigned_lead = 0;
@@ -158,12 +182,22 @@ namespace bmmo::session {
         return true;
     }
 
+    // How far a raise of p may go before another member's Sector event
+    // would reach p past what p can take (design 2.9): the worst margin less
+    // a tick, plus the rewind reach for a client that rewinds a late remote
+    // Sector; never below 0.  Without a margin sample, `k` (no bound).
+    inline int64_t lead_sector_bound(const lead_player& p, int64_t k) {
+        if (!p.sector_margin.known()) return k;
+        const int64_t reach = p.rewinds_sectors ? kLeadSectorReachTicks : 0;
+        return std::max<int64_t>(p.sector_margin.worst() - 1 + reach, 0);
+    }
+
     // What the runner does with one meter decision.
     enum class lead_route : uint8_t {
         none,       // no decision
         observe,    // flag off, or no CAP_LEAD: logged, nothing sent, the meter stays pending
         declined,   // the total cap left nothing of the raise: no further raise this assignment
-        deferred,   // the Sector margin left nothing of it: the meter may decide again after kSectorRetryTicks
+        deferred,   // the Sector bound left nothing of it: the meter may decide again after kSectorRetryTicks
         send,       // a SessionLead goes out
     };
 
@@ -208,8 +242,7 @@ namespace bmmo::session {
             const int64_t total = static_cast<int64_t>(p.assigned_lead) + meter.offset();
             const int64_t total_bound = std::max<int64_t>(static_cast<int64_t>(kLeadCapTicks) - total, 0);
             const bool cut_total = k > total_bound;
-            const int64_t sector_bound = p.sector_margin.known()
-                ? std::max<int64_t>(p.sector_margin.worst() - 1, 0) : static_cast<int64_t>(k);
+            const int64_t sector_bound = lead_sector_bound(p, k);
             const bool cut_sector = k > sector_bound;
             const bool total_binds = cut_total && total_bound <= sector_bound;
             if (cut_total || cut_sector) {

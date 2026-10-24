@@ -117,7 +117,14 @@ left. Each design named here has its own document with its step table.
    queue in the script record (engine access change #20), lives that end
    inside a window, the retail beam's generation, and F (found at B1): the
    script replay consumes the next-frame flags of scripts the live frame
-   skips (`P_Modul_18_Particle Script`).
+   skips (`P_Modul_18_Particle Script`). Also the CPU cliff (found at B2,
+   no design yet): three respawns within 15 ticks (A5u at 150 ms, 2596-2612)
+   make every frame a 38-39-tick lifecycle rewind, the frame loop falls
+   about 33 ticks behind wall time, the schedule rebases and the client
+   resyncs - on all four clients with the flags off, on the raised one with
+   them on (`resync-and-sector-timing-design.md`, As built (step B2)).
+   Root cause the per-frame cost first (one rewind per frame for the
+   frame's lifecycle set, or the rewinds' own cost).
 9. Record-format gaps (`record-format-gaps-design.md`): time factor and
    gravity per tick, Level 1 switches the tutorial off (main-branch exit,
    10-frame delay, every world), the array-read census.

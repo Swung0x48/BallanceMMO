@@ -14,6 +14,7 @@
 #include <session/journal.hpp>
 #include <session/lateness.hpp>
 #include <session/lead.hpp>
+#include <session/rollback.hpp>
 #include <session/timeline.hpp>
 
 #include "../sim/late_tick.hpp"
@@ -653,6 +654,77 @@ TEST(LeadDecide, TheSectorMarginCapsARaise) {
     ASSERT_EQ(plans[0].route, lead_route::send);
     EXPECT_EQ(plans[0].k, 3);
     EXPECT_STREQ(plans[0].cap, "sector");
+}
+
+// Resync step B2 (late-player plan step 14): a client that rewinds a late
+// remote Sector (CAP_RESYNC_STATE, the session core with the rollback on) is
+// bounded by its rewind reach, not by the margin alone.  The margin 4 that
+// caps the client above at 3 leaves this one the whole raise.
+TEST(LeadDecide, ASectorRewindingClientIsNotCappedByTheMargin) {
+    meter_rig rig;
+    rig.lead.rewinds_sectors = true;
+    rig.lead.sector_margin.push(9);
+    rig.lead.sector_margin.push(4);
+    rig.lead.sector_margin.push(12);
+    std::vector<lead_plan> plans;
+    rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+        plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
+    });
+    ASSERT_EQ(plans.size(), 1u);
+    ASSERT_EQ(plans[0].route, lead_route::send);
+    EXPECT_GT(plans[0].decided_k, 3);
+    EXPECT_EQ(plans[0].k, plans[0].decided_k);
+    EXPECT_EQ(plans[0].cap, nullptr);
+    EXPECT_EQ(rig.lead.capped, 0u);
+}
+
+// ... but the reach still binds: a raise that would make another member's
+// Sector event reach the client more than the reach late (a rewind to
+// stamp - 1 deeper than max_resim_ticks, a resync instead) is cut, not
+// latched, and one the reach leaves nothing of is deferred.
+TEST(LeadDecide, TheRewindReachBoundsARaise) {
+    {
+        meter_rig rig;
+        rig.lead.rewinds_sectors = true;
+        rig.lead.sector_margin.push(-44);   // the reach leaves 48 - 45 = 3
+        std::vector<lead_plan> plans;
+        rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+            plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
+        });
+        ASSERT_EQ(plans.size(), 1u);
+        ASSERT_EQ(plans[0].route, lead_route::send);
+        EXPECT_EQ(plans[0].k, 3);
+        EXPECT_STREQ(plans[0].cap, "sector");
+        EXPECT_STREQ(plans[0].binding, "sector");
+        EXPECT_FALSE(rig.meter.at_cap());
+    }
+    {
+        meter_rig rig;
+        rig.lead.rewinds_sectors = true;
+        rig.lead.sector_margin.push(-47);   // nothing left: deferred
+        std::vector<lead_plan> plans;
+        rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+            plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
+        });
+        ASSERT_GE(plans.size(), 1u);
+        EXPECT_EQ(plans[0].route, lead_route::deferred);
+        EXPECT_EQ(rig.lead.sent, 0u);
+        EXPECT_FALSE(rig.meter.at_cap());
+    }
+}
+
+TEST(LeadSector, TheBoundIsTheMarginPlusTheClientsRewindReach) {
+    lead_player p;
+    EXPECT_EQ(lead_sector_bound(p, 20), 20);   // no sample: no bound
+    p.sector_margin.push(15);
+    EXPECT_EQ(lead_sector_bound(p, 20), 14);   // no rewind: k <= margin - 1
+    p.rewinds_sectors = true;
+    EXPECT_EQ(lead_sector_bound(p, 20), 14 + kLeadSectorReachTicks);
+    p.sector_margin.push(-60);
+    EXPECT_EQ(lead_sector_bound(p, 20), 0);    // never below 0
+    // The reach is the depth client_core's sector_rewind_reachable allows:
+    // rollback.hpp's max_resim_ticks.  A stamp d ticks late rewinds d + 1.
+    EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(bmmo::session::rollback_thresholds{}.max_resim_ticks));
 }
 
 TEST(LeadDecide, ALowerMovesNoRange) {
