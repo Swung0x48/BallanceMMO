@@ -1960,7 +1960,9 @@ namespace bmmo::session {
         // to take over.  Returns false then, and the caller must re-anchor.
         // `reach` (step A3): a deeper limit than max_resim_ticks, at most the
         // resync reach, for a correction inside an exact resync's re-step
-        // (the client core's window_rewind_reach); 0 = max_resim_ticks.
+        // (the client core's window_rewind_reach) and for a forced rewind
+        // deeper than max_resim_ticks (force_rewind, step A4); 0 =
+        // max_resim_ticks.
         bool rewind_to(const rollback_world& world, uint32_t anchor, uint32_t current_tick,
                        const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
                        const std::string& reason, uint32_t reach = 0) {
@@ -1975,7 +1977,8 @@ namespace bmmo::session {
             // body back to a record up to the whole history old, re-simulate
             // nothing and drop the history.  A caller's own rewind that deep
             // (an input corrected 49-96 ticks late, a lifecycle event that
-            // late) is refused and counted as too far instead.
+            // late) is refused and counted as too far instead, unless the
+            // caller passed a `reach` (above) that covers it.
             if (current_tick - anchor > limit) {
                 ++stats_.too_far;
                 return false;

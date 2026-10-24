@@ -2832,6 +2832,56 @@ namespace {
         EXPECT_TRUE(state_of(core).own_life_.empty());
     }
 
+    // Resync design 9 Q2 (step A4): a forced rewind deeper than
+    // max_resim_ticks (48) re-steps, up to the resync reach (history_ticks -
+    // 1 = 95), as an exact resync does; one whose anchor has left the
+    // history is a counted miss that steps nothing.
+    TEST(SessionClientCoreForcedRewind, DeeperThanMaxResimReStepsUpToTheResyncReach) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(replay_platform(fake, bound), session_capabilities{});
+        bound = &core;
+        run_to_tick_125(core, fake);
+        ASSERT_EQ(state_of(core).rollback_.thresholds().max_resim_ticks, 48u);
+        ASSERT_EQ(state_of(core).rollback_.resync_reach(), 95u);
+        record_ticks(core, 30, 125);   // the whole history: 96 records
+
+        size_t from = fake.calls.size();
+        {
+            const auto forced = core.force_rewind(80);
+            EXPECT_TRUE(forced.rolled);
+        }
+        {
+            const auto calls = since(fake.calls, from);
+            const auto steps_taken = std::count(calls.begin(), calls.end(), std::string("step"));
+            EXPECT_EQ(steps_taken, 80) << "anchor 45, ticks 46..125 re-simulated";
+            ASSERT_GE(calls.size(), 4u);
+            EXPECT_EQ(calls[2], "pre_step:46");
+            EXPECT_EQ(calls.back(), "keep_live_cells:exit:rolled back");
+        }
+        EXPECT_EQ(state_of(core).forced_rollbacks_, 1u);
+        EXPECT_EQ(state_of(core).forced_rollback_depth_, 80u);
+        EXPECT_EQ(state_of(core).forced_rollbacks_missed_, 0u);
+        EXPECT_EQ(state_of(core).rollback_.stats().too_far, 0u);
+
+        // Past the reach: the anchor (29) is no longer recorded, so the
+        // engine refuses it before any depth check; nothing is stepped.
+        const uint64_t unmatched = state_of(core).rollback_.stats().unmatched;
+        from = fake.calls.size();
+        {
+            const auto forced = core.force_rewind(96);
+            EXPECT_FALSE(forced.rolled);
+        }
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(std::count(calls.begin(), calls.end(), std::string("step")), 0);
+        }
+        EXPECT_EQ(state_of(core).forced_rollbacks_, 1u);
+        EXPECT_EQ(state_of(core).forced_rollbacks_missed_, 1u);
+        EXPECT_EQ(state_of(core).rollback_.stats().unmatched, unmatched + 1);
+        EXPECT_EQ(state_of(core).rollback_.stats().too_far, 0u);
+    }
+
     // Design 5.1 "Own echoes": a MOVED birth, with own body control, is
     // taken out, moved in the records and rewound for, and made again at
     // its applied tick inside the replay; the restore's destroy_body takes

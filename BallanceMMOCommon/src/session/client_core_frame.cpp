@@ -126,7 +126,12 @@ namespace bmmo::session {
         };
         const uint32_t anchor = now - depth;
         forced_rewind result{false, platform_.keep_live_cells(*this)};
-        if (s.rollback_.rewind_to(world(), anchor, now, input_at, "forced")) {
+        // Deeper than max_resim_ticks only up to the resync reach, the depth
+        // an exact resync re-steps (step A4: the retail 80-tick re-step
+        // timing of resync design 9 Q2); a depth within max_resim_ticks is
+        // the rewind it always was.
+        const uint32_t reach = depth > s.rollback_.thresholds().max_resim_ticks ? depth : 0;
+        if (s.rollback_.rewind_to(world(), anchor, now, input_at, "forced", reach)) {
             ++s.forced_rollbacks_;
             s.forced_rollback_depth_ += now - anchor;
             drop_carried_own_replay(anchor, false);

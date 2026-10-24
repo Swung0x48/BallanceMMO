@@ -1023,7 +1023,10 @@ namespace bmmo::session {
         // keeps the result: the host's traces after the rewind still run
         // inside that scope, as they did when the whole of it was the host's.
         // Without rollback, or before `depth + 2` ticks are played, it does
-        // nothing (not rolled, not counted, no cells kept).
+        // nothing (not rolled, not counted, no cells kept).  A depth above
+        // max_resim_ticks re-steps up to the resync reach (history_ticks -
+        // 1), the depth an exact resync re-steps (step A4, resync design 9
+        // Q2); deeper than the history it is a counted miss.
         struct forced_rewind {
             bool rolled = false;
             scope_guard keep_cells;
