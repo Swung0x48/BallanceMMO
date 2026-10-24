@@ -2190,6 +2190,199 @@ each. Pass:
   The other client logs `sector +K at tick <the server's>`, and neither
   sends an own Sector event it did not earn.
 
+**As built (step A4, 2026-10-24): the full-tier gate of the exact resync.**
+
+- **Binaries.** New = HEAD 93c13f6 (`build-agent-rA4`), and for the retail
+  runs, Q2 and the re-captured set `build-agent-rA4f` / the x86 mod of the
+  same tree with the one code change below. Old = `build-agent-rB1`.
+  Protocol 10 refuses protocol-9 peers, so each old run was served by a
+  protocol-9 Arch server built from 64be32e in its own tree
+  (`~/bmmo-build-arch-b1`, id `...+bmmo-64be32ec068d`) and each new run by
+  the Arch build of HEAD (`...+bmmo-93c13f603ffe`); the B1 Arch binary had
+  been overwritten at A3.
+- **The one code change (a test path).** `force_rewind` passes a deeper
+  `reach` to `rewind_to` when the depth is above `max_resim_ticks` (bounded
+  by the resync reach), so `session force-rollback E:80` re-steps 80 ticks
+  as a resync does (client_core_frame.cpp `force_rewind`). Before it a
+  forced rewind deeper than 48 was refused as too far, and Q2 had no verb.
+  A depth up to 48 is the rewind it was: `wire_check.sh rA4 rA4f`
+  WIRE-CHECK: ALL SAME on the 16 protocol-10 captures. No live run but Q2's
+  forces a rewind, so the A/B batches (run with rA4) stand. The headless
+  `--force-rollback E:D` goes through the same function, so a D of 49-95
+  now re-steps there too (it was a counted miss); no reference recipe
+  forces deeper than 24. A depth whose anchor has left the history (96 and
+  more) is still a counted miss (the engine's `unmatched`). Unit test
+  `SessionClientCoreForcedRewind.DeeperThanMaxResimReStepsUpToTheResyncReach`
+  (80 ticks re-stepped, 96 missed). §7.6's forced-vs-unforced solo server
+  comparison was not rerun: A3 ran it, and the forced depths it uses (≤ 48)
+  are unchanged.
+- **Adapted: the r2_x_t1_b recipe.** Its resync came from own frames late
+  past the reach at ~435 in R2's run, and `a4_r2x_1` (the recipe as
+  written) had no resync. The recipe never produced that trigger: R2's run
+  (`maps/arena-test/r2_x_t1_b/server.log`) shows a one-off pause of about
+  0.6 s shared by both clients and the server at tick 435 - the server held
+  BOTH players' frames 435..443 at once from source 434 (`S2 held`), its
+  relay of a BodyRevived stamped 435 took 621478 µs (41.4 ticks), and both
+  clients got the held notice for 435 at 496/497 (each client's window of
+  480 relayed 35 frames instead of ~60). Net lag 150 alone delays every
+  frame by the same amount and never pushes one past the reach, so no
+  build change made the trigger go away (B1 and A3 included). The recipe keeps net lag 150 both ways on
+  both clients and the key record, and adds `net blackout 900 both at 430`
+  on both (500 ms up gave no resync), which reproduces that mechanism on
+  purpose (`a4_r2x_b1` server: both players held 431..480 from source 430):
+  both clients resync with "a
+  substituted own frame arrived past the reach" at 502-503, S 507-510, the
+  pusher dropping at 512 (the original's S 496, drop 508). The run scripts
+  were rebuilt from `retail_two_client_test.py` and the R1/R2/B1 notes
+  (`.local-tools/work/a4/a4_retail.py`; `r0_keys.bmrc` re-made from
+  `r0_keys_p0.bmrc`, identical keys, level 11 - the R2 journal's own key
+  edges match frame for frame); client LOCAL checkpoints every 2 ticks
+  (`BMMO_JOURNAL_CHECKPOINT_TICKS=2`).
+- **Headless arms** (arena, 4 clients, snapshots off unless named; every
+  server journal replays exactly in the harness; cpu sampler max total
+  18-27 %, worst outside process 3.8 %):
+  - resync_snapoff O1 O2 / N1 N2 N3: resyncs per run old 4, 4; new 4, 1, 4.
+    Every new apply: S = base - 1, D 11-38, unportable, unmapped, refused,
+    unexplained, unattributed, deferred 0; P_Modul_08, P_Modul_01 and
+    P_Modul_03 within 0.000003 m of the server from B+1 to the end in every
+    resynced client (old, legacy full snapshot: P_Modul_08 4.7-6.1 m, the
+    sack 4.8-6.9 m); every member's snapshot count unchanged by a resync.
+  - running-client resync, 0 ms ×3 (Δ -7, D 15-16) and 150 ms ×3 (Δ -5/-6,
+    D 33-34), plus the Δ > 0 arm ×3 (Δ +14, +15, +14; resent own frames
+    14-15): every apply clean as above; client 0's passes at the server's
+    ticks, none twice; phase_misses 0; the modules exact after B but
+    P_Modul_03 (G-c, below).
+  - a5u_lead O1 O2 / N1 N2 N3: sector +4 at 1713 everywhere, one Sector
+    rewind on c0, c1 and c3, own Sector 4 stamps 1789-1808 after their
+    crossings, phase_misses 0. Client 2 resynced 1, 3, 3 times (old 3, 2),
+    D 49-53; between consecutive resyncs and after the last its modules are
+    within 0.000002 m. One apply of 7 has `unmapped 1` (below). Criterion
+    3 (`.local-tools/work/a4/sector_bodies*.py`, the bodies the server
+    first records at or after 1713, PE_Balloon excluded, max from 1713):
+    clients 0, 1 and 3 in N1-N3 and O1-O2 alike have P_Modul_03_Gate
+    1.360-1.366 m (G-c), P_Modul_19_Flaps 1.794 mm at 1736 settling to
+    0.804 mm from 1744 (G-c: the leader's BodyRevived at 1728, as B1's
+    note found), PE_Box_slide 0.396 m at 2132 (keep-local: jointed to the
+    balloon platform, `resync_rules.hpp`), P_Modul_08_Schaukel 0; client 2
+    has Flaps 0 and Schaukel 6.6-6.9 m only before a resync (11.1-12.0 m
+    old). So, as at B1, the criterion holds against client 2's own
+    maximum and fails per body on G-c alone (roadmap §4 item 7).
+  - Regression lane / swing (10 % loss) / a6m, O1 N1 O2 N2: no new resync
+    (lane: old 1-2 per client, new 0-1; swing, a6m 0), `sector_rewinds` 0
+    in a6m and swing, max_err new 0.08-5.0 m against old 11.4-24.3 m in the
+    lane, swing and a6m inside the old band but for t_max in swing N2 (c1
+    77 ms against 56-57, c3 70 against 55-65). Cause
+    (`.local-tools/work/a4/swing_tmax.py`): in every swing run, old and
+    new, the t_max of clients 1-3 is one rewind in the ticks 2145-2200
+    just after the sector-3 pass, where the replay builds the new sector's
+    mechanisms and costs 1.76-2.06 ms per re-simulated tick (old
+    1.85-2.02, new 1.76-2.06: equal), so t_max ≈ that rewind's depth ×
+    ~1.85 ms. In N2 that rewind was 42 deep on c1 (2174, 2175) and 43 on
+    c3 (2174): player 3183853383's relayed frames reached them up to 41-42
+    ticks late in the windows of 2200/2220, against 31-36 in O1, O2 and
+    N1 - a loss burst of the 10 % loss arm (the lag ladder 27..41 of one
+    recovered run of frames), not a code change. The cpu sampler over that
+    run shows 8-14 % total and no outside process above 3 %; the old runs'
+    own deepest rewinds elsewhere reach 43-48.
+  - The resync state's emit time: 54 states, 3.9-5.6 ms (median 5.1), 29-52
+    KB on the wire; `resync_base_missed` never logged.
+- **CPU.** No capture replays on both sides of protocol 10, so parity is
+  judged by the live and the server numbers below; `cpu_parity.sh rA3
+  rA4` on core_ref_r3_a3 resync_snapoff (PASS, 22.76/22.90 s against
+  22.98/22.89 s) compares two builds of the same commit 93c13f6 and is
+  only a sanity check of the tool on the protocol-10 set. Live client
+  cost per re-simulated tick old vs new lane 1.289/1.201, swing
+  1.067/1.044, a6m 1.680/1.692, resync 1.203/1.157, a5u 1.356/1.287 ms,
+  capture per tick 0.816-0.856 both; the server per step (SimTool replay of
+  each arm's server journals by its own build, pinned, two rounds) lane
+  288/287, swing 312/309, a6m 293/298 µs per tick (+1.7 %, within 5 %).
+- **Retail (Level 11, two clients, core on, the HEAD Arch server).**
+  - r1_c_on1 (r1_c2.py's second form: net lag 150, beams 4 m up and 30 m
+    down, `session stall 1000` on client 2), snapshots on ×3 and off ×1:
+    client 2 resyncs "tick driver rebased" with Δ -45/-50, D 11-12;
+    `a4_r1c_on3` also resynced both clients for "a substituted own frame
+    arrived past the reach" (Δ -5, D 47 and 54). Every apply unportable 0
+    and unmapped 0 (retail CK2 against the server's engine: the x86 mod
+    restores the x64 server's blob); the sack and rope within 0.000003 m of
+    the server from B+1 to the end (R1's legacy: 4.48 m); 0 correction
+    records name the sack after B; holds 0; no rebase but the stall's.
+    Client 1 (no resync where it had none) exact on every module.
+  - r2_x_t1_b (adapted, above) ×3, snapshots off: both clients resync, Δ
+    +15..+17, D 31-34, unportable and unmapped 0; client 1's Pusher001
+    0.000000 m from B+1 to the end; the sack and rope within 0.000003 m
+    (one 0.08 m at the `journal mark` tick, stamped a tick early - R2's
+    known mark artifact); client 2's Pusher001 0.78-0.83 mm at B+1,
+    decaying to bit-exact by B+30 (below).
+  - B1 check (`a4_b1_1`): client 1 `net lag 300 up`, `sector 2` stamped
+    382; client 2 logs `sector +2 at tick 382 ... re-derived in a rewind at
+    live tick 393`, the server's 382; the session has one Sector event,
+    client 1's.
+  - Every retail server journal replays exactly in the SimTool (2435-2534
+    ticks, 0 checkpoint mismatches).
+- **Residuals, pre-existing, root-caused, each its own queued item.**
+  - **The own row unmapped (2 of 81 applies).** a5u_lead N2 c2's third
+    apply (S 3260): its own ball unphysicalized at 3286, after S and before
+    the apply, so it has no body when the state comes and its row is not
+    mapped (client_core_resync.cpp:203-205); the re-step lacks the own ball
+    for (S, 3286]. That is gap L, a life that ends inside the window
+    (rollback-engine-gaps-design.md §2.3, roadmap item 8); the same build
+    before A3 shows it in every rewind across an own death (`a4_a5u_o1` c2:
+    "object 'Ball_Stone' is in the savestate but not in the world" anchor
+    2274, death 2302). core_ref_r3/swing_snapon c3 (S 3249): its own
+    Unphysicalize stamped 3227 was applied by the server at 3250 and kept
+    at 3227 here ("only an own Physicalize is moved here") - late-player
+    plan step 22 (own death move, roadmap stage B). In both the modules are
+    within 0.000001 m after B.
+  - **G-c** (world-agreement design): P_Modul_03 1.36 m in every non-leader
+    client, resynced or not, old and new alike.
+  - **Retail own echoes (R4):** client 2's own BodyRevived stamped 521 was
+    applied by the server at 525 and kept at 521 (the retail core runs
+    `own_echoes` off), so client 2 woke Pusher001 four ticks early: the
+    0.8 mm above, gone when the pusher rests.
+  - **N2 exists only in the retail mod (new finding).**
+    a4_resync_n2 client 1 (no resync): its own crossing of the sector-4
+    checkpoint fell in the frame of the union's pass (pass 1786, own stamp
+    1822 = 1786 + 1 + 35). The held chain's Execute Script is neutralized
+    (sector_activation.hpp), but its two Set Cells still write
+    IngameParameter[0][1] = 4 and [0][2] = 3 in that frame, before the
+    manager, activated by `run_sector` with 4 / 0 (session_client.cpp
+    `start_sector`), reads them at its Start (Get Cell [0][1], Get Cell
+    [0][2]): the manager deactivated sector 3 in this world only. The
+    [0][1] write was harmless here (4, what `run_sector` wrote); the [0][2]
+    write is the cause. The retail mod has pinned exactly that Set Cell's
+    Value to a session constant 0 since design 9.25 (N2,
+    physics_session_client.cpp:1013-1167 `sector_deactivate_resolve` /
+    `_apply` / `_restore`, applied on core-on retail too, core_host.cpp:870
+    and :1420), so retail, legacy and core-on, is not exposed; the headless
+    client (session_client.cpp:1605-1629 holds the chain and splits the
+    phase cell, never pins [0][2]) and the server's world
+    (physics_world.cpp:270-295, the same) lack it, and the server's world
+    can hit the same race when a clone crosses a checkpoint in the frame of
+    an `update_sectors` pass (not observed at A4). The replay re-issues the pass with the recorded cells 4 / 0 and
+    never runs the own chain, so a rewind across the pass (1812 -> 1769)
+    found the live world without 15 sector-3 bodies (`skipped=15`), the
+    re-executed scripts differed from the live record (`Deactivate Sector
+    3 vs 0`, P_Modul_26_MF Script flags), and P_Modul_26_Sack came back
+    without its rope joint and fell (8498 m at the end). Only a live pass
+    whose frame also sees the own crossing races (own stamp = pass + 1 +
+    lead; 1 of 148 headless client-runs at A4; crossings one frame before
+    or after are safe, and so is a pass made inside a rewind, as in
+    core_ref_r3/resync_snapoff client 1). Reproduced before A3/B1:
+    `r4_lane_loss10` client 1 (build 8042b03, 2026-10-21), the same diff
+    signature and the sack at 7439 m. Queued as its own step (roadmap §4
+    item 7, "N2 on every world"): N2's rewire moves into a shared `game/`
+    header next to `sector_activation.hpp`, the retail mod's copy becomes a
+    use of it (one implementation), and the headless client and the
+    server's world apply it at their anchor. The [0][1] Set Cell must keep
+    working: the own sector poll reads that cell (`poll_sector`, and the
+    retail mod's N2 leaves it for the same reason). The same step checks
+    the one case [0][1] could still matter, an own crossing of sector K in
+    the frame of a pass of another sector J (the chain's K over
+    `run_sector`'s J), on every world.
+- **Q2, Q3, Q7, Q9 settled** (§9): cap 95; no wait; no hold; Δ -50..+17.
+- **The reference set re-captured** as `core_ref_r3/` (§7.5, "As built
+  (step A4)"); A3's four captures moved to `core_ref_r3_a3/`.
+
 ### 7.5 The 16 reference captures (`maps/arena-test/core_ref_e0/`)
 
 Replay the captures with the B1 binary, twice. The expected results, with
@@ -2285,6 +2478,36 @@ After A3 (protocol 10):
   untracked, as the data is) has the commands, the per-capture facts and
   the 18 journals' sha256 (e.g. a5u_lead/client0 `d529ad28…`).
 
+**As built (step A4, 2026-10-24): `core_ref_r3/`, the protocol-10 set.**
+
+- **What.** The four REF arms (swing_snapon, a6m_snapoff, resync_snapoff,
+  a5u_lead) and the two running-client arms (resync_at150 and the Δ > 0
+  arm resync_at150_down), each 4 clients with `--capture-inbound` and
+  `--trace-sends`, under the cpu sampler, plus the solo snapshots-off
+  baseline `old1` / `old2`; recorded with `build-agent-rA4f` against the
+  Arch build of 93c13f6. A3's four captures (rA3) are kept unchanged in
+  `core_ref_r3_a3/`, which A3's note cites. The set's README (untracked,
+  with the data) has the commands, the per-capture facts and the 26
+  journals' sha256 (e.g. a5u_lead/client0 `f6c9b618…`).
+- **Verified.** The 24 captures replay `BYTE-IDENTICAL-EXCEPT-BUILD-ID: 24
+  pairs`; `wire_check.sh - rA4f`: 24/24 sends SAME against the live traces,
+  24/24 journals IDENTICAL, WIRE-CHECK: ALL SAME. The six server journals
+  replay exactly (4004, 4204, 4178, 4193, 4058, 4182 ticks). `old1` against
+  `old2` and against A3's solo: RESULT: IDENTICAL.
+- **The facts a gate judges against.** Sector starts: swing +4 62, +2 1702,
+  +3 2143; a6m 784 / 1230 / 1673; resync_snapoff 824 / 1270 / 1786;
+  a5u_lead 824 / 1270 / 1713; resync_at150 824 / 1270 / 1713;
+  resync_at150_down 824 / 1417 / 1917. Resyncs (S -> B, Δ): swing c3
+  3249 -> 3308 (-20, the own row unmapped: plan step 22); resync_snapoff c2
+  1571 -> 1583 (-50), c3 1884, c1 2226, c0 2229 (-17/-18); a5u_lead c2
+  2733 -> 2786 and 3232 -> 3285 (-37, -38); resync_at150 c0 886 -> 920
+  (-5); resync_at150_down c0 884 -> 916 (+16) and 1124 (-18), c1-c3 at
+  1092-1121 (-19..-22).
+- **The tools.** `.local-tools/wire_check.sh` and `cpu_parity.sh` default to
+  `core_ref_r3` (the e0 copies: `.local-tools/work/a4/*.e0.bak`); the
+  capture scripts are `.local-tools/work/a4/r3_run.sh`, `r3_solo.sh` and
+  `r3_batch.sh`.
+
 ### 7.6 Server
 
 - `--replay` of every A3 and A5 run's `server.bmjr` is bit-exact.
@@ -2362,6 +2585,21 @@ travel?**
   - If one frame stays under 100 ms, the cap is 95.
   - Otherwise the cap is 48, with the resync hold engaging for raised
     members.
+- **Settled (step A4): the cap stays 95.** Retail L11, x86 mod, snapshots
+  2 / 66, the key record, `session force-rollback 150:80` on client 1
+  (`a4_q2_80`; the verb re-steps past 48 since A4's `force_rewind` reach):
+  15 forced 80-tick rewinds, the longest 52 ms (`t_max`), about 45 ms on
+  average (0.57 ms per re-simulated tick), no rebase, client 1's modules
+  exact against the server throughout. The deepest live re-steps seen at
+  A4: D 59 headless, 54 retail. A forced rewind is local only; a real
+  apply also restores the server's blob, runs the reconcile and installs
+  the server's scripts and navigation. `t_max` times all of that (the
+  rewind timer of `restore_and_replay` spans the travelling blob, the
+  reconcile's destroys and the replay), and the real retail applies stay
+  below the forced 80: `a4_r1c_on3` session t_max 32 ms on client 1 (its
+  D 54 apply the deepest rewind it ran) and 42 ms on client 2 (D 47 and
+  D 11). The frame's other work (one live step, the render) is not in
+  `t_max`; it is the frame time a rewind adds.
 
 **Q3. How often does the apply wait for the body set (§2.6.4 step 2), and
 for how long?**
@@ -2370,6 +2608,9 @@ for how long?**
 - Expected: for resyncs, the passes of `(R, S]` (Δ < 0); for late joiners,
   the owed passes, about 7-10 ticks each per lp1_join's 1642/1649.
 - Any wait longer than the owed passes explain is investigated.
+- **Settled for resyncs (step A4):** 0 waits in all 81 applies (67
+  headless across the A4 arms and core_ref_r3, 14 retail): `waited 0
+  frame(s)`, `resync_deferred` 0. The late joiner's count is A5's.
 
 **Q4. Should every replay re-derive the union, not only B1's and A3's?**
 
@@ -2409,6 +2650,11 @@ the sector-placement design both ask for journal version 4).
 - **Settle:** the A4 runs log every hold with its length. A hold seen in
   normal retail play becomes a non-blocking variant (`nonblocking_hold`
   capability) before R7.
+- **Settled (step A4): no hold.** No resync hold engaged in any A4 run
+  (`holds=0/0 hold_max=0` on every client of the 10 retail runs and the
+  headless arms): D was at most 54 on retail and 59 headless, against the
+  reach of 95. The blocking hold stays as built; it remains covered by unit
+  tests only.
 
 **Q8. Does the manager activate `PE_Balloon Script` through next-frame
 flags?** §2.8 relies on it to re-issue a forgotten pass's balloon.
@@ -2433,6 +2679,11 @@ flags?** §2.8 relies on it to re-issue a forgotten pass's balloon.
   A3 harness arms and the A4 retail runs. A Δ beyond `history_ticks` cannot
   be reconciled from `life_log_`; if one is seen, `life_log_` and
   `pass_log_` are sized from the measured maximum.
+- **Settled (step A4): -50 ≤ Δ ≤ +17, the sizes stay.** 81 applies: headless
+  -50..+16 (Δ > 0 in 4, all from the downlink step of resync_at150_down,
+  +14..+16; stalls -17..-50; `--resync-at` -5..-7), retail -50..+17 (Δ > 0
+  in 8 of 14: the adapted r2_x_t1_b's both-way blackout, +15..+17; the
+  stall -45/-50). |Δ| stays far inside `history_ticks` (96).
 
 ## 10. Review
 

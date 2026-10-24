@@ -104,7 +104,15 @@ left. Each design named here has its own document with its step table.
    may land early).
 7. World agreement (`world-agreement-gaps-design.md`): client proximity
    sensors rewired to the nearest ball (own or mirror), the member-added
-   message, leave and rejoin.
+   message, leave and rejoin. Also its own step, **N2 on every world**
+   (found at A4; `resync-and-sector-timing-design.md` §7.4, As built (step
+   A4)): the retail mod pins the checkpoint chain's Set Cell of
+   IngameParameter[0][2] to 0 (N2); the headless client and the server's
+   world do not, so an own crossing (or a clone's, on the server) in the
+   frame of a sector pass deactivates the previous sector in that world
+   alone (a4_resync_n2 c1: P_Modul_26_Sack 8498 m; r4_lane_loss10 c1,
+   before B1). N2's rewire moves into a shared `game/` header used by all
+   three; [0][1] stays (the own sector poll reads it).
 8. Rollback engine gaps (`rollback-engine-gaps-design.md`): the PreSimulate
    queue in the script record (engine access change #20), lives that end
    inside a window, the retail beam's generation, and F (found at B1): the
