@@ -44,6 +44,30 @@ left. Each design named here has its own document with its step table.
   verification; checks that cannot influence each other run in parallel.
 - The retail legacy session path gets nothing new and is deleted at R7.
 
+**Operating rules while the user is away (accepted 2026-10-24).**
+
+- A step whose own change is correct may be committed when a check exposes
+  a pre-existing problem, provided the residual is reproduced on the build
+  before the change, its root cause is found and written into the commit
+  message, and its fix is queued as a step of its own. A residual whose
+  cause is unknown, or which the step introduced, stops the step.
+- A design detail that turns out wrong may be adapted without asking, as
+  long as no principle above is touched; the adaptation goes into the
+  design's as-built note and the commit message, for review on return.
+  Anything that touches a principle waits.
+- A step blocked on the user's decision does not stop the other tracks:
+  work that does not depend on it goes on, and the blocked step is recorded.
+- Disk: run outputs of committed steps under `maps/arena-test/` and stale
+  build copies may be deleted; the reference capture sets, the directories a
+  design note cites as a reproduction, and the current and previous step's
+  build copies are kept.
+- Defaults chosen for likely forks: if the offline resync check (A2) shows
+  rows alone miss 1 mm, the server's IVP savestate travels with the resync
+  state (measured first); if the trafo's collision-sound script leaves
+  PreSimulate entries that refuse the savestate, the rollback engine's
+  idempotent replayed Create comes first rather than a change to the sound
+  script; no further snapshot-path work before the stage A close-out.
+
 ## 3. Built
 
 | area | state |
