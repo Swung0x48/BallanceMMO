@@ -1487,6 +1487,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.forget_births_after = [](uint32_t tick, const std::vector<std::string>& entities) {
         host.births.forget_after(tick, entities);
     };
+    // Step A5: the level walk's pending activations inside a late joiner's
+    // resync window (host support).
+    p.forget_pending_activations = [](uint32_t from, uint32_t to) { return host.activations.forget_pending(from, to); };
     p.birth_tick_of = [](const std::string& entity) { return host.births.birth_tick_of(entity); };
     p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
         auto* bytes = CKUnPackData(static_cast<int>(size), reinterpret_cast<char*>(const_cast<uint8_t*>(packed.data())),

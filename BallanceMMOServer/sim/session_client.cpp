@@ -1042,6 +1042,11 @@ namespace {
                 const size_t n = local_births_.forget_after(tick, entities);
                 if (n) logf("resync: %zu birth(s) after tick %u of bodies the server's state has at it forgotten", n, tick);
             };
+            // Step A5: the level walk's pending activations inside a late
+            // joiner's resync window (host support).
+            p.forget_pending_activations = [this](uint32_t from, uint32_t to) {
+                return manager_activations_.forget_pending(from, to);
+            };
             p.birth_tick_of = [this](const std::string& entity) { return local_births_.birth_tick_of(entity); };
             p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
                 char* bytes = CKUnPackData(static_cast<int>(size), reinterpret_cast<const char*>(packed.data()),

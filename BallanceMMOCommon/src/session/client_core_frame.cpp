@@ -196,7 +196,12 @@ namespace bmmo::session {
     // scripts from the same anchor on the same stamps, so the tick a pass
     // starts at is the same on every side.
     void session_client_core::sector_union_pass(uint32_t tick) {
+        const bool walk_open = s.sectors_.walk().seen;
         const auto pass = s.sectors_.tick(tick, platform_.sector_manager_active());
+        // The level-walk gate (sector_union.hpp, step S4) opening: the tick
+        // every side must log alike (sector-placement design 2.6).
+        if (!walk_open && s.sectors_.walk().seen)
+            logf("level walk %s at tick %u", s.sectors_.walk_open().timed_out ? "timeout" : "seen", s.sectors_.walk_open().tick);
         if (pass) {
             s.recent_passes_[1] = s.recent_passes_[0];
             s.recent_passes_[0] = {tick, pass.sector};
@@ -694,6 +699,19 @@ namespace bmmo::session {
             } else if (event.what == body_event::kind::wakeup && !name.empty() && platform_.reportable_wakeup(name, ball_name)
                        && !revived_reported.count(name)) {
                 revived_reported.insert(name);
+                // Step A5: a late joiner's wakeups before its apply are its
+                // catch-up passes' (the level's own walk, the owed passes,
+                // physicalizing modules the server's world has had settled
+                // for long): reported, the server would wake those bodies at
+                // ticks where nothing in the shared world woke them, and no
+                // other world would (a5_join_1: P_Ball_Paper_MF and the
+                // P_Modul_29 plates 26 mm off in every member from 1650).
+                if (s.resync_join_ && s.resync_pending_) {
+                    if (s.join_wakes_withheld_++ == 0)
+                        logf("late join: wakeups before the apply are not reported (%s at tick %u first)", name.c_str(),
+                             tick);
+                    return false;
+                }
                 bmmo::session_event_msg revived;
                 revived.tick = tick;
                 revived.type = bmmo::session::event_type::BodyRevived;

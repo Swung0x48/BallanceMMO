@@ -1398,6 +1398,155 @@ activates `PE_Balloon Script` through next-frame flags is checked in step A1
 - **#9 option B** for pooled levels. Pass order moves pooled frames and
   hinges (audit2 §5).
 
+**As built (step A5, 2026-10-24).** Audit #16 was built first, as the
+sector-placement design's step S4 (its §2.6 As built note: the gate is
+`gated_sector_union`; the legacy path keeps the gate-free union).
+
+- **Server** (`server.cpp handle_session_ready`): a late joiner with
+  `CAP_RESYNC_STATE` gets its assignment (and every repeat) with
+  `ASSIGN_FLAG_STATE_FOLLOWS`, the last Physicalizes and the sector history
+  as before, then `request_resync_state(session, joiner, assigned)` instead
+  of the full snapshot broadcast; it logs `the state of tick S follows to
+  the late joiner X alone (protocol 10)`. A joiner without the capability
+  gets the broadcast as before. A missed base is answered by
+  `resync_member`, as any resync's.
+- **Core, first assignment** (`client_core.cpp on_session_assign`): with
+  the flag, rollback on and a numbered base, the ordinary first-assign
+  renumbering runs, then `resync_pending_`, `resync_exact_` and
+  `anchor_resync(base, old tick)`: the anchored level start recorded as
+  base - 1, Δ = -(base - 1) (`late join: the server's state of tick S
+  follows`). The owed passes then run live from the catch-up stamps (B1's
+  case 4), after the level's own walk (S4), and the apply waits for their
+  bodies (A3's wait).
+- **Adaptation (not in the design): the level's own walk is dropped from the
+  re-step.** Init Ingame's activation of the manager is a pending
+  activation the live frames record (`manager_activations::record_pending`)
+  and every replay re-issues at its tick; after the restore of the
+  server's state at S it would walk sector 1 again over the server's
+  mid-run modules (Set World Matrix and module reset). At the apply, when
+  the gate opened by the walk's edge inside (S, now], the core drops the
+  manager's pending activations of base .. the walk's tick (new required
+  platform op `forget_pending_activations`, host support
+  `activation_slots::forget_pending`, one line per host), and logs `the
+  level's own walk (seen at tick N) is in the server's state of tick S: k
+  manager activation(s) of base..N not re-issued`. Review fix-up: the drop
+  is confined to the late joiner (`resync_join_`) and to a walk seen in the
+  current numbering (`walk_open().known`, cleared by every renumbering
+  assignment, sector-placement design §2.6 As built). Without the first, a
+  running member's A3 resync whose S lies before the server's walk (a
+  request in the session's first ticks) would drop the Init Ingame
+  activation the server's state at S has not run yet - audit #16 again on a
+  start member. Without the second, a join superseded by an exact re-assign
+  (the base missed, `resync_member`) would compare a walk tick of the old
+  numbering with the new window and drop the manager's other activations
+  (a death's sector reset) at those ticks; the walk's own activation went
+  with the re-assign's `forget_activations_from(base)`. `resync_join_` is
+  also cleared wherever the pending resync ends otherwise (a full snapshot,
+  a re-assign without the flag). Unit tests: a running member's resync with
+  the walk inside its window, and a superseded join, drop nothing; a
+  re-assign without the flag ends the join.
+- **Protocol 10 inside the resync track.** The protocol number does not
+  change: an A3/A4 core joining late would get the flag on its first
+  assignment, ignore it, drop the state as stale and get no full snapshot.
+  No such build was released (protocol 10 is the unreleased resync
+  track's).
+- **Gap found and fixed here (not in the design): a joiner's catch-up
+  wakeups reached the server.**
+  - Symptom (`a5_join_1`, the first build, snapshots off): the joiner equal
+    to the members after the apply, but every world, the members included,
+    off the server on `P_Ball_Paper_MF` and the `P_Modul_29` plates (26 mm)
+    and `P_Ball_Wood_MF` (1.9 mm) from 1646-1652 on, the same bodies and
+    the same maxima in each client.
+  - Cause: the joiner's world before the apply is the level start plus its
+    catch-up passes; their physicalizes wake bodies, and every Physics
+    WakeUp of a non-ball body is reported as BodyRevived
+    (client_core_frame.cpp post_step). The joiner sent BodyRevived for
+    `P_Ball_Wood_MF` (1643), `P_Modul_41` (1644), `P_Ball_Paper_MF`,
+    `P_Box_MF`, `P_Ball_Stone_MF` (1650), `Modul17_Dreharme`,
+    `P_Modul_26_Sack`, `P_Modul_26_Rope` (1658); the server woke them at
+    those ticks (its `S5 event ... applied=1643..1658`), where nothing in
+    the shared world did, and no client world did.
+  - Pre-existing: the pre-A5 `lp1_join` shows the same bodies off by the
+    same maxima from 1646/1648; the join's full snapshot broadcast did not
+    precede the wakes.
+  - Fix: while a late joiner's exact resync is pending (`resync_join_`,
+    set by the first assignment, cleared by the apply) its wakeups are not
+    reported (`late join: wakeups before the apply are not reported`, the
+    status line's `join_wakes_withheld=`). After it, the bodies are exact
+    in every world (below). A3's pending window keeps reporting: a running
+    client's own-ball wakes there can be the shared world's.
+- **Checks** (quick tier; snapshots off, 150 ms, arena, 4 clients, captures;
+  `build-agent-rA5`, the Arch server rebuilt from this tree; one run each).
+  - **Late join** (`a5_join_2`, `--keep-lane --join-late 3:1500`): base
+    1638, the walk seen at 1641, the owed passes live at 1647 and 1654, the
+    state waited 8 frames, re-stepped 1637 -> 1659 (22 ticks, Δ -1637; 26
+    rows, 0 unmapped, 40125 script bytes localized, 0 unportable, blob
+    restored; unexplained and unattributed 0), one walk activation dropped,
+    the two live passes forgotten; mechanisms 52/52 (lp1_join: 52/45).
+    After B every map body is the server's (P_Modul_29, P_Ball_*_MF 0.000000
+    m) through 1839, then only G-c: `P_Modul_19_Flaps` 1.001 mm from 1740
+    and `P_Modul_03_*` from 1840 (the leader's wakes, the same in client 0,
+    1.37 m), and the keep-local `PE_Box_slide`. The joiner's world hash
+    equals the server's at 1770-1827 (58 ticks; before, its mirrors are
+    predicted); client 0's never (its own `P_Modul_34` 1.8 mm from 1346).
+    Clients 1 and 2 resynced once each on a host stall (`tick schedule
+    rebased`).
+  - **Last-sector variant** (`a5_joinlast_1`, `--join-late 3:1800`, after
+    sector 4 at 1714): base 1936, walk 1939, passes 1945/1952/1959 live,
+    waited 10 frames, re-stepped 1935 -> 1964 (29 ticks), three passes
+    forgotten; from 1966 every `P_Modul` body within 0.061 mm of the server
+    to the end (sector 4's included: the leader's wake precedes S). The
+    balloon's 18 bodies, born in the window by the joiner's own sector-4
+    walk, were destroyed at the restore and made again by the replayed
+    balloon script (births 18/18 remade, missing 0) and exist to the end.
+    Mechanisms 52/48: the four `PE_Balloon_Ballon*` are 21-23 m from the
+    server's rows, past the registry's 20 m identity guard (exception (c)).
+    The joiner's balloon sinks (Ballon01 y 6.7 -> -15) where the members'
+    stays up (y 1-3): pre-existing (`lp1_join`'s joiner: -13; `a5_join_2`'s
+    joiner, whose sector 4 came on time: -15), the balloon, left by the
+    decision of 2026-10-24.
+  - **10 % loss** (`a5_joinloss_1`): the assignment came at 1775 (after
+    sector 4), taken with the flag; walk 1778, passes 1795/1802/1809,
+    waited 10 frames, re-stepped 1774 -> 1814 (40 ticks), the same zero
+    counts; after B every map body exact but `P_Modul_03_*` from 1840 (G-c,
+    client 0 alike); hash equal at 1815-1827 and 1974-1978; 52/48 (the
+    balloons, as above).
+  - **A3's resync_snapoff** (`a5_resync_snapoff_1`): 4 resyncs, all `tick
+    schedule rebased`, as in `core_ref_r3/resync_snapoff` (4); each S =
+    base - 1, D 11-37, every count 0, scripts localized; after B
+    `P_Modul_01/08/03` exact (client 1's `P_Modul_03` from 1972: G-c, as in
+    the reference).
+  - Unit tests 466/466 at the implement round, 468/468 after the review
+    fix-up (new: `ALateJoinersFirstAssignmentTakesTheStatePath`,
+    `TheWalkDropIsTheLateJoinersAlone`, `ActivationSlots.ForgetPending`,
+    `ALateJoinersWakeupsBeforeTheApplyAreWithheld`, the S4 gate cases; A3's
+    apply asserts no walk is dropped); GCC 16.2 26 files ok; x64 BUILD-OK,
+    x86 CLIENT-BUILD-OK (client objects deleted: `client_core.hpp`,
+    `client_platform.hpp` layout); wire check `rA4 rA5`: ALL SAME (24
+    journals identical); solo snapshots off IDENTICAL to old1 (a first run
+    lost to host stalls, rerun).
+- **Review fix-up gate round** (core code changed: the drop's condition,
+  `forget_walk_tick`, `resync_join_` clears): unit tests 468/468; GCC 26
+  files ok; x64 BUILD-OK, x86 CLIENT-BUILD-OK (client objects deleted:
+  `sector_union.hpp`'s `walk_opened`); the Arch server rebuilt; wire check
+  `rA4 rA5` ALL SAME (24 journals identical); one late-join run
+  (`a5_join_fix` sector 1, the `a5_join_2` recipe): base 1639, walk 1642,
+  the drop as before (`1 manager activation(s) of 1639..1642 not
+  re-issued`), re-stepped 1638 -> 1660 (22 ticks, 0 unportable,
+  unexplained 0, unattributed 0), 8 wakes withheld, `walk_timeouts=0`
+  everywhere; after the apply every map body equal to the server's through
+  1839 but `P_Modul_19_Flaps` 1.001 mm from 1740, then `P_Modul_03_*` from
+  1840 (G-c, client0 1.37 m), the balloon's bodies 21-22 m from 1996 (as in
+  `a5_join_2`, 21.6-24.0 m; the harness's count 52/48 there against
+  `a5_join_2`'s 52/52 is the 20 m guard at its measuring moment,
+  exception (c)); the joiner's world hash equal to the server's at 1776
+  and 1799-1827; the server's journal replays matched (0 checkpoint
+  mismatches). The other arms were not rerun: the fix-up cannot reach
+  them (the drop fires only on the joiner's resync, which they share with
+  this arm; A3's never had the walk in its window).
+- **Not run** (quick tier): the second and third runs of each arm, the
+  regression arms, retail.
+
 ### 2.10 Where it runs
 
 | world | file | change |

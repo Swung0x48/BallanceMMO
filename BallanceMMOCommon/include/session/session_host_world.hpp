@@ -98,6 +98,25 @@ namespace bmmo::session {
             const auto it = by_tick_.find(tick);
             return it == by_tick_.end() ? nullptr : &it->second;
         }
+        // The pending slots of the ticks from..to emptied, the pass slots
+        // kept (a late joiner's level walk inside its resync's window, step
+        // A5).  Returns how many there were.
+        size_t forget_pending(uint32_t from, uint32_t to) {
+            size_t n = 0;
+            for (auto it = by_tick_.lower_bound(from);
+                 it != by_tick_.end() && static_cast<int32_t>(it->first - to) <= 0;) {
+                if (!it->second.have_pending) {
+                    ++it;
+                    continue;
+                }
+                ++n;
+                it->second.have_pending = false;
+                it->second.pending = {};
+                if (!it->second.have_pass) it = by_tick_.erase(it);
+                else ++it;
+            }
+            return n;
+        }
         // Every slot at a tick >= `tick` dropped (a resync's re-assign, step
         // A3: the old numbering's frames).  Returns the ticks dropped.
         size_t forget_from(uint32_t tick) {

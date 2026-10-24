@@ -770,6 +770,39 @@ TEST(ActivationSlots, ForgetFromAndBirthsForgetAfter) {
     EXPECT_EQ(births.birth_tick_of("P_Modul_08_Schaukel"), 0u);
 }
 
+// Step A5: forget_pending empties the pending slots of from..to (inclusive),
+// keeps their pass slots, drops a tick left with nothing, and leaves the
+// ticks outside the range alone.
+TEST(ActivationSlots, ForgetPending) {
+    bmmo::session::activation_slots slots;
+    bmmo::session::manager_activation pending;
+    pending.activate = 1;
+    bmmo::session::manager_activation pass;
+    pass.activate = 2;
+    slots.record_pending(139, pending);   // before the range
+    slots.record_pending(140, pending);   // pending only
+    slots.record_pending(141, pending);   // pending and a pass
+    slots.set_pass(141, pass);
+    slots.set_pass(142, pass);            // a pass only
+    slots.record_pending(143, pending);   // `to` itself
+    slots.record_pending(144, pending);   // to + 1
+    EXPECT_EQ(slots.forget_pending(140, 143), 3u);
+    ASSERT_NE(slots.find(139), nullptr);
+    EXPECT_TRUE(slots.find(139)->have_pending);
+    EXPECT_EQ(slots.find(140), nullptr) << "nothing left: the tick goes";
+    ASSERT_NE(slots.find(141), nullptr);
+    EXPECT_FALSE(slots.find(141)->have_pending);
+    EXPECT_TRUE(slots.find(141)->have_pass);
+    ASSERT_EQ(slots.at(141).size(), 1u);
+    EXPECT_EQ(slots.at(141)[0]->activate, 2);
+    ASSERT_NE(slots.find(142), nullptr);
+    EXPECT_TRUE(slots.find(142)->have_pass);
+    EXPECT_EQ(slots.find(143), nullptr) << "the bound is inclusive";
+    ASSERT_NE(slots.find(144), nullptr);
+    EXPECT_TRUE(slots.find(144)->have_pending);
+    EXPECT_EQ(slots.forget_pending(140, 143), 0u);
+}
+
 TEST(ActivationSlots, PendingThenPassAndForgetKeepsPending) {
     bmmo::session::activation_slots slots;
     bmmo::session::manager_activation pending;

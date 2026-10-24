@@ -253,6 +253,7 @@ namespace bmmo::session {
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
         s.resync_held_ = false;
+        s.resync_join_ = false;   // step A5
         s.life_log_.clear();
         s.pending_deaths_.clear();
         // R1: the retail policies' and readers' state, and no frame
@@ -462,6 +463,7 @@ namespace bmmo::session {
             // goes with it: its rows are keyed by the old numbers.
             s.rollback_.invalidate_history();
             s.union_records_.clear();   // step B1: beside the records
+            s.sectors_.forget_walk_tick();   // step A5: an old numbering's tick
             // An own beam the new numbering has not reached yet is the
             // server's to apply at its stamp, and so ours: live once
             // more, rather than retired with the history.  The births
@@ -472,6 +474,9 @@ namespace bmmo::session {
             s.resync_pending_ = true;
             s.have_snapshot_ = false;
             s.resync_exact_ = exact;
+            // A late join superseded by an exact re-assign is still a join;
+            // one answered by the full snapshot is not (step A5).
+            if (!exact) s.resync_join_ = false;
             if (s.resync_held_) {
                 // A newer base answers the held resync: the hold ends here.
                 s.resync_held_ = false;
@@ -494,6 +499,15 @@ namespace bmmo::session {
             return;
         }
         s.assigned_ = true;
+        // Step A5 (resync design 2.9): a late joiner's first assignment with
+        // ASSIGN_FLAG_STATE_FOLLOWS is taken as a resync's - the server's
+        // state of base - 1 follows, and the world as it stands (the
+        // anchored level start) is recorded as that tick.  Read before the
+        // renumbering, like a re-assign's old tick: Delta is then the whole
+        // distance to the level start.
+        const bool exact_join = (msg.flags & bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS) != 0 && config.rollback
+                             && msg.first_tick != 0;
+        const uint32_t join_old_tick = current_tick();
         // A numbered base is the ordinary case: the server anchors the
         // members present at the start at its start lead and a late
         // joiner (or a resync) at its current tick plus the same lead,
@@ -510,6 +524,7 @@ namespace bmmo::session {
             // asked us for, and nothing can match them again.
             s.rollback_.invalidate_history();
             s.union_records_.clear();   // step B1: beside the records
+            s.sectors_.forget_walk_tick();   // step A5: an old numbering's tick
             s.own_inputs_.clear();
             // ...and our own body changes, numbered the same way
             // (an unanswered birth is set aside for its echo).
@@ -533,6 +548,18 @@ namespace bmmo::session {
         logf("tick base %u assigned (%lld frames since anchor)", s.tick_base_, static_cast<long long>(s.frames_since_anchor_));
         journal_.note("assigned: tick base " + std::to_string(s.tick_base_) + " ("
                       + std::to_string(s.frames_since_anchor_) + " frames since the anchor)");
+        if (exact_join) {
+            // The resync's anchor (2.6.1 steps 2-5): the frames from the base
+            // run normally, the owed passes live (stamped late, 2.7 case 4),
+            // and the apply waits for their bodies (2.6.4 step 2), then takes
+            // the server's rows, scripts and union of base - 1 and re-steps.
+            s.resync_pending_ = true;
+            s.resync_exact_ = true;
+            s.resync_join_ = true;
+            s.have_snapshot_ = false;
+            logf("late join: the server's state of tick %u follows (protocol 10)", s.tick_base_ - 1);
+            anchor_resync(s.tick_base_, join_old_tick);
+        }
         flush_inputs();
     }
 

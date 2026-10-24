@@ -130,6 +130,15 @@ namespace {
 
     client_core_state& state_of(session_client_core& core) { return steps{core}.s(); }
 
+    // The level-walk gate (sector_union.hpp, step S4) opened, as after the
+    // level's own walk: for a union, or for the core's live union.
+    void open_gate(bmmo::session::gated_sector_union& u) {
+        auto st = u.state();
+        st.walk = bmmo::session::sector_union::level_walk{true, false, 0};
+        u.restore(st);
+    }
+    void open_gate(session_client_core& core) { open_gate(state_of(core).sectors_); }
+
     // Records every platform call in order, as "op:detail".
     struct fake_platform {
         std::vector<std::string> calls;
@@ -365,6 +374,11 @@ namespace {
             p.forget_births_after = [this](uint32_t tick, const std::vector<std::string>& entities) {
                 calls.push_back("forget_births_after:" + std::to_string(tick) + ":" + std::to_string(entities.size()));
             };
+            // Step A5's.
+            p.forget_pending_activations = [this](uint32_t from, uint32_t to) {
+                calls.push_back("forget_pending_activations:" + std::to_string(from) + ":" + std::to_string(to));
+                return size_t{1};
+            };
             p.birth_tick_of = [this](const std::string& entity) {
                 const auto it = birth_ticks.find(entity);
                 return it == birth_ticks.end() ? 0u : it->second;
@@ -387,7 +401,7 @@ namespace {
     }
 
     TEST(SessionClientCore, RefusesAPlatformWithoutAnOperation) {
-        for (int missing = 0; missing < 41; ++missing) {
+        for (int missing = 0; missing < 42; ++missing) {
             fake_platform fake;
             session_platform p = fake.make();
             if (missing == 0) p.send = nullptr;
@@ -431,6 +445,7 @@ namespace {
             if (missing == 38) p.forget_activations_from = nullptr;
             if (missing == 39) p.forget_births_after = nullptr;
             if (missing == 40) p.unpack_bytes = nullptr;
+            if (missing == 41) p.forget_pending_activations = nullptr;
             EXPECT_THROW(session_client_core(p, session_capabilities{}), std::invalid_argument) << missing;
         }
         // E7: the capture only with the event log's own births; make_own and
@@ -3498,6 +3513,7 @@ namespace {
         session_client_core core(fake.make_flow(), session_capabilities{});
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
+        open_gate(core);   // after the level's own walk (step S4)
         EXPECT_EQ(state_of(core).sector_cell_, 0);
         core.request_sector(3, "sector verb");   // stamped 128
         size_t from = fake.calls.size();
@@ -3604,6 +3620,7 @@ namespace {
         session_client_core core(fake.make_flow(), session_capabilities{});
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
+        open_gate(core);   // after the level's own walk (step S4)
         core.request_sector(3, "sector verb");   // stamped 128
         for (uint32_t tick = 120; tick <= 128; ++tick) steps{core}.sector_union_pass(tick);
         const auto phase_poll = [](int phase, bool read = true) {
@@ -3841,6 +3858,38 @@ namespace {
         EXPECT_FALSE(core.post_step(false));
         EXPECT_TRUE(since(fake.calls, from).empty());
         EXPECT_EQ(core.current_tick(), 126u);
+    }
+
+    // Step A5: a late joiner's wakeups before its apply are its catch-up
+    // passes', no event of the shared world: not sent (withheld, counted,
+    // logged once).  Any other frame's are BodyRevived as before.
+    TEST(SessionClientCoreFrame, ALateJoinersWakeupsBeforeTheApplyAreWithheld) {
+        for (const bool joining: {true, false}) {
+            journal_dir dir(joining ? "join_wake_on" : "join_wake_off");
+            flow_fake fake;
+            fake.path = dir.path / "client.bmjr";
+            session_capabilities caps;
+            caps.own_body_control = true;
+            session_client_core core(frame_platform(fake, true), caps);
+            run_to_tick_125_four(core, fake);
+            state_of(core).resync_join_ = joining;
+            state_of(core).resync_pending_ = joining;
+            bmmo::session::body_event wakeup;
+            wakeup.what = bmmo::session::body_event::kind::wakeup;
+            wakeup.name = "P_Modul_29_Platte06";
+            fake.body_events = {wakeup};
+            const uint64_t sent = state_of(core).events_sent_;
+            core.pre_step();
+            const size_t from = fake.calls.size();
+            ASSERT_TRUE(core.post_step(true));
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(state_of(core).events_sent_ - sent, joining ? 0u : 1u) << joining;
+            EXPECT_EQ(state_of(core).join_wakes_withheld_, joining ? 1u : 0u) << joining;
+            EXPECT_EQ(std::find(calls.begin(), calls.end(),
+                                "log:0:late join: wakeups before the apply are not reported (P_Modul_29_Platte06 at tick 126 first)")
+                          != calls.end(),
+                      joining);
+        }
     }
 
     // An own ball made or gone in the event log is reported (the event log's
@@ -4448,6 +4497,7 @@ namespace {
     void b1_session(session_client_core& core, flow_fake& fake, uint32_t to) {
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
+        open_gate(core);   // the level's own walk is not what these tests are about
         b1_frames(core, 120, to);
         ASSERT_EQ(core.current_tick(), to);
     }
@@ -4548,6 +4598,7 @@ namespace {
         session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
+        open_gate(core);   // after the level's own walk (step S4)
         b1_frames(core, 120, 140, [&](uint32_t t) {
             if (t == 125) core.request_sector(4, "checkpoint");                    // current 124: stamped 132
             if (t == 130) core.on_session_event(sector_message(5, 5, 135, 135));   // on time
@@ -4577,6 +4628,7 @@ namespace {
         session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
+        open_gate(core);   // after the level's own walk (step S4)
         b1_frames(core, 120, 135, [&](uint32_t t) {
             if (t == 121) core.on_session_event(sector_message(5, 4, 124, 124));
         });
@@ -4723,6 +4775,7 @@ namespace {
         session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 120));
+        open_gate(core);   // after the level's own walk (step S4)
         b1_frames(core, 120, 135, [&](uint32_t t) {
             if (t == 122) core.request_sector(4, "checkpoint");   // current 121: stamped 129
         });
@@ -4780,7 +4833,8 @@ namespace {
         msg.session = 9;
         msg.tick = base - 1;
         msg.base = base;
-        bmmo::session::sector_union u;
+        bmmo::session::gated_sector_union u;
+        open_gate(u);
         for (int sector: active) if (sector != 1) u.request(4, sector, base - 30);
         while (u.pass_pending()) u.tick(base - 20, false);
         msg.union_state = bmmo::session::sector_union::serialize(u.state());
@@ -4855,6 +4909,7 @@ namespace {
             EXPECT_EQ(b1_count(calls, "replayed:"), depth) << "one replayed tick per tick of the window";
             EXPECT_NE(std::find(calls.begin(), calls.end(), "localize_scripts:4:none"), calls.end());
             EXPECT_EQ(b1_count(calls, "forget_births_after:139"), 1u);
+            EXPECT_EQ(b1_count(calls, "forget_pending_activations:"), 0u) << "no level walk in a running client's window";
             EXPECT_EQ(s.sectors_.active(), std::set<int>({1, 2})) << "the server's union";
             EXPECT_EQ(s.union_records_.at(139).active, std::set<int>({1, 2}));
             const auto line = std::find_if(calls.begin(), calls.end(), [](const std::string& c) {
@@ -4872,6 +4927,147 @@ namespace {
             EXPECT_EQ(steps{core}.window_rewind_reach(139u), 48u) << "its anchor would be before S";
             core.on_session_assign(exact_assign(9, 200));
             EXPECT_FALSE(s.resync_window_) << "a new numbering ends it";
+        }
+    }
+
+    // Step A5 (resync design 2.9): a late joiner's first assignment with the
+    // flag is taken as a resync's - the world as it stands (the anchored
+    // level start) recorded as base - 1, the exact resync pending.  The
+    // level's own walk then opens the union's gate (step S4) inside the
+    // window, and the apply drops its manager activations from the base
+    // through the walk's tick, which the server's state has run long before.
+    // A first assignment without the flag, or with rollback off, is the
+    // ordinary one.
+    TEST(SessionClientCoreResync, ALateJoinersFirstAssignmentTakesTheStatePath) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        size_t from = fake.calls.size();
+        core.on_session_assign(exact_assign(9, 140));
+        auto calls = since(fake.calls, from);
+        auto& s = state_of(core);
+        EXPECT_TRUE(s.assigned_);
+        EXPECT_EQ(core.current_tick(), 140u);
+        EXPECT_TRUE(s.resync_pending_);
+        EXPECT_TRUE(s.resync_exact_);
+        EXPECT_EQ(s.resync_base_, 140u);
+        EXPECT_TRUE(s.resync_join_) << "its wakeups are withheld until the apply";
+        EXPECT_TRUE(s.rollback_.knows_tick(139)) << "the synthetic anchor: the level start";
+        EXPECT_EQ(s.union_records_.count(139), 1u);
+        EXPECT_FALSE(s.union_records_.at(139).walk.seen) << "the joiner's own walk has not run";
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "note_script_resets:139"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "forget_activations_from:140"), calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "log:0:late join: the server's state of tick 139 follows (protocol 10)"),
+                  calls.end());
+        // The level's own walk: the manager idle 140-142, active 143-146.
+        b1_frames(core, 140, 152, [&fake](uint32_t t) { fake.manager_active = t >= 143 && t <= 146; });
+        fake.manager_active = false;
+        EXPECT_TRUE(s.sectors_.walk().seen);
+        EXPECT_EQ(s.sectors_.walk_open().tick, 143u);
+        EXPECT_NE(std::find(fake.calls.begin(), fake.calls.end(), "log:0:level walk seen at tick 143"), fake.calls.end());
+        from = fake.calls.size();
+        deliver(core, resync_state(140, {1}));
+        calls = since(fake.calls, from);
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_FALSE(s.resync_join_);
+        EXPECT_EQ(s.resyncs_restepped_, 1u);
+        EXPECT_EQ(b1_count(calls, "forget_pending_activations:"), 1u);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "forget_pending_activations:140:143"), calls.end());
+        EXPECT_LT(std::find(calls.begin(), calls.end(), "forget_pending_activations:140:143"),
+                  std::find(calls.begin(), calls.end(), "replayed:140"))
+            << "dropped before the re-step re-issues them";
+        EXPECT_EQ(b1_count(calls, "replayed:"), 13u);
+        EXPECT_TRUE(s.sectors_.walk().seen) << "the server's union: past its own walk";
+
+        // Without the flag, or with rollback off: the ordinary first assignment.
+        for (const bool rollback: {true, false}) {
+            flow_fake plain;
+            session_client_core other(b1_platform(plain, std::make_shared<bool>(false)), session_capabilities{});
+            state_of(other).own_id_ = 3;
+            bmmo::session::core_config config;
+            config.rollback = rollback;
+            ASSERT_FALSE(other.begin(start_message(9, 3), config).refused);
+            other.level_requested();
+            bmmo::session::anchor_report report;
+            report.hash.pose = 0x51;
+            report.hash.surfaces = 0x52;
+            report.physics_sha256 = "headless-64";
+            report.build_id = "build-x";
+            report.own_name = "Me";
+            report.load_ticks = 12;
+            other.anchor(report);
+            other.on_session_assign(rollback ? assign_message(9, 140) : exact_assign(9, 140));
+            EXPECT_FALSE(state_of(other).resync_pending_) << rollback;
+            EXPECT_FALSE(state_of(other).rollback_.knows_tick(139)) << rollback;
+        }
+    }
+
+    // Step A5 review fix-up: the level-walk drop is the late joiner's alone,
+    // and only for a walk seen in the current numbering.  (a) A running
+    // member's exact resync whose window holds its own walk (a request in
+    // the session's first ticks) drops nothing: the server's state at S has
+    // not run the walk.  (b) A join superseded by an exact re-assign (the
+    // base missed) is still a join, but the walk it saw is a tick of the old
+    // numbering: nothing dropped.  (c) A re-assign without the flag ends the
+    // join (the full snapshot answers it).
+    TEST(SessionClientCoreResync, TheWalkDropIsTheLateJoinersAlone) {
+        {
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            run_to_anchor(core, fake);
+            core.on_session_assign(assign_message(9, 120));   // the gate still closed
+            b1_frames(core, 120, 122);
+            core.on_session_assign(exact_assign(9, 124));
+            auto& s = state_of(core);
+            ASSERT_TRUE(s.resync_pending_);
+            EXPECT_FALSE(s.resync_join_);
+            b1_frames(core, 124, 132, [&fake](uint32_t t) { fake.manager_active = t >= 126 && t <= 128; });
+            fake.manager_active = false;
+            ASSERT_TRUE(s.sectors_.walk().seen);
+            EXPECT_EQ(s.sectors_.walk_open().tick, 126u);
+            EXPECT_TRUE(s.sectors_.walk_open().known);
+            const size_t from = fake.calls.size();
+            deliver(core, resync_state(124, {1}));
+            const auto calls = since(fake.calls, from);
+            EXPECT_FALSE(s.resync_pending_);
+            EXPECT_EQ(s.resyncs_restepped_, 1u);
+            EXPECT_EQ(b1_count(calls, "forget_pending_activations:"), 0u) << "a start member's walk is the server's too";
+        }
+        {
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            run_to_anchor(core, fake);
+            core.on_session_assign(exact_assign(9, 140));
+            b1_frames(core, 140, 146, [&fake](uint32_t t) { fake.manager_active = t >= 143; });
+            fake.manager_active = false;
+            auto& s = state_of(core);
+            ASSERT_TRUE(s.sectors_.walk_open().known);
+            EXPECT_EQ(s.sectors_.walk_open().tick, 143u);
+            core.on_session_assign(exact_assign(9, 141));   // the base missed: answered again
+            EXPECT_TRUE(s.resync_pending_);
+            EXPECT_TRUE(s.resync_join_) << "still the late joiner's resync";
+            EXPECT_FALSE(s.sectors_.walk_open().known) << "143 names the old numbering";
+            b1_frames(core, 141, 145);
+            const size_t from = fake.calls.size();
+            deliver(core, resync_state(141, {1}));
+            const auto calls = since(fake.calls, from);
+            EXPECT_FALSE(s.resync_pending_);
+            EXPECT_FALSE(s.resync_join_);
+            EXPECT_EQ(s.resyncs_restepped_, 1u);
+            EXPECT_EQ(b1_count(calls, "forget_pending_activations:"), 0u) << "an old numbering's walk tick";
+        }
+        {
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            run_to_anchor(core, fake);
+            core.on_session_assign(exact_assign(9, 140));
+            auto& s = state_of(core);
+            ASSERT_TRUE(s.resync_join_);
+            b1_frames(core, 140, 142);
+            core.on_session_assign(assign_message(9, 150));
+            EXPECT_TRUE(s.resync_pending_);
+            EXPECT_FALSE(s.resync_exact_);
+            EXPECT_FALSE(s.resync_join_) << "the full snapshot answers it";
         }
     }
 
@@ -5118,6 +5314,7 @@ namespace {
         session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
         run_to_anchor(core, fake);
         core.on_session_assign(assign_message(9, 110));
+        open_gate(core);   // after the level's own walk (step S4)
         core.on_session_event(sector_message(4, 3, 122, 122));
         b1_frames(core, 110, 125);
         auto& s = state_of(core);
@@ -5130,7 +5327,8 @@ namespace {
         b1_frames(core, 121, 128);
         auto msg = resync_state(121, {1});
         {
-            bmmo::session::sector_union u;   // the server's union at S: sector 1, the pacer idle
+            bmmo::session::gated_sector_union u;   // the server's union at S: sector 1, the pacer idle
+            open_gate(u);
             for (uint32_t t = 118; t <= 120; ++t) u.tick(t, false);
             msg.union_state = bmmo::session::sector_union::serialize(u.state());
         }

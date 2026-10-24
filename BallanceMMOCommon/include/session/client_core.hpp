@@ -256,7 +256,7 @@ namespace bmmo::session {
         uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
         uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
         bool start_sector_pending_ = false;  // a --start-sector waiting for the first assigned frame
-        bmmo::session::sector_union sectors_;   // the sectors this session runs, the rule every side runs
+        bmmo::session::gated_sector_union sectors_;   // the sectors this session runs, the rule every side runs
         uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
         std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
@@ -621,6 +621,13 @@ namespace bmmo::session {
         uint64_t resync_rewinds_subsumed_ = 0;   // pending corrections the apply's re-step covered
         uint64_t resync_amends_ = 0;   // own records amended while an exact resync was pending
         uint64_t resync_resent_ = 0;   // own frames of the old numbering played again (Delta > 0)
+        // Step A5: the pending exact resync is a late joiner's (its first
+        // assignment carried the flag), until its apply.  Its world before
+        // the apply is the level start plus its catch-up passes, which the
+        // server's state replaces: the wakeups those passes cause are no
+        // event of the shared world, and are not reported (withheld).
+        bool resync_join_ = false;
+        uint64_t join_wakes_withheld_ = 0;
         // A resync request sent and not answered yet (no assignment with a
         // newer base): its full snapshot covers every reason found meanwhile.
         bool resync_in_flight_ = false;

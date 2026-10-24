@@ -8,11 +8,21 @@
 #include <session/sector_union.hpp>
 
 using bmmo::session::sector_pacer;
+using bmmo::session::gated_sector_union;
 using bmmo::session::sector_union;
 
 namespace {
-    // Ticks the union with an idle manager until the pacer is saturated.
+    // A union whose level-walk gate has opened (step S4): the tests below
+    // that are not about the gate start after the level's own walk.
+    void open_gate(sector_union& u) {
+        auto st = u.state();
+        st.walk = sector_union::level_walk{true, false, 0};
+        u.restore(st);
+    }
+    // Ticks the union with an idle manager until the pacer is saturated,
+    // its gate open.
     void settle(sector_union& u, uint32_t& tick) {
+        open_gate(u);
         for (int i = 0; i < sector_pacer::kIdleTicks; ++i) EXPECT_FALSE(u.tick(tick++, false));
     }
 }
@@ -119,18 +129,138 @@ TEST(SectorUnion, RequestNowIsTheServersPathAndIgnoresNonSectors) {
     EXPECT_EQ(p.player, 4u);
 }
 
-TEST(SectorUnion, ThePassWaitsWhileTheLevelsOwnWalkRuns) {
-    // Fresh world: Init Ingame runs the manager for sector 1 during the first
-    // frames.  A sector stamped for the anchor waits for it, plus the idle ticks.
-    sector_union u;
-    u.stamp(1, 2, 0);
-    for (uint32_t t = 0; t < 7; ++t) EXPECT_FALSE(u.tick(t, true));
-    EXPECT_FALSE(u.tick(7, false));
-    EXPECT_FALSE(u.tick(8, false));
-    const auto p = u.tick(9, false);
-    ASSERT_TRUE(p);
-    EXPECT_EQ(p.sector, 2);
-    EXPECT_EQ(p.stamped_tick, 0u);
+// The level-walk gate (sector-placement design 2.6, audit #16, step S4): no
+// pass before the level's own walk has been seen - the manager inactive at a
+// tick after the anchor, then active (an edge) - or the 64-tick timeout.
+TEST(SectorUnion, ThePassWaitsForTheLevelsOwnWalk) {
+    // Owed {2} at tick 0, manager inactive 0-2, active 3-6, inactive from 7:
+    // the gate opens at 3 and the pass starts at 9, three idle ticks after
+    // the walk - not at 2, where audit #16 had it.
+    {
+        gated_sector_union u;
+        u.stamp(1, 2, 0);
+        sector_union::pass p;
+        uint32_t at = 0;
+        for (uint32_t t = 0; t <= 12 && !p; ++t) {
+            p = u.tick(t, t >= 3 && t <= 6);
+            at = t;
+            if (t == 2) EXPECT_FALSE(u.walk().seen);
+            if (t == 3) {
+                EXPECT_TRUE(u.walk().seen);
+                EXPECT_EQ(u.walk_open().tick, 3u);
+                EXPECT_FALSE(u.walk_open().timed_out);
+                EXPECT_TRUE(u.walk_open().known);
+            }
+        }
+        ASSERT_TRUE(p);
+        EXPECT_EQ(at, 9u);
+        EXPECT_EQ(p.sector, 2);
+        EXPECT_EQ(p.stamped_tick, 0u);
+        EXPECT_EQ(u.walk_timeouts(), 0u);
+    }
+    // A walk running at the anchor (active 0-4), inactive 5-6, active 7-10,
+    // inactive from 11: the gate opens at 7, not at 0, and the pass starts at
+    // 13.
+    {
+        gated_sector_union u;
+        u.stamp(1, 2, 0);
+        sector_union::pass p;
+        uint32_t at = 0;
+        for (uint32_t t = 0; t <= 20 && !p; ++t) {
+            p = u.tick(t, t <= 4 || (t >= 7 && t <= 10));
+            at = t;
+            if (t == 6) EXPECT_FALSE(u.walk().seen) << "a walk running at the anchor is no edge";
+        }
+        ASSERT_TRUE(p);
+        EXPECT_EQ(u.walk_open().tick, 7u);
+        EXPECT_EQ(at, 13u);
+    }
+    // Active 0-20, then inactive for ever; and never active: the timeout
+    // opens the gate at tick 64 (`wait` passes 64 there, counting from tick
+    // 0), the pass starts there, one timeout.
+    for (const uint32_t active_until: {20u, 0u}) {
+        gated_sector_union u;
+        u.stamp(1, 2, 0);
+        sector_union::pass p;
+        uint32_t at = 0;
+        for (uint32_t t = 0; t <= 100 && !p; ++t) {
+            p = u.tick(t, active_until && t <= active_until);
+            at = t;
+        }
+        ASSERT_TRUE(p) << active_until;
+        EXPECT_EQ(at, 64u) << active_until;
+        EXPECT_TRUE(u.walk_open().timed_out);
+        EXPECT_EQ(u.walk_open().tick, at);
+        EXPECT_EQ(u.walk_timeouts(), 1u);
+    }
+    // The gate-free union (the legacy retail path's, held by value in a
+    // layout kept until R7): unchanged, the owed pass at tick 2 (audit #16's
+    // case), and its state reports the gate open.
+    {
+        sector_union u;
+        u.stamp(1, 2, 0);
+        EXPECT_FALSE(u.tick(0, false));
+        EXPECT_FALSE(u.tick(1, false));
+        const auto p = u.tick(2, false);
+        ASSERT_TRUE(p);
+        EXPECT_EQ(p.sector, 2);
+        EXPECT_TRUE(u.state().walk.seen);
+    }
+    // requested == active: no pass, and the pacer counts as without the gate.
+    {
+        gated_sector_union u;
+        sector_pacer reference;
+        for (uint32_t t = 0; t <= 30; ++t) {
+            const bool active = t >= 3 && t <= 6;
+            EXPECT_FALSE(u.tick(t, active));
+            reference.tick(active);
+            EXPECT_EQ(u.pacer().idle_ticks(), reference.idle_ticks()) << t;
+        }
+        EXPECT_EQ(u.passes(), 0u);
+        EXPECT_TRUE(u.walk().seen);
+    }
+    // A renumbering forgets the tick the gate opened at (step A5): not
+    // known any more, the gate's state unchanged; the next opening is known
+    // again.
+    {
+        gated_sector_union u;
+        EXPECT_FALSE(u.walk_open().known) << "not opened yet";
+        for (uint32_t t = 0; t <= 4; ++t) u.tick(t, t == 3);
+        ASSERT_TRUE(u.walk_open().known);
+        const auto open = u.state();
+        u.forget_walk_tick();
+        EXPECT_FALSE(u.walk_open().known);
+        EXPECT_EQ(u.walk_open().tick, 3u);
+        EXPECT_EQ(u.state(), open);
+        u.reset();
+        for (uint32_t t = 10; t <= 12; ++t) u.tick(t, t == 12);
+        EXPECT_TRUE(u.walk_open().known);
+        EXPECT_EQ(u.walk_open().tick, 12u);
+    }
+    // reset() closes the gate again; the gate is rollback state.
+    {
+        gated_sector_union u;
+        uint32_t t = 0;
+        for (; t <= 8; ++t) u.tick(t, t == 3);
+        ASSERT_TRUE(u.walk().seen);
+        u.reset();
+        EXPECT_FALSE(u.walk().seen);
+        EXPECT_EQ(u.state(), sector_union::state_type{});
+        for (t = 0; t <= 2; ++t) u.tick(t, false);
+        const auto closed = u.state();
+        EXPECT_FALSE(closed.walk.seen);
+        EXPECT_TRUE(closed.walk.armed);
+        EXPECT_EQ(closed.walk.wait, 3);
+        EXPECT_TRUE(sector_union::serialize(closed).empty()) << "a closed gate is not in the bytes";
+        u.tick(3, true);
+        const auto open = u.state();
+        EXPECT_EQ(open.walk, (sector_union::level_walk{true, false, 0}));
+        u.restore(closed);
+        EXPECT_FALSE(u.walk().seen);
+        EXPECT_EQ(u.state(), closed);
+        u.tick(3, true);
+        EXPECT_EQ(u.state(), open);
+    }
 }
 
 TEST(SectorUnion, ResetGoesBackToTheLevelsOwnSector) {
@@ -199,8 +329,12 @@ TEST(SectorUnionState, RestoreUnstampAndBytesRoundTrip) {
     other[0] = 99;
     EXPECT_FALSE(sector_union::deserialize(other.data(), other.size(), untouched));
     EXPECT_EQ(untouched, sector_union::state_type{});
-    EXPECT_TRUE(sector_union::deserialize(sector_union::serialize({}).data(), sector_union::serialize({}).size(), back));
-    EXPECT_EQ(back, sector_union::state_type{});
+    // The fresh state, its gate open (a closed gate is not in the bytes).
+    sector_union::state_type fresh;
+    fresh.walk.seen = true;
+    EXPECT_TRUE(sector_union::serialize(sector_union::state_type{}).empty());
+    EXPECT_TRUE(sector_union::deserialize(sector_union::serialize(fresh).data(), sector_union::serialize(fresh).size(), back));
+    EXPECT_EQ(back, fresh);
 }
 
 // A late stamp re-derived from the record of its tick - 1 (the stamps from
@@ -224,6 +358,7 @@ TEST(SectorUnionState, ALateStampReTickedFromItsRecordGivesTheOnTimePasses) {
     const std::vector<sector_union::stamped> log = {{410, 2, 3}, {404, 1, 2}, {450, 1, 4}};
     // On time: every stamp before its tick.
     sector_union on_time;
+    open_gate(on_time);
     std::map<uint32_t, sector_union::state_type> on_records;
     std::map<uint32_t, int> on_passes;
     int on_busy = 0;
@@ -232,6 +367,7 @@ TEST(SectorUnionState, ALateStampReTickedFromItsRecordGivesTheOnTimePasses) {
     EXPECT_EQ(on_passes, (std::map<uint32_t, int>{{404, 2}, {414, 3}, {450, 4}}));
     // Late: the stamp for 404 arrives at 430; the others on time.
     sector_union late;
+    open_gate(late);
     std::map<uint32_t, sector_union::state_type> late_records;
     std::map<uint32_t, int> late_passes;
     int late_busy = 0;
@@ -335,6 +471,7 @@ TEST(SectorUnionState, RederivationMovesForgetsAndAbandons) {
     using bmmo::session::sector_rederivation;
     // The record of tick 99: sector 2 ran at 90, the manager idle since.
     sector_union u;
+    open_gate(u);
     u.stamp(7, 2, 90);
     uint32_t last_pass = 0;
     const auto busy = [&last_pass](uint32_t t) { return last_pass && t - last_pass <= 7; };
@@ -401,6 +538,7 @@ TEST(SectorUnionState, SerializeRefusesWhatTheFormatCannotHold) {
     const std::vector<uint8_t> none;
     EXPECT_FALSE(sector_union::deserialize(none.data(), none.size(), back));
     sector_union::state_type fits;
+    fits.walk.seen = true;
     for (int sector = 1; sector <= 255; ++sector) fits.active.insert(sector);
     const auto bytes = sector_union::serialize(fits);
     ASSERT_FALSE(bytes.empty());

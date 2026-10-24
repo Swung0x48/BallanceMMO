@@ -162,7 +162,7 @@ namespace bmmo::sim {
             int rng_cursor = 0;
             int random_cursor = 0;
             bool callback_pending = false;
-            bmmo::session::sector_union sectors;
+            bmmo::session::gated_sector_union sectors;
         };
         step_state capture_step_state() const;
         void restore_step_state(const step_state& state);
@@ -240,7 +240,7 @@ namespace bmmo::sim {
         // entered (session/sector_union.hpp), each started by update_sectors()
         // before the step of the tick the shared rule picks.
         const std::set<int>& active_sectors() const { return sectors_.active(); }
-        const bmmo::session::sector_union& sectors() const { return sectors_; }
+        const bmmo::session::gated_sector_union& sectors() const { return sectors_; }
         void update_sectors();
 
         std::string describe() const;
@@ -339,7 +339,7 @@ namespace bmmo::sim {
         bool callback_pending_ = false;
         CK_ID sector_manager_ = 0;
         CK_ID ingame_parameter_ = 0;
-        bmmo::session::sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
+        bmmo::session::gated_sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
         bmmo::game::checkpoint_phase_split checkpoint_phase_;   // the chain's own phase cell (game/checkpoint_phase.hpp)
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;

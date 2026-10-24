@@ -172,10 +172,10 @@ namespace bmmo::session {
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                      "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
-                     "sectors: rew=%llu/%llu depth=%llu forgot=%llu births_moved=%llu phase_misses=%llu "
+                     "sectors: rew=%llu/%llu depth=%llu forgot=%llu births_moved=%llu phase_misses=%llu walk_timeouts=%llu "
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
                      "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
-                     "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu "
+                     "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu join_wakes_withheld=%llu "
                      "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
@@ -293,6 +293,8 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(s.sector_rewind_depth_),
                      static_cast<unsigned long long>(s.sector_passes_forgotten_),
                      static_cast<unsigned long long>(rs.births_moved), static_cast<unsigned long long>(s.phase_misses_),
+                     // walk_timeouts: the level-walk gate opened by its timeout (step S4)
+                     static_cast<unsigned long long>(s.sectors_.walk_timeouts()),
                      // resync: (step A3) the exact resyncs re-stepped / done
                      // in all, their re-stepped ticks, the states received,
                      // stale and refused, the applies put off for the body set
@@ -321,6 +323,7 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(s.resync_rewinds_subsumed_),
                      static_cast<unsigned long long>(s.resync_amends_),
                      static_cast<unsigned long long>(s.resync_resent_),
+                     static_cast<unsigned long long>(s.join_wakes_withheld_),   // step A5
                      static_cast<unsigned long long>(s.input_reports_), static_cast<unsigned long long>(s.input_starved_),
                      s.input_reports_ ? 100.0 * static_cast<double>(s.input_starved_) / static_cast<double>(s.input_reports_) : 0.0,
                      s.worst_starved_,

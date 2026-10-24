@@ -465,6 +465,13 @@ namespace bmmo::session {
         // births are no births of this history any more).  Births of the
         // bodies the replay made again at their tick stay.
         std::function<void(uint32_t tick, const std::vector<std::string>& entities)> forget_births_after;
+        // Step A5 (resync design 2.9): the manager's pending activations
+        // recorded for the ticks from..to dropped, the pass slots kept -
+        // the level's own walk (Init Ingame's activation of the manager)
+        // that a late joiner's live frames ran inside its resync's window,
+        // and that the server's state at S ran long before.  Returns how
+        // many were dropped.
+        std::function<size_t(uint32_t from, uint32_t to)> forget_pending_activations;
         // Optional: the tick the host's birth log has `entity` born at (its
         // latest birth; 0 unknown) - the reconcile's attribution of an
         // anchor body the server has no row for (resync design 2.6.3).
@@ -649,6 +656,7 @@ namespace bmmo::session {
         if (!platform.localize_scripts) return "localize_scripts";
         if (!platform.forget_activations_from) return "forget_activations_from";
         if (!platform.forget_births_after) return "forget_births_after";
+        if (!platform.forget_pending_activations) return "forget_pending_activations";   // step A5
         if (!platform.unpack_bytes) return "unpack_bytes";   // the state's packed sections
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";

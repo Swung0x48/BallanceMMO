@@ -121,6 +121,7 @@ namespace bmmo::session {
                                      body.owner == s.own_id_ ? true : wake, error);
             }
             s.resync_pending_ = false;
+            s.resync_join_ = false;   // step A5: the world is the snapshot's
             // Every own tick up to the snapshot's is the server's now,
             // substituted ones included: no held notice of them is late.
             // Nor is one up to the next tick we step: the snapshot replaced

@@ -1678,18 +1678,33 @@ public:
                 runner_->set_player_rtt(msg.session, c, current_rtt_ms(c));
             }
         }
+        // A late joiner that applies the resync state (CAP_RESYNC_STATE, the
+        // session core; resync design 2.9, step A5) takes its first
+        // assignment as a resync's: the flag on the assignment and on every
+        // repeat, and the server's state of base - 1 to it alone after the
+        // runner steps that tick.  One without it (the legacy retail path)
+        // gets the full snapshot broadcast, as before.
+        const bool late = s.late.count(c) != 0;
+        const bool state = late && (msg.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
         runner_->player_ready(msg.session, c, assigned);
-        if (s.late.count(c)) send_session_assign(s, c, assigned);
+        if (late) send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         else assign_start_members(s);
         Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s; caps %08x).", s.id, client_it->second.name,
                 assigned, msg.physics_sha256.substr(0, 12), msg.build_id, msg.caps);
-        if (s.late.count(c)) {
+        if (late) {
             // catch the late joiner up: everyone's current ball, every sector
-            // the union has grown by, then a full snapshot
+            // the union has grown by, then the state of base - 1 (or a full
+            // snapshot)
             for (const auto& [member, last]: s.last_physicalize)
                 if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
             for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
-            runner_->request_full_snapshot(s.id);
+            if (state) {
+                runner_->request_resync_state(s.id, c, assigned);
+                Printf("Physics session %u: the state of tick %u follows to the late joiner %s alone (protocol 10).", s.id,
+                       assigned - 1, client_it->second.name);
+            } else {
+                runner_->request_full_snapshot(s.id);
+            }
         }
     }
 

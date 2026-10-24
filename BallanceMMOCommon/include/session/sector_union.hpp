@@ -75,13 +75,45 @@ namespace bmmo::session {
             if (requested_.insert(sector).second) origin_[sector] = {tick, player, sector};
         }
 
+        // The level-walk gate's state (gated_sector_union, step S4): open
+        // (`seen`), or closed with `armed` (the manager seen inactive since
+        // the anchor) and `wait` (the ticks ticked while closed).  Once open
+        // it is {true, false, 0} for good.
+        static constexpr int kLevelWalkWait = 64;
+        struct level_walk {
+            bool seen = false;
+            bool armed = false;
+            int wait = 0;
+            bool operator==(const level_walk& o) const { return seen == o.seen && armed == o.armed && wait == o.wait; }
+            bool operator!=(const level_walk& o) const { return !(*this == o); }
+        };
+        // Where a union's gate opened (diagnostic, the live union's own like
+        // the counters): the tick, whether by the timeout, and whether the
+        // tick is one of the current numbering (`known`: false until the
+        // gate opens in a tick() of this union, and again after a
+        // renumbering - gated_sector_union::forget_walk_tick).
+        struct walk_opened {
+            uint32_t tick = 0;
+            bool timed_out = false;
+            bool known = false;
+        };
+
         // Once per tick, before that tick's step and after the tick's events:
         // applies the stamps due, counts the pacer with the manager's state
         // after the previous step, and names the sector a pass may start for -
         // the lowest requested sector that is not active yet, so every side
         // picks the same one from the same sets.  One pass per call, like the
-        // server's.
-        pass tick(uint32_t tick, bool manager_active) {
+        // server's.  This union has no level-walk gate (gated_sector_union).
+        pass tick(uint32_t tick, bool manager_active) { return tick_gated(tick, manager_active, nullptr); }
+
+    protected:
+        struct gate {
+            level_walk walk;
+            walk_opened opened;
+            uint64_t timeouts = 0;
+        };
+        // tick(), with the level-walk gate `g` (null: none).
+        pass tick_gated(uint32_t tick, bool manager_active, gate* g) {
             ticked_ = true;
             last_tick_ = tick;
             if (!pending_.empty()) {
@@ -93,6 +125,32 @@ namespace bmmo::session {
                 pending_.erase(keep, pending_.end());
             }
             const bool may_start = pacer_.tick(manager_active);
+            // The level-walk gate (sector-placement design 2.6, audit #16,
+            // step S4): no pass before the level's own walk has been seen -
+            // the manager observed inactive at some tick after the anchor and
+            // active at a later one (an edge, so a walk already running at
+            // the anchor cannot open it).  Without it a late joiner's owed
+            // pass started at relative tick 2, in the frame Init Ingame's own
+            // sector-1 activation arrives, overwrote the activate cell, and
+            // sector 1 was never walked in that world.  Bounded: after
+            // kLevelWalkWait ticks without an edge it opens anyway (a walk
+            // that started after the anchor has ended by then, and the pacer
+            // still wants its idle ticks).
+            if (g && !g->walk.seen) {
+                level_walk& walk = g->walk;
+                bool timed_out = false;
+                if (!manager_active) walk.armed = true;
+                else if (walk.armed) walk.seen = true;
+                if (!walk.seen && ++walk.wait > kLevelWalkWait) walk.seen = timed_out = true;
+                if (walk.seen) {
+                    // Open for good: the state keeps only that (what tick()
+                    // decides from); where and how it opened is diagnostic.
+                    walk = level_walk{true, false, 0};
+                    g->opened = {tick, timed_out, true};
+                    if (timed_out) ++g->timeouts;
+                }
+                if (!walk.seen || manager_active) return {};
+            }
             if (requested_ == active_ || !may_start) return {};
             for (int sector: requested_) {
                 if (active_.count(sector)) continue;
@@ -105,11 +163,13 @@ namespace bmmo::session {
             return {};
         }
 
+    public:
         // The union as rollback state (resync design 2.5, step B1): a value
         // with everything tick() decides from - the sets, the origins, the
-        // stamps not applied yet, the pacer's count and the last tick ticked.
-        // The counters (passes, late) are not in it: diagnostics, they stay
-        // the live union's across a restore.
+        // stamps not applied yet, the pacer's count, the last tick ticked
+        // and the level-walk gate (step S4; a union without one reports it
+        // open).  The counters (passes, late, walk timeouts) are not in it:
+        // diagnostics, they stay the live union's across a restore.
         struct state_type {
             std::set<int> active{1};
             std::set<int> requested{1};
@@ -118,12 +178,14 @@ namespace bmmo::session {
             int idle = 0;
             uint32_t last_tick = 0;
             bool ticked = false;
+            level_walk walk;
             bool operator==(const state_type& o) const {
                 const auto same = [](const stamped& a, const stamped& b) {
                     return a.tick == b.tick && a.player == b.player && a.sector == b.sector;
                 };
                 if (active != o.active || requested != o.requested || idle != o.idle || last_tick != o.last_tick
-                        || ticked != o.ticked || origin.size() != o.origin.size() || pending.size() != o.pending.size())
+                        || ticked != o.ticked || walk != o.walk || origin.size() != o.origin.size()
+                        || pending.size() != o.pending.size())
                     return false;
                 for (auto a = origin.begin(), b = o.origin.begin(); a != origin.end(); ++a, ++b)
                     if (a->first != b->first || !same(a->second, b->second)) return false;
@@ -142,9 +204,11 @@ namespace bmmo::session {
             out.idle = pacer_.idle_ticks();
             out.last_tick = last_tick_;
             out.ticked = ticked_;
+            out.walk = level_walk{true, false, 0};
             return out;
         }
-        // Back to a saved state; the counters stay.
+        // Back to a saved state; the counters stay (and the gate is the
+        // gated union's).
         void restore(const state_type& in) {
             active_ = in.active;
             requested_ = in.requested;
@@ -203,10 +267,21 @@ namespace bmmo::session {
         // origins, more than 65535 stamps, an idle count above 255) gives an
         // empty vector, which deserialize refuses: never a truncated state
         // that reads back as another one.
+        // The level-walk gate (step S4) is not in the bytes, which stay the
+        // protocol-10 ones: a state whose gate has opened reads back as an
+        // open gate, and a state whose gate is still closed is one the
+        // format cannot hold.  The server's state of S = base - 1, the one
+        // state that travels, is past the server's own walk for a late
+        // joiner (it loads the level after the runner has started), but not
+        // for an A3 resync whose S lies before the server's walk (a request
+        // in the first ticks of the session): the server then sends no union
+        // bytes (physics_world resync_state's error) and the client keeps its
+        // anchor's own union (client_core_resync.cpp) - the designed answer,
+        // since neither union can have started a pass before its walk.
         static constexpr uint8_t kStateVersion = 1;
         static std::vector<uint8_t> serialize(const state_type& in) {
             std::vector<uint8_t> out;
-            if (in.active.size() > 255 || in.requested.size() > 255 || in.origin.size() > 255
+            if (!in.walk.seen || in.active.size() > 255 || in.requested.size() > 255 || in.origin.size() > 255
                     || in.pending.size() > 0xFFFF || in.idle < 0 || in.idle > 255)
                 return out;
             const auto u8 = [&out](uint32_t v) { out.push_back(static_cast<uint8_t>(v & 0xFFu)); };
@@ -249,6 +324,7 @@ namespace bmmo::session {
             const auto u16 = [&u8]() -> uint32_t { const uint32_t lo = u8(); return lo | (u8() << 8); };
             const auto u32 = [&u16]() -> uint32_t { const uint32_t lo = u16(); return lo | (u16() << 16); };
             state_type in;
+            in.walk.seen = true;   // only an open gate is serialized
             if (u8() != kStateVersion || !ok) return false;
             in.last_tick = u32();
             in.ticked = u8() != 0;
@@ -308,6 +384,7 @@ namespace bmmo::session {
         size_t stamps_pending() const { return pending_.size(); }
         uint64_t passes() const { return passes_; }
         uint64_t late() const { return late_; }
+
         const sector_pacer& pacer() const { return pacer_; }
 
         // A new session: back to the level's own sector.
@@ -322,6 +399,50 @@ namespace bmmo::session {
         bool ticked_ = false;
         uint32_t last_tick_ = 0;
         uint64_t passes_ = 0, late_ = 0;
+    };
+
+    // The union with the level-walk gate (sector-placement design 2.6, audit
+    // #16, step S4): no pass before the level's own walk has been seen - the
+    // manager observed inactive at some tick after the anchor and active at
+    // a later one (an edge, so a walk already running at the anchor cannot
+    // open it).  Without it a late joiner's owed pass started at relative
+    // tick 2, in the frame Init Ingame's own sector-1 activation arrives,
+    // overwrote the activate cell, and sector 1 was never walked in that
+    // world.  Bounded: after kLevelWalkWait ticks without an edge it opens
+    // anyway (a walk that started after the anchor has ended by then, and
+    // the pacer still wants its idle ticks).  The gate is rollback state.
+    //
+    // Every world of the session core and the server's runs this one.  The
+    // gate-free sector_union stays the legacy retail path's: it is held by
+    // value in physics_session_state, which keeps its layout until R7
+    // (session-client-core design 3.2), and that path gets no feature.
+    class gated_sector_union : public sector_union {
+    public:
+        pass tick(uint32_t tick, bool manager_active) { return tick_gated(tick, manager_active, &gate_); }
+        state_type state() const {
+            state_type out = sector_union::state();
+            out.walk = gate_.walk;
+            return out;
+        }
+        void restore(const state_type& in) {
+            sector_union::restore(in);
+            gate_.walk = in.walk;
+        }
+        // The gate's state, where this union saw it open (meaningful once
+        // walk().seen became true in a tick() of this union, not after a
+        // restore()), and how many times it opened by the timeout.
+        const level_walk& walk() const { return gate_.walk; }
+        const walk_opened& walk_open() const { return gate_.opened; }
+        // The client renumbered (an assignment's new base): the tick the gate
+        // opened at names a tick of the old numbering, so it is no longer
+        // known.  The gate's state (open or not) is unchanged.
+        void forget_walk_tick() { gate_.opened.known = false; }
+        uint64_t walk_timeouts() const { return gate_.timeouts; }
+        // A new session: back to the level's own sector, the gate closed.
+        void reset() { *this = gated_sector_union(); }
+
+    private:
+        gate gate_;
     };
 
     // The re-derivation of a Sector rewind (resync design 2.5 "the merge",
@@ -386,13 +507,13 @@ namespace bmmo::session {
         // A window-born body of a live pass the re-derivation moved or
         // forgot (sector_union::birth_moved).
         bool birth_moved(uint32_t birth_tick) const { return sector_union::birth_moved(live_, passes_, birth_tick); }
-        const sector_union& u() const { return u_; }
+        const gated_sector_union& u() const { return u_; }
         const std::map<uint32_t, int>& live_passes() const { return live_; }
         const std::map<uint32_t, int>& passes() const { return passes_; }
         uint32_t forgotten() const { return forgotten_; }
 
     private:
-        sector_union u_;
+        gated_sector_union u_;
         std::map<uint32_t, int> live_, passes_;
         uint32_t forgotten_ = 0;
     };

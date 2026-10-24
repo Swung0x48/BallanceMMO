@@ -611,9 +611,77 @@ longer depends on the order.
 tick 9 (three idle ticks after the walk), not at 2; manager active 0-4 (a walk
 running at the anchor), inactive 5-6, active 7-10, inactive from 11: the gate
 opens at 7, not at 0, and the pass starts at 13; active 0-20 then inactive
-for ever: the timeout opens it at tick 65, the pass starts at 65, the timeout
-counter is 1; never active: the same; requested == active: no pass and no
+for ever: the timeout opens it at tick 64, the pass starts at 64, the timeout
+counter is 1 (64: `wait` passes `kLevelWalkWait` at tick 64 counting from
+tick 0 - corrected at step S4, this read 65); never active: the same; requested == active: no pass and no
 change to the pacer's counts; `reset()` re-arms the gate.
+
+**As built (step S4, 2026-10-24; built inside the resync track's step A5,
+which needs it).**
+
+- **Where.** `session/sector_union.hpp`: the gate is `gated_sector_union`, a
+  class derived from `sector_union` (`tick` = the base's `tick_gated` with
+  its gate; `state`/`restore` carry it; `walk()`, `walk_open()`,
+  `walk_timeouts()`; `reset()` closes it). Every world of the session core
+  (`client_core_state::sectors_`), the re-derivation (`sector_rederivation`)
+  and the server's world (`physics_world::sectors_` and its step state) run
+  it. Log lines: the core `level walk seen at tick N` (or `timeout`) in
+  `sector_union_pass`, the server `world: level walk seen at tick N` in
+  `update_sectors`; the status line's `sectors:` group gains
+  `walk_timeouts=`.
+- **Adaptation: the legacy retail path keeps the gate-free union.** This
+  section says the legacy path gets the rule at once. It cannot without a
+  layout change: `physics_session_state` holds a `sector_union` by value
+  (physics_session.hpp:291) and keeps its layout until R7
+  (session-client-core design 3.2), and the legacy path gets no feature.
+  So `sector_union` keeps its members exactly (the gate's state lives in the
+  derived class) and the legacy path behaves as before: a legacy late joiner
+  keeps audit #16, and a stamp due before the level's walk ends (none in any
+  recipe: the earliest stamp is hundreds of ticks in) would start there on
+  the legacy path a few ticks before the server.
+- **Adaptation: the gate's state is {seen, armed, wait}**, normalized to
+  {true, false, 0} when it opens; where and how it opened (`walk_open()`:
+  the tick, by the timeout or not, and `known`: whether that tick is one of
+  the current numbering) is the live union's diagnostic, like the counters,
+  so a state round-trips exactly. A renumbering (`forget_walk_tick()`, called
+  by both of the core's renumbering assignments) clears `known`: the tick
+  names the old numbering. Step A5's level-walk drop requires it (the
+  resync design's As built (step A5)).
+- **Adaptation: the bytes stay protocol 10's.** The resync state's union
+  bytes (`serialize`, version 1) carry no gate: a state with the gate open
+  reads back open, and a state with it closed is one the format cannot hold
+  (serialized to nothing, refused on reading). The one state that travels,
+  the server's at S = base - 1, is past the server's own walk for a late
+  joiner (it loads the level after the runner started). An A3 resync whose
+  S lies before the server's walk (a request in the session's first ticks)
+  gets no union bytes (the server logs `the sector union does not
+  serialize`) and the client keeps its anchor's own union: neither union can
+  have started a pass before its walk, so the re-step decides the same
+  passes.
+- **The timeout tick.** With the code above run from tick 0, `wait` passes
+  64 at tick 64, so the timeout opens the gate (and the pass starts) at tick
+  64, not 65 as the prose said; the prose above is corrected and the unit
+  test asserts 64.
+- **Checks.**
+  - Unit tests (`SectorUnion.ThePassWaitsForTheLevelsOwnWalk`: the five
+    cases above with the 64 of the previous item, the gate-free union's pass
+    at tick 2 unchanged, the gate as rollback state and closed-gate bytes
+    refused); every other union, core and re-derivation test opens the gate
+    first (`open_gate`), as after the level's walk. 466/466 with A5's.
+  - V6 (SimTool, L8, `--savestate-check --drop-sector 1
+    --drop-second-sector 2 --drop-settle 60`): `world: level walk seen at
+    tick 3`, `world: sector +2 at tick 9`, objects 65 at t0 = 43 of sector 1
+    alone + 22 of sector 2 (rA4: `sector +2 at tick 2`, 64); `--drop-sector 2
+    --drop-second-sector 3`: walk at 3, `+2 at 9`, `+3 at 16`, 73 objects,
+    50 savestate rounds failed 0. `P_Modul_30_Wippe_R15` needs S2's copies
+    and is not checkable before S2.
+  - Arena: `level walk seen at tick 30` (base 27 + 3) on the server and
+    every client in every live run of A5, and in all 24 replays of the
+    `core_ref_r3` captures, whose sends and journals are unchanged
+    (`wire_check.sh rA4 rA5`: ALL SAME); `sector +N` ticks as before
+    (lane/resync recipe 824/1270/1713-1785, the join recipe 825/1270/1714 as
+    in `lp1_join`); `walk_timeouts=0` everywhere. `lp1_join` client3 52/52:
+    see the resync design's As built (step A5).
 
 ### 2.7 Interplay with what already exists
 

@@ -385,6 +385,27 @@ namespace bmmo::session {
                 logf("resync: mirror %s of %u: %u relayed frame(s) in (%u, %u], %u..%u%s", remote.entity.c_str(), player, have,
                      anchor, now, first, last, remote.physicalized ? "" : " (no body)");
             }
+        // The level's own walk inside the window (a late joiner, step A5:
+        // its anchor is the level start).  Init Ingame's activation of the
+        // manager is a pending activation of the live frames, which every
+        // replay re-issues at its tick; the server's state at S has run that
+        // walk long before, so re-issued after the restore it would walk
+        // sector 1 a second time over the server's mid-run modules (a Set
+        // World Matrix and a module reset).  Every pending activation of the
+        // manager from the base through the tick the walk was seen is the
+        // level's own (the gate lets no union pass start before it), and is
+        // dropped.  A walk opened by the gate's timeout was never seen.
+        // Only the late joiner's resync (a running member's A3 resync whose
+        // S lies before the server's walk would drop the activation the
+        // server's state has not run yet), and only a walk seen in the
+        // current numbering (a superseded join's re-assign forgot the old
+        // numbering's activations from its base, anchor_resync).
+        if (const auto& walk = s.sectors_.walk_open(); s.resync_join_ && walk.known && s.sectors_.walk().seen && !walk.timed_out
+                && static_cast<int32_t>(walk.tick - anchor) > 0 && static_cast<int32_t>(walk.tick - now) <= 0) {
+            const size_t dropped = platform_.forget_pending_activations(s.resync_base_, walk.tick);
+            logf("resync: the level's own walk (seen at tick %u) is in the server's state of tick %u: %zu manager "
+                 "activation(s) of %u..%u not re-issued", walk.tick, anchor, dropped, s.resync_base_, walk.tick);
+        }
         // 6. The restore and the re-step, the union re-derived in the replay
         // (2.8), the live cells adopted from it (4.6).
         auto& rd = s.rederive_;
@@ -450,6 +471,7 @@ namespace bmmo::session {
         s.held_floor_ = anchor;
         s.resync_pending_ = false;
         s.resync_exact_ = false;
+        s.resync_join_ = false;   // step A5: the world is the shared one again
         s.have_resync_state_ = false;
         ++s.resyncs_done_;
         ++s.resyncs_restepped_;

@@ -814,7 +814,13 @@ namespace bmmo::sim {
         auto* parameters = CKDataArray::Cast(context->GetObject(ingame_parameter_));
         auto* manager_script = CKBehavior::Cast(context->GetObject(sector_manager_));
         if (!parameters || !manager_script) return;
+        const bool walk_open = sectors_.walk().seen;
         const auto pass = sectors_.tick(tick_, manager_script->IsActive() != FALSE);
+        // The level-walk gate opening (sector_union.hpp, step S4): the tick
+        // every side logs alike.
+        if (!walk_open && sectors_.walk().seen)
+            log(std::string("world: level walk ") + (sectors_.walk_open().timed_out ? "timeout" : "seen") + " at tick "
+                + std::to_string(sectors_.walk_open().tick));
         if (!pass) return;
         int none = 0, activate = pass.sector;
         parameters->SetElementValue(0, 2, &none, sizeof(none));

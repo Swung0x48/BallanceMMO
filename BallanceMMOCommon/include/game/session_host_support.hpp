@@ -230,6 +230,10 @@ namespace bmmo::game {
         // A live pass the re-derivation did not make at `tick`; the pending
         // slot stays.  True when there was one.
         bool forget_pass(uint32_t tick) { return slots_.forget_pass(tick); }
+        // The manager's pending activations of the ticks from..to dropped
+        // (platform forget_pending_activations, step A5); the pass slots and
+        // the scripts' activations stay.
+        size_t forget_pending(uint32_t from, uint32_t to) { return slots_.forget_pending(from, to); }
         const bmmo::session::activation_slots& slots() const { return slots_; }
         // Every record at a tick >= `tick` dropped - both slots, the script
         // activations and the explosion referentials (a resync's re-assign,
