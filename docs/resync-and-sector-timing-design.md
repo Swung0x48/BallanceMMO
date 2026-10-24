@@ -1461,6 +1461,234 @@ binding.
     constraint of the sector's joints after the restore (present, attached
     to the right cores).
 
+**As built (step A2, 2026-10-24).**
+
+- **Where.** `BallanceMMOServer/sim/sim_tool.cpp` only: `--resync-check S B`
+  (`run_resync_check` and its `rc_*` helpers). Nothing shared changed.
+- **The harness.** One world (`physics_world`, the server's), one process.
+  Every run starts from a ROOT: `--resync-root` whole world ticks (240)
+  after player 1 joins, so the retail ball is parked and the retail blocks
+  that retry every frame are queued (the savestate refuses a PreSimulate
+  queue that differs from its own). A run from the root is put back the way
+  a rollback restores, plus what a root needs: the scripts' v2 record with
+  `replay_activation`; every body the previous run made destroyed (joint
+  handles released, entity put back where its Physicalize found it: the
+  binding's `destroy_body` + `release_joints`); the savestate; the world's
+  counters; and, harness-only, every 3D entity's world matrix, visibility
+  and parent, every data-array cell, and the restored-active scripts
+  re-registered with the behaviour manager (finding G1 below). A warm-up
+  run from the live root is compared with the straight run from the
+  restored root at every boundary: **identical** in every scene but the
+  pooled one (finding G2). Ticks on the command line count from the root;
+  "S" is boundary S (the server's end-of-tick state of S-1).
+- **The apply** follows `restore_and_replay`'s order: counters from the
+  anchor with the server's union; the server's portable record localized
+  against the anchor's v2 and restored with `replay_activation`; the
+  anchor run's bodies of a pass the server's union lacks at S destroyed
+  (before the blob, like the engine's births; `--resync-destroy-after-blob`
+  is the A/B); the anchor's blob, lenient; the rows (wake/freeze as the row
+  says, rechecked when they move the body or the blob did not know it);
+  live bodies the blob did not know and no row covers rechecked at once;
+  the anchor's recorded contacts re-made for the rowed bodies. The re-step
+  is the server world's whole tick, S..B+600 (not the client's replay
+  recipe: that recipe is `--savestate-check --frames`'s and the sector
+  replay's, the union re-derivation B1's).
+- **Adaptations.**
+  - **A row the body already has, bit for bit, in a body the blob knows,
+    is not written** (`--resync-write-equal-rows` is the A/B). The write is
+    a beam, and a beam loses what no row carries: the hull manager's
+    gradient and values, a sleeping core's PSI time stamp and delta, the
+    entity matrix rebuilt from the quaternion (low bits). Measured, arm E on
+    Level 11 with every row written: 0 of 630 ticks exact, Pusher001
+    0.24 mm, a stone prop 4.3 cm; with the rule: 630 of 630. **A3's
+    `resync()` takes this rule** (the "every row is authoritative" of §4.1
+    then means "every row that differs"). Consequence: **arm E writes no
+    row at all** (16 or 33 rows "equal"), so arm E checks the blob, the
+    scripts, the counters and the reconcile, not `set_body`; the row write
+    is exercised by arms R and S (and `--resync-write-equal-rows`). That a
+    row write is not a no-op is itself a gap of the shared binding (finding
+    G3 below).
+  - **Arm R is not the arm the procedure above words.** The procedure's
+    anchor is "a perturbed run's tick S (scripts of S-17 restored at S-17
+    and stepped)". Built as worded (`--resync-perturb-scripts`: the
+    selected scripts captured and restored with `replay_activation` at
+    S-17, no body touched) the anchor does not diverge: Level 11 and the
+    arena both 630 of 630 blobs exact, gate 0 - it is arm E again and
+    measures nothing about an anchor that differs. The arm as built moves
+    the anchor instead: at S-17 every movable body is moved by M in x and z
+    and the awake ones are sped up by 5M m/s (`--resync-perturb M`, 1 cm by
+    default), then stepped to S, so the anchor's contacts, mindists, queues
+    and calm references at S are its own. M is the arm's free parameter;
+    it was swept (1, 5 and 20 cm). Arm R's failures below are this
+    substitute's; Q1's decision stands on arm S alone.
+  - Arms S and A shift the stamp of sector K by 9 ticks; the tool checks
+    that the case holds (S: K born in the straight run before S and in the
+    arm's after it; A: K passed by the server after S and born in the arm's
+    before it). Arena K = 4 (P_Modul_08, P_Modul_03, P_Modul_19, the level
+    end); Level 11 K = 5 (two P_Modul_08), and K = 2 for the pooled case.
+  - The level end's bodies (`PE_`: the balloon, its airship, its slide) are
+    reported and not judged (I3); the whole-frame re-step does not re-issue
+    their keep-local activations (§2.8), so arm S's balloon falls apart
+    (its joints are reset by the anchor's keep-local record, its bodies
+    unknown to the blob).
+  - Lower-case arms `r`, `s`, `a` are R, S and A applied with the **server's
+    blob of S** instead of the anchor's: the Q1 alternative, measured in
+    the same runs. With `--resync-server-blob FILE` they restore another
+    process's blob instead (the cross-world restore test below).
+  - The verdict is strict about its own inputs: a gate body never compared
+    fails its arm; a `--resync-watch` name that is not a movable body, arm
+    R's perturbation at or before the root, and A before R in
+    `--resync-arms` (A is judged against R's band) refuse the run. The
+    harness line (warm-up vs restored root) is informational: every arm and
+    the straight run start from the same restored root.
+  - A body name two bodies share gets a `#n` suffix in the pose capture by
+    listing order; in arm S that order differs between worlds, so a shared
+    name could swap suffixes. These scenes have none; Level 8 (two
+    `P_Modul_30_Wippe`) must be judged by entity id, not suffix.
+- **Results** (gate: Pusher001, both sacks, and K's movable bodies over
+  (B, B+600], 1 mm; depth B-S = 30):
+
+  | scene | arm | gate worst | other worst | blobs exact |
+  |---|---|---|---|---|
+  | L11 s1, ball on Pusher001, S=150 | E | 0 | 0 | 630/630 |
+  | | R 1 cm | 0.038 mm (Pusher001) | 3.1 mm (P_Modul_25_Bridge001) | 0 |
+  | | R 5 cm | **8.4 mm** (Pusher001) | 18.7 mm (ball) | 0 |
+  | | R 20 cm | **7.8 mm** (Pusher001) | 68.9 mm (ball) | 0 |
+  | | r (any) | 0 | 0 | 630/630 |
+  | L11 K=5 late (S=30) | S | 0.0025 mm (Schaukel) | 0 | 0 |
+  | | s | 0 | 0 | 630/630 |
+  | L11 K=5 early (S=38) | E / R 1 cm | 0 / 0.25 mm (Pusher001) | 0 / 0.49 mm | 630 / 0 |
+  | | A | K bit-exact | 0 | 0 (order bookkeeping) |
+  | | a | K bit-exact | 0 | 630/630 |
+  | arena, ball on the Schaukel, S=150 | E | 0 | 0 | 630/630 |
+  | | R 1 / 5 / 20 cm | 0.002 / 0.009 / **133 mm** (Schaukel) | 0.02 / 0.3 / 6893 mm (ball) | 0 |
+  | | r | 0 | 0 | 630/630 |
+  | arena K=4 late, ball dropped on its see-saw (S=30) | S | **14.4 mm** (Schaukel) | 11.6 mm (ball) | 0 |
+  | | s | 0 | 0 | 0 (the level end only) |
+  | arena K=4 early (S=38) | E, R | 0, 0.00007 mm | 0, 0.0002 mm | 630, 0 |
+  | | A, a | K bit-exact | 0 | 0, 630 |
+  | L11 K=2 (pooled with s1) early | E | 0 | **19.9 mm** (P_Modul_25_Bridge001) | 0 |
+  | | A / a | K bit-exact | 30.5 / 46.3 mm (P_Modul_25_Bridge) | 0 |
+
+  Constraints of K after arm S's apply: every non-level-end body's named
+  controllers equal the server's (arena 12 of 12, Level 11 2 of 2).
+- **Q1, decided: rows-only is not exact enough; the server's IVP savestate
+  travels** (the user's standing default, roadmap §2). Arm S fails the
+  gate on the arena (14.4 mm), arm R (the substitute above) from a 5 cm
+  anchor error on (Level 11 8.4 mm, the arena 133 mm at 20 cm); the
+  server's blob is exact in every non-pooled scene, the local level-end
+  bodies aside (the pooled L11 K=2 case is G2: `a` 46.3 mm; the arena's
+  `s` has 0 of 630 identical blobs because of the level end alone, every
+  judged body 0). Causes:
+  - **Arm S.** A body the anchor's blob does not know enters IVP by its
+    live insertion plus the apply's recheck: its place in
+    `m_MovableObjects` (`[Schaukel, Ball]` against the server's
+    `[Ball, Schaukel]`), the simulation units' numbering (A_Floor_001 unit
+    67 against 55) and its collision pairs (made at S by the recheck, not
+    at its birth: the falling ball's `current_speed` and hull gradient
+    rebuilt to 0) are the anchor's, so IVP processes the same bodies in
+    another order: 2.5 µm with no contact (Level 11), 14.4 mm once the
+    ball lands on the see-saw (arena).
+  - **Arm R.** A row carries pose, velocity and sleep. After a rows-only
+    apply from a 5 cm anchor the bodies' poses equal the server's, and
+    still 403 collision records (mindist lengths, recalc stamps), 33
+    contact points (Pusher001-Rinne001, ball-Pusher001), 11 friction
+    systems, 30 hull managers and 16 cores (calm references, PSI fields)
+    differ (`--savestate-trace`, the applied world against the server's):
+    the anchor's own contact state at its own poses.
+  - **The measurement of the alternative** (A3 builds it):
+    - size of the server's blob at S: arena s1+s4 with one ball 101,171
+      bytes (zlib 8,473), Level 11 s1 with one ball 146,296 (zlib 28,000),
+      Level 8 s1 68,751 (zlib 5,434);
+    - **the cross-world restore test (x64, two processes).** Process 1
+      joins as player 1 and writes its server blob of S
+      (`--savestate-trace P` -> `P.server.blob`); process 2 runs the same
+      scene as player 2 (its own clone `Ball_Stone_BMMO_2`, as a client's
+      own ball is spelled otherwise than the server's clone) and restores
+      that file in the `r`/`s` arms (`--resync-server-blob`). Scenes: L11
+      ball on Pusher001 (S=150, arm r) and the arena K=4 late (S=30,
+      arm s). Results:
+      - **as it is, the blob is refused**: "the savestate was captured in
+        another environment". The blob's header carries the capturing
+        `IVP_Environment` pointer (`world_record::environment_id`,
+        physics_savestate_capture.cpp `out.environment_id`), and the
+        restore's first precondition compares it with the live one
+        (physics_savestate_restore.cpp `restorer::run`). The blob was
+        designed never to leave its process. With the blob refused the
+        apply leaves the anchor's live IVP state under the rows: L11
+        (anchor perturbed 1 cm) 45 mm (sack), arena 20.5 mm (Schaukel). **A3 needs a restore flag that waives the environment
+        identity for a travelling blob** (shared savestate code);
+      - past the identity (`--resync-blob-adopt-environment` writes process
+        2's identity into the header, what that flag would do) and with
+        the one rename `Ball_Stone_BMMO_1 -> Ball_Stone_BMMO_2`
+        (`--resync-blob-rename`, one occurrence): the renamed foreign blob
+        is **byte-identical** to process 2's own server blob of S (146,296
+        and 101,171 bytes), and the arms are exact: L11 `r` 630 of 630,
+        gate 0; arena `s` gate 0 and rest 0 (the level end's 58 skipped
+        records as in-process);
+      - without the rename: the own ball's record is not found, it stays
+        the anchor's ("unknown", its records skipped: 55 on L11, 107 on the
+        arena): L11 5.9 mm (Pusher001), arena 1.9 mm (Schaukel) - fails;
+      - so the names: exactly one name maps, the resynced member's own
+        clone to its own ball; every other body, the mirrors' clones
+        included, has the same name in both worlds. The entity ids agreed
+        between the two processes (same load order); on a retail client
+        they will not, and they matter only for a name several bodies share
+        (`live_world::find_by_name`): 0 in these scenes, so a retail blob
+        must not rely on them for Level 8's two `P_Modul_30_Wippe` (by
+        then unique names from the sector placement's copies, or a mapping
+        by occurrence order);
+    - format: fixed-width little-endian fields; an edge is named by its
+      byte offset in the compact surface, whose layout is int-based and
+      16-byte aligned (`ivp_compact_ledge.hxx`), so x64 and x86 agree if
+      their surface builders build the same surfaces (the world hash's
+      surface field says so at every handshake). **Not executed**: the x86
+      SimTool tree (`build-sim-x86`) was configured with a Visual Studio
+      2022 toolchain that is no longer installed and the x86 client tree
+      has no SimTool target, so the x64-server vs x86-retail blob test is
+      **open and is A3's first gate**;
+    - what a travelling blob cannot carry: the keep-local bodies (the
+      balloon: arm `s` skipped 58 records, its constraints, because the
+      anchor's keep-local record had reset them) and the client-only ones
+      (trafo pieces) - A3 restores with KEEP_UNKNOWN and keeps the anchor's
+      own records of the keep-local bodies.
+- **Findings, queued as their own items** (pre-existing, root-caused):
+  - **G1. A restored-active script that finished on its own never runs in
+    the live frames again.** `script_replay::restore` sets
+    `CKBEHAVIOR_ACTIVE` with `ModifyFlags` (script_replay.hpp
+    `restore_behavior`), but a script whose graph finished cleared its
+    scene descriptor's `CK_SCENEOBJECT_ACTIVE` (CK2 `CKBehavior.cpp`
+    `CheckBehaviorActivity`) and an owner with no active script left the
+    behaviour manager's object list (`CKBeObject::ExecuteBehaviors` ->
+    `RemoveObjectNextFrame`); only a scene activation adds it back
+    (`CKScene::ActivateScript` -> `AddObjectNextFrame`). A replay's
+    `execute_frame` runs it (it calls `Execute` directly); the first live
+    frame after the replay does not. Seen at the harness's root restore:
+    Level 11's `P_Modul_01_MF Script` (both copies) finished in the
+    warm-up run; restored active, its proximity's Last Check stayed 8 and
+    the far pusher never woke (73 m on a stone prop at the end). Any
+    rollback whose corrected history keeps alive a script the live run had
+    finished has it. Fix: the restore re-registers what it activates
+    (shared code, both hosts).
+  - **G2. A pass of a pooled sector inside the window** (#9; the sector
+    placement design): on Level 11 the pass of sector 2 re-places sector
+    1's `P_Modul_25`/`P_Modul_37` bridges (moved frames, rebuilt hinges),
+    which neither the blob nor the scripts put back: arm E 19.9 mm, A
+    30.5 mm, a 46.3 mm, the harness's own root 48.6 m. Not a resync
+    defect; closed by the sector placement step.
+  - **G3. A row write is not a no-op.** The binding's `set_body` (the
+    physics_RT body write behind `rollback_world::set_body`) is a beam:
+    writing a body's own pose, velocity and sleep back onto it rebuilds
+    the hull manager's gradient and values, resets a sleeping core's PSI
+    time stamp and delta, and rebuilds the entity matrix from the
+    quaternion (low bits). Measured: arm E on Level 11 with every row
+    written (`--resync-write-equal-rows`), 0 of 630 ticks exact, Pusher001
+    0.24 mm, a stone prop 4.3 cm. The same write serves every snapshot
+    correction of the live rollback, not only the resync, so a correction
+    that agrees with the client still perturbs it. The equal-row skip is
+    the resync's workaround; the fix (a write that leaves what the row
+    does not change) is its own item, shared code.
+
 **`--late-sector-check K T A` (new, step B1).** The client binding on the
 SimTool world.
 
@@ -1654,6 +1882,20 @@ travel?**
     - the x64-server vs x86-retail blob format;
     - size (101,375 bytes on L11 sector 1 alone, `ssc_l11.txt`).
   - It is decided before A3, never waived.
+- **Decided (step A2): the server's blob travels** (the user's standing
+  default, roadmap §2). Rows-only fails the gate: arm S 14.4 mm on the
+  arena's see-saw (a body unknown to the anchor's blob takes another place
+  in IVP's orders and pairs), arm R 8.4 mm on Pusher001 from a 5 cm
+  anchor (a substitute perturbation; the anchor's own contacts, mindists
+  and hull state); the server's blob is exact in every non-pooled scene,
+  the local level-end bodies aside. The cross-world restore test (x64, two
+  processes): size measured; the name mapping measured (one rename, the
+  own clone; with it the foreign blob is byte-identical and exact, without
+  it 1.9-5.9 mm); and a blob of another process is **refused** today (its
+  header names the capturing environment), so A3 adds a restore flag for
+  a travelling blob. **Still open, A3's first gate:** the x64-server vs
+  x86-retail format, not executed (no x86 SimTool build). Details in §7.2,
+  "As built (step A2)".
 
 **Q2. The reach of the re-step: 95 or 48?**
 

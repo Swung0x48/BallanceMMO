@@ -10,6 +10,10 @@
 //   BallanceMMOSimTool --root <game dir> --level N --savestate-check [scene switches] [--ticks N] [--rounds R]
 //       [--max-depth D] [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]
 //       [--savestate-trace PATH] [--stop-on-divergence] [--verbose]
+//   BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA] [--resync-stamp SECTOR TICK]
+//       [--resync-sector K] [--resync-drop TICK --drop <entity> <ball type>] [--resync-watch NAME]
+//       [--resync-player ID] [--resync-server-blob FILE [--resync-blob-rename OLD NEW] [--resync-blob-adopt-environment]]
+//       [--verbose]
 //
 // Replay mode boots base.cmo, loads the recorded level, waits for the retail
 // Gameplay_Ingame script to activate (the record's frame 0 anchor), performs
@@ -234,6 +238,31 @@ namespace {
         // sector 2..N of the level (--drop-settle ticks apart); see
         // run_portable_scripts_check.
         bool portable_scripts_check = false;
+        // --resync-check S B (resync design 7.2, step A2): the resync apply
+        // offline, arms E/R/S/A; S and B are ticks after the scene's root
+        // (see run_resync_check).
+        bool resync_check = false;
+        int resync_s = 0, resync_b = 0;
+        std::string resync_arms = "E";
+        std::vector<std::pair<int, int>> resync_stamps;   // --resync-stamp SECTOR TICK (default: sector 1 at 0)
+        int resync_sector = 0;            // --resync-sector K: the sector arms S and A shift
+        int resync_shift = 9;             // --resync-shift N
+        int resync_perturb_ticks = 17;    // --resync-perturb-ticks N: arm R's perturbation at S-N
+        double resync_perturb = 0.01;     // --resync-perturb M: metres (and 5*M m/s on awake bodies)
+        int resync_after = 600;           // --resync-after N: compared up to B+N
+        int resync_root = 240;            // --resync-root N: world ticks before the root (the retail ball parked)
+        int resync_harness_diag = -1;     // --resync-harness-diag T: warm-up vs restored run at root+T (scripts, blob)
+        int resync_drop = -1;             // --resync-drop TICK: player 1's --drop ball physicalized then
+        std::vector<std::string> resync_watch;   // --resync-watch NAME: the gate's bodies (with the K sector's)
+        double resync_gate_mm = 1.0;      // --resync-gate MM
+        bool resync_destroy_after_blob = false;   // --resync-destroy-after-blob: arm A's destroy after the blob (A/B)
+        bool resync_reregister = false;   // --resync-reregister: the apply re-registers restored-active scripts (A/B)
+        bool resync_write_equal_rows = false;   // --resync-write-equal-rows: write rows the body already has (A/B)
+        int resync_player = 1;            // --resync-player ID: the player id this process joins (its clone "_BMMO_<ID>")
+        std::string resync_server_blob;   // --resync-server-blob FILE: another process's server blob for the r/s/a arms
+        std::vector<std::pair<std::string, std::string>> resync_blob_rename;   // --resync-blob-rename OLD NEW
+        bool resync_blob_adopt_env = false;   // --resync-blob-adopt-environment: the foreign blob's environment id := ours
+        bool resync_perturb_scripts = false;  // --resync-perturb-scripts: arm R as 7.2 words it (scripts of S-N restored at S-N)
         bool ignore_ov = false;           // --ignore-ov: --savestate-diff leaves the overlap tree out
         bool ignore_order = false;        // --ignore-order: ...and the cache ring and unit numbering
         int max_diff = 1;                 // --max-diff N: --savestate-diff lists up to N differing fields
@@ -372,6 +401,39 @@ namespace {
             else if (arg == "--savestate-describe") { if (!(v = next())) return false; out.savestate_describe = v; }
             else if (arg == "--describe-script") { if (!(v = next())) return false; out.describe_script = v; }
             else if (arg == "--portable-scripts-check") out.portable_scripts_check = true;
+            else if (arg == "--resync-check") {
+                out.resync_check = true;
+                if (!(v = next())) return false; out.resync_s = std::atoi(v);
+                if (!(v = next())) return false; out.resync_b = std::atoi(v);
+            }
+            else if (arg == "--resync-arms") { if (!(v = next())) return false; out.resync_arms = v; }
+            else if (arg == "--resync-stamp") {
+                int sector = 0;
+                if (!(v = next())) return false; sector = std::atoi(v);
+                if (!(v = next())) return false; out.resync_stamps.emplace_back(sector, std::atoi(v));
+            }
+            else if (arg == "--resync-sector") { if (!(v = next())) return false; out.resync_sector = std::atoi(v); }
+            else if (arg == "--resync-shift") { if (!(v = next())) return false; out.resync_shift = std::atoi(v); }
+            else if (arg == "--resync-perturb-ticks") { if (!(v = next())) return false; out.resync_perturb_ticks = std::atoi(v); }
+            else if (arg == "--resync-perturb") { if (!(v = next())) return false; out.resync_perturb = std::atof(v); }
+            else if (arg == "--resync-harness-diag") { if (!(v = next())) return false; out.resync_harness_diag = std::atoi(v); }
+            else if (arg == "--resync-root") { if (!(v = next())) return false; out.resync_root = std::atoi(v); }
+            else if (arg == "--resync-after") { if (!(v = next())) return false; out.resync_after = std::atoi(v); }
+            else if (arg == "--resync-drop") { if (!(v = next())) return false; out.resync_drop = std::atoi(v); }
+            else if (arg == "--resync-watch") { if (!(v = next())) return false; out.resync_watch.emplace_back(v); }
+            else if (arg == "--resync-gate") { if (!(v = next())) return false; out.resync_gate_mm = std::atof(v); }
+            else if (arg == "--resync-destroy-after-blob") out.resync_destroy_after_blob = true;
+            else if (arg == "--resync-reregister") out.resync_reregister = true;
+            else if (arg == "--resync-write-equal-rows") out.resync_write_equal_rows = true;
+            else if (arg == "--resync-player") { if (!(v = next())) return false; out.resync_player = std::atoi(v); }
+            else if (arg == "--resync-server-blob") { if (!(v = next())) return false; out.resync_server_blob = v; }
+            else if (arg == "--resync-blob-adopt-environment") out.resync_blob_adopt_env = true;
+            else if (arg == "--resync-perturb-scripts") out.resync_perturb_scripts = true;
+            else if (arg == "--resync-blob-rename") {
+                std::string from;
+                if (!(v = next())) return false; from = v;
+                if (!(v = next())) return false; out.resync_blob_rename.emplace_back(from, v);
+            }
             else if (arg == "--ignore-ov") out.ignore_ov = true;
             else if (arg == "--ignore-order") out.ignore_order = true;
             else if (arg == "--max-diff") { if (!(v = next())) return false; out.max_diff = std::atoi(v); }
@@ -3568,6 +3630,1446 @@ namespace {
         return failures == 0 ? 0 : 3;
     }
 
+    // ------------------------------------------------------------------
+    // --resync-check S B (docs/resync-and-sector-timing-design.md 7.2, step
+    // A2): the resync apply of 2.6 offline, against the server's own world
+    // (physics_world), with no wire.  One process, one world; every run
+    // starts from the scene's ROOT (--resync-root whole ticks after player 1
+    // joins, before any stamp), put back the way a rollback restores (the
+    // mechanism scripts with replay_activation, this run's births destroyed
+    // with their joint handles released and their entities put back where
+    // their Physicalize found them, the savestate, the world's counters) and,
+    // harness-only, every 3D entity's matrix, visibility and parent, every
+    // data-array cell, and the restored-active scripts re-registered with the
+    // behaviour manager (rc_unregistered_scripts); a warm-up run from the
+    // live root checks that.  Ticks on the command line count from the root;
+    // a "boundary t" is the world before the step of tick t, and the state
+    // "at S" is boundary S (the server's end-of-tick state of S-1).
+    //
+    //   schedule  --resync-stamp SECTOR TICK (player 1's Sector events;
+    //             default sector 1 at 0), --resync-drop TICK (player 1's
+    //             --drop ball physicalized then; it must be before every
+    //             arm's divergence)
+    //   straight  root -> B+N (--resync-after, 600): at every boundary of
+    //             [S, B+N] the movable bodies and the blob; at S the server's
+    //             resync state: rows (snapshot_for_journal = a full
+    //             snapshot's bodies), the portable script record (session
+    //             selection) and the union (the world's step state).
+    //   arms      each an ANCHOR run from the root to B, its own world's
+    //             state kept at S (blob, local v2 scripts, counters, contacts:
+    //             the synthetic anchor of 2.6.1), then the APPLY at B and the
+    //             re-step S..B+N with the straight schedule's events from S on:
+    //       E     the anchor run is the straight one;
+    //       R     ... perturbed at S-17 (--resync-perturb-ticks): every
+    //             movable body moved by M (--resync-perturb, 1 cm) in x and
+    //             z, awake ones 5*M m/s faster, so the anchor's contacts,
+    //             mindists, queues and calm references at S are its own
+    //             (resync design 7.2 words arm R as the scripts of S-17
+    //             restored at S-17 and stepped: --resync-perturb-scripts);
+    //       S     ... with sector K (--resync-sector) stamped 9
+    //             (--resync-shift) ticks later: K's bodies exist in the
+    //             server's state at S but not in the anchor's blob;
+    //       A     ... with K stamped 9 ticks earlier: K's bodies exist in the
+    //             anchor at S, the server's pass of K comes after S.
+    //   apply     (2.6.3/2.6.4, the restore order of rollback_engine::
+    //             restore_and_replay): the world's counters from the anchor
+    //             with the server's union; the server's portable record
+    //             localized against the anchor's v2 (keep_local_script) and
+    //             restored with replay_activation; the bodies the anchor run
+    //             made for a pass the server's union does not have at S
+    //             destroyed and put back (arm A; before the blob, like the
+    //             engine's births, or after it with
+    //             --resync-destroy-after-blob); the anchor's blob (lenient,
+    //             as the clients run it); every row written (wake/freeze as
+    //             the row says, rechecked when it moves the body or the blob
+    //             did not know it); live bodies the blob did not know and no
+    //             row covers rechecked at once (resync mode: no deferral);
+    //             the anchor's own recorded contacts re-made for the rowed
+    //             bodies; then whole world ticks S..B+N.
+    //   r, s, a   the same cases applied with the SERVER's blob of S instead
+    //             of the anchor's (resync design 9 Q1's alternative); with
+    //             --resync-server-blob FILE, another process's server blob
+    //             (its --savestate-trace PREFIX.server.blob), its names
+    //             mapped by --resync-blob-rename OLD NEW (the cross-world
+    //             restore test: run the capturing process as --resync-player
+    //             1 and this one as another id, so the own clone's name
+    //             differs, as the own retail ball's does on a client);
+    //             --resync-blob-adopt-environment writes this process's
+    //             environment identity into its header (the restore refuses
+    //             a blob of another environment).
+    //   rows      a row the body already has bit for bit (and the blob knows
+    //             the body) is not written: the beam would lose the hull
+    //             manager's state, a sleeping core's PSI stamp and the entity
+    //             matrix's low bits (--resync-write-equal-rows is the A/B).
+    //   result    per arm: the blob of every boundary (S, B+N] against the
+    //             straight run's (exact ticks), and per body the largest
+    //             position error over (S, B] and over (B, B+N].  The gate
+    //             bodies are --resync-watch plus the movable bodies of
+    //             sector K.  E passes when every blob is identical; R and S
+    //             when every gate body stays <= --resync-gate mm (1) over
+    //             (B, B+N]; A when K's bodies are bit-exact from their
+    //             re-birth on and the rest stay within arm R's worst error
+    //             (when R ran too; else <= the gate).  Arm S also reports
+    //             K's constraints after the apply (each core's named
+    //             controllers against the server's blob at S).  An arm whose
+    //             schedule does not produce its case (S: K born in the
+    //             straight run before S and in the arm's after it; A: K
+    //             passed by the server after S and born in the arm's before
+    //             it) is INVALID and fails the check.  A gate body never
+    //             compared fails its arm; a --resync-watch name that is not
+    //             a movable body refuses the run.  The harness line (warm-up
+    //             vs restored root) is informational: all runs share the
+    //             restored root.
+    //
+    // The re-step is the server world's own whole tick, not a client's
+    // replay recipe (the selected scripts' frame + PreSimulate + the physics
+    // step): that recipe's fidelity is --savestate-check --frames' and the
+    // sector-activation replay's, and the union re-derivation inside a
+    // replay is B1's.  This check measures what the apply's STATE leaves
+    // behind (resync design 9 Q1).
+    // ------------------------------------------------------------------
+    struct rc_pose {
+        double p[3] = {};
+        double q[4] = {};
+        float v[3] = {};
+        float w[3] = {};
+        bool sim = false;
+    };
+    using rc_poses = std::map<std::string, rc_pose>;
+
+    struct rc_birth {
+        uint32_t tick = 0;
+        bmmo::session::local_birth birth;
+    };
+
+    struct rc_state {
+        uint32_t tick = 0;
+        std::vector<uint8_t> blob;
+        std::vector<uint8_t> v2;
+        bmmo::sim::physics_world::step_state counters;
+        std::map<std::string, std::vector<bmmo_physics_contact>> contacts;
+        std::vector<bmmo::session::body_state> rows;   // the server's
+        std::vector<uint8_t> portable;                 // the server's
+    };
+
+    struct rc_event {
+        uint32_t tick = 0;
+        int kind = 0;     // 0 stamp, 1 drop, 2 perturb
+        int sector = 0;
+    };
+
+    struct rc_tick {
+        rc_poses poses;
+        std::vector<uint8_t> blob;
+        uint64_t blob_hash = 0;
+    };
+
+    // Every movable body's state, by name (a repeated name gets "#n").
+    rc_poses rc_capture_poses(CKIpionManager* physics) {
+        rc_poses out;
+        std::vector<bmmo_physics_body_state> bodies(256);
+        int count = bmmo::physics::list_bodies(physics, bodies.data(), static_cast<int>(bodies.size()));
+        if (count > static_cast<int>(bodies.size())) {
+            bodies.resize(static_cast<size_t>(count));
+            count = bmmo::physics::list_bodies(physics, bodies.data(), static_cast<int>(bodies.size()));
+        }
+        bodies.resize(static_cast<size_t>(std::max(0, count)));
+        for (const auto& b: bodies) {
+            if (!b.movable) continue;
+            std::string name = b.name;
+            for (int n = 2; out.count(name); ++n) name = std::string(b.name) + "#" + std::to_string(n);
+            rc_pose& p = out[name];
+            for (int k = 0; k < 3; ++k) { p.p[k] = b.position[k]; p.v[k] = b.linear[k]; p.w[k] = b.angular[k]; }
+            for (int k = 0; k < 4; ++k) p.q[k] = b.rotation[k];
+            p.sim = b.simulated;
+        }
+        return out;
+    }
+
+    bool rc_same_bits(const rc_pose& a, const rc_pose& b) {
+        return std::memcmp(a.p, b.p, sizeof a.p) == 0 && std::memcmp(a.q, b.q, sizeof a.q) == 0
+            && std::memcmp(a.v, b.v, sizeof a.v) == 0 && std::memcmp(a.w, b.w, sizeof a.w) == 0 && a.sim == b.sim;
+    }
+
+    double rc_distance(const rc_pose& a, const rc_pose& b) {
+        double d = 0.0;
+        for (int k = 0; k < 3; ++k) d += (a.p[k] - b.p[k]) * (a.p[k] - b.p[k]);
+        return std::sqrt(d);
+    }
+
+    // "core <name> ... controllers=[...]" of a describe_savestate text: the
+    // named controllers (kind 1: constraints, gravity, forces) per core,
+    // the friction handles (kind 0, whose system index is bookkeeping) left
+    // out.
+    std::map<std::string, std::string> rc_named_controllers(const std::string& text) {
+        std::map<std::string, std::string> out;
+        size_t pos = 0;
+        while (pos < text.size()) {
+            const size_t end = text.find('\n', pos);
+            const std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            pos = end == std::string::npos ? text.size() : end + 1;
+            if (line.rfind("core ", 0) != 0) continue;
+            const size_t space = line.find(' ', 5);
+            const std::string name = line.substr(5, space == std::string::npos ? std::string::npos : space - 5);
+            const size_t at = line.find(" controllers=[");
+            if (at == std::string::npos) continue;
+            const size_t close = line.find(']', at);
+            const std::string list = line.substr(at + 14, close == std::string::npos ? std::string::npos : close - at - 14);
+            std::vector<std::string> named;
+            size_t p = 0;
+            while ((p = list.find('{', p)) != std::string::npos) {
+                const size_t q = list.find('}', p);
+                const std::string entry = list.substr(p + 1, q == std::string::npos ? std::string::npos : q - p - 1);
+                p = q == std::string::npos ? list.size() : q + 1;
+                if (entry.rfind("k1 ", 0) != 0) continue;
+                // "k1 s<sys> p<part> <priority> <name>": the priority and the name
+                size_t f = entry.find(' ', 3);
+                f = f == std::string::npos ? f : entry.find(' ', f + 1);
+                named.push_back(f == std::string::npos ? entry : entry.substr(f + 1));
+            }
+            std::sort(named.begin(), named.end());
+            std::string joined;
+            for (const auto& n: named) joined += (joined.empty() ? "" : ",") + n;
+            out[name] = joined;
+        }
+        return out;
+    }
+
+    // A birth's pass (design 2.6.3): the pass at M with M + 5 == b, else the
+    // newest with M + 5 <= b, else the newest with M <= b; 0 = none (a body
+    // of the root's world).
+    int pass_of_list(const std::vector<std::pair<uint32_t, int>>& passes, uint32_t b) {
+        for (const auto& [m, s]: passes) if (m + 5 == b) return s;
+        int found = 0;
+        for (const auto& [m, s]: passes) if (m + 5 <= b) found = s;
+        if (found) return found;
+        for (const auto& [m, s]: passes) if (m <= b) found = s;
+        return found;
+    }
+
+    std::vector<rc_birth> births_of_list(const std::vector<rc_birth>& births,
+                                         const std::vector<std::pair<uint32_t, int>>& passes, int sector) {
+        std::vector<rc_birth> out;
+        for (const auto& b: births) if (pass_of_list(passes, b.tick) == sector) out.push_back(b);
+        return out;
+    }
+
+    // Every data array's cells (the harness's root restore): the level's
+    // run-time tables (PH's Set? column, the manager's and the modules'
+    // cells) are no script's state and no body's, so neither record carries
+    // them.  Integer, float and object cells by value, strings by text,
+    // parameter cells by their data bytes.
+    struct rc_cell {
+        CK_ID array = 0;
+        int row = 0, column = 0;
+        CK_ARRAYTYPE type = CKARRAYTYPE_INT;
+        CKUINTPTR value = 0;
+        std::string text;
+        std::vector<uint8_t> bytes;
+    };
+
+    std::vector<rc_cell> rc_capture_arrays(CKContext* context, std::map<CK_ID, int>& rows) {
+        std::vector<rc_cell> out;
+        rows.clear();
+        const int count = context->GetObjectsCountByClassID(CKCID_DATAARRAY);
+        CK_ID* ids = context->GetObjectsListByClassID(CKCID_DATAARRAY);
+        for (int i = 0; i < count; ++i) {
+            auto* a = CKDataArray::Cast(context->GetObject(ids[i]));
+            if (!a) continue;
+            rows[ids[i]] = a->GetRowCount();
+            for (int r = 0; r < a->GetRowCount(); ++r)
+                for (int c = 0; c < a->GetColumnCount(); ++c) {
+                    rc_cell cell;
+                    cell.array = ids[i];
+                    cell.row = r;
+                    cell.column = c;
+                    cell.type = a->GetColumnType(c);
+                    CKUINTPTR* e = a->GetElement(static_cast<size_t>(r), static_cast<size_t>(c));
+                    if (!e) continue;
+                    if (cell.type == CKARRAYTYPE_STRING) {
+                        const char* t = reinterpret_cast<const char*>(*e);
+                        cell.text = t ? t : "";
+                    } else if (cell.type == CKARRAYTYPE_PARAMETER) {
+                        auto* p = reinterpret_cast<CKParameter*>(*e);
+                        if (!p) continue;
+                        const auto* data = static_cast<const uint8_t*>(p->GetReadDataPtr(FALSE));
+                        if (data) cell.bytes.assign(data, data + p->GetDataSize());
+                    } else {
+                        cell.value = *e;
+                    }
+                    out.push_back(std::move(cell));
+                }
+        }
+        return out;
+    }
+
+    // Writes the cells back where they differ; `changed` gets "array:cells"
+    // of what differed.
+    int rc_restore_arrays(CKContext* context, const std::vector<rc_cell>& cells, const std::map<CK_ID, int>& rows,
+                          std::string& changed) {
+        std::map<std::string, int> by_array;
+        int written = 0;
+        for (const auto& [id, n]: rows)
+            if (auto* a = CKDataArray::Cast(context->GetObject(id)); a && a->GetRowCount() != n)
+                changed += std::string(" ") + (a->GetName() ? a->GetName() : "?") + ":rows " + std::to_string(a->GetRowCount())
+                         + "->" + std::to_string(n) + "(not restored)";
+        for (const auto& cell: cells) {
+            auto* a = CKDataArray::Cast(context->GetObject(cell.array));
+            if (!a || cell.row >= a->GetRowCount() || cell.column >= a->GetColumnCount()) continue;
+            CKUINTPTR* e = a->GetElement(static_cast<size_t>(cell.row), static_cast<size_t>(cell.column));
+            if (!e) continue;
+            bool differs = false;
+            if (cell.type == CKARRAYTYPE_STRING) {
+                const char* t = reinterpret_cast<const char*>(*e);
+                if (cell.text != (t ? t : "")) {
+                    differs = true;
+                    a->SetElementStringValue(cell.row, cell.column, const_cast<CKSTRING>(cell.text.c_str()));
+                }
+            } else if (cell.type == CKARRAYTYPE_PARAMETER) {
+                auto* p = reinterpret_cast<CKParameter*>(*e);
+                if (!p || static_cast<size_t>(p->GetDataSize()) != cell.bytes.size()) continue;
+                auto* data = static_cast<uint8_t*>(p->GetWriteDataPtr());
+                if (data && std::memcmp(data, cell.bytes.data(), cell.bytes.size()) != 0) {
+                    differs = true;
+                    std::memcpy(data, cell.bytes.data(), cell.bytes.size());
+                }
+            } else if (*e != cell.value) {
+                differs = true;
+                *e = cell.value;
+            }
+            if (differs) {
+                ++written;
+                ++by_array[a->GetName() ? a->GetName() : "?"];
+            }
+        }
+        for (const auto& [name, n]: by_array) changed += " " + name + ":" + std::to_string(n);
+        return written;
+    }
+
+    // The selected scripts the script record wrote ACTIVE whose activity the
+    // behaviour manager does not know: script_replay::restore sets
+    // CKBEHAVIOR_ACTIVE with ModifyFlags (script_replay.hpp restore_behavior),
+    // but a script that finished on its own cleared its scene descriptor's
+    // CK_SCENEOBJECT_ACTIVE (CK2 CKBehavior.cpp CheckBehaviorActivity) and an
+    // owner with no active script left the manager's object list
+    // (CKBeObject::ExecuteBehaviors -> RemoveObjectNextFrame); only a scene
+    // activation puts it back (CKScene::ActivateScript -> AddObjectNextFrame).
+    // So the live frames never execute such a script again (a replay's
+    // execute_frame does: it calls Execute directly).  Counted, and with `fix`
+    // re-registered: the scene flag set and the owner added for the next
+    // frame, the way ActivateScript does it, without its next-frame flags or
+    // callbacks (the record already holds the script's state).
+    int rc_unregistered_scripts(CKContext* context, const bmmo::game::script_replay::selection& sel, bool fix,
+                                std::string* names = nullptr) {
+        CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+        if (!scene) return 0;
+        int count = 0;
+        for (CK_ID id: sel.scripts) {
+            auto* beh = CKBehavior::Cast(context->GetObject(id));
+            if (!beh || !beh->IsActive()) continue;
+            const CKDWORD flags = scene->GetObjectFlags(beh);
+            if (flags & CK_SCENEOBJECT_ACTIVE) continue;
+            ++count;
+            if (names && count <= 8) {
+                CKBeObject* owner = beh->GetOwner();
+                *names += std::string(" ") + (owner && owner->GetName() ? owner->GetName() : "?") + "/"
+                        + (beh->GetName() ? beh->GetName() : "?");
+            }
+            if (!fix) continue;
+            scene->SetObjectFlags(beh, static_cast<CK_SCENEOBJECT_FLAGS>(flags | CK_SCENEOBJECT_ACTIVE));
+            if (CKBeObject* owner = beh->GetOwner()) context->GetBehaviorManager()->AddObjectNextFrame(owner);
+        }
+        return count;
+    }
+
+    int run_resync_check(const arguments& args) {
+        using bmmo::game::script_replay;
+        // Unbuffered: MSVC's _IOLBF is full buffering, and a fast-fail
+        // (heap corruption) takes the buffer with it.
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        const int after = args.resync_after;
+        if (args.resync_s < 1 || args.resync_b < args.resync_s || after < 1) {
+            std::fprintf(stderr, "--resync-check S B needs 1 <= S <= B and --resync-after >= 1\n");
+            return 2;
+        }
+        for (char arm: args.resync_arms)
+            if (std::string("ERSArsa").find(arm) == std::string::npos) {
+                std::fprintf(stderr, "--resync-arms takes E, R, S and A (r, s, a: the same with the server's blob)\n");
+                return 2;
+            }
+        const bool want_s = args.resync_arms.find_first_of("Ss") != std::string::npos;
+        const bool want_a = args.resync_arms.find_first_of("Aa") != std::string::npos;
+        const bool want_r = args.resync_arms.find_first_of("Rr") != std::string::npos;
+        std::vector<std::pair<int, int>> stamps = args.resync_stamps;
+        if (stamps.empty()) stamps.emplace_back(1, 0);
+        const int k_sector = args.resync_sector;
+        if ((want_s || want_a)
+                && std::none_of(stamps.begin(), stamps.end(), [&](const std::pair<int, int>& s) { return s.first == k_sector; })) {
+            std::fprintf(stderr, "arms S and A shift the stamp of --resync-sector K, which --resync-stamp must schedule\n");
+            return 2;
+        }
+        const bool drop = args.resync_drop >= 0;
+        if (drop && args.drop_entity.empty() && !args.have_drop_at) {
+            std::fprintf(stderr, "--resync-drop needs --drop ENTITY TYPE (and optionally --drop-at X Y Z)\n");
+            return 2;
+        }
+        if (drop && want_r && args.resync_drop >= args.resync_s - args.resync_perturb_ticks) {
+            std::fprintf(stderr, "--resync-drop must come before arm R's perturbation (S-%d)\n", args.resync_perturb_ticks);
+            return 2;
+        }
+        if (drop && args.resync_drop >= args.resync_s) {
+            std::fprintf(stderr, "--resync-drop must come before S (a lifecycle event of the re-step is not modelled)\n");
+            return 2;
+        }
+        // Arm R's perturbation is an event of the anchor run, which starts at
+        // the root: at or before the root it would never be applied and arm R
+        // would quietly be arm E.
+        if (want_r && (args.resync_perturb_ticks < 1 || args.resync_s <= args.resync_perturb_ticks)) {
+            std::fprintf(stderr, "arm R needs 1 <= --resync-perturb-ticks < S (the perturbation at S-%d is before the root)\n",
+                         args.resync_perturb_ticks);
+            return 2;
+        }
+        // Arm A is judged against arm R's band, so R must run first.
+        {
+            const size_t first_a = args.resync_arms.find_first_of("Aa");
+            const size_t first_r = args.resync_arms.find('R');
+            if (first_a != std::string::npos && first_r != std::string::npos && first_r > first_a) {
+                std::fprintf(stderr, "--resync-arms: R must come before A and a (they are judged against R's band)\n");
+                return 2;
+            }
+        }
+        if (args.resync_player < 1) {
+            std::fprintf(stderr, "--resync-player needs an id >= 1\n");
+            return 2;
+        }
+        if (!args.resync_server_blob.empty() && args.resync_arms.find_first_of("rsa") == std::string::npos) {
+            std::fprintf(stderr, "--resync-server-blob is used by the r, s and a arms only\n");
+            return 2;
+        }
+        const uint32_t pid = static_cast<uint32_t>(args.resync_player);
+
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        std::string error;
+        if (!world->add_player(pid, 0, error)) {
+            std::fprintf(stderr, "add_player failed: %s\n", error.c_str());
+            return 1;
+        }
+        CKContext* context = world->engine().context();
+        CKIpionManager* physics = world->physics();
+        if (!physics || !physics->GetEnvironment()) {
+            std::fprintf(stderr, "resync-check: no physics environment\n");
+            return 1;
+        }
+        const script_replay::selection sel = bmmo::game::session_script_selection(context);
+        bmmo::game::script_replay_hooks hooks;
+        hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
+            bmmo_physics_force_block state{};
+            std::string e;
+            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
+            out.exists = state.exists != 0;
+            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+            return true;
+        };
+        hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
+            bmmo_physics_force_block state{};
+            state.exists = in.exists ? 1 : 0;
+            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+            std::string e;
+            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
+        };
+        const script_replay::keep_local_fn keep_rule = [](const std::string& owner, const std::string& script) {
+            return bmmo::session::keep_local_script(owner, script);
+        };
+        // The client's binding over this world: the body, recheck, contact and
+        // savestate writes are the rollback's own code paths (lenient, as both
+        // clients run the savestate).
+        bmmo::physics::physics_direct backend(physics);
+        bmmo::session::rollback_binding_options binding_options;
+        binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+        binding_options.savestate = true;
+        binding_options.savestate_flags = 0u;
+        std::string blob_refusal;   // the last set_savestate's error (empty when it was taken)
+        binding_options.on_savestate_restored = [&blob_refusal](bool ok, const std::string& e,
+                                                                const bmmo::session::savestate_outcome&) {
+            blob_refusal = ok ? std::string() : e;
+        };
+        bmmo::session::rollback_world binding = bmmo::session::bind_rollback_world(backend, binding_options);
+
+        // The PH table: which module is in which sector (the sector K of the
+        // arms is chosen from this).
+        if (auto* ph = CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>("PH"), CKCID_DATAARRAY, nullptr))) {
+            int column = -1, name_column = 0;
+            std::string columns;
+            for (int c = 0; c < ph->GetColumnCount(); ++c) {
+                const char* cn = ph->GetColumnName(c);
+                if (cn && std::strcmp(cn, "Sector") == 0) column = c;
+                if (cn && (std::strcmp(cn, "Objekt") == 0 || std::strcmp(cn, "Object") == 0 || std::strcmp(cn, "Name") == 0
+                           || std::strcmp(cn, "Entity") == 0))
+                    name_column = c;
+                columns += std::string(" ") + (cn ? cn : "?");
+            }
+            if (args.verbose) std::printf("PH columns:%s\n", columns.c_str());
+            std::map<int, std::string> by_sector;
+            for (int r = 0; column >= 0 && r < ph->GetRowCount(); ++r) {
+                int sector = 0;
+                char name[256] = {};
+                if (!ph->GetElementValue(r, column, &sector)) continue;
+                ph->GetElementStringValue(r, name_column, name, static_cast<int>(sizeof(name)));
+                by_sector[sector] += std::string(by_sector[sector].empty() ? "" : " ") + name;
+            }
+            for (const auto& [sector, names]: by_sector) std::printf("PH sector %d: %s\n", sector, names.c_str());
+        }
+
+        // The root: --resync-root whole world ticks first, with no event, so
+        // the retail ball is parked (its body removed, design 9.x) and the
+        // retail blocks that then retry every frame (Sound_Manager's
+        // collision detections, Gameplay_Ingame's wake-up) are queued as they
+        // will be at every later restore: the savestate refuses a PreSimulate
+        // queue that differs from its own.
+        if (!settle_world(*world, std::max(0, args.resync_root))) return 1;
+        const uint32_t root_tick = world->tick_index();
+        const uint32_t S = root_tick + static_cast<uint32_t>(args.resync_s);
+        const uint32_t B = root_tick + static_cast<uint32_t>(args.resync_b);
+        const uint32_t end = B + static_cast<uint32_t>(after);
+        std::printf("resync-check level=%d root=%u S=%u B=%u end=%u (depth %u) arms=%s K=%d shift=%d perturb=%.4f m at S-%d"
+                    " selected=%zu gate=%.3f mm\n", world->level(), root_tick, S, B, end, B - S, args.resync_arms.c_str(),
+                    k_sector, args.resync_shift, args.resync_perturb, args.resync_perturb_ticks, sel.scripts.size(),
+                    args.resync_gate_mm);
+
+        // ---- the run machinery
+        std::vector<rc_birth> births;                  // this run's, in order
+        std::vector<std::pair<uint32_t, int>> passes;  // this run's (tick stepped, sector)
+        std::set<int> active_before;
+        std::set<std::string> ball_names;
+        for (const auto& row: world->ball_rows()) ball_names.insert(row.name);
+        const auto is_ball = [&](const std::string& name) {
+            return name.find("_BMMO_") != std::string::npos || ball_names.count(name) != 0;
+        };
+        const auto drain = [&](uint32_t t) {
+            const std::string events = bmmo::physics::drain_event_log(physics);
+            bmmo::session::parse_event_log(events, [&](const std::string& kind, const std::string& text) {
+                if (kind != "recipe") return;
+                rc_birth b;
+                if (!bmmo::session::parse_recipe_event(text, b.birth) || is_ball(b.birth.name)) return;
+                b.tick = t;
+                births.push_back(std::move(b));
+            });
+        };
+        const auto note_passes = [&](uint32_t t) {
+            const std::set<int>& now = world->active_sectors();
+            for (int s: now) if (!active_before.count(s)) passes.emplace_back(t, s);
+            active_before = now;
+        };
+        const auto pass_of = [&](uint32_t b) { return pass_of_list(passes, b); };
+        const auto births_of = [&](int sector) { return births_of_list(births, passes, sector); };
+        const auto ball_entity = [&]() {
+            return world->ball_rows()[world->player_ball_type(pid)].name + "_BMMO_" + std::to_string(pid);
+        };
+        const auto apply_events = [&](uint32_t t, const std::vector<rc_event>& events) -> bool {
+            for (const auto& e: events) {
+                if (e.tick != t) continue;
+                std::string event_error;
+                if (e.kind == 0) {
+                    bmmo::sim::lifecycle_event where;
+                    where.type = bmmo::session::event_type::Sector;
+                    where.sector = e.sector;
+                    where.tick = t;
+                    if (!world->apply_event(pid, where, event_error)) {
+                        std::fprintf(stderr, "sector event failed: %s\n", event_error.c_str());
+                        return false;
+                    }
+                } else if (e.kind == 1) {
+                    VxVector spawn(args.drop_at[0], args.drop_at[1], args.drop_at[2]);
+                    if (!args.have_drop_at) {
+                        auto* target = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
+                            const_cast<CKSTRING>(args.drop_entity.c_str()), CKCID_3DENTITY, nullptr));
+                        if (!target) {
+                            std::fprintf(stderr, "no 3D entity named %s (pass --drop-at X Y Z)\n", args.drop_entity.c_str());
+                            return false;
+                        }
+                        target->GetPosition(&spawn);
+                    }
+                    spawn.y += args.drop_height;
+                    bmmo::sim::lifecycle_event event;
+                    event.type = bmmo::session::event_type::Physicalize;
+                    event.ball_type = static_cast<uint8_t>(args.drop_ball);
+                    event.position[0] = spawn.x;
+                    event.position[1] = spawn.y;
+                    event.position[2] = spawn.z;
+                    event.recipe = world->retail_recipe(event.ball_type);
+                    event.tick = t;
+                    if (!world->apply_event(pid, event, event_error)) {
+                        std::fprintf(stderr, "physicalize failed: %s\n", event_error.c_str());
+                        return false;
+                    }
+                } else if (e.kind == 2 && args.resync_perturb_scripts) {
+                    // Arm R as 7.2 words it: the selected scripts of S-N
+                    // captured and restored at S-N (replay_activation), then
+                    // stepped - a client rollback's script restore, with no
+                    // body moved.
+                    std::vector<uint8_t> record;
+                    std::string e2;
+                    if (!script_replay::capture(context, sel, hooks, record)
+                            || !script_replay::restore(context, sel, hooks, record, &e2, nullptr, nullptr, true)) {
+                        std::fprintf(stderr, "arm R: the script restore at %u failed: %s\n", t, e2.c_str());
+                        return false;
+                    }
+                    if (args.verbose) std::printf("  scripts restored at tick %u\n", t);
+                } else if (e.kind == 2) {
+                    // Arm R: every movable body moved, the awake ones sped up.
+                    const double m = args.resync_perturb;
+                    int moved = 0;
+                    for (const auto& [name, pose]: rc_capture_poses(physics)) {
+                        if (name.find('#') != std::string::npos) continue;
+                        bmmo_physics_body_state state{};
+                        if (!binding.get_body(name, state)) continue;
+                        state.position[0] += m;
+                        state.position[2] += m;
+                        if (state.simulated) {
+                            state.linear[0] += static_cast<float>(5.0 * m);
+                            state.linear[2] += static_cast<float>(5.0 * m);
+                        }
+                        if (binding.set_body(name, state, bmmo::session::wake_mode::keep, true)) ++moved;
+                    }
+                    if (args.verbose) std::printf("  perturbed %d bodies at tick %u\n", moved, t);
+                }
+            }
+            return true;
+        };
+        // Steps until boundary `stop`, calling `at` at every boundary on the
+        // way (before that boundary's events), `stop` included.
+        const auto run_until = [&](uint32_t stop, const std::vector<rc_event>& events,
+                                   const std::function<bool(uint32_t)>& at) -> bool {
+            for (;;) {
+                const uint32_t t = world->tick_index();
+                if (at && !at(t)) return false;
+                if (t >= stop) return true;
+                if (!apply_events(t, events)) return false;
+                std::string tick_error;
+                if (!world->tick(tick_error)) {
+                    std::fprintf(stderr, "tick %u failed: %s\n", t, tick_error.c_str());
+                    return false;
+                }
+                drain(t);
+                note_passes(t);
+            }
+        };
+        const auto capture_state = [&](rc_state& out, bool server) -> bool {
+            out = rc_state{};
+            out.tick = world->tick_index();
+            std::string e;
+            if (!bmmo::physics::get_savestate(physics, out.blob, e)) {
+                std::fprintf(stderr, "savestate capture failed at %u: %s\n", out.tick, e.c_str());
+                return false;
+            }
+            if (!script_replay::capture(context, sel, hooks, out.v2)) {
+                std::fprintf(stderr, "script capture failed at %u\n", out.tick);
+                return false;
+            }
+            out.counters = world->capture_step_state();
+            for (const auto& [name, pose]: rc_capture_poses(physics)) {
+                if (name.find('#') != std::string::npos) continue;
+                std::vector<bmmo_physics_contact> contacts;
+                if (binding.get_contacts(name, contacts) > 0) out.contacts[name] = std::move(contacts);
+            }
+            if (server) {
+                world->snapshot_for_journal(out.rows);
+                if (!script_replay::capture_portable(context, sel, hooks, out.portable, &e)) {
+                    std::fprintf(stderr, "portable capture failed at %u: %s\n", out.tick, e.c_str());
+                    return false;
+                }
+            }
+            return true;
+        };
+        // Destroys births (newest first, each name once), the event log
+        // muted, each entity put back where its first listed Physicalize
+        // found it, and the joint handles the scripts held on it nulled
+        // (IVP freed those joints with the body) - the rollback's
+        // destroy_body + put_back_birth + the script binding's
+        // release_joints (rollback_binding_scripts.hpp).
+        const auto destroy = [&](const std::vector<rc_birth>& list) {
+            std::set<std::string> done;
+            int destroyed = 0;
+            bmmo::physics::set_event_log_muted(true);
+            for (auto it = list.rbegin(); it != list.rend(); ++it) {
+                if (!done.insert(it->birth.name).second) continue;
+                const auto first = std::find_if(list.begin(), list.end(),
+                                                [&](const rc_birth& b) { return b.birth.name == it->birth.name; });
+                const std::vector<CKBehavior*> held = script_replay::joints_on(context, sel, it->birth.name);
+                std::string e;
+                if (bmmo::physics::unphysicalize(physics, it->birth.name.c_str(), e)) {
+                    ++destroyed;
+                    script_replay::release_joints(held);
+                }
+                bmmo::game::put_back_birth(context, it->birth.name, first->birth);
+            }
+            bmmo::physics::set_event_log_muted(false);
+            return destroyed;
+        };
+
+        // ---- the root, and the warm-up run (run 0) that makes every run after
+        // it a run from a restored root
+        std::vector<rc_event> straight_events;
+        for (const auto& [sector, tick]: stamps) straight_events.push_back({root_tick + static_cast<uint32_t>(tick), 0, sector});
+        if (drop) straight_events.push_back({root_tick + static_cast<uint32_t>(args.resync_drop), 1, 0});
+        rc_state root;
+        if (!capture_state(root, false)) return 1;
+        // Every 3D entity's world matrix at the root: the savestate carries
+        // the matrices of the physicalized entities only, and the server
+        // world's no-ball proximity fallback is Ball_Pos_Frame, the child of
+        // the parked retail ball, which follows the last clone (world-
+        // agreement-gaps design G-c6): left where the previous run ended, it
+        // gives the TT Scaleable Proximity countdowns another phase before
+        // the drop (Last Check 29 vs 8 at root+39 on Level 11, the far
+        // pusher woken at root+68 in one run and never in the other).  Put
+        // back at every root restore, each with its children kept.
+        std::map<CK_ID, int> root_array_rows;
+        const std::vector<rc_cell> root_cells = rc_capture_arrays(context, root_array_rows);
+        // The hierarchy too: a module script re-parents its parts (the
+        // balloon's), and a pass places a module by moving its frame, which
+        // carries only the children it still has.
+        // (GetObjectsListByClassID lists one class exactly: every 3D class.)
+        struct root_entity { CK_ID id = 0; CK_ID parent = 0; VxMatrix matrix; bool visible = false; };
+        std::vector<root_entity> root_matrices;
+        for (const CK_CLASSID cid: {CKCID_3DENTITY, CKCID_3DOBJECT, CKCID_PLACE, CKCID_CURVE, CKCID_SPRITE3D, CKCID_CHARACTER,
+                                    CKCID_GRID, CKCID_CAMERA, CKCID_TARGETCAMERA, CKCID_LIGHT, CKCID_TARGETLIGHT}) {
+            const int count = context->GetObjectsCountByClassID(cid);
+            CK_ID* ids = context->GetObjectsListByClassID(cid);
+            for (int i = 0; i < count; ++i)
+                if (auto* entity = CK3dEntity::Cast(context->GetObject(ids[i]))) {
+                    root_entity r;
+                    r.id = ids[i];
+                    r.parent = entity->GetParent() ? entity->GetParent()->GetID() : 0;
+                    r.matrix = entity->GetWorldMatrix();
+                    r.visible = entity->IsVisible() != FALSE;
+                    root_matrices.push_back(r);
+                }
+        }
+        active_before = world->active_sectors();
+        bmmo::physics::drain_event_log(physics);
+        const auto restore_root = [&]() -> bool {
+            std::string e;
+            if (world->player_physicalized(pid)) {
+                bmmo::sim::lifecycle_event gone;
+                gone.type = bmmo::session::event_type::Unphysicalize;
+                if (!world->apply_event(pid, gone, e)) {
+                    std::fprintf(stderr, "root: unphysicalize failed: %s\n", e.c_str());
+                    return false;
+                }
+            }
+            if (!script_replay::restore(context, sel, hooks, root.v2, &e, nullptr, nullptr, true)) {
+                std::fprintf(stderr, "root: script restore failed: %s\n", e.c_str());
+                return false;
+            }
+            // The harness's own restore re-registers what the record made
+            // active (rc_unregistered_scripts): the root is the warm-up run's.
+            std::string names;
+            if (const int n = rc_unregistered_scripts(context, sel, true, &names); n > 0 && args.verbose)
+                std::printf("  root: %d script(s) re-registered with the behaviour manager:%s\n", n, names.c_str());
+            destroy(births);
+            int reparented = 0;
+            for (const auto& r: root_matrices) {
+                auto* entity = CK3dEntity::Cast(context->GetObject(r.id));
+                if (!entity) continue;
+                const CK_ID now = entity->GetParent() ? entity->GetParent()->GetID() : 0;
+                if (now == r.parent) continue;
+                entity->SetParent(CK3dEntity::Cast(context->GetObject(r.parent)), TRUE);
+                ++reparented;
+            }
+            if (reparented && args.verbose) std::printf("  root: %d entities re-parented\n", reparented);
+            std::string cells_changed;
+            if (const int n = rc_restore_arrays(context, root_cells, root_array_rows, cells_changed); (n || !cells_changed.empty())
+                    && args.verbose)
+                std::printf("  root: %d data-array cells put back:%s\n", n, cells_changed.c_str());
+            bmmo::physics::savestate_report report;
+            if (!bmmo::physics::set_savestate(physics, root.blob.data(), root.blob.size(), 0u, e, &report)) {
+                std::fprintf(stderr, "root: savestate refused: %s\n", e.c_str());
+                return false;
+            }
+            // After the blob, whose entity writes carry their children along.
+            int moved = 0, shown = 0;
+            for (const auto& r: root_matrices)
+                if (auto* entity = CK3dEntity::Cast(context->GetObject(r.id))) {
+                    if ((entity->IsVisible() != FALSE) != r.visible) {
+                        entity->Show(r.visible ? CKSHOW : CKHIDE);
+                        ++shown;
+                    }
+                    if (std::memcmp(&entity->GetWorldMatrix(), &r.matrix, sizeof(VxMatrix)) == 0) continue;
+                    entity->SetWorldMatrix(r.matrix, TRUE);
+                    ++moved;
+                }
+            if ((moved || shown) && args.verbose)
+                std::printf("  root: %d entity matrices and %d visibilities put back\n", moved, shown);
+            if (!report.unknown_bodies.empty() || report.skipped) {
+                std::fprintf(stderr, "root: the restored world is not the root's (unknown=%zu, first %s; skipped=%u)\n",
+                             report.unknown_bodies.size(),
+                             report.unknown_bodies.empty() ? "-" : report.unknown_bodies.front().c_str(), report.skipped);
+                return false;
+            }
+            world->restore_step_state(root.counters);
+            births.clear();
+            passes.clear();
+            active_before = world->active_sectors();
+            bmmo::physics::drain_event_log(physics);
+            return true;
+        };
+        std::map<uint32_t, rc_poses> warm;   // the warm-up run's bodies at every boundary
+        const auto started = std::chrono::steady_clock::now();
+        const uint32_t diag_tick = args.resync_harness_diag >= 0 ? root_tick + static_cast<uint32_t>(args.resync_harness_diag) : 0;
+        std::vector<uint8_t> diag_scripts[2], diag_blob[2];
+        std::string diag_cells[2];
+        const auto diag_capture = [&](int k) {
+            script_replay::capture(context, sel, hooks, diag_scripts[k]);
+            for (const auto& name: args.resync_watch) {
+                auto* entity = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()),
+                                                                                     CKCID_3DENTITY, nullptr));
+                if (!entity) continue;
+                VxVector at;
+                entity->GetPosition(&at);
+                CK3dEntity* parent = entity->GetParent();
+                char line[400];
+                int same_name = 0;
+                {
+                    const int count = context->GetObjectsCountByClassID(CKCID_3DENTITY);
+                    CK_ID* ids = context->GetObjectsListByClassID(CKCID_3DENTITY);
+                    for (int i = 0; i < count; ++i) {
+                        CKObject* o = context->GetObject(ids[i]);
+                        if (o && o->GetName() && name == o->GetName()) ++same_name;
+                    }
+                }
+                std::snprintf(line, sizeof(line), "\n  entity %s #%u (%d of the name) at (%.4f,%.4f,%.4f) parent %s visible %d",
+                              name.c_str(), static_cast<unsigned>(entity->GetID()), same_name, at.x, at.y,
+                              at.z, parent && parent->GetName() ? parent->GetName() : "-", entity->IsVisible() ? 1 : 0);
+                diag_cells[k] += line;
+            }
+            CKScene* scene = context->GetCurrentLevel() ? context->GetCurrentLevel()->GetCurrentScene() : nullptr;
+            for (CK_ID id: sel.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                if (!beh || !beh->GetName() || std::string(beh->GetName()).find("P_Modul_01") == std::string::npos) continue;
+                std::string children;
+                for (int i = 0; i < beh->GetSubBehaviorCount(); ++i) {
+                    CKBehavior* c = beh->GetSubBehavior(i);
+                    if (c && c->IsActive()) children += std::string(" ") + (c->GetName() ? c->GetName() : "?");
+                }
+                diag_cells[k] += "\n  " + std::to_string(id) + " active=" + std::to_string(beh->IsActive() ? 1 : 0)
+                               + " flags=" + std::to_string(beh->GetFlags()) + " scene="
+                               + std::to_string(scene ? static_cast<unsigned>(scene->GetObjectFlags(beh)) : 0u)
+                               + " active children:" + children;
+            }
+            std::string ignored;
+            bmmo::physics::get_savestate(physics, diag_blob[k], ignored);
+        };
+        if (!run_until(end, straight_events, [&](uint32_t t) {
+                warm[t] = rc_capture_poses(physics);
+                if (diag_tick && t == diag_tick) diag_capture(0);
+                return true;
+            }))
+            return 1;
+        std::map<uint32_t, rc_poses> early;  // the straight run's before S
+
+        // ---- the straight run (the server)
+        if (!restore_root()) return 1;
+        std::map<uint32_t, rc_tick> straight;
+        rc_state server;
+        std::string blob_error;
+        if (!run_until(end, straight_events, [&](uint32_t t) {
+                if (t == S && !capture_state(server, true)) return false;
+                if (diag_tick && t == diag_tick) diag_capture(1);
+                if (t < S) {
+                    early[t] = rc_capture_poses(physics);
+                    return true;
+                }
+                rc_tick& rec = straight[t];
+                rec.poses = rc_capture_poses(physics);
+                if (!bmmo::physics::get_savestate(physics, rec.blob, blob_error)) {
+                    std::fprintf(stderr, "resync-check: the straight run's savestate at %u failed: %s\n", t, blob_error.c_str());
+                    return false;
+                }
+                rec.blob_hash = bmmo::physics::hash_savestate(rec.blob.data(), rec.blob.size());
+                return true;
+            }))
+            return 1;
+        if (diag_tick) {
+            std::printf("harness diag warm-up:%s\nharness diag restored:%s\n", diag_cells[0].c_str(), diag_cells[1].c_str());
+            const auto d = script_replay::diff(context, sel, diag_scripts[0], diag_scripts[1]);
+            std::printf("harness diag at %u: scripts %s (%d logical, %d float); blob: %s\n", diag_tick,
+                        d.any ? (d.where + " | " + d.detail).c_str() : "identical", d.logical_count, d.float_count,
+                        bmmo::physics::diff_savestate(diag_blob[0].data(), diag_blob[0].size(), diag_blob[1].data(),
+                                                      diag_blob[1].size(), false, 6, false).c_str());
+        }
+        const std::vector<rc_birth> straight_births = births;
+        const std::vector<std::pair<uint32_t, int>> straight_passes = passes;
+        {
+            // The harness itself: a run from the restored root against the
+            // warm-up run (the first run, from the live root): the first
+            // boundary a body differs at, and the worst at the end.
+            double worst = 0.0;
+            std::string worst_name, first_name;
+            uint32_t first_tick = 0;
+            int missing = 0;
+            for (uint32_t t = root_tick; t <= end && !first_tick; ++t) {
+                const rc_poses& mine = t < S ? early[t] : straight[t].poses;
+                for (const auto& [name, pose]: mine) {
+                    const auto it = warm[t].find(name);
+                    if (it == warm[t].end() || !rc_same_bits(pose, it->second)) {
+                        first_tick = t;
+                        first_name = name;
+                        break;
+                    }
+                }
+            }
+            for (const auto& [name, pose]: straight[end].poses) {
+                const auto it = warm[end].find(name);
+                if (it == warm[end].end()) { ++missing; continue; }
+                const double d = rc_distance(pose, it->second);
+                if (d > worst) { worst = d; worst_name = name; }
+            }
+            if (first_tick) {
+                std::printf("harness: the warm-up run and the runs from the restored root first differ at boundary %u (%s)\n",
+                            first_tick, first_name.c_str());
+                {
+                    const rc_poses& mine = first_tick < S ? early[first_tick] : straight[first_tick].poses;
+                    std::string differing;
+                    int n = 0;
+                    for (const auto& [name, pose]: mine) {
+                        const auto it = warm[first_tick].find(name);
+                        if (it != warm[first_tick].end() && rc_same_bits(pose, it->second)) continue;
+                        if (++n <= 40) differing += " " + name;
+                    }
+                    std::printf("harness:   %d bodies differ there:%s\n", n, differing.c_str());
+                }
+                for (uint32_t t = first_tick > root_tick + 2 ? first_tick - 2 : root_tick; t <= std::min(end, first_tick + 6); ++t) {
+                    const rc_poses& mine = t < S ? early[t] : straight[t].poses;
+                    const auto x = warm[t].find(first_name);
+                    const auto y = mine.find(first_name);
+                    if (x == warm[t].end() || y == mine.end()) continue;
+                    std::printf("harness:   %u warm (%.9f,%.9f,%.9f)%s restored (%.9f,%.9f,%.9f)%s\n", t, x->second.p[0],
+                                x->second.p[1], x->second.p[2], x->second.sim ? "*" : "", y->second.p[0], y->second.p[1],
+                                y->second.p[2], y->second.sim ? "*" : "");
+                }
+            }
+            std::string pass_text;
+            for (const auto& [m, s]: straight_passes) pass_text += " " + std::to_string(s) + "@" + std::to_string(m);
+            std::printf("straight: %zu births, passes:%s; rows at S=%zu, portable=%zu bytes, blob=%zu bytes, union at S {",
+                        straight_births.size(), pass_text.c_str(), server.rows.size(), server.portable.size(),
+                        server.blob.size());
+            for (int s: server.counters.sectors.active()) std::printf(" %d", s);
+            std::printf(" }\n");
+            // What a server blob that travelled would have to be mapped by
+            // (Q1): its objects by name, the names it carries that a client
+            // world spells otherwise (the clones, "_BMMO_<player>": the own
+            // ball's is the client's retail ball), and the names several
+            // objects share, which the restore tells apart by the capturing
+            // process's entity ids.
+            {
+                const std::string text = bmmo::physics::describe_savestate(server.blob.data(), server.blob.size());
+                std::map<std::string, int> names;
+                size_t pos = 0;
+                while (pos < text.size()) {
+                    const size_t eol = text.find('\n', pos);
+                    const std::string line = text.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
+                    pos = eol == std::string::npos ? text.size() : eol + 1;
+                    if (line.rfind("object ", 0) != 0) continue;
+                    const size_t sp = line.find(' ', 7);
+                    ++names[line.substr(7, sp == std::string::npos ? std::string::npos : sp - 7)];
+                }
+                int clones = 0, shared = 0;
+                std::string clone_names, shared_names;
+                for (const auto& [name, n]: names) {
+                    if (name.find("_BMMO_") != std::string::npos) { ++clones; clone_names += " " + name; }
+                    if (n > 1) { shared += n; shared_names += " " + name + "x" + std::to_string(n); }
+                }
+                std::printf("server blob at S: %zu bytes, %zu object names; clone names %d:%s; shared names %d:%s\n",
+                            server.blob.size(), names.size(), clones, clone_names.empty() ? " -" : clone_names.c_str(), shared,
+                            shared_names.empty() ? " -" : shared_names.c_str());
+                if (!args.savestate_trace.empty()) {
+                    if (std::FILE* f = std::fopen((args.savestate_trace + ".server.blob").c_str(), "wb")) {
+                        std::fwrite(server.blob.data(), 1, server.blob.size(), f);
+                        std::fclose(f);
+                    }
+                }
+            }
+            std::printf("harness: warm-up run vs the run from the restored root at %u: worst %.9f m (%s), %d missing%s\n", end,
+                        worst, worst_name.empty() ? "-" : worst_name.c_str(), missing,
+                        worst == 0.0 && missing == 0 ? " (identical)" : "");
+        }
+        // --resync-server-blob FILE: the cross-world restore test of Q1.  The
+        // r/s/a arms restore ANOTHER process's server blob of S (written by
+        // --savestate-trace PREFIX as PREFIX.server.blob), with the object
+        // names --resync-blob-rename maps (the own clone "_BMMO_<id>" of the
+        // capturing process to this process's own ball), instead of this
+        // process's own.  The rename rewrites the length-prefixed strings of
+        // the blob that spell OLD exactly; check_savestate validates the
+        // result.  This process's own server blob of S stays the reference.
+        std::vector<uint8_t> foreign;
+        if (!args.resync_server_blob.empty()) {
+            std::FILE* f = std::fopen(args.resync_server_blob.c_str(), "rb");
+            if (!f) {
+                std::fprintf(stderr, "cannot open --resync-server-blob %s\n", args.resync_server_blob.c_str());
+                return 2;
+            }
+            uint8_t chunk[65536];
+            size_t n = 0;
+            while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) foreign.insert(foreign.end(), chunk, chunk + n);
+            std::fclose(f);
+            const size_t loaded = foreign.size();
+            std::string renames;
+            for (const auto& [from, to]: args.resync_blob_rename) {
+                std::vector<uint8_t> pattern(4), replacement(4);
+                const uint32_t from_size = static_cast<uint32_t>(from.size()), to_size = static_cast<uint32_t>(to.size());
+                for (int k = 0; k < 4; ++k) {
+                    pattern[k] = static_cast<uint8_t>(from_size >> (8 * k));
+                    replacement[k] = static_cast<uint8_t>(to_size >> (8 * k));
+                }
+                pattern.insert(pattern.end(), from.begin(), from.end());
+                replacement.insert(replacement.end(), to.begin(), to.end());
+                std::vector<uint8_t> out;
+                out.reserve(foreign.size());
+                int hits = 0;
+                size_t i = 0;
+                while (i < foreign.size()) {
+                    if (foreign.size() - i >= pattern.size() && std::equal(pattern.begin(), pattern.end(), foreign.begin() + i)) {
+                        out.insert(out.end(), replacement.begin(), replacement.end());
+                        i += pattern.size();
+                        ++hits;
+                    } else {
+                        out.push_back(foreign[i++]);
+                    }
+                }
+                foreign.swap(out);
+                renames += " " + from + "->" + to + " x" + std::to_string(hits);
+            }
+            // The blob's header is the magic, the format version and the
+            // capturing environment's identity (the IVP_Environment pointer
+            // as a u64): the restore refuses a blob of another environment
+            // ("captured in another environment"), so a blob cannot travel
+            // as it is.  --resync-blob-adopt-environment writes this
+            // process's identity over it - what a restore flag for a
+            // travelling blob would waive (A3) - to measure past it.
+            if (args.resync_blob_adopt_env && foreign.size() >= 16 && server.blob.size() >= 16) {
+                uint64_t theirs = 0, ours = 0;
+                std::memcpy(&theirs, foreign.data() + 8, 8);
+                std::memcpy(&ours, server.blob.data() + 8, 8);
+                std::memcpy(foreign.data() + 8, server.blob.data() + 8, 8);
+                renames += " environment " + std::to_string(theirs) + "->" + std::to_string(ours);
+            }
+            std::string check_error;
+            const bool valid = bmmo::physics::check_savestate(foreign.data(), foreign.size(), check_error);
+            const bool same = foreign == server.blob;
+            std::printf("foreign server blob %s: %zu bytes loaded, %zu after the renames (%s), check %s; against this"
+                        " process's own server blob at S (%zu bytes): %s\n", args.resync_server_blob.c_str(), loaded,
+                        foreign.size(), renames.empty() ? "none" : renames.substr(1).c_str(),
+                        valid ? "ok" : ("REFUSED: " + check_error).c_str(), server.blob.size(),
+                        same ? "BYTE-IDENTICAL" : "differs");
+            if (!same)
+                std::printf("foreign server blob: first differences: %s\n",
+                            bmmo::physics::diff_savestate(server.blob.data(), server.blob.size(), foreign.data(), foreign.size(),
+                                                          false, 4, false).c_str());
+        }
+        // Sector K's bodies, as the straight run made them: the movable ones
+        // join the gate.
+        // The level end's bodies (the PE_ module: the balloon, its airship and
+        // its slide) are local to each player (the user's exception (c),
+        // invariant I3): reported, never judged.
+        const auto is_local = [](const std::string& name) { return name.rfind("PE_", 0) == 0; };
+        std::set<std::string> k_movable;
+        if (k_sector > 0) {
+            std::string list;
+            for (const auto& b: births_of(k_sector)) {
+                if (b.birth.recipe.fixed || is_local(b.birth.name)) continue;
+                if (k_movable.insert(b.birth.name).second) list += " " + b.birth.name + "@" + std::to_string(b.tick);
+            }
+            std::printf("sector %d's movable bodies (straight run, the level end's left out):%s\n", k_sector,
+                        list.empty() ? " none" : list.c_str());
+        }
+        std::set<std::string> gate(args.resync_watch.begin(), args.resync_watch.end());
+        gate.insert(k_movable.begin(), k_movable.end());
+        for (const auto& name: args.resync_watch)
+            if (!straight[S].poses.count(name) && !straight[end].poses.count(name)) {
+                std::fprintf(stderr, "--resync-watch %s is not a movable body of this scene\n", name.c_str());
+                return 2;
+            }
+
+        // ---- the arms
+        struct arm_result {
+            char arm = 0;
+            bool valid = true;
+            std::string invalid;
+            int exact_ticks = 0, compared_ticks = 0;
+            uint32_t first_inexact = 0;
+            std::string first_diff;
+            std::map<std::string, double> window_err, after_err;
+            std::map<std::string, bool> bit_exact;   // over (S, end]
+            int missing = 0;
+            double gate_worst = 0.0, rest_worst = 0.0;
+            std::string gate_worst_name, rest_worst_name;
+            bool pass = false;
+        };
+        std::vector<arm_result> results;
+        double r_band = -1.0;   // arm R's worst error over (B, end], every body
+        for (char arm: args.resync_arms) {
+            // A lower-case arm is its upper-case case applied with the
+            // SERVER's blob of S instead of the anchor's (the Q1 alternative:
+            // the server's IVP savestate travels with the resync state).
+            const bool server_blob = arm >= 'a' && arm <= 'z';
+            const char kind = server_blob ? static_cast<char>(arm - 'a' + 'A') : arm;
+            arm_result res;
+            res.arm = arm;
+            if (!restore_root()) return 1;
+            std::vector<rc_event> events = straight_events;
+            if (kind == 'S' || kind == 'A')
+                for (auto& e: events)
+                    if (e.kind == 0 && e.sector == k_sector)
+                        e.tick = kind == 'S' ? e.tick + static_cast<uint32_t>(args.resync_shift)
+                                            : e.tick - static_cast<uint32_t>(std::min<int>(args.resync_shift,
+                                                                                            static_cast<int>(e.tick - root_tick)));
+            if (kind == 'R') events.push_back({S - static_cast<uint32_t>(args.resync_perturb_ticks), 2, 0});
+            rc_state anchor;
+            rc_poses anchor_at_s;
+            if (!run_until(B, events, [&](uint32_t t) {
+                    if (t == S) {
+                        anchor_at_s = rc_capture_poses(physics);
+                        return capture_state(anchor, false);
+                    }
+                    return true;
+                }))
+                return 1;
+            const std::vector<rc_birth> anchor_births = births;
+            // The arm's case, checked against what the runs did.
+            if (kind == 'S' || kind == 'A') {
+                uint32_t straight_first = 0, straight_last = 0, arm_first = 0, arm_last = 0;
+                bool any_straight = false, any_arm = false;
+                for (const auto& b: straight_births)
+                    if (pass_of_list(straight_passes, b.tick) == k_sector) {
+                        straight_first = any_straight ? std::min(straight_first, b.tick) : b.tick;
+                        straight_last = any_straight ? std::max(straight_last, b.tick) : b.tick;
+                        any_straight = true;
+                    }
+                for (const auto& b: anchor_births)
+                    if (pass_of(b.tick) == k_sector) {
+                        arm_first = any_arm ? std::min(arm_first, b.tick) : b.tick;
+                        arm_last = any_arm ? std::max(arm_last, b.tick) : b.tick;
+                        any_arm = true;
+                    }
+                const bool server_has_k = server.counters.sectors.active().count(k_sector) != 0;
+                char text[256];
+                std::snprintf(text, sizeof(text), "sector %d births: straight %u..%u%s, arm %u..%u%s; server's union at S %s it",
+                              k_sector, straight_first, straight_last, any_straight ? "" : " (none)", arm_first, arm_last,
+                              any_arm ? "" : " (none)", server_has_k ? "has" : "lacks");
+                if (kind == 'S' && !(any_straight && any_arm && server_has_k && straight_last < S && arm_first >= S && arm_last < B))
+                    res.valid = false;
+                if (kind == 'A' && !(any_straight && any_arm && !server_has_k && straight_first >= S && arm_last < S))
+                    res.valid = false;
+                res.invalid = text;
+                std::printf("arm %c: %s%s\n", arm, text, res.valid ? "" : " -> INVALID: not the arm's case");
+            }
+
+            // ---- the apply, at B
+            bmmo::sim::physics_world::step_state counters = anchor.counters;
+            counters.sectors = server.counters.sectors;
+            const bool rng_same = anchor.counters.rng_cursor == server.counters.rng_cursor
+                               && anchor.counters.random_cursor == server.counters.random_cursor;
+            world->restore_step_state(counters);
+            // The scripts: the server's portable record localized against the
+            // anchor's own v2 record.
+            std::vector<uint8_t> localized;
+            script_replay::portable_report localize_report;
+            std::string e;
+            const bool localized_ok = script_replay::localize(context, sel, server.portable, &anchor.v2, keep_rule, localized,
+                                                              &e, &localize_report);
+            if (!localized_ok) std::printf("arm %c: localize refused the server's record: %s\n", arm, e.c_str());
+            bool scripts_ok = script_replay::restore(context, sel, hooks, localized_ok ? localized : anchor.v2, &e, nullptr,
+                                                     nullptr, true);
+            if (!scripts_ok) std::printf("arm %c: script restore failed: %s\n", arm, e.c_str());
+            std::string unregistered_names;
+            const int unregistered = rc_unregistered_scripts(context, sel, args.resync_reregister, &unregistered_names);
+            if (unregistered)
+                std::printf("arm %c: %d restored-active script(s) unknown to the behaviour manager%s:%s\n", arm, unregistered,
+                            args.resync_reregister ? " (re-registered)" : " (left: the live frames will not run them)",
+                            unregistered_names.c_str());
+            // The anchor's bodies of a pass the server has not run at S.
+            std::vector<rc_birth> doomed;
+            for (const auto& b: anchor_births) {
+                const int sector = pass_of(b.tick);
+                if (sector > 0 && !server.counters.sectors.active().count(sector)) doomed.push_back(b);
+            }
+            int destroyed = 0;
+            if (!args.resync_destroy_after_blob) destroyed = destroy(doomed);
+            bmmo::session::savestate_outcome outcome;
+            const std::vector<uint8_t>& restored_blob = !server_blob ? anchor.blob : foreign.empty() ? server.blob : foreign;
+            const bool blob_ok = binding.set_savestate(restored_blob, outcome);
+            if (!blob_ok)
+                std::printf("arm %c: the %s blob was refused: %s\n", arm,
+                            !server_blob ? "anchor's" : foreign.empty() ? "server's" : "foreign server", blob_refusal.c_str());
+            if (server_blob && !foreign.empty())
+                std::printf("arm %c: restored the foreign server blob: skipped=%u unknown bodies=%zu%s\n", arm,
+                            backend.last_report.skipped, outcome.unknown_bodies.size(),
+                            outcome.unknown_bodies.empty() ? "" : (" (first " + outcome.unknown_bodies.front() + ")").c_str());
+            const bmmo::physics::savestate_report blob_report = backend.last_report;
+            if (args.resync_destroy_after_blob) destroyed = destroy(doomed);
+            std::set<std::string> unknown(outcome.unknown_bodies.begin(), outcome.unknown_bodies.end());
+            // The rows.
+            std::set<std::string> rowed;
+            int rows_written = 0, rows_unmapped = 0, row_rechecks = 0, contacts_made = 0, unknown_rechecks = 0, rows_equal = 0;
+            std::string unmapped_names, written_names;
+            for (const auto& row: server.rows) {
+                std::string entity = row.kind == bmmo::session::body_kind::Ball ? ball_entity() : row.name;
+                bmmo_physics_body_state live{};
+                if (entity.empty() || !binding.get_body(entity, live)) {
+                    ++rows_unmapped;
+                    if (rows_unmapped <= 6) unmapped_names += " " + (entity.empty() ? std::string("?") : entity);
+                    continue;
+                }
+                bmmo_physics_body_state state{};
+                for (int k = 0; k < 3; ++k) {
+                    state.position[k] = row.position[k];
+                    state.linear[k] = row.linear[k];
+                    state.angular[k] = row.angular[k];
+                }
+                for (int k = 0; k < 4; ++k) state.rotation[k] = row.rotation[k];
+                state.simulated = (row.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
+                // A row the body already has, bit for bit, in a body the blob
+                // knows: not written.  The write is a beam, which loses what a
+                // row does not carry - the hull manager's gradient and values,
+                // the core's PSI time stamp and delta of a sleeping body, the
+                // entity matrix rebuilt from the quaternion (low bits) - so
+                // writing the server's own state onto the server's own world
+                // is not a no-op (measured: arm E, Level 11, the ball's hull
+                // and matrix, 16 rows -> 0 of 630 ticks exact).
+                if (!args.resync_write_equal_rows && !unknown.count(entity)
+                        && std::memcmp(state.position, live.position, sizeof state.position) == 0
+                        && std::memcmp(state.rotation, live.rotation, sizeof state.rotation) == 0
+                        && std::memcmp(state.linear, live.linear, sizeof state.linear) == 0
+                        && std::memcmp(state.angular, live.angular, sizeof state.angular) == 0
+                        && state.simulated == live.simulated) {
+                    ++rows_equal;
+                    continue;
+                }
+                double dp = 0.0, dv = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    dp += (state.position[k] - live.position[k]) * (state.position[k] - live.position[k]);
+                    dv += (static_cast<double>(state.linear[k]) - live.linear[k])
+                        * (static_cast<double>(state.linear[k]) - live.linear[k]);
+                }
+                const bool recheck = unknown.count(entity) != 0 || std::sqrt(dp) > bmmo::session::kRecheckPositionM
+                                  || std::sqrt(dv) > bmmo::session::kRecheckVelocityMs;
+                if (recheck) ++row_rechecks;
+                if (binding.set_body(entity, state, state.simulated ? bmmo::session::wake_mode::wake
+                                                                     : bmmo::session::wake_mode::freeze, recheck)) {
+                    ++rows_written;
+                    if (args.verbose && rows_written <= 12) written_names += " " + entity;
+                }
+                rowed.insert(entity);
+            }
+            for (const auto& name: unknown)
+                if (!rowed.count(name) && binding.recheck_body(name)) ++unknown_rechecks;
+            for (const auto& name: rowed) {
+                const auto it = anchor.contacts.find(name);
+                if (it == anchor.contacts.end()) continue;
+                const int made = binding.set_contacts(name, it->second, BMMO_PHYSICS_CONTACT_DEFAULT);
+                if (made > 0) contacts_made += made;
+            }
+            active_before = world->active_sectors();
+            // births: kept, the next root restore destroys every body made since the root
+            passes.clear();
+            bmmo::physics::drain_event_log(physics);
+            if (args.verbose && !written_names.empty()) std::printf("arm %c: rows written to:%s\n", arm, written_names.c_str());
+            std::vector<uint8_t> applied;
+            if (!bmmo::physics::get_savestate(physics, applied, e)) applied.clear();
+            if (!args.savestate_trace.empty()) {
+                // --savestate-trace PREFIX: both worlds at S as text, for a
+                // field-by-field diff.
+                const std::string base = args.savestate_trace + ".arm" + std::string(1, arm);
+                write_text_file(base + ".server.txt", bmmo::physics::describe_savestate(server.blob.data(), server.blob.size()));
+                write_text_file(base + ".anchor.txt", bmmo::physics::describe_savestate(anchor.blob.data(), anchor.blob.size()));
+                write_text_file(base + ".applied.txt", bmmo::physics::describe_savestate(applied.data(), applied.size()));
+            }
+            std::printf("arm %c: apply at B=%u of S=%u: rng %s, localize %s (unportable=%u kept_local=%u resolved=%u), scripts %s,"
+                        " blob %s (unknown=%zu skipped=%u contacts_dropped=%zu), destroyed=%d, rows written=%d equal=%d unmapped=%d%s"
+                        " rechecked=%d, unknown rechecked=%d, contacts re-made=%d\n",
+                        arm, B, S, rng_same ? "same" : "DIFFERS", localized_ok ? "ok" : "REFUSED", localize_report.unportable,
+                        localize_report.kept_local, localize_report.objects_resolved, scripts_ok ? "ok" : "FAILED",
+                        blob_ok ? "ok" : "REFUSED", outcome.unknown_bodies.size(), blob_report.skipped,
+                        outcome.contacts_dropped.size(), destroyed, rows_written, rows_equal, rows_unmapped,
+                        unmapped_names.empty() ? "" : (" (" + unmapped_names + " )").c_str(), row_rechecks, unknown_rechecks,
+                        contacts_made);
+            {
+                // The applied world against the server's at S.
+                const std::string d = bmmo::physics::diff_savestate(server.blob.data(), server.blob.size(), applied.data(),
+                                                                    applied.size(), false, 3, false);
+                std::printf("arm %c: applied world vs the server's at S: %s\n", arm, d.empty() ? "IDENTICAL" : d.c_str());
+                if (!d.empty()) {
+                    const std::string o = bmmo::physics::diff_savestate(server.blob.data(), server.blob.size(), applied.data(),
+                                                                        applied.size(), true, 3, true);
+                    std::printf("arm %c:   (overlap tree and order bookkeeping aside: %s)\n", arm, o.c_str());
+                }
+                // Every body's pose against the server's rows: the rows' write.
+                double worst = 0.0;
+                std::string worst_name;
+                for (const auto& [name, pose]: rc_capture_poses(physics)) {
+                    const auto it = straight[S].poses.find(name);
+                    if (it == straight[S].poses.end()) continue;
+                    const double dd = rc_distance(pose, it->second);
+                    if (dd > worst) { worst = dd; worst_name = name; }
+                }
+                std::printf("arm %c: after the apply, worst body vs the server at S: %.9f m (%s)\n", arm, worst,
+                            worst_name.empty() ? "-" : worst_name.c_str());
+                if (kind == 'S') {
+                    // K's constraints: each core's named controllers.
+                    const auto expected = rc_named_controllers(
+                        bmmo::physics::describe_savestate(server.blob.data(), server.blob.size()));
+                    const auto got = rc_named_controllers(bmmo::physics::describe_savestate(applied.data(), applied.size()));
+                    std::set<std::string> k_all;
+                    for (const auto& b: births_of_list(straight_births, straight_passes, k_sector)) k_all.insert(b.birth.name);
+                    int same = 0, differ = 0, absent = 0, with_constraints = 0, same_constrained = 0, local_differ = 0;
+                    for (const auto& name: k_all) {
+                        const auto x = expected.find(name), y = got.find(name);
+                        if (x == expected.end() || y == got.end()) {
+                            ++absent;
+                            std::printf("arm %c: constraint check: %s %s\n", arm, name.c_str(),
+                                        x == expected.end() ? "has no core in the server's blob" : "has no core after the apply");
+                            continue;
+                        }
+                        const bool constrained = !x->second.empty() && !is_local(name);
+                        if (constrained) ++with_constraints;
+                        if (x->second == y->second) {
+                            if (!is_local(name)) ++same;
+                            if (constrained) ++same_constrained;
+                            if (args.verbose && !x->second.empty())
+                                std::printf("arm %c: constraint check: %s [%s] same\n", arm, name.c_str(), x->second.c_str());
+                        } else if (is_local(name)) {
+                            ++local_differ;
+                        } else {
+                            ++differ;
+                            std::printf("arm %c: constraint check: %s server [%s] applied [%s]\n", arm, name.c_str(),
+                                        x->second.c_str(), y->second.c_str());
+                        }
+                    }
+                    std::printf("arm %c: constraints of sector %d's %zu bodies after the apply: the level end's aside, %d same,"
+                                " %d differ, %d absent, and of those with named controllers %d of %d same; the level end's"
+                                " (local, I3): %d differ\n", arm, k_sector, k_all.size(), same, differ, absent, same_constrained,
+                                with_constraints, local_differ);
+                }
+            }
+
+            // ---- the re-step S..end, compared with the straight run
+            std::vector<rc_event> rest;
+            for (const auto& ev: straight_events) if (ev.tick >= S) rest.push_back(ev);
+            std::vector<uint8_t> blob;
+            if (!run_until(end, rest, [&](uint32_t t) {
+                    if (t <= S) return true;
+                    const rc_tick& expected = straight[t];
+                    const rc_poses poses = rc_capture_poses(physics);
+                    std::string ce;
+                    if (!bmmo::physics::get_savestate(physics, blob, ce)) {
+                        std::fprintf(stderr, "resync-check: arm %c's savestate at %u failed: %s\n", arm, t, ce.c_str());
+                        return false;
+                    }
+                    ++res.compared_ticks;
+                    if (blob.size() == expected.blob.size()
+                            && bmmo::physics::hash_savestate(blob.data(), blob.size()) == expected.blob_hash && blob == expected.blob) {
+                        ++res.exact_ticks;
+                    } else if (!res.first_inexact) {
+                        res.first_inexact = t;
+                        res.first_diff = bmmo::physics::diff_savestate(expected.blob.data(), expected.blob.size(), blob.data(),
+                                                                       blob.size(), false, 2, false);
+                    }
+                    auto& errs = t <= B ? res.window_err : res.after_err;
+                    for (const auto& [name, pose]: expected.poses) {
+                        const auto it = poses.find(name);
+                        if (it == poses.end()) { ++res.missing; continue; }
+                        const double d = rc_distance(pose, it->second);
+                        double& slot = errs[name];
+                        slot = std::max(slot, d);
+                        auto be = res.bit_exact.emplace(name, true).first;
+                        be->second = be->second && rc_same_bits(pose, it->second);
+                    }
+                    for (const auto& [name, pose]: poses) if (!expected.poses.count(name)) ++res.missing;
+                    return true;
+                }))
+                return 1;
+
+            // ---- the verdict
+            double local_worst = 0.0;
+            std::string local_worst_name;
+            for (const auto& [name, err]: res.after_err) {
+                if (is_local(name)) {
+                    if (err > local_worst) { local_worst = err; local_worst_name = name; }
+                    continue;
+                }
+                const bool in_gate = gate.count(name) != 0;
+                double& worst = in_gate ? res.gate_worst : res.rest_worst;
+                std::string& worst_name = in_gate ? res.gate_worst_name : res.rest_worst_name;
+                if (err > worst) { worst = err; worst_name = name; }
+            }
+            const double gate_m = args.resync_gate_mm / 1000.0;
+            if (kind == 'E') {
+                res.pass = res.valid && res.exact_ticks == res.compared_ticks && res.missing == 0;
+            } else if (kind == 'R' || kind == 'S') {
+                std::string unseen;
+                for (const auto& name: gate)
+                    if (!res.after_err.count(name)) unseen += " " + name;
+                if (!unseen.empty()) std::printf("arm %c: gate bodies never compared (the arm fails):%s\n", arm, unseen.c_str());
+                res.pass = res.valid && res.missing == 0 && res.gate_worst <= gate_m && unseen.empty();
+                if (arm == 'R') r_band = std::max(res.gate_worst, res.rest_worst);
+            } else if (kind == 'A') {
+                bool k_exact = !k_movable.empty();
+                for (const auto& name: k_movable) {
+                    const auto it = res.bit_exact.find(name);
+                    k_exact = k_exact && it != res.bit_exact.end() && it->second;
+                }
+                // the rest: every body outside K
+                double rest = 0.0;
+                std::string rest_name;
+                for (const auto& [name, err]: res.after_err)
+                    if (!k_movable.count(name) && !is_local(name) && err > rest) { rest = err; rest_name = name; }
+                const double band = r_band >= 0.0 ? r_band : gate_m;
+                res.pass = res.valid && k_exact && res.missing == 0 && rest <= band;
+                std::printf("arm %c: sector %d's %zu movable bodies %s; the rest worst %.9f m (%s) against %s %.9f m\n", arm,
+                            k_sector, k_movable.size(), k_exact ? "bit-exact" : "NOT bit-exact", rest, rest_name.empty() ? "-" : rest_name.c_str(),
+                            r_band >= 0.0 ? "arm R's band" : "the gate", band);
+            }
+            // The report: the gate bodies, then the ten worst others.
+            std::printf("arm %c: blobs identical at %d of %d ticks", arm, res.exact_ticks, res.compared_ticks);
+            if (res.first_inexact) std::printf(" (first differing at %u: %s)", res.first_inexact, res.first_diff.c_str());
+            std::printf("; bodies missing/extra %d\n", res.missing);
+            std::vector<std::pair<double, std::string>> ranked;
+            for (const auto& [name, err]: res.after_err) ranked.emplace_back(err, name);
+            std::sort(ranked.rbegin(), ranked.rend());
+            for (const auto& name: gate) {
+                const auto w = res.window_err.find(name), a = res.after_err.find(name);
+                std::printf("arm %c: gate %-28s window(S,B] %.9f m  after(B,B+%d] %.9f m%s\n", arm, name.c_str(),
+                            w == res.window_err.end() ? -1.0 : w->second, after, a == res.after_err.end() ? -1.0 : a->second,
+                            res.bit_exact.count(name) && res.bit_exact[name] ? " bit-exact" : "");
+            }
+            int shown = 0;
+            for (const auto& [err, name]: ranked) {
+                if (gate.count(name)) continue;
+                if (++shown > 10) break;
+                std::printf("arm %c: other %-28s after %.9f m  window %.9f m%s\n", arm, name.c_str(), err,
+                            res.window_err.count(name) ? res.window_err[name] : -1.0,
+                            res.bit_exact.count(name) && res.bit_exact[name] ? " bit-exact" : "");
+            }
+            if (!local_worst_name.empty())
+                std::printf("arm %c: the level end's bodies (local, I3, not judged): worst %.9f m (%s)\n", arm, local_worst,
+                            local_worst_name.c_str());
+            std::printf("RESULT arm=%c %s gate_worst=%.9f m (%s) rest_worst=%.9f m (%s) exact_ticks=%d/%d%s\n", arm,
+                        res.pass ? "PASS" : "FAIL", res.gate_worst, res.gate_worst_name.empty() ? "-" : res.gate_worst_name.c_str(),
+                        res.rest_worst, res.rest_worst_name.empty() ? "-" : res.rest_worst_name.c_str(), res.exact_ticks,
+                        res.compared_ticks, res.valid ? "" : " INVALID");
+            std::fflush(stdout);
+            results.push_back(res);
+        }
+        int failed = 0;
+        for (const auto& r: results) failed += r.pass ? 0 : 1;
+        std::fprintf(stderr, "resync-check: %.1f s\n",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        std::printf("%s arms=%zu failed=%d\n", failed == 0 ? "PASS" : "FAIL", results.size(), failed);
+        std::fflush(stdout);
+        return failed == 0 ? 0 : 3;
+    }
+
     int run_describe_script(const arguments& args) {
         auto world = create_session_world(args, 0.0f);
         if (!world) return 1;
@@ -3634,7 +5136,20 @@ int main(int argc, char** argv) {
             "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --portable-scripts-check [--drop-settle N] [--verbose]\n"
             "           (the portable script record localized back must equal the v2 record byte for byte at anchor+30\n"
-            "            and after each sector; lists the registry and unportable references; exit 0 PASS, 3 FAIL)\n");
+            "            and after each sector; lists the registry and unportable references; exit 0 PASS, 3 FAIL)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA]\n"
+            "           [--resync-stamp SECTOR TICK ...] [--resync-sector K] [--resync-shift N] [--resync-perturb M]\n"
+            "           [--resync-perturb-ticks N] [--resync-after N] [--resync-drop TICK --drop <entity> <ball type>\n"
+            "           [--drop-at X Y Z] [--drop-height F]] [--resync-watch NAME ...] [--resync-gate MM]\n"
+            "           [--resync-root N] [--resync-destroy-after-blob] [--resync-write-equal-rows] [--resync-reregister]\n"
+            "           [--resync-harness-diag T] [--savestate-trace PREFIX] [--resync-player ID]\n"
+            "           [--resync-server-blob FILE [--resync-blob-rename OLD NEW ...] [--resync-blob-adopt-environment]]\n"
+            "           [--resync-perturb-scripts]\n"
+            "           [--verbose]\n"
+            "           (the resync apply offline: the server's rows, portable scripts and union at S over a client anchor's\n"
+            "            blob, re-stepped to B+N against the straight run; exit 0 PASS, 3 FAIL, 2 bad arguments; the\n"
+            "            harness line (warm-up run vs the run from the restored root) is informational: every arm and\n"
+            "            the straight run start from the same restored root)\n");
         return 2;
     }
     if (!args.replay_session.empty()) return run_replay_session(args);
@@ -3652,6 +5167,7 @@ int main(int argc, char** argv) {
         return run_replay_nav(args);
     }
     // Before --drop and --spawn-test: it composes with their scenes.
+    if (args.resync_check) return run_resync_check(args);
     if (args.savestate_check) return run_savestate_check(args);
     if (args.portable_scripts_check) return run_portable_scripts_check(args);
     if (!args.drop_entity.empty()) return run_drop(args);
