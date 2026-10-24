@@ -274,6 +274,30 @@ namespace bmmo::session {
         // detection, and is rechecked in at the start of its birth tick, in
         // birth_order, where the live creation inserted it.
         std::function<uint32_t(const std::string& entity)> birth_tick_of;
+        // Step RR of the session-core design: a snapshot row the engine wrote
+        // at tick t is the server's state of that body after t's step, and
+        // every later replay that crosses t writes it again after stepping t
+        // (and re-records t from it), so a rewind anchored before t does not
+        // undo the correction.  The rows are kept with the record of t (its
+        // `rows`), for as long as the history keeps that record.  A flag, not
+        // an engine member: the legacy retail path holds the engine in its
+        // own state, whose layout stays as it is until R7, and gets nothing
+        // new (session-core design 3.2); the shared bind_session_world sets
+        // it for both hosts' cores.  Off, rows are written at their anchor
+        // only, as before.
+        bool replay_rows = false;
+        // Optional, with replay_rows: the local entity a row of the server's
+        // body (kind, owner) belongs to at the replayed `tick`, "" when none.
+        // A row is kept under the entity it was written on, but a lifecycle
+        // event that arrives after the snapshot can give that server body
+        // another local body inside the window (a late remote birth: the row
+        // went onto the mirror of the player's previous life, which the
+        // rewind for the birth destroys, and the new mirror is born before
+        // the row's tick).  Without this the replay writes every other row of
+        // the tick and leaves that body on its prediction - a world half the
+        // server's and half ours, measured worse than writing none in a
+        // ball pile.  The own ball needs no hook (the replayed record names it).
+        std::function<std::string(body_kind kind, uint32_t owner, uint32_t tick)> row_entity;
     };
 
     // What the caller tracks at a tick: the bodies (entity names) and, for
@@ -1050,6 +1074,36 @@ namespace bmmo::session {
                 if (!item.from_row) continue;
                 auto existing = at->bodies.find(entity);
                 if (existing != at->bodies.end()) existing->second = item.state;
+                // ...and stays so in every later replay that crosses T (step
+                // RR): kept with T's record, written again after T's step.
+                if (world.replay_rows) {
+                    applied_row kept{};
+                    kept.state = item.state;
+                    kept.mode = item.mode;
+                    // The lifetime the body has now: the one it had at T, since
+                    // a body born after T takes the birth branch above and is
+                    // never written from a row.
+                    kept.generation = generation_now(entity);
+                    if (const auto row = rows.find(entity); row != rows.end() && row->second.row) {
+                        kept.kind = row->second.row->kind;
+                        kept.owner = row->second.row->owner;
+                        kept.identified = true;
+                    }
+                    kept.own = !tracked.own_entity.empty() && entity == tracked.own_entity;
+                    // The newer row wins also when an earlier snapshot of T put
+                    // the same server body's row on another local entity (a
+                    // late birth gave the player a new mirror in between): one
+                    // row per server body, or a replay could write the older
+                    // one through row_entity and skip this one.
+                    for (auto other = at->rows.begin(); other != at->rows.end();) {
+                        const bool same = other->first != entity
+                                       && ((kept.own && other->second.own)
+                                           || (kept.identified && other->second.identified && !other->second.own
+                                               && other->second.kind == kept.kind && other->second.owner == kept.owner));
+                        other = same ? at->rows.erase(other) : std::next(other);
+                    }
+                    at->rows[entity] = std::move(kept);
+                }
             }
             // The rechecks, once every pose is in (see rollback_world::recheck_body).
             for (const auto& entity: rechecks) world.recheck_body(entity);
@@ -1074,6 +1128,12 @@ namespace bmmo::session {
                     const int made = world.set_contacts(entity, it->second, contact_flags_);
                     if (made < 0) ++stats_.contact_restore_failures;
                     else stats_.contacts_restored += static_cast<uint64_t>(made);
+                    if (item.from_row && world.replay_rows) {
+                        if (const auto kept = at->rows.find(entity); kept != at->rows.end()) {
+                            kept->second.contacts = it->second;
+                            kept->second.have_contacts = true;
+                        }
+                    }
                 }
             // The navigation replicas: here on the per-body path (a refused
             // savestate included, whose early write may not have survived); the
@@ -1144,6 +1204,8 @@ namespace bmmo::session {
             // this replay (carried into the tail the relay has not reached).
             std::map<std::string, uint32_t> alive;
             std::map<std::string, input_frame> carried;
+            size_t rows_reapplied = 0, row_ticks = 0;   // step RR, for the log line
+            uint32_t first_row_tick = 0;
             for (uint32_t t = anchor + 1; t <= current_tick; ++t) {
                 tick_state* recorded = find(t);
                 // A copy: a remote born inside the replay is added to it below
@@ -1328,6 +1390,20 @@ namespace bmmo::session {
                     write_extra(entity, item, false);
                     write_extra(entity, item, true);
                 }
+                // The snapshot rows a restore anchored at this tick wrote (step
+                // RR): the server's state after this step, written again the
+                // way that restore wrote them, so the record re-captured below
+                // and every tick after it carry the correction.  After the
+                // births' re-pose (a row describes the body after the whole
+                // tick).  Only for a tick after the anchor: the anchor's own
+                // rows are in its blob already (re-captured at that restore).
+                if (recorded && !recorded->rows.empty()) {
+                    const size_t n = reapply_rows(world, *recorded, step_tracked, plan, t);
+                    if (n) {
+                        rows_reapplied += n;
+                        if (!row_ticks++) first_row_tick = t;
+                    }
+                }
                 if (!trace.empty()) {
                     for (const auto& remote: step_tracked.remote_entities) {
                         bmmo_physics_body_state after{};
@@ -1427,13 +1503,22 @@ namespace bmmo::session {
                                   + (where.empty() ? std::to_string(state.scripts.size()) + " vs "
                                                        + std::to_string(live_scripts.size()) + " bytes" : where));
                 }
-                if (recorded) *recorded = std::move(state);
-                else history_.push_back(std::move(state));
+                if (recorded) {
+                    // The rows stay with their tick for the next replay.
+                    state.rows = std::move(recorded->rows);
+                    *recorded = std::move(state);
+                } else {
+                    history_.push_back(std::move(state));
+                }
             }
             for (const auto& entity: polled) world.nav_poll(entity, true);
             if (world.log)
                 world.log("rollback to tick " + std::to_string(anchor) + " (" + reason + "), re-simulated "
-                          + std::to_string(lag) + " ticks");
+                          + std::to_string(lag) + " ticks"
+                          + (rows_reapplied ? ", " + std::to_string(rows_reapplied) + " snapshot row(s) of "
+                                                  + std::to_string(row_ticks) + " tick(s) written again (first "
+                                                  + std::to_string(first_row_tick) + ")"
+                                            : std::string()));
             report(1);
             return true;
         }
@@ -1576,6 +1661,10 @@ namespace bmmo::session {
                 touched = state.contacts.erase(entity) > 0 || touched;
                 touched = state.navs.erase(entity) > 0 || touched;
                 if (gap) {
+                    // Step RR: no row for motion the server never stepped.  A
+                    // row of a tick from `applied` on is the server's state of
+                    // the body made again there, and stays.
+                    touched = state.rows.erase(entity) > 0 || touched;
                     touched = state.inputs.erase(entity) > 0 || touched;
                     if (state.tracked.own_entity == entity) {
                         state.tracked.own_entity.clear();
@@ -1648,6 +1737,26 @@ namespace bmmo::session {
         }
 
     private:
+        // One snapshot row a restore wrote, as it wrote it (step RR): the
+        // pose and sleep write, the lifetime of the body it was written on,
+        // and the friction contacts the restore then re-created for it from
+        // the anchor's own record (the contact pass runs for a row like for
+        // any body the blob did not cover), so the write after a replayed
+        // step repeats the restore's sequence.
+        struct applied_row {
+            bmmo_physics_body_state state{};
+            wake_mode mode = wake_mode::keep;
+            uint32_t generation = 0;
+            // The server's identity of the body (rollback_world::row_entity),
+            // and whether it was the own ball (the replayed record names it).
+            body_kind kind = body_kind::Ball;
+            uint32_t owner = 0;
+            bool own = false;
+            bool identified = false;   // kind/owner came from the row (the restore had it)
+            std::vector<bmmo_physics_contact> contacts;
+            bool have_contacts = false;   // the restore called set_contacts with them
+        };
+
         struct tick_state {
             uint32_t tick = 0;
             rollback_tracked tracked;
@@ -1675,6 +1784,13 @@ namespace bmmo::session {
             // replay of T+1.. starts from.
             std::vector<uint8_t> savestate;
             bool have_savestate = false;
+            // The snapshot rows a restore anchored at this tick wrote into the
+            // world (rollback_world::replay_rows), by entity: what a replay
+            // that crosses this tick writes again after its step.  Carried
+            // over when a replay re-records the tick; merged when a later
+            // snapshot of the same tick writes rows again (the newer row
+            // wins).  Not touched by capture(), so an amendment keeps them.
+            std::map<std::string, applied_row> rows;
         };
 
 
@@ -1740,6 +1856,61 @@ namespace bmmo::session {
                     * (static_cast<double>(target.linear[k]) - live.linear[k]);
             }
             return std::sqrt(dp) > kRecheckPositionM || std::sqrt(dv) > kRecheckVelocityMs;
+        }
+
+        // Step RR: the rows a restore anchored at `t` wrote, written again
+        // after `t`'s step inside a later replay, with that restore's
+        // sequence for a row - the pose and sleep write (rechecked when it
+        // moves the body, at the write or in a second pass), then the
+        // friction contacts it re-created from the anchor's record.  A row
+        // writes no extra (a row carries no queue).  Skipped: a body the
+        // replayed world does not have at `t`, one of another lifetime than
+        // the row was written on, and one the plan still parks for a later
+        // birth - each tried again under the identity the server gave the
+        // row (rollback_world::row_entity).  Returns the rows written.
+        size_t reapply_rows(const rollback_world& world, const tick_state& recorded, const rollback_tracked& tracked,
+                            const std::map<std::string, restore>& plan, uint32_t t) {
+            size_t written = 0;
+            std::vector<std::string> rechecks;
+            std::vector<std::pair<std::string, const applied_row*>> contacted;
+            std::unordered_set<std::string> targets;
+            const auto parked = [&](const std::string& name) {
+                const auto it = plan.find(name);
+                return it != plan.end() && it->second.repose_tick != 0 && static_cast<int32_t>(it->second.repose_tick - t) > 0;
+            };
+            bmmo_physics_body_state live{};
+            for (const auto& [entity, row]: recorded.rows) {
+                // The body the row was written on, when the replayed world
+                // has it at `t` in the same lifetime; otherwise the body the
+                // server's identity has here (the own ball by the replayed
+                // record, the others through row_entity).
+                std::string target = entity;
+                const auto g = tracked.generations.find(entity);
+                bool usable = (g == tracked.generations.end() ? 0u : g->second) == row.generation && !parked(entity)
+                            && world.get_body(entity, live);
+                if (!usable) {
+                    target = row.own ? tracked.own_entity
+                           : world.row_entity && row.identified ? world.row_entity(row.kind, row.owner, t) : std::string();
+                    usable = !target.empty() && target != entity && !parked(target) && world.get_body(target, live);
+                }
+                if (!usable || !targets.insert(target).second) continue;
+                const bool recheck = recheck_on_restore_ && write_moves_body(live, row.state);
+                const bool deferred = recheck && two_pass_recheck_ && world.recheck_body;
+                world.set_body(target, row.state, row.mode, recheck && !deferred);
+                if (deferred) rechecks.push_back(target);
+                // The contacts the restore re-created were the anchor record's
+                // of the body it wrote: not another body's.
+                if (row.have_contacts && target == entity) contacted.emplace_back(target, &row);
+                ++written;
+            }
+            for (const auto& entity: rechecks) world.recheck_body(entity);
+            if (restore_contacts_ && world.set_contacts)
+                for (const auto& [entity, row]: contacted) {
+                    const int made = world.set_contacts(entity, row->contacts, contact_flags_);
+                    if (made < 0) ++stats_.contact_restore_failures;
+                    else stats_.contacts_restored += static_cast<uint64_t>(made);
+                }
+            return written;
         }
 
         // The oldest record that carries `entity` in its current lifetime: the

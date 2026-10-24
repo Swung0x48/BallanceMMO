@@ -68,6 +68,19 @@ namespace bmmo::session {
             return false;
         };
         world_hooks_.ball = [this](const std::string& entity) { return is_ball(entity); };
+        // Step RR: a snapshot row's body at a replayed tick, by the server's
+        // identity - the mirror the player's ball is driven as by then (the
+        // replay_remotes rule), or the resolved mechanism.  The own ball is
+        // the engine's (the replayed record names it).
+        world_hooks_.row_entity = [this](bmmo::session::body_kind kind, uint32_t owner, uint32_t tick) -> std::string {
+            if (kind != bmmo::session::body_kind::Ball) return s.mechanism_tracking_.entity_of(owner);
+            if (owner == s.own_id_) return {};
+            const auto it = s.remotes_.find(owner);
+            if (it == s.remotes_.end() || !it->second.physicalized || !it->second.navigation
+                    || static_cast<int32_t>(it->second.driven_from - tick) > 0)
+                return {};
+            return it->second.entity;
+        };
     }
 
     // Every movable body but the balls (step P): the balls are the own

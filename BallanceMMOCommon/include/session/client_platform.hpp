@@ -156,6 +156,10 @@ namespace bmmo::session {
         // the parking path (step P: the identity the "Ball_" prefix stood
         // in for, which the trafo explosion pieces share).
         std::function<bool(const std::string& entity)> ball;
+        // Step RR: the local entity a snapshot row of the server's body
+        // (kind, owner) belongs to at a replayed tick (rollback_world::
+        // row_entity): a mirror driven by then, or the resolved mechanism.
+        std::function<std::string(body_kind kind, uint32_t owner, uint32_t tick)> row_entity;
     };
 
     // The own ball as the host sees it after a step (design 2.2 own_ball;

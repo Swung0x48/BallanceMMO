@@ -2653,6 +2653,150 @@ TEST(RollbackEngine, SavestateRowsWrittenOnTop) {
     EXPECT_EQ(engine.stats().savestates_restored, 2u);
 }
 
+// Step RR of the session-core design: a snapshot row written at tick t is the
+// server's state after t's step, so a later rewind anchored BEFORE t writes it
+// again after replaying t - also once that replay has re-recorded t, for the
+// next rewind - and arrives at the corrected world bit for bit.  With
+// rollback_world::replay_rows off (the legacy retail path) the replay puts the
+// prediction back, as before.
+TEST(RollbackEngine, ASnapshotRowIsWrittenAgainByEveryLaterReplayThatCrossesItsTick) {
+    for (const bool replay_rows: {true, false}) {
+        SCOPED_TRACE(replay_rows ? "replay_rows on" : "replay_rows off");
+        fake_world world;
+        seed_savestate_world(world);
+        rollback_engine engine;
+        record_with_blobs(world, engine, 8);
+        auto w = world.adapter();
+        w.replay_rows = replay_rows;
+        // the server had the own ball 0.5 m further at tick 5
+        fake_body server_own;
+        server_own.position[0] = 0.5;
+        ASSERT_TRUE(engine.on_snapshot(w, snapshot_of(5, {ball_body(1, server_own)}), 8, entity_of, no_input));
+        const fake_world corrected = world;
+
+        // anchored before the row's tick: 4..8 replayed, the row written
+        // again after the step of 5 (and nowhere else)
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 3, 8, no_input, "test"));
+        EXPECT_EQ(world.count("set_body Own"), replay_rows ? 1 : 0);
+        if (replay_rows) {
+            EXPECT_EQ(world.count("set_contacts Own"), 1);
+            EXPECT_GT(world.first("set_body Own"), world.first("step"));
+            EXPECT_EQ(bit_difference(corrected, world), "");
+        } else {
+            EXPECT_NE(bit_difference(corrected, world), "");
+        }
+
+        // the replay re-recorded 5 and kept its row: a second rewind across it
+        // arrives at the same world
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 4, 8, no_input, "test"));
+        EXPECT_EQ(world.count("set_body Own"), replay_rows ? 1 : 0);
+        if (replay_rows) EXPECT_EQ(bit_difference(corrected, world), "");
+
+        // anchored at the row's tick: the blob carries it, no write
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 5, 8, no_input, "test"));
+        EXPECT_EQ(world.count("set_body "), 0);
+        if (replay_rows) EXPECT_EQ(bit_difference(corrected, world), "");
+    }
+}
+
+// Step RR: a row whose body the replayed world no longer has at its tick (a
+// late birth replaced the player's mirror inside the window) is written on the
+// body rollback_world::row_entity names for the server's identity there - its
+// pose, not the contacts the restore re-created for the other body - and on
+// none when the hook answers "".
+TEST(RollbackEngine, AReplayedRowFollowsTheServerBodyToTheBodyItHasAtTheTick) {
+    for (const bool answer: {true, false}) {
+        SCOPED_TRACE(answer ? "row_entity names Remote2" : "row_entity answers nothing");
+        fake_world world;
+        seed_savestate_world(world);
+        rollback_engine engine;
+        record_with_blobs(world, engine, 8);
+        auto w = world.adapter();
+        w.replay_rows = true;
+        std::vector<uint32_t> asked;
+        w.row_entity = [&](body_kind kind, uint32_t owner, uint32_t tick) -> std::string {
+            EXPECT_EQ(kind, body_kind::Ball);
+            EXPECT_EQ(owner, 2u);
+            asked.push_back(tick);
+            return answer ? "Remote2" : "";
+        };
+        fake_body server_remote;
+        server_remote.position[0] = 7.0;
+        ASSERT_TRUE(engine.on_snapshot(w, snapshot_of(5, {ball_body(2, server_remote)}), 8, entity_of, no_input));
+        // the mirror the row went on is gone; the player's new one is Remote2
+        world.bodies["Remote2"] = world.bodies["Remote"];
+        world.bodies["Remote2"].position[0] = 1.0;
+        world.bodies.erase("Remote");
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 3, 8, no_input, "test"));
+        EXPECT_EQ(asked, std::vector<uint32_t>{5});
+        EXPECT_EQ(world.count("set_body Remote2"), answer ? 1 : 0);
+        EXPECT_EQ(world.count("set_contacts Remote2"), 0) << "the contacts were another body's";
+        if (answer) {
+            EXPECT_GT(world.first("set_body Remote2"), world.first("step"));
+            EXPECT_EQ(world.bodies["Remote2"].position[0], 7.0);
+        } else {
+            EXPECT_EQ(world.bodies["Remote2"].position[0], 1.0);
+        }
+    }
+}
+
+// Step RR: two snapshots of one tick that put the same server body's row on two
+// local bodies (a new mirror between them) leave one row: the newer.
+TEST(RollbackEngine, TheNewerRowOfAServerBodyAtATickWins) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Own"];
+    world.bodies["RemoteA"].position[0] = 5.0;
+    world.bodies["RemoteB"].position[0] = 10.0;
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.remote_entities = {"RemoteA", "RemoteB"};
+    record_ticks(world, engine, tracked, 1, 8);
+    auto w = world.adapter();
+    w.replay_rows = true;
+    fake_body first, second;
+    first.position[0] = 7.0;
+    second.position[0] = 12.0;
+    const auto as_a = [](const body_state& body) { return body.owner == 2 ? std::string("RemoteA") : std::string(); };
+    const auto as_b = [](const body_state& body) { return body.owner == 2 ? std::string("RemoteB") : std::string(); };
+    ASSERT_TRUE(engine.on_snapshot(w, snapshot_of(5, {ball_body(2, first)}), 8, as_a, no_input));
+    ASSERT_TRUE(engine.on_snapshot(w, snapshot_of(5, {ball_body(2, second)}), 8, as_b, no_input));
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 3, 8, no_input, "test"));
+    EXPECT_EQ(world.count("set_body RemoteA"), 0) << "the older row is gone";
+    EXPECT_EQ(world.count("set_body RemoteB"), 1);
+    EXPECT_EQ(world.bodies["RemoteB"].position[0], 12.0);
+}
+
+// Step RR: an own birth the server applied later (move_birth) keeps the rows of
+// the ticks from the applied one on - the server's state of the body made again
+// there - and a replay writes them again.
+TEST(RollbackEngine, AMovedBirthKeepsTheRowsFromItsAppliedTick) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Own"];
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.generations["Own"] = 1;
+    record_ticks(world, engine, tracked, 1, 10);
+    auto w = world.adapter();
+    w.replay_rows = true;
+    fake_body server_own;
+    server_own.position[0] = 50.0;
+    ASSERT_TRUE(engine.on_snapshot(w, snapshot_of(8, {ball_body(1, server_own)}), 10, entity_of, no_input));
+    EXPECT_GT(engine.move_birth("Own", 1, 4, 7, true), 0u);
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 3, 10, no_input, "test"));
+    EXPECT_EQ(world.count("set_body Own"), 1);
+    EXPECT_EQ(world.bodies["Own"].position[0], 50.0);
+}
+
 // No blob, no savestate path: a world without the hooks, a world whose blobs
 // come back empty (which count as none) and a world that can capture but not
 // restore all get the per-body restore, exactly as before.

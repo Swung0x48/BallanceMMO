@@ -280,6 +280,10 @@ namespace bmmo::session {
         binding.replay_mechanisms = hooks.replay_mechanisms;
         binding.on_correction = hooks.on_correction;
         rollback_world world = bind_rollback_world(backend, binding);
+        // Step RR: a snapshot row is written again after its tick's step in
+        // every later replay that crosses it (rollback_world::replay_rows).
+        world.replay_rows = true;
+        world.row_entity = hooks.row_entity;
         const local_birth_log* births = o.births;
         // A body born inside the window is put where its Physicalize made it
         // at the start of its birth tick (set_body_matrix), its joints and

@@ -5456,6 +5456,162 @@ anchor.
     recorded with the Q binaries (as `core_ref_e0/README.md` describes) before
     a later step can use the wire check as a gate.
 
+**As built (step RR): a snapshot row applied at tick t is written again
+after t's step in every later replay that crosses t.** The gap step P's gate
+found (the `P_Ball_Wood_MF` row of 1722 undone by the forced rewinds at 1705
+and 1718; verified in `pr2_trafo/forced-13x24`: the mismatch and restore at
+local 1723, then `rollback to tick 1705 (forced)` and `1718 (forced)` re-record
+1722 from the replay, and the arm's later mismatches at 1887 and 2383 are that
+uncorrected track) is closed in the shared engine.
+
+- **Where the rows live.** `tick_state::rows` (rollback.hpp), by entity: the
+  row's state and sleep mode, the generation of the body it was written on,
+  the server identity (kind, owner), whether it was the own ball, and the
+  friction contacts the restore then re-created for it from the anchor's
+  record. Written in the restore's row loop beside `existing->second =
+  item.state`; merged when a later snapshot of the same tick writes rows
+  again, one row per server body (the newer row also replaces one of the same
+  (kind, owner), or the own ball's, kept under another local entity - a late
+  birth in between; review round); carried over when a replay re-records the
+  tick (`state.rows = std::move(recorded->rows)`); erased by `move_birth` on
+  the gap's ticks only (motion the server never stepped; a row from the
+  applied tick on is the server's state of the body made again there, review
+  round); gone with the record (history length, `invalidate_history`). Memory: one
+  `bmmo_physics_body_state` + a contact vector per authoritative row of a
+  mismatching snapshot, nothing for a matching one.
+- **The write.** `reapply_rows`, after a replayed tick's step and its births'
+  re-pose, before the tick is re-captured: the restore's sequence for a row
+  (pose and sleep write rechecked when it moves the body, at the write or in
+  the second pass; then `set_contacts` with the kept contacts; no extra). Only
+  ticks after the anchor: the anchor's own rows are in its blob (re-captured
+  at that restore), and on the per-body path in its record. Skipped: a body
+  the replayed world lacks at t, one of another lifetime, one still parked for
+  a later birth. The `rollback to tick ...` line gains `, N snapshot row(s)
+  of M tick(s) written again (first T)` when it wrote any.
+- **Births inside the window (adaptation, found by the wire check).** A row
+  is kept under the entity it was written on, but a late lifecycle event can
+  give that server body another local body inside the window (swing c0: the
+  row of player 2367392004 at 702 went onto the old mirror `..._2367392005`;
+  the late Physicalize at 701 destroys it and makes `..._2367392006`, and the
+  rewind to 700 re-applied 4 of the 5 rows). New optional
+  `rollback_world::row_entity(kind, owner, tick)`: a row whose body is gone is
+  written on the body the server identity has at t - the own ball by the
+  replayed record, a mirror by the core's `replay_remotes` rule
+  (`driven_from <= t`), a mechanism by `mechanism_tracking_`
+  (`core_world_hooks::row_entity`, client_core.cpp); asked only for a row
+  that carries its identity. Its contacts are not written there (they were
+  another body's). The generation kept is the body's newest, which is its
+  generation at t: a body born after t takes the birth branch and is never
+  written from a row. Measured: swing c0 writes 5 rows
+  at 702; the mismatch counts of the 16 replays are unchanged by it.
+- **Legacy retail gets nothing new**: the switch is
+  `rollback_world::replay_rows` (a field of the per-call binding, not an
+  engine member: `rollback_engine` is held by `physics_session_state`, whose
+  layout stays until R7). `bind_session_world` sets it (both cores); PSC's
+  `physics_session_rollback_world()` and the SimTool's binding leave it off.
+  `rollback_engine`'s members and `physics_session_state` are unchanged; no
+  counter (layout), the log line instead. The x86 client objects were
+  deleted before the build (`core_world_hooks` grew).
+- **The resync design's rows at S** (resync-and-sector-timing-design.md 4.3)
+  write rows on top of S's blob and re-capture it; going through
+  `restore_and_replay` they would be kept with S's record like any row. Today
+  a resync drops the history, so no anchor before S exists.
+- **Measured (quick tier):** x64 BUILD-OK (`build-agent-rRR` without the
+  slot-13 hack, `build-agent-rRRh` with it), x86 CLIENT-BUILD-OK, 425 tests
+  pass (new: `ASnapshotRowIsWrittenAgainByEveryLaterReplayThatCrossesItsTick`),
+  `linux_test_syntax.sh` 25 ok.
+  - (1) `rr_trafo` (snapshots off, control + 13:24, 186 forced): 55 of 55
+    bodies EXACT, `P_Ball_Wood_MF` 0.0000 m (P: 0.0848 from 1730); the arm's
+    mism 3 -> 1 (the 1887 / 2383 mismatches gone), its two forced rewinds
+    across 1722 each write 1 row again.
+  - (2) `rr_ssc` (snapshots on) 50:12 (48 forced), 97:24 (25), 131:47 (16):
+    EXACT on 53 bodies.
+  - (3) `wire_check.sh rQ rRR`: 11 of 16 journals change (swing c0-c3, a6m
+    c0, resync c0/c2/c3, a5u c1-c3), sends differ in a6m c0, resync c0/c2;
+    the 5 unchanged (a6m c1-c3, resync c1, a5u c0) log no row written again,
+    each changed one logs one before its first difference. Against the
+    server's FULL checkpoints: the snapshots-on captures' own measure falls in
+    all four (mism 203 -> 199, 33 -> 25, 31 -> 15, 227 -> 212; far 2 -> 1,
+    0, 1, 2 -> 1); the snapshots-off ones keep their counts. The summed body
+    distance to the server from the first difference to the end (the
+    balloon left out, as the user decided): closer in 9 of 11 (resync c0
+    11602 -> 964 m, c2 16080 -> 3178), further in 2: swing c0 254.23 ->
+    254.77 (+0.2 %), a5u c2 1103.8 -> 1120.3 (+1.5 %); with the balloon
+    a5u c1 and c3 are further too (the balloon bodies only). See the
+    residual below.
+  - (4) headless, 4 clients, snapshots on (`p3_h4` `rrh1`, with captures):
+    mism 47 / 65 / 53 / 57 (P's `pr2h1..3`: 48-53 / 65-73 / 55-57 / 60-61),
+    rb 99 / 130 / 107 / 119 (103-110 / 126-140 / 114-135 / 118-125);
+    unmatched, far, starved, resyncs, rebases 0; the server journal replays
+    exact (2439 ticks, 0 checkpoint mismatches). The captures replayed with
+    `rRR` equal the live journals; with HEAD's `rQ` all four differ (every
+    client writes rows again: 10-15 replays each; first difference 878, 878,
+    878, 1190, after the first re-applies at 818-826, which wrote rows the
+    replay with the corrected input had reproduced bit for bit). Mean body
+    distance to the server mm-level either way (c0, c1, c3 closer, c2
+    further: ball 2599189757 1.7 -> 4.2 mm).
+- **The residual: 2 of 11 changed wire-check journals end further from the
+  server.** Symptom and cause, per journal (the swing c0 cause measured in the
+  review round with a diagnostic build, not committed: each row write, and
+  each replayed tick's balls, logged against the server's checkpoints).
+  - swing c0. From 722 to 740 the remote balls 905583447 and 2632207374 are
+    0.10 -> 0.60 m and 0.09 -> 0.50 m from the server where the old replay is
+    0.00-0.14 m; the snapshot rollback anchored at 718 (local 741) brings both
+    to 0.0000 in both binaries, and from there the new one keeps ball
+    2367392004 exact where the old keeps 0.0065-0.0069 m for good (swing c1:
+    the same transient, then three balls exact against 0.15-1.2 m). NOT the
+    remote inputs: every player's keys are `01` and unchanged from 695 to 745
+    and the replays that cross 702 have every input to 702 (local 720), so
+    the prediction is the truth. The rows at 702 (4 balls and
+    `P_Modul_08_Schaukel`) are right: after them the replayed balls are within
+    0.0001 m / 0.0005 m/s of the server at 704 and 0.0004 m / 0.0027 m/s at
+    712 (state a row does not carry - the friction contacts the replay's own
+    world has - the beam residual every restore has). At 713-714 the four
+    balls, born in a row at 701, collide: 0.0006 / 0.0025 m and 0.07 / 0.39
+    m/s at 714, 1.5 m/s for 905583447 at 716, on the collision alone (the
+    replays anchored at 701 and 710 show it, their predicted inputs being the
+    server's). The old replay entered that collision from its own 702,
+    where the two mirrors born at 701 were 0.17 m/s slower than the server's
+    balls (vx 0.1836 against 0.3555 / 0.3355; own ball and 2367392004 0.02
+    m/s slower) - a pre-existing difference of the late-birth replay, the
+    same in both binaries, not investigated here - and its collision happened
+    to resolve nearer the server's until the 718 rows. A chaotic pile
+    amplifying the beam residual, the floor the lockstep blocker notes
+    record for piles, not a wrong write.
+  - a5u c2 (snapshots off). `P_Modul_08_Schaukel` is out of phase with the
+    server in both binaries (0.2-10.7 m, a client/server divergence of that
+    run that no later snapshot corrects); the 3359 row moves its phase (old
+    and new 0-2.2 m apart) and the oscillating error averages 1.5 % higher.
+  - Neither is a write the live restore did not make. Options: (a) accept,
+    judging by the snapshot path's own measure and the long run; (c) write
+    again only the rows that breached (an in-tolerance row is often
+    reproduced bit for bit anyway; not measured). The option (b) the first round offered (write
+    only when the replay has every remote input to t) rested on the input
+    cause the measurement refutes, and would not change swing c0 either.
+- **Review round.** Fixed: the newer row of a server body wins across local
+  entities (both reviews: two snapshots of one tick on the old and the new
+  mirror left both rows and the replay could write the older one); the
+  `row_entity` fallback only for a row with its identity; `move_birth` keeps
+  the rows from the applied tick on. New tests:
+  `AReplayedRowFollowsTheServerBodyToTheBodyItHasAtTheTick` (the fallback,
+  no contacts on the other body, an empty answer writes nothing),
+  `TheNewerRowOfAServerBodyAtATickWins`,
+  `AMovedBirthKeepsTheRowsFromItsAppliedTick`,
+  `SessionClientCore.RowEntityIsTheBodyTheServerIdentityHasAtTheTick` (the
+  `driven_from` rule before, at and after the tick; own ball, unknown player,
+  no navigation, no body, unresolved mechanism). Not changed: the kept
+  generation (see above: equal to the generation at t). Deferred to the next
+  full tier: an RR arm in the CPU parity measurement (the re-apply adds a
+  `set_body` per kept row per crossed tick). Rerun: 429 tests pass,
+  `linux_test_syntax.sh` all ok, x64 BUILD-OK (`build-agent-rRRf` plain,
+  `build-agent-rRRfh` with the slot-13 hack), x86 CLIENT-BUILD-OK (plain);
+  the 16 captures replayed with `rRRf` are identical, journals and sends, to
+  the implement round's `rRR` replays (so the same 11 changed against `rQ`,
+  the same 2 further); (1) `rrf_trafo` 13:24 (169 forced): 55 of 55 EXACT,
+  `P_Ball_Wood_MF` 0.0000 m, both forced rewinds across 1722 write its row
+  again, starved 0; (2) `rrf_ssc` 50:12 (49), 97:24 (24), 131:47 (18): EXACT
+  on 53 bodies.
+
 ## 7. Open questions
 
 1. **Retail's resync triggers.** Retail resyncs on `too_far`, `frozen`, 30

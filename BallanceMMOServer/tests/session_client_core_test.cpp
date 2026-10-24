@@ -76,6 +76,7 @@ namespace bmmo::session {
     struct core_test_access {
         session_client_core& c;
         client_core_state& s() { return c.s; }
+        const core_world_hooks& world_hooks() { return c.world_hooks_; }
 #define BMMO_CORE_STEP(name) \
         template <class... A> decltype(auto) name(A&&... a) { return c.name(std::forward<A>(a)...); }
         BMMO_CORE_STEP(drain_due_events)
@@ -407,6 +408,35 @@ namespace {
         EXPECT_EQ(t, fake.clock);
         const std::vector<std::string> expected = {"send:abc:2", "now:resync_limiter", "log:1:a line"};
         EXPECT_EQ(fake.calls, expected);
+    }
+
+    // Step RR: the body a snapshot row of the server's (kind, owner) belongs
+    // to at a replayed tick - a remote's mirror once it is driven there (the
+    // replay_remotes rule), never the own ball (the engine's), an unresolved
+    // mechanism none.
+    TEST(SessionClientCore, RowEntityIsTheBodyTheServerIdentityHasAtTheTick) {
+        fake_platform fake;
+        session_client_core core(fake.make(), session_capabilities{});
+        state_of(core).own_id_ = 3;
+        auto& remote = state_of(core).remotes_[4];
+        remote.entity = "Ball_Wood_BMMO_4";
+        remote.physicalized = true;
+        remote.navigation = true;
+        remote.driven_from = 120;
+        const auto& row_entity = steps{core}.world_hooks().row_entity;
+        ASSERT_TRUE(row_entity);
+        using bmmo::session::body_kind;
+        EXPECT_EQ(row_entity(body_kind::Ball, 4, 119), "") << "not driven yet at 119";
+        EXPECT_EQ(row_entity(body_kind::Ball, 4, 120), "Ball_Wood_BMMO_4");
+        EXPECT_EQ(row_entity(body_kind::Ball, 4, 130), "Ball_Wood_BMMO_4");
+        EXPECT_EQ(row_entity(body_kind::Ball, 3, 130), "") << "the own ball is the engine's";
+        EXPECT_EQ(row_entity(body_kind::Ball, 5, 130), "") << "no such player";
+        EXPECT_EQ(row_entity(body_kind::Mechanism, 7, 130), "") << "no mechanism resolved";
+        remote.navigation = false;
+        EXPECT_EQ(row_entity(body_kind::Ball, 4, 130), "") << "not driven by the navigation";
+        remote.navigation = true;
+        remote.physicalized = false;
+        EXPECT_EQ(row_entity(body_kind::Ball, 4, 130), "") << "no body";
     }
 
     TEST(SessionClientCore, CapabilitiesDefaultToCannot) {
