@@ -322,22 +322,25 @@ namespace bmmo::session {
         // not a lifetime change of the body the records describe.
         if (!o.park_births) {
             const auto own_birth = hooks.destroy_own_birth;
+            const auto remake_mirror = hooks.remake_mirror_birth;
             const auto own_body = hooks.own_body;
             const auto mirror = hooks.mirror;
             const auto ball = hooks.ball;
             const auto put_back = o.put_back;
             const auto own_failed = o.on_own_destroy_failed;
             const auto failed = o.on_destroy_failed;
-            world.destroy_body = [b, own_birth, own_body, mirror, ball, births, put_back, own_failed, failed](
+            world.destroy_body = [b, own_birth, remake_mirror, own_body, mirror, ball, births, put_back, own_failed, failed](
                                          const std::string& entity, uint32_t birth_tick) {
                 bool destroyed = false;
                 if (own_birth && own_birth(entity, birth_tick, destroyed)) {
                     if (!destroyed && own_failed) own_failed(entity);
                     return destroyed;
                 }
+                // A mirror the core makes again at its birth tick from its
+                // Physicalize (step LB); any other keeps the parking path.
+                if (mirror && mirror(entity)) return remake_mirror && remake_mirror(entity, birth_tick);
                 // The balls by what they are (step P), not by a name.
                 if ((ball && ball(entity)) || (own_body && own_body(entity))) return false;
-                if (mirror && mirror(entity)) return false;
                 const local_birth* birth = births ? births->find(entity, birth_tick) : nullptr;
                 if (!birth && births) birth = births->find(entity, 0);
                 std::string error, mute_error;
@@ -348,6 +351,10 @@ namespace bmmo::session {
                 if (!ok && failed) failed(entity, error);
                 return ok;
             };
+            // Step LB: a mirror destroy_body took out is made again by the
+            // core from the session's inputs; after its birth tick's step it
+            // stays as the step made it (rollback_world::birth_from_inputs).
+            world.birth_from_inputs = mirror;
             // Step P: a mechanism alive at the anchor that the window
             // destroyed (the trafo explosion pieces' reset, a script the
             // replay re-runs) is made again at the restore from the birth of

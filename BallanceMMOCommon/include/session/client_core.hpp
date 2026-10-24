@@ -147,6 +147,28 @@ namespace bmmo::session {
 
         enum class phase { idle, loading, running };
 
+        struct pending_birth {
+            uint32_t player = 0, tick = 0, origin = 0;   // tick: applied (protocol 9)
+            uint8_t ball_type = 0, flags = 0;
+            float position[3] = {};
+            float rotation[9] = {};
+            bmmo::session::ball_recipe recipe;
+            // Step LB: the player's current mirror made again inside a
+            // replay (remake_mirror_birth) - the same entity and lifetime,
+            // nothing of the remote's live state touched but its body and
+            // navigation.
+            bool remake = false;
+            static pending_birth of(const bmmo::session_event_msg& event) {
+                pending_birth b;
+                b.player = event.player; b.tick = event.tick; b.origin = event.origin_tick;
+                b.ball_type = event.ball_type; b.flags = event.flags;
+                std::copy(std::begin(event.position), std::end(event.position), b.position);
+                std::copy(std::begin(event.rotation), std::end(event.rotation), b.rotation);
+                b.recipe = event.recipe;
+                return b;
+            }
+        };
+
         struct remote_ball {
             std::string entity;
             uint8_t ball_type = 0;
@@ -165,6 +187,15 @@ namespace bmmo::session {
             // replay_remotes): born_tick, or the tick its navigation was
             // attached when that came later.
             uint32_t driven_from = 0;
+            // Step LB: the Physicalize the current body was made from, when
+            // it was made at its stamp (inside a replay, or live on time):
+            // every later restore anchored before born_tick makes it again
+            // from this at that tick (remake_mirror_birth), so the birth
+            // tick's step is re-simulated with the inputs the history has
+            // then.  False for a body started elsewhere (a late live birth,
+            // a row start): it keeps the parking path.
+            pending_birth birth{};
+            bool birth_known = false;
             std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
             bmmo::session::body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
@@ -207,23 +238,6 @@ namespace bmmo::session {
             // The missing-echo deadline and its uplink gate (expire_own_echoes).
             bmmo::session::own_echo_deadline echo_deadline;
             bool moved() const { return made && applied != origin; }
-        };
-
-        struct pending_birth {
-            uint32_t player = 0, tick = 0, origin = 0;   // tick: applied (protocol 9)
-            uint8_t ball_type = 0, flags = 0;
-            float position[3] = {};
-            float rotation[9] = {};
-            bmmo::session::ball_recipe recipe;
-            static pending_birth of(const bmmo::session_event_msg& event) {
-                pending_birth b;
-                b.player = event.player; b.tick = event.tick; b.origin = event.origin_tick;
-                b.ball_type = event.ball_type; b.flags = event.flags;
-                std::copy(std::begin(event.position), std::end(event.position), b.position);
-                std::copy(std::begin(event.rotation), std::end(event.rotation), b.rotation);
-                b.recipe = event.recipe;
-                return b;
-            }
         };
 
         uint32_t own_id_ = 0;
@@ -496,6 +510,11 @@ namespace bmmo::session {
         // front of it (apply_event).
         struct applied_death { uint32_t origin = 0, applied = 0; };
         std::map<uint32_t, applied_death> remote_last_unphysicalize_;
+        // Step LB: mirrors a restore took out and made again at their birth
+        // tick (the replay, or make_unmade_remakes live), and those neither
+        // could make again (left bodiless).  The engine's births_recreated
+        // counts the remakes too, among the mechanisms it re-creates.
+        uint64_t mirror_remakes_ = 0, mirror_remakes_lost_ = 0;
         uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
         bool resync_pending_ = false;
         // A resync request sent and not answered yet (no assignment with a
@@ -985,7 +1004,22 @@ namespace bmmo::session {
         void drain_pending_births(uint32_t tick);
         // A physicalized mirror without navigation is driven from now on, if
         // the host has the navigation (post_step step 16, and every birth).
-        void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote);
+        void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote, bool quiet = false);
+        // A restore's destroy_body for a mirror (core_world_hooks::
+        // remake_mirror_birth, step LB): the mirror born at `birth_tick` is
+        // taken out (body and navigation) and its birth queued again, so the
+        // replay makes it at that tick the way it was made first
+        // (drain_pending_births).  False, and nothing done, when `entity` is
+        // not a mirror whose birth at that tick is known, or without the
+        // lifecycle rewind.
+        bool remake_mirror_birth(const std::string& entity, uint32_t birth_tick);
+        // The mirror's current body is one remake_mirror_birth makes again
+        // at its birth tick (made at its stamp, navigated from it, the
+        // lifecycle rewind on).
+        bool remakes_birth(const client_core_state::remote_ball& remote) const;
+        // A mirror taken out for a remake that no replay made again (the
+        // replay stopped before its birth tick): made now, live.
+        void make_unmade_remakes();
         // The frame a live step of `tick` drives a predicted mirror with
         // (post_step step 28).
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick);

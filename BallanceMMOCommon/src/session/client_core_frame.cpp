@@ -317,6 +317,9 @@ namespace bmmo::session {
         // client has this order already.
         replay_corrected_inputs();
         retry_owed_resync();
+        // A mirror a restore took out for a remake that no replay made
+        // again (step LB): made now, not left without a body.
+        make_unmade_remakes();
         if (platform_.hooks.after_rewinds) platform_.hooks.after_rewinds(frame_tick);
         // The body changes stamped for this very tick, the own beam among
         // them: after the rewinds above, so none of them undoes one, and

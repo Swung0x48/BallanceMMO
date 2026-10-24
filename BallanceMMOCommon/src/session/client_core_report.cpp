@@ -167,7 +167,7 @@ namespace bmmo::session {
         }
         double mech_max = 0.0;
         for (const auto& [name, c]: s.mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
-        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu snapshots=%llu/%llu/%llu "
+        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
@@ -193,6 +193,10 @@ namespace bmmo::session {
                      // overtaken: older remote births relayed after their death
                      // and put back in front of it (dropped or re-ordered).
                      static_cast<unsigned long long>(s.births_overtaken_),
+                     // remake=made/lost (step LB): mirrors made again at their
+                     // birth tick inside a replay (or live after it), and those
+                     // made again neither in the replay nor live (bodiless).
+                     static_cast<unsigned long long>(s.mirror_remakes_), static_cast<unsigned long long>(s.mirror_remakes_lost_),
                      static_cast<unsigned long long>(s.snapshots_received_),
                      static_cast<unsigned long long>(s.snapshots_applied_), static_cast<unsigned long long>(s.snapshots_stale_),
                      static_cast<unsigned long long>(s.life_rewinds_), static_cast<unsigned long long>(s.life_rewinds_missed_),

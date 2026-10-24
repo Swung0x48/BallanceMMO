@@ -5612,6 +5612,186 @@ uncorrected track) is closed in the shared engine.
   again, starved 0; (2) `rrf_ssc` 50:12 (49), 97:24 (24), 131:47 (18): EXACT
   on 53 bodies.
 
+**As built (step LB): a mirror born inside a rewind's window is made again
+at its birth tick from the inputs, not parked and re-posed.** The finding RR
+left open (swing c0: the two mirrors born at 701 0.17 m/s behind the server at
+702, the own ball and the third mirror 0.02-0.03 m/s) is closed in the shared
+core, engine and binding.
+
+- **Ground truth.** The server applies navigation at a clone's birth tick:
+  `set_input` before the events, `set_ball` at the Physicalize, the force in
+  that tick's PreSimulate (session_runner.cpp `step`, physics_world.cpp
+  `apply_event`); its 702 rows have vx 0.3955 / 0.3755 / 0.3555 / 0.3355 (two
+  ticks of force, 0.1836 each, plus a push of +0.03 / +0.01 / -0.01 / -0.03:
+  the four balls are born 3 m apart, x 711 / 708 / 705 / 702, and push one
+  another in the 701 step). The client's live frames never had these mirrors
+  at 702: all four births arrived 18-19 ticks late (local 719-720), so they
+  exist only in replays and the server is the reference.
+- **Cause, two mechanisms** (a diagnostic build logging, per replayed tick,
+  each ball's state and navigation before and after the step and after the
+  births' re-pose; its replay journal byte-identical to the clean build's):
+  1. *The birth tick's force.* The late birth's first replay (local 719) made
+     the mirror at 701 in `pre_step` with no frame for it: the relay had not
+     reached 701 (`relay_frame_or_earlier` returns none for the tail) and the
+     window's records, captured while the player was dead, hold no
+     prediction for it, so the navigation stayed idle (`a0 c00`) and its
+     record of 701 has vx 0. Every later rewind across 701 took the engine's
+     birth branch: parked at that record, out of collision detection, and
+     after the 701 step - which the now-known frame drove to vx 0.18358 - put
+     back on the record (`post-step vx 0.18358`, `post-repose vx 0.00000`).
+     `note_input_correction` skipped the 701 frame by rule
+     (`relay_birth_frozen_`: a replay re-poses it anyway). One tick of force
+     lost in every replay: the 0.17 m/s.
+  2. *The birth tick's collisions.* A parked body is inert through its birth
+     tick's step, so of the four balls born together only the two the replay
+     made itself (the own beam, the pending birth of 2367392004) pushed each
+     other: +0.01 / -0.01 where the server has +0.03 / +0.01 - the own ball's
+     and that mirror's 0.02-0.03 m/s.
+- **The fix: the mirror's birth is re-run, as the own ball's beam already is
+  (`apply_own_lives` in every replay).**
+  - core: `remote_ball` keeps the `pending_birth` it was made from and
+    `birth_known` (made at its stamp; false for a late live birth or a row
+    start). `remake_mirror_birth` (`core_world_hooks::remake_mirror_birth`),
+    asked by a restore's `destroy_body`: a mirror whose birth is known
+    (`remakes_birth`: rollback and lifecycle rewind on, physicalized and
+    navigated, `born_tick` = its stamp = `driven_from`) is taken out
+    (navigation detached, body unmade with the event log muted) and its birth
+    queued again (`pending_birth::remake`); `drain_pending_births` makes it
+    at that tick in join order with the tick's other births and our own
+    changes. `physicalize_remote`'s remake: the same entity (no
+    `mirror_entity`), the same lifetime (no generation bump: the window's
+    records and RR's kept rows name it), the remote's live state untouched
+    (predictor, `applied`, corrector, `born_tick`, `driven_from`, birth), the
+    navigation attached without the log line. `make_unmade_remakes`, after
+    the frame's rewinds: a remake no replay made is made live.
+  - `note_input_correction`: the birth tick's frame is news again for a
+    remade birth (`!remakes_birth`), so its arrival rewinds to the tick
+    before the birth.
+  - engine: `rollback_world::birth_from_inputs`. A body `destroy_body` took
+    out that it names (`restore::from_inputs`) is fed again after
+    `pre_step` at its birth tick (its navigation is the one made with it,
+    after the tick's first feed) and left as that step made it: no re-pose
+    to the birth record, which was made with the inputs known then (logged
+    `made again at tick T from the inputs it has now, kept against its
+    birth record`, counted in `births_recreated_exact` when equal). No new
+    engine member (layout).
+  - binding (`bind_session_world`): `destroy_body` asks the core for a
+    mirror first, before the ball rule; `birth_from_inputs` is the core's
+    mirror test. `--park-births` installs neither.
+  - headless host: `make_mirror` finds the spec's entity by name before
+    `remote_entity`, which clones a new, uniquely named entity on every call
+    (the live makes are unchanged: `mirror_entity` names the entity in the
+    same frame).
+  - Legacy retail: no core hooks, unchanged. Retail with the core on:
+    `lifecycle_rewind` is off until R3, so `remake_mirror_birth` answers
+    false and the mirrors keep the parking path; the retail `make_mirror`
+    keeps one entity per player and type, so R3 needs no host change.
+- **Adaptations.** The design had no remake; the step asked for the fix in
+  the shared code. A predicted frame at the birth tick alone would fix (1)
+  and not (2); re-running the birth fixes both. The headless `make_mirror`
+  lookup is the one host change. The x86 client objects were deleted before
+  the build (`client_core.hpp` and `client_platform.hpp` changed layout).
+- **Measured (quick tier).** 432 tests pass (new:
+  `RollbackEngine.AMirrorMadeAgainFromTheInputsIsFedAtItsBirthTickAndKeptAsStepped`,
+  `RollbackBinding.SessionWorldHandsAMirrorsBirthToTheCore`,
+  `SessionClientCoreLifecycle.AMirrorBornInTheWindowIsMadeAgainAtItsBirthTick`);
+  `linux_test_syntax.sh` 25 ok; x64 BUILD-OK (`build-agent-rLB` plain,
+  `build-agent-rLBh` with the slot-13 hack); x86 CLIENT-BUILD-OK (plain).
+  - swing c0 replay: once all four births are known (the replays anchored at
+    700-711 from local 720 on), every replayed tick 702-712 has the four
+    balls within 4.1e-6 m/s of the server's vx (RR: 0.17 m/s), and 713-740,
+    through the four balls' collision, within 2.3e-5 m/s (RR: 0.07 / 0.39
+    m/s at 714, 1.5 m/s at 716).
+  - `wire_check.sh rRR rLB lbw`: sends identical in 15 of 16 (a6m c1 from
+    send 3464, tick 3167). All 16 journals differ. 9 are the same world
+    (TICK hash and pose equal at every tick): the TICK records' birth
+    counters (parked -> made again) and, in resync c1, a6m c3 and a5u c2, one
+    more rewind (the birth tick's frame no longer skipped) that reproduces
+    the same world. 7 change the world; against the server's FULL
+    checkpoints (balloon left out) 6 end closer - swing c0 797.8 -> 788.9 m
+    (own ball mean 0.0017 -> 0.0007 m), swing c1 1105.1 -> 1094.1, swing c2
+    586.21 -> 586.20, a6m c1 83.55 -> 80.31, a6m c2 51.47 -> 46.03, resync c0
+    7050.75 -> 7046.45 - and swing c3 ends further, 412.63 -> 414.48 m, all
+    of it at one LOCAL checkpoint (local 724; every other tick equal, or
+    closer: ball 2632207374 at 844-944). There the old replay's birth-tick
+    error breached the snapshot of 702 (own ball, 0.085896 m) and its rows
+    corrected 702; the new replay's 702 was within tolerance and the
+    snapshot of 704 breached instead (mirror `Ball_Stone_BMMO_2367392006`,
+    0.037240 m), its rows corrected 704. Both rewinds ran at local 723-724,
+    while the frames of 905583447's mirror from 701 were still arriving one
+    by one (the corrections for 705-722 follow through local ~752). The
+    LOCAL checkpoints 702-722 are equal in the two journals (written live,
+    before any of the four births was known); at 724 both are predictions
+    with that input missing, from different corrections (the four balls
+    0.728 / 0.504 / 0.997 / 0.166 m from the server -> 0.643 / 1.098 /
+    0.342 / 0.895, sum 2.395 -> 2.979 m); at 726 both equal the server's
+    (0.0000 on all four). Measured on the balls (the mechanisms differ only
+    in `P_Modul_41`, a pair about 598 m apart in both): swing c3 +0.568 m,
+    all at 724; the other six -8.53 / -10.80 / -0.009 / -3.24 / -5.45 /
+    -8.06 m. **This check fails for swing c3**; the cause is above, and
+    whether it may stand is the user's decision.
+  - `savestate_check --journals` 50:12 (48 forced), 97:24 (25), 131:47 (18):
+    EXACT on 53 bodies.
+  - headless, 4 clients, swing bay, snapshots off, 60 s (`lb_swing_n1`,
+    `rLBh`, captures): the four captures replayed with `rLBh` are IDENTICAL
+    to the live journals, counters equal; the server journal replays rc 0, 0
+    mismatches; resyncs, unmatched, rebases 0. Mirror error against the
+    server's FULL checkpoints: p99 10.0 m over all clients (per client 1.56 /
+    2.76 / 3.11 / 12.41) against `e8ab2_swing` n1 / n2 / o1 / o2 103.6 /
+    27.4 / 16.7 / 80.3 (per client 3.1-524.9); mean 4.98 against 4.26-5.84
+    and max 565.6 against 557.8, both the beam and death transients. Seen,
+    not caused by LB: relay_late 0 / 3 / 6 / 3 (lag max 48-49 against the
+    48-tick reach; E8 n1 had 150), starved 4-7 (E8 0-5), t_max 147 / 88 /
+    142 ms live where the replays of the same captures give 43-55 (E8
+    43-75): host spikes.
+  - solo snapshots off (`solo/lb_new1`): IDENTICAL to HEAD's binary run
+    beside it (`solo/rr_old1`: TICK hash and pose 2377 / 2377, LOCAL 1189 /
+    1189, other records 5979 / 5979). Both differ from `old1` from tick 952;
+    step P's binary (`solo/p_old1`) equals `old1`, so the difference came
+    with Q (the anchor restores the proximity countdowns, server and
+    headless), not with LB: `old1` is no longer the solo reference. (Not
+    bisected further: Q's binary on disk, `build-agent-rQ`, is the plain
+    build, which the arena server refuses with "physics sessions need an
+    original level"; a slot-13 build of Q is needed for that run.)
+- **Gate round.**
+  - A remake whose make fails (`make_mirror` refuses, or the remote has no
+    entity) left the mirror without a body for good: its pending entry was
+    already drained, and before LB the parked body had stayed. Now
+    `drain_pending_births` queues a failed remake again, so
+    `make_unmade_remakes` tries it once more, live, after the frame's
+    rewinds; failing there too, it is counted and logged (status
+    `remake=made/lost`), `birth_known` is cleared, and the mirror stays
+    bodiless until the player's next Physicalize. The status line's
+    `remake=` also gives the number of remakes, which the engine's
+    `births_recreated` counts among its mechanism re-creations (and
+    `births_recreated_exact` there, for a remake, means "equal to the birth
+    record of the earlier inputs", not a fidelity statement). The fake
+    platform's `make_mirror_ok` covers both failures in
+    `AMirrorBornInTheWindowIsMadeAgainAtItsBirthTick`.
+  - a6m c1's sends: the first differing send is #3464, tick 3167, type 5
+    (the input history, 325 bytes); sends 3167-3175 differ, the rest are
+    equal. The own frames at 3167 and 3168 swap (keys 1, 5 -> 5, 1): the
+    run drives with `--keep-lane 15`, which steers from the own ball's
+    state, and every history datagram carrying those two frames differs.
+    The world first differs at tick 2606 (TICK hash and pose, the own ball's
+    spawn tick); the one control-flow difference before it is LB's new
+    rewind at local ~2596, `rollback to tick 2587 (Ball_Stone_BMMO_1267384801
+    input corrected at tick 2588)`: the frame of that mirror's birth tick,
+    which the old binary skipped (`relay_birth_frozen` 1 -> 0).
+  - resync c2's capture replay stops at pass 14234 (`own birth moved 2635
+    -> never ... resync`, then `expected a clock read at resync_limiter`)
+    with LB and with RR's binary alike (`rr2_new`); the binaries before RR
+    (`rPw_new`, `rrw_old`) replayed it to the end. It predates LB.
+  - Rerun for the fix-up (shared code): 432 tests; GCC `-fsyntax-only` with
+    the Arch tree's own compile commands on the 10 translation units LB
+    touches (the scratchpad's `linux_test_syntax.sh` was lost with the temp
+    tree), all ok; x64 and x86 (objects deleted) built; the 16 captures
+    replayed with the fix-up's binary: every journal IDENTICAL to the
+    implement round's (`lbw_new`) under the exclusions and every send equal
+    past the first (the hello, which carries the build id) - the failure
+    path was never taken in them (status `remake=` 3-24 made, 0 lost, per
+    journal).
+
 ## 7. Open questions
 
 1. **Retail's resync triggers.** Retail resyncs on `too_far`, `frozen`, 30

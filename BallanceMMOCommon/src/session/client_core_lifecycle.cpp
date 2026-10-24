@@ -273,6 +273,7 @@ namespace bmmo::session {
         if (!physicalize_remote(birth, live_first_tick(event.tick))) return true;   // logged; not again from the event
         const auto it = s.remotes_.find(event.player);
         if (it == s.remotes_.end()) return true;
+        it->second.birth_known = false;   // started from the row, not from its Physicalize: no remake (step LB)
         std::string error;
         if (!platform_.write_body(it->second.entity, row.position, row.rotation, row.linear, row.angular, row.simulated, error))
             logf("remote physicalize %s from the row of tick %u: %s", it->second.entity.c_str(), row.tick, error.c_str());
@@ -399,10 +400,15 @@ namespace bmmo::session {
                 apply_own_lives(tick, "replay", false);
                 own = false;
             }
+            bool made = false;
             {
                 const event_log_mute mute(*this);
-                physicalize_remote(birth, tick);
+                made = physicalize_remote(birth, tick);
             }
+            // A remake that failed (step LB): its body was taken out at the
+            // restore, so it is queued again for make_unmade_remakes, which
+            // tries once more, live, after the frame's rewinds.
+            if (!made && birth.remake) s.pending_births_.push_back(birth);
             s.mechanism_tracking_.mark_dirty();
         }
         if (own) apply_own_lives(tick, "replay", false);
@@ -446,11 +452,26 @@ namespace bmmo::session {
 
     // `first_tick`: the first tick this world steps the body (the stamp
     // inside a replay, live_first_tick otherwise).
+    // A remake (event.remake, step LB: remake_mirror_birth took the body out
+    // at a restore) makes the same body again: the entity it had (no
+    // mirror_entity, which on the headless host clones a new one), its
+    // lifetime kept (no generation bump: the records of the window name
+    // it), and nothing of the remote's live state changed but its body and
+    // navigation - the predictor, the frame the next live step drives it
+    // with, the corrector and the birth stay as they are.
     bool session_client_core::physicalize_remote(const pending_birth& event, uint32_t first_tick) {
         std::string error;
         {
-            const std::string entity = platform_.mirror_entity(event.player, event.ball_type, error);
-            if (entity.empty()) { logf("remote physicalize: %s", error.c_str()); return false; }
+            const bool remake = event.remake;
+            std::string entity;
+            if (remake) {
+                const auto found = s.remotes_.find(event.player);
+                if (found != s.remotes_.end()) entity = found->second.entity;
+                if (entity.empty()) { logf("remote physicalize: no mirror of %u to make again", event.player); return false; }
+            } else {
+                entity = platform_.mirror_entity(event.player, event.ball_type, error);
+                if (entity.empty()) { logf("remote physicalize: %s", error.c_str()); return false; }
+            }
             auto& remote = s.remotes_[event.player];
             if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
             remote.navigation = false;
@@ -480,6 +501,12 @@ namespace bmmo::session {
                 logf("remote physicalize %s: %s", entity.c_str(), made.error.c_str());
                 return false;
             }
+            if (remake) {
+                ++s.mirror_remakes_;
+                remote.physicalized = true;
+                attach_remote_navigation(event.player, remote, true);
+                return true;
+            }
             // The mirror's body is new: a new lifetime, so no record of the
             // previous one can restore it (design 9.25).
             ++s.generations_[entity];
@@ -488,6 +515,10 @@ namespace bmmo::session {
             remote.physicalized = true;
             remote.born_tick = first_tick;
             remote.driven_from = first_tick;
+            // Made at its stamp: every later restore anchored before it can
+            // make it again the same way (step LB).
+            remote.birth = event;
+            remote.birth_known = first_tick == event.tick;
             remote.corrector.clear();
             // Frames relayed before this mirror existed move into its ring:
             // the newest becomes the live predictor, and a rewind that later
@@ -531,17 +562,88 @@ namespace bmmo::session {
         return true;
     }
 
-    void session_client_core::attach_remote_navigation(uint32_t player, remote_ball& remote) {
+    // `remake`: the navigation of a mirror made again inside a replay (step
+    // LB) - attached as at its birth, without the log line and with the
+    // corrector left as the live frames have it.
+    void session_client_core::attach_remote_navigation(uint32_t player, remote_ball& remote, bool remake) {
         if (!remote.physicalized || remote.navigation) return;
         std::string error;
         const mirror_navigation attached = platform_.attach_mirror_navigation(player, remote.entity, remote.ball_type, error);
         if (attached == mirror_navigation::unavailable) return;
         if (attached == mirror_navigation::attached) {
             remote.navigation = true;
+            if (remake) return;
             remote.corrector.clear();
             logf("remote %s now predicted", remote.entity.c_str());
         } else {
             logf("remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
+        }
+    }
+
+
+    // Step LB: a mirror born inside a rewind's window, taken out at the
+    // restore (the binding's destroy_body) and made again at its birth tick
+    // by drain_pending_births, in join order with the other births of that
+    // tick and our own changes - what the first replay, or the live frame,
+    // did.  Parked instead (the path before LB), it was held out of
+    // collision detection through its birth tick's step and re-posed after
+    // it at its birth record, which a late birth's first replay had made
+    // without the frame of that tick (the relay had not reached it, so the
+    // navigation stood idle): every later replay kept that tick's missing
+    // force and the collisions of the balls born with it (swing c0: the
+    // mirrors born at 701 0.17 m/s behind the server at 702).  Only a body
+    // made at its stamp with its navigation from the start (birth_known,
+    // driven_from) and only with the lifecycle rewind, the switch under
+    // which this host makes births inside a replay at all.
+    bool session_client_core::remakes_birth(const remote_ball& remote) const {
+        return config.rollback && config.lifecycle_rewind && remote.physicalized && remote.navigation && remote.birth_known
+            && remote.born_tick != 0 && remote.birth.tick == remote.born_tick && remote.driven_from == remote.born_tick;
+    }
+
+    bool session_client_core::remake_mirror_birth(const std::string& entity, uint32_t birth_tick) {
+        for (auto& [player, remote]: s.remotes_) {
+            if (remote.entity != entity) continue;
+            if (!remakes_birth(remote) || remote.born_tick != birth_tick) return false;
+            for (const auto& queued: s.pending_births_)
+                if (queued.player == player && queued.tick == birth_tick) return false;   // made there already
+            platform_.detach_mirror_navigation(entity);
+            remote.navigation = false;
+            unphysicalize_mirror(entity);
+            remote.physicalized = false;
+            pending_birth again = remote.birth;
+            again.remake = true;
+            s.pending_births_.push_back(again);
+            return true;
+        }
+        return false;
+    }
+
+    // A remake no replay made (the replay stopped before its birth tick, or
+    // the make failed there): the mirror is made now, at its birth pose, as
+    // make_remote_birth makes a late birth whose replay did not get that
+    // far.  When this make fails too the mirror is left without a body until
+    // the player's next Physicalize (its frames counted bodiless): counted
+    // (remake=.../lost) and never remade again.
+    void session_client_core::make_unmade_remakes() {
+        for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();) {
+            if (!it->remake) { ++it; continue; }
+            const pending_birth birth = *it;
+            s.pending_births_.erase(it);
+            logf("remote physicalize of %u: the replay did not make it again at tick %u, made live", birth.player, birth.tick);
+            bool made = false;
+            {
+                const event_log_mute mute(*this);
+                made = physicalize_remote(birth, birth.tick);
+            }
+            if (!made) {
+                ++s.mirror_remakes_lost_;
+                if (const auto remote = s.remotes_.find(birth.player); remote != s.remotes_.end())
+                    remote->second.birth_known = false;
+                logf("remote physicalize of %u: made again neither in the replay nor live; no body until its next Physicalize",
+                     birth.player);
+            }
+            s.mechanism_tracking_.mark_dirty();
+            it = s.pending_births_.begin();
         }
     }
 

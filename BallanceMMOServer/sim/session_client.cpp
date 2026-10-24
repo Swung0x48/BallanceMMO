@@ -919,6 +919,11 @@ namespace {
                 // The one mirror_entity found for this spec (the core asks for
                 // it first, in the same frame); else the same lookup again.
                 CK3dEntity* entity = mirror_made_entity_;
+                // A mirror made again inside a replay (step LB) names the
+                // entity it had; remote_entity would clone a new one.
+                if (!entity || !entity->GetName() || spec.entity != entity->GetName())
+                    entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndClass(
+                            const_cast<CKSTRING>(spec.entity.c_str()), CKCID_3DOBJECT, nullptr));
                 if (!entity || !entity->GetName() || spec.entity != entity->GetName()) {
                     std::string error;
                     entity = remote_entity(spec.player, spec.ball_type, error);

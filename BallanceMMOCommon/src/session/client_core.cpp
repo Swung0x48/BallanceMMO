@@ -62,6 +62,15 @@ namespace bmmo::session {
         world_hooks_.destroy_own_birth = [this](const std::string& entity, uint32_t birth_tick, bool& destroyed) {
             return destroy_moved_own_birth(entity, birth_tick, destroyed);
         };
+        // Step LB: a mirror born inside the window is taken out at the
+        // restore and made again at its birth tick by the core's births, as
+        // the first replay (or the live frame) made it - stepped with the
+        // other bodies of that tick and driven with the frame the history
+        // has for it now - instead of being parked inert and re-posed at a
+        // birth record made with the inputs known then.
+        world_hooks_.remake_mirror_birth = [this](const std::string& entity, uint32_t birth_tick) {
+            return remake_mirror_birth(entity, birth_tick);
+        };
         world_hooks_.own_body = [this](const std::string& entity) { return entity == s.own_body_entity_; };
         world_hooks_.mirror = [this](const std::string& entity) {
             for (const auto& [id, remote]: s.remotes_) if (remote.entity == entity) return true;

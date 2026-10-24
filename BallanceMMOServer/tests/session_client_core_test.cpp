@@ -82,6 +82,8 @@ namespace bmmo::session {
         BMMO_CORE_STEP(drain_due_events)
         BMMO_CORE_STEP(apply_held_lifecycle)
         BMMO_CORE_STEP(drain_pending_births)
+        BMMO_CORE_STEP(remake_mirror_birth)
+        BMMO_CORE_STEP(make_unmade_remakes)
         BMMO_CORE_STEP(attach_remote_navigation)
         BMMO_CORE_STEP(process_own_echoes)
         BMMO_CORE_STEP(report_physicalize)
@@ -128,6 +130,7 @@ namespace {
         std::string driven;              // what own_driven_entity answers
         bool write_ok = true;            // what write_body answers (false: "no body")
         bool mirror_ok = true;           // what mirror_entity answers (false: "" and "no ball")
+        bool make_mirror_ok = true;      // what make_mirror answers (false: not made, "no body")
         bmmo::session::mirror_navigation attach_answer = bmmo::session::mirror_navigation::attached;
         std::vector<bmmo::session::mirror_spec> specs;   // every make_mirror's spec, in order
         std::vector<std::string> bodies_there;           // the entities body_state answers true for (E7)
@@ -205,8 +208,9 @@ namespace {
                                 + (spec.kick ? ":kick" + std::to_string(spec.kick_index) : std::string()));
                 specs.push_back(spec);
                 bmmo::session::mirror_made made;
-                made.made = true;
-                made.kicked = spec.kick;
+                made.made = make_mirror_ok;
+                made.kicked = make_mirror_ok && spec.kick;
+                if (!make_mirror_ok) made.error = "no body";
                 return made;
             };
             p.unmake_mirror = [this](const std::string& entity) { calls.push_back("unmake_mirror:" + entity); };
@@ -2088,6 +2092,125 @@ namespace {
         state_of(core).pending_births_.clear();
         steps{core}.drain_pending_births(130);
         EXPECT_TRUE(since(fake.calls, from).empty());
+    }
+
+    // Step LB: a mirror made at its stamp (here inside a replay) is taken out
+    // by a later restore anchored before it (the binding's destroy_body ->
+    // remake_mirror_birth) and made again at that tick by the core's births:
+    // the same entity (no mirror_entity), its lifetime kept, no log line, the
+    // live predictor and the frame the next live step drives it with left
+    // alone.  Not for another tick, a body started elsewhere (made live after
+    // its stamp), one already taken out, or without the lifecycle rewind.  A
+    // remake no replay made is made live by make_unmade_remakes.
+    TEST(SessionClientCoreLifecycle, AMirrorBornInTheWindowIsMadeAgainAtItsBirthTick) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        client_core_state::pending_birth birth;
+        birth.player = 4; birth.tick = 124; birth.origin = 124;
+        birth.position[0] = 705.0f;
+        state_of(core).pending_births_ = {birth};
+        steps{core}.drain_pending_births(124);
+        auto& four = state_of(core).remotes_.at(4);
+        ASSERT_TRUE(four.physicalized);
+        ASSERT_TRUE(four.navigation);
+        EXPECT_TRUE(four.birth_known) << "made at its stamp";
+        EXPECT_EQ(four.born_tick, 124u);
+        EXPECT_EQ(state_of(core).generations_.at("Ball_0_BMMO_4"), 1u);
+        four.applied.keys = 9;   // what the end of the last live frame chose
+        const auto& remake = steps{core}.world_hooks().remake_mirror_birth;
+        ASSERT_TRUE(remake) << "the core's half of the binding";
+
+        EXPECT_FALSE(remake("Ball_0_BMMO_4", 123)) << "another tick";
+        EXPECT_FALSE(remake("Ball_0_BMMO_5", 124)) << "no such mirror";
+        size_t from = fake.calls.size();
+        EXPECT_TRUE(remake("Ball_0_BMMO_4", 124));
+        {
+            const std::vector<std::string> expected = {
+                "detach_mirror_navigation:Ball_0_BMMO_4", "mute_event_log:on", "unmake_mirror:Ball_0_BMMO_4",
+                "mute_event_log:off"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_FALSE(four.physicalized);
+        EXPECT_FALSE(four.navigation);
+        ASSERT_EQ(state_of(core).pending_births_.size(), 1u);
+        EXPECT_TRUE(state_of(core).pending_births_[0].remake);
+        EXPECT_FALSE(remake("Ball_0_BMMO_4", 124)) << "taken out already";
+
+        from = fake.calls.size();
+        steps{core}.drain_pending_births(124);
+        {
+            const std::vector<std::string> expected = {
+                "mute_event_log:on", "make_mirror:Ball_0_BMMO_4:P#0", "attach_mirror_navigation:4:Ball_0_BMMO_4",
+                "mute_event_log:off"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(state_of(core).pending_births_.empty());
+        EXPECT_TRUE(four.physicalized);
+        EXPECT_TRUE(four.navigation);
+        EXPECT_EQ(four.born_tick, 124u);
+        EXPECT_EQ(four.driven_from, 124u);
+        EXPECT_EQ(four.applied.keys, 9u) << "the next live step's frame stays";
+        EXPECT_EQ(state_of(core).generations_.at("Ball_0_BMMO_4"), 1u) << "the same lifetime";
+
+        // Taken out, and no replay made it again: made live.
+        EXPECT_TRUE(remake("Ball_0_BMMO_4", 124));
+        from = fake.calls.size();
+        steps{core}.make_unmade_remakes();
+        {
+            const std::vector<std::string> expected = {
+                "log:0:remote physicalize of 4: the replay did not make it again at tick 124, made live",
+                "mute_event_log:on", "make_mirror:Ball_0_BMMO_4:P#0", "attach_mirror_navigation:4:Ball_0_BMMO_4",
+                "mute_event_log:off"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(four.physicalized);
+        EXPECT_TRUE(state_of(core).pending_births_.empty());
+        EXPECT_EQ(state_of(core).mirror_remakes_lost_, 0u);
+        EXPECT_EQ(state_of(core).mirror_remakes_, 2u) << "the replay's and the live one";
+
+        // A remake whose make fails in the replay is queued again and tried
+        // once more live; failing there too, it is counted (remake=.../lost),
+        // left bodiless and never remade again.
+        EXPECT_TRUE(remake("Ball_0_BMMO_4", 124));
+        fake.make_mirror_ok = false;
+        steps{core}.drain_pending_births(124);
+        ASSERT_EQ(state_of(core).pending_births_.size(), 1u) << "queued again";
+        EXPECT_TRUE(state_of(core).pending_births_[0].remake);
+        EXPECT_FALSE(four.physicalized);
+        steps{core}.make_unmade_remakes();
+        EXPECT_TRUE(state_of(core).pending_births_.empty());
+        EXPECT_FALSE(four.physicalized);
+        EXPECT_FALSE(four.birth_known);
+        EXPECT_EQ(state_of(core).mirror_remakes_lost_, 1u);
+        EXPECT_FALSE(remake("Ball_0_BMMO_4", 124)) << "no body to take out";
+        // Made again by an ordinary make (here: the queued remake once more,
+        // the make working again).
+        fake.make_mirror_ok = true;
+        client_core_state::pending_birth again = state_of(core).remotes_.at(4).birth;
+        again.remake = true;
+        state_of(core).pending_births_ = {again};
+        steps{core}.make_unmade_remakes();
+        EXPECT_TRUE(four.physicalized);
+        EXPECT_EQ(state_of(core).mirror_remakes_lost_, 1u);
+        EXPECT_EQ(state_of(core).mirror_remakes_, 3u);
+
+        // Without the lifecycle rewind: the parking path.
+        core.config.lifecycle_rewind = false;
+        EXPECT_FALSE(remake("Ball_0_BMMO_4", 124));
+        core.config.lifecycle_rewind = true;
+        // A body made live after its stamp (a late birth the history could
+        // not replay): started elsewhere, no remake.
+        state_of(core).pending_births_.clear();
+        core.on_session_event(event_message(5, bmmo::session::event_type::Physicalize, 100, 100));
+        steps{core}.drain_due_events(126);
+        const auto& five = state_of(core).remotes_.at(5);
+        ASSERT_TRUE(five.physicalized);
+        EXPECT_FALSE(five.birth_known);
+        EXPECT_FALSE(remake(five.entity, five.born_tick));
+        EXPECT_TRUE(five.physicalized);
     }
 
     // A late birth inside the history is deferred into the replay of its

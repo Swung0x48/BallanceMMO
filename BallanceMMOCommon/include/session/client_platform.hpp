@@ -146,6 +146,11 @@ namespace bmmo::session {
         // again at its applied tick.  True when `entity` at `birth_tick` is
         // one (`destroyed`: taken out); false otherwise.
         std::function<bool(const std::string& entity, uint32_t birth_tick, bool& destroyed)> destroy_own_birth;
+        // destroy_body for a mirror (step LB): true when the mirror born at
+        // `birth_tick` was taken out and the replay makes it again at that
+        // tick from its Physicalize (the core's births); false, and the
+        // mirror keeps the parking path, otherwise.
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> remake_mirror_birth;
         // The entity is the own ball's body, or a mirror's: never a
         // mechanism birth to destroy or insert.
         std::function<bool(const std::string& entity)> own_body;

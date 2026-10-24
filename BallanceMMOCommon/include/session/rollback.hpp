@@ -224,6 +224,17 @@ namespace bmmo::session {
         // body still missing after that tick's step is counted (births_missing).
         std::function<bool(const std::string& entity, uint32_t birth_tick)> destroy_body;
         std::function<bool(const std::string& entity, uint32_t birth_tick)> recreate_body;
+        // Optional, with destroy_body (step LB of the session-core design): a
+        // body destroy_body took out that the caller makes again at its
+        // birth tick from the session's inputs - a mirror, made from its
+        // Physicalize event and driven with the frames the history has for
+        // it now.  After its birth tick's step it is left as the step made
+        // it: its birth record was a replay's or a live frame's, made with
+        // the inputs known then, so a difference to it is what the history
+        // has learnt since, not a fidelity gap to correct.  Its navigation
+        // is new (made with the body, before the tick's step), so the
+        // tick's frame is fed again after the caller's births.
+        std::function<bool(const std::string& entity)> birth_from_inputs;
         // Optional, the other end of a lifetime (step P of the session-core
         // design): a mechanism the anchor's record has and the world no
         // longer has - destroyed inside the window by a script the replay
@@ -950,6 +961,7 @@ namespace bmmo::session {
                         if (!item.repose_tick) continue;
                         if (world.destroy_body(entity, item.repose_tick)) {
                             item.recreate = true;
+                            item.from_inputs = world.birth_from_inputs && world.birth_from_inputs(entity);
                             ++stats_.births_recreated;
                         } else {
                             ++stats_.birth_recreate_failures;
@@ -1317,11 +1329,17 @@ namespace bmmo::session {
                         const auto was = step_tracked.generations.find(entity);
                         const bool same_life = was != step_tracked.generations.end() && was->second == generation;
                         step_tracked.generations[entity] = generation;
-                        if (named && same_life) continue;
+                        // Made again by pre_step at this, its birth tick, from
+                        // the inputs (birth_from_inputs): its navigation is the
+                        // one made with it, after the feed above.
+                        const auto made = plan.find(entity);
+                        const bool remade = made != plan.end() && made->second.from_inputs && made->second.repose_tick == t;
+                        if (named && same_life && !remade) continue;
                         // Named, but under the lifetime that went (a same-name
-                        // death and birth at one stamp): the feed above ran
-                        // before pre_step, on the navigation the new body
-                        // replaced, so it is fed again.  Not named: added.
+                        // death and birth at one stamp), or made again just now:
+                        // the feed above ran before pre_step, on the navigation
+                        // the new body replaced, so it is fed again.  Not
+                        // named: added.
                         if (!named) remotes.push_back(entity);
                         feed(entity, true);
                         if (const auto fed = inputs.find(entity); fed != inputs.end()) {
@@ -1358,6 +1376,26 @@ namespace bmmo::session {
                             if (world.log && recreate_logs_++ < 8)
                                 world.log("birth: " + entity + " was destroyed at the restore and is not back after its birth tick "
                                           + std::to_string(t));
+                        }
+                        continue;
+                    }
+                    // Made again from the inputs (birth_from_inputs): the step
+                    // is the state, whatever the record of the earlier inputs
+                    // says.
+                    if (item.from_inputs) {
+                        if (same_body_state(live, item.state)) {
+                            ++stats_.births_recreated_exact;
+                        } else if (world.log && recreate_logs_++ < 8) {
+                            char buf[200];
+                            std::snprintf(buf, sizeof(buf), " dp=(%.3g,%.3g,%.3g) dv=(%.3g,%.3g,%.3g)%s",
+                                          live.position[0] - item.state.position[0], live.position[1] - item.state.position[1],
+                                          live.position[2] - item.state.position[2],
+                                          static_cast<double>(live.linear[0]) - item.state.linear[0],
+                                          static_cast<double>(live.linear[1]) - item.state.linear[1],
+                                          static_cast<double>(live.linear[2]) - item.state.linear[2],
+                                          live.simulated != item.state.simulated ? " sleep differs" : "");
+                            world.log("birth: " + entity + " made again at tick " + std::to_string(t)
+                                      + " from the inputs it has now, kept against its birth record:" + buf);
                         }
                         continue;
                     }
@@ -1811,6 +1849,7 @@ namespace bmmo::session {
             // it anyway.
             bool recontact = false;
             uint32_t repose_tick = 0;    // 0: none - re-pose at this replayed tick
+            bool from_inputs = false;    // destroyed and made again from the inputs: kept as stepped (birth_from_inputs)
             // Only set when the state came from our OWN record (the recorded
             // branch of the planning loop) or from the birth record of a body
             // born inside the window (written at its re-pose, not at the

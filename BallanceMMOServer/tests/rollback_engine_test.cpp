@@ -2558,6 +2558,96 @@ TEST(RollbackEngine, ARemoteRebornUnderTheSameNameIsFedAfterItsBirthAndRelabelle
     EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], live.linear[0]);
 }
 
+// Step LB of the session-core design: a mirror born inside the window that
+// the caller takes out at the restore (destroy_body) and makes again at its
+// birth tick from the inputs (birth_from_inputs) is fed after it is made -
+// its navigation is new, and the feed before pre_step found none - and is
+// left as that step made it, whatever its birth record says: the record was
+// made with the inputs known then (a late birth's first replay, before the
+// relay had reached its stamp).  The control, the same re-creation without
+// the flag, keeps the birth tick undriven and its record's state.
+TEST(RollbackEngine, AMirrorMadeAgainFromTheInputsIsFedAtItsBirthTickAndKeptAsStepped) {
+    for (const bool from_inputs: {true, false}) {
+        SCOPED_TRACE(from_inputs ? "birth_from_inputs" : "control");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Own"];
+        rollback_engine engine;
+        auto w = world.adapter();
+        // the navigation exists only while the body does
+        const auto base_input = w.nav_input;
+        w.nav_input = [&](const std::string& entity, const input_frame& frame) {
+            if (entity == "Mirror" && !world.bodies.contains("Mirror")) {
+                world.calls.push_back("nav_input " + entity + " refused");
+                return false;
+            }
+            return base_input(entity, frame);
+        };
+        input_frame held{};
+        held.keys = 1;
+        held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+        constexpr uint32_t kBorn = 4;
+        fake_body born;
+        born.position[0] = 10.0;
+        rollback_tracked before;
+        before.own_entity = "Own";
+        before.generations = {{"Own", 1}};
+        rollback_tracked after = before;
+        after.remote_entities = {"Mirror"};
+        after.generations["Mirror"] = 2;
+        // Made at its stamp with no frame of its own yet: idle through 4..6.
+        for (uint32_t tick = 1; tick <= 6; ++tick) {
+            if (tick == kBorn) world.bodies["Mirror"] = born;
+            w.step();
+            std::map<std::string, input_frame> inputs{{"Own", input_frame{}}};
+            if (tick >= kBorn) inputs["Mirror"] = input_frame{};
+            engine.record(w, tick, tick >= kBorn ? after : before, inputs);
+        }
+        ASSERT_FLOAT_EQ(world.bodies["Mirror"].linear[0], 0.0f);
+
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return entity == "Mirror" && world.bodies.erase(entity) > 0;
+        };
+        if (from_inputs) w.birth_from_inputs = [](const std::string& entity) { return entity == "Mirror"; };
+        // The caller's births: made again before its birth tick's step, with
+        // a new navigation (nothing pending on it).
+        w.pre_step = [&](uint32_t tick) {
+            if (tick != kBorn || world.bodies.contains("Mirror")) return;
+            world.calls.push_back("made Mirror@" + std::to_string(tick));
+            world.bodies["Mirror"] = born;
+            world.pending_keys.erase("Mirror");
+        };
+        w.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) {
+            if (tick >= kBorn && world.bodies.contains("Mirror")) out["Mirror"] = 2;
+        };
+        // The relay has the frames now: the key held from the stamp on.
+        const auto relayed = [&](const std::string& entity, uint32_t tick, input_frame& out) {
+            if (entity != "Mirror" || tick < kBorn) return false;
+            out = held;
+            return true;
+        };
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, kBorn - 1, 6, relayed, "Mirror input corrected at tick 4"));
+        EXPECT_EQ(world.count("destroy Mirror@4"), 1);
+        EXPECT_EQ(world.count("made Mirror@4"), 1);
+        EXPECT_EQ(world.count("set_body Mirror"), 0) << "found on its record or kept: no write either way";
+        EXPECT_EQ(engine.stats().births_recreated, 1u);
+        if (from_inputs) {
+            EXPECT_EQ(world.count("nav_input Mirror keys=1"), 3) << "fed at its birth tick, after it was made";
+            EXPECT_FLOAT_EQ(world.bodies["Mirror"].linear[0], 3.0f) << "driven at 4, 5 and 6";
+            EXPECT_NEAR(world.bodies["Mirror"].position[0], 10.0 + 6.0 * kDt, 1e-6);
+            EXPECT_EQ(engine.stats().births_recreated_exact, 0u) << "not on the record of the earlier inputs";
+            EXPECT_EQ(engine.stats().birth_recreate_mismatches, 0u) << "a difference that is the inputs, not a gap";
+            EXPECT_EQ(world.count("log birth: Mirror made again at tick 4 from the inputs it has now"), 1);
+        } else {
+            EXPECT_EQ(world.count("nav_input Mirror keys=1"), 2) << "the birth tick's frame went nowhere";
+            EXPECT_FLOAT_EQ(world.bodies["Mirror"].linear[0], 2.0f);
+            EXPECT_EQ(engine.stats().births_recreated_exact, 1u) << "on its record: undriven at 4";
+        }
+    }
+}
+
 // The IVP savestate (docs/ivp-savestate-design.md): an anchor whose record
 // carries a blob is put back by set_savestate, after the navigation replicas
 // (set_nav re-creates the controllers the blob orders) and before anything

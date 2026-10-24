@@ -512,6 +512,42 @@ namespace {
     }
 }
 
+// Step LB: destroy_body hands a mirror's birth to the core
+// (remake_mirror_birth) before any ball rule, and takes nothing out itself;
+// birth_from_inputs is the core's mirror test.  Without the core's hook a
+// mirror keeps the parking path; --park-births installs neither.
+TEST(RollbackBinding, SessionWorldHandsAMirrorsBirthToTheCore) {
+    session_backend backend;
+    bmmo::session::core_world_hooks hooks;
+    std::vector<std::string> asked;
+    hooks.mirror = [](const std::string& entity) { return entity.rfind("Ball_Wood_BMMO_", 0) == 0; };
+    hooks.ball = hooks.mirror;
+    bmmo::session::local_birth_log births;
+    bmmo::session::session_world_options w;
+    w.births = &births;
+    {
+        rollback_world world = bmmo::session::bind_session_world(backend, hooks, w);
+        EXPECT_FALSE(world.destroy_body("Ball_Wood_BMMO_5", 120)) << "no core hook: parked";
+    }
+    hooks.remake_mirror_birth = [&](const std::string& entity, uint32_t tick) {
+        asked.push_back(entity + "@" + std::to_string(tick));
+        return entity == "Ball_Wood_BMMO_5";
+    };
+    rollback_world world = bmmo::session::bind_session_world(backend, hooks, w);
+    backend.calls.clear();
+    EXPECT_TRUE(world.destroy_body("Ball_Wood_BMMO_5", 120));
+    EXPECT_FALSE(world.destroy_body("Ball_Wood_BMMO_6", 121));
+    EXPECT_EQ(asked, std::vector<std::string>({"Ball_Wood_BMMO_5@120", "Ball_Wood_BMMO_6@121"}));
+    EXPECT_TRUE(backend.calls.empty()) << "the core takes it out, not the binding";
+    ASSERT_TRUE(world.birth_from_inputs);
+    EXPECT_TRUE(world.birth_from_inputs("Ball_Wood_BMMO_5"));
+    EXPECT_FALSE(world.birth_from_inputs("P_Box"));
+    w.park_births = true;
+    rollback_world parked = bmmo::session::bind_session_world(backend, hooks, w);
+    EXPECT_FALSE(parked.destroy_body);
+    EXPECT_FALSE(parked.birth_from_inputs);
+}
+
 // Design 2.4 / 5.1 (E9): bind_session_world composes the core's hooks with
 // the host's options in one order.  Before a replayed tick: the core's
 // births, then the manager activation, then the host's traces (and a

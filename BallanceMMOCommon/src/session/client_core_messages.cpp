@@ -426,11 +426,13 @@ namespace bmmo::session {
             ++s.relay_bodiless_;
             return;
         }
-        // The birth tick: every rewind across it parks the body and re-poses
-        // it at that tick's record after the step, so a different frame for
-        // it changes nothing a replay can reach - a whole replay for the
-        // same world.  (The one-tick error stays until a snapshot.)
-        if (remote.physicalized && tick == remote.born_tick && !feeds_next) {
+        // The birth tick of a body every rewind across it parks and re-poses
+        // at that tick's record after the step: a different frame for it
+        // changes nothing a replay can reach - a whole replay for the same
+        // world.  (The one-tick error stays until a snapshot.)  Not a body
+        // the restore makes again at its birth tick (step LB,
+        // remakes_birth): the replay steps that tick with this frame.
+        if (remote.physicalized && tick == remote.born_tick && !feeds_next && !remakes_birth(remote)) {
             ++s.relay_birth_frozen_;
             return;
         }
