@@ -159,6 +159,7 @@ namespace bmmo::sim {
         header.anchor_hash = anchor_hash;
         header.anchor_surfaces = anchor_surfaces;
         header.build_id = bmmo::physics::build_id();
+        header.world_options = s.world_options;
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = clock::now();
         std::string error;
@@ -176,14 +177,17 @@ namespace bmmo::sim {
     void session_runner::create_session(uint32_t session, int level,
                                         const std::vector<std::pair<uint32_t, uint8_t>>& players,
                                         uint32_t input_delay, uint32_t start_base, float spawn_impulse,
-                                        const std::string& note, std::vector<std::string> names) {
+                                        const std::string& note, std::vector<std::string> names,
+                                        uint32_t sector_lead, uint32_t world_option_bits) {
         post([this, session, level, players, input_delay, start_base, spawn_impulse, note,
-              names = std::move(names)] {
+              names = std::move(names), sector_lead, world_option_bits] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
             s->level = level;
             s->input_delay = input_delay ? input_delay : config_.input_delay;
+            s->sector_lead = sector_lead;
+            s->world_options = world_option_bits;
             {
                 std::lock_guard lk(view_mutex_);
                 views_[session] = view{};
@@ -194,6 +198,7 @@ namespace bmmo::sim {
             options.seed = config_.seed;
             options.trace = config_.trace;
             options.spawn_impulse = spawn_impulse;
+            options.trafo_inputs = (world_option_bits & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
@@ -237,6 +242,16 @@ namespace bmmo::sim {
                 std::string add_error;
                 if (!s->world->add_player(player, join_order, add_error)) {
                     log("[session " + std::to_string(session) + "] add_player failed: " + add_error);
+                    if (s->world->trafo_failed()) {
+                        // Fail closed (trafo-replication design 2.4): a set
+                        // that fails its invariants ends the session.
+                        s->failed = true;
+                        info.error = add_error;
+                        s->journal.note(first_tick, "end: " + add_error);
+                        s->journal.close();
+                        if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
+                        return;
+                    }
                     continue;
                 }
                 s->players.insert(player);
@@ -252,6 +267,7 @@ namespace bmmo::sim {
             info.anchor_hash = s->world->anchor_hash();
             info.anchor_surfaces = s->world->anchor_surfaces();
             info.ball_rows = s->world->ball_rows();
+            info.trafo_points = s->world->trafo_points();
             {
                 const VxMatrix& spawn = s->world->spawn_matrix();
                 VxQuaternion rotation;
@@ -294,6 +310,12 @@ namespace bmmo::sim {
             std::string error;
             if (!s.world->add_player(player, join_order, error)) {
                 log("[session " + std::to_string(session) + "] add_player failed: " + error);
+                if (s.world->trafo_failed()) {
+                    s.failed = true;
+                    s.running = false;
+                    s.journal.note(s.world->tick_index(), "end: " + error);
+                    if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
+                }
                 return;
             }
             s.players.insert(player);
@@ -313,8 +335,14 @@ namespace bmmo::sim {
         s.last_physicalize_tick.erase(player);
         s.last_frames.erase(player);
         s.leaving.erase(player);
+        // Its Trafo events stay (trafo-replication design 2.4): they act on
+        // the player's piece set, which outlives its slot, and every member
+        // was relayed them - a rejoin before the old self's removal must not
+        // drop the final resets the others apply.
         s.events.erase(std::remove_if(s.events.begin(), s.events.end(),
-                [player](const pending_event& e) { return e.player == player; }), s.events.end());
+                [player](const pending_event& e) {
+                    return e.player == player && e.event.type != bmmo::session::event_type::Trafo;
+                }), s.events.end());
         s.cadence.force_full();
     }
 
@@ -346,7 +374,11 @@ namespace bmmo::sim {
                 bmmo::session::lifecycle_acceptance::leaver_event gone;
                 const uint32_t next = s.world->tick_index();
                 const bool has_ball = s.acceptance.leaver_unphysicalize(player, next, gone);
-                const bool queued = std::any_of(s.events.begin(), s.events.end(),
+                // Trafo-replication design 2.2 "Leavers": with the trafo as
+                // an input the leaver always gets its three final resets
+                // queued below, so its Unphysicalize is queued as it is when
+                // other events are (and applied before them).
+                const bool queued = s.trafo_on() || std::any_of(s.events.begin(), s.events.end(),
                         [player](const pending_event& e) { return e.player == player; });
                 if (has_ball && queued) {
                     lifecycle_event death;
@@ -373,6 +405,16 @@ namespace bmmo::sim {
                         a.intake = clock::now();
                         callbacks_.on_event_accepted(a);
                     }
+                }
+                if (s.trafo_on()) {
+                    // After the Unphysicalize: F counts every queued event of
+                    // the player, an explosion accepted at E > next included.
+                    // Every live type set is reset at >= its explosion + 1,
+                    // the quiet ones at F; all three TRAFO_FINAL (no more
+                    // inputs for this set: every world retires it).
+                    const uint32_t F = bmmo::session::lifecycle_leaver_removal_tick(s.events, player, next);
+                    const float none[3] = {};
+                    for (const auto& d: s.trafo.leaver(player, F)) queue_trafo(s, d, none, clock::now(), 0, "leaver");
                 }
                 if (queued) {
                     auto& leaving = s.leaving[player];
@@ -631,6 +673,65 @@ namespace bmmo::sim {
             // its player is superseded: not queued, not relayed to the others.
             const uint32_t next = s.world->tick_index();
             const auto type = event.type;
+            if (type == bmmo::session::event_type::Trafo) {
+                // Trafo-replication design 2.2: through the ledger per
+                // (player, piece type), not the lifecycle acceptance.
+                const auto handed = [&](uint32_t applied, bool superseded, bool rejected) {
+                    if (!callbacks_.on_event_accepted) return;
+                    accepted_event a;
+                    a.session = s.id;
+                    a.player = player;
+                    a.origin = tick;
+                    a.applied = applied;
+                    a.type = type;
+                    a.superseded = superseded;
+                    a.rejected = rejected;
+                    a.ball_type = event.ball_type;
+                    a.flags = event.flags;
+                    for (int k = 0; k < 3; ++k) a.position[k] = event.position[k];
+                    a.token = token;
+                    a.intake = arrival;
+                    callbacks_.on_event_accepted(a);
+                };
+                if (!s.trafo_on() || event.ball_type >= bmmo::session::kTrafoTypes) {
+                    // The network side refuses these first; never applied.
+                    ++s.trafo_rejected;
+                    log("[session " + std::to_string(s.id) + "] Trafo from " + std::to_string(player) + " stamped "
+                        + std::to_string(tick) + " refused: " + (s.trafo_on() ? "bad piece type" : "the session has no trafo inputs"));
+                    handed(tick, false, true);
+                    return;
+                }
+                const uint8_t piece = event.ball_type;
+                if (bmmo::session::trafo_is_reset(event.flags)) {
+                    const auto d = s.trafo.reset(player, piece, tick, next);
+                    if (d.superseded) {
+                        ++s.trafo_superseded;
+                        log("[session " + std::to_string(s.id) + "] Trafo reset of " + bmmo::session::trafo_type_name(piece)
+                            + " from " + std::to_string(player) + " stamped " + std::to_string(tick)
+                            + " is older than its newest explosion: superseded, never applied");
+                        if (s.journal.is_open() && !s.journal.capped())
+                            s.journal.note(next, "superseded: p" + std::to_string(player) + " Trafo reset of "
+                                           + bmmo::session::trafo_type_name(piece) + " stamped " + std::to_string(tick));
+                        handed(tick, true, false);
+                        return;
+                    }
+                    if (d.applied != tick) ++s.restamped_events;
+                    queue_trafo(s, d, event.position, arrival, token, nullptr);
+                    handed(d.applied, false, false);
+                    return;
+                }
+                for (const auto& d: s.trafo.explode(player, piece, tick, next)) {
+                    if (d.flags & bmmo::session::TRAFO_SERVER) {
+                        const float none[3] = {};
+                        queue_trafo(s, d, none, arrival, 0, "re-explosion of a live type set");
+                        continue;
+                    }
+                    if (d.applied != tick) ++s.restamped_events;
+                    queue_trafo(s, d, event.position, arrival, token, nullptr);
+                    handed(d.applied, false, false);
+                }
+                return;
+            }
             const auto verdict = s.acceptance.accept(player, type, tick, next);
             const auto accepted = [&](bool superseded) {
                 if (!callbacks_.on_event_accepted) return;
@@ -682,6 +783,43 @@ namespace bmmo::sim {
             events.insert(pos, std::move(pe));
             accepted(false);
         });
+    }
+
+    void session_runner::queue_trafo(session_state& s, const bmmo::session::trafo_decision& d, const float position[3],
+                                     clock::time_point arrival, uint64_t token, const char* why) {
+        lifecycle_event event;
+        event.type = bmmo::session::event_type::Trafo;
+        event.ball_type = d.type;
+        event.flags = d.flags;
+        if (!bmmo::session::trafo_is_reset(d.flags))
+            for (int k = 0; k < 3; ++k) event.position[k] = position[k];
+        event.tick = d.applied;
+        pending_event pe{d.player, d.origin, d.applied, std::move(event), arrival};
+        auto pos = std::upper_bound(s.events.begin(), s.events.end(), d.applied,
+            [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
+        s.events.insert(pos, std::move(pe));
+        if (token != 0) return;
+        // The server's own: relayed to every member (the owner included,
+        // for which it is a remote input), an EVENT record when applied.
+        ++s.trafo_server_resets;
+        const uint32_t next = s.world ? s.world->tick_index() : 0;
+        const std::string text = std::string("trafo: server ") + bmmo::session::trafo_type_name(d.type) + " reset of p"
+            + std::to_string(d.player) + " for tick " + std::to_string(d.applied) + " (" + (why ? why : "?") + ")"
+            + ((d.flags & bmmo::session::TRAFO_FINAL) ? ", final" : "");
+        log("[session " + std::to_string(s.id) + "] " + text + " (next tick " + std::to_string(next) + ")");
+        if (s.journal.is_open() && !s.journal.capped()) s.journal.note(next, text);
+        if (callbacks_.on_event_accepted) {
+            accepted_event a;
+            a.session = s.id;
+            a.player = d.player;
+            a.origin = d.origin;
+            a.applied = d.applied;
+            a.type = bmmo::session::event_type::Trafo;
+            a.ball_type = d.type;
+            a.flags = d.flags;
+            a.intake = arrival;
+            callbacks_.on_event_accepted(a);
+        }
     }
 
     void session_runner::request_full_snapshot(uint32_t session) {
@@ -758,6 +896,9 @@ namespace bmmo::sim {
                 + " pending_events=" + std::to_string(s.events.size())
                 + " restamped=" + std::to_string(s.restamped_events)
                 + " superseded=" + std::to_string(s.superseded_births) + "/" + std::to_string(s.superseded_events)
+                + (s.trafo_on() ? " trafo: server_resets=" + std::to_string(s.trafo_server_resets) + " superseded="
+                                  + std::to_string(s.trafo_superseded) + " refused=" + std::to_string(s.trafo_rejected)
+                                : std::string())
                 + " bodiless=" + std::to_string(s.bodiless.runs()) + "/" + std::to_string(s.bodiless.open_runs())
                 + "/" + std::to_string(s.bodiless_short);
             for (auto& [player, buffer]: s.inputs)
@@ -986,6 +1127,16 @@ namespace bmmo::sim {
                         std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - s.journal_start).count()));
         }
         s.scheduler.advance();
+        // Trafo-replication design 2.2, the deadline (decision 9.6): after
+        // each tick, every live type set whose 20 s ends within the lead of
+        // the next tick N gets the server's reset at max(N, explosion +
+        // kTrafoLife), in every world - Game Over and an owner that never
+        // resets included.
+        if (s.trafo_on()) {
+            const float none[3] = {};
+            for (const auto& d: s.trafo.deadline(s.world->tick_index(), s.sector_lead))
+                queue_trafo(s, d, none, clock::now(), 0, "deadline");
+        }
         const bool changed = s.world->body_set_changed();
         const int decision = s.cadence.decide(tick, changed);
         if (decision != 0) emit_snapshot(s, decision == 2);

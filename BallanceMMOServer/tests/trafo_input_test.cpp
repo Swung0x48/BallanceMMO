@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 #include <session/resync_rules.hpp>
 #include <session/trafo_input.hpp>
@@ -299,4 +301,48 @@ TEST(TrafoRecordPlan, BuiltForNewScriptsFailForVanishedOnes) {
     EXPECT_EQ((std::vector<uint32_t>{12}), plan.vanished);
 }
 
+}
+
+// Design 2.2, decision 9.3 (step T2): the server's check at acceptance.
+TEST(TrafoValidation, AcceptRejectTable) {
+    // L2's P_Trafo_Stone_MF and its Shadow, and the arena's wood trafo.
+    std::vector<trafo_point> trafos(3);
+    trafos[0].name = "P_Trafo_Stone_MF";
+    trafos[0].position[0] = 948.7410f; trafos[0].position[1] = 0.7663f; trafos[0].position[2] = -56.5141f;
+    trafos[1].name = "P_Trafo_Stone_Shadow";
+    trafos[1].position[0] = 948.8206f; trafos[1].position[1] = 0.7373f; trafos[1].position[2] = -56.2956f;
+    trafos[2].name = "P_Trafo_Wood_MF";
+    trafos[2].position[0] = 0.0f; trafos[2].position[1] = 0.095f; trafos[2].position[2] = 43.0f;
+    EXPECT_EQ(4.5f, kTrafoReach) << "the measured 3.000 m x 1.5";
+    const float measured[3] = {948.74127f, 3.7663198f, -56.514111f};   // the hold's capture (T1 S7)
+    auto v = trafo_validate(TRAFO_EXPLODE, 0, measured, trafos);
+    EXPECT_TRUE(v.ok());
+    EXPECT_EQ(0, v.nearest);
+    EXPECT_NEAR(3.0, v.distance, 1e-3);
+    const float inside[3] = {0.0f, 0.095f + 4.49f, 43.0f};
+    EXPECT_TRUE(trafo_validate(TRAFO_EXPLODE, 2, inside, trafos).ok());
+    const float outside[3] = {0.0f, 0.095f + 4.51f, 43.0f};
+    v = trafo_validate(TRAFO_EXPLODE, 2, outside, trafos);
+    EXPECT_EQ(trafo_check::too_far, v.verdict);
+    EXPECT_EQ(2, v.nearest);
+    EXPECT_NEAR(4.51, v.distance, 1e-3);
+    const float far_away[3] = {500.0f, 0.0f, 0.0f};
+    EXPECT_EQ(trafo_check::too_far, trafo_validate(TRAFO_EXPLODE, 0, far_away, trafos).verdict);
+    const float nan[3] = {std::nanf(""), 0.0f, 0.0f};
+    EXPECT_EQ(trafo_check::not_finite, trafo_validate(TRAFO_EXPLODE, 0, nan, trafos).verdict);
+    const float inf[3] = {0.0f, INFINITY, 43.0f};
+    EXPECT_EQ(trafo_check::not_finite, trafo_validate(TRAFO_EXPLODE, 0, inf, trafos).verdict);
+    EXPECT_EQ(trafo_check::bad_type, trafo_validate(TRAFO_EXPLODE, 3, measured, trafos).verdict);
+    EXPECT_EQ(trafo_check::bad_type, trafo_validate(TRAFO_RESET, 3, measured, trafos).verdict);
+    EXPECT_EQ(trafo_check::client_bits, trafo_validate(TRAFO_RESET | TRAFO_SERVER, 0, measured, trafos).verdict);
+    EXPECT_EQ(trafo_check::client_bits, trafo_validate(TRAFO_RESET | TRAFO_FINAL, 0, measured, trafos).verdict);
+    EXPECT_EQ(trafo_check::bad_flags, trafo_validate(static_cast<uint8_t>(1u << 3), 0, measured, trafos).verdict);
+    // A reset's position is read by no world: not checked.
+    EXPECT_TRUE(trafo_validate(TRAFO_RESET, 1, far_away, trafos).ok());
+    EXPECT_TRUE(trafo_validate(TRAFO_RESET, 1, nan, trafos).ok());
+    // A level without a trafo has no explosion.
+    EXPECT_EQ(trafo_check::no_trafo, trafo_validate(TRAFO_EXPLODE, 0, measured, {}).verdict);
+    EXPECT_TRUE(trafo_validate(TRAFO_RESET, 0, measured, {}).ok());
+    for (int c = 0; c <= static_cast<int>(trafo_check::too_far); ++c)
+        EXPECT_STRNE("?", trafo_check_name(static_cast<trafo_check>(c)));
 }

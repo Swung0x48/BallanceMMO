@@ -34,6 +34,8 @@
 #include "CKAll.h"
 #include "CKIpionManager.h"
 
+#include "trafo_hooks.hpp"
+
 namespace bmmo::sim {
 
     struct trafo_tool_options {
@@ -81,6 +83,12 @@ namespace bmmo::sim {
         std::vector<unmake> unmakes;
         bool retire = false;
         long long teardown = -1;
+        // --trafo-ensure ID TICK (step T2's review): game/trafo_sets.hpp
+        // ensure_trafo_set at TICK, before the inputs - kept, reselected (a
+        // retired set not destroyed yet, put back to its built state) or
+        // built; logged with the scripts' value digest against the build's.
+        struct ensure { uint32_t player = 0; long long tick = 0; };
+        std::vector<ensure> ensures;
         bool any() const {
             return !players.empty() || !originals.empty() || hold || describe;
         }
@@ -94,49 +102,7 @@ namespace bmmo::sim {
         return true;
     }
 
-    // The bridge as the headless hosts reach it.
-    inline bmmo::game::trafo_set_hooks make_trafo_hooks(CKIpionManager* physics) {
-        bmmo::game::trafo_set_hooks hooks;
-        hooks.has_body = [physics](const std::string& name) {
-            CKContext* context = physics ? physics->m_Context : nullptr;
-            auto* entity = context ? CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()),
-                                                                                              CKCID_3DENTITY, nullptr))
-                                   : nullptr;
-            PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
-            return object && object->m_RealObject;
-        };
-        hooks.unphysicalize = [physics](const std::string& name, std::string& error) {
-            return bmmo::physics::unphysicalize(physics, name.c_str(), error);
-        };
-        hooks.restore_originals = [physics]() { bmmo::physics::restore_explosion_pieces(physics->m_Context); };
-        hooks.register_set = [physics](uint32_t player, const uint32_t frames[3], const std::vector<uint32_t>& explosions,
-                                       bmmo_physics_trafo_set_report& out, std::string& error) {
-            return bmmo::physics::trafo_set_register(physics, player, frames, explosions.data(), static_cast<int>(explosions.size()),
-                                                     out, error);
-        };
-        hooks.unregister_set = [physics](uint32_t player, std::string& error) {
-            return bmmo::physics::trafo_set_unregister(physics, player, error);
-        };
-        hooks.seed = [physics](uint32_t frame, int32_t seed) { bmmo::physics::trafo_set_seed(physics, frame, seed); };
-        hooks.unmake = [physics](uint32_t frame, std::string& error) { return bmmo::physics::trafo_set_unmake(physics, frame, error); };
-        hooks.forces.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string error;
-            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, error)) return false;
-            out.exists = state.exists != 0;
-            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-            return true;
-        };
-        hooks.forces.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-            bmmo_physics_force_block state{};
-            state.exists = in.exists ? 1 : 0;
-            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-            std::string error;
-            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
-        };
-        hooks.log = [](const std::string& line) { std::printf("%s\n", line.c_str()); };
-        return hooks;
-    }
+    // make_trafo_hooks: sim/trafo_hooks.hpp (shared with the server's world since step T2).
 
     class trafo_tool {
     public:
@@ -237,10 +203,26 @@ namespace bmmo::sim {
                     remade = remade || u.remake;
                 }
             if (o_.teardown >= 0 && tick == o_.teardown) teardown(tick);
+            for (const auto& en: o_.ensures)
+                if (en.tick == tick) ensure(en.player, tick);
             for (const auto& k: o_.pokes)
                 if (k.tick == tick) poke_create(k.player, tick);
             apply_inputs(static_cast<uint32_t>(tick));
             if (frame && !remade) run_frame();
+        }
+        void ensure(uint32_t player, long long tick) {
+            const auto r = bmmo::game::ensure_trafo_set(context_, registry_, player, hooks_);
+            const char* how = r.how == bmmo::game::trafo_ensure::kept ? "kept"
+                            : r.how == bmmo::game::trafo_ensure::reselected ? "reselected" : "built";
+            const auto* set = registry_.find(player);
+            const std::string now = set ? bmmo::game::trafo_value_digest(context_, set->scripts, player) : std::string("-");
+            const bool same = set && now == set->value_digest;
+            std::printf("trafo ensure t=%lld player %u: %s %s; value digest now %s, built %s: %s%s\n", tick, player,
+                        r.ok ? "ok" : "FAILED", how, now.c_str(), set ? set->value_digest.c_str() : "-",
+                        same ? "same" : "DIFFERENT", r.error.empty() ? "" : (" (" + r.error + ")").c_str());
+            for (const auto& l: r.lines)
+                if (o_.describe || !r.ok || r.how == bmmo::game::trafo_ensure::reselected) std::printf("  %s\n", l.c_str());
+            if (!r.ok || !same) ++failures_;
         }
         void reconcile_half(const trafo_tool_options::unmake& u, long long tick) {
             std::string error;
@@ -723,6 +705,44 @@ namespace bmmo::sim {
             const bool body = header && v3.size() > v2.size() && std::equal(v2.begin() + 8, v2.end(), v3.begin() + 8);
             check(header && body, "(1) the v3 record's mechanism part equals the v2 record (" + std::to_string(v2.size()) + " / "
                                   + std::to_string(v3.size()) + " bytes)");
+            // (5) step T2: the portable record's version 2 (the trafo part by
+            // name, design 4.5/4.7) localized in the same world is record v3
+            // byte for byte; without a trafo part it stays version 1 and
+            // localizes to the v2 record; a version 2 record refuses a world
+            // that selects no trafo scripts.
+            {
+                std::vector<uint8_t> p1, p2, l1, l2, none;
+                std::string e1, e2, e3, e4, e5;
+                const bool c1 = script_replay::capture_portable(context_, sel, forces, p1, &e1);
+                const bool c2 = script_replay::capture_portable(context_, sel, forces, p2, &e2, nullptr, &registry_.part());
+                const bool versions = c1 && c2 && p1.size() >= 8 && p2.size() >= 8 && p1[4] == 1 && p2[4] == 2;
+                const bool v3_back = script_replay::localize(context_, sel, p2, nullptr, nullptr, l2, &e3, nullptr, &registry_.part())
+                                  && l2 == v3;
+                const bool v2_back = script_replay::localize(context_, sel, p1, nullptr, nullptr, l1, &e4, nullptr, &registry_.part())
+                                  && l1 == v2;
+                const bool refused = !script_replay::localize(context_, sel, p2, nullptr, nullptr, none, &e5);
+                check(versions && v3_back && v2_back && refused,
+                      "(5) portable v1 " + std::to_string(p1.size()) + " / v2 " + std::to_string(p2.size()) + " bytes; v2 localized == v3: "
+                          + (v3_back ? "yes" : "NO " + e3) + "; v1 with the trafo part == v2: " + (v2_back ? "yes" : "NO " + e4)
+                          + "; v2 without a trafo part refused: " + (refused ? e5 : std::string("NO")) + (e1.empty() ? "" : " " + e1)
+                          + (e2.empty() ? "" : " " + e2));
+                // (5b) T2's review: with the option on and no set selected the
+                // record is still version 2 (an empty trafo part); it
+                // localizes in a world with no set, and a world that holds
+                // sets the record does not list refuses it.
+                const script_replay::trafo_part empty_part{};
+                std::vector<uint8_t> p0, l0, l0x;
+                std::string f1, f2, f3;
+                const bool c0 = script_replay::capture_portable(context_, sel, forces, p0, &f1, nullptr, &empty_part);
+                const bool v2_empty = c0 && p0.size() >= 8 && p0[4] == 2;
+                const bool empty_back = script_replay::localize(context_, sel, p0, nullptr, nullptr, l0, &f2, nullptr, &empty_part)
+                                     && l0.size() >= 8 && l0[4] == 3;
+                const bool strict = !script_replay::localize(context_, sel, p0, nullptr, nullptr, l0x, &f3, nullptr, &registry_.part());
+                check(v2_empty && empty_back && strict,
+                      "(5b) empty trafo part: portable v2 " + std::to_string(p0.size()) + " bytes: " + (v2_empty ? "yes" : "NO " + f1)
+                          + "; localized with no set: " + (empty_back ? "yes" : "NO " + f2) + "; refused by a world with sets: "
+                          + (strict ? f3 : std::string("NO")));
+            }
             if (registry_.sets().size() < 2) {
                 check(false, "(2)-(4) need two sets (--trafo-sets 2 or more)");
                 return;

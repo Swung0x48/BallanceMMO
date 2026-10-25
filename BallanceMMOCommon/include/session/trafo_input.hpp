@@ -16,16 +16,21 @@
 //     own, remote and server-stamped (live application, the replayed ticks'
 //     re-application, "the newest explosion of (p, T) at or before t");
 //   * plan_trafo_record_restore: what record v3's restore does with the
-//     trafo sets' scripts (game/script_replay.hpp), decided without CK.
+//     trafo sets' scripts (game/script_replay.hpp), decided without CK;
+//   * trafo_validate (step T2): the server's check of a client's Trafo
+//     event at acceptance, against the level's static P_Trafo_* positions
+//     (kTrafoReach, decision 9.3).
 //
-// No wire in T1: nothing here is serialized.  Step T2 adds event_type::Trafo
-// and carries these fields (ball_type = T, flags, position) in the existing
-// session_event_msg fields.
+// Step T2 put it on the wire: event_type::Trafo (protocol 11) carries these
+// fields in the existing session_event_msg fields (ball_type = T, flags,
+// position).
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -361,6 +366,99 @@ namespace bmmo::session {
         }
         std::map<uint32_t, std::vector<trafo_input>> by_tick_;
     };
+
+    // ---- validation at acceptance (design 2.2, decision 9.3; step T2)
+    //
+    // Static level data only, so the verdict does not depend on which other
+    // events have arrived.  The explosion's position is its referential
+    // (Ball_Pos_Frame's parent): measured exactly 3.000 m above the
+    // P_Trafo_*_MF centre on every trafo of the R2, r2t, p3_two and p3_h4
+    // journals (624 trafo records, 4 distinct trafos on the arena and
+    // Level 11; the new ball's Physicalize after the trafo as the proxy) and
+    // 3.00002 m on L2's P_Trafo_Stone_MF from the hold's own capture (T1's
+    // S7); the bound is that maximum x 1.5 (design 9.3).  Farther than this
+    // from every P_Trafo_* is rejected (decision 9.3): never applied, the
+    // owner gets REJECTED and undoes its local effect, the server logs it as
+    // possible cheating or corruption.
+    constexpr float kTrafoReach = 4.5f;
+
+    // One P_Trafo_* entity of the level and its world position (the
+    // server reads them from its own world at the anchor).
+    struct trafo_point {
+        std::string name;
+        float position[3] = {};
+    };
+
+    enum class trafo_check : uint8_t {
+        ok = 0,
+        bad_flags,     // a bit beyond TRAFO_RESET / TRAFO_SERVER / TRAFO_FINAL
+        client_bits,   // TRAFO_SERVER or TRAFO_FINAL set by a client
+        bad_type,      // not 0 wood, 1 stone, 2 paper
+        not_finite,    // an explosion's position is NaN or infinite
+        no_trafo,      // an explosion on a level without a P_Trafo_*
+        too_far,       // an explosion farther than the reach from every P_Trafo_*
+    };
+    inline const char* trafo_check_name(trafo_check c) {
+        switch (c) {
+        case trafo_check::ok: return "ok";
+        case trafo_check::bad_flags: return "unknown flag bits";
+        case trafo_check::client_bits: return "server-only flag bits from a client";
+        case trafo_check::bad_type: return "unknown piece type";
+        case trafo_check::not_finite: return "a position that is not finite";
+        case trafo_check::no_trafo: return "an explosion on a level without a trafo";
+        case trafo_check::too_far: return "an explosion farther than the reach from every trafo";
+        }
+        return "?";
+    }
+    struct trafo_validation {
+        trafo_check verdict = trafo_check::ok;
+        int nearest = -1;          // index into the trafo list (an explosion with a finite position)
+        double distance = 0.0;     // to that trafo, metres
+        bool ok() const { return verdict == trafo_check::ok; }
+    };
+
+    // A client's Trafo event as the server checks it at acceptance (design
+    // 2.2): kind in {explode, reset}, type < 3, the server-only bits clear;
+    // for an explosion a finite position within `reach` of the nearest
+    // P_Trafo_*.  A reset's position is not read by any world and is not
+    // checked.
+    inline trafo_validation trafo_validate(uint8_t flags, uint8_t type, const float position[3],
+                                           const std::vector<trafo_point>& trafos, float reach = kTrafoReach) {
+        trafo_validation v;
+        if ((flags & ~static_cast<uint8_t>(TRAFO_RESET | TRAFO_SERVER | TRAFO_FINAL)) != 0) {
+            v.verdict = trafo_check::bad_flags;
+            return v;
+        }
+        if ((flags & (TRAFO_SERVER | TRAFO_FINAL)) != 0) {
+            v.verdict = trafo_check::client_bits;
+            return v;
+        }
+        if (type >= kTrafoTypes) {
+            v.verdict = trafo_check::bad_type;
+            return v;
+        }
+        if (trafo_is_reset(flags)) return v;
+        for (int k = 0; k < 3; ++k)
+            if (!std::isfinite(position[k])) {
+                v.verdict = trafo_check::not_finite;
+                return v;
+            }
+        for (size_t i = 0; i < trafos.size(); ++i) {
+            double d2 = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double d = static_cast<double>(position[k]) - static_cast<double>(trafos[i].position[k]);
+                d2 += d * d;
+            }
+            const double d = std::sqrt(d2);
+            if (v.nearest < 0 || d < v.distance) {
+                v.nearest = static_cast<int>(i);
+                v.distance = d;
+            }
+        }
+        if (v.nearest < 0) v.verdict = trafo_check::no_trafo;
+        else if (v.distance > static_cast<double>(reach)) v.verdict = trafo_check::too_far;
+        return v;
+    }
 
     // ---- record v3's restore, decided (design 4.5; game/script_replay.hpp
     // carries the bytes).  `recorded`: the trafo scripts a record lists, by

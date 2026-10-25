@@ -79,6 +79,14 @@ public:
     // the clients apply the lead (plan steps 11 and 15); off, the server does
     // exactly what it did before the flag existed.
     bool physics_lead_adjust = false;
+    // Trafo-replication design 2.14 (protocol 11, step T2): the session's
+    // world option WORLD_TRAFO_INPUTS - every member's trafo explosion and
+    // reset are Trafo events, every world runs every member's piece set.  A
+    // member whose SessionReady does not declare CAP_TRAFO_INPUTS is refused
+    // by such a session.  Off by default until both session-core hosts run
+    // the trafo inputs (steps T3, T4); off, the server does what it did
+    // before the option existed.
+    bool physics_trafo_inputs = false;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

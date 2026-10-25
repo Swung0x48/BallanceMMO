@@ -19,6 +19,12 @@
 // to the tick it applies it at, and a client journal's replay orders a
 // tick's events by the origin.  A version 2 file is still read; its events
 // have no origin of their own and read back with the stamp as the origin.
+// Version 5 (protocol 11, trafo-replication design 5, step T2) appends the
+// session's world_options (session::WORLD_*) to the HEADER - a replay builds
+// its world with them (WORLD_TRAFO_INPUTS: the trafo piece sets) - and has
+// EVENT records of type 5 (Trafo) in the existing ball_type / flags /
+// position fields, the server's own resets (TRAFO_SERVER) among them; an
+// older file reads as options 0.
 //
 //   file   = magic "BMMOJRNL" (8 bytes) , u32 version , record*
 //   record = u8 tag , u32 payload_size , payload[payload_size]
@@ -77,7 +83,8 @@ namespace bmmo::session {
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
     // 4: the RESYNC record (protocol 10, resync design 5, step A3).
-    constexpr uint32_t kJournalVersion = 4;
+    // 5: the HEADER's world_options and the Trafo EVENT (protocol 11, step T2).
+    constexpr uint32_t kJournalVersion = 5;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
@@ -125,6 +132,8 @@ namespace bmmo::session {
         uint64_t utc_ms = 0;         // wall clock when the header was written
         uint32_t own_player = 0;     // 0 in a server journal
         uint8_t own_join_order = 255;   // 255 in a server journal
+        // Version 5: the session's session::WORLD_* bits (0 in an older file).
+        uint32_t world_options = 0;
     };
 
     struct journal_player {
@@ -484,6 +493,7 @@ namespace bmmo::session {
             write_u64(out, h.utc_ms);
             write_u32(out, h.own_player);
             write_u8(out, h.own_join_order);
+            write_u32(out, h.world_options);
         }
 
         inline bool read_header_payload(const std::string& payload, journal_header& h) {
@@ -504,6 +514,8 @@ namespace bmmo::session {
             h.utc_ms = in.u64();
             h.own_player = in.u32();
             h.own_join_order = in.u8();
+            // Version 5: trailing, so an older file (none) reads as 0.
+            h.world_options = in.ok && in.size - in.pos >= 4 ? in.u32() : 0;
             return in.ok;
         }
     }
@@ -1104,15 +1116,18 @@ namespace bmmo::session {
     // sent, at the stamp, and once more as the server's echo said, at the
     // applied tick and with its state - MOVED, SUPERSEDED or REJECTED.  The
     // last record of an event is what the server's world had: this keeps,
-    // per (player, origin, type, ball type, sector, name) - the event's
-    // identity without the applied tick, as lifecycle_event_key has it - the
+    // per (player, origin, type, ball type, sector, name, and for a Trafo
+    // event its flags) - the event's identity without the applied tick, as
+    // lifecycle_event_key has it (protocol 11: the server's own reset and an
+    // owner's event of one type set can share every other field) - the
     // record written last, and drops that one too when its state says the
     // server never applied the event.  Groups left with nothing to replay
     // keep their other records.  Returns the records dropped.
     inline size_t journal_keep_last_events(journal& j) {
-        using key = std::tuple<uint32_t, uint32_t, uint8_t, uint8_t, int32_t, std::string>;
+        using key = std::tuple<uint32_t, uint32_t, uint8_t, uint8_t, int32_t, std::string, uint8_t>;
         const auto key_of = [](const journal_event& e) {
-            return key{e.id, e.origin_tick, static_cast<uint8_t>(e.type), e.ball_type, e.sector, e.name};
+            return key{e.id, e.origin_tick, static_cast<uint8_t>(e.type), e.ball_type, e.sector, e.name,
+                       e.type == event_type::Trafo ? e.flags : static_cast<uint8_t>(0)};
         };
         std::map<key, uint64_t> last;
         for (const auto& group: j.ticks)

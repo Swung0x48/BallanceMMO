@@ -56,7 +56,16 @@ namespace bmmo::session {
     //      record, every ball's navigation and the server's IVP savestate -
     //      instead of a full snapshot broadcast to every member; a member
     //      declares it can (SessionReady caps CAP_RESYNC_STATE).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 10;   // 4: SessionStart carries spawn_spacing
+    //  11  the trafo as a lockstep input (docs/trafo-replication-design.md,
+    //      step T2): SessionEvent type Trafo (ball_type = the piece type,
+    //      flags TRAFO_*, position = the explosion's referential), accepted
+    //      through the server's per-(player, type) ledger and relayed to
+    //      every member; SessionStart carries world_options (the sector
+    //      placement design's u32 after `protocol`; bit WORLD_TRAFO_INPUTS);
+    //      SessionReady caps CAP_TRAFO_INPUTS; SessionResyncState carries the
+    //      trafo ledger; the portable script record carries the trafo sets'
+    //      scripts (version 2) when the world option is on.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 11;   // 4: SessionStart carries spawn_spacing
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
@@ -68,6 +77,23 @@ namespace bmmo::session {
     // (the legacy retail path) is answered as before protocol 10: an
     // assignment without flags and a full snapshot broadcast to every member.
     constexpr uint32_t CAP_RESYNC_STATE = 1u << 1;
+    // Protocol 11 (trafo-replication design 2.14, step T2): the client runs
+    // the trafo as an input - its own trafo scripts held and sent as Trafo
+    // events, every member's piece set built and driven by the relayed ones
+    // (the session core).  The design named bit 1, which CAP_RESYNC_STATE
+    // took at protocol 10.  A member that does not declare it is refused by
+    // a session whose world_options has WORLD_TRAFO_INPUTS.
+    constexpr uint32_t CAP_TRAFO_INPUTS = 1u << 2;
+
+    // session_start_msg::world_options bits (protocol 11): what every world
+    // of the session runs, fixed by the server for the session's life (never
+    // a per-client choice).  Bit 0 is the sector placement design's
+    // WORLD_PLACEMENT_CLONES, bit 2 the world-agreement design's, bit 3 the
+    // record-format design's (none built yet).  WORLD_TRAFO_INPUTS
+    // (trafo-replication design 2.14): every member has its own trafo piece
+    // set in every world, the trafo's explosion and reset are Trafo events,
+    // a piece never collides with a local body (PE_Balloon*).
+    constexpr uint32_t WORLD_TRAFO_INPUTS = 1u << 1;
 
     // session_assign_msg::flags (protocol 10).  STATE_FOLLOWS: a
     // SessionResyncState of tick first_tick - 1 follows on the reliable
@@ -96,6 +122,32 @@ namespace bmmo::session {
         Sector = 2,
         Finish = 3,
         BodyRevived = 4,
+        // Protocol 11 (trafo-replication design 2.2): a trafo's explosion or
+        // reset of one piece type (ball_type) of the player's own set;
+        // flags session/trafo_input.hpp TRAFO_*; position the explosion's
+        // referential (zeros for a reset).
+        Trafo = 5,
+    };
+
+    // One type set of the trafo ledger a resync or join state carries
+    // (trafo-replication design 4.7; protocol 11): the three type sets of
+    // EVERY set the server's world holds at the state's tick S - a member's
+    // set that never exploded and a leaver's set between its final resets
+    // and its retirement included (step T2's review: the portable record
+    // lists every selected set's scripts, and a client must hold exactly
+    // those sets to take it).  The explosion's seed follows from (session
+    // seed, player, explode_applied, type).
+    struct trafo_ledger_entry {
+        uint32_t player = 0;
+        uint8_t type = 0;             // 0 wood, 1 stone, 2 paper
+        bool has_explosion = false;   // an explosion applied at or before S (explode_applied, position valid)
+        uint32_t explode_applied = 0;
+        float position[3] = {};
+        bool has_bodies = false;      // its pieces have bodies at the end of S
+        bool has_reset = false;       // a reset applied after that explosion, at or before S
+        uint32_t reset_applied = 0;
+        bool final = false;           // the type set's TRAFO_FINAL reset was applied at or before S
+        uint32_t final_applied = 0;   // the set's newest TRAFO_FINAL reset (retirement: + history_ticks)
     };
 
     // session_snapshot_msg body kind.

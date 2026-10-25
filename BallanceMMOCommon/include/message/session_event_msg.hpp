@@ -26,9 +26,9 @@ namespace bmmo {
 
         // Union of optional payloads; serialize()/deserialize() only put the
         // fields the current `type` needs on the wire.
-        uint8_t ball_type = 0;              // Physicalize
-        uint8_t flags = 0;                  // Physicalize: session::PHYSICALIZE_FLAG_*
-        float position[3] = {};             // Physicalize
+        uint8_t ball_type = 0;              // Physicalize; Trafo: the piece type
+        uint8_t flags = 0;                  // Physicalize: session::PHYSICALIZE_FLAG_*; Trafo: TRAFO_* (session/trafo_input.hpp)
+        float position[3] = {};             // Physicalize; Trafo: the explosion's referential (zeros for a reset)
         float rotation[9] = {};             // Physicalize: world matrix rows (right, up, dir)
         session::ball_recipe recipe;        // Physicalize
         int32_t sector = 0;                 // Sector
@@ -155,6 +155,13 @@ namespace bmmo {
                 case session::event_type::BodyRevived:
                     message_utils::write_string<uint16_t>(name.substr(0, session::MAX_NAME), raw);
                     break;
+                case session::event_type::Trafo:
+                    // Protocol 11 (trafo-replication design 2.2, 5): the
+                    // existing fields, no layout of its own.
+                    raw.write(reinterpret_cast<const char*>(&ball_type), sizeof(ball_type));
+                    raw.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+                    raw.write(reinterpret_cast<const char*>(position), sizeof(position));
+                    break;
             }
             raw.write(reinterpret_cast<const char*>(&origin_tick), sizeof(origin_tick));
             raw.write(reinterpret_cast<const char*>(&state), sizeof(state));
@@ -169,7 +176,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &tick)) return false;
             uint8_t t = 0;
             if (!message_utils::read_variable(raw, &t)) return false;
-            if (t > static_cast<uint8_t>(session::event_type::BodyRevived)) return false;
+            if (t > static_cast<uint8_t>(session::event_type::Trafo)) return false;
             type = static_cast<session::event_type>(t);
 
             switch (type) {
@@ -189,6 +196,11 @@ namespace bmmo {
                 case session::event_type::BodyRevived:
                     if (!message_utils::read_string<uint16_t>(raw, name)) return false;
                     if (name.size() > session::MAX_NAME) return false;
+                    break;
+                case session::event_type::Trafo:
+                    if (!message_utils::read_variable(raw, &ball_type)) return false;
+                    if (!message_utils::read_variable(raw, &flags)) return false;
+                    if (!raw.read(reinterpret_cast<char*>(position), sizeof(position))) return false;
                     break;
             }
             if (!message_utils::read_variable(raw, &origin_tick)) return false;

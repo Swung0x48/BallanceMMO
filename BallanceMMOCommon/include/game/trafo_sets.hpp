@@ -1610,6 +1610,82 @@ namespace bmmo::game {
         return true;
     }
 
+    // How a world comes to hold `player`'s set - at the server's add_player,
+    // before any of the player's inputs is applied, wherever a client host
+    // needs one (design 2.4).  One rule for every world, whose result does
+    // not depend on how far a retirement got in that world (T2's review: the
+    // server destroys a set at its deselect, a client history_ticks later,
+    // so a player back inside that span would otherwise find a fresh set in
+    // one world and a reselected one, its scripts as they finished, in
+    // another):
+    //   * a selected set is kept as it is (a fade in progress, its final
+    //     marks: a set marked final is retired by every world on the same
+    //     rule, and the player's input after that finds no selected set);
+    //   * a retired set not destroyed yet (only a client: the server never
+    //     holds one) is selected again AND put back to what a fresh build
+    //     is: every type set unmade (its scripts to their built state; the
+    //     set is inert, so no body or controller goes), every copied
+    //     object's initial condition - the build saved it (step 6) - read
+    //     back, the final marks and the final tick cleared;
+    //   * otherwise a fresh build.
+    enum class trafo_ensure : uint8_t { kept, reselected, built };
+    struct trafo_ensure_result {
+        bool ok = false;
+        trafo_ensure how = trafo_ensure::kept;
+        std::string error;
+        std::vector<std::string> lines;   // a build's lines (build_trafo_set), or what a reselect did
+    };
+    inline trafo_ensure_result ensure_trafo_set(CKContext* context, trafo_registry& registry, uint32_t player,
+                                                const trafo_set_hooks& hooks) {
+        trafo_ensure_result r;
+        if (!context) {
+            r.error = "no context";
+            return r;
+        }
+        if (trafo_set* held = registry.find(player)) {
+            if (held->selected) {
+                r.ok = true;
+                r.how = trafo_ensure::kept;
+                return r;
+            }
+            r.how = trafo_ensure::reselected;
+            if (!trafo_set_inert(context, *held, hooks)) {
+                r.error = "the retired set of player " + std::to_string(player) + " is not inert";
+                return r;
+            }
+            if (!reselect_trafo_set(registry, hooks, player, r.error)) {
+                if (r.error.empty()) r.error = "the set of player " + std::to_string(player) + " was not selected again";
+                return r;
+            }
+            int removed = 0;
+            for (uint8_t t = 0; t < bmmo::session::kTrafoTypes; ++t)
+                if (!unmake_type_set(context, registry, hooks, player, t, removed, r.error)) return r;
+            trafo_set* set = registry.find(player);
+            int ics = 0;
+            if (CKScene* scene = context->GetCurrentScene())
+                for (CK_ID id: set->objects) {
+                    CKObject* o = context->GetObject(id);
+                    if (!o || o->GetClassID() == CKCID_BEHAVIOR || CKIsChildClassOf(o, CKCID_MESH)) continue;
+                    auto* so = CKSceneObject::Cast(o);
+                    if (!so) continue;
+                    if (CKStateChunk* chunk = scene->GetObjectInitialValue(so)) {
+                        CKReadObjectState(o, chunk);
+                        ++ics;
+                    }
+                }
+            set->final_tick = 0;
+            r.lines.push_back("selected again and put back to its built state (" + std::to_string(ics) + " initial conditions read back)");
+            r.ok = true;
+            return r;
+        }
+        auto built = build_trafo_set(context, registry, player, hooks);
+        r.how = trafo_ensure::built;
+        r.ok = built.ok;
+        r.error = std::move(built.error);
+        r.lines = std::move(built.lines);
+        return r;
+    }
+
     // Session end: every live piece unphysicalized, the winds' controllers
     // deleted, the sets unregistered and destroyed.  Returns the bodies removed.
     inline int teardown_trafo_sets(CKContext* context, trafo_registry& registry, const trafo_set_hooks& hooks) {

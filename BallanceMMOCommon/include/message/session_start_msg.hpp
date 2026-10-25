@@ -38,6 +38,13 @@ namespace bmmo {
         // session::PHYSICS_PROTOCOL_VERSION of the server.  Required: a build
         // that does not send it does not parse here, and the receiver says so.
         uint32_t protocol = session::PHYSICS_PROTOCOL_VERSION;
+        // session::WORLD_* bits (protocol 11): what every world of the
+        // session runs, fixed by the server for the session's life, the same
+        // in every SessionStart of it (late joiners included).  The sector
+        // placement design's field (a u32 after `protocol`; the record-format
+        // design's Q3 settled it), first used by the trafo replication's
+        // WORLD_TRAFO_INPUTS.  Required.
+        uint32_t world_options = 0;
 
         session_start_msg() : serializable_message(bmmo::SessionStart) {}
 
@@ -62,6 +69,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&spawn_impulse), sizeof(spawn_impulse));
             raw.write(reinterpret_cast<const char*>(&spawn_spacing), sizeof(spawn_spacing));
             raw.write(reinterpret_cast<const char*>(&protocol), sizeof(protocol));
+            raw.write(reinterpret_cast<const char*>(&world_options), sizeof(world_options));
 
             const uint8_t player_count = static_cast<uint8_t>(std::min<size_t>(players.size(), session::MAX_PLAYERS_PER_SESSION));
             raw.write(reinterpret_cast<const char*>(&player_count), sizeof(player_count));
@@ -101,6 +109,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &spawn_impulse)) return false;
             if (!message_utils::read_variable(raw, &spawn_spacing)) return false;
             if (!message_utils::read_variable(raw, &protocol)) return false;
+            if (!message_utils::read_variable(raw, &world_options)) return false;
 
             uint8_t player_count = 0;
             if (!message_utils::read_variable(raw, &player_count)) return false;

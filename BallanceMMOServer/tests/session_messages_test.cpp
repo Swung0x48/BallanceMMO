@@ -12,6 +12,7 @@
 // include order in message_all.hpp), so pull in the aggregate
 #include <message/message_all.hpp>
 #include <message/message_utils.hpp>
+#include <session/lifecycle.hpp>
 
 namespace {
 
@@ -92,6 +93,8 @@ TEST(SessionStartMsg, SerializeDeserializeRoundTrip) {
     EXPECT_EQ(-42, parsed.seed);
     EXPECT_FLOAT_EQ(2.5f, parsed.spawn_impulse);
     EXPECT_FLOAT_EQ(4.2f, parsed.spawn_spacing);
+    EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
+    EXPECT_EQ(0u, parsed.world_options);
     ASSERT_EQ(2u, parsed.players.size());
     EXPECT_EQ(10u, parsed.players[0].id);
     EXPECT_EQ(0, parsed.players[0].join_order);
@@ -693,8 +696,7 @@ TEST(SessionEventMsg, DeserializeRejectsBallCountAboveCap) {
 
 // Protocol 10 (resync design 5, step A3): SessionAssign's flags, on every
 // copy, and SessionResyncState with its rows, clones and byte sections.
-TEST(SessionAssignMsg, FlagsRoundTripAndTheProtocolIs10) {
-    EXPECT_EQ(10u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+TEST(SessionAssignMsg, FlagsRoundTrip) {
     bmmo::session_assign_msg msg;
     msg.session = 9;
     msg.first_tick = 1572;
@@ -1212,4 +1214,168 @@ TEST(SessionRemoteInputMsg, V3RejectsBadHeldSectionsAndAV6Datagram) {
         v6.pop_back();   // the empty section's count
         EXPECT_FALSE(parses(v6)) << members << " entries";
     }
+}
+
+// ---------------------------------------------------------------------
+// Protocol 11 (trafo-replication design 5, step T2): the Trafo event, the
+// capability, the world options, the resync state's trafo ledger.
+// ---------------------------------------------------------------------
+
+TEST(TrafoWire, TheProtocolIs11AndTheBitsAreDistinct) {
+    EXPECT_EQ(11u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(5, static_cast<int>(bmmo::session::event_type::Trafo));
+    EXPECT_EQ(0u, bmmo::session::CAP_TRAFO_INPUTS & (bmmo::session::CAP_LEAD | bmmo::session::CAP_RESYNC_STATE));
+    EXPECT_NE(0u, bmmo::session::CAP_TRAFO_INPUTS);
+    EXPECT_EQ(1u << 1, bmmo::session::WORLD_TRAFO_INPUTS) << "bit 0 is the sector placement's, 2 and 3 are claimed";
+}
+
+TEST(TrafoWire, SessionStartCarriesTheWorldOptions) {
+    bmmo::session_start_msg msg{};
+    msg.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+    bmmo::session::player_entry p{};
+    p.id = 4;
+    msg.players = {p};
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(bmmo::session::WORLD_TRAFO_INPUTS, parsed.world_options);
+    ASSERT_EQ(1u, parsed.players.size());
+    EXPECT_EQ(4u, parsed.players[0].id);
+    msg.clear();
+    expect_rejects_every_truncation(msg);
+}
+
+namespace {
+bmmo::session_event_msg make_trafo_event(uint8_t type, uint8_t flags) {
+    bmmo::session_event_msg msg{};
+    msg.session = 3;
+    msg.player = 77;
+    msg.tick = 860;
+    msg.origin_tick = 843;
+    msg.state = bmmo::session::EVENT_STATE_MOVED;
+    msg.type = bmmo::session::event_type::Trafo;
+    msg.ball_type = type;
+    msg.flags = flags;
+    msg.position[0] = 948.74127f;
+    msg.position[1] = 3.7663198f;
+    msg.position[2] = -56.514111f;
+    return msg;
+}
+}
+
+TEST(TrafoWire, TheEventRoundTripsAndRefusesEveryTruncation) {
+    auto msg = make_trafo_event(1, 0);
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(bmmo::session::event_type::Trafo, parsed.type);
+    EXPECT_EQ(77u, parsed.player);
+    EXPECT_EQ(860u, parsed.tick);
+    EXPECT_EQ(843u, parsed.origin_tick);
+    EXPECT_EQ(bmmo::session::EVENT_STATE_MOVED, parsed.state);
+    EXPECT_EQ(1, parsed.ball_type);
+    EXPECT_EQ(0, parsed.flags);
+    EXPECT_EQ(948.74127f, parsed.position[0]);
+    EXPECT_EQ(3.7663198f, parsed.position[1]);
+    EXPECT_EQ(-56.514111f, parsed.position[2]);
+    // Exactly the three fields and the trailer: type byte, then 1 + 1 + 12.
+    msg.clear();
+    ASSERT_TRUE(msg.serialize());
+    auto sector = make_trafo_event(1, 0);
+    sector.type = bmmo::session::event_type::Finish;
+    ASSERT_TRUE(sector.serialize());
+    EXPECT_EQ(sector.raw.str().size() + 14, msg.raw.str().size());
+    auto again = make_trafo_event(2, 3);
+    expect_rejects_every_truncation(again);
+    // A type past Trafo is refused.
+    std::string bytes = msg.raw.str();
+    const size_t type_at = sizeof(bmmo::opcode) + 3 * sizeof(uint32_t);
+    bytes[type_at] = 6;
+    bmmo::session_event_msg unknown{};
+    unknown.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    EXPECT_FALSE(unknown.deserialize());
+}
+
+TEST(TrafoWire, TheKeySeparatesExplodeResetAndServerStamped) {
+    using bmmo::session::lifecycle_key_of;
+    auto explode = make_trafo_event(0, 0);
+    auto reset = make_trafo_event(0, 1);
+    auto server = make_trafo_event(0, 3);
+    server.origin_tick = server.tick;
+    auto owner_at_applied = make_trafo_event(0, 1);
+    owner_at_applied.origin_tick = owner_at_applied.tick;
+    EXPECT_FALSE(lifecycle_key_of(explode, 77) == lifecycle_key_of(reset, 77)) << "explode and reset at one origin";
+    EXPECT_FALSE(lifecycle_key_of(server, 77) == lifecycle_key_of(owner_at_applied, 77)) << "server-stamped vs the owner's";
+    EXPECT_TRUE(lifecycle_key_of(reset, 77) == lifecycle_key_of(make_trafo_event(0, 1), 77)) << "a copy is a copy";
+    bmmo::session::event_seen seen;
+    EXPECT_TRUE(seen.first(lifecycle_key_of(explode, 77)));
+    EXPECT_TRUE(seen.first(lifecycle_key_of(reset, 77)));
+    EXPECT_FALSE(seen.first(lifecycle_key_of(explode, 77)));
+    // Every other type keys as before: the Physicalize's SPAWN flag is not in it.
+    auto birth = make_trafo_event(0, bmmo::session::PHYSICALIZE_FLAG_SPAWN);
+    birth.type = bmmo::session::event_type::Physicalize;
+    EXPECT_EQ(0, lifecycle_key_of(birth, 77).flags);
+    EXPECT_EQ(2, bmmo::session::lifecycle_event_rank(bmmo::session::event_type::Trafo));
+    EXPECT_STREQ("trafo", bmmo::session::event_type_name(5));
+}
+
+TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
+    bmmo::session_resync_state_msg msg;
+    msg.session = 2;
+    msg.tick = 999;
+    msg.base = 1000;
+    bmmo::session::trafo_ledger_entry a, b;
+    a.player = 3920120238u;
+    a.type = 2;
+    a.has_explosion = true;
+    a.explode_applied = 808;
+    a.position[0] = 74.0f;
+    a.position[1] = 3.095f;
+    a.position[2] = 43.0f;
+    a.has_bodies = true;
+    b.player = 5;
+    b.type = 0;
+    b.has_explosion = true;
+    b.explode_applied = 700;
+    b.has_reset = true;
+    b.reset_applied = 900;
+    b.final = true;            // a leaver's set between its final resets and its retirement
+    b.final_applied = 900;
+    msg.trafo_ledger = {a, b};
+    ASSERT_TRUE(msg.serialize());
+    const std::string bytes = msg.raw.str();
+    bmmo::session_resync_state_msg parsed;
+    parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    ASSERT_EQ(2u, parsed.trafo_ledger.size());
+    EXPECT_EQ(3920120238u, parsed.trafo_ledger[0].player);
+    EXPECT_EQ(2, parsed.trafo_ledger[0].type);
+    EXPECT_TRUE(parsed.trafo_ledger[0].has_explosion);
+    EXPECT_TRUE(parsed.trafo_ledger[0].has_bodies);
+    EXPECT_FALSE(parsed.trafo_ledger[0].has_reset);
+    EXPECT_EQ(808u, parsed.trafo_ledger[0].explode_applied);
+    EXPECT_EQ(3.095f, parsed.trafo_ledger[0].position[1]);
+    EXPECT_FALSE(parsed.trafo_ledger[1].has_bodies);
+    EXPECT_TRUE(parsed.trafo_ledger[1].has_reset);
+    EXPECT_EQ(900u, parsed.trafo_ledger[1].reset_applied);
+    EXPECT_FALSE(parsed.trafo_ledger[0].final);
+    EXPECT_TRUE(parsed.trafo_ledger[1].final);
+    EXPECT_EQ(900u, parsed.trafo_ledger[1].final_applied);
+    msg.clear();
+    expect_rejects_every_truncation(msg);
+    // A forged count past the cap, an unknown piece type and an unknown
+    // bit are refused.
+    std::string forged = bytes;
+    const size_t count_at = bytes.size() - 2 * (4 + 1 + 1 + 4 + 12 + 4 + 4) - 2;
+    const uint16_t too_many = static_cast<uint16_t>(bmmo::session_resync_state_msg::kMaxTrafoLedger + 1);
+    std::memcpy(&forged[count_at], &too_many, sizeof(too_many));
+    bmmo::session_resync_state_msg capped;
+    capped.raw.write(forged.data(), static_cast<std::streamsize>(forged.size()));
+    EXPECT_FALSE(capped.deserialize());
+    std::string bad_type = bytes;
+    bad_type[count_at + 2 + 4] = 3;
+    bmmo::session_resync_state_msg typed;
+    typed.raw.write(bad_type.data(), static_cast<std::streamsize>(bad_type.size()));
+    EXPECT_FALSE(typed.deserialize());
+    std::string bad_bits = bytes;
+    bad_bits[count_at + 2 + 4 + 1] = static_cast<char>(16);
+    bmmo::session_resync_state_msg bitted;
+    bitted.raw.write(bad_bits.data(), static_cast<std::streamsize>(bad_bits.size()));
+    EXPECT_FALSE(bitted.deserialize());
 }

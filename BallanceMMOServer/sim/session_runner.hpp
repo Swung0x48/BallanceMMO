@@ -33,6 +33,7 @@
 #include <session/lead.hpp>
 #include <session/lifecycle.hpp>
 #include <session/timeline.hpp>
+#include <session/trafo_input.hpp>
 
 #include "physics_world.hpp"
 
@@ -76,8 +77,8 @@ namespace bmmo::sim {
     // must too.  A superseded birth is never applied; it is handed over for
     // its owner's SUPERSEDED echo only.  `token` is the server's handle on
     // the message it submitted (0 = produced by the runner itself: the
-    // leaver's Unphysicalize), and `intake` when submit_event was called, for
-    // the S5 intake-to-send line.
+    // leaver's Unphysicalize, or a server-stamped Trafo reset), and `intake`
+    // when submit_event was called, for the S5 intake-to-send line.
     struct accepted_event {
         uint32_t session = 0;
         uint32_t player = 0;
@@ -85,6 +86,15 @@ namespace bmmo::sim {
         uint32_t applied = 0;
         bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
         bool superseded = false;
+        // Protocol 11 (trafo-replication design 2.2): a Trafo event's
+        // payload, for the events the runner makes itself (token 0: the
+        // reset before a re-explosion, the deadline's, a leaver's final
+        // ones - TRAFO_SERVER, origin = applied); a submitted one keeps the
+        // message the server parked.  `rejected`: refused at acceptance (the
+        // world option is off), REJECTED to its owner only, never applied.
+        uint8_t ball_type = 0, flags = 0;
+        float position[3] = {};
+        bool rejected = false;
         // Not accepted at all: the session or the player was gone when the
         // event reached the runner.  Nothing is sent; the server only lets go
         // of the message it parked under `token`.
@@ -138,6 +148,10 @@ namespace bmmo::sim {
         // The level's Physicalize_GameBall rows: the reference the event
         // validation compares a reported ball recipe with (design 9.4).
         std::vector<physics_world::ball_row> ball_rows;
+        // Every P_Trafo_* of the level (a world with trafo inputs): what a
+        // client's Trafo explosion is validated against (protocol 11,
+        // session/trafo_input.hpp trafo_validate).
+        std::vector<bmmo::session::trafo_point> trafo_points;
         std::string error;
     };
 
@@ -206,9 +220,15 @@ namespace bmmo::sim {
         // members: what a human needs to recognise the recording later) and
         // `names` are the players' display names, parallel to `players` -
         // either the same length or empty.
+        // `sector_lead` is the session's (SessionStart's): the lead the
+        // trafo deadline is queued within (trafo-replication design 2.2).
+        // `world_options` the session's session::WORLD_* bits (SessionStart
+        // carries the same), fixed for the session's life: the world is
+        // built with them and the journal's header records them.
         void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
                             uint32_t input_delay, uint32_t start_base, float spawn_impulse,
-                            const std::string& note = {}, std::vector<std::string> names = {});
+                            const std::string& note = {}, std::vector<std::string> names = {},
+                            uint32_t sector_lead = 0, uint32_t world_options = 0);
         // `reason` goes into the journal as `end: <reason>` before it closes.
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.
@@ -383,6 +403,18 @@ namespace bmmo::sim {
             // The re-stamp and the superseded-birth rule (design 3.1), per
             // player, decided when an event is accepted.
             bmmo::session::lifecycle_acceptance acceptance;
+            // Protocol 11 (trafo-replication design 2.2): the session's world
+            // options, its Sector lead and the trafo ledger per (player, piece
+            // type) - the applied tick of every accepted Trafo event, the
+            // server's own resets (before a re-explosion, at the deadline, for
+            // a leaver), the superseded resets.  Kept for a leaver too (its
+            // final resets are in it): a rejoin's first explosion keeps the
+            // span after them.
+            uint32_t world_options = 0;
+            uint32_t sector_lead = 0;
+            bmmo::session::trafo_acceptance trafo;
+            uint64_t trafo_server_resets = 0, trafo_superseded = 0, trafo_rejected = 0;
+            bool trafo_on() const { return (world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0; }
             uint64_t superseded_births = 0, restamped_events = 0;
             std::vector<pending_event> events;   // sorted by applied tick on insertion
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs
@@ -425,6 +457,12 @@ namespace bmmo::sim {
         // Takes a leaver out of the world before the step of `tick`, with
         // the journal's PLAYER record at that tick.
         void finish_leave(session_state& s, uint32_t player, uint32_t tick);
+        // A Trafo decision of the ledger queued as a pending event (the
+        // server's own resets and the accepted client events alike), and
+        // for a runner-made one (token 0) the relay through
+        // on_event_accepted.  `why` names a server reset in the log and box.
+        void queue_trafo(session_state& s, const bmmo::session::trafo_decision& d, const float position[3],
+                         std::chrono::steady_clock::time_point arrival, uint64_t token, const char* why);
         void observe_lateness(session_state& s, uint32_t tick);
         // What a decision does with lead_adjust on (design 2.3): the plan,
         // the buffer reset, the S1 lead line, the journal note and on_lead.

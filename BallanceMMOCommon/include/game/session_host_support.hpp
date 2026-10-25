@@ -358,9 +358,13 @@ namespace bmmo::game {
     // The script replay's selection of the session core's world, both hosts
     // (step P): the mechanism scripts, the sector manager and the trafo
     // scripts.  The legacy retail rollback calls script_replay::select
-    // without the trafo scripts.
-    inline script_replay::selection session_script_selection(CKContext* context) {
-        return script_replay::select(context, true);
+    // without the trafo scripts.  `trafo_inputs` (a session with
+    // WORLD_TRAFO_INPUTS, trafo-replication design 4.3/4.5): the originals
+    // never run from the anchor on and are not selected; the sets' scripts
+    // travel beside the selection as the trafo part (game/trafo_sets.hpp
+    // trafo_registry::part).
+    inline script_replay::selection session_script_selection(CKContext* context, bool trafo_inputs = false) {
+        return script_replay::select(context, !trafo_inputs);
     }
 
     // The platform's localize_scripts (step A3, resync design 2.6.4 step 4),

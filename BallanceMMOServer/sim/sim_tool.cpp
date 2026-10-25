@@ -51,6 +51,7 @@
 
 #include "headless_engine.hpp"
 #include "trafo_tool.hpp"
+#include "trafo_synth.hpp"
 #include "crash_report.hpp"
 #include "process_qos.hpp"
 #include "physics_world.hpp"
@@ -117,6 +118,11 @@ namespace {
         // renumbering left is no reason to stop; --ignore-resync replays past
         // the record as if it were not there (the pre-T1 replay, for an A/B).
         std::string replay_session;
+        // --synth-trafo-session DIR (trafo-replication design 7.2 S10, step
+        // T2): a server session with the trafo inputs on the real runner,
+        // its journal written to DIR (sim/trafo_synth.hpp); --synth-ticks N.
+        std::string synth_trafo_session;
+        uint32_t synth_ticks = 1560;
         bool list_journal = false;
         bool stop_on_divergence = false;
         bool continue_after_jump = false;
@@ -307,7 +313,8 @@ namespace {
         // [--trafo-track ID|orig TYPE] [--trafo-presim] [--trafo-contacts]
         // [--trafo-surfaces] [--trafo-no-collsound] [--trafo-record-check]
         // [--trafo-colldump] [--trafo-poke-create ID TICK]
-        // [--trafo-built-params] [--list-trafos].  See sim/trafo_tool.hpp.
+        // [--trafo-built-params] [--trafo-ensure ID TICK] [--list-trafos].
+        // See sim/trafo_tool.hpp.
         bmmo::sim::trafo_tool_options trafo;
         bool list_trafos = false;
         // --set-local SCRIPT LOCAL VALUE TICK, repeatable (free run, S12): an
@@ -416,6 +423,12 @@ namespace {
             }
         }
         else if (arg == "--trafo-retire") out.trafo.retire = true;
+        else if (arg == "--trafo-ensure") {
+            bmmo::sim::trafo_tool_options::ensure en;
+            if (!(v = next())) return false; en.player = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            if (!(v = next())) return false; en.tick = std::atoll(v);
+            out.trafo.ensures.push_back(en);
+        }
         else if (arg == "--trafo-teardown") { if (!(v = next())) return false; out.trafo.teardown = std::atoll(v); }
         else if (arg == "--list-entities") { if (!(v = next())) return false; out.list_entities = v; }
         else if (arg == "--beam-again") {
@@ -449,6 +462,8 @@ namespace {
             if (arg == "--root") { if (!(v = next())) return false; out.root = v; }
             else if (arg == "--replay") { if (!(v = next())) return false; out.replay = v; }
             else if (arg == "--replay-session") { if (!(v = next())) return false; out.replay_session = v; }
+            else if (arg == "--synth-trafo-session") { if (!(v = next())) return false; out.synth_trafo_session = v; }
+            else if (arg == "--synth-ticks") { if (!(v = next())) return false; out.synth_ticks = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--list") out.list_journal = true;
             else if (arg == "--stop-on-divergence") out.stop_on_divergence = true;
             else if (arg == "--continue-after-jump") out.continue_after_jump = true;
@@ -2781,6 +2796,7 @@ namespace {
             case bmmo::session::event_type::Sector: return "Sector";
             case bmmo::session::event_type::Finish: return "Finish";
             case bmmo::session::event_type::BodyRevived: return "BodyRevived";
+            case bmmo::session::event_type::Trafo: return "Trafo";
         }
         return "unknown";
     }
@@ -3651,6 +3667,12 @@ namespace {
         options.trace = args.journal_trace;
         options.boot_ticks = args.boot_ticks;
         options.anchor_timeout = args.anchor_timeout;
+        // Journal v5 (protocol 11): the session's world options.  The trafo
+        // inputs build every player's piece set at its PLAYER record and run
+        // the Trafo EVENT records (the server's own resets among them).
+        options.trafo_inputs = (header.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
+        if (header.world_options != 0) std::printf("journal world options %08x%s\n", header.world_options,
+                                                   options.trafo_inputs ? " (trafo inputs)" : "");
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) {
@@ -3685,6 +3707,7 @@ namespace {
             out_header.anchor_hash = world->anchor_hash();
             out_header.anchor_surfaces = world->anchor_surfaces();
             out_header.build_id = build;
+            out_header.world_options = header.world_options;
             out_header.utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
             const std::filesystem::path path = args.write_journal;
@@ -3889,7 +3912,7 @@ namespace {
             }
             for (const auto* entry: ordered) {
                 const auto& e = *entry;
-                if (static_cast<uint8_t>(e.type) > static_cast<uint8_t>(bmmo::session::event_type::BodyRevived)) {
+                if (static_cast<uint8_t>(e.type) > static_cast<uint8_t>(bmmo::session::event_type::Trafo)) {
                     // A newer writer's event type: the world would not know
                     // what to do with it, and guessing would be worse.
                     std::printf("tick %u: event type %u from p%u is unknown to this build, skipped\n", e.tick,
@@ -6782,6 +6805,18 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (!args.replay_session.empty()) return run_replay_session(args);
+    if (!args.synth_trafo_session.empty()) {
+        if (args.root.empty()) {
+            std::fprintf(stderr, "--synth-trafo-session needs --root <game dir>\n");
+            return 2;
+        }
+        bmmo::sim::synth_trafo_options so;
+        so.root = args.root;
+        so.out_dir = args.synth_trafo_session;
+        so.level = args.level > 0 ? args.level : 2;
+        so.ticks = args.synth_ticks;
+        return bmmo::sim::run_synth_trafo_session(so);
+    }
     if (!args.savestate_diff[0].empty() || !args.savestate_describe.empty()) return run_savestate_files(args);
     if (!args.describe_script.empty()) return run_describe_script(args);
     if (args.root.empty()) {

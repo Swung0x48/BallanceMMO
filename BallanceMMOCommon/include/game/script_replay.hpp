@@ -747,6 +747,13 @@ namespace bmmo::game {
         //         u16 children, per child u8 present + block
         //         u16 delayed links, u16 countdown each as v2
         //   3 x (u8 present, u32 value)    the three cells, as v2
+        //   version 2 only (protocol 11, trafo-replication design 4.5/4.7,
+        //   step T2): the trafo sets' scripts, keyed like the selection's -
+        //   u32 count, per script: str owner_name (BMMO_TrafoOwner_<p>), str
+        //   script_name (<original>_Trafo<p>), u8 present, block.  Written
+        //   whenever a trafo part is passed (the world option is on), an
+        //   empty part included (count 0): every record of a session without
+        //   the sets stays version 1, byte for byte.
         //
         // (str: u16 length, bytes.)  A script is keyed by (owner name, script
         // name) - unique in every level's selection (design 2.4) and checked
@@ -756,6 +763,7 @@ namespace bmmo::game {
         // takes unchanged.
         static constexpr uint32_t kPortableMagic = 0x50534d42u;   // "BMSP"
         static constexpr uint32_t kPortableVersion = 1;
+        static constexpr uint32_t kPortableVersionTrafo = 2;
 
         // What capture_portable and localize met.  The lists are filled only
         // when `lists` is set (the SimTool check); each entry names the
@@ -818,39 +826,49 @@ namespace bmmo::game {
 
         static bool capture_portable(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                                      std::vector<uint8_t>& out, std::string* error = nullptr,
-                                     portable_report* report = nullptr) {
+                                     portable_report* report = nullptr, const trafo_part* trafo = nullptr) {
             out.clear();
             if (error) error->clear();
             if (!context) return fail(error, "no context");
             if (!sel.satellites.empty()) return fail(error, "satellite blocks are not portable");
             portable_report scratch;
             portable_report& r = report ? *report : scratch;
+            // Version 2 whenever a trafo part is passed (the world option is
+            // on), an empty one included: a world without a selected set says
+            // so, and a world holding sets the record does not list fails
+            // its localize instead of putting them to their built state.
+            const bool v2 = trafo != nullptr;
             put_u32(out, kPortableMagic);
-            put_u32(out, kPortableVersion);
-            put_u32(out, static_cast<uint32_t>(sel.scripts.size()));
+            put_u32(out, v2 ? kPortableVersionTrafo : kPortableVersion);
             std::vector<std::pair<std::string, std::string>> keys;
-            for (CK_ID id: sel.scripts) {
-                auto* beh = CKBehavior::Cast(context->GetObject(id));
-                const std::string owner = owner_name(beh), name = beh && beh->GetName() ? beh->GetName() : "";
-                put_str(out, owner);
-                put_str(out, name);
-                put_u8(out, beh ? 1 : 0);
-                if (!beh) continue;
-                if (std::find(keys.begin(), keys.end(), std::make_pair(owner, name)) != keys.end()) {
-                    out.clear();
-                    if (error) *error = "two selected scripts share the key " + owner + "/" + name;
-                    return false;
+            const auto put_scripts = [&](const std::vector<CK_ID>& ids) {
+                put_u32(out, static_cast<uint32_t>(ids.size()));
+                for (CK_ID id: ids) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(id));
+                    const std::string owner = owner_name(beh), name = beh && beh->GetName() ? beh->GetName() : "";
+                    put_str(out, owner);
+                    put_str(out, name);
+                    put_u8(out, beh ? 1 : 0);
+                    if (!beh) continue;
+                    if (std::find(keys.begin(), keys.end(), std::make_pair(owner, name)) != keys.end()) {
+                        out.clear();
+                        if (error) *error = "two selected scripts share the key " + owner + "/" + name;
+                        return false;
+                    }
+                    keys.emplace_back(owner, name);
+                    ++r.scripts;
+                    capture_portable_behavior(context, beh, hooks, out, r, name, owner + "/" + name);
                 }
-                keys.emplace_back(owner, name);
-                ++r.scripts;
-                capture_portable_behavior(context, beh, hooks, out, r, name, owner + "/" + name);
-            }
+                return true;
+            };
+            if (!put_scripts(sel.scripts)) return false;
             for (int c = 0; c < kCellCount; ++c) {
                 int value = 0;
                 const bool present = read_cell(context, c, value);
                 put_u8(out, present ? 1 : 0);
                 put_u32(out, static_cast<uint32_t>(value));
             }
+            if (v2 && !put_scripts(trafo->scripts)) return false;
             return true;
         }
 
@@ -866,10 +884,16 @@ namespace bmmo::game {
         // names are copied from `local_anchor` (a v2 record of this world's
         // `sel`) instead.  A key in one selection and not the other, or any
         // count that differs, fails the whole call with the place named:
-        // half a record never runs.
+        // half a record never runs.  A version 2 record's trafo scripts
+        // (step T2) become record v3's trafo part of `trafo` (this world's
+        // trafo list, design 4.5), keyed the same way and as strictly; a
+        // version 1 record with a trafo part passed gives a record without
+        // one (its restore puts the sets to their built state); a version 2
+        // record without one fails.
         static bool localize(CKContext* context, const selection& sel, const std::vector<uint8_t>& portable,
                              const std::vector<uint8_t>* local_anchor, const keep_local_fn& keep_local,
-                             std::vector<uint8_t>& out, std::string* error = nullptr, portable_report* report = nullptr) {
+                             std::vector<uint8_t>& out, std::string* error = nullptr, portable_report* report = nullptr,
+                             const trafo_part* trafo = nullptr) {
             out.clear();
             if (error) error->clear();
             if (!context) return fail(error, "no context");
@@ -880,24 +904,43 @@ namespace bmmo::game {
             size_t pos = 0;
             uint32_t magic = 0, version = 0, count = 0;
             if (!get_u32(portable, pos, magic) || magic != kPortableMagic) return fail(error, "not a portable script record");
-            if (!get_u32(portable, pos, version) || version != kPortableVersion) return fail(error, "portable record version");
+            if (!get_u32(portable, pos, version) || (version != kPortableVersion && version != kPortableVersionTrafo))
+                return fail(error, "portable record version");
             if (!get_u32(portable, pos, count)) return fail(error, "truncated portable record");
             struct entry { std::string owner, name; size_t at = 0; bool used = false; };
-            std::vector<entry> entries;
-            for (uint32_t i = 0; i < count; ++i) {
-                entry e;
-                uint8_t present = 0;
-                if (!get_str(portable, pos, e.owner) || !get_str(portable, pos, e.name) || !get_u8(portable, pos, present))
-                    return fail(error, "truncated portable script");
-                if (!present) continue;
-                e.at = pos;
-                if (!skip_portable_block(portable, pos)) {
-                    if (error) *error = "truncated portable block of " + e.owner + "/" + e.name;
-                    return false;
+            const auto read_entries = [&](uint32_t n, std::vector<entry>& list) {
+                for (uint32_t i = 0; i < n; ++i) {
+                    entry e;
+                    uint8_t present = 0;
+                    if (!get_str(portable, pos, e.owner) || !get_str(portable, pos, e.name) || !get_u8(portable, pos, present))
+                        return fail(error, "truncated portable script");
+                    if (!present) continue;
+                    e.at = pos;
+                    if (!skip_portable_block(portable, pos)) {
+                        if (error) *error = "truncated portable block of " + e.owner + "/" + e.name;
+                        return false;
+                    }
+                    list.push_back(std::move(e));
                 }
-                entries.push_back(std::move(e));
-            }
+                return true;
+            };
+            std::vector<entry> entries;
+            if (!read_entries(count, entries)) return false;
             const size_t cells_at = pos;
+            // Version 2: the trafo scripts after the cells.
+            std::vector<entry> trafo_entries;
+            size_t end_at = portable.size();
+            if (version == kPortableVersionTrafo) {
+                size_t at = cells_at + static_cast<size_t>(kCellCount) * 5;
+                if (at > portable.size()) return fail(error, "truncated portable cells");
+                pos = at;
+                uint32_t trafo_count = 0;
+                if (!get_u32(portable, pos, trafo_count)) return fail(error, "truncated portable trafo scripts");
+                if (!read_entries(trafo_count, trafo_entries)) return false;
+                end_at = pos;
+                if (!trafo) return fail(error, "the portable record carries a trafo part and this world has no trafo list");
+            }
+            const bool v3 = version == kPortableVersionTrafo;
             // The local anchor's scripts by id: where each one's entry starts
             // (the id) and ends.
             record_index anchored;
@@ -917,7 +960,7 @@ namespace bmmo::game {
                 local_keys.push_back(std::move(key));
             }
             put_u32(out, kMagic);
-            put_u32(out, kVersion);
+            put_u32(out, v3 ? kVersionTrafo : kVersion);
             put_u32(out, static_cast<uint32_t>(sel.scripts.size()));
             for (CK_ID id: sel.scripts) {
                 auto* beh = CKBehavior::Cast(context->GetObject(id));
@@ -969,6 +1012,41 @@ namespace bmmo::game {
             pos = cells_at;
             for (int c = 0; c < kCellCount; ++c)
                 if (!copy_bytes(portable, pos, 5, out)) { out.clear(); return fail(error, "truncated portable cells"); }
+            if (v3) {
+                // Record v3's trafo part: this world's trafo list in its
+                // order, each script from the entry of its key.
+                put_u32(out, static_cast<uint32_t>(trafo->scripts.size()));
+                for (CK_ID id: trafo->scripts) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(id));
+                    put_u32(out, static_cast<uint32_t>(id));
+                    if (!beh) { put_u8(out, 0); continue; }
+                    const std::string owner = owner_name(beh), name = beh->GetName() ? beh->GetName() : "";
+                    auto e = std::find_if(trafo_entries.begin(), trafo_entries.end(),
+                                          [&](const entry& x) { return !x.used && x.owner == owner && x.name == name; });
+                    if (e == trafo_entries.end()) {
+                        out.clear();
+                        if (error) *error = "the portable record has no trafo script " + owner + "/" + name;
+                        return false;
+                    }
+                    e->used = true;
+                    put_u8(out, 1);
+                    ++r.scripts;
+                    size_t at = e->at;
+                    const std::string place = owner + "/" + name;
+                    if (!localize_behavior(context, beh, portable, at, out, error, r, name, place)) {
+                        out.clear();
+                        if (error) *error = place + ": " + *error;
+                        return false;
+                    }
+                }
+                for (const entry& e: trafo_entries)
+                    if (!e.used) {
+                        out.clear();
+                        if (error) *error = "the local trafo list has no script " + e.owner + "/" + e.name;
+                        return false;
+                    }
+                pos = end_at;
+            }
             if (pos != portable.size()) { out.clear(); return fail(error, "trailing bytes in the portable record"); }
             return true;
         }

@@ -45,6 +45,7 @@ namespace bmmo::session {
         case 2: return "sector";
         case 3: return "finish";
         case 4: return "bodyrevived";
+        case 5: return "trafo";
         default: return "?";
         }
     }
@@ -269,6 +270,11 @@ namespace bmmo::session {
         uint8_t ball_type = 0;
         int32_t sector = 0;
         std::string name;
+        // Protocol 11 (trafo-replication design 5): a Trafo event's flags -
+        // an explode and a reset of one type at one origin are two events,
+        // and a server-stamped one (TRAFO_SERVER, origin = applied) never
+        // collides with an owner's.  0 for every other type.
+        uint8_t flags = 0;
 
         bool operator<(const lifecycle_event_key& o) const {
             if (tick != o.tick) return tick < o.tick;
@@ -277,11 +283,12 @@ namespace bmmo::session {
             if (type != o.type) return type < o.type;
             if (ball_type != o.ball_type) return ball_type < o.ball_type;
             if (sector != o.sector) return sector < o.sector;
+            if (flags != o.flags) return flags < o.flags;
             return name < o.name;
         }
         bool operator==(const lifecycle_event_key& o) const {
             return tick == o.tick && applied == o.applied && player == o.player && type == o.type
-                && ball_type == o.ball_type && sector == o.sector && name == o.name;
+                && ball_type == o.ball_type && sector == o.sector && flags == o.flags && name == o.name;
         }
     };
 
@@ -300,6 +307,8 @@ namespace bmmo::session {
         k.ball_type = m.ball_type;
         k.sector = m.sector;
         k.name = m.name;
+        if constexpr (requires { m.flags; })
+            if (m.type == event_type::Trafo) k.flags = m.flags;
         return k;
     }
 
@@ -318,7 +327,10 @@ namespace bmmo::session {
     // events by this rank (the server's runner, the headless client's drain,
     // the retail mod's batch) - and ignores an Unphysicalize stamped at or
     // before the player's last applied Physicalize, which a late copy of a
-    // death would otherwise take out the respawn with.
+    // death would otherwise take out the respawn with.  A Trafo event ranks
+    // 2 with Sector, Finish and BodyRevived (trafo-replication design 2.2:
+    // the ledger never puts two events of one type set into one tick, so
+    // inside a tick it only orders flag writes on distinct type sets).
     inline int lifecycle_event_rank(event_type t) {
         if (t == event_type::Unphysicalize) return 0;
         if (t == event_type::Physicalize) return 1;

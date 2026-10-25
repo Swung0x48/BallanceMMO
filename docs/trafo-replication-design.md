@@ -2,7 +2,9 @@
 
 Status: design (track 2 of the post-audit designs), revision 2 after two
 reviews (§10); step T1 built (host support, bridge v21, SimTool; no wire:
-§8, "As built (step T1)"), T2-T5 not. It implements the user's decision of 2026-10-23
+§8, "As built (step T1)"); step T2 built (wire and server, protocol 11 /
+journal v5, the world option off by default: §8, "As built (step TR2 =
+T2)"), T3-T5 not. It implements the user's decision of 2026-10-23
 on audit item #2 (and #11): option (b), the trafo becomes a replicated input
 and its explosion, wind and reset run in every world for every player's trafo,
 identically.
@@ -1562,6 +1564,264 @@ support, the bridge and SimTool; no wire, no host uses any of it yet (T2-T4).
     retail x86 build both are 4 bytes.  The local is the particle emitter's,
     deleted right before; no physics state.  Same in the control without
     sets.
+
+**As built (step TR2 = T2, 2026-10-25; HEAD 2e6f026 + the working tree).**
+Wire and server: the Trafo event, its acceptance, validation, deadline and
+leaver resets, the world option, the sets in the server's world, the ledger
+in the resync and join state, the portable record's trafo part.  No client
+speaks it yet (T3, T4): with the option off - the default at T2 - every
+session runs as before.
+
+- **Numbers.** `PHYSICS_PROTOCOL_VERSION` 10 -> **11**, journal version 4 ->
+  **5** (`entity/session.hpp`, `session/journal.hpp`; the next free ones, as
+  expected).  `event_type::Trafo = 5`.  `CAP_TRAFO_INPUTS = 1u << 2` (the
+  design's bit 1 is `CAP_RESYNC_STATE` since protocol 10).
+  `WORLD_TRAFO_INPUTS = 1u << 1` in the sector placement design's field (a
+  `u32 world_options` after `protocol` in SessionStart; the record-format
+  design's Q3 settled the field; §5 here said a byte after `spawn_spacing`).
+  Portable script record version **2** = version 1 plus the trafo scripts by
+  name after the cells, written whenever a trafo part is passed - the option
+  is on - an empty part (no set selected) included (every session without
+  the option still sends version 1, byte for byte).
+- **The world option (adapted).** 2.14 sets the bit "only when every member
+  has the capability", but the capabilities arrive with SessionReady, after
+  SessionStart (which carries the bit and before which the world is built).
+  So the bit is the server's config `physics.trafo_inputs` (default **off**
+  until both session-core hosts run the inputs: T3 / T4 turn it on), fixed at
+  `start_physics_session` like the spawn impulse, and a member whose
+  SessionReady lacks `CAP_TRAFO_INPUTS` in a session with the bit is refused
+  with a reason (SessionEnd to it, out of the session, not of the room, as
+  the start barrier drops a silent member) - start members as well as late
+  joiners.
+- **`kTrafoReach` = 4.5 m** (decision 9.3): the R2 / r2t / p3_two / p3_h4 logs
+  (`maps/arena-test/r2_*`, `r2f_b_*`, `p3_t_ctl`, `p3_tR2_ctl`, `pr2_*`,
+  `p3_b_*`, `p3_h4`) predate the hold and carry no captured position; the
+  proxy is the new ball's Physicalize after the trafo ("set new Ball" puts it
+  where the explosion read the old ball, 2.3).  624 trafo records, 4 distinct
+  trafos (arena wood / paper / stone, L11 s1 stone): every one exactly
+  **3.000 m** above its `P_Trafo_*_MF`; T1's S7 hold capture on L2 3.00002 m.
+  Maximum 3.0 x 1.5 = 4.5 (`work/tr2/reach.py`, `reach.txt`).
+- **Found and fixed: the trafo positions are the PH table's, not the
+  anchor's entities.**  The original levels pool their trafos across sectors
+  (sector placement design 1.2): L11's `P_Trafo_Stone_MF001` stands at its
+  sector-6 row (1532.83, -101.89, -343.45) at the anchor and is moved to its
+  sector-1 row (60.95, 5.10, -12.58) when sector 1 is placed.  Validated
+  against the anchor's entities, every L11 sector-1 stone trafo (the p3_two
+  and R2 two-client trafo, 3.0 m above that row) was 1.5 km from every trafo
+  and would have been rejected.  The server's trafo points are every PH row
+  of a `P_Trafo_*` type (static level data, read at the anchor) plus every
+  `P_Trafo_*` entity where it stands (a level without a PH table): L11 16
+  rows + 10 entities, the measured explosion 2.9999 m from
+  `P_Trafo_Stone_MF001@PH12`.
+- **Where.**  `session/trafo_input.hpp`: `kTrafoReach`, `trafo_point`,
+  `trafo_validate` (kind, type, the client-set server/final bits, unknown
+  bits, a finite position within the reach of the nearest point; a reset's
+  position is read by no world and not checked).  `entity/session.hpp`:
+  the constants and `trafo_ledger_entry` {player, type, has_explosion,
+  explode_applied, position, has_bodies, has_reset, reset_applied, final,
+  final_applied} (the last two from the review fix-up below).
+  `message/session_event_msg.hpp` (Trafo: ball_type, flags, position),
+  `session_start_msg.hpp` (world_options), `session_resync_state_msg.hpp`
+  (`trafo_ledger` after the savestate, capped at 3 x 2 x 64 entries).
+  `session/lifecycle.hpp`: the key gains `flags` (Trafo only), the name
+  "trafo"; the rank of Trafo is 2 (unchanged code: every type but U/P).
+  `session/journal.hpp` v5 (header `world_options`, trailing; a v4 file reads
+  as 0).  `game/script_replay.hpp`: `capture_portable(..., trafo)`,
+  `localize(..., trafo)` (a v2 record becomes record v3's trafo part, keyed
+  and as strict as the selection; a v1 record with a trafo part passed gives
+  a record without one; a v2 record without one fails).
+  `game/session_host_support.hpp`: `session_script_selection(context,
+  trafo_inputs)` leaves the originals out with the option (4.3).
+  Server: `sim/physics_world.*` (`world_options::trafo_inputs`; the level
+  reference captured on the boot's first tick the 8 scripts exist - engine
+  tick 16; `anchor_trafo`: the trafo points, the quiesce - `0 bodies, 0
+  controllers, 0 scripts` on L2 and L11, a non-zero count is logged as a bug
+  -, the hold armed, the piece x local-body filter on; `make_trafo_set` at
+  `add_player`, a kept set reselected, a failed build fails the session;
+  `apply_trafo` before the player lookup, since a set outlives its member's
+  slot; the trafo frame after `update_sectors()`; `after_trafo_tick`: the
+  hold (reports logged as a bug), the effect checks, the body-set flag at a
+  reset's R + 132, retirement destroying at the deselect; the ledger and the
+  portable v2 record in `capture_resync_state`), `sim/trafo_hooks.hpp` (the
+  hooks factory, moved out of `trafo_tool.hpp` for the world and T3),
+  `sim/session_runner.*` (`create_session(..., sector_lead, world_options)`;
+  `submit_event` takes a Trafo through `trafo_acceptance`; `queue_trafo`
+  queues every decision and relays the server's own resets with token 0 and
+  a journal note; the deadline after every step with N = the next tick and
+  L = `sector_lead`; the leaver's final resets in `remove_player`; the
+  journal header's world options), `server.cpp` (config, SessionStart,
+  validation at intake with `reject_trafo` - REJECTED to the owner alone,
+  reliable plus the protocol-6 repeats, and the cheating-or-corruption log
+  line with player, stamp, server tick, position, nearest trafo and its
+  distance, the piece type and the player's last ball type, session -, the
+  refusal at SessionReady, `on_event_accepted` for the runner's Trafo
+  events, the ledger into SessionResyncState), `config_manager.*`
+  (`physics.trafo_inputs`).  SimTool: `--replay-session` builds the world
+  with the header's options and applies Trafo EVENT records;
+  `--synth-trafo-session DIR` (S10's journal producer, `sim/trafo_synth.hpp`);
+  `--trafo-record-check` (5), the portable round trip.
+  `scripts/journal_trace.py` reads v5.
+- **Adaptations** beyond the numbers and the two above:
+  - The leaver path (2.2 "Leavers") queues the leaver's Unphysicalize, when
+    it has a ball, whenever the option is on - its final resets always
+    follow - so the ball goes at the same tick everywhere; before, a leaver
+    with nothing queued was dropped with its slot at once.
+  - `finish_leave` keeps the player's Trafo events: a player that rejoins
+    before its old self is removed would otherwise drop final resets every
+    other world was relayed and applies.  Consequence (every world alike, by
+    the retirement rule): those finals mark the kept set final, it is
+    retired once inert, and the rejoined player's next explosion finds no
+    selected set and gets one by `ensure_trafo_set` (review fix-up below).
+  - A Trafo the runner refuses (option off, bad type - the network side
+    refuses these first) is handed back `rejected` and echoed REJECTED to
+    its owner alone, never queued.
+  - The server's hold polls with option E off (it has no own ball).
+- **Cost.** The hold and the effect checks after every tick: 101-118
+  us/tick on L11 with three sets (the effect check's 51 by-name lookups),
+  `trafo_after_us` in `describe`.
+- **Not done here (T3/T4):** no client declares `CAP_TRAFO_INPUTS`, sends,
+  applies or journals Trafo events, or reads the ledger; the client
+  journal's RESYNC record carries no ledger yet (T3 adds it as a trailing
+  field, which the format allows without a version); the config default
+  flips when both hosts run the inputs.  (The implement round recorded here
+  that a late joiner misses a Trafo event accepted before it joined and
+  applied after its state's tick S, "unreachable in practice" with a 40-tick
+  lead; the reviews showed the bound wrong - a re-explosion moved behind a
+  reset lands up to the lead + `kTrafoResetSpan` = 140 ticks after its
+  acceptance - and the fix-up below closes it.)
+- **Checks** (x64 `build-agent-rTR2`, every run its own process, outputs in
+  `.local-tools/work/tr2/`):
+  - 7.1: **493 tests pass** (486 + 7: the protocol and bits, SessionStart's
+    world options, the Trafo event's round trip and truncations, the key
+    (explode / reset / server-stamped apart; Physicalize's SPAWN flag not in
+    a key), the resync state's ledger (round trip, truncations, forged count,
+    bad type), journal v5 (header, a v4 header reads 0, the Trafo EVENT), the
+    validation table).  The acceptance rules were T1's tests; here they run
+    through the real runner (below).
+  - S10 on synthetic journals: `--synth-trafo-session` on L2 and L11 (3
+    players, 1560 ticks, snapshots off, checkpoints every 20 ticks): 17/17
+    echo checks PASS on both - on time (40, 60, 100, 620), a live type set
+    exploded again (the server's reset at N, 180/181, the explosion at
+    reset + 140), the owner's reset (300), the next explosion moved to
+    300 + 140 = 440, a reset older than it superseded, a late reset moved to
+    N (502), a bad type refused, the leaver's three finals at 621 (its wood
+    explosion at 620 + 1), the deadline reset of a never-reset paper at
+    60 + 1320 = 1380, queued at N = 1360 (= 1380 - L), none for a reset type
+    set; every reset's pieces gone from the checkpoint after R + 132; the
+    leaver's set deselected and destroyed at 818 (inert after its collision
+    sound's 3 s); hold 0, `trafo_original_leaks` 0, every set's digests
+    `90f856e0c8c20dd4/493` and `bf8575545ab7fbe0/597` (T1's).  Their server
+    journals replayed: **L2 1575/1575 matched, 79 checkpoints, 0
+    mismatches; L11 1575/1575, 79, 0** - every piece of every set in the
+    checkpoints (up to 51 + 16 piece rows).
+  - The off path: the six core_ref_r3 server journals (v4) replayed by the
+    new SimTool: swing 4004/4004, a6m 4204/4204, resync 4178/4178, a5u
+    4193/4193, resync_at150 4058/4058, resync_at150_down 4182/4182 matched,
+    0 checkpoint mismatches each (A4's numbers).  Solo snapshots off
+    (`e0_solo.sh rTR2`, the Arch server rebuilt with the tree): IDENTICAL to
+    `rTR1b` (2330 TICK hash + pose common, 0 differ; LOCAL 1165/1165), its
+    server journal 2329/2329 matched.
+  - `--trafo-record-check` (L2, 2 sets): (1)-(4) PASS as at T1 (43968 /
+    62096 bytes), (5) portable v1 49632 / v2 70392 bytes, v2 localized ==
+    record v3, v1 with the trafo part == the v2 record, v2 refused without
+    a trafo part.
+  - `wire_check.sh rTR1 rTR2 rTR2w`: the 24 protocol-10 captures are refused
+    at SessionStart by the protocol-11 build ("the server runs a different
+    physics protocol than this client (11)"), as expected; not re-captured
+    (T3 does, when the headless host speaks protocol 11).
+  - Builds: x64 BUILD-OK, x86 CLIENT-BUILD-OK (the client's objects deleted
+    first; map.hpp untouched), Arch ARCH-BUILD-OK; `linux_test_syntax.sh` 27
+    ok.
+  - Observed, every world alike: a reset applied while the same type
+    set's previous reset is still fading restarts the fade (the reset
+    script is activated with Reset), so the bodies go at the later reset's
+    R + 132.  In the synthetic run p103's stone reset at 500 and its leaver
+    final at 621: the stone pieces went at 753, not 632.  The ledger's
+    guarantees hold (the span is counted from the last reset); a leaver's
+    final reset of a fading type set extends that fade by up to 132 ticks.
+- **Review fix-up (two reviews, 2026-10-25).**
+  - **The ledger names every set the server holds** (review 1 #1).  4.7's
+    filter (bodies, a live explosion, or a reset before its Restore IC) left
+    out a member's set that never exploded and a leaver's set between its
+    final resets and its retirement (about 230 ticks), while the portable
+    record lists every selected set's scripts and `localize` is strict both
+    ways: a joiner or resync in that span could not take the state.  It
+    also never said a set was final, so a client that missed a
+    `TRAFO_FINAL` reset would never retire the set the server retires.
+    `capture_trafo_ledger` now writes the three type sets of every set the
+    world holds (the server destroys at the deselect, so every held set is
+    selected) and each entry carries `final` (bit 8) and `final_applied`
+    (the set's newest final reset; u32 after `reset_applied`).  The cap stays
+    3 x 2 x 64 entries (128 sets: the members and the leavers not yet
+    retired); a ledger over it is logged with the other cut sections.
+    Client side (T3): build a set for every player named, mark the final
+    type sets with `trafo_set_final(..., final_applied)`.
+  - **One rule for "a set for this player"** (review 1 #2).
+    `game/trafo_sets.hpp` `ensure_trafo_set`, which the server's
+    `make_trafo_set` (at `add_player`) and `apply_trafo` (before every
+    input) call and T3's hosts must call: a selected set is kept; a retired
+    set not yet destroyed - only a client holds one, history_ticks after its
+    deselect - is selected again AND put back to what a fresh build is
+    (every type set unmade: scripts to their built bytes, the set being
+    inert nothing else goes; every copied object's initial condition, which
+    the build saved, read back; the final marks and tick cleared); otherwise
+    a fresh build.  Before, the server built fresh where a client would have
+    reselected a set whose scripts kept their finished state.  Measured
+    (`--trafo-ensure ID TICK`, new; `work/tr2/ensure_check.sh`, L2, one set,
+    wood explosion at 300, finals at 400, deselected at 533, destroyed at
+    629 with the client's history; the same explosion again at 760): arm A
+    ensures at 580 (reselected, 61 initial conditions read back), arm B at
+    720 (built afresh); the scripts' value digest equals the build's
+    (`bf8575545ab7fbe0/597`) in both, and the 240 per-tick pose lines after
+    760 (17 cores, 16 piece bodies) are **identical**.  The id stays alive
+    for the records that still list it (4.5: a restore refuses a record
+    naming a destroyed script), which is why the reselect is not a destroy
+    and rebuild.
+  - **Late joiners and resyncs get the Trafo events applied after S**
+    (review 1 #3, review 2 #2).  The server keeps every relayed, applied
+    Trafo event with its applied tick (`trafo_relayed`, pruned after 4 x
+    1320 ticks, capped at 4096) and resends the ones applied at or after the
+    base with the join's and the resync's catch-up (`resend_trafo_relayed`,
+    next to `sector_history`); a member that has one drops the copy by its
+    key.
+  - **Smaller fixes.**  A reset's position is zeroed at intake, so the relay
+    and every journal carry the zeros the server's own resets carry
+    (review 1 #4).  A Trafo event over the rate limit is answered REJECTED
+    to its owner (`reject_trafo`, reason "more events per second than the
+    rate limit"), never dropped silently (review 1 #5, review 2 #3).  The
+    portable record is version 2 whenever the option is on, an empty trafo
+    part included; `localize` takes it with an empty local list and refuses
+    it only when the world has no trafo list at all (review 1 #6).
+    `journal_keep_last_events` keys a Trafo event with its flags, as
+    `lifecycle_event_key` does: the server's reset at a re-explosion
+    (origin = applied) and an owner's event of that type stamped for that
+    tick were one key and the replay kept only the last (review 2 #1; unit
+    test).  SessionStart's seed is the runner's `runner_config::seed`, the
+    value every server-side seed derives from, not a second literal 1
+    (review 2 #5).
+  - **Not exercised by any check yet** (review 1 #7): the network side -
+    the intake rejection and its log line, the REJECTED echo, the relay of
+    the server's own resets, the refusal at SessionReady, the resend above.
+    The synthetic sessions drive `session_runner` directly; the wire path
+    runs first when T3's headless host sends Trafo events (its harness
+    checks and H7).
+  - **Gate round checks:** **494 tests pass** (493 + the journal key's;
+    the ledger test now covers the final bit, the final tick and an unknown
+    bit); `--synth-trafo-session` on L2 and L11 **22/22 PASS** each - the
+    17 echo checks unchanged and 5 new ledger checks on a resync state of
+    S = 659 (9 entries: p103's three final at 621 with its wood live and
+    stone fading, p101's never-exploded stone and paper, p102's live paper)
+    -, their server journals replayed **1575/1575 matched, 79 checkpoints,
+    0 mismatches** each; `--trafo-record-check` (1)-(5) PASS as before plus
+    (5b) (an empty part: portable v2 49636 bytes, localized with no set,
+    refused by a world holding sets); the ensure check above; x64 BUILD-OK,
+    x86 CLIENT-BUILD-OK (the client's objects deleted first), ARCH-BUILD-OK,
+    `linux_test_syntax.sh` 27 ok.  Not rerun, since nothing the fix-up
+    changed reaches them: the wire check (the protocol-10 captures are
+    refused at SessionStart before any changed code), the core_ref_r3
+    server-journal replays and the solo snapshots-off run (every change is
+    behind the option or keyed to the Trafo type; the SessionStart seed is
+    the same 1).
 
 ## 9. Open questions
 

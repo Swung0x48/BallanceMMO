@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <session/journal.hpp>
+#include <session/trafo_input.hpp>
 
 namespace {
     using namespace bmmo::session;
@@ -55,6 +56,7 @@ namespace {
         h.utc_ms = 1725400000000ULL;
         h.own_player = 42;
         h.own_join_order = 1;
+        h.world_options = WORLD_TRAFO_INPUTS;
         return h;
     }
 
@@ -286,6 +288,7 @@ TEST(SessionJournal, RoundTripOfEveryRecordType) {
     EXPECT_EQ(expected.utc_ms, out.header.utc_ms);
     EXPECT_EQ(expected.own_player, out.header.own_player);
     EXPECT_EQ(expected.own_join_order, out.header.own_join_order);
+    EXPECT_EQ(expected.world_options, out.header.world_options) << "journal v5: the session's world options";
 
     // the founding members: the ones at first_tick before the first TICK
     ASSERT_EQ(2u, out.initial_players.size());
@@ -450,8 +453,8 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(300u, r.scripts.size());
     EXPECT_EQ(70003u, r.savestate.size());
     EXPECT_EQ("end", r.savestate.substr(70000));
-    EXPECT_EQ(4u, kJournalVersion);
-    EXPECT_EQ(2u, kJournalOldestReadable) << "version 2 and 3 files still read";
+    EXPECT_EQ(5u, kJournalVersion) << "5: the HEADER's world options and the Trafo EVENT (protocol 11)";
+    EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
 }
 
 TEST(SessionJournal, TruncatedTailKeepsTheTicksBeforeIt) {
@@ -1116,4 +1119,99 @@ TEST(SessionJournal, TheLastRecordOfAnEventIsTheServersAndANeverAppliedOneGoes) 
     EXPECT_TRUE(left[130].empty());
     // Idempotent: nothing more to drop.
     EXPECT_EQ(0u, journal_keep_last_events(out));
+}
+
+// Protocol 11 (step T2's review): the server's own reset of a type set
+// (TRAFO_RESET | TRAFO_SERVER, origin = applied) and its owner's explosion
+// or reset stamped for that very tick share every other field of the key;
+// the flags keep them apart, so neither is taken for the other's echo.
+TEST(SessionJournal, TrafoEventsOfOneTickAreKeptApartByTheirFlags) {
+    const temp_dir dir("keep_last_trafo");
+    const auto path = dir.file("client.bmjr");
+    const auto trafo = [](uint32_t tick, uint32_t origin, uint8_t flags, uint8_t state) {
+        journal_event e;
+        e.tick = tick;
+        e.event_tick = tick;
+        e.origin_tick = origin;
+        e.state = state;
+        e.id = 42;
+        e.type = event_type::Trafo;
+        e.ball_type = 1;
+        e.flags = flags;
+        return e;
+    };
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        writer.event(trafo(240, 240, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER, 0));   // the server's reset
+        writer.event(trafo(240, 240, 0, 0));                                                          // the owner's explosion, sent
+        writer.event(trafo(240, 240, bmmo::session::TRAFO_RESET, 0));                                 // the owner's reset, sent
+        writer.tick(240, make_hash(240), 10);
+        writer.event(trafo(380, 240, 0, EVENT_STATE_MOVED));                                          // the explosion's echo
+        writer.tick(380, make_hash(380), 20);
+        writer.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(1u, journal_keep_last_events(out));   // the explosion as sent
+    std::map<uint32_t, std::vector<uint8_t>> left;   // tick -> flags
+    for (const auto& group: out.ticks)
+        for (const auto& e: group.events) left[group.tick].push_back(e.flags);
+    ASSERT_EQ(2u, left[240].size());
+    EXPECT_EQ(bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER, left[240][0]);
+    EXPECT_EQ(bmmo::session::TRAFO_RESET, left[240][1]);
+    ASSERT_EQ(1u, left[380].size());
+    EXPECT_EQ(0, left[380][0]);
+}
+
+// Journal v5 (protocol 11, trafo-replication design 5, step T2): a header
+// without the trailing world options (every older file) reads as 0, and a
+// Trafo EVENT record keeps its piece type, flags and position.
+TEST(SessionJournal, V5WorldOptionsAndTheTrafoEvent) {
+    journal_header h = make_header();
+    std::string payload;
+    journal_detail::write_header_payload(payload, h);
+    journal_header back;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload, back));
+    EXPECT_EQ(WORLD_TRAFO_INPUTS, back.world_options);
+    journal_header old;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 4), old)) << "a v4 header";
+    EXPECT_EQ(0u, old.world_options);
+    EXPECT_EQ(h.own_join_order, old.own_join_order);
+
+    const temp_dir dir("trafo_event");
+    const auto path = dir.file("session.bmjr");
+    {
+        journal_writer w;
+        std::string error;
+        ASSERT_TRUE(w.open(path, h, 0, error)) << error;
+        journal_event e;
+        e.tick = 140;
+        e.event_tick = 140;
+        e.origin_tick = 120;
+        e.id = 7;
+        e.type = event_type::Trafo;
+        e.ball_type = 2;
+        e.flags = 3;   // TRAFO_RESET | TRAFO_SERVER
+        e.position[0] = 948.74127f;
+        e.position[1] = 3.7663198f;
+        e.position[2] = -56.514111f;
+        w.event(e);
+        w.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(WORLD_TRAFO_INPUTS, out.header.world_options);
+    ASSERT_EQ(1u, out.ticks.size());
+    ASSERT_EQ(1u, out.ticks[0].events.size());
+    const auto& e = out.ticks[0].events[0];
+    EXPECT_EQ(event_type::Trafo, e.type);
+    EXPECT_EQ(2, e.ball_type);
+    EXPECT_EQ(3, e.flags);
+    EXPECT_EQ(120u, e.origin_tick);
+    EXPECT_EQ(948.74127f, e.position[0]);
+    EXPECT_EQ(-56.514111f, e.position[2]);
 }

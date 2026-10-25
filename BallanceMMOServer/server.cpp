@@ -711,6 +711,21 @@ public:
         // The level's Physicalize_GameBall rows (from the world boot): the
         // reference a reported ball recipe is validated against.
         std::vector<bmmo::sim::physics_world::ball_row> ball_rows;
+        // Protocol 11 (trafo-replication design 2.14): the session's world
+        // options (SessionStart's, fixed at the start from the server's
+        // config) and the level's P_Trafo_* positions (from the world boot),
+        // which a client's Trafo explosion is validated against.
+        uint32_t world_options = 0;
+        std::vector<bmmo::session::trafo_point> trafo_points;
+        uint64_t rejected_trafos = 0;
+        // Every Trafo event relayed as applied (serialized, player set) with
+        // its applied tick: a join or resync state of tick S carries the
+        // ledger of S, and an event accepted before the member's join but
+        // applied after S (a re-explosion moved behind a reset lands up to
+        // the lead + kTrafoResetSpan ticks after its acceptance) reaches it
+        // only from here.  Resent with the state, the ones applied at or
+        // after the base; pruned when far in the past.
+        std::vector<std::pair<uint32_t, std::string>> trafo_relayed;
         // Event validation (design 9.4): rate limit rejects, the rest is
         // logged and counted in M4 (no rejection: the retail scripts decide
         // respawn poses per player, the server only knows the union).  The
@@ -761,6 +776,7 @@ public:
             rc.journal_dir = config_manager::resolve_path(config_.physics_journal_dir.c_str());
         rc.journal_max_bytes = static_cast<uint64_t>(config_.physics_journal_max_mb) << 20;
         rc.journal_checkpoint_ticks = config_.physics_journal_checkpoint_ticks;
+        physics_seed_ = rc.seed;
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
@@ -882,6 +898,15 @@ public:
         // to move it out from under the clients that were already told.
         s.spawn_impulse = s.members.size() > 1 ? config_.physics_spawn_impulse : 0.0f;
         s.spawn_spacing = s.members.size() > 1 ? config_.physics_spawn_spacing : 0.0f;
+        // Protocol 11: the world options, fixed here with the rest (the world
+        // is built with them, every SessionStart carries them).  The trafo
+        // design wanted WORLD_TRAFO_INPUTS "when every member has the
+        // capability", but the capabilities arrive with SessionReady, after
+        // SessionStart: the bit is the server's config, and a member that
+        // cannot run it is refused at its SessionReady (handle_session_ready).
+        s.world_options = config_.physics_trafo_inputs ? bmmo::session::WORLD_TRAFO_INPUTS : 0u;
+        if (s.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
+            Printf("Room %u: the trafo is an input in this session (world option trafo inputs).", r.id);
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
@@ -901,13 +926,16 @@ public:
         const uint32_t input_delay = s.input_delay;
         const uint32_t start_base = s.start_tick_base;
         const float spawn_impulse = s.spawn_impulse;
+        const uint32_t sector_lead = s.sector_lead;
+        const uint32_t world_options = s.world_options;
         physics_sessions_.emplace(id, std::move(s));
         // The world is numbered from the same base its members are (design 9.25
         // phase alignment): its first simulated tick is `start_base`, so the
         // server and every client take their first step from their anchor under
         // one tick number instead of the server being `start_base` steps ahead
         // of them at every number for the rest of the session.
-        runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names));
+        runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names),
+                                sector_lead, world_options);
         return id;
     }
 
@@ -950,9 +978,10 @@ public:
         msg.input_delay = static_cast<uint8_t>(std::min<uint32_t>(255, s.input_delay));
         msg.sector_lead = static_cast<uint8_t>(std::min<uint32_t>(255, s.sector_lead));
         msg.first_tick = first_tick;
-        msg.seed = 1;
+        msg.seed = physics_seed_;   // the seed the server's world runs with
         msg.spawn_impulse = s.spawn_impulse;
         msg.spawn_spacing = s.spawn_spacing;
+        msg.world_options = s.world_options;
         // Every member spawns at the retail resetpoint (design 9.10): the
         // kick set below moves same-tick spawns apart instead of a ring.
         for (size_t i = 0; i < s.members.size() && i < bmmo::session::MAX_PLAYERS_PER_SESSION; ++i) {
@@ -983,6 +1012,7 @@ public:
         s.anchor_hash = info.anchor_hash;
         s.anchor_surfaces = info.anchor_surfaces;
         s.ball_rows = info.ball_rows;
+        s.trafo_points = info.trafo_points;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
         for (int k = 0; k < 4; ++k) s.spawn_rotation[k] = info.spawn_rotation[k];
         s.resetpoints = info.resetpoints;
@@ -1218,6 +1248,7 @@ public:
         msg.savestate = out.state.savestate;
         msg.scripts_size = out.state.scripts_size;
         msg.savestate_size = out.state.savestate_size;
+        msg.trafo_ledger = out.state.trafo_ledger;
         // serialize() caps the rows at MAX_BODIES_PER_SNAPSHOT and each byte
         // section at kMaxBytesField: a state that large is sent cut, and the
         // client's restore of a cut blob refuses it - said here, not silently.
@@ -1228,6 +1259,9 @@ public:
                                          {&msg.scripts, "scripts"}, {&msg.savestate, "savestate"}})
             if (bytes->size() > bmmo::session_resync_state_msg::kMaxBytesField)
                 cut += std::string(" ") + what + " " + std::to_string(bytes->size()) + " bytes";
+        if (msg.trafo_ledger.size() > bmmo::session_resync_state_msg::kMaxTrafoLedger)
+            cut += " trafo ledger " + std::to_string(msg.trafo_ledger.size()) + " > "
+                 + std::to_string(bmmo::session_resync_state_msg::kMaxTrafoLedger) + " entries";
         if (!cut.empty())
             Printf("Physics session %u: the resync state for %s is cut on the wire (%s): the client will refuse what is cut.",
                    s.id, get_client_name(c), cut.c_str());
@@ -1342,6 +1376,28 @@ public:
         if (runner_) runner_->remove_player(session, c);
         if (s.members.empty()) end_physics_session(session, "everyone left");
         else assign_start_members(s);   // the leaver may have been the one everybody waited for
+    }
+
+    // With a join or resync state of S = base - 1 (trafo-replication design
+    // 4.7, T2's review): the Trafo events applied at or after the base,
+    // which the ledger of S cannot name.  One accepted before a joiner was a
+    // member reaches it only from here (the relay went before it joined); a
+    // member that has one already drops the copy by its key.  Entries far in
+    // the past are pruned on the way.
+    void resend_trafo_relayed(physics_session_state& s, HSteamNetConnection c, uint32_t base) {
+        constexpr uint32_t kKeep = 4 * bmmo::session::kTrafoLife;
+        s.trafo_relayed.erase(std::remove_if(s.trafo_relayed.begin(), s.trafo_relayed.end(),
+                                             [base](const auto& e) { return static_cast<int32_t>(e.first + kKeep - base) < 0; }),
+                              s.trafo_relayed.end());
+        size_t sent = 0;
+        for (const auto& [applied, bytes]: s.trafo_relayed)
+            if (static_cast<int32_t>(applied - base) >= 0) {
+                send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+                ++sent;
+            }
+        if (sent)
+            Printf("Physics session %u: %zu Trafo event(s) applied at or after tick %u resent to %s with its state.", s.id, sent,
+                   base, get_client_name(c));
     }
 
     // The tick a resync is anchored at off the per-player path.  input_delay
@@ -1646,6 +1702,21 @@ public:
                 return;
             }
         }
+        // Protocol 11 (trafo-replication design 2.14): a session whose
+        // world option makes the trafo an input refuses a member that cannot
+        // run it (the legacy retail path, session core off): out of the
+        // session, not out of the room - as the start barrier drops a silent
+        // member - and the rest go on.
+        if ((s.world_options & bmmo::session::WORLD_TRAFO_INPUTS) && !(msg.caps & bmmo::session::CAP_TRAFO_INPUTS)) {
+            const std::string reason = "this session runs the trafo as an input (world option trafo inputs) and "
+                                       "this client cannot (it needs the session core: session core on)";
+            Printf("Physics session %u: %s refused: no CAP_TRAFO_INPUTS (caps %08x) in a session with trafo inputs.", s.id,
+                   client_it->second.name, msg.caps);
+            const uint32_t session = s.id;
+            send_session_end(session, c, reason);
+            physics_session_member_left(c);
+            return;
+        }
         if (!s.late.count(c) && s.world_ready
                 && (msg.anchor_hash != s.anchor_hash || msg.anchor_surfaces != s.anchor_surfaces)) {
             end_physics_session(msg.session, Sprintf("world mismatch for %s (client %016llx/%016llx, server %016llx/%016llx)",
@@ -1698,6 +1769,7 @@ public:
             for (const auto& [member, last]: s.last_physicalize)
                 if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
             for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+            resend_trafo_relayed(s, c, assigned);
             if (state) {
                 runner_->request_resync_state(s.id, c, assigned);
                 Printf("Physics session %u: the state of tick %u follows to the late joiner %s alone (protocol 10).", s.id,
@@ -1760,6 +1832,7 @@ public:
         for (const auto& [member, last]: s.last_physicalize)
             if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
         for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+        resend_trafo_relayed(s, c, assigned);
         // The state of base - 1, after the runner steps it (posted after
         // player_ready, on the same queue).
         if (state) runner_->request_resync_state(s.id, c, assigned);
@@ -1839,6 +1912,11 @@ public:
                     Printf("Physics session %u: %s sends more than %u events per second; dropping the excess.",
                            s.id, client_it->second.name, rate_limit);
                 }
+                // A Trafo event never applied must reach its owner as
+                // REJECTED, which undoes its local effect (decision 9.3).
+                if (msg.type == bmmo::session::event_type::Trafo)
+                    reject_trafo(s, client_it, msg, "more events per second than the rate limit",
+                                 bmmo::session::trafo_validation{});
                 return;
             }
             auto flag = [&](const std::string& why) {
@@ -1913,6 +1991,23 @@ public:
                 if (msg.sector < 1 || msg.sector > guard.sector + 1)
                     flag("sector " + std::to_string(msg.sector) + " after sector " + std::to_string(guard.sector));
                 guard.sector = std::max(guard.sector, msg.sector);
+            } else if (msg.type == bmmo::session::event_type::Trafo) {
+                // Trafo-replication design 2.2, decision 9.3: static level
+                // data only.  A rejected one is never applied: its owner gets
+                // REJECTED and undoes its local effect, and the rejection is
+                // logged as possible cheating or corruption.
+                const bool on = (s.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
+                const auto v = bmmo::session::trafo_validate(msg.flags, msg.ball_type, msg.position, s.trafo_points);
+                if (!on || !v.ok()) {
+                    reject_trafo(s, client_it, msg, on ? bmmo::session::trafo_check_name(v.verdict)
+                                                       : "the session does not run the trafo as an input", v);
+                    return;
+                }
+                // A reset's position is read by no world; zeros on the
+                // relay, as the server's own resets carry, so every journal
+                // records the same bytes for it.
+                if (bmmo::session::trafo_is_reset(msg.flags))
+                    for (int k = 0; k < 3; ++k) msg.position[k] = event.position[k] = 0.0f;
             }
         }
         if (msg.type == bmmo::session::event_type::BodyRevived) {
@@ -1959,6 +2054,48 @@ public:
         runner_->submit_event(waiting.msg.session, c, stamp, std::move(event), token);
     }
 
+    // A Trafo event refused at intake (trafo-replication design 2.2,
+    // decision 9.3): REJECTED to its owner alone (reliable, then the
+    // unreliable repeats), never submitted or relayed; logged as possible
+    // cheating or corruption with what matters - the player, the tick, the
+    // position, the nearest trafo and its distance, the ball types, the
+    // session.
+    void reject_trafo(physics_session_state& s, client_data_collection::iterator client_it, bmmo::session_event_msg& msg,
+                      const char* why, const bmmo::session::trafo_validation& v) {
+        const HSteamNetConnection c = client_it->first;
+        ++s.rejected_events;
+        ++s.rejected_trafos;
+        // The player's ball type as the server knows it: its last relayed
+        // Physicalize (the type the ball became; the event names the type
+        // it was).
+        std::string ball = "unknown";
+        if (const auto last = s.last_physicalize.find(c); last != s.last_physicalize.end()) {
+            bmmo::session_event_msg birth;
+            birth.raw.str(last->second.bytes);
+            if (birth.deserialize()) ball = std::to_string(static_cast<int>(birth.ball_type));
+        }
+        std::string nearest = "none";
+        if (v.nearest >= 0 && static_cast<size_t>(v.nearest) < s.trafo_points.size())
+            nearest = Sprintf("%s at %.3f m", s.trafo_points[static_cast<size_t>(v.nearest)].name.c_str(), v.distance);
+        if (s.rejected_trafos <= 50)
+            Printf("Physics session %u: REJECTED Trafo %s %s from %s (player %u) stamped for tick %u (server tick %u): %s; "
+                   "position (%.3f, %.3f, %.3f), nearest trafo %s (reach %.2f m); piece type %u, the player's last ball "
+                   "type %s - possible cheating or corruption.",
+                   s.id, bmmo::session::trafo_is_reset(msg.flags) ? "reset" : "explosion",
+                   bmmo::session::trafo_type_name(msg.ball_type), client_it->second.name, static_cast<unsigned>(c), msg.tick,
+                   runner_->current_tick(s.id), why, static_cast<double>(msg.position[0]), static_cast<double>(msg.position[1]),
+                   static_cast<double>(msg.position[2]), nearest.c_str(), static_cast<double>(bmmo::session::kTrafoReach),
+                   static_cast<unsigned>(msg.ball_type), ball.c_str());
+        msg.player = static_cast<uint32_t>(c);
+        msg.origin_tick = msg.tick;
+        msg.state = bmmo::session::EVENT_STATE_REJECTED;
+        msg.clear();
+        msg.serialize();
+        const std::string bytes = msg.raw.str();
+        send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        s.event_repeats.push(bytes, {static_cast<uint32_t>(c)});
+    }
+
     // Simulation thread: the runner accepted a lifecycle event and fixed the
     // tick it is applied at (late-player design 3.1).  Relayed from here to
     // EVERY member, the owner included - the owner's copy is its echo, a
@@ -1990,6 +2127,15 @@ public:
             if (waiting == s.awaiting_events.end()) return;   // its sender left meanwhile
             msg = std::move(waiting->second.msg);
             s.awaiting_events.erase(waiting);
+        } else if (a.type == bmmo::session::event_type::Trafo) {
+            // Produced by the runner (protocol 11): the server's own trafo
+            // reset - before a re-explosion, at the deadline, a leaver's
+            // final ones - with origin = applied.
+            msg.session = a.session;
+            msg.type = a.type;
+            msg.ball_type = a.ball_type;
+            msg.flags = a.flags;
+            for (int k = 0; k < 3; ++k) msg.position[k] = a.position[k];
         } else {
             msg.session = a.session;   // produced by the runner: the leaver's Unphysicalize
             msg.type = a.type;
@@ -2004,7 +2150,8 @@ public:
         msg.tick = a.applied;
         msg.origin_tick = a.origin;
         msg.state = static_cast<uint8_t>((a.applied != a.origin ? bmmo::session::EVENT_STATE_MOVED : 0)
-                                         | (a.superseded ? bmmo::session::EVENT_STATE_SUPERSEDED : 0));
+                                         | (a.superseded ? bmmo::session::EVENT_STATE_SUPERSEDED : 0)
+                                         | (a.rejected ? bmmo::session::EVENT_STATE_REJECTED : 0));
         msg.clear();
         msg.serialize();
         const std::string bytes = msg.raw.str();
@@ -2012,8 +2159,11 @@ public:
             return std::find(s.members.begin(), s.members.end(), m) != s.members.end();
         };
         std::vector<uint32_t> to;
-        if (a.superseded) {
-            ++s.superseded_births;
+        if (a.rejected) {
+            ++s.rejected_events;
+            if (is_member(owner)) to.push_back(owner);
+        } else if (a.superseded) {
+            if (a.type != bmmo::session::event_type::Trafo) ++s.superseded_births;
             if (is_member(owner)) to.push_back(owner);
         } else {
             // Re-stamped and applied (one definition with the runner's
@@ -2042,6 +2192,11 @@ public:
                     s.last_physicalize.erase(last);
             } else if (msg.type == bmmo::session::event_type::Sector) {
                 s.sector_history.push_back(bytes);
+            } else if (msg.type == bmmo::session::event_type::Trafo) {
+                // resend_trafo_relayed prunes by tick; a hard cap besides
+                // (three events per trafo, 20 per second per member at most).
+                if (s.trafo_relayed.size() >= 4096) s.trafo_relayed.erase(s.trafo_relayed.begin(), s.trafo_relayed.begin() + 2048);
+                s.trafo_relayed.emplace_back(a.applied, bytes);
             }
             // BodyRevived is the server's own business (design 3.3: a wake of
             // a body the server's scripts also run), relayed to the others
@@ -2063,7 +2218,8 @@ public:
                "to=%zu%s", s.id, a.player, session_event_type_name(msg.type), a.origin, a.applied,
                static_cast<int>(static_cast<int32_t>(a.applied - a.origin)), static_cast<long long>(delay_us),
                static_cast<double>(delay_us) / 15000.0, recipients,
-               a.superseded ? " superseded" : (a.token == 0 ? " leaver" : ""));
+               a.rejected ? " rejected" : a.superseded ? " superseded"
+                   : (a.token == 0 ? (a.type == bmmo::session::event_type::Trafo ? " server" : " leaver") : ""));
     }
 
     static const char* session_event_type_name(bmmo::session::event_type type) {
@@ -2073,6 +2229,7 @@ public:
             case bmmo::session::event_type::Sector: return "Sector";
             case bmmo::session::event_type::Finish: return "Finish";
             case bmmo::session::event_type::BodyRevived: return "BodyRevived";
+            case bmmo::session::event_type::Trafo: return "Trafo";
         }
         return "?";
     }
@@ -3524,6 +3681,9 @@ protected:
     std::unordered_map<uint32_t, uint32_t> room_session_;               // room -> session
     std::unordered_map<HSteamNetConnection, uint32_t> client_session_;  // member -> session
     uint32_t next_session_id_ = 1;
+    // The runner's seed (runner_config::seed): every world's spawn impulse
+    // and trafo seeds derive from it, so SessionStart carries this value.
+    int physics_seed_ = 1;
     std::chrono::steady_clock::time_point next_rtt_post_{};   // post_player_rtts, once a second
     // Declared last so it is destroyed first: its thread calls back into
     // the members above.

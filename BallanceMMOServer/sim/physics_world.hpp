@@ -12,9 +12,12 @@
 //                  event (design 8.2: lifecycle events are client-reported).
 //   set_input()    the player's input for the coming tick (keys, camera basis,
 //                  nav_active flag).
-//   apply_event()  Physicalize / Unphysicalize / Sector / Finish / BodyRevived.
+//   apply_event()  Physicalize / Unphysicalize / Sector / Finish / BodyRevived
+//                  / Trafo (a world with trafo_inputs: run_trafo on the
+//                  player's own piece set).
 //   tick()         one behaviour frame: per-player navigation, sector union
-//                  activations, CKContext::Process, parking of the retail ball.
+//                  activations, the trafo frame, CKContext::Process, parking
+//                  of the retail ball, the trafo hold.
 //   snapshot()     the balls plus the movable mechanism bodies.
 //
 // Every method runs on the simulation thread that created the world.
@@ -35,7 +38,9 @@
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
+#include <game/trafo_sets.hpp>
 #include <session/sector_union.hpp>
+#include <session/trafo_input.hpp>
 #include <physics/physics_rt_api.h>
 
 #include "headless_engine.hpp"
@@ -81,6 +86,12 @@ namespace bmmo::sim {
         // test, checkpoints, trafos) react to the clone; a Hide of the retail
         // ball unphysicalizes the clone, a new retail body re-physicalizes it.
         bool mirror_clone_to_retail = false;
+        // session::WORLD_TRAFO_INPUTS (trafo-replication design 2.14, step
+        // T2): every player gets its own trafo piece set at add_player, the
+        // level's originals are quiesced at the anchor and held after every
+        // tick, Trafo events run the sets' scripts in the trafo frame, a
+        // piece never collides with a local body.  Off: every world as before.
+        bool trafo_inputs = false;
         std::function<void(const std::string&)> log;
     };
 
@@ -95,6 +106,8 @@ namespace bmmo::sim {
         bmmo_physics_ball_recipe recipe{};
         int32_t sector = 0;
         std::string name;   // BodyRevived: the mechanism body
+        // Trafo (protocol 11): ball_type = the piece type, flags =
+        // session::TRAFO_*, position = the explosion's referential.
         // The tick this event was submitted for (session_runner::pending_event
         // tick): Physicalize's spawn impulse direction is derived from it, so
         // both sides pick the same table entry (session/spawn_impulse.hpp).
@@ -235,6 +248,10 @@ namespace bmmo::sim {
             // The scripts and the savestate are packed (CKPackData, zlib):
             // their unpacked sizes (0 when a section is carried as it is).
             uint32_t scripts_size = 0, savestate_size = 0;
+            // Trafo-replication design 4.7 (step T2): every type set that has
+            // bodies at this tick, a live explosion, or a reset not yet past
+            // its Restore IC (empty without trafo_inputs).
+            std::vector<bmmo::session::trafo_ledger_entry> trafo_ledger;
             std::string error;   // what could not be captured ("" when all of it was)
         };
         void capture_resync_state(uint32_t player, resync_state& out);
@@ -296,6 +313,21 @@ namespace bmmo::sim {
         // world itself).  Unset: nothing runs.
         void set_frame_hook(std::function<void()> hook) { frame_hook_ = std::move(hook); }
 
+        // The trafo as an input (trafo-replication design, step T2), with
+        // trafo_inputs on.  Every P_Trafo_* of the level and its position,
+        // read at the anchor: what a client's explosion is validated against
+        // (session/trafo_input.hpp trafo_validate).
+        bool trafo_inputs() const { return options_.trafo_inputs; }
+        const std::vector<bmmo::session::trafo_point>& trafo_points() const { return trafo_points_; }
+        const bmmo::game::trafo_registry& trafo_registry() const { return trafo_registry_; }
+        // A set's build failed its invariants at add_player (fail closed:
+        // the session cannot run that member's trafo, the runner ends it).
+        bool trafo_failed() const { return trafo_failed_; }
+        // The server's hold fired (an own Trafo Manager acting on the parked
+        // ball - a bug) or an original leaked (a body or a running script).
+        uint64_t trafo_hold_reports() const { return trafo_hold_reports_; }
+        uint64_t trafo_original_leaks() const { return trafo_leaks_; }
+
     private:
         physics_world() = default;
         // Shared by snapshot() and snapshot_for_journal(); `bookkeeping` says
@@ -305,6 +337,14 @@ namespace bmmo::sim {
         void collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out, bool number = false);
         bool boot(std::string& error);
         bool anchor(std::string& error);
+        // trafo_inputs: the quiesce, the hold, the filter rule and the
+        // trafo list at the anchor; a member's set at add_player; the hold,
+        // the effect checks and retirement after every tick.
+        bool anchor_trafo(std::string& error);
+        bool make_trafo_set(uint32_t id, std::string& error);
+        bool apply_trafo(uint32_t id, const lifecycle_event& event, std::string& error);
+        void after_trafo_tick();
+        void capture_trafo_ledger(std::vector<bmmo::session::trafo_ledger_entry>& out) const;
         bool ensure_collision_filter(std::string& error);
 
         struct player {
@@ -389,6 +429,23 @@ namespace bmmo::sim {
         // row (simulated = 0) into the next delta snapshot.
         std::unordered_map<std::string, bool> last_simulated_;
         bool body_set_changed_ = true;
+        // The trafo sets (trafo_inputs): the registry, the bridge's hooks,
+        // the hold of the originals and what each type set was last given -
+        // the newest explosion applied (its tick and referential) and the
+        // newest reset applied after it - for the resync state's ledger.
+        bmmo::game::trafo_registry trafo_registry_;
+        bmmo::game::trafo_set_hooks trafo_hooks_;
+        bmmo::game::trafo_hold trafo_hold_;
+        std::vector<bmmo::session::trafo_point> trafo_points_;
+        struct trafo_applied {
+            bool explosion = false, reset = false;
+            uint32_t explode_applied = 0, reset_applied = 0;
+            float position[3] = {};
+        };
+        std::map<std::pair<uint32_t, uint8_t>, trafo_applied> trafo_applied_;
+        bool trafo_failed_ = false;
+        uint64_t trafo_hold_reports_ = 0, trafo_leaks_ = 0;
+        uint64_t trafo_after_us_ = 0, trafo_after_ticks_ = 0;   // what the hold and the checks cost (describe)
         void* filter_environment_ = nullptr;
         int rng_cursor_ = 0;
         int random_cursor_ = 0;   // bmmo::physics::random_* state, saved/restored around tick() like rng_cursor_

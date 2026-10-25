@@ -48,7 +48,7 @@ import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 4   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10)
+VERSION = 5   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11)
 OLDEST_READABLE = 2   # a version 2 file has no event origin: its stamp is the origin
 
 TAG_HEADER = 0
@@ -88,7 +88,7 @@ CHECKPOINT_RECEIVED = 4
 CHECKPOINT_RESYNC = 8   # version 4: the rows of a resync state
 RESYNC_OUTCOMES = {0: "applied", 1: "refused_scripts", 2: "timed_out"}
 
-EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived"}
+EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived", 5: "Trafo"}
 CORRECTION_KINDS = {0: "mismatch", 1: "rollback", 2: "hard", 3: "blend", 4: "resync",
                     5: "too_far", 6: "frozen", 7: "unmatched"}
 BODY_KINDS = {0: "ball", 1: "mechanism"}
@@ -269,6 +269,7 @@ class JournalWriter(object):
         buf += _U64.pack(header["utc_ms"])
         buf += _U32.pack(header["own_player"])
         buf += _U8.pack(header["own_join_order"])
+        buf += _U32.pack(header.get("world_options", 0))
         return bytes(buf)
 
     def player(self, record):
@@ -720,6 +721,8 @@ class JournalReader(object):
                   "first_tick": cursor.u32(), "anchor_hash": cursor.u64(), "anchor_surfaces": cursor.u64(),
                   "build_id": cursor.string(), "utc_ms": cursor.u64(), "own_player": cursor.u32(),
                   "own_join_order": cursor.u8()}
+        # Version 5: the session's world_options (session::WORLD_*), trailing.
+        header["world_options"] = cursor.u32() if cursor.remaining() >= 4 else 0
         return header
 
     @staticmethod
@@ -1197,9 +1200,9 @@ def print_header(journal):
              header["spawn_impulse"], header["input_delay"], header["checkpoint_ticks"], header["first_tick"]))
     print("        anchor hash=%016x surfaces=%016x build=%s"
           % (header["anchor_hash"], header["anchor_surfaces"], header["build_id"] or "-"))
-    print("        utc=%s (local %s) own_player=%d own_join_order=%d"
+    print("        utc=%s (local %s) own_player=%d own_join_order=%d world_options=%08x"
           % (_fmt_utc(header["utc_ms"]), _fmt_local(header["utc_ms"]), header["own_player"],
-             header["own_join_order"]))
+             header["own_join_order"], header.get("world_options", 0)))
     members = " | ".join('p%d join=%d "%s"' % (record["id"], record["join_order"], record["name"])
                          for record in journal.initial_players if record["added"])
     print("members: %s" % (members or "(none)"))
@@ -1496,7 +1499,7 @@ def _synthetic_server():
               "input_delay": 4, "checkpoint_ticks": 660, "first_tick": 100,
               "anchor_hash": 0x0123456789ABCDEF, "anchor_surfaces": 0xFEDCBA9876543210,
               "build_id": "ballanced-0123abc+bridge-9", "utc_ms": 1757000000123,
-              "own_player": 0, "own_join_order": 255}
+              "own_player": 0, "own_join_order": 255, "world_options": 2}
     recipe = {"fixed": 1, "start_frozen": 1, "enable_collision": 1, "calc_mass_center": 1,
               "friction": f32(0.7), "elasticity": f32(0.5), "mass": f32(2.0), "linear_damp": f32(0.1),
               "rot_damp": f32(0.05), "mass_center": (f32(0.0), f32(0.25), f32(-0.5)),
@@ -1567,7 +1570,7 @@ def _synthetic_client():
               "input_delay": 4, "checkpoint_ticks": 660, "first_tick": 0,
               "anchor_hash": 0x0123456789ABCDEF, "anchor_surfaces": 0xFEDCBA9876543210,
               "build_id": "ballanced-0123abc+bridge-9", "utc_ms": 1757000000456,
-              "own_player": 3, "own_join_order": 2}
+              "own_player": 3, "own_join_order": 2, "world_options": 0}
     plan = []
     plan.append(("note", {"tick": 0, "text": "anchor: hash 0123456789abcdef surfaces fedcba9876543210"}))
     plan.append(("player", {"tick": 0, "id": 3, "join_order": 2, "added": True, "name": "Cara"}))

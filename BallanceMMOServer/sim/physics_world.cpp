@@ -9,7 +9,10 @@
 #include <physics/physics_state.hpp>
 #include <session/spawn_impulse.hpp>
 
+#include "trafo_hooks.hpp"
+
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -125,8 +128,26 @@ namespace bmmo::sim {
         engine_ = headless_engine::create(eo, error);
         if (!engine_) return false;
         if (!engine_->load_composition(error)) return false;
-        for (int i = 0; i < options_.boot_ticks; ++i)
+        // Trafo-replication design 2.4 step 6 (T1's level reference): the 8
+        // original trafo scripts' values as Balls.nmo has them, captured on
+        // the first tick they exist - before any original explosion - and
+        // written into every copy the world builds.
+        const auto capture_trafo_reference = [this]() {
+            if (!options_.trafo_inputs || !trafo_registry_.reference().empty()) return;
+            bmmo::game::trafo_reference reference;
+            std::string reference_error;
+            if (!bmmo::game::capture_trafo_reference(engine_->context(), reference, reference_error)) return;
+            size_t blocks = 0;
+            for (const auto& [name, b]: reference.scripts) blocks += b.size();
+            trafo_registry_.set_reference(std::move(reference));
+            log("world: trafo level reference captured at engine tick " + std::to_string(engine_->ticks()) + ": 8 scripts, "
+                + std::to_string(blocks) + " blocks");
+        };
+        capture_trafo_reference();
+        for (int i = 0; i < options_.boot_ticks; ++i) {
             if (!engine_->tick(error)) return false;
+            capture_trafo_reference();
+        }
         bmmo::physics::drain_event_log(engine_->physics());  // install the listener
         engine_->request_level(options_.level);
         int waited = 0;
@@ -257,7 +278,8 @@ namespace bmmo::sim {
         // their anchor (trafo scripts included, so the three have the same
         // keys) and the force hook over this world, for the resync state's
         // portable record.  Selecting reads the graphs; it changes nothing.
-        script_selection_ = bmmo::game::session_script_selection(context);
+        if (options_.trafo_inputs && !anchor_trafo(error)) return false;
+        script_selection_ = bmmo::game::session_script_selection(context, options_.trafo_inputs);
         script_hooks_ = {};
         script_hooks_.capture_force = [manager](CKBehavior* block, bmmo::game::force_block_state& out) {
             bmmo_physics_force_block state{};
@@ -742,6 +764,14 @@ namespace bmmo::sim {
         used_slots_.insert(slot);
         players_.emplace(id, std::move(p));
         log("world: player " + std::to_string(id) + " added");
+        // Trafo-replication design 2.4: every member's own piece set, built
+        // at its add (a set kept from an earlier stay is selected again).
+        if (options_.trafo_inputs && !make_trafo_set(id, error)) {
+            const std::string why = error;
+            remove_player(id);
+            error = why;
+            return false;
+        }
         return true;
     }
 
@@ -843,6 +873,9 @@ namespace bmmo::sim {
     bool physics_world::apply_event(uint32_t id, const lifecycle_event& event, std::string& error) {
         using bmmo::session::event_type;
         error.clear();
+        // A Trafo event acts on the player's piece set, which outlives the
+        // player's slot (a leaver's final resets fade after it left).
+        if (event.type == event_type::Trafo) return apply_trafo(id, event, error);
         auto it = players_.find(id);
         if (it == players_.end()) {
             error = "unknown player";
@@ -970,6 +1003,10 @@ namespace bmmo::sim {
         update_proximity_probes();
         update_ball_identity_reads();
         update_sectors();
+        // The trafo frame (design 2.5): after the tick's inputs and the
+        // union's pass, before the behaviour pass and the step - every
+        // selected set's scripts, sets by player id, with the fixed delta.
+        if (options_.trafo_inputs) bmmo::game::trafo_frame(context, trafo_registry_, kFixedDeltaMs);
         if (frame_hook_) frame_hook_();
         // Navigation edges and parking run from the PreSimulate pass (see
         // tick_callback); one callback at a time in case a tick had no
@@ -982,6 +1019,7 @@ namespace bmmo::sim {
             }
         if (!engine_->tick(error)) return false;
         if (options_.park_retail_ball && retail_parked_) park_retail_ball();
+        if (options_.trafo_inputs) after_trafo_tick();
         if (options_.mirror_clone_to_retail) {
             // The retail entity (no body) follows the first physicalized clone.
             if (CK3dEntity* retail = retail_ball())
@@ -1105,6 +1143,232 @@ namespace bmmo::sim {
         }
     }
 
+    // ---- the trafo as an input (trafo-replication design, step T2)
+
+    // At the anchor, before the selection: the level's P_Trafo_* positions
+    // (validation), the originals quiesced (design 2.3: nothing to remove in
+    // this world - a non-zero count is a bug), the hold armed (it never
+    // fires here: the retail ball is parked), the piece x local-body filter
+    // rule on (design 2.10).
+    bool physics_world::anchor_trafo(std::string& error) {
+        CKContext* context = engine_->context();
+        CKIpionManager* manager = physics();
+        trafo_hooks_ = make_trafo_hooks(manager, [this](const std::string& line) { log("world: " + line); });
+        if (trafo_registry_.reference().empty()) {
+            // Not seen during the load (never expected: Balls.nmo is part of
+            // the composition); the anchor is still before any explosion.
+            bmmo::game::trafo_reference reference;
+            if (!bmmo::game::capture_trafo_reference(context, reference, error)) {
+                error = "trafo level reference: " + error;
+                return false;
+            }
+            trafo_registry_.set_reference(std::move(reference));
+            log("world: trafo level reference captured at the anchor");
+        }
+        // The places a trafo can be: every PH row of a P_Trafo_* type (the
+        // level's placement table - the original levels pool their trafos
+        // across sectors, and a pass moves the pooled object to its row:
+        // L11's P_Trafo_Stone_MF001 sits at its sector-6 row at the anchor
+        // and at its sector-1 row (60.95, 5.10, -12.58) once sector 1 is
+        // placed), then every P_Trafo_* entity where it stands now (a level
+        // without a PH table).  Static level data either way.
+        trafo_points_.clear();
+        if (CKDataArray* ph = engine_->data_array("PH")) {
+            int type_column = -1, matrix_column = -1, object_column = -1;
+            for (int c = 0; c < ph->GetColumnCount(); ++c) {
+                const char* name = ph->GetColumnName(c);
+                if (!name) continue;
+                if (std::strcmp(name, "Type Name") == 0) type_column = c;
+                else if (std::strcmp(name, "Matrix") == 0) matrix_column = c;
+                else if (std::strcmp(name, "Object") == 0) object_column = c;
+            }
+            for (int row = 0; type_column >= 0 && matrix_column >= 0 && row < ph->GetRowCount(); ++row) {
+                char type[128] = {};
+                ph->GetElementStringValue(row, type_column, type, static_cast<int>(sizeof(type)));
+                type[sizeof(type) - 1] = 0;
+                if (std::strncmp(type, "P_Trafo_", 8) != 0) continue;
+                VxMatrix m;
+                if (!ph->GetElementValue(row, matrix_column, &m)) continue;
+                bmmo::session::trafo_point point;
+                CKObject* object = object_column >= 0 ? ph->GetElementObject(row, object_column) : nullptr;
+                point.name = std::string(object && object->GetName() ? object->GetName() : type) + "@PH" + std::to_string(row);
+                point.position[0] = m[3][0];
+                point.position[1] = m[3][1];
+                point.position[2] = m[3][2];
+                trafo_points_.push_back(std::move(point));
+            }
+        }
+        const size_t placements = trafo_points_.size();
+        const XObjectPointerArray& all = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
+        for (int i = 0; i < all.Size(); ++i) {
+            auto* e = CK3dEntity::Cast(all[i]);
+            if (!e || !e->GetName() || std::strncmp(e->GetName(), "P_Trafo_", 8) != 0) continue;
+            VxVector at;
+            e->GetPosition(&at);
+            bmmo::session::trafo_point point;
+            point.name = e->GetName();
+            point.position[0] = at.x;
+            point.position[1] = at.y;
+            point.position[2] = at.z;
+            trafo_points_.push_back(std::move(point));
+        }
+        std::sort(trafo_points_.begin() + static_cast<std::ptrdiff_t>(placements), trafo_points_.end(),
+                  [](const bmmo::session::trafo_point& a, const bmmo::session::trafo_point& b) { return a.name < b.name; });
+        const auto quiesce = bmmo::game::quiesce_originals(context, trafo_hooks_);
+        log("world: " + quiesce.text() + (quiesce.bodies || quiesce.controllers || quiesce.scripts
+                                            ? " - NOT EXPECTED in the server's world (a bug)" : ""));
+        trafo_hold_.arm(context, kFixedDeltaMs);
+        if (!bmmo::physics::trafo_set_filter(manager, true, error)) {
+            error = "trafo filter: " + error;
+            return false;
+        }
+        log("world: trafo inputs on: " + std::to_string(placements) + " P_Trafo_* placements in PH and "
+            + std::to_string(trafo_points_.size() - placements) + " P_Trafo_* entities (reach "
+            + std::to_string(bmmo::session::kTrafoReach) + " m), the originals held, the piece x local-body filter on");
+        return true;
+    }
+
+    // The player's set, by the rule every world runs (game/trafo_sets.hpp
+    // ensure_trafo_set): kept when selected (still fading from an earlier
+    // stay), otherwise built - the server destroys a set at its deselect, so
+    // the reselect branch never runs here.
+    bool physics_world::make_trafo_set(uint32_t id, std::string& error) {
+        const auto r = bmmo::game::ensure_trafo_set(engine_->context(), trafo_registry_, id, trafo_hooks_);
+        if (!r.ok) {
+            // Fail closed (design 2.4): the session cannot run this member's
+            // trafo; the runner ends it.
+            for (const auto& line: r.lines) log("world: trafo build " + std::to_string(id) + ": " + line);
+            trafo_failed_ = true;
+            error = "trafo set of player " + std::to_string(id) + " failed: " + r.error;
+            return false;
+        }
+        if (r.how == bmmo::game::trafo_ensure::kept) return true;
+        if (r.how == bmmo::game::trafo_ensure::reselected) {
+            for (const auto& line: r.lines) log("world: trafo set " + std::to_string(id) + " " + line);
+            return true;
+        }
+        const auto* set = trafo_registry_.find(id);
+        log("world: trafo set " + std::to_string(id) + " built: " + std::to_string(set->objects.size()) + " objects, "
+            + std::to_string(set->scripts.size()) + " scripts, digest " + set->digest + ", value digest " + set->value_digest);
+        return true;
+    }
+
+    // A Trafo event at its applied tick (event.tick): the type set's
+    // referential and seed for an explosion, the next-frame flags of the
+    // explosion or the reset; the trafo frame of this tick runs it.
+    bool physics_world::apply_trafo(uint32_t id, const lifecycle_event& event, std::string& error) {
+        if (!options_.trafo_inputs) {
+            error = "a Trafo event in a world without trafo inputs";
+            return false;
+        }
+        const uint8_t type = event.ball_type;
+        if (type >= bmmo::session::kTrafoTypes) {
+            error = "trafo piece type " + std::to_string(type);
+            return false;
+        }
+        // A set before the player's input (design 2.4), by the shared rule:
+        // a set retired since the player's add_player is built afresh.
+        if (!make_trafo_set(id, error)) return false;
+        const bool reset = bmmo::session::trafo_is_reset(event.flags);
+        const int32_t seed = reset ? 0 : bmmo::session::trafo_seed(static_cast<uint32_t>(options_.seed), id, event.tick, type);
+        if (!bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, id, event.flags, type, event.position, seed, error))
+            return false;
+        if (event.flags & bmmo::session::TRAFO_FINAL) bmmo::game::trafo_set_final(trafo_registry_, id, type, event.tick);
+        auto& a = trafo_applied_[{id, type}];
+        if (reset) {
+            a.reset = true;
+            a.reset_applied = event.tick;
+        } else {
+            a.explosion = true;
+            a.explode_applied = event.tick;
+            for (int k = 0; k < 3; ++k) a.position[k] = event.position[k];
+            a.reset = false;
+            a.reset_applied = 0;
+            body_set_changed_ = true;   // the trafo frame of this tick physicalizes the pieces
+        }
+        char text[256];
+        std::snprintf(text, sizeof(text), "world: trafo %s %s of player %u at tick %u%s%s pos=%a,%a,%a seed=%d",
+                      bmmo::session::trafo_type_name(type), reset ? "reset" : "explode", id, event.tick,
+                      (event.flags & bmmo::session::TRAFO_SERVER) ? " (server)" : "",
+                      (event.flags & bmmo::session::TRAFO_FINAL) ? " (final)" : "",
+                      static_cast<double>(event.position[0]), static_cast<double>(event.position[1]),
+                      static_cast<double>(event.position[2]), seed);
+        log(text);
+        return true;
+    }
+
+    // After the engine's frame of a tick (tick_ is still that tick's): the
+    // server's hold (design 2.3: it reports, cancels and sends nothing - it
+    // should never fire), the effect checks, the body-set flag of a reset's
+    // De Physicalize frame (R + 132), retirement (the server has no
+    // rollback: a retired set is destroyed at its deselect).
+    void physics_world::after_trafo_tick() {
+        const auto started = std::chrono::steady_clock::now();
+        CKContext* context = engine_->context();
+        for (const auto& r: trafo_hold_.poll(context, tick_, false)) {
+            ++trafo_hold_reports_;
+            if (trafo_hold_reports_ <= 20)
+                log("world: trafo hold FIRED at tick " + std::to_string(tick_) + ": " + bmmo::session::trafo_type_name(r.type)
+                    + (bmmo::session::trafo_is_reset(r.flags) ? " reset" : " explosion") + " from " + r.source
+                    + " cancelled - an own Trafo Manager acting on the parked ball (a bug)");
+        }
+        const auto effect = trafo_hold_.effect_check(context, trafo_hooks_);
+        if (effect.leaks()) {
+            trafo_leaks_ += static_cast<uint64_t>(effect.leaks());
+            log("world: trafo_original_leaks at tick " + std::to_string(tick_) + ": " + std::to_string(effect.bodies) + " bodies, "
+                + std::to_string(effect.scripts) + " scripts, first " + effect.first);
+        }
+        for (const auto& [key, a]: trafo_applied_)
+            if (a.reset && a.reset_applied + bmmo::session::kTrafoResetDephysicalize == tick_) body_set_changed_ = true;
+        for (const auto& line: bmmo::game::retire_trafo_sets(context, trafo_registry_, trafo_hooks_, tick_,
+                                                             96 /* history_ticks */, true))
+            log("world: " + line);
+        trafo_after_us_ += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+        ++trafo_after_ticks_;
+    }
+
+    // The ledger a resync or join state carries (design 4.7), after the
+    // step of S = tick_ - 1: the three type sets of every set this world
+    // holds (the server destroys a set at its deselect, so every set it
+    // holds is selected: exactly the sets the portable record lists), in
+    // the registry's order - bodies, the newest explosion and reset, the
+    // final bit and the set's newest final reset.  As built at T2's
+    // review: the design's filter (bodies, a live explosion, or a reset
+    // before its Restore IC) left out a member's set that never exploded
+    // and a leaver's set between its final resets and its retirement,
+    // which the portable record still lists, and never said a set was
+    // final.
+    void physics_world::capture_trafo_ledger(std::vector<bmmo::session::trafo_ledger_entry>& out) const {
+        out.clear();
+        CKContext* context = engine_->context();
+        for (const auto& set: trafo_registry_.sets()) {
+            if (!set.selected) continue;
+            for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
+                bmmo::session::trafo_ledger_entry e;
+                e.player = set.player;
+                e.type = type;
+                for (CK_ID piece: set.types[type].pieces) {
+                    CKObject* o = context->GetObject(piece);
+                    if (o && o->GetName() && trafo_hooks_.has_body(o->GetName())) {
+                        e.has_bodies = true;
+                        break;
+                    }
+                }
+                if (const auto a = trafo_applied_.find({set.player, type}); a != trafo_applied_.end()) {
+                    e.has_explosion = a->second.explosion;
+                    e.explode_applied = a->second.explode_applied;
+                    for (int k = 0; k < 3; ++k) e.position[k] = a->second.position[k];
+                    e.has_reset = a->second.reset;
+                    e.reset_applied = a->second.reset_applied;
+                }
+                e.final = set.types[type].final;
+                e.final_applied = e.final ? set.final_tick : 0;
+                out.push_back(e);
+            }
+        }
+    }
+
     void physics_world::snapshot(bool full, std::vector<bmmo::session::body_state>& out) {
         collect_bodies(full, true, out);
     }
@@ -1142,7 +1406,8 @@ namespace bmmo::sim {
         out.union_state = bmmo::session::sector_union::serialize(sectors_.state());
         if (out.union_state.empty()) out.error = "the sector union does not serialize";
         std::string e;
-        if (!bmmo::game::script_replay::capture_portable(engine_->context(), script_selection_, script_hooks_, out.scripts, &e)) {
+        if (!bmmo::game::script_replay::capture_portable(engine_->context(), script_selection_, script_hooks_, out.scripts, &e,
+                                                         nullptr, options_.trafo_inputs ? &trafo_registry_.part() : nullptr)) {
             out.scripts.clear();
             if (out.error.empty()) out.error = "portable script record: " + e;
         }
@@ -1167,6 +1432,7 @@ namespace bmmo::sim {
         };
         pack(out.scripts, out.scripts_size);
         pack(out.savestate, out.savestate_size);
+        if (options_.trafo_inputs) capture_trafo_ledger(out.trafo_ledger);
     }
 
     void physics_world::collect_bodies(bool full, bool bookkeeping, std::vector<bmmo::session::body_state>& out, bool number) {
@@ -1240,7 +1506,12 @@ namespace bmmo::sim {
 
     std::string physics_world::describe() const {
         std::string text = "tick=" + std::to_string(tick_) + " players=" + std::to_string(players_.size())
-            + " parked=" + (retail_parked_ ? "1" : "0") + " sectors=";
+            + " parked=" + (retail_parked_ ? "1" : "0");
+        if (options_.trafo_inputs)
+            text += " trafo_sets=" + std::to_string(trafo_registry_.sets().size()) + " trafo_hold=" + std::to_string(trafo_hold_reports_)
+                  + " trafo_leaks=" + std::to_string(trafo_leaks_) + " trafo_after_us="
+                  + std::to_string(trafo_after_ticks_ ? trafo_after_us_ / trafo_after_ticks_ : 0) + "/tick";
+        text += " sectors=";
         for (int s: sectors_.active()) text += std::to_string(s) + ",";
         for (const auto& [id, p]: players_) {
             text += " [" + std::to_string(id) + ": type=" + std::to_string(p.ball_type)

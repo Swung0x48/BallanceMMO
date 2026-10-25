@@ -44,6 +44,14 @@ namespace bmmo {
     //               S, which pushed the re-step past the rollback's reach and
     //               every relayed frame of the window past it too (measured:
     //               183 KB, D = 72).  Packed it is 5-10 times smaller.
+    //   trafo_ledger (protocol 11; trafo-replication design 4.7) the three
+    //               type sets of every set the server's world holds at S
+    //               (bodies, the newest explosion and reset, the final
+    //               bit and tick): the client builds the sets it lacks,
+    //               marks the final ones, and the reconcile makes the body
+    //               set of each type set equal to it before the rows and
+    //               the portable record are written.  Empty unless the
+    //               session has WORLD_TRAFO_INPUTS.
     struct session_resync_state_msg : public serializable_message {
         static constexpr uint32_t kMaxBytesField = 4u << 20;   // a forged length is refused, never allocated
 
@@ -57,6 +65,12 @@ namespace bmmo {
         std::vector<uint8_t> scripts;
         std::vector<uint8_t> savestate;
         uint32_t scripts_size = 0, savestate_size = 0;   // unpacked sizes; 0 = not packed
+        std::vector<session::trafo_ledger_entry> trafo_ledger;   // <= kMaxTrafoLedger
+        // Three type sets per set; the sets are the members' and the
+        // leavers' not yet retired (a leaver's goes about 230 ticks after
+        // its final resets), so twice the member cap.  The server logs a
+        // ledger cut at it.
+        static constexpr size_t kMaxTrafoLedger = 3 * 2 * session::MAX_PLAYERS_PER_SESSION;
 
         session_resync_state_msg() : serializable_message(bmmo::SessionResyncState) {}
 
@@ -100,6 +114,20 @@ namespace bmmo {
             write_bytes(union_state);
             write_bytes(scripts);
             write_bytes(savestate);
+            const uint16_t ledger_count = static_cast<uint16_t>(std::min<size_t>(trafo_ledger.size(), kMaxTrafoLedger));
+            raw.write(reinterpret_cast<const char*>(&ledger_count), sizeof(ledger_count));
+            for (uint16_t i = 0; i < ledger_count; ++i) {
+                const auto& e = trafo_ledger[i];
+                const uint8_t bits = static_cast<uint8_t>((e.has_explosion ? 1u : 0u) | (e.has_bodies ? 2u : 0u)
+                                                          | (e.has_reset ? 4u : 0u) | (e.final ? 8u : 0u));
+                raw.write(reinterpret_cast<const char*>(&e.player), sizeof(e.player));
+                raw.write(reinterpret_cast<const char*>(&e.type), sizeof(e.type));
+                raw.write(reinterpret_cast<const char*>(&bits), sizeof(bits));
+                raw.write(reinterpret_cast<const char*>(&e.explode_applied), sizeof(e.explode_applied));
+                raw.write(reinterpret_cast<const char*>(e.position), sizeof(e.position));
+                raw.write(reinterpret_cast<const char*>(&e.reset_applied), sizeof(e.reset_applied));
+                raw.write(reinterpret_cast<const char*>(&e.final_applied), sizeof(e.final_applied));
+            }
             return raw.good();
         }
 
@@ -158,6 +186,25 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &scripts_size) || scripts_size > kMaxBytesField) return false;
             if (!message_utils::read_variable(raw, &savestate_size) || savestate_size > kMaxBytesField) return false;
             if (!read_bytes(union_state) || !read_bytes(scripts) || !read_bytes(savestate)) return false;
+            uint16_t ledger_count = 0;
+            if (!message_utils::read_variable(raw, &ledger_count) || ledger_count > kMaxTrafoLedger) return false;
+            trafo_ledger.clear();
+            for (uint16_t i = 0; i < ledger_count; ++i) {
+                session::trafo_ledger_entry e;
+                uint8_t bits = 0;
+                if (!message_utils::read_variable(raw, &e.player)) return false;
+                if (!message_utils::read_variable(raw, &e.type) || e.type > 2) return false;
+                if (!message_utils::read_variable(raw, &bits) || (bits & ~15u) != 0) return false;
+                if (!message_utils::read_variable(raw, &e.explode_applied)) return false;
+                if (!raw.read(reinterpret_cast<char*>(e.position), sizeof(e.position))) return false;
+                if (!message_utils::read_variable(raw, &e.reset_applied)) return false;
+                if (!message_utils::read_variable(raw, &e.final_applied)) return false;
+                e.has_explosion = (bits & 1u) != 0;
+                e.has_bodies = (bits & 2u) != 0;
+                e.has_reset = (bits & 4u) != 0;
+                e.final = (bits & 8u) != 0;
+                trafo_ledger.push_back(e);
+            }
             return true;
         }
 
