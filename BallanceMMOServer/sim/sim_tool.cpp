@@ -331,7 +331,68 @@ namespace {
         // --list-placement (sector placement design 7.2 V1, step S1): the
         // PH row plan of --level at its anchor, read-only (sim/placement_tool.hpp).
         bool list_placement = false;
+        // The sector placement (design 7.2, step S2): --placement on|off
+        // (default off) builds every physics_world with it; with
+        // --list-placement the listing then applies it in the tool (censuses,
+        // fingerprints, signatures, the name review).  --placement-fail-at
+        // ROW: step 5 refuses at that row (V12).  --tick-hashes (--drop):
+        // the world hash after every tick (V3).  --watch-entity NAME,
+        // repeatable (--drop): that entity's world position at every report
+        // and at the end (V4/V5: trafos, extras, the player's ball).
+        bool placement = false;
+        int placement_fail_at = -1;
+        bool tick_hashes = false;
+        std::vector<std::string> watch_entities;
     };
+
+    // The sector placement switches (step S2); false: not one of them, or a
+    // value is missing or malformed.
+    bool parse_placement_arg(const std::string& arg, const std::function<const char*()>& next, arguments& out) {
+        const char* v = nullptr;
+        if (arg == "--placement") {
+            if (!(v = next())) return false;
+            const std::string value = v;
+            if (value != "on" && value != "off") return false;
+            out.placement = value == "on";
+        }
+        else if (arg == "--placement-fail-at") { if (!(v = next())) return false; out.placement_fail_at = std::atoi(v); }
+        else if (arg == "--tick-hashes") out.tick_hashes = true;
+        else if (arg == "--watch-entity") { if (!(v = next())) return false; out.watch_entities.emplace_back(v); }
+        else return false;
+        return true;
+    }
+
+    // The placement's physics hooks over this tool's engine (design 2.3
+    // step 3), as physics_world gives them: the anchor's body names and the
+    // force blocks' controllers.  `bodies` must outlive the hooks.
+    bmmo::game::placement_hooks tool_placement_hooks(CKIpionManager* manager, int fail_at, std::set<std::string>& bodies) {
+        bodies.clear();
+        std::vector<bmmo::physics::body_state> list(static_cast<size_t>(std::max(0, bmmo::physics::list_bodies(manager, nullptr, 0))));
+        const int count = bmmo::physics::list_bodies(manager, list.data(), static_cast<int>(list.size()));
+        for (int i = 0; i < count && i < static_cast<int>(list.size()); ++i) bodies.insert(list[static_cast<size_t>(i)].name);
+        bmmo::game::placement_hooks hooks;
+        hooks.has_body = [&bodies](CK3dEntity* entity) { return entity && entity->GetName() && bodies.count(entity->GetName()) != 0; };
+        hooks.force_exists = [manager](CKBehavior* block) {
+            bmmo_physics_force_block state{};
+            std::string ignored;
+            return bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, ignored) && state.exists != 0;
+        };
+        hooks.fail_at_row = fail_at;
+        return hooks;
+    }
+
+    // --replay --placement on: the placement applied at the record's first
+    // frame (the engine's anchor), its log on stderr.  False (printed) when
+    // it refused.
+    bool apply_tool_placement(CKContext* context, CKIpionManager* manager, const arguments& args,
+                              bmmo::game::sector_placement& placement) {
+        std::set<std::string> bodies;
+        const std::string refused = placement.apply(context, tool_placement_hooks(manager, args.placement_fail_at, bodies));
+        std::fprintf(stderr, "%s", placement.describe().c_str());
+        std::fprintf(stderr, "placement signature %016llx\n", static_cast<unsigned long long>(placement.signature(context)));
+        if (!refused.empty()) std::fprintf(stderr, "sector placement refused: %s\n", refused.c_str());
+        return refused.empty();
+    }
 
     // The trafo set switches (sim/trafo_tool.hpp) and --set-local: parse()'s
     // chain is at the compiler's nesting limit.  False: not one of them, or a
@@ -436,6 +497,10 @@ namespace {
         else if (arg == "--trafo-teardown") { if (!(v = next())) return false; out.trafo.teardown = std::atoll(v); }
         else if (arg == "--list-entities") { if (!(v = next())) return false; out.list_entities = v; }
         else if (arg == "--list-placement") out.list_placement = true;
+        // Every --placement* option goes to parse_placement_arg, which rejects one it does not know:
+        // a new one (S3's --placement-trace) is added there.
+        else if (arg.rfind("--placement", 0) == 0 || arg == "--tick-hashes" || arg == "--watch-entity")
+            return parse_placement_arg(arg, next, out);
         else if (arg == "--beam-again") {
             arguments::beam_write b;
             for (int k = 0; k < 3; ++k) { if (!(v = next())) return false; b.at[k] = std::atof(v); }
@@ -1239,6 +1304,15 @@ namespace {
         std::printf("anchor bodies: %s\nanchor events: %s\n",
             bmmo::physics::describe_physics_objects(engine.physics()).c_str(),
             bmmo::physics::drain_event_log(engine.physics()).c_str());
+        // --placement on (step S2): at the record's first frame; the copies are
+        // released (root first) before the engine goes, as physics_world does.
+        bmmo::game::sector_placement placement;
+        struct release_on_exit {
+            bmmo::game::sector_placement& placement;
+            CKContext* context;
+            ~release_on_exit() { placement.release(context); }
+        } release_guard{placement, engine.context()};
+        if (args.placement && !apply_tool_placement(engine.context(), engine.physics(), args, placement)) return 1;
 
         size_t matched = 0;
         long long first_divergence = -1;
@@ -1422,11 +1496,46 @@ namespace {
         options.spawn_impulse = spawn_impulse;
         options.boot_ticks = args.boot_ticks;
         options.anchor_timeout = args.anchor_timeout;
+        options.placement_clones = args.placement;            // step S2
+        options.placement_fail_at = args.placement_fail_at;
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         std::string error;
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) std::fprintf(stderr, "world create failed: %s\n", error.c_str());
         return world;
+    }
+
+    // --tick-hashes / --watch-entity (step S2) in the drop scene: one line
+    // per tick with the world hash (every field), and the watched entities'
+    // world positions on the report ticks.
+    void placement_tick_report(const arguments& args, bmmo::sim::physics_world& world, int tick, bool report) {
+        if (args.tick_hashes) {
+            bmmo::physics::world_hash hash;
+            std::string error;
+            if (bmmo::physics::capture_world_hash(world.physics(), hash, error))
+                std::printf("tickhash tick=%d full=%016llx pose=%016llx surfaces=%016llx cores=%d\n", tick,
+                            static_cast<unsigned long long>(hash.hash), static_cast<unsigned long long>(hash.pose),
+                            static_cast<unsigned long long>(hash.surfaces), hash.cores);
+            else
+                std::printf("tickhash tick=%d <%s>\n", tick, error.c_str());
+        }
+        if (!report || args.watch_entities.empty()) return;
+        std::string text;
+        for (const std::string& name: args.watch_entities) {
+            auto* entity = CK3dEntity::Cast(world.engine().context()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+            char part[200];
+            if (!entity) {
+                std::snprintf(part, sizeof(part), " %s(none)", name.c_str());
+            } else {
+                VxVector p;
+                entity->GetPosition(&p);
+                std::snprintf(part, sizeof(part), " %s(%.4f,%.4f,%.4f)%s", name.c_str(), p.x, p.y, p.z,
+                              entity->IsVisible() ? "" : "[hidden]");
+            }
+            text += part;
+        }
+        std::printf("watch tick=%d%s\n", tick, text.c_str());
     }
 
     // The sector union follows the players: report where each of them is and
@@ -1610,6 +1719,7 @@ namespace {
                         root_scripts(world->engine()).c_str());
         };
         report_parts(-1);
+        placement_tick_report(args, *world, -1, true);
         std::map<std::string, double> start;
         for (const auto& body: watched(*world)) start.emplace(body.name, body.position[1]);
         for (int i = 0; i < args.ticks; ++i) {
@@ -1621,6 +1731,7 @@ namespace {
             if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             if (trafo) trafo->after_frame(i, {});
             if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
+            placement_tick_report(args, *world, i, (args.report_every > 0 && i % args.report_every == 0) || i + 1 == args.ticks);
         }
         double fell = 0.0;
         for (const auto& body: watched(*world)) {
@@ -2701,6 +2812,8 @@ namespace {
         options.zero_retail_force = !clone;
         options.retail_nav_from_script = true;
         options.mirror_clone_to_retail = clone;
+        options.placement_clones = args.placement;            // step S2
+        options.placement_fail_at = args.placement_fail_at;
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) {
@@ -4339,9 +4452,19 @@ namespace {
     // its PH table, the builder's copy block and the row plan; nothing is
     // written to the world.
     int run_list_placement(const arguments& args) {
-        auto world = create_session_world(args, 0.0f);
+        // The listing is of the unplaced world; --placement on applies the
+        // placement afterwards, in the tool (step S2).
+        arguments unplaced = args;
+        unplaced.placement = false;
+        auto world = create_session_world(unplaced, 0.0f);
         if (!world) return 1;
-        return bmmo::sim::list_placement(world->engine().context(), args.level > 0 ? args.level : 1);
+        const int listed = bmmo::sim::list_placement(world->engine().context(), args.level > 0 ? args.level : 1);
+        if (!args.placement) return listed;
+        std::set<std::string> bodies;
+        const bmmo::game::placement_hooks hooks = tool_placement_hooks(world->physics(), args.placement_fail_at, bodies);
+        std::printf("anchor bodies: %zu\n", bodies.size());
+        const int applied = bmmo::sim::list_placement_apply(world->engine().context(), hooks);
+        return listed ? listed : applied;
     }
 
     // ------------------------------------------------------------------
@@ -6800,6 +6923,10 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --list-placement\n"
             "           (sector placement: the builder's copy block, its dependency words, the PH rows and the row plan\n"
             "            at the anchor, read-only; exit 0, 3 on a block or plan error)\n"
+            "           [--placement on [--placement-fail-at ROW]]  (then applies the placement in the tool: censuses,\n"
+            "            fingerprints, signatures, the name review; with the fail row the all-or-nothing check V12)\n"
+            "       --placement on|off  (any physics_world mode: the sector placement at the anchor, default off)\n"
+            "       --drop ... [--tick-hashes] [--watch-entity NAME]...  (world hash per tick; entity positions)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA]\n"
             "           [--resync-stamp SECTOR TICK ...] [--resync-sector K] [--resync-shift N] [--resync-perturb M]\n"
             "           [--resync-perturb-ticks N] [--resync-after N] [--resync-drop TICK --drop <entity> <ball type>\n"

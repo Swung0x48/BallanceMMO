@@ -102,6 +102,7 @@ namespace bmmo::sim {
     }
 
     physics_world::~physics_world() {
+        if (engine_) placement_.release(engine_->context());   // sector placement: see place_sectors()
         // Players first: their navigation controllers live in the environment.
         players_.clear();
         engine_.reset();
@@ -197,6 +198,7 @@ namespace bmmo::sim {
             log("world: " + std::to_string(restored) + " of " + std::to_string(level_proximities_.size())
                 + " proximity countdown(s) restored to the level file's (" + std::to_string(differed) + " differed)");
         }
+        if (!place_sectors(error)) return false;   // sector placement (step S2): after the restores, before the hash
         bmmo::physics::world_hash hash;
         if (!bmmo::physics::capture_world_hash(manager, hash, error)) return false;
         // The handshake compares the movable-core pose hash: the full hash
@@ -1520,5 +1522,58 @@ namespace bmmo::sim {
                 + std::to_string(p.navigation ? p.navigation->controller_count() : 0) + "]";
         }
         return text;
+    }
+
+    // ---- sector placement (docs/sector-placement-design.md 2.4, step S2)
+    //
+    // At the anchor, after the Sequencer and proximity restores (a copy
+    // inherits its source's level-file counters) and before the anchor hash,
+    // the rewiring and the selection (the copies' probes, ball reads and
+    // scripts are the world's like any other): with placement_clones every
+    // PH row gets its own object (game/sector_placement.hpp apply, all or
+    // nothing - a refusal fails the anchor); the signature of the table as
+    // it then stands is computed either way.  The destructor releases the
+    // copies before the engine goes: the context reset destroys dynamic
+    // objects in their creation order, which inside a copy is CK's hash
+    // order, and a P_Extra copy whose Extra block ran must be torn down root
+    // first (sector_placement::release).
+    bool physics_world::place_sectors(std::string& error) {
+        CKContext* context = engine_->context();
+        CKIpionManager* manager = engine_->physics();
+        if (options_.placement_clones) {
+            std::set<std::string> bodies;
+            {
+                std::vector<bmmo_physics_body_state> list(
+                    static_cast<size_t>(std::max(0, bmmo::physics::list_bodies(manager, nullptr, 0))));
+                const int count = bmmo::physics::list_bodies(manager, list.data(), static_cast<int>(list.size()));
+                for (int i = 0; i < count && i < static_cast<int>(list.size()); ++i) bodies.insert(list[static_cast<size_t>(i)].name);
+            }
+            bmmo::game::placement_hooks hooks;
+            hooks.has_body = [&bodies](CK3dEntity* entity) {
+                return entity && entity->GetName() && bodies.count(entity->GetName()) != 0;
+            };
+            hooks.force_exists = [manager](CKBehavior* block) {
+                bmmo_physics_force_block state{};
+                std::string ignored;
+                return bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, ignored)
+                    && state.exists != 0;
+            };
+            hooks.fail_at_row = options_.placement_fail_at;
+            const std::string refused = placement_.apply(context, hooks);
+            std::istringstream lines(placement_.describe());
+            for (std::string line; std::getline(lines, line);) log("world: placement: " + line);
+            if (!refused.empty()) {
+                error = "sector placement refused: " + refused;
+                return false;
+            }
+        }
+        std::string signature_error;
+        anchor_placement_ = placement_.signature(context, &signature_error);
+        char text[200];
+        std::snprintf(text, sizeof(text), "world: placement signature %016llx (placement %s, %zu copies)%s",
+                      static_cast<unsigned long long>(anchor_placement_), options_.placement_clones ? "on" : "off",
+                      placement_.copies().size(), signature_error.empty() ? "" : " - the PH table is unreadable: ");
+        log(text + signature_error);
+        return true;
     }
 }

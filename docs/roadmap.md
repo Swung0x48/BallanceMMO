@@ -106,7 +106,20 @@ left. Each design named here has its own document with its step table.
    out-of-reach trafos rejected and logged.
 6. Sector placement (`sector-placement-design.md`): S1-S11. One object per
    placement at the anchor; the late joiner's lost sector-1 walk (S4, which
-   may land early).
+   may land early). Also found at S2, **the x64 teardown over-read** (not
+   placement-specific): Ballanced's `SetLocalParameterObject` (CK2
+   CKBehavior.cpp:1146-1155) makes `CKParameter::SetValue` copy a pointer
+   parameter's 8 bytes from a 4-byte `CK_ID`, so the particle block's
+   BEHAVIORDETACH (GeneralParticleSystem.cpp:415) leaves 0x00007FF600000000
+   instead of NULL; when the context reset detaches a P_Extra copy's particle
+   block before its Extra block (CK's hash order inside one copy, F5),
+   `DestroyExtra` deactivates the particle scripts and `ShowParticles` reads
+   it: 0xC0000005 at world teardown. S2's `release` orders the placement's
+   own copies; the builder's `*_MF001` copies are unordered, so an x64 server
+   or headless world can crash at session end once an Extra block ran.
+   Retail x86 cannot meet it. Fix: an engine change (write a null of the
+   parameter's size, or have CK2 copy the full size), then an x64 teardown
+   sweep (sector-placement-design.md, As built (step S2)).
 7. World agreement (`world-agreement-gaps-design.md`): client proximity
    sensors rewired to the nearest ball (own or mirror), the member-added
    message, leave and rejoin. Also its own step, **N2 on every world**

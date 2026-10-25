@@ -38,6 +38,7 @@
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
+#include <game/sector_placement.hpp>
 #include <game/trafo_sets.hpp>
 #include <session/sector_union.hpp>
 #include <session/trafo_input.hpp>
@@ -92,6 +93,14 @@ namespace bmmo::sim {
         // tick, Trafo events run the sets' scripts in the trafo frame, a
         // piece never collides with a local body.  Off: every world as before.
         bool trafo_inputs = false;
+        // Sector placement (docs/sector-placement-design.md 2.4, step S2):
+        // at the anchor every PH row whose object an earlier row placed at
+        // another matrix gets its own copy (game/sector_placement.hpp).  Off
+        // by default until the session option exists (S5); the signature is
+        // computed either way.  placement_fail_at: SimTool's test hook
+        // (--placement-fail-at, design 7.2 V12), -1 = none.
+        bool placement_clones = false;
+        int placement_fail_at = -1;
         std::function<void(const std::string&)> log;
     };
 
@@ -328,6 +337,12 @@ namespace bmmo::sim {
         uint64_t trafo_hold_reports() const { return trafo_hold_reports_; }
         uint64_t trafo_original_leaks() const { return trafo_leaks_; }
 
+        // The sector placement (docs/sector-placement-design.md 2.4, step
+        // S2): the signature of the PH table at the anchor (placement on or
+        // off) and the copies this world made (placement_clones).
+        uint64_t anchor_placement() const { return anchor_placement_; }
+        const bmmo::game::sector_placement& placement() const { return placement_; }
+
     private:
         physics_world() = default;
         // Shared by snapshot() and snapshot_for_journal(); `bookkeeping` says
@@ -446,6 +461,11 @@ namespace bmmo::sim {
         bool trafo_failed_ = false;
         uint64_t trafo_hold_reports_ = 0, trafo_leaks_ = 0;
         uint64_t trafo_after_us_ = 0, trafo_after_ticks_ = 0;   // what the hold and the checks cost (describe)
+        // The sector placement (step S2): run at the anchor after the
+        // Sequencer and proximity restores, before the anchor hash.
+        bool place_sectors(std::string& error);
+        bmmo::game::sector_placement placement_;
+        uint64_t anchor_placement_ = 0;
         void* filter_environment_ = nullptr;
         int rng_cursor_ = 0;
         int random_cursor_ = 0;   // bmmo::physics::random_* state, saved/restored around tick() like rng_cursor_

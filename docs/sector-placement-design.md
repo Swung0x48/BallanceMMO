@@ -1,6 +1,6 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1 built (as-built notes in 2.2 and 2.6); revision 2
+Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1 and S2 built (as-built notes in 2.2, 2.3 and 2.6); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or
@@ -551,6 +551,165 @@ order in every attribute list are the same in every world. Inside one copy
 the creation order, and therefore the relative CK ids of a copy's objects,
 follow the hash order of the source ids (F5) and are world-dependent; steps
 8-9 remove that dependence from the lists, and §3.2 handles the ids.
+
+**As built (step S2, 2026-10-25).**
+
+- **Where.** `game/sector_placement.hpp`: after S1's readers, `placement_hooks`
+  (the physics half of step 3, which the CK-only header cannot see: `has_body`,
+  `force_exists`, and SimTool's `fail_at_row`), the helpers in
+  `placement_detail` and `class sector_placement` with `apply`, `signature`,
+  `holds_copies`, `copies`, `rows_written`, `describe` and `release`.
+  `physics_world` (§2.4's server part): `world_options::placement_clones`
+  (default off) and `placement_fail_at` (-1), `place_sectors()` (the hooks from
+  `list_bodies` and `force_block_get`, the apply, the log, the signature), one
+  call line in `anchor()`, `anchor_placement()` and `placement()`. SimTool:
+  `--placement on|off` (default off; `create_session_world` and the `--nav`
+  world pass it, `--replay` applies it at the record's first frame - built
+  but not exercised: no retail tick record of a pooled level was at hand),
+  `--placement-fail-at ROW`, and for the drop scenes `--tick-hashes` (the full
+  world hash after every tick, V3) and `--watch-entity NAME` (positions and
+  visibility on the report ticks: trafos, the player's ball); `--list-placement
+  --placement on` lists the unplaced world as S1 does, then applies in the
+  tool (`placement_tool.hpp list_placement_apply`). Of the files trafo T3 also
+  changes: `physics_world.cpp` (the destructor's first line, the call line in
+  `anchor()`, `place_sectors` at the end of the file), `physics_world.hpp` (an
+  option block, two accessors, a member block) and `sim_tool.cpp` (an option
+  block at the end of `arguments`, new functions, two lines each in
+  `create_session_world`, the `--nav` world and `run_drop`, a block in
+  `run_replay`, `run_list_placement`). `session_client.cpp`, `client_core*.cpp`,
+  `rollback.hpp` and the savestate files are not touched; the headless client
+  does not include the header.
+- **Adaptation: the call site** is after the Sequencer **and** the proximity
+  restore (step Q, PW `anchor()`), before the anchor hash: a copy inherits
+  both level-file states from its source.
+- **Adaptation: what a copy made** is every object created during its copy
+  (the context's object ids before and after), not `FillRemappedDependencies`;
+  both are printed and are equal for all 489 copies made on the 14 levels.
+  The undo (step 11) destroys everything created since the first copy.
+- **Adaptation: destroys notify.** The undo and `release` destroy with flags 0
+  and empty dependencies, not `CK_DESTROY_NONOTIFY`: NONOTIFY skips every
+  `CheckPreDeletion` (a group would keep the freed copy) and the managers'
+  `OnSequenceToBeDeleted` (Ballanced `CKObjectManager::DeleteObjects`,
+  CKObjectManager.cpp:249-262).
+- **Adaptation: steps 8-9 act on the hierarchy's entities**, as written: a
+  script is a `CKSceneObject`, not a `CKBeObject`, so no group or attribute
+  holds one. Step 8 does not set an attribute type flagged
+  `CK_ATTRIBUT_DONOTCOPY` (as `CKBeObject::Copy` does not; none occurs on the
+  14 levels), and an object-valued attribute naming a member of the hierarchy
+  names its copy. The attribute types the copies carry: Coll Detection ID,
+  Continuous Contact ID, Particle Gravity and TrafoType (the trafo attribute of
+  F6, on every trafo copy). Groups: each copy joins its type group
+  (`All_P_<type>`), the boxes also `DepthTest`; `Trafos` does not exist yet at
+  the anchor (Init Ingame builds it later from the TrafoType holders).
+- **Adaptation: step 6's order.** Entities are activated only where they are
+  not; each script is `DeActivate`d in the scene first, which sets
+  DEACTIVATENEXTFRAME (CKScene.cpp `ActivateScript`), then `Activate(FALSE,
+  FALSE)` and all three next-frame flags cleared; then `Show(CKHIDE)` on every
+  hierarchy entity.
+- **Adaptation: the length rule for renamed entities** is
+  `min(MAX_NAME, BMMO_PHYSICS_NAME_SIZE - 1)` = 63, not 64: a renamed entity's
+  name is its body's name, and the bridge's `bmmo_physics_body_state.name`
+  holds 63 characters and a terminator. The longest renamed entity on the 14
+  levels has 35 characters (L12); the longest copy root 24.
+- **Addition: the placed table is checked.** After step 10 `apply` re-reads
+  the PH table: every row must name its action's object and the table must
+  re-plan to 0 copies and 0 rewrites, else it undoes.
+- **Root cause found and fixed: a teardown crash of a placed world.** Symptom:
+  `--level 11 --drop-sector 3 --drop-second-sector 1 --drop P_Ball_Stone 1
+  --drop-at 694.546 -53.35 -227.162 --placement on` ran its 200 ticks and
+  crashed in the world's destructor (0xC0000005 reading 0x00007FF600000008 in
+  `ShowParticles`, TT_ParticleSystems_RT GeneralParticleSystem.cpp:110); the
+  same scene with the placement off exits 0. Cause: the context reset
+  (`CKObjectManager::OnCKReset`) destroys the dynamic objects in their
+  creation order, which inside one copy is CK's hash order (F5), so a P_Extra
+  copy's particle block got its BEHAVIORDETACH before its Extra block's. The
+  particle DETACH deletes the emitter and calls `SetLocalParameterObject(0,
+  NULL)`, which on x64 Ballanced copies the 8-byte pointer parameter's size
+  from a 4-byte `CK_ID` (CKBehavior.cpp:1146-1155, `CKParameter::SetValue`
+  memcpy of `m_Size`), leaving 0x00007FF600000000; the Extra block's DETACH
+  then runs `DestroyExtra` (TT_Gravity_RT Extra.cpp:174-215, initialized by
+  the s3 pass), which deactivates the children's particle scripts, whose
+  DEACTIVATESCRIPT callback reads that pointer. Fix (no engine change):
+  `release` destroys a copy's hierarchy scripts root first, then the rest, in
+  one call (so every Extra deactivation runs while its emitters live), and
+  every world releases its copies before its engine goes: the
+  `physics_world` destructor and SimTool's `--replay` (S6 must do the same in
+  the headless client). After the fix the scene exits 0 and its output is
+  identical. The underlying x64 over-read is generic; 32 teardown scenes with
+  builder copies (L2, L4, L6, L8-L12, sectors 2-6, placement off on rSP1 and
+  on with this build) did not crash, retail x86 cannot meet it (4-byte
+  pointers), and a fix in Ballanced's `SetLocalParameterObject` would be an
+  engine change of its own. The builder's own copies (`*_MF001`) are made the
+  same way, so an x64 server or headless world torn down after an Extra block
+  ran could meet it at session end without any placement: queued as its own
+  item (roadmap §4 item 6, "the x64 teardown over-read").
+- **Checks (offline, `--root C:/Users/geekerwan/Desktop/Ballance-Agent`; tools and outputs in
+  `.local-tools/work/SP2/`).**
+  - **V1 complete**, all 14 levels (`v1.sh`): copies exactly as S1's plan and
+    §1.4 (L1 23 with r38 rewritten to `P_Trafo_Wood_MF_R37`, L2 26, L3 17, L4
+    29, L5 27, L6 25, L7 28, L8 39, L9 46, L10 47, L11 53, L12 62, original
+    L13 50, arena 0 "nothing to copy"); every copy's census and fingerprint
+    printed; every renamed entity <= 35 characters; the name review (§4) finds
+    0 names that are not unique among the 3D entities across all PH rows'
+    hierarchies (294-821 names per level); release then re-apply: inventory
+    equal to the unplaced world's, `holds_copies` no, signature back to the
+    unplaced one and the re-applied signature equal to the first: PASS on all
+    14.
+  - **V2**, L8 and L11, three runs each per arm: `anchored, hash=a8c7f832281a39c5`
+    with surfaces 796eff6c40f81c4e (L8) and a34811ce6a4225ed (L11) identical on
+    and off; signatures on 91a138e4fd6e7254 / 5d22d3b5a61c38cb, off
+    629f6128b4fc8389 / 4f444149dc156465, stable over the three runs and equal
+    to `--list-placement`'s.
+  - **V3**: 601 per-tick full world hashes identical on vs off; the active
+    root scripts identical; the s1 see-saw falls 0.048 m in both (the design's
+    0.085 m is the diagnosis's older build; this build's own control gives
+    0.048).
+  - **V4** (every arm judged against its own control with the placement on,
+    body by body on every report line, `cmp_parts.py`): L8 s1 plank with
+    sector 2 at world ticks 0/30/50/70/150 SAME (off at 30: 0.265 m off the
+    control); ball at the s2 site, sector 2 at 30 and 330 SAME (off: the plank
+    woken at 330); L8 s2 rope bridge with sector 4 at 30 and 160 SAME (8.314 m
+    sag, the control's; off: planks flung 1958 m); L10 P_Modul_41 with sector 4
+    SAME (0 m); L11 P_Modul_37 with sector 2 SAME (0 m); L11 sack with sector 3
+    at tick 160 SAME, Sack001 x 90.41..90.99 (off: x 84.68..96.75); L11 s1
+    Pushers with a player at the s4 site and sector 4 SAME, never simulated (off:
+    simulated on 11 report lines); L1 row 10 wood trafo with sector 4 SAME, it stays at
+    (-153.7933, 16.5896, -272.9166) (off: moved 557.6 m to the s4 pose).
+  - **V5**: a stone ball on L8 row 15's pose lands on `P_Modul_30_Wippe_R15`
+    (stays at y 20.3-21.8; off: falls to -377); `P_Modul_29_Platte01..09_R50`
+    and `P_Box_MF001_R73`, `_R74`, `_R75`, `_R80`, `_R83` have bodies; L11
+    `P_Ball_Stone_MF001..004_R39..R42` and `P_Modul_01_*_R61` / `_R75` have
+    bodies; the L10 s5 dome copy catches the ball at y -13.35 (off: the floor,
+    -16.996). Adaptation: on L11 s4 the ball does not stay on the Pusher - the
+    woken Pusher001_R61 pushes it off, exactly as the s1 original pushes a ball
+    dropped on it (same run on row 0); the design's "rests on the Pusher" came
+    from the diagnosis's control, whose module was never woken.
+  - **V11**: the whole `--list-placement --placement on` listing (signatures,
+    censuses, fingerprints, release checks) of the x64, the x86
+    (`build/sim-x86-a3`) and the Linux (Arch) SimTool are identical on all 14
+    levels, apart from the block ids and glibc's `%a` spelling of the matrices
+    (the 16 words are identical).
+  - **V12**, L8 row 50: refused at row 50 after 17 copies, 17 PH rows put
+    back, 7464 objects destroyed, 0 left; PH table, 56 attribute lists (157
+    holders), 54 group member lists (1386 members) and the names of all 55965
+    objects equal to the world before the call; signature back to
+    629f6128b4fc8389; `holds_copies` no: PASS. Through `physics_world` the same
+    flag fails the anchor ("sector placement refused: row 50: ...").
+  - The option is off by default: the wire check (`REF=core_ref_t3off`, rSP1
+    vs rSP2) ALL SAME, 24 send traces and 24 journals identical; the reference
+    solo server journal replays 2867/2867 matched, stdout identical to rSP1's.
+- **Open, for later steps (found in the S2 reviews).** (a) The plan's name
+  bound is looser than `apply`'s: `apply` and `--list-placement` call
+  `plan_placements` with `session::MAX_NAME` (64) while step 5 refuses a
+  renamed entity above 63, so a custom map with a 64-character copy root
+  would pass the CK-free plan and fail the anchor; no level is close (longest
+  root 24). S5, which puts the plan into the core's path, passes 63 to the
+  plan. (b) The scene is only logged: `apply` prints "NOT the level scene"
+  but step 7 then saves the initial values in whatever scene is current;
+  every host today anchors in the level scene. S6/S10 (the host anchor calls)
+  make it a refusal. (c) SimTool sends every `--placement*` argument to
+  `parse_placement_arg`, which rejects any it does not know: S3's
+  `--placement-trace` goes there.
 
 ### 2.4 Where it runs in each world
 
