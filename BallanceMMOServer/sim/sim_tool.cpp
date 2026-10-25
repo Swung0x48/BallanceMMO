@@ -55,6 +55,7 @@
 #include "crash_report.hpp"
 #include "process_qos.hpp"
 #include "physics_world.hpp"
+#include "placement_tool.hpp"
 #include <entity/session.hpp>
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
@@ -327,6 +328,9 @@ namespace {
         struct beam_write { double at[3] = {}; long long tick = 0; };
         std::vector<beam_write> beams_again;
         std::string list_entities;   // --list-entities PREFIX: as --list-trafos, any name prefix
+        // --list-placement (sector placement design 7.2 V1, step S1): the
+        // PH row plan of --level at its anchor, read-only (sim/placement_tool.hpp).
+        bool list_placement = false;
     };
 
     // The trafo set switches (sim/trafo_tool.hpp) and --set-local: parse()'s
@@ -431,6 +435,7 @@ namespace {
         }
         else if (arg == "--trafo-teardown") { if (!(v = next())) return false; out.trafo.teardown = std::atoll(v); }
         else if (arg == "--list-entities") { if (!(v = next())) return false; out.list_entities = v; }
+        else if (arg == "--list-placement") out.list_placement = true;
         else if (arg == "--beam-again") {
             arguments::beam_write b;
             for (int k = 0; k < 3; ++k) { if (!(v = next())) return false; b.at[k] = std::atof(v); }
@@ -4330,6 +4335,16 @@ namespace {
     }
 
     // ------------------------------------------------------------------
+    // --list-placement: the session world at its anchor (before any pass),
+    // its PH table, the builder's copy block and the row plan; nothing is
+    // written to the world.
+    int run_list_placement(const arguments& args) {
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        return bmmo::sim::list_placement(world->engine().context(), args.level > 0 ? args.level : 1);
+    }
+
+    // ------------------------------------------------------------------
     // --portable-scripts-check (docs/resync-and-sector-timing-design.md 7.2,
     // step A1).  The server's world (physics_world) of --level, one player
     // in sector 1; at anchor+30 and after each sector 2..N (stamped by the
@@ -6782,6 +6797,9 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --portable-scripts-check [--drop-settle N] [--verbose]\n"
             "           (the portable script record localized back must equal the v2 record byte for byte at anchor+30\n"
             "            and after each sector; lists the registry and unportable references; exit 0 PASS, 3 FAIL)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --list-placement\n"
+            "           (sector placement: the builder's copy block, its dependency words, the PH rows and the row plan\n"
+            "            at the anchor, read-only; exit 0, 3 on a block or plan error)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA]\n"
             "           [--resync-stamp SECTOR TICK ...] [--resync-sector K] [--resync-shift N] [--resync-perturb M]\n"
             "           [--resync-perturb-ticks N] [--resync-after N] [--resync-drop TICK --drop <entity> <ball type>\n"
@@ -6836,6 +6854,7 @@ int main(int argc, char** argv) {
     if (args.resync_check) return run_resync_check(args);
     if (args.savestate_check) return run_savestate_check(args);
     if (args.portable_scripts_check) return run_portable_scripts_check(args);
+    if (args.list_placement) return run_list_placement(args);
     if (!args.drop_entity.empty()) return run_drop(args);
     if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;

@@ -1,6 +1,6 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix), not built; revision 2
+Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1 built (as-built notes in 2.2 and 2.6); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or
@@ -299,6 +299,129 @@ accepted and a 65-character one is an error; planning the applied table (the
 L1 and L8 plans applied in the test's model: copies renamed, share rows
 rewritten) is all keep/share with `rewrites() == 0`; the signature of an
 applied table does not depend on the order of `entity_print`s given.
+
+**As built (step S1, 2026-10-25).**
+
+- **Where.** `BallanceMMOCommon/include/session/placement_plan.hpp` (the
+  plan, CK-free, header-only, as specified above);
+  `BallanceMMOCommon/include/game/sector_placement.hpp` (new: the read-only
+  half of §2.3, see the adaptation below); SimTool `--list-placement`
+  (`BallanceMMOServer/sim/placement_tool.hpp`, new; in `sim_tool.cpp` only a
+  new `arguments` field at the end of the struct, one line in
+  `parse_trafo_arg`, the new `run_list_placement` before
+  `run_portable_scripts_check`'s comment block, one dispatch line in `main`
+  and the usage
+  lines); `BallanceMMOServer/tests/placement_plan_test.cpp` with
+  `placement_plan_rows.inc` (the L1, L8 and arena PH tables, generated from
+  the `--list-placement` listings: row, sector, type, object, the 16 words).
+  Of the files trafo T3 also changes, none is touched (T3 does not change
+  `sim_tool.cpp`).
+- **Adaptation: `name` is filled for every kind.** keep: the source; copy:
+  the new root; share: the holder's object; none: `""`. So `name` is what
+  the row names after the CK step, and `placement_applied_rows(rows, plan)`
+  (new, the test's and the listing's model of step 10) sets each row's object
+  to it. Also new: `shares()`, `placement_kind_name`,
+  `describe_placement_action` (the log line, `row 15 s2 P_Modul_30 copy
+  P_Modul_30_MF -> P_Modul_30_MF_R15`).
+- **Adaptation: the name rules.** The length rule (`> max_name` is an error,
+  64 allowed) applies to the copies' root names, the names the plan makes;
+  an original's name is the level's and is not the plan's to refuse. "Two
+  actions producing the same name" is implemented as: a copy name equal to
+  another copy's or to any object a row of the table names is an error (the
+  latter is the only way a copy could meet an existing name the plan can
+  see; the CK step's `GetObjectByNameAndParentClass` check of §2.3 step 5
+  covers the rest of the world). On an error the actions are still filled for
+  the log.
+- **Adaptation: the signature's encoding**, which the prose leaves open:
+  integers as 4 little-endian bytes, strings as a 4-byte length then the
+  bytes, the row count and each hierarchy's print count first; the prints
+  are sorted by name and then by every other field (two prints with one name
+  cannot depend on the given order either); a row past the end of
+  `hierarchies` hashes as an empty hierarchy.
+- **Adaptation: §2.3 steps 1-2 landed here, read-only**, as free functions of
+  `game/sector_placement.hpp`, so that S2 builds `sector_placement` on the
+  same readers and `--list-placement` prints what the anchor will read:
+  `read_placement_rows` (the five columns checked by name, array type and,
+  for the two parameter columns, parameter GUID - matrix, bool - in the
+  builder's order; the matrix read with `GetElementValue` into a `VxMatrix`
+  and copied word for word; the Type Name read as the pointer the STRING
+  cell stores, `GetElement(r, 1)`, whole and with no length cap, since it is
+  hashed into the signature - `GetElementStringValue`'s 4-argument form is
+  Ballanced's alone, the retail SDK has only the 3-argument one; and one
+  name must mean one object: two rows naming different objects of one name
+  are refused, since the plan keys objects by name - none of the 14 levels
+  has such a pair), `find_builder_copy_blocks` (every Object Copy
+  block of `Levelinit_build`, recursively, with its parent graph and the
+  targets of its output 0; chosen = parent `Copy Objects` and a link to
+  `TT Save IC`; an error unless exactly one is chosen, naming every block),
+  `builder_copy_dependencies` (input 0 read as ObjectCopier reads it) and
+  `describe_copy_dependencies`. Only calls both SDKs declare with one
+  signature; nothing in the x86 mod includes it yet (S10 will), but an x86
+  MSVC syntax probe of the header against the retail Virtools SDK compiles
+  (and the same probe fails with C2660 on the 4-argument
+  `GetElementStringValue`, the review's finding), and a GCC
+  `-fsyntax-only` of it against Ballanced is clean.
+- **`--list-placement`** builds the session world (`physics_world::create`,
+  so the anchor is the server's: after the Sequencer restore, before any
+  pass), prints the copy blocks, the block's settings and dependency words
+  (per class with the bit meanings and the default copy words, then every
+  nonzero word by class name), every PH row (`%a` matrix and the 16 words),
+  one `plan` line per row, the copies by kind (extra / trafo / fan =
+  P_Modul_18 / module / prop), the same-pose and rewritten rows, the longest
+  copy name, the applied table's changed rows and its re-plan, and
+  `placement: level N, R rows, C copies, S shared (W rewritten)`. Exit 0, or
+  3 on a block, PH or plan error. The censuses and fingerprints of V1 come
+  with S2's copies.
+- **V1 (S1's part), all levels** (`--root C:/Users/geekerwan/Desktop/Ballance-Agent`;
+  the original L13 from a scratch copy of the install with
+  `Level_13.NMO.orig` as `Level_13.NMO`, md5 9b5be1ca6a92..., the arena is the
+  install's `Level_13.NMO`): on all 14 the chosen block is `Copy
+  Objects/Object Copy` (id 37186) -> `TT Save IC` and the one ignored block
+  is `init and load Checkpoints/Object Copy` (id 37657) -> `fill
+  Checkpoint-Arary`; rows, copies and kinds are exactly §1.4's table (L1 51
+  rows 23 copies 10/2/0/0/11, L2 62/26 15/8/3/0/0, L3 53/17 8/8/0/1/0, L4
+  75/29 16/11/1/0/1, L5 55/27 11/9/1/6/0, L6 54/25 11/9/5/0/0, L7 64/28
+  10/8/3/7/0, L8 86/39 12/11/4/7/5, L9 96/46 12/10/9/14/1, L10 109/47
+  10/12/10/11/4, L11 105/53 12/11/5/17/8, L12 115/62 27/18/15/1/1, L13 orig
+  104/50 22/8/10/1/9, arena 25/0); the three same-pose pairs are bitwise
+  equal and are the only shares (L1 r38 = r37, rewritten `P_Trafo_Wood_MF ->
+  P_Trafo_Wood_MF_R37`; L3 r16 = r8 and L8 r52 = r41, `P_Dome_MF`, not
+  rewritten); the longest copy name is 24 (L10-L12); the applied table
+  re-plans to 0 copies and 0 rewrites on every level.
+- **§9 Q1, settled from the printed words** (identical on all 14 levels):
+  `m_Flags` 0 (custom, per class). OBJECT 0x3 (NAME and UNIQUENAME: the
+  builder's `..001` names, F1), SCENEOBJECT 0x1 (SCENES), **BEOBJECT 0x7
+  (scripts, attributes and groups are all copied)**, 3DENTITY 0x2 (CHILDREN
+  only: meshes are not copied - F2 - and neither are animations), MESH 0x2,
+  3DOBJECT, BEHAVIOR, MATERIAL and GROUP 0; the other nonzero words are
+  2dEntity 3, Target Camera 1, 3D Sprite 2, Target Light 1, Character 1, Grid
+  1, Layer 1, Array 2. The block is version 0x00010000 with Dynamic = 1:
+  below 0x00020000 ObjectCopier ignores its Awake Object setting and always
+  passes `CK_OBJECTCREATION_ACTIVATE` (ObjectCopier.cpp:132-141). What it
+  means for S2: a copy made with these words arrives with the original's
+  attributes and in the original's groups, in the hash order of F5, so the
+  remove-then-append of §2.3 steps 8-9 is required, not defensive; UNIQUENAME
+  is on, so step 5's rename is what fixes the names; S2's own copy passes no
+  ACTIVATE and sets the state explicitly (step 6) - unchanged. The retail half
+  of Q1 (the same words printed by the retail CK2, §7.5 run 1) stays with
+  S10.
+- **Checks.** `BallanceMMOMessageTests` 505/505 (11 new: the §2.2 cases and
+  the L1, L8 and arena tables); the GCC syntax check, every line ok
+  (`placement_plan_test.cpp` included); the x64 build; the wire check
+  (`REF=core_ref_t3off`, `rTR2` vs `rSP1`): ALL SAME, 24 send traces and 24
+  journals identical. Not run, because the change cannot reach them: the x86
+  build (no retail file includes the new headers), the solo snapshots-off
+  check (no rollback or session code changed) and every live run (no
+  server, headless or retail code changed). Coverage: `linux_test_syntax.sh`
+  and the Arch server build do not compile `game/sector_placement.hpp` or
+  `placement_tool.hpp`; only the x64 SimTool build and the two probes above
+  do. Review fix-up (the type reader, the one-name-one-object refusal, the
+  test's limit taken from `MAX_NAME`, the MESH bits text): tests 505/505
+  again, the GCC syntax check every line ok, the x64 build, and
+  `--list-placement` re-run on all 14 levels: identical to the first
+  listings except the MESH bits text (so every row's type and every plan
+  line are unchanged by the new reader). No wire check: nothing but SimTool
+  and the tests includes the changed headers.
 
 ### 2.3 The CK step (host support)
 
