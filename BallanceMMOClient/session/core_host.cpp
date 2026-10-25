@@ -555,6 +555,57 @@ namespace {
     // written back at both paths' anchors (game/script_state.hpp).  Here, not
     // beside level_sequencers_, because BallanceMMOClient takes no new member.
     bmmo::game::proximity_countdown_state level_proximity_state;
+
+    // ------------------------------------------------------------ the level's lifetime
+    // Step SP9 (sector-placement design 2.5): every retail anchor is on a level
+    // loaded after the last session on it.  The server builds a fresh level for
+    // every session; the retail anchor is an in-level restart, and the vanilla
+    // restart deactivates the current sector only, so a level that ran a
+    // session (the sector union keeps every sector any member entered running,
+    // nothing deactivated) would anchor on a world the server does not have
+    // ("world mismatch", measured at SP9 (1)).  So a countdown on such a level
+    // reloads it - the pause menu's "Exit Level", then the menus' level start
+    // (game/menu_driver.hpp, the automation's 'level N') - and "Go!" restarts
+    // once the new load is in play and past the Sequencer capture window
+    // (capture_level_sequencers), which makes the anchor exactly the measured
+    // path: a fresh load, then the restart.  A clean level restarts as before.
+    // File-scope (BallanceMMOClient takes no member); outlives sessions.
+    struct level_lifetime {
+        // A session anchored on this level since its load (design 2.5's
+        // `level_ran_union`): set at a core anchor and while a legacy session
+        // runs, cleared by a map load (OnLoadObject(isMap)).
+        bool ran_union = false;
+        // 'session reload on|off' (a testing tool; on by default): off makes
+        // the countdown restart a dirty level as before SP9, which reproduces
+        // the gap (SP9 (1)).
+        bool enabled = true;
+        // 'session reload delay <ms>' (a testing tool; 0 by default): the
+        // reloaded level counts as ready only this long after its map load,
+        // which makes the load slower than the countdown ("Go!" waits).
+        long delay_ms = 0;
+        // The reload of the current countdown: the exit sent and the level
+        // requested through the menus, until the new load is ready.
+        bool reloading = false;
+        bool loaded = false;       // OnLoadObject(isMap) seen since the exit
+        bool go_waiting = false;   // "Go!" came first: the restart waits for the load
+        bool exit_seen = false;    // OnPostExitLevel of the reload's exit
+        int level = 0;
+        clock_type::time_point started{}, loaded_at{};
+        uint64_t reloads = 0, clean_restarts = 0, abandoned = 0;
+    };
+    level_lifetime level_life;
+
+    // The reload's own deadline: the exit, the menus, the load, the capture
+    // window (30 frames) and "Go!".  The server's start barrier (8 s from its
+    // SessionStart, session_runner.hpp) is the effective limit: past it the
+    // server ends the session for this member; this give-up is the barrier
+    // plus a margin, so the host's log names its own cause when the server's
+    // SessionEnd does not come.
+    constexpr std::chrono::seconds kReloadTimeout{10};
+
+    double seconds_since(clock_type::time_point t) {
+        return std::chrono::duration<double>(clock_type::now() - t).count();
+    }
 }
 
 bool bmmo::session::retail::core_enabled() {
@@ -737,7 +788,104 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
                       bmmo::ansi::BrightGreen);
     logger_->Info("Physics session %u (core): countdown started (players=%zu, join order %d, own id %u)", msg.session,
                   msg.players.size(), core.own_join_order(), db_.get_client_id());
+    // Step SP9 (design 2.5): a level that ran a session since its load is
+    // reloaded at the start of the countdown, overlapped with it; a clean one
+    // restarts on "Go!" as before.
+    level_life.reloading = level_life.loaded = level_life.go_waiting = level_life.exit_seen = false;
+    if (level_life.ran_union && level_life.enabled) {
+        // The session's level (what the server simulates); only an original
+        // level slot can be started through the menus.
+        const int level = msg.map.level;
+        if (level < 1 || level > 13) {
+            core_host_end_local(std::format("the level ran a session and cannot be reloaded (session map level {} is "
+                                            "not an original level slot)", level));
+            return;
+        }
+        CKContext* context = m_bml->GetCKContext();
+        auto* level_object = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
+            const_cast<CKSTRING>("Level"), CKCID_BEOBJECT, nullptr));
+        auto* all_balls = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
+            const_cast<CKSTRING>("All_Balls"), CKCID_BEOBJECT, nullptr));
+        if (!level_object || !all_balls) {
+            core_host_end_local("the level ran a session and cannot be reloaded (no Level / All_Balls object)");
+            return;
+        }
+        // The pause menu's "Exit Level" (Menu_Pause: Exit Level -> Send Message
+        // "Exit Level" to Level and to All_Balls), without its Yes/No; then the
+        // level started through the menus as a player does.  A "Load Level"
+        // message alone (the automation's 'level N direct') does not reload
+        // from inside a level: measured at SP9, Event_handler fires
+        // PreLoadLevel and the level goes on.
+        auto* messages = m_bml->GetMessageManager();
+        const CKMessageType exit_level = messages->AddMessageType(const_cast<CKSTRING>("Exit Level"));
+        messages->SendMessageSingle(exit_level, level_object);
+        messages->SendMessageSingle(exit_level, all_balls);
+        level_request_.begin(level);
+        level_life.reloading = true;
+        level_life.level = level;
+        level_life.started = clock_type::now();
+        ++level_life.reloads;
+        host.restart_deadline = level_life.started + kReloadTimeout;
+        logger_->Info("Physics session %u: the level ran a union: reloading level %d (exit, then the menus) during "
+                      "the countdown", msg.session, level);
+    } else {
+        if (level_life.ran_union)
+            logger_->Info("Physics session %u: the level ran a union, but 'session reload off': restarting it as it is",
+                          msg.session);
+        else {
+            ++level_life.clean_restarts;
+            logger_->Info("Physics session %u: a clean level (no session since its load): the restart needs no load",
+                          msg.session);
+        }
+    }
     core_host_countdown();
+}
+
+// Step SP9: the reload's level is ready for the restart - the map load seen
+// since the exit, the Sequencer / proximity capture window after it passed
+// (capture_level_sequencers), the menus' request done and the level in play.
+bool BallanceMMOClient::core_host_reload_ready() {
+    // No pause test: the restart opens the pause menu itself and runs from a
+    // paused level as the clean path's "Go!" does (review of SP9).
+    return level_life.loaded && level_sequencers_frames_ <= 0 && !level_request_.pending() && m_bml->IsIngame()
+        && gameplay_ingame_script_active()
+        && clock_type::now() >= level_life.loaded_at + std::chrono::milliseconds(level_life.delay_ms);
+}
+
+// Step SP9: OnLoadObject(isMap) - a fresh level: no session ran on it.
+void BallanceMMOClient::core_host_map_loaded() {
+    level_life.ran_union = false;
+    if (!level_life.reloading) return;
+    level_life.loaded = true;
+    level_life.loaded_at = clock_type::now();
+    logger_->Info("Physics session %u: the reload's map load %.3f s after the exit", host.session,
+                  seconds_since(level_life.started));
+}
+
+// Step SP9: OnPostExitLevel - the reload's own exit does not end the session
+// it is made for (true: the caller leaves the session alone).  Anything else
+// is a level left (false: the session ends, as before).
+bool BallanceMMOClient::core_host_reload_exit() {
+    if (!level_life.reloading || level_life.exit_seen || host.phase != retail_host::phase_type::counting_down)
+        return false;
+    level_life.exit_seen = true;
+    logger_->Info("Physics session %u: the reload left the level %.3f s after the exit was sent; the session goes on",
+                  host.session, seconds_since(level_life.started));
+    return true;
+}
+
+// "Go!": the countdown's last step, the restart (the legacy
+// physics_session_countdown's), with the restart deadline counted from here.
+void BallanceMMOClient::core_host_go() {
+    const uint32_t session = host.session;
+    SendIngameMessage(std::format("Physics session {} - Go!", session), bmmo::ansi::BrightGreen);
+    play_countdown_sound(bmmo::countdown_type::Go);
+    host.phase = retail_host::phase_type::restarting;
+    host.saw_ingame_inactive = false;
+    host.restart_deadline = clock_type::now() + std::chrono::seconds(20);
+    logger_->Info("Physics session %u: restart requested", session);
+    if (!fixed_tick_.enabled()) fixed_tick_.enable(m_bml);
+    restart_current_level();
 }
 
 // The "3 - 2 - 1 - Go!" lead-in, then the restart (the legacy
@@ -758,14 +906,15 @@ void BallanceMMOClient::core_host_countdown() {
     }
     m_bml->AddTimer(delay, [this, session, still_starting] {
         if (!still_starting()) return;
-        SendIngameMessage(std::format("Physics session {} - Go!", session), bmmo::ansi::BrightGreen);
-        play_countdown_sound(bmmo::countdown_type::Go);
-        host.phase = retail_host::phase_type::restarting;
-        host.saw_ingame_inactive = false;
-        host.restart_deadline = clock_type::now() + std::chrono::seconds(20);
-        logger_->Info("Physics session %u: restart requested", session);
-        if (!fixed_tick_.enabled()) fixed_tick_.enable(m_bml);
-        restart_current_level();
+        // Step SP9: a reload still loading takes "Go!" when it is ready
+        // (core_host_process).
+        if (level_life.reloading) {
+            level_life.go_waiting = true;
+            logger_->Info("Physics session %u: \"Go!\" waits for the reload (%.3f s since the exit, map %s)", session,
+                          seconds_since(level_life.started), level_life.loaded ? "loaded" : "not loaded yet");
+            return;
+        }
+        core_host_go();
     });
 }
 
@@ -775,6 +924,9 @@ void BallanceMMOClient::core_host_countdown() {
 // otherwise the mailbox drained and the countdown's or the restart's checks
 // (the legacy process_physics_session).
 void BallanceMMOClient::core_host_process() {
+    // Step SP9: a legacy session running on this level makes it dirty too
+    // (it runs the union as well); read here, so the legacy path is unchanged.
+    if (physics_session_.phase == bs::physics_session_state::phase_type::running) level_life.ran_union = true;
     if (!host.net_pending.empty()) {
         const uint32_t tick = session_tick_now(physics_session_);
         for (auto it = host.net_pending.begin(); it != host.net_pending.end();) {
@@ -809,6 +961,27 @@ void BallanceMMOClient::core_host_process() {
     core_host_drain();
     switch (host.phase) {
     case retail_host::phase_type::counting_down:
+        // Step SP9: the reload's own exit and load are no leaving; when the
+        // new level is ready, "Go!" (if it came already) restarts it.
+        if (level_life.reloading) {
+            if (core_host_reload_ready()) {
+                level_life.reloading = false;
+                logger_->Info("Physics session %u: the reloaded level %d is ready %.3f s after the exit (map load "
+                              "+%.3f s, capture window passed)%s", host.session, level_life.level,
+                              seconds_since(level_life.started),
+                              std::chrono::duration<double>(level_life.loaded_at - level_life.started).count(),
+                              level_life.go_waiting ? "; \"Go!\" came first: restarting now" : "");
+                if (level_life.go_waiting) {
+                    level_life.go_waiting = false;
+                    core_host_go();
+                }
+            } else if (clock_type::now() > host.restart_deadline) {
+                core_host_end_local(std::format("the level reload did not finish in {} s", kReloadTimeout.count()));
+            } else if (!level_request_.error.empty()) {
+                core_host_end_local("the level reload failed: " + level_request_.error);
+            }
+            return;
+        }
         // Leaving the level during the lead-in cancels the session instead
         // of restarting something else on "Go!".
         if (!m_bml->IsIngame()) core_host_end_local("the level was left during the countdown");
@@ -1013,6 +1186,20 @@ void BallanceMMOClient::core_host_anchor() {
     if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 1, &report.sector_cell);
     host.phase = retail_host::phase_type::running;
     host.last_rebases = fixed_tick_.rebases();
+    // Step SP9: the level ran a session from here on (the next countdown
+    // reloads it); and the anchor's body list, comparable with the server's
+    // world (physics_world's "anchor bodies" line, SimTool's).
+    level_life.ran_union = true;
+    {
+        // In pieces of at most 900 characters (the legacy line's cut), every
+        // body kept: "anchor bodies [i/n]: ...".
+        const std::string bodies = physics_view_.describe_physics_objects();
+        constexpr size_t kPiece = 900;
+        const size_t pieces = bodies.empty() ? 1 : (bodies.size() + kPiece - 1) / kPiece;
+        for (size_t i = 0; i < pieces; ++i)
+            logger_->Info("Physics session %u: anchor bodies [%zu/%zu]: %s", host.session, i + 1, pieces,
+                          bodies.substr(i * kPiece, kPiece).c_str());
+    }
     core.anchor(report);
     logger_->Info("Physics session %u: anchored (hash %016llx surfaces %016llx), waiting for the tick assignment",
                   core.session_id(), static_cast<unsigned long long>(hash.pose), static_cast<unsigned long long>(hash.surfaces));
@@ -1151,6 +1338,12 @@ void BallanceMMOClient::core_host_frame() {
 // driver off.  Nothing while no core session runs.
 void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (host.phase == retail_host::phase_type::idle) return;
+    // Step SP9: a reload in progress is the session's no longer (the menus'
+    // load goes on; the level it makes is a fresh one either way).
+    if (level_life.reloading) {
+        level_life.reloading = level_life.go_waiting = false;
+        ++level_life.abandoned;
+    }
     std::string error;
     pause_clock_restore();
     pause_scripts_restore();
@@ -1835,6 +2028,22 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
                            host.mute_source_differs);
+    }
+    if (what == "reload") {
+        // Step SP9: the countdown's reload of a level that ran a session (on
+        // by default); off is a testing tool that reproduces the gap.
+        if (value == "on" || value == "off") level_life.enabled = value == "on";
+        else if (value == "delay") {
+            long ms = -1;
+            args >> ms;
+            if (ms < 0 || ms > 20000) return "error usage: session reload delay <ms> (0..20000)";
+            level_life.delay_ms = ms;
+        } else if (!value.empty() && value != "status") return "error usage: session reload on|off|delay <ms>|status";
+        return std::format("ok reload={} delay_ms={} level_ran_union={} reloading={} loaded={} go_waiting={} reloads={} "
+                           "clean_restarts={} abandoned={}", level_life.enabled ? "on" : "off", level_life.delay_ms,
+                           level_life.ran_union ? 1 : 0, level_life.reloading ? 1 : 0, level_life.loaded ? 1 : 0,
+                           level_life.go_waiting ? 1 : 0, level_life.reloads, level_life.clean_restarts,
+                           level_life.abandoned);
     }
     if (what == "force-rollback") {
         const size_t colon = value.find(':');

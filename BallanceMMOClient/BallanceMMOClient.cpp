@@ -242,6 +242,7 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         level_sequencers_.clear();
         bmmo::session::retail::level_proximities().clear();   // step Q
         level_sequencers_frames_ = 30;
+        core_host_map_loaded();   // step SP9: a fresh level (session/core_host.cpp)
         boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).[cn]mo$", boost::regex::icase);
         std::string path(filename);
         boost::smatch matched;
@@ -388,7 +389,9 @@ void BallanceMMOClient::proximity_countdowns_restore() {
 }
 
 void BallanceMMOClient::OnPostExitLevel() {
-    physics_session_end_local("left the level");
+    // Step SP9: a core session's own reload (its countdown on a level that ran
+    // a session) leaves the level and goes on; any other exit ends a session.
+    if (!core_host_reload_exit()) physics_session_end_local("left the level");
     // The guard's callback hangs on a level script, so the teardown destroys it
     // with the script; disabling it here hands the time factor back anyway.
     std::string error;

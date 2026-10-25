@@ -1,6 +1,6 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2 and S3 built (as-built notes in 2.2, 2.3, 2.6 and 7.3); revision 2
+Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2, S3 and S9 built (as-built notes in 2.2, 2.3, 2.5, 2.6 and 7.3); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or
@@ -834,6 +834,95 @@ hpp:139).
 - **After the session.** Vanilla play on the dirty level until the next
   session or load is outside every session (no shared state). What the
   player sees there (earlier union sectors still physicalized) is §9 Q3.
+
+**As built (step SP9 = S9, 2026-10-25).** Retail only: `BallanceMMOClient/session/core_host.cpp`,
+`BallanceMMOClient/BallanceMMOClient.cpp` (two hook lines), `BallanceMMOClient/BallanceMMOClient.h`
+(four non-virtual methods, no data member) and `BallanceMMOClient/automation/client_automation.cpp`
+(the `session reload` verb routed). Nothing under `BallanceMMOCommon`, the headless client or the
+server changed; of the files trafo T3 also changes, none is touched. Runs (two retail clients, L11,
+session core on, the Arch server of HEAD 81c6803, snapshots off) under `scripts/retail/sp9_*`; run
+script `.local-tools/work/SP9/sp9_retail.py`.
+
+- **(1) The gap, measured.** Session 1 on a menu-loaded L11, client 1 crossing s1 -> s3 (`sector 2`,
+  `sector 3`: union `running: 1 2 3` on both), then the host restarts the session (`room start
+  physics` again) with no reload. Session 1 anchors `a8c7f832281a39c5 / a34811ce6a4225ed cores=0`
+  (the server's); session 2 anchors client 1 `560bb584d6758db9 / d08289d97445702b cores=2`, client 2
+  `5f19f8f3de4657c0 / d08289d97445702b cores=2`, and the server ends it: `world mismatch for
+  Player673_0 (client 5f19.../d082..., server a8c7.../a348...)` (`sp9_gap_1`, the HEAD binary).
+  Repeated with this step's binary and `session reload off` (`sp9_gap_2`: `28b968edf184f7cc` /
+  `38591266aa0a8508`, same surfaces, same mismatch), whose new `anchor bodies:` line gives the body
+  list at the anchor itself: 61 bodies against the fresh anchor's 48, all 48 identical, 13 extra -
+  sector 1's mechanisms (`P_Ball_Stone_MF`, `_MF005`, both `P_Modul_01` rows, `P_Modul_25_Bridge001`,
+  `P_Modul_26_Rope` and `_Sack` still swinging, flag 1: the two awake cores and the per-client pose
+  hash) and sector 2's `P_Modul_19_Flaps001` and `P_Modul_30_Wippe001`; none of sector 3's; the script
+  replay selection `45 scripts (10 active)` against a fresh anchor's `(3 active)`. **Cause:** the
+  anchor's vanilla restart (Event_handler `reset Level`: `Set Cell IngameParameter[0][2]`, then
+  `Execute Script Gameplay_SectorManager`) deactivates the sector in the cell only, which the union
+  left at 3; sectors 1 and 2, which the union never deactivates, stay physicalized with their scripts
+  and their session-1 state. (Membership from session 1's journal: sector 1's bodies appear at ticks
+  14-16, sector 2's at the pass at 134 - `Flaps`, `Flaps001`, `Wippe001`, `Kiste001`,
+  `Schiebestein001` - sector 3's at 270; the pooled `Flaps`, `Kiste001`, `Schiebestein001` are sector
+  3's rows by then and went with it.) This is the expected result (§2.5 item 1). The P_Modul_26
+  swing is the same cause: sector 1 was never reset.
+- **(2) Built.** File-scope `level_lifetime` in CH: `ran_union` (this design's `level_ran_union`) set
+  at every core anchor and in every frame a legacy session runs (read in `core_host_process`, so the
+  legacy path itself is unchanged), cleared by `core_host_map_loaded()` from `OnLoadObject(isMap)`
+  (MC). At a core SessionStart that passes the in-level check, a set flag starts the reload at the
+  start of the countdown and logs `the level ran a union: reloading level N`; a clear one logs `a
+  clean level ...: the restart needs no load` and restarts as before. "Go!" (`core_host_go()`, the
+  restart factored out of the countdown) runs only when `core_host_reload_ready()`: the map load
+  seen since the exit, `level_sequencers_frames_` at 0 (the capture window), the menus' request done,
+  in game, `Gameplay_Ingame` active (no pause test: the restart opens the pause menu itself, as the
+  clean path's "Go!" does from a paused level); a "Go!" that comes first waits (`"Go!" waits for the
+  reload`) and the countdown's frame check restarts when ready; the restart deadline (20 s) counts
+  from then. The reloaded level is the session's (`msg.map.level`, what the server simulates); a
+  session map that is not an original level slot (1..13) ends the session locally instead of loading
+  something else. The reload's own deadline is 10 s (`the level reload did not finish`): the server's
+  start barrier (8 s from its SessionStart) is the effective limit - past it the server ends the
+  session for this member - and the host's give-up is the barrier plus a margin, so its log names its
+  own cause when no SessionEnd comes. A failed menu request ends the session too. `OnPostExitLevel` (MC) skips `physics_session_end_local` once for the
+  reload's own exit (`core_host_reload_exit()`, true only while a core countdown reloads). No reload
+  at session end (§11, Q3).
+- **Adaptation: how the level is reloaded.** The design moves the automation's direct load (F15:
+  `CurrentLevel[0,0]`, `Load Level` to Event_handler's owner) into host support. Measured from inside
+  L11 (`level 11 direct`): Event_handler fires PreLoadLevel and nothing loads, the level runs on
+  (no OnLoadObject, `level_time` still counting) - its `Load Level` branch only runs from the menu.
+  So the host sends what the pause menu's "Exit Level" button sends (Menu_Pause: `Exit Level` to
+  `Level` and to `All_Balls`, without its Yes/No) and starts the level through the menus with the
+  existing `level_request_` (`game/menu_driver.hpp`, already the one level start shared by the
+  automation's `level N`, the headless engine and SimTool); `automation_load_level` is unchanged and
+  is not called by the host. The one implementation is therefore the menu driver, not the CA function.
+- **Additions.** `anchor bodies [i/n]:` (the anchor's full body list, as the server's `world: anchor
+  bodies:` line, which the server cuts at 900 characters) at every core anchor, logged in pieces of at
+  most 900 characters so no body is cut and no single log line grows with the level. Testing tools:
+  `session reload on|off|delay <ms>|status` - `off` reproduces the gap (1), `delay` makes the
+  reloaded level ready only that long after its map load (the "Go!"-waits path).
+- **Gate (2).** `sp9_two_1`: three sessions in one game run, each with s1 -> s3 crossings; session 1
+  clean (no load), sessions 2 and 3 reload (exit seen 0.83 s, map load 1.50 s, ready 2.12 s after the
+  exit, before "Go!") and anchor `a8c7f832281a39c5 / a34811ce6a4225ed cores=0` on both clients, the
+  server's; SessionStart -> anchor 3.75 s (the barrier is 8 s); the three anchors' body lists (48)
+  identical on both clients and with the session-1 fresh anchor, and the server's logged 19 bodies
+  identical. `sp9_goslow_2` (`delay 2500`): "Go!" waited 1.0 s, anchor 4.74 s after SessionStart, the
+  server's hashes, `cores=0`. `sp9_paused_1`: both players in the pause menu at the restart: the
+  reload works, the server's hashes, no menu left active. Three launches of both copies answered
+  within 1.8 s; the legacy path (`session core off`) anchors on the server's hashes with no reload.
+  After the review fix-ups (no pause test, the session's level, the 10 s give-up, the pieced body
+  line): `sp9_two_fix`, three sessions with s1 -> s3 crossings: session 1 clean, sessions 2 and 3
+  reload (map load 1.52-1.54 s, ready 2.14-2.17 s after the exit, before "Go!"), every anchor
+  `a8c7f832281a39c5 / a34811ce6a4225ed cores=0` on both clients and the server, SessionStart ->
+  anchor 3.75 s, the six rejoined body lists (48, three pieces each) identical, no mismatch.
+- **Build-tree finding (pre-existing, not code).** The first runs of HEAD's x86 mod crashed or
+  stalled every client at the first core SessionStart (one run: both processes gone after
+  `countdown started`; three probes: `session core` showed `sessions=1 made=0 error=''`, the core
+  never made and no log line): the incremental build had recompiled the client-core objects but not
+  `core_host.cpp.obj` (the tree was last built from other sources, most likely trafo T3's parked
+  tree), so the host and the core disagreed on a layout. Deleting the `BallanceMMOClient.dir` objects and rebuilding cured it; the S10 builds
+  must do the same after any header change (the rule in the R notes).
+- **Not covered: Level 1.** A reloaded L1 starts its tutorial (the reload's load runs `OnStartLevel`
+  with `countdown_restart_` false, so the mod's tutorial exit is not fired); if the tutorial holds
+  `Gameplay_Ingame` inactive the reload never becomes ready and the server's barrier ends the session
+  (no hang). L1 is excluded from this step's gate until the queued Level-1-tutorial-off step, which
+  owns it; the gate ran on L11 only.
 
 ### 2.6 The union's level-walk gate (#16)
 

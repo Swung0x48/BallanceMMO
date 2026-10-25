@@ -795,6 +795,13 @@ private:
 	void core_host_dispatch(int code, const std::string& bytes);
 	void core_host_replay_activation(uint32_t tick, bool inside = false);
 	void core_host_zero_retail_forces();
+	// Step SP9 (sector-placement design 2.5): the level a core session builds
+	// from.  A countdown on a level that ran a session since its load reloads
+	// it first; "Go!" restarts once that load is ready.
+	void core_host_go();   // the restart on "Go!" (the countdown's last step)
+	bool core_host_reload_ready();   // the reload's level is loaded, past the capture window and in play
+	void core_host_map_loaded();   // OnLoadObject(isMap): a fresh level (the flag cleared)
+	bool core_host_reload_exit();   // OnPostExitLevel: the exit is the reload's own (the session goes on)
 	CKDataArray* current_level_array() {
 		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;
 	}
