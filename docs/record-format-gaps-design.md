@@ -740,3 +740,132 @@ A15) are kept as they were.
 - **Q4.** The fan's sound-slot array is not physics; the written cells are
   recorded with the other cells (no filtering), so a replay plays the same
   sounds; no check compares it.
+
+## As built (step K0, 2026-10-25)
+
+Read-only SimTool tools; no simulation result, record, wire or shared file
+changes. Files: `BallanceMMOServer/sim/array_census.hpp` (new, SimTool-local)
+and `BallanceMMOServer/sim/sim_tool.cpp` (the parked trafo T3, 02bbcf6, does
+not change it; the additions are still kept to new functions and a new option
+block - `parse_record_format_arg`, the `--globals-trace` functions and
+`globals_trace_guard` before `scene_tick`, `resolve_record_format_switches`,
+`run_array_reads` - plus one-line hooks in `parse()`, `parse_placement_arg`,
+`create_session_world`, `scene_tick`, `run_drop`, `run_savestate_check` and
+`main`).
+
+**`--array-reads [--client-scope] [--array-reads-all]`** (§2.2, S2). The census
+of `--level`'s session world at its anchor, nothing ticked; parameters are
+read with `update = FALSE`, so no operation runs. Adaptations:
+
+- The census is in a SimTool header, not yet `script_replay::array_reads`: K0
+  touches no shared file. K2 moves it into SRP for the hosts' anchor log.
+- **Scope.** The session world is the server's, whose ball identity reads are
+  already private copies (`physics_world::rewire_ball_identity_reads`).
+  `--client-scope` is S2's control: a read of a `*_BMMO_Ball_N` copy is
+  classified as a read of the array it copies, which is what a client world
+  (WAG's bit clear) reads; the line names the copy.
+- **Level tables** (not in §2.2): a read of an array whose every writer block
+  in the whole composition is in a load-time script (`Levelinit_*`,
+  `*_Init`) is `load-time` ("table"). Writers are counted per constant
+  column, and only the column-confined writers (`Set Cell`, `Column
+  Transform`, `Column Operation`) keep their column: a row- or column-moving
+  writer (`Sort Rows` on its sorting column, Add / Remove / Move / Swap Rows,
+  Shuffle, Clear, ...) counts for every column. A constant row or column is
+  an `int` local (by parameter type) that its script never writes. Without
+  this class, the sector manager's `Get Key Row` on `PH_Groups` and
+  P_Modul_18's sound `Get Cell` column 0 (only `P_Modul_18_Init` writes it)
+  would be unrecorded.
+- **Unwritten** (not in §2.2): a read of an array, or of a constant column of
+  it, that no block of the composition writes is its own class, `unwritten`,
+  counted in the closing line (`unwritten=N`): the level file's data, unless a
+  native writer (a CK manager, host C++) the census cannot see writes it. K2
+  confirms the class (no native writer) before it counts as load-time. Today
+  it is the sector manager's `Get Key Row` on `Physicalize_Convex` and
+  `Physicalize_Balls`, 2 per level.
+- **Whole-row readers** (`Iterator`, `Iterator If`, `Get Key Row`, `Get Row`,
+  `Get Nearest`, `Get Highest`, `Get Lowest`) output every column of the row
+  (`WriteOutputParameters`), so their column is `*` (the key column is noted).
+- **Sound.** A read is sound when its links and parameter flow reach a sound
+  block and only sound blocks, blocks on the same array and flow blocks
+  (Identity, Binary Switch, Op, Nop, Delayer, Test, Sequencer, Parameter
+  Selector, Switch On Parameter), without leaving the start block's graph; a
+  write is sound when every census read of its array is sound and its own
+  flow meets nothing else (the end-of-sound `Set Cell` reaches no block).
+  Leaving is conservative: a link to a graph's own output (the start's graph
+  or a nested one: not followed further), a value written into the graph's
+  exported output or into a parameter owned outside the graph, and a reader
+  or operation anywhere else in the root script (shortcuts) all make the read
+  not sound. A consumer nested in a subgraph has its links followed in its own
+  parent graph.
+- The `*_Init` scripts are not in the selection (their owners are not `P_*`),
+  so A2's column-2 `Ball_Pos_Frame` reads do not appear.
+
+Results (L1-L13, `census_all.sh`; selected + keep-local = RSD's 12, 31, 22,
+17, 21, 28, 35, 31, 43, 45, 45, 45, 23; the review fix-up's stricter sound
+walk, writer columns and `unwritten` class changed no unrecorded or sound
+count, only moved the two `Physicalize_*` reads from load-time to unwritten):
+
+| level | client scope: unrecorded (P_Modul_18 / P_Modul_29 `Get Cell` `CurrentLevel[0][1]`, + manager PH) | server scope: private / unrecorded | sound |
+|---|---|---|---|
+| 1 | 0 / 0 + 2 | 0 / 2 | 0 |
+| 2 | 9 / 1 + 2 | 10 / 2 | 27 |
+| 3 | 3 / 1 + 2 | 4 / 2 | 9 |
+| 4 | 3 / 1 + 2 | 4 / 2 | 9 |
+| 5 | 2 / 0 + 2 | 2 / 2 | 6 |
+| 6 | 8 / 2 + 2 | 10 / 2 | 24 |
+| 7 | 4 / 2 + 2 | 6 / 2 | 12 |
+| 8 | 2 / 1 + 2 | 3 / 2 | 6 |
+| 9 | 5 / 1 + 2 | 6 / 2 | 15 |
+| 10 | 5 / 2 + 2 | 7 / 2 | 15 |
+| 11 | 5 / 1 + 2 | 6 / 2 | 15 |
+| 12 | 11 / 0 + 2 | 11 / 2 | 33 |
+| 13 | 1 / 1 + 2 | 2 / 2 | 3 |
+
+The control's `CurrentLevel[0][1]` reads are exactly A1's counts on every
+level. `sound` is three blocks per fan (`Row Search` column 1 and both
+`Set Cell` column 1 of `P_Modul18_ActiveSounds`), on every level with a fan.
+
+**Finding: the sector manager's PH read (not in A1/A2's classes).** Both
+`Iterator If` blocks of Gameplay_SectorManager (Deactivate Sector, Activate
+Sector) output whole `PH` rows; every `activate Type 1/2/3` starts with
+`Test(Set? == TRUE)` on column 4. Column 4 has two in-play writers:
+`P_Extra_Point_MF Script`'s `Update Array` (an `Iterator If` on column 3 = its
+own object, then `Set Cell` column 4 = FALSE, at the extra's pickup) and
+Event_handler's `reset Level / Reset PH-Array` (every row TRUE). So only an
+extra point's row changes in play, and only its non-physics `activate Type 1`
+(Set World Matrix, Show, Activate Script of the extra) depends on it: the read
+is unrecorded but not a physics read. It stays `unrecorded` in the census (2
+per level, both scopes), so §2.2's rule (unrecorded = 0 with WAG's bit) cannot
+hold until K2 decides it: record `PH[*][4]` with the cells, or a class for
+"only non-physics rows are written in play" with the writers proven
+structurally. Queued for K2.
+
+**`--globals-trace`** (S5). In the drop scene (`--drop`) and the sector scene
+(`--savestate-check` without `--drop` / `--spawn-test`): a line at the
+anchor and after every scene tick with the factor, the physics delta and
+the gravity (`CKIpionManager::GetGravity`), each change marked and summed up.
+The world's tick hashes are identical with and without it (L2, 150 ticks) and
+equal to rEG0's SimTool. Results, L1-L13 (L1-4, 9, 12, 13 drop scene; L5-8,
+10, 11 sector scene; `globals_all.sh`, `globals_sector.sh`): one change after
+the anchor on L2-L13 and the same change on L1, at world tick 1 (frame 2):
+factor 0.001 -> 0.002, gravity (0, -9.81, 0) -> **(0, -20, 0)**, A18
+reproduced. L1 has a second change, the tutorial's freeze: Gameplay_Ingame
+writes 2.0 at tick 1, Gameplay_Refresh 2.0 at tick 2 (no change),
+Gameplay_Tutorial **0 at tick 8** (frame 9; S5's pass on L1 needs C4, K3).
+The trace's summary is printed on every way out of the scene, a failed setup
+included.
+Corrections to the text above: the SPG gravity is `0,-20,0`, not `0,0,-20`
+(§1.4, A10); the tutorial's 0 is not in the first two frames (A12's
+inference), which K3's 10-frame exit timer (§11 Q1) must land after.
+
+**`--world-options BITS`** (a `physics_world` mode). A u32 number or names
+joined by `,`/`|`: `PLACEMENT_CLONES` (bit 0, the sector placement's; it sets
+`--placement on`, no constant exists before S5; an explicit `--placement`
+that disagrees is refused) and `TRAFO_INPUTS` (bit 1). Only the world honours
+bit 1, so it is accepted only with `--array-reads` and with `--drop` without
+the `--trafo-*` sets: the savestate, portable-scripts, resync, late-run and
+late-sector checks make their own script selection without it, and the drop
+scene's trafo sets would build a second registry for the same players.
+Bits 2 (WAG) and 3 (this design's `SESSION_CLOCK`, K3) are refused as not
+built; so are `--world-options` on a journal replay (the header carries
+them), in the modes without a session world, and a number above 32 bits.

@@ -57,6 +57,7 @@
 #include "physics_world.hpp"
 #include "placement_tool.hpp"
 #include "placement_trace.hpp"
+#include "array_census.hpp"   // step K0
 #include <entity/session.hpp>
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
@@ -382,6 +383,23 @@ namespace {
         // dropped there, WakeUps too (the fact's control arm: the same
         // inputs as --ball-off-wake-only, nothing pending at the re-make).
         bool ball_off_drop_all = false;
+        // Step K0 (record-format-gaps-design.md §8, read-only tools):
+        // --array-reads [--client-scope] [--array-reads-all]: the array-read
+        // census of --level's session world at its anchor (design 2.2, S2;
+        // sim/array_census.hpp).  --globals-trace: in the drop and sector
+        // scenes, one line per world tick with the physics time factor, the
+        // physics delta and the gravity (S5).  --world-options BITS: the
+        // session world's session::WORLD_* bits, as a SessionStart carries
+        // them (a number, or names joined by ',' or '|'); only the bits that
+        // exist: bit 0 the sector placement's (= --placement on), bit 1
+        // WORLD_TRAFO_INPUTS.
+        bool array_reads = false;
+        bool array_reads_client = false;
+        bool array_reads_all = false;
+        bool globals_trace = false;
+        bool world_options_given = false;
+        uint32_t world_options = 0;
+        bool placement_given = false;   // --placement was on the command line (checked against bit 0)
     };
 
     // The sector placement switches (step S2); false: not one of them, or a
@@ -393,6 +411,7 @@ namespace {
             const std::string value = v;
             if (value != "on" && value != "off") return false;
             out.placement = value == "on";
+            out.placement_given = true;   // step K0
         }
         else if (arg == "--placement-fail-at") { if (!(v = next())) return false; out.placement_fail_at = std::atoi(v); }
         else if (arg == "--tick-hashes") out.tick_hashes = true;
@@ -576,6 +595,45 @@ namespace {
             if (!(v = next())) return false; w.value = std::atoi(v);
             if (!(v = next())) return false; w.tick = std::atoll(v);
             out.local_writes.push_back(w);
+        }
+        else return false;
+        return true;
+    }
+
+    // ---- step K0 (record-format-gaps-design.md §8): the read-only tools'
+    // switches.  False: not one of them, or a value is missing or malformed.
+    bool parse_world_options_value(const std::string& text, uint32_t& out) {
+        out = 0;
+        if (text.empty()) return false;
+        if (text[0] >= '0' && text[0] <= '9') {
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(text.c_str(), &end, 0);
+            if (!end || *end || v > 0xFFFFFFFFull) return false;   // a u32, also where long is 64 bits
+            out = static_cast<uint32_t>(v);
+            return true;
+        }
+        size_t start = 0;
+        while (start <= text.size()) {
+            const size_t stop = text.find_first_of(",|", start);
+            const std::string name = text.substr(start, stop == std::string::npos ? std::string::npos : stop - start);
+            if (name == "PLACEMENT_CLONES") out |= 1u << 0;   // the sector placement design's bit 0 (no constant before S5)
+            else if (name == "TRAFO_INPUTS") out |= bmmo::session::WORLD_TRAFO_INPUTS;
+            else return false;
+            if (stop == std::string::npos) break;
+            start = stop + 1;
+        }
+        return true;
+    }
+
+    bool parse_record_format_arg(const std::string& arg, const std::function<const char*()>& next, arguments& out) {
+        const char* v = nullptr;
+        if (arg == "--array-reads") out.array_reads = true;
+        else if (arg == "--client-scope") out.array_reads_client = true;
+        else if (arg == "--array-reads-all") out.array_reads_all = true;
+        else if (arg == "--globals-trace") out.globals_trace = true;
+        else if (arg == "--world-options") {
+            if (!(v = next()) || !parse_world_options_value(v, out.world_options)) return false;
+            out.world_options_given = true;
         }
         else return false;
         return true;
@@ -787,7 +845,7 @@ namespace {
             }
             else if (arg == "--ball-off-wake-only") out.ball_off_wake_only = true;      // step EG0
             else if (arg == "--ball-off-drop-all") out.ball_off_drop_all = true;        // step EG0
-            else if (!parse_trafo_arg(arg, next, out)) return false;
+            else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
         // reading: no game data needed.
@@ -1770,6 +1828,7 @@ namespace {
         options.anchor_timeout = args.anchor_timeout;
         options.placement_clones = args.placement;            // step S2
         options.placement_fail_at = args.placement_fail_at;
+        options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         std::string error;
         auto world = bmmo::sim::physics_world::create(options, error);
@@ -1837,6 +1896,97 @@ namespace {
         return trace;
     }
 
+    // ---- step K0: --globals-trace (record-format-gaps-design.md 7.2 S5)
+
+    // The physics globals of a world: CKIpionManager's time factor and
+    // physics delta (get_clock) and the environment's gravity (GetGravity,
+    // the floats SetPhysicsGlobals' VxVector held).  Read-only.
+    struct physics_globals_sample {
+        bool ok = false;
+        float factor = 0.0f, delta = 0.0f;
+        float gravity[3] = {};
+        bool same(const physics_globals_sample& o) const {
+            return ok == o.ok && std::memcmp(&factor, &o.factor, sizeof(float)) == 0
+                && std::memcmp(gravity, o.gravity, sizeof(gravity)) == 0;
+        }
+    };
+    physics_globals_sample sample_physics_globals(bmmo::sim::physics_world& world) {
+        physics_globals_sample s;
+        CKIpionManager* manager = world.physics();
+        std::string error;
+        if (!manager || !manager->GetEnvironment() || !bmmo::physics::get_clock(manager, s.factor, s.delta, error)) return s;
+        VxVector g;
+        manager->GetGravity(g);
+        s.gravity[0] = g.x; s.gravity[1] = g.y; s.gravity[2] = g.z;
+        s.ok = true;
+        return s;
+    }
+
+    struct globals_trace_state {
+        bool on = false;
+        bool have = false;
+        physics_globals_sample last;
+        long long lines = 0;
+        std::vector<std::string> changes;   // "tick T: before -> after"
+    };
+    globals_trace_state& globals_trace() {
+        static globals_trace_state state;
+        return state;
+    }
+
+    std::string globals_text(const physics_globals_sample& s) {
+        if (!s.ok) return "unavailable";
+        char text[256];
+        std::snprintf(text, sizeof(text), "factor=%.9g (%a) pdelta=%.9g (%a) gravity=(%.9g,%.9g,%.9g)",
+                      static_cast<double>(s.factor), static_cast<double>(s.factor), static_cast<double>(s.delta),
+                      static_cast<double>(s.delta), static_cast<double>(s.gravity[0]), static_cast<double>(s.gravity[1]),
+                      static_cast<double>(s.gravity[2]));
+        return text;
+    }
+
+    // One line for `tick` ("anchor" for the state the world was created
+    // with, else the world tick index the line follows); a change of the
+    // factor or the gravity from the line before is marked and kept for the
+    // summary.  The physics delta is printed, not compared: SetDeltaTime
+    // averages it every frame.
+    void globals_trace_tick(bmmo::sim::physics_world& world, const std::string& tick) {
+        globals_trace_state& t = globals_trace();
+        if (!t.on) return;
+        const physics_globals_sample s = sample_physics_globals(world);
+        const bool changed = t.have && !s.same(t.last);
+        std::printf("globals tick=%s %s%s\n", tick.c_str(), globals_text(s).c_str(), changed ? " CHANGED" : "");
+        if (changed) t.changes.push_back("tick " + tick + ": " + globals_text(t.last) + " -> " + globals_text(s));
+        t.last = s;
+        t.have = true;
+        ++t.lines;
+    }
+
+    void open_globals_trace(const arguments& args, bmmo::sim::physics_world& world) {
+        if (!args.globals_trace) return;
+        globals_trace() = globals_trace_state{};
+        globals_trace().on = true;
+        globals_trace_tick(world, "anchor");
+    }
+
+    void close_globals_trace() {
+        globals_trace_state& t = globals_trace();
+        if (!t.on) return;
+        std::printf("globals-trace: %lld lines, %zu changes after the anchor\n", t.lines, t.changes.size());
+        for (const std::string& c: t.changes) std::printf("globals-trace change %s\n", c.c_str());
+        t.on = false;
+        std::fflush(stdout);   // a mode's own exit path may not flush (the engine's shutdown)
+    }
+
+    // Closes the trace (prints its summary) on every way out of the scope,
+    // the early returns of a failed scene included; a no-op after an explicit
+    // close_globals_trace().
+    struct globals_trace_guard {
+        globals_trace_guard() = default;
+        globals_trace_guard(const globals_trace_guard&) = delete;
+        globals_trace_guard& operator=(const globals_trace_guard&) = delete;
+        ~globals_trace_guard() { close_globals_trace(); }
+    };
+
     // One world tick of the drop scene: the second player's --second-move
     // passes and the ball's --drop-again due before this tick, the tick, then
     // the trace's lines for it.
@@ -1866,6 +2016,7 @@ namespace {
             trace->set_ball(world.player_ball_entity(1));
             trace->write(tick);
         }
+        globals_trace_tick(world, std::to_string(tick));   // step K0
         return true;
     }
 
@@ -2063,6 +2214,8 @@ namespace {
         auto world = create_session_world(args, 0.0f);
         if (!world) return 1;
         if (const int code = open_scene_trace(args, *world)) return code;   // step S3
+        open_globals_trace(args, *world);                                    // step K0
+        const globals_trace_guard globals_guard;                             // step K0
         if (const int code = setup_drop_scene(args, *world)) return code;
         std::string error;
         // The trafo sets in the drop scene (S11, sim/trafo_tool.hpp): built
@@ -2121,6 +2274,7 @@ namespace {
         }
         std::printf("summary: the lowest watched part of %s fell %.3f m\n", args.drop_entity.c_str(), fell);
         close_scene_trace(*world);   // step S3
+        close_globals_trace();       // step K0
         std::fflush(stdout);
         if (trafo) return trafo->finish();
         return 0;
@@ -2565,6 +2719,8 @@ namespace {
         // ---- the scene, with whole world ticks
         auto world = create_session_world(args, spawn ? args.spawn_impulse : 0.0f);
         if (!world) return 1;
+        open_globals_trace(args, *world);   // step K0: the scene's ticks (drop, sector)
+        const globals_trace_guard globals_guard;   // step K0: closes on a failed scene's return
         std::string scene;
         if (drop) {
             if (const int code = setup_drop_scene(args, *world)) return code;
@@ -2578,6 +2734,7 @@ namespace {
             scene = "sector:" + std::to_string(args.drop_sector);
             if (args.drop_second_sector > 0) scene += "+" + std::to_string(args.drop_second_sector);
         }
+        close_globals_trace();   // step K0
         if (!settle_world(*world, args.savestate_lead)) return 1;
         scene = "level" + std::to_string(world->level()) + ":" + scene;
         CKIpionManager* physics = world->physics();
@@ -7247,6 +7404,76 @@ namespace {
         return 0;
     }
 
+    // ---- step K0 (record-format-gaps-design.md §8): the read-only tools
+
+    // The K0 switches against the mode they belong to; bit 0 of
+    // --world-options turns the placement on (the bit's meaning, step S2's
+    // physics_world option).  0 = fine, 2 = refused (printed).
+    int resolve_record_format_switches(arguments& args) {
+        const bool scene = !args.drop_entity.empty() || (args.savestate_check && args.spawn_test <= 0);
+        const bool world_mode = scene || args.spawn_test > 0 || args.savestate_check || args.portable_scripts_check
+            || args.list_placement || args.resync_check || args.late_sector_check || !args.late_run.empty()
+            || args.array_reads;
+        const bool file_mode = !args.replay_session.empty() || !args.synth_trafo_session.empty() || !args.replay.empty()
+            || !args.nav_mode.empty() || !args.savestate_diff[0].empty() || !args.savestate_describe.empty()
+            || !args.describe_script.empty();
+        const char* why = nullptr;
+        if ((args.array_reads_client || args.array_reads_all) && !args.array_reads)
+            why = "--client-scope and --array-reads-all go with --array-reads";
+        else if (args.array_reads && (file_mode || scene || args.spawn_test > 0 || args.savestate_check
+                                      || args.portable_scripts_check || args.list_placement || args.resync_check
+                                      || args.late_sector_check || !args.late_run.empty()))
+            why = "--array-reads is a mode of its own (--level N [--world-options B] [--placement on])";
+        else if (args.globals_trace && (file_mode || !scene || args.late_sector_check || !args.late_run.empty()
+                                        || args.resync_check || args.portable_scripts_check || args.list_placement))
+            why = "--globals-trace is for the drop scene (--drop) and the sector scene (--savestate-check without "
+                  "--drop or --spawn-test)";
+        else if (args.world_options_given && (file_mode || !world_mode))
+            why = "--world-options sets a session world's bits (a --replay-session takes them from the journal "
+                  "header)";
+        else if (args.world_options_given && (args.world_options & ~((1u << 0) | bmmo::session::WORLD_TRAFO_INPUTS)))
+            why = "--world-options: only bit 0 (PLACEMENT_CLONES) and bit 1 (TRAFO_INPUTS) exist; bit 2 is the "
+                  "world-agreement design's and bit 3 the record-format design's (step K3), neither built";
+        else if ((args.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
+                 && !(args.array_reads || (!args.drop_entity.empty() && !args.trafo.any() && args.late_run.empty()
+                                          && !args.late_sector_check && !args.resync_check && !args.savestate_check
+                                          && !args.portable_scripts_check && !args.list_placement)))
+            // Only the world honours the bit: the other modes make their own
+            // script selection without it (the savestate, portable-scripts,
+            // resync, late-run and late-sector checks), and the drop scene's
+            // trafo sets (--trafo-*) build a second registry for the same
+            // players.  A verdict about a selection the world does not run
+            // would mislead.
+            why = "--world-options TRAFO_INPUTS: only with --array-reads, or --drop without the --trafo-* sets (the "
+                  "other modes make their own script selection without the bit)";
+        else if (args.world_options_given && args.placement_given
+                 && ((args.world_options & (1u << 0)) != 0) != args.placement)
+            why = "--world-options bit 0 (PLACEMENT_CLONES) and --placement disagree";
+        if (why) {
+            std::fprintf(stderr, "%s\n", why);
+            return 2;
+        }
+        if (args.world_options & (1u << 0)) args.placement = true;
+        if (args.world_options_given) std::fprintf(stderr, "world options %08x\n", args.world_options);
+        return 0;
+    }
+
+    // --array-reads: the census of --level's session world at its anchor
+    // (sim/array_census.hpp), nothing ticked, nothing written.  The selection
+    // is the one every world makes (session_script_selection, with the
+    // world's trafo bit).  Exit 0 (a listing), 1 when the world fails.
+    int run_array_reads(const arguments& args) {
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        CKContext* context = world->engine().context();
+        const bool trafo = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
+        const auto sel = bmmo::game::session_script_selection(context, trafo);
+        const auto census = bmmo::sim::array_census::run(context, sel, args.array_reads_client);
+        bmmo::sim::array_census::print(census, world->level(), args.array_reads_client, args.array_reads_all);
+        std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
+        return 0;
+    }
+
 }
 
 int main(int argc, char** argv) {
@@ -7341,10 +7568,20 @@ int main(int argc, char** argv) {
             "           (step EG0: the PreSimulate queue and the current ball's body whenever they change; the ball's\n"
             "            body out before frame FROM and made again before TO with the retail recipe, and before the\n"
             "            re-make every queued entry but the WakeUps, or every entry, dropped - measurement switches\n"
-            "            that change the run)\n");
+            "            that change the run)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --array-reads [--client-scope] [--array-reads-all]\n"
+            "           (step K0: every data-array access of the selected scripts at the anchor, classified recorded,\n"
+            "            private, load-time, sound or unrecorded; --client-scope: a client world's view, the server's\n"
+            "            ball identity copies read as the array they copy; read-only)\n"
+            "       --drop ... | --savestate-check --drop-sector N ... [--globals-trace]  (step K0: the physics time\n"
+            "            factor, delta and gravity after every scene tick, and every change)\n"
+            "       --world-options BITS  (step K0, a physics_world mode: a number or PLACEMENT_CLONES,TRAFO_INPUTS;\n"
+            "            the session world's session::WORLD_* bits; bit 0 = --placement on; TRAFO_INPUTS only with\n"
+            "            --array-reads or --drop without the --trafo-* sets)\n");
         return 2;
     }
     if (const int code = check_scene_switches(args)) return code;   // step S3: before every dispatch
+    if (const int code = resolve_record_format_switches(args)) return code;   // step K0
     if (!args.replay_session.empty()) return run_replay_session(args);
     if (!args.synth_trafo_session.empty()) {
         if (args.root.empty()) {
@@ -7378,6 +7615,7 @@ int main(int argc, char** argv) {
     if (args.savestate_check) return run_savestate_check(args);
     if (args.portable_scripts_check) return run_portable_scripts_check(args);
     if (args.list_placement) return run_list_placement(args);
+    if (args.array_reads) return run_array_reads(args);   // step K0
     if (!args.drop_entity.empty()) return run_drop(args);
     if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;

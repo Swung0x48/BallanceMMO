@@ -150,7 +150,9 @@ left. Each design named here has its own document with its step table.
    frame's lifecycle set, or the rewinds' own cost).
 9. Record-format gaps (`record-format-gaps-design.md`): time factor and
    gravity per tick, Level 1 switches the tutorial off (main-branch exit,
-   10-frame delay, every world), the array-read census. Also three found
+   10-frame delay, every world), the array-read census (K0's tools built;
+   K2 must also decide the sector manager's `PH[*][4]` read that K0's census
+   found - written in play only on extra-point rows, As built (step K0)). Also three found
    at T1 (`resync-and-sector-timing-design.md`, As built (step T1)):
    (a) an own BodyRevived the server applies late is in the client journal
    only at its stamp - the server never echoes it to its owner
